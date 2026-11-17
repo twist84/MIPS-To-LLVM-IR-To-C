@@ -462,6 +462,10 @@ def main(argv=None):
         help="Bounded R3000 instructions per SIF poll, when --iop-irx is provided",
     )
     parser.add_argument(
+        "--disc-image", type=Path,
+        help="Raw 2048-byte-sector ISO attached to CDVD (requires ROM0)",
+    )
+    parser.add_argument(
         "--timeout-seconds", type=int, default=10,
         help="hard wall-time limit for each guest replay (default: 10)",
     )
@@ -682,6 +686,10 @@ def main(argv=None):
             command.append(f"--iop-quantum={args.iop_quantum}")
             if args.iop_start_all:
                 command.append("--iop-start-all")
+        if args.disc_image is not None:
+            command.append(
+                f"--disc-image={args.disc_image.resolve(strict=True)}"
+            )
         if args.trace:
             command.append("--trace")
         if args.trace_entry is not None:

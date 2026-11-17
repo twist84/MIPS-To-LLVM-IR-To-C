@@ -59,6 +59,7 @@ add_library(iop_cpu STATIC
     src/iop/iop_sif0_dma_transport.cpp
     src/iop/iop_sifcmd_bridge.cpp
     src/iop/iop_disc_loader.cpp
+    src/iop/iop_cdvd.cpp
     src/iop/iop_sif_rpc_bridge.cpp
 )
 target_include_directories(iop_cpu PUBLIC ${CMAKE_SOURCE_DIR}/src/iop)
@@ -114,6 +115,8 @@ add_executable(iop_sifcmd_bridge_test tests/smoke/iop_sifcmd_bridge_test.cpp)
 target_link_libraries(iop_sifcmd_bridge_test PRIVATE iop_cpu ee_core)
 add_executable(iop_disc_loader_test tests/smoke/iop_disc_loader_test.cpp)
 target_link_libraries(iop_disc_loader_test PRIVATE iop_cpu)
+add_executable(iop_cdvd_test tests/smoke/iop_cdvd_test.cpp)
+target_link_libraries(iop_cdvd_test PRIVATE iop_cpu)
 add_executable(iop_sif_rpc_bridge_test tests/smoke/iop_sif_rpc_bridge_test.cpp)
 target_link_libraries(iop_sif_rpc_bridge_test PRIVATE iop_cpu ee_core)
 
@@ -195,6 +198,11 @@ target_link_libraries(ee_recomp PRIVATE ee_core)
 # IOP IRX execution at SIF polling rendezvous points.
 add_executable(ee_game_runner src/tools/ee_game_runner_main.cpp)
 target_link_libraries(ee_game_runner PRIVATE ee_core iop_cpu ${CMAKE_DL_LIBS})
+if(MSVC)
+    # This diagnostic runner has a large monolithic dispatch frame. Keep its
+    # host stack reserve explicit instead of depending on the 1 MiB PE default.
+    target_link_options(ee_game_runner PRIVATE /STACK:8388608)
+endif()
 
 add_executable(ee_ram_interpreter_test tests/smoke/ee_ram_interpreter_test.cpp)
 target_link_libraries(ee_ram_interpreter_test PRIVATE ee_core)
@@ -396,6 +404,7 @@ add_test(NAME iop_sif_dma COMMAND iop_sif_dma_test)
 add_test(NAME iop_sif1_bridge COMMAND iop_sif1_bridge_test)
 add_test(NAME iop_sifcmd_bridge COMMAND iop_sifcmd_bridge_test)
 add_test(NAME iop_disc_loader COMMAND iop_disc_loader_test)
+add_test(NAME iop_cdvd COMMAND iop_cdvd_test)
 add_test(NAME iop_sif_rpc_bridge COMMAND iop_sif_rpc_bridge_test)
 add_test(NAME decoder COMMAND ee_decoder_test)
 add_test(NAME dispatcher COMMAND ee_dispatcher_test)

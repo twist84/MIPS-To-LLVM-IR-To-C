@@ -82,6 +82,8 @@ public:
     const s_memory_fault& last_memory_fault() const;
     bool read32(uint32_t address, uint32_t* value) const;
     bool write32(uint32_t address, uint32_t value);
+    // Hardware DMA writes physical IOP RAM without going through MMIO.
+    bool dma_write(uint32_t address, const uint8_t* data, uint32_t size);
 
     // Exactly one guest instruction, with architectural branch-delay slots.
     // Exceptions and unsupported instructions leave PC at the faulting word.

@@ -20,6 +20,7 @@ public:
     );
     using t_sif0_start_callback = void (*)(void* user);
     using t_sif1_start_callback = void (*)(void* user);
+    using t_cdvd_start_callback = void (*)(void* user);
     static constexpr uint32_t k_scratchpad_base = 0x1f800000u;
     static constexpr uint32_t k_scratchpad_size = 1024u;
     static constexpr uint32_t k_i_stat = 0x1f801070u;
@@ -81,6 +82,7 @@ public:
                        t_sif_mmio_write write);
     void bind_sif0_start(void* user, t_sif0_start_callback callback);
     void bind_sif1_start(void* user, t_sif1_start_callback callback);
+    void bind_cdvd_start(void* user, t_cdvd_start_callback callback);
 
     // For the ordinary MMIO/scratchpad range, address is physical.
     // The cache-control register retains its privileged full address.
@@ -110,8 +112,11 @@ public:
     bool debug_console_truncated() const;
     // Expose pending work to an eventual real CDVD sector provider.
     bool cdvd_ncmd_pending() const;
+    uint8_t cdvd_ncmd_command() const;
     uint32_t cdvd_ncmd_parameter_count() const;
     bool cdvd_ncmd_parameter(uint32_t index, uint8_t* value) const;
+    bool cdrom_dma_register(uint32_t index, uint32_t* value) const;
+    bool complete_cdvd_read(uint8_t interrupt_reason);
 
 private:
     bool scratchpad_range(uint32_t address, uint32_t width) const;
@@ -157,6 +162,8 @@ private:
     t_sif1_start_callback m_sif1_start = nullptr;
     t_sif_mmio_read m_sif_mmio_read = nullptr;
     t_sif_mmio_write m_sif_mmio_write = nullptr;
+    void* m_cdvd_user = nullptr;
+    t_cdvd_start_callback m_cdvd_start = nullptr;
     uint32_t m_dma_icr = 0u;
     uint32_t m_dma_icr2 = 0u;
     std::string m_debug_console;

@@ -50,6 +50,8 @@ void c_hw::reset()
     m_sif1_start = nullptr;
     m_sif_mmio_read = nullptr;
     m_sif_mmio_write = nullptr;
+    m_cdvd_user = nullptr;
+    m_cdvd_start = nullptr;
     for (uint32_t channel = 0u; channel < 2u; ++channel)
     {
         for (uint32_t reg = 0u; reg < 4u; ++reg)
@@ -83,6 +85,12 @@ void c_hw::bind_sif1_start(void* user, t_sif1_start_callback callback)
 {
     m_sif1_user = callback != nullptr ? user : nullptr;
     m_sif1_start = m_sif1_user != nullptr ? callback : nullptr;
+}
+
+void c_hw::bind_cdvd_start(void* user, t_cdvd_start_callback callback)
+{
+    m_cdvd_user = callback != nullptr ? user : nullptr;
+    m_cdvd_start = m_cdvd_user != nullptr ? callback : nullptr;
 }
 
 bool c_hw::scratchpad_range(
@@ -330,6 +338,10 @@ bool c_hw::write(
         m_cdvd_ncmd_pending = true;
         // An actual sector provider must consume/complete this request.
         // Do not supply empty sector data or clear DMA3 STR here.
+        if (m_cdvd_start != nullptr)
+        {
+            m_cdvd_start(m_cdvd_user);
+        }
         return true;
     }
     if (address == k_debug_console && width == 1u)
@@ -359,6 +371,11 @@ bool c_hw::write(
         // STR, asserting an IRQ or claiming command completion.
         // A future disc transport must explicitly complete it.
         m_cdrom_dma[reg] = value;
+        if (reg == 2u && (value & 0x01000000u) != 0u &&
+            m_cdvd_start != nullptr)
+        {
+            m_cdvd_start(m_cdvd_user);
+        }
         return true;
     }
 
@@ -640,6 +657,11 @@ bool c_hw::cdvd_ncmd_pending() const
     return m_cdvd_ncmd_pending;
 }
 
+uint8_t c_hw::cdvd_ncmd_command() const
+{
+    return m_cdvd_ncmd_command;
+}
+
 uint32_t c_hw::cdvd_ncmd_parameter_count() const
 {
     return m_cdvd_ncmd_param_count;
@@ -652,6 +674,32 @@ bool c_hw::cdvd_ncmd_parameter(uint32_t index, uint8_t* value) const
         return false;
     }
     *value = m_cdvd_ncmd_params[index];
+    return true;
+}
+
+bool c_hw::cdrom_dma_register(uint32_t index, uint32_t* value) const
+{
+    if (value == nullptr || index >= 3u)
+    {
+        return false;
+    }
+    *value = m_cdrom_dma[index];
+    return true;
+}
+
+bool c_hw::complete_cdvd_read(uint8_t interrupt_reason)
+{
+    if (!m_cdvd_ncmd_pending || m_cdvd_ncmd_command != 0x06u ||
+        (m_cdrom_dma[2u] & 0x01000000u) == 0u)
+    {
+        return false;
+    }
+    m_cdrom_dma[2u] &= ~0x01000000u;
+    m_cdvd_ncmd_pending = false;
+    m_cdvd_ncmd_param_count = 0u;
+    m_cdvd_i_stat |= interrupt_reason;
+    (void)complete_dma_channel(3u);
+    (void)raise_interrupt(2u);
     return true;
 }
 

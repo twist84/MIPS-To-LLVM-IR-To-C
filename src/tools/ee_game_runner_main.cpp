@@ -5,6 +5,7 @@
 #include "ee_hw_bus.h"
 #include "elf_loader.h"
 #include "iop_kernel.h"
+#include "iop_cdvd.h"
 #include "iop_sifman_bridge.h"
 #include "iop_sif1_bridge.h"
 #include "iop_sif1_dma_transport.h"
@@ -151,6 +152,7 @@ void usage(const char* program)
         "  --iop-irx=FILE       Repeat in dependency order; last IRX starts by default\n"
         "  --iop-rom0=FILE      Boot caller-supplied 4 MiB PS2 BIOS ROM at BFC00000\n"
         "                        Also accepts SDBZ_IOP_ROM0 environment variable\n"
+        "  --disc-image=FILE    Attach a raw 2048-byte-sector ISO to CDVD\n"
         "  --iop-start-all      Start all loaded IOP modules (default: last only)\n"
         "  --iop-quantum=N      Max R3000 instructions per SIF poll (default 256)\n"
         "  --trace              Print guest PC, reason and dispatch count per step\n"
@@ -190,6 +192,12 @@ struct s_kernel_interrupt_handler
     uint32_t m_address = 0;
     uint32_t m_arg = 0;
     uint32_t m_gp = 0;
+};
+
+struct s_cdvd_context
+{
+    std::unique_ptr<iop::c_iso_sector_source> m_source;
+    std::unique_ptr<iop::c_cdvd_dma_transport> m_transport;
 };
 
 // ps2-web-recomp/runtime/src/kernel.cpp::add_handler:
@@ -470,6 +478,7 @@ int main(int argc, char** argv)
     const char* report_path = nullptr;
     std::vector<std::string> iop_irx_paths;
     const char* iop_rom0_path = nullptr;
+    const char* disc_image_path = nullptr;
     bool iop_start_all = false;
     uint32_t budget = k_default_dispatch_budget;
     uint32_t loop_budget = 0u;
@@ -551,6 +560,16 @@ int main(int argc, char** argv)
                 return 2;
             }
             iop_rom0_path = argv[i] + 11;
+            continue;
+        }
+        if (argument.compare(0, 13, "--disc-image=") == 0)
+        {
+            if (argument.size() == 13u || disc_image_path != nullptr)
+            {
+                std::fprintf(stderr, "invalid or duplicate disc image path\n");
+                return 2;
+            }
+            disc_image_path = argv[i] + 13;
             continue;
         }
         if (argument == "--iop-start-all")
@@ -706,6 +725,7 @@ int main(int argc, char** argv)
         iop_quantum == 0u || iop_quantum > 65536u ||
         (iop_start_all && iop_irx_paths.empty()) ||
         (iop_rom0_path != nullptr && !iop_irx_paths.empty()) ||
+        (disc_image_path != nullptr && iop_rom0_path == nullptr) ||
         stack >= k_ee_ram_size ||
         (has_trace_entry && (trace_entry & 3u) != 0u) ||
         (has_watch_word && (watch_word & 3u) != 0u) ||
@@ -798,6 +818,7 @@ int main(int argc, char** argv)
     std::unique_ptr<iop::c_sifcmd_bridge> iop_sifcmd;
     std::unique_ptr<iop::c_disc_loader> iop_disc;
     std::unique_ptr<iop::c_sif_rpc_bridge> iop_rpc;
+    std::unique_ptr<s_cdvd_context> cdvd;
     if (!iop_irx_paths.empty() || iop_rom0_path != nullptr)
     {
         iop_kernel = std::make_unique<iop::c_kernel>();
@@ -846,6 +867,33 @@ int main(int argc, char** argv)
                     *memory, hardware.dmac(),
                     iop_kernel->cpu(), iop_kernel->hardware()
                 );
+            if (disc_image_path != nullptr)
+            {
+                cdvd = std::make_unique<s_cdvd_context>();
+                cdvd->m_source =
+                    std::make_unique<iop::c_iso_sector_source>(
+                    std::filesystem::path(disc_image_path)
+                );
+                if (!cdvd->m_source->valid())
+                {
+                    std::fprintf(
+                        stderr, "CDVD ISO must be readable and aligned to "
+                        "2048-byte sectors: %s\n", disc_image_path
+                    );
+                    return 1;
+                }
+                cdvd->m_transport =
+                    std::make_unique<iop::c_cdvd_dma_transport>(
+                        iop_kernel->cpu(), iop_kernel->hardware(),
+                        *cdvd->m_source
+                    );
+                std::printf(
+                    "CDVD media attached: path=%s sectors=%llu "
+                    "sector_size=2048\n", disc_image_path,
+                    static_cast<unsigned long long>(
+                        cdvd->m_source->sector_count())
+                );
+            }
             const iop::s_cpu_state& boot =
                 iop_kernel->cpu().state();
             std::printf(
