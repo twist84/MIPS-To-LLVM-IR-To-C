@@ -714,6 +714,12 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 consider_read(ins.rs);
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
+            case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUBU:
+                // Scalar doubleword results preserve the upper 64 bits of rd.
+                consider_read(ins.rs);
+                consider_read(ins.rt);
+                break;
             case e_ee_opcode::FUNCT_ADD:
             case e_ee_opcode::FUNCT_ADDU:
             case e_ee_opcode::FUNCT_SUB:

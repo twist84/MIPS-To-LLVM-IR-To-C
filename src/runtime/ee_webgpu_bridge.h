@@ -32,6 +32,11 @@ public:
         const uint8_t* data, uint32_t qwc
     );
 
+    // Read-only validation against the same display-source decoder used
+    // by present/readback. This does not submit any GPU work.
+    bool supports_display(const s_ee_gs_display_registers& registers,
+        uint32_t crt_mode) const;
+
     // Present only when the host observes a genuine guest scanout field.
     // An invalid GS display configuration cannot trigger a presentation.
     bool present(const s_ee_gs_display_registers& registers,

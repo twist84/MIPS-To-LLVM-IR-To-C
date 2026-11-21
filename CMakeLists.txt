@@ -56,6 +56,7 @@ add_library(ee_core STATIC
 # runner until module loading, timing and SIF transport are integrated.
 add_library(iop_cpu STATIC
     src/iop/iop_cpu.cpp
+    src/iop/iop_guest_fault_probe.cpp
     src/iop/iop_hw.cpp
     src/iop/iop_spu2.cpp
     src/iop/irx_loader.cpp
@@ -76,6 +77,9 @@ add_library(iop_cpu STATIC
 target_include_directories(iop_cpu PUBLIC ${CMAKE_SOURCE_DIR}/src/iop)
 add_executable(iop_cpu_test tests/smoke/iop_cpu_test.cpp)
 target_link_libraries(iop_cpu_test PRIVATE iop_cpu)
+add_executable(iop_guest_fault_probe_test
+    tests/smoke/iop_guest_fault_probe_test.cpp)
+target_link_libraries(iop_guest_fault_probe_test PRIVATE iop_cpu)
 add_executable(iop_rom0_boot_test tests/smoke/iop_rom0_boot_test.cpp)
 target_link_libraries(iop_rom0_boot_test PRIVATE iop_cpu)
 add_executable(iop_hw_test tests/smoke/iop_hw_test.cpp)
@@ -139,7 +143,7 @@ target_link_libraries(iop_cdvd_test PRIVATE iop_cpu)
 add_executable(iop_folder_sector_source_test tests/smoke/iop_folder_sector_source_test.cpp)
 target_link_libraries(iop_folder_sector_source_test PRIVATE iop_cpu)
 add_executable(iop_cdvdman_bridge_test tests/smoke/iop_cdvdman_bridge_test.cpp)
-target_link_libraries(iop_cdvdman_bridge_test PRIVATE iop_cpu)
+target_link_libraries(iop_cdvdman_bridge_test PRIVATE iop_cpu ee_core)
 add_executable(iop_sif_rpc_bridge_test tests/smoke/iop_sif_rpc_bridge_test.cpp)
 target_link_libraries(iop_sif_rpc_bridge_test PRIVATE iop_cpu ee_core)
 
@@ -256,6 +260,13 @@ target_link_libraries(ee_recomp PRIVATE ee_core)
 # IOP IRX execution at SIF polling rendezvous points.
 add_executable(ee_hot_loop_diagnostics_test tests/smoke/ee_hot_loop_diagnostics_test.cpp)
 add_test(NAME ee_hot_loop_diagnostics COMMAND ee_hot_loop_diagnostics_test)
+
+# Pure host watchdog gate: no guest IR, EE runtime or GPU dependency.
+add_executable(ee_host_loop_yield_budget_test
+    tests/smoke/ee_host_loop_yield_budget_test.cpp)
+target_include_directories(ee_host_loop_yield_budget_test PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/tools)
+add_test(NAME ee_host_loop_yield_budget COMMAND ee_host_loop_yield_budget_test)
 
 add_executable(ee_isa_inventory_test tests/smoke/ee_isa_inventory_test.cpp)
 target_link_libraries(ee_isa_inventory_test PRIVATE ee_core)
@@ -457,9 +468,18 @@ add_executable(ee_sdbz_dma_wait_probe_test tests/smoke/ee_sdbz_dma_wait_probe_te
 target_link_libraries(ee_sdbz_dma_wait_probe_test PRIVATE ee_core)
 add_test(NAME ee_sdbz_dma_wait_probe COMMAND ee_sdbz_dma_wait_probe_test)
 
+add_executable(ee_sdbz_pad_return_probe_test tests/smoke/ee_sdbz_pad_return_probe_test.cpp)
+target_link_libraries(ee_sdbz_pad_return_probe_test PRIVATE ee_core)
+add_test(NAME ee_sdbz_pad_return_probe COMMAND ee_sdbz_pad_return_probe_test)
+
 add_executable(ee_gs_gif_diagnostics_test tests/smoke/ee_gs_gif_diagnostics_test.cpp)
 target_link_libraries(ee_gs_gif_diagnostics_test PRIVATE ee_core)
 add_test(NAME ee_gs_gif_diagnostics COMMAND ee_gs_gif_diagnostics_test)
+
+add_executable(ee_gs_presentation_probe_test
+    tests/smoke/ee_gs_presentation_probe_test.cpp)
+target_link_libraries(ee_gs_presentation_probe_test PRIVATE ee_core)
+add_test(NAME ee_gs_presentation_probe COMMAND ee_gs_presentation_probe_test)
 
 add_executable(ee_gs_state_test tests/smoke/ee_gs_state_test.cpp)
 target_link_libraries(ee_gs_state_test PRIVATE ee_core)
@@ -582,6 +602,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ee_m2_dispatch_trace_analysis
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_analyze_m2_dispatch_trace.py)
+    add_test(NAME ee_sdbz_elf_hotspot_xrefs
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_inspect_sdbz_elf_hotspots.py)
     add_test(NAME ee_wgpu_native_sdk_bootstrap
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ensure_wgpu_native.py)
@@ -621,6 +644,14 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME boot_session_orchestration
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_boot_session.py)
+    # Rebuilding host-only probe headers must relink existing guest
+    # objects, never force a fresh ELF-to-LLVM translation.
+    add_test(NAME ee_translation_cache_input_split
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_translation_cache_input_split.py)
+    add_test(NAME ee_interrupted_append_recovery
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_interrupted_append_recovery.py)
     add_test(NAME iop_rom0_runner
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_rom0_runner.py
@@ -664,6 +695,7 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_vu0_differential_x11_config.py)
 endif()
 add_test(NAME iop_cpu COMMAND iop_cpu_test)
+add_test(NAME iop_guest_fault_probe COMMAND iop_guest_fault_probe_test)
 add_test(NAME iop_rom0_boot COMMAND iop_rom0_boot_test)
 add_test(NAME iop_hw COMMAND iop_hw_test)
 add_test(NAME iop_timer5_exception COMMAND iop_timer5_exception_test)

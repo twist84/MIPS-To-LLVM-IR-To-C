@@ -36,6 +36,13 @@ struct s_cpu_state
     // to describe guest exceptions at the precise branch boundary.
     bool m_in_delay_slot = false;
     uint32_t m_branch_pc = 0u;
+    // Host-only bounded guest instruction history, preserved across IOP
+    // thread switches. Does not feed COP0, guest RAM or virtual cycles.
+    static constexpr uint32_t k_recent_pc_capacity = 8u;
+    uint32_t m_recent_pc[k_recent_pc_capacity]{};
+    uint32_t m_recent_opcode[k_recent_pc_capacity]{};
+    uint32_t m_recent_next = 0u;
+    uint32_t m_recent_count = 0u;
 };
 
 struct s_run_result

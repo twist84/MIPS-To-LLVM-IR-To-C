@@ -385,6 +385,7 @@ bool c_sifman_bridge::handle_syscall(
 
         struct s_transfer
         {
+            uint32_t m_iop_source = 0u;
             uint32_t m_ee_destination = 0u;
             std::vector<uint8_t> m_bytes;
         };
@@ -435,6 +436,7 @@ bool c_sifman_bridge::handle_syscall(
             }
 
             s_transfer transfer{};
+            transfer.m_iop_source = source_physical;
             transfer.m_ee_destination = destination_physical;
             transfer.m_bytes.reserve(size);
             for (uint32_t offset = 0u; offset < size; offset += 4u)
@@ -470,6 +472,30 @@ bool c_sifman_bridge::handle_syscall(
                         static_cast<uint32_t>(index),
                     transfer.m_bytes[index]
                 );
+            }
+        }
+        if (kernel.hardware().pad_trace_window())
+        {
+            for (const s_transfer& transfer : transfers)
+            {
+                // The retail EE helper selects between two 128-byte
+                // records. Report actual committed records of that size.
+                if (transfer.m_bytes.size() == 128u)
+                {
+                    const uint32_t dst = transfer.m_ee_destination;
+                    std::fprintf(stderr,
+                        "PAD SIF record poll=%u ee_completed=%llu thread=%u ra=%08x "
+                        "src=%08x dst=%08x frame=%u payload=%02x %02x %02x %02x "
+                        "ee=%02x %02x %02x %02x\n",
+                        kernel.hardware().pad0_polls(),
+                        static_cast<unsigned long long>(kernel.hardware().pad_trace_dispatch()),
+                        kernel.current_thread_id(), state.m_gpr[31],
+                        transfer.m_iop_source, dst, m_ee_ram->read32(dst + 0x58u),
+                        transfer.m_bytes[0], transfer.m_bytes[1],
+                        transfer.m_bytes[2], transfer.m_bytes[3],
+                        m_ee_ram->read8(dst), m_ee_ram->read8(dst + 1u),
+                        m_ee_ram->read8(dst + 2u), m_ee_ram->read8(dst + 3u));
+                }
             }
         }
         if (!m_dmac->raise(5u))

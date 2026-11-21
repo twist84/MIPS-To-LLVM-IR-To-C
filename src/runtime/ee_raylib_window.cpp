@@ -1,6 +1,7 @@
 #include "ee_raylib_window.h"
 
 #include "ee_webgpu_bridge.h"
+#include "ee_gs_presentation_probe.h"
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 
 #include <raylib.h>
@@ -67,7 +68,8 @@ bool c_ee_raylib_window::initialize()
 
 void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     const s_ee_gs_display_registers& registers,
-    uint32_t crt_mode, uint64_t field_count)
+    uint32_t crt_mode, uint64_t field_count,
+    c_ee_gs_presentation_probe* probe)
 {
     if (!m_ready || m_closed)
     {
@@ -105,8 +107,15 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     if (advanced)
     {
         m_last_fields = field_count;
-        // Only genuine guest fields with a valid GS display are presented.
-        bridge.present(registers, crt_mode);
+        // Count the actual window attempt separately from the guest field
+        // count. A native surface/present failure is not a guest event.
+        const bool supported = bridge.supports_display(registers, crt_mode);
+        const bool presented = bridge.present(registers, crt_mode);
+        if (probe != nullptr)
+        {
+            probe->record_present(
+                field_count, supported, presented, registers, crt_mode);
+        }
     }
     // Never call BeginDrawing/EndDrawing: these swap raylib's GL buffers.
 }

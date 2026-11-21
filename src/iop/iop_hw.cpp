@@ -39,6 +39,7 @@ void c_hw::reset()
     m_ssbus_spu2_delay1 = 0u;
     m_sio2_ctrl = 0u;
     m_sio2_stat = 0u;
+    m_sio2_intr = 0u;
     m_sio2_index = 0u;
     std::fill(m_sio2_send3, m_sio2_send3 + 16u, 0u);
     std::fill(m_sio2_port, m_sio2_port + 8u, 0u);
@@ -49,10 +50,31 @@ void c_hw::reset()
     m_sio2_pad[0].m_connected = true;
     m_sio2_pending_tx.clear();
     m_sio2_rx.clear();
+    m_sio2_rx_cross_tags.clear();
+    m_sio2_empty_rx_read_count = 0u;
+    m_pad_trace_dispatch = 0u;
+    m_sio2_pad0_poll_count = 0u;
+    m_sio2_pad0_cross_pressed_polls = 0u;
+    m_sio2_pad0_cross_bytes_pio_read = 0u;
+    m_sio2_pad0_cross_bytes_dma_written = 0u;
+    m_sio2_pad0_cross_bytes_fifo_discarded = 0u;
+    m_sio2_pad0_cross_first_poll = 0u;
+    m_sio2_pad0_cross_poll_count = 0u;
     m_sio2_transfer_requested = false;
     m_sio2_ctrl_start_count = 0u;
     m_sio2_packet_count = 0u;
     m_sio2_transfer_count = 0u;
+    m_sio2_last_start_guest_pc = 0u;
+    m_sio2_last_start_guest_ra = 0u;
+    m_sio2_packets_at_last_start = 0u;
+    m_sio2_tx_bytes_at_last_start = 0u;
+    m_sio2_rx_bytes_at_last_start = 0u;
+    for (auto& packet : m_sio2_first_packets)
+    {
+        packet = s_sio2_packet_observation{};
+    }
+    m_sio2_last_rejection = e_sio2_rejection::none;
+    m_sio2_rejected_start_count = 0u;
     m_timer5_count = 0u;
     m_timer5_mode = 0u;
     m_timer5_target = 0u;
@@ -138,6 +160,33 @@ void c_hw::bind_dma_cpu(c_cpu* cpu)
     m_dma_cpu = cpu;
 }
 
+void c_hw::configure_sio2_pad0_cross_pulse(
+    uint32_t first_poll, uint32_t poll_count)
+{
+    // A test pulse is explicitly opt-in and only modifies the bytes
+    // returned to a real guest pad read; it never queues a new packet.
+    m_sio2_pad0_cross_first_poll =
+        first_poll != 0u && poll_count != 0u ? first_poll : 0u;
+    m_sio2_pad0_cross_poll_count =
+        m_sio2_pad0_cross_first_poll != 0u ? poll_count : 0u;
+    m_sio2_pad0_poll_count = 0u;
+    m_sio2_pad0_cross_pressed_polls = 0u;
+    m_sio2_pad0_cross_bytes_pio_read = 0u;
+    m_sio2_pad0_cross_bytes_dma_written = 0u;
+    m_sio2_pad0_cross_bytes_fifo_discarded = 0u;
+}
+
+bool c_hw::pad_trace_window() const
+{
+    const uint64_t poll = m_sio2_pad0_poll_count;
+    const uint64_t begin = m_sio2_pad0_cross_first_poll;
+    const uint64_t end = begin + m_sio2_pad0_cross_poll_count;
+    // Include one preceding poll and two release polls. Limit output
+    // during intentionally long holds to the press and release edges.
+    return begin != 0u && poll != 0u && poll + 1u >= begin &&
+        poll < end + 2u && (poll < begin + 8u || poll + 1u >= end);
+}
+
 // SIO2 controller exchange from ps2-web-recomp/SDBZ's sio2.cpp:
 // SEND3 supplies the input and output sizes; the guest's actual TX bytes
 // select the device command. Never make a response to a write-only setup.
@@ -178,6 +227,7 @@ bool c_hw::process_sio2_packet()
         m_sio2_port[port * 2u + 1u] != 0x5ffffu &&
         m_sio2_port[port * 2u + 1u] != 0x00030064u &&
         m_sio2_pending_tx[0u] == 0x01u;
+    bool cross_reply = false;
     if (!pad_present)
     {
         m_sio2_stat |= 0xc000u |
@@ -234,6 +284,33 @@ bool c_hw::process_sio2_packet()
             break;
         case 0x42u:
             neutral_data();
+            if (port == 0u)
+            {
+                // PS2 pad button bits are active-low: Cross is bit 14,
+                // the upper byte's bit 6. Only a genuine guest 0x42
+                // read on a connected port-0 pad consumes the probe.
+                ++m_sio2_pad0_poll_count;
+                if (m_sio2_pad0_cross_poll_count != 0u &&
+                    m_sio2_pad0_poll_count >=
+                        m_sio2_pad0_cross_first_poll &&
+                    m_sio2_pad0_poll_count -
+                        m_sio2_pad0_cross_first_poll <
+                        m_sio2_pad0_cross_poll_count)
+                {
+                    put(4u, 0xbfu);
+                    cross_reply = true;
+                    ++m_sio2_pad0_cross_pressed_polls;
+                }
+                if (pad_trace_window() && reply.size() >= 5u)
+                {
+                    std::fprintf(stderr,
+                        "PAD poll=%u ee_completed=%llu iop_cpu_cycle=%llu "
+                        "wire=%02x %02x %02x %02x %02x\n",
+                        pad0_polls(), static_cast<unsigned long long>(m_pad_trace_dispatch),
+                        static_cast<unsigned long long>(m_dma_cpu->cycles()),
+                        reply[0], reply[1], reply[2], reply[3], reply[4]);
+                }
+            }
             break;
         case 0x43u:
             if (!pad.m_config)
@@ -317,9 +394,26 @@ bool c_hw::process_sio2_packet()
             break;
         }
     }
-    for (const uint8_t byte : reply)
+    // A mere packet count cannot distinguish controller port 0/1
+    // from memory-card port 2. Preserve the first four *real* decoded
+    // requests without changing any guest-visible SIO2 response bytes.
+    if (m_sio2_packet_count < 4u)
     {
-        m_sio2_rx.push_back(byte);
+        s_sio2_packet_observation& packet =
+            m_sio2_first_packets[m_sio2_packet_count];
+        packet.m_port = port;
+        packet.m_send3 = send;
+        packet.m_input_size = in_size;
+        packet.m_output_size = out_size;
+        packet.m_first_tx_byte = m_sio2_pending_tx[0u];
+        packet.m_command = in_size >= 2u ? m_sio2_pending_tx[1u] : 0u;
+        packet.m_pad_present = pad_present;
+    }
+    for (size_t index = 0u; index < reply.size(); ++index)
+    {
+        m_sio2_rx.push_back(reply[index]);
+        m_sio2_rx_cross_tags.push_back(
+            cross_reply && index == 4u ? 1u : 0u);
     }
     m_sio2_pending_tx.clear();
     ++m_sio2_index;
@@ -333,9 +427,18 @@ bool c_hw::process_sio2_packet()
 // IRQ; setup writes alone never generate successful completion.
 bool c_hw::run_sio2_transfer()
 {
+    // Record why a genuine guest CTRL.start was not completed. Rejection
+    // attribution is host-only and never acknowledges DMA11/12 or IRQ17.
+    m_sio2_last_rejection = e_sio2_rejection::none;
+    const auto reject = [this](e_sio2_rejection reason)
+    {
+        m_sio2_last_rejection = reason;
+        ++m_sio2_rejected_start_count;
+        return false;
+    };
     if (m_dma_cpu == nullptr)
     {
-        return false;
+        return reject(e_sio2_rejection::cpu_unavailable);
     }
     const bool input_dma =
         (m_sio2_dma[0u][2u] & k_spu2_dma_str_bit) != 0u;
@@ -357,14 +460,14 @@ bool c_hw::run_sio2_transfer()
             input_blocks > 16u || total > k_sio2_tx_limit ||
             m_sio2_index + input_blocks > 16u)
         {
-            return false;
+            return reject(e_sio2_rejection::dma11_geometry);
         }
         inbound.resize(static_cast<size_t>(total));
         if (!m_dma_cpu->dma_read(
                 m_sio2_dma[0u][0u], inbound.data(),
                 static_cast<uint32_t>(total)))
         {
-            return false;
+            return reject(e_sio2_rejection::dma11_source);
         }
     }
     if (output_dma)
@@ -377,7 +480,7 @@ bool c_hw::run_sio2_transfer()
         if (output_words == 0u || output_blocks == 0u ||
             output_blocks > 16u || total > k_sio2_tx_limit)
         {
-            return false;
+            return reject(e_sio2_rejection::dma12_geometry);
         }
         // Validate the write range before processing the device command.
         // A failed target must never perform partial peripheral writes.
@@ -387,7 +490,7 @@ bool c_hw::run_sio2_transfer()
                 m_sio2_dma[1u][0u] +
                     static_cast<uint32_t>(total) - 1u, &check, 1u))
         {
-            return false;
+            return reject(e_sio2_rejection::dma12_destination);
         }
     }
     bool processed = false;
@@ -401,7 +504,7 @@ bool c_hw::run_sio2_transfer()
                 m_sio2_pending_tx.end(), begin, begin + block_bytes);
             if (!process_sio2_packet())
             {
-                return false;
+                return reject(e_sio2_rejection::packet_incomplete);
             }
             processed = true;
         }
@@ -416,34 +519,62 @@ bool c_hw::run_sio2_transfer()
     }
     if (!processed)
     {
-        return false;
+        // Original SDBZ SIO2MAN issues CTRL=0x3bd after sending its
+        // two PIO pad polls. The combined FIFO reset/start clears both
+        // queues *before* entering here. The primary ps2-web-recomp
+        // SIO2 run_transfer() still acknowledges that actual START
+        // through IRQ17, even with no additional data to transfer.
+        //
+        // An empty PIO START is therefore a real control completion,
+        // not a missing device reply. Incomplete PIO packets and armed
+        // DMA11/12 requests must still pass their normal preflight.
+        if (!input_dma && !output_dma && m_sio2_pending_tx.empty())
+        {
+            processed = true;
+        }
+        else
+        {
+            return reject(m_sio2_pending_tx.empty()
+                ? e_sio2_rejection::no_processed_packet
+                : e_sio2_rejection::packet_incomplete);
+        }
     }
     if (output_dma)
     {
         const uint32_t block_bytes = output_words * 4u;
         for (uint32_t block = 0u; block < output_blocks; ++block)
         {
-            if (m_sio2_index < output_blocks ||
-                m_sio2_rx.size() <
-                    ((m_sio2_send3[block] >> 18u) & 0x1ffu))
+            if (m_sio2_index < output_blocks)
             {
-                return false;
+                return reject(e_sio2_rejection::dma12_packet_count);
+            }
+            if (m_sio2_rx.size() <
+                ((m_sio2_send3[block] >> 18u) & 0x1ffu))
+            {
+                return reject(e_sio2_rejection::dma12_reply_underflow);
             }
             const uint32_t count =
                 (m_sio2_send3[block] >> 18u) & 0x1ffu;
             std::vector<uint8_t> bytes(count);
+            uint32_t cross_bytes = 0u;
             for (uint32_t index = 0u; index < count; ++index)
             {
                 bytes[index] = m_sio2_rx.front();
                 m_sio2_rx.pop_front();
+                cross_bytes += m_sio2_rx_cross_tags.front();
+                m_sio2_rx_cross_tags.pop_front();
             }
-            if (count > block_bytes ||
-                !m_dma_cpu->dma_write(
+            if (count > block_bytes)
+            {
+                return reject(e_sio2_rejection::dma12_block_too_small);
+            }
+            if (!m_dma_cpu->dma_write(
                     m_sio2_dma[1u][0u] + block * block_bytes,
                     bytes.data(), count))
             {
-                return false;
+                return reject(e_sio2_rejection::dma12_write);
             }
+            m_sio2_pad0_cross_bytes_dma_written += cross_bytes;
         }
     }
     if (input_dma)
@@ -458,6 +589,10 @@ bool c_hw::run_sio2_transfer()
     }
     m_sio2_transfer_requested = false;
     ++m_sio2_transfer_count;
+    // The SIO2 device's own completion latch is separate from the IOP
+    // interrupt controller. The SIO2MAN callback at 0xbf808280 reads
+    // this bit and writes the same value to clear it (W1C).
+    m_sio2_intr |= 0x1u;
     (void)raise_interrupt(17u);
     return true;
 }
@@ -730,13 +865,32 @@ bool c_hw::read(
     if (address == k_sio2_rx_fifo &&
         (width == 1u || width == 4u))
     {
-        // Never invent a response to an unexecuted guest transaction.
+        // Match ps2-web-recomp/SDBZ SIO2 read(0x1f808264):
+        // an empty RX FIFO reads as 0xff, not an unsupported MMIO
+        // operation. This is open-bus/empty-FIFO data, not a controller
+        // response: no bytes are queued and no IRQ/DMA is triggered.
         if (m_sio2_rx.empty())
         {
-            return false;
+            ++m_sio2_empty_rx_read_count;
+            *value = 0xffu;
         }
-        *value = m_sio2_rx.front();
-        m_sio2_rx.pop_front();
+        else
+        {
+            *value = m_sio2_rx.front();
+            if (m_sio2_rx_cross_tags.front() != 0u && pad_trace_window() &&
+                m_dma_cpu != nullptr)
+            {
+                std::fprintf(stderr,
+                    "PAD PIO ee_completed=%llu iop_cpu_cycle=%llu pc=%08x ra=%08x byte=%02x\n",
+                    static_cast<unsigned long long>(m_pad_trace_dispatch),
+                    static_cast<unsigned long long>(m_dma_cpu->cycles()),
+                    m_dma_cpu->state().m_pc, m_dma_cpu->state().m_gpr[31], *value);
+            }
+            m_sio2_rx.pop_front();
+            m_sio2_pad0_cross_bytes_pio_read +=
+                m_sio2_rx_cross_tags.front();
+            m_sio2_rx_cross_tags.pop_front();
+        }
         return true;
     }
 
@@ -876,7 +1030,13 @@ bool c_hw::read(
         *value = m_cache_control;
         return true;
     case k_sio2_ctrl:
-        *value = m_sio2_ctrl;
+        // Match ps2-web-recomp/SDBZ: CTRL reads return zero rather
+        // than echoing the last write. Original SIO2MAN performs
+        // reset (CTRL | 0x0c), sends PIO data, then START (CTRL | 1).
+        // Echoing the reset write turns that START into 0x3bd,
+        // discarding the real pad replies immediately before recv_td.
+        // Keep m_sio2_ctrl for host-only last-write diagnostics.
+        *value = 0u;
         return true;
     case k_sio2_stat:
         *value = m_sio2_stat;
@@ -886,6 +1046,9 @@ bool c_hw::read(
         return true;
     case k_sio2_aux_status:
         *value = 0u;
+        return true;
+    case k_sio2_intr:
+        *value = m_sio2_intr;
         return true;
     default:
         return false;
@@ -1194,19 +1357,40 @@ bool c_hw::write(
     case k_cache_control:
         m_cache_control = value;
         return true;
+    case k_sio2_intr:
+        // SIO2 interrupt status bits 0/1 are write-one-to-clear.
+        // Do not clear the independent IOP INTC I_STAT bit here:
+        // INTRMAN acknowledges that interrupt separately.
+        m_sio2_intr &= ~(value & 0x3u);
+        return true;
     case k_sio2_ctrl:
         m_sio2_ctrl = value;
         if ((value & 0x0cu) == 0x0cu)
         {
             m_sio2_index = 0u;
             m_sio2_pending_tx.clear();
+            m_sio2_pad0_cross_bytes_fifo_discarded +=
+                static_cast<uint32_t>(std::count(
+                    m_sio2_rx_cross_tags.begin(),
+                    m_sio2_rx_cross_tags.end(), uint8_t{1u}));
             m_sio2_rx.clear();
+            m_sio2_rx_cross_tags.clear();
             m_sio2_transfer_requested = false;
         }
         if ((value & 1u) != 0u)
         {
             ++m_sio2_ctrl_start_count;
             m_sio2_transfer_requested = true;
+            m_sio2_last_start_guest_pc = m_dma_cpu != nullptr
+                ? m_dma_cpu->state().m_pc : 0u;
+            m_sio2_last_start_guest_ra = m_dma_cpu != nullptr
+                ? m_dma_cpu->state().m_gpr[31u] : 0u;
+            // Capture packet order *at* the guest's CTRL.start. Final
+            // packet counts alone cannot show whether an incomplete
+            // PIO packet was transmitted after its first START.
+            m_sio2_packets_at_last_start = m_sio2_packet_count;
+            m_sio2_tx_bytes_at_last_start = m_sio2_pending_tx.size();
+            m_sio2_rx_bytes_at_last_start = m_sio2_rx.size();
             (void)run_sio2_transfer();
         }
         return true;
@@ -1557,6 +1741,71 @@ uint32_t c_hw::sio2_packets() const
 uint32_t c_hw::sio2_completed_transfers() const
 {
     return m_sio2_transfer_count;
+}
+
+c_hw::s_sio2_diagnostics c_hw::sio2_diagnostics() const
+{
+    s_sio2_diagnostics result{};
+    result.m_ctrl = m_sio2_ctrl;
+    result.m_stat = m_sio2_stat;
+    result.m_intr = m_sio2_intr;
+    result.m_packet_index = m_sio2_index;
+    result.m_last_start_guest_pc = m_sio2_last_start_guest_pc;
+    result.m_last_start_guest_ra = m_sio2_last_start_guest_ra;
+    result.m_packets_at_last_start = m_sio2_packets_at_last_start;
+    result.m_tx_bytes_at_last_start = m_sio2_tx_bytes_at_last_start;
+    result.m_rx_bytes_at_last_start = m_sio2_rx_bytes_at_last_start;
+    result.m_first_packet_count = m_sio2_packet_count < 4u
+        ? m_sio2_packet_count : 4u;
+    for (uint32_t index = 0u; index < 4u; ++index)
+    {
+        result.m_first_packets[index] = m_sio2_first_packets[index];
+        result.m_send3[index] = m_sio2_send3[index];
+    }
+    for (uint32_t index = 0u; index < 3u; ++index)
+    {
+        result.m_dma11[index] = m_sio2_dma[0u][index];
+        result.m_dma12[index] = m_sio2_dma[1u][index];
+    }
+    result.m_tx_bytes = m_sio2_pending_tx.size();
+    result.m_rx_bytes = m_sio2_rx.size();
+    result.m_empty_rx_reads = m_sio2_empty_rx_read_count;
+    result.m_pad0_polls = m_sio2_pad0_poll_count;
+    result.m_pad0_cross_pressed_polls =
+        m_sio2_pad0_cross_pressed_polls;
+    result.m_pad0_cross_first_poll =
+        m_sio2_pad0_cross_first_poll;
+    result.m_pad0_cross_poll_count =
+        m_sio2_pad0_cross_poll_count;
+    result.m_pad0_cross_bytes_pio_read =
+        m_sio2_pad0_cross_bytes_pio_read;
+    result.m_pad0_cross_bytes_dma_written =
+        m_sio2_pad0_cross_bytes_dma_written;
+    result.m_pad0_cross_bytes_fifo_discarded =
+        m_sio2_pad0_cross_bytes_fifo_discarded;
+    result.m_last_rejection = m_sio2_last_rejection;
+    result.m_rejected_starts = m_sio2_rejected_start_count;
+    return result;
+}
+
+const char* c_hw::sio2_rejection_name() const
+{
+    switch (m_sio2_last_rejection)
+    {
+    case e_sio2_rejection::none: return "none";
+    case e_sio2_rejection::cpu_unavailable: return "cpu_unavailable";
+    case e_sio2_rejection::dma11_geometry: return "dma11_geometry";
+    case e_sio2_rejection::dma11_source: return "dma11_source";
+    case e_sio2_rejection::dma12_geometry: return "dma12_geometry";
+    case e_sio2_rejection::dma12_destination: return "dma12_destination";
+    case e_sio2_rejection::packet_incomplete: return "packet_incomplete";
+    case e_sio2_rejection::no_processed_packet: return "no_processed_packet";
+    case e_sio2_rejection::dma12_packet_count: return "dma12_packet_count";
+    case e_sio2_rejection::dma12_reply_underflow: return "dma12_reply_underflow";
+    case e_sio2_rejection::dma12_block_too_small: return "dma12_block_too_small";
+    case e_sio2_rejection::dma12_write: return "dma12_write";
+    default: return "unknown";
+    }
 }
 
 bool c_hw::complete_cdvd_read(uint8_t interrupt_reason)

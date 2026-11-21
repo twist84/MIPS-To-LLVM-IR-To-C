@@ -184,6 +184,18 @@ int main()
         return fail("PACKED continuation across independent DMA starts");
     }
 
+    // Counters are per parser and count only GS-accepted chunks, not
+    // the current GIFtag state or hypothetical host DMA starts.
+    if (parser.counters().m_accepted_batches != 2u ||
+        parser.counters().m_rejected_batches != 0u ||
+        parser.counters().m_input_qwc != 5u ||
+        parser.counters().m_tags != 1u ||
+        parser.counters().m_primitive_events != 1u ||
+        parser.counters().m_packed_events != 4u)
+    {
+        return fail("PATH3 accepted parser accounting");
+    }
+
     // REGLIST has two 64-bit entries per QWC. With NREG=3 the final
     // high half is padding, and the next quad must be treated as GIFtag.
     hardware.reset();
@@ -304,6 +316,13 @@ int main()
     {
         return fail("failed event batch advanced parser or DMAC");
     }
+    if (parser.counters().m_accepted_batches != 0u ||
+        parser.counters().m_rejected_batches != 1u ||
+        parser.counters().m_input_qwc != 0u ||
+        parser.counters().m_tags != 0u)
+    {
+        return fail("rejected PATH3 packet counted as committed");
+    }
     capture.m_accept = true;
     ee::ee_mem_write32(&runtime, k_gif, 0u);
     program_gif(&runtime, 0x800u, 2u);
@@ -315,6 +334,15 @@ int main()
         (hardware.dmac().status() & k_gif_status) == 0u)
     {
         return fail("retry after sink refusal failed");
+    }
+
+    if (parser.counters().m_accepted_batches != 1u ||
+        parser.counters().m_rejected_batches != 1u ||
+        parser.counters().m_tags != 1u ||
+        parser.counters().m_packed_events != 1u ||
+        parser.counters().m_input_qwc != 2u)
+    {
+        return fail("PATH3 retry committed counters more than once");
     }
 
     // Explicit sink opt-in and channel identity: a GIF PATH3 parser

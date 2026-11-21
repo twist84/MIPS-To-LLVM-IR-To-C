@@ -412,6 +412,13 @@ void c_ee_webgpu_bridge::committed_gif_events(
     }
 }
 
+bool c_ee_webgpu_bridge::supports_display(
+    const s_ee_gs_display_registers& registers, uint32_t crt_mode) const
+{
+    ps2::gs::gpu::DisplaySource src{};
+    return m_ready && make_display_source(registers, crt_mode, src);
+}
+
 bool c_ee_webgpu_bridge::present(
     const s_ee_gs_display_registers& registers, uint32_t crt_mode)
 {

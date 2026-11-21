@@ -322,6 +322,10 @@ bool test_guest_sio2_controller()
     {
         0xffu, 0x41u, 0x5au, 0xffu, 0xffu
     };
+    // The original SIO2MAN interrupt handler at 0x00020180
+    // accesses this device latch through its KSEG1 alias.
+    constexpr uint32_t intr = iop::c_hw::k_sio2_intr;
+    constexpr uint32_t guest_intr = 0xbf808280u;
 
     // Real PIO: a started and fully transmitted SEND3-described packet
     // can obtain the neutral virtual controller reply and IRQ17.
@@ -330,15 +334,53 @@ bool test_guest_sio2_controller()
         !hw.write(tx, 1u, poll[0u]) ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
         (status & irq) != 0u ||
-        hw.read(rx, 1u, &status))
+        !hw.read(rx, 1u, &status) || status != 0xffu ||
+        !cpu.read32(guest_intr, &status) || status != 0u)
     {
         return false;
     }
+    // The actual SIO2MAN IRX reads the uncached byte RX FIFO at
+    // 0xbf808264. An empty FIFO returns 0xff without creating a
+    // controller response, interrupt or DMA completion.
+    uint8_t guest_empty_rx = 0u;
+    if (!cpu.read8(0xbf808264u, &guest_empty_rx) ||
+        guest_empty_rx != 0xffu ||
+        hw.sio2_diagnostics().m_empty_rx_reads != 2u ||
+        hw.sio2_diagnostics().m_rx_bytes != 0u ||
+        hw.sio2_packets() != 0u ||
+        hw.sio2_completed_transfers() != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
+        (status & irq) != 0u)
+    {
+        return false;
+    }
+
     // Requesting a transfer with an incomplete packet must not
     // manufacture a device response, DMA completion or interrupt.
     if (!hw.write(ctrl, 4u, 1u) ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
         (status & irq) != 0u)
+    {
+        return false;
+    }
+    // An actual CTRL.start with a short guest PIO packet must refuse
+    // completion without clearing any DMA/IRQ state. Attribute the
+    // exact rejected preflight and preserve the guest packet bytes.
+    const iop::c_hw::s_sio2_diagnostics first_rejection =
+        hw.sio2_diagnostics();
+    if (first_rejection.m_last_rejection !=
+            iop::c_hw::e_sio2_rejection::packet_incomplete ||
+        first_rejection.m_rejected_starts != 1u ||
+        first_rejection.m_tx_bytes != 1u ||
+        first_rejection.m_rx_bytes != 0u ||
+        first_rejection.m_packet_index != 0u ||
+        first_rejection.m_packets_at_last_start != 0u ||
+        first_rejection.m_tx_bytes_at_last_start != 1u ||
+        first_rejection.m_rx_bytes_at_last_start != 0u ||
+        first_rejection.m_send3[0u] !=
+            ((5u << 8u) | (5u << 18u)) ||
+        !hw.sio2_transfer_requested() ||
+        !hw.read(intr, 4u, &status) || status != 0u)
     {
         return false;
     }
@@ -357,9 +399,31 @@ bool test_guest_sio2_controller()
     {
         return false;
     }
+    const iop::c_hw::s_sio2_diagnostics first_packet =
+        hw.sio2_diagnostics();
     if (hw.sio2_ctrl_starts() != 2u ||
         hw.sio2_packets() != 1u ||
-        hw.sio2_completed_transfers() != 1u)
+        hw.sio2_completed_transfers() != 1u ||
+        // The authentic SIO2 interrupt completion bit is latched
+        // before the IOP IRQ17 handler reads and acknowledges it.
+        !cpu.read32(guest_intr, &status) || status != 1u ||
+        !cpu.write32(guest_intr, 2u) ||
+        !hw.read(intr, 4u, &status) || status != 1u ||
+        !cpu.write32(guest_intr, 1u) ||
+        !cpu.read32(guest_intr, &status) || status != 0u ||
+        // Device W1C does not acknowledge the separate IOP INTC bit.
+        !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
+        (status & irq) == 0u ||
+        first_packet.m_first_packet_count != 1u ||
+        first_packet.m_packets_at_last_start != 1u ||
+        first_packet.m_tx_bytes_at_last_start != 0u ||
+        first_packet.m_rx_bytes_at_last_start != 5u ||
+        first_packet.m_first_packets[0u].m_port != 0u ||
+        first_packet.m_first_packets[0u].m_input_size != 5u ||
+        first_packet.m_first_packets[0u].m_output_size != 5u ||
+        first_packet.m_first_packets[0u].m_first_tx_byte != 0x01u ||
+        first_packet.m_first_packets[0u].m_command != 0x42u ||
+        !first_packet.m_first_packets[0u].m_pad_present)
     {
         return false;
     }
@@ -371,9 +435,29 @@ bool test_guest_sio2_controller()
             return false;
         }
     }
-    if (hw.read(rx, 1u, &status) ||
+    if (!hw.read(rx, 1u, &status) || status != 0xffu ||
         !hw.write(iop::c_hw::k_i_stat, 4u, ~irq) ||
         hw.pending_interrupts() != 0u)
+    {
+        return false;
+    }
+    // As in ps2-web-recomp/SDBZ, an actual empty PIO CTRL.start
+    // still completes through IRQ17. No new controller bytes or
+    // DMA11/12 completion may be generated for this control event.
+    if (!hw.write(ctrl, 4u, 1u) ||
+        hw.sio2_diagnostics().m_last_rejection !=
+            iop::c_hw::e_sio2_rejection::none ||
+        hw.sio2_diagnostics().m_rejected_starts != 1u ||
+        hw.sio2_diagnostics().m_packet_index != 1u ||
+        hw.sio2_diagnostics().m_rx_bytes != 0u ||
+        hw.sio2_transfer_requested() ||
+        hw.sio2_completed_transfers() != 2u ||
+        !cpu.read32(guest_intr, &status) || status != 1u ||
+        !cpu.write32(guest_intr, status) ||
+        !cpu.read32(guest_intr, &status) || status != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
+        (status & irq) == 0u ||
+        !hw.write(iop::c_hw::k_i_stat, 4u, ~irq))
     {
         return false;
     }
@@ -414,9 +498,23 @@ bool test_guest_sio2_controller()
         return false;
     }
 
-    if (hw.sio2_ctrl_starts() != 3u ||
+    const iop::c_hw::s_sio2_diagnostics second_packet =
+        hw.sio2_diagnostics();
+    if (hw.sio2_ctrl_starts() != 4u ||
         hw.sio2_packets() != 2u ||
-        hw.sio2_completed_transfers() != 2u)
+        hw.sio2_completed_transfers() != 3u ||
+        second_packet.m_last_rejection !=
+            iop::c_hw::e_sio2_rejection::none ||
+        second_packet.m_rejected_starts != 1u ||
+        second_packet.m_first_packet_count != 2u ||
+        second_packet.m_packets_at_last_start != 1u ||
+        second_packet.m_tx_bytes_at_last_start != 0u ||
+        second_packet.m_rx_bytes_at_last_start != 0u ||
+        second_packet.m_first_packets[1u].m_port != 0u ||
+        second_packet.m_first_packets[1u].m_input_size != 8u ||
+        second_packet.m_first_packets[1u].m_output_size != 8u ||
+        second_packet.m_first_packets[1u].m_command != 0x42u ||
+        !second_packet.m_first_packets[1u].m_pad_present)
     {
         return false;
     }
@@ -434,15 +532,301 @@ bool test_guest_sio2_controller()
         (status & 0x01000000u) == 0u ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
         (status & irq) != 0u ||
-        hw.sio2_ctrl_starts() != 4u ||
+        hw.sio2_ctrl_starts() != 5u ||
         hw.sio2_packets() != 2u ||
-        hw.sio2_completed_transfers() != 2u)
+        hw.sio2_completed_transfers() != 3u ||
+        hw.sio2_diagnostics().m_last_rejection !=
+            iop::c_hw::e_sio2_rejection::dma11_source ||
+        hw.sio2_diagnostics().m_rejected_starts != 2u ||
+        hw.sio2_diagnostics().m_dma11[0u] !=
+            iop::c_cpu::k_ram_size - 4u)
     {
         return false;
     }
+    // Exact SDBZ retail sequence: SIO2MAN sends two original pad
+    // 0x42 PIO polls (connected port 0, disconnected port 1),
+    // then writes CTRL=0x3bd (FIFO reset + START simultaneously).
+    // The reset discards both queued replies before the start handler
+    // runs, but IRQ17 must still signal genuine CTRL completion.
+    iop::c_kernel retail_kernel;
+    if (!retail_kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    iop::c_hw& retail_hw = retail_kernel.hardware();
+    if (!retail_hw.set_interrupt_mask(17u, true) ||
+        !retail_hw.write(send3, 4u, (5u << 8u) | (5u << 18u)) ||
+        !retail_hw.write(send3 + 4u, 4u,
+                         (5u << 8u) | (5u << 18u) | 1u))
+    {
+        return false;
+    }
+    for (uint32_t packet = 0u; packet < 2u; ++packet)
+    {
+        for (const uint8_t byte : poll)
+        {
+            if (!retail_hw.write(tx, 1u, byte))
+            {
+                return false;
+            }
+        }
+    }
+    const iop::c_hw::s_sio2_diagnostics before_start =
+        retail_hw.sio2_diagnostics();
+    if (before_start.m_first_packet_count != 2u ||
+        before_start.m_packet_index != 2u ||
+        before_start.m_tx_bytes != 0u ||
+        before_start.m_rx_bytes != 10u ||
+        before_start.m_first_packets[0u].m_port != 0u ||
+        !before_start.m_first_packets[0u].m_pad_present ||
+        before_start.m_first_packets[1u].m_port != 1u ||
+        before_start.m_first_packets[1u].m_pad_present ||
+        before_start.m_first_packets[0u].m_command != 0x42u ||
+        before_start.m_first_packets[1u].m_command != 0x42u ||
+        !retail_hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
+        (status & irq) != 0u)
+    {
+        return false;
+    }
+    if (!retail_hw.write(ctrl, 4u, 0x03bdu))
+    {
+        return false;
+    }
+    const iop::c_hw::s_sio2_diagnostics after_start =
+        retail_hw.sio2_diagnostics();
+    if (retail_hw.sio2_ctrl_starts() != 1u ||
+        retail_hw.sio2_packets() != 2u ||
+        retail_hw.sio2_completed_transfers() != 1u ||
+        retail_hw.sio2_transfer_requested() ||
+        after_start.m_last_rejection !=
+            iop::c_hw::e_sio2_rejection::none ||
+        after_start.m_rejected_starts != 0u ||
+        after_start.m_ctrl != 0x03bdu ||
+        after_start.m_packet_index != 0u ||
+        after_start.m_packets_at_last_start != 2u ||
+        after_start.m_tx_bytes_at_last_start != 0u ||
+        after_start.m_rx_bytes_at_last_start != 0u ||
+        after_start.m_rx_bytes != 0u ||
+        !retail_hw.read(rx, 1u, &status) || status != 0xffu ||
+        !retail_kernel.cpu().read32(guest_intr, &status) ||
+        status != 1u ||
+        !retail_kernel.cpu().write32(guest_intr, status) ||
+        !retail_kernel.cpu().read32(guest_intr, &status) ||
+        status != 0u ||
+        !retail_hw.read(iop::c_hw::k_i_stat, 4u, &status) ||
+        (status & irq) == 0u ||
+        !retail_hw.read(dma11 + 8u, 4u, &status) ||
+        (status & 0x01000000u) != 0u ||
+        !retail_hw.read(dma12 + 8u, 4u, &status) ||
+        (status & 0x01000000u) != 0u)
+    {
+        return false;
+    }
+
+    // Reproduce original SIO2MAN's two read-modify-write CTRL calls:
+    // first reset via CTRL | 0x0c, then START via CTRL | 1 AFTER
+    // transmitting the two genuine 5-byte PADMAN poll packets.
+    // The reference returns zero for CTRL reads, so START does not
+    // repeat the FIFO reset and the original worker receives the
+    // already-queued pad replies after IRQ17.
+    iop::c_kernel guest_sequence_kernel;
+    if (!guest_sequence_kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    iop::c_hw& guest_sequence = guest_sequence_kernel.hardware();
+    guest_sequence.configure_sio2_pad0_cross_pulse(1u, 1u);
+    uint32_t guest_ctrl = 0u;
+    if (!guest_sequence.read(ctrl, 4u, &guest_ctrl) ||
+        guest_ctrl != 0u ||
+        !guest_sequence.write(ctrl, 4u, guest_ctrl | 0x0cu) ||
+        !guest_sequence.read(ctrl, 4u, &guest_ctrl) ||
+        guest_ctrl != 0u ||
+        !guest_sequence.write(send3, 4u,
+            (5u << 8u) | (5u << 18u)) ||
+        !guest_sequence.write(send3 + 4u, 4u,
+            (5u << 8u) | (5u << 18u) | 1u))
+    {
+        return false;
+    }
+    for (uint32_t port = 0u; port < 2u; ++port)
+    {
+        for (const uint8_t byte : poll)
+        {
+            if (!guest_sequence.write(tx, 1u, byte))
+            {
+                return false;
+            }
+        }
+    }
+    if (guest_sequence.sio2_diagnostics().m_rx_bytes != 10u ||
+        guest_sequence.sio2_completed_transfers() != 0u ||
+        !guest_sequence.read(ctrl, 4u, &guest_ctrl) ||
+        guest_ctrl != 0u ||
+        !guest_sequence.write(ctrl, 4u, guest_ctrl | 1u) ||
+        guest_sequence.sio2_completed_transfers() != 1u ||
+        guest_sequence.sio2_diagnostics().m_ctrl != 1u ||
+        guest_sequence.sio2_diagnostics().m_rx_bytes != 10u)
+    {
+        return false;
+    }
+    for (uint32_t port = 0u; port < 2u; ++port)
+    {
+        for (uint32_t reply_index = 0u; reply_index < 5u;
+             ++reply_index)
+        {
+            uint8_t guest_byte = 0u;
+            const uint8_t expected =
+                port == 0u ? (reply_index == 4u ?
+                    0xbfu : neutral_reply[reply_index]) : 0xffu;
+            if (!guest_sequence_kernel.cpu().read8(
+                    0xbf808264u, &guest_byte) ||
+                guest_byte != expected)
+            {
+                return false;
+            }
+        }
+    }
+    const iop::c_hw::s_sio2_diagnostics guest_sequence_result =
+        guest_sequence.sio2_diagnostics();
+    if (guest_sequence_result.m_pad0_polls != 1u ||
+        guest_sequence_result.m_pad0_cross_pressed_polls != 1u ||
+        guest_sequence_result.m_pad0_cross_bytes_pio_read != 1u ||
+        guest_sequence_result.m_pad0_cross_bytes_dma_written != 0u ||
+        guest_sequence_result.m_pad0_cross_bytes_fifo_discarded != 0u ||
+        guest_sequence_result.m_rx_bytes != 0u ||
+        guest_sequence_result.m_empty_rx_reads != 0u ||
+        guest_sequence_result.m_rejected_starts != 0u ||
+        guest_sequence.sio2_packets() != 2u)
+    {
+        return false;
+    }
+
+    // A deliberate host Cross press is delivered ONLY in genuine
+    // connected port-0 SIO2 0x42 reply bytes, for a bounded number of
+    // guest pad polls. No new packet/IRQ is created by configuration,
+    // and the ordinary neutral state must resume automatically.
+    iop::c_kernel input_probe_kernel;
+    if (!input_probe_kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    iop::c_hw& input_probe = input_probe_kernel.hardware();
+    input_probe.configure_sio2_pad0_cross_pulse(3u, 2u);
+    if (input_probe.sio2_diagnostics().m_pad0_cross_first_poll != 3u ||
+        input_probe.sio2_diagnostics().m_pad0_cross_poll_count != 2u ||
+        input_probe.sio2_packets() != 0u ||
+        input_probe.sio2_completed_transfers() != 0u)
+    {
+        return false;
+    }
+    for (uint32_t pad_poll = 1u; pad_poll <= 7u; ++pad_poll)
+    {
+        if (!input_probe.write(ctrl, 4u, 0x0cu) ||
+            !input_probe.write(send3, 4u, (5u << 8u) | (5u << 18u)))
+        {
+            return false;
+        }
+        for (const uint8_t byte : poll)
+        {
+            if (!input_probe.write(tx, 1u, byte))
+            {
+                return false;
+            }
+        }
+        for (uint32_t reply_index = 0u; reply_index < 5u;
+             ++reply_index)
+        {
+            const uint32_t expected =
+                reply_index == 4u && (pad_poll == 3u || pad_poll == 4u)
+                ? 0xbfu : neutral_reply[reply_index];
+            if (!input_probe.read(rx, 1u, &status) ||
+                status != expected)
+            {
+                return false;
+            }
+        }
+        if (input_probe.pad_trace_window() != (pad_poll >= 2u && pad_poll <= 6u) ||
+            input_probe.pad0_polls() != pad_poll ||
+            input_probe.sio2_completed_transfers() != pad_poll - 1u ||
+            !input_probe.write(ctrl, 4u, 0x03bdu) ||
+            input_probe.sio2_completed_transfers() != pad_poll ||
+            !input_probe.write(intr, 4u, 1u) ||
+            !input_probe.write(iop::c_hw::k_i_stat, 4u, ~irq))
+        {
+            return false;
+        }
+    }
+    const iop::c_hw::s_sio2_diagnostics input_result =
+        input_probe.sio2_diagnostics();
+    if (input_result.m_pad0_polls != 7u ||
+        input_result.m_pad0_cross_pressed_polls != 2u ||
+        input_result.m_pad0_cross_first_poll != 3u ||
+        input_result.m_pad0_cross_poll_count != 2u ||
+        input_result.m_pad0_cross_bytes_pio_read != 2u ||
+        input_result.m_pad0_cross_bytes_dma_written != 0u ||
+        input_result.m_pad0_cross_bytes_fifo_discarded != 0u ||
+        input_probe.sio2_packets() != 7u ||
+        input_probe.sio2_ctrl_starts() != 7u ||
+        input_probe.sio2_completed_transfers() != 7u ||
+        input_result.m_rx_bytes != 0u)
+    {
+        return false;
+    }
+    // A reply that is generated but never consumed must not count as
+    // delivered. The guest can reset the FIFO via CTRL=0x0c; retain
+    // host-only provenance for the discarded Cross button byte.
+    input_probe.configure_sio2_pad0_cross_pulse(1u, 1u);
+    if (!input_probe.write(ctrl, 4u, 0x0cu) ||
+        !input_probe.write(send3, 4u, (5u << 8u) | (5u << 18u)))
+    {
+        return false;
+    }
+    for (const uint8_t byte : poll)
+    {
+        if (!input_probe.write(tx, 1u, byte))
+        {
+            return false;
+        }
+    }
+    for (uint32_t index = 0u; index < 4u; ++index)
+    {
+        if (!input_probe.read(rx, 1u, &status) ||
+            status != neutral_reply[index])
+        {
+            return false;
+        }
+    }
+    if (!input_probe.write(ctrl, 4u, 0x0cu))
+    {
+        return false;
+    }
+    const iop::c_hw::s_sio2_diagnostics discarded =
+        input_probe.sio2_diagnostics();
+    if (discarded.m_pad0_cross_pressed_polls != 1u ||
+        discarded.m_pad0_cross_bytes_pio_read != 0u ||
+        discarded.m_pad0_cross_bytes_dma_written != 0u ||
+        discarded.m_pad0_cross_bytes_fifo_discarded != 1u ||
+        discarded.m_rx_bytes != 0u ||
+        input_probe.sio2_completed_transfers() != 7u)
+    {
+        return false;
+    }
+
+    input_probe_kernel.reset();
+    if (input_probe_kernel.hardware().sio2_diagnostics()
+            .m_pad0_cross_poll_count != 0u ||
+        input_probe_kernel.hardware().sio2_diagnostics()
+            .m_pad0_cross_bytes_fifo_discarded != 0u)
+    {
+        return false;
+    }
+
     kernel.reset();
     return kernel.hardware().sio2_ctrl_starts() == 0u &&
         kernel.hardware().sio2_packets() == 0u &&
+        kernel.hardware().read(intr, 4u, &status) &&
+        status == 0u &&
         kernel.hardware().sio2_completed_transfers() == 0u &&
         !kernel.hardware().sio2_transfer_requested() &&
         kernel.hardware().sio2_pending_tx_bytes() == 0u &&
@@ -1080,16 +1464,20 @@ int main()
         return fail("cache-control register access validation");
     }
 
-    // Module startup resets/configures SIO2 before any controller transfer.
-    // Preserve that register state without inventing peripheral data or IRQs.
+    // Module startup resets/configures SIO2 before a pad transfer.
+    // The primary reference returns zero on CTRL reads, not the last
+    // written 0x3bc: original SIO2MAN uses this for both reset and
+    // START read-modify-write. Preserve the write in diagnostics only.
     if (!hardware.write(iop::c_hw::k_sio2_ctrl, 4u, 0x3bcu) ||
         !hardware.read(iop::c_hw::k_sio2_ctrl, 4u, &actual) ||
-        actual != 0x3bcu || hardware.pending_interrupts() != 0u ||
+        actual != 0u ||
+        hardware.sio2_diagnostics().m_ctrl != 0x3bcu ||
+        hardware.pending_interrupts() != 0u ||
         hardware.write(iop::c_hw::k_sio2_ctrl, 2u, 0u) ||
         !hardware.read(iop::c_hw::k_sio2_stat, 4u, &actual) ||
         actual != 0u)
     {
-        return fail("SIO2 control register storage and width validation");
+        return fail("SIO2 CTRL reference readback and write validation");
     }
 
     // SIO2 register family backed by guest-written state only.
@@ -1110,8 +1498,10 @@ int main()
         hardware.write(send3, 2u, 1u) ||
         !hardware.write(iop::c_hw::k_sio2_tx_fifo, 1u, 0xabu) ||
         !hardware.write(iop::c_hw::k_sio2_tx_fifo, 4u, 0xcdu) ||
-        hardware.read(iop::c_hw::k_sio2_rx_fifo, 4u, &actual) ||
-        hardware.read(iop::c_hw::k_sio2_rx_fifo, 1u, &actual) ||
+        !hardware.read(iop::c_hw::k_sio2_rx_fifo, 4u, &actual) ||
+        actual != 0xffu ||
+        !hardware.read(iop::c_hw::k_sio2_rx_fifo, 1u, &actual) ||
+        actual != 0xffu ||
         hardware.sio2_pending_tx_bytes() != 2u ||
         !hardware.sio2_tx_byte(1u, &transmit) ||
         transmit != 0xcdu ||
@@ -1453,9 +1843,12 @@ int main()
         return fail("could not schedule HLE guest SIO2 MMIO fixture");
     }
     const iop::s_kernel_run_result hle_run = hle_kernel.run(32u, 8u);
+    // The authentic R3000 KSEG1 LW sees the reference-compatible
+    // zero CTRL readback; the guest SW remains in host diagnostics.
     if (hle_run.m_stop != iop::e_kernel_stop::breakpoint ||
         hle_run.m_executed != 5u ||
-        hle_kernel.cpu().state().m_gpr[10] != 0x34u ||
+        hle_kernel.cpu().state().m_gpr[10] != 0u ||
+        hle_kernel.hardware().sio2_diagnostics().m_ctrl != 0x34u ||
         hle_kernel.cpu().last_memory_fault().m_valid ||
         hle_kernel.hardware().pending_interrupts() != 0u)
     {

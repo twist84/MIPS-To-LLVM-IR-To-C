@@ -42,11 +42,17 @@ void c_ee_gif_path3::bind_event_sink(
 void c_ee_gif_path3::reset()
 {
     m_state = {};
+    m_counters = {};
 }
 
 const s_ee_gif_path3_state& c_ee_gif_path3::state() const
 {
     return m_state;
+}
+
+const s_ee_gif_path_counters& c_ee_gif_path3::counters() const
+{
+    return m_counters;
 }
 
 bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
@@ -59,6 +65,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     }
     if (data == nullptr || m_sink == nullptr || qwc > 0xffffu)
     {
+        ++m_counters.m_rejected_batches;
         return false;
     }
 
@@ -160,6 +167,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
         const uint32_t run = std::min(remaining, qwc - i);
         if (run == 0u)
         {
+            ++m_counters.m_rejected_batches;
             return false;
         }
         events.push_back(event(
@@ -177,9 +185,34 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     // Failure does NOT advance state or consume GIF/DMA input.
     if (!m_sink(m_sink_user, events.data(), events.size(), data, qwc))
     {
+        ++m_counters.m_rejected_batches;
         return false;
     }
     m_state = next;
+    ++m_counters.m_accepted_batches;
+    m_counters.m_input_qwc += qwc;
+    for (const s_ee_gif_event& item : events)
+    {
+        switch (item.m_type)
+        {
+        case e_ee_gif_event_type::tag:
+            ++m_counters.m_tags;
+            break;
+        case e_ee_gif_event_type::primitive:
+            ++m_counters.m_primitive_events;
+            break;
+        case e_ee_gif_event_type::packed:
+            ++m_counters.m_packed_events;
+            break;
+        case e_ee_gif_event_type::reglist:
+            ++m_counters.m_reglist_events;
+            break;
+        case e_ee_gif_event_type::image:
+            ++m_counters.m_image_events;
+            m_counters.m_image_qwc += item.m_qwc;
+            break;
+        }
+    }
     return true;
 }
 

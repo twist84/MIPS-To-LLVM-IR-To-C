@@ -39,6 +39,7 @@ private:
         uint32_t m_handler = 0u;
         uint32_t m_argument = 0u;
         uint32_t m_gp = 0u;
+        s_guest_callback_origin m_origin{};
     };
 
     struct s_interrupt

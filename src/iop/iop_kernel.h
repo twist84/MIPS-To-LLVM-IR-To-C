@@ -43,6 +43,32 @@ struct s_kernel_run_result
     uint32_t m_opcode = 0u;
 };
 
+
+enum class e_guest_callback_source : uint32_t
+{
+    unknown = 0u,
+    vblank_start = 1u,
+    vblank_end = 2u,
+    cdvdman_read = 3u
+};
+
+// Origin data is host-only and never exposed to guest IOP state.
+struct s_guest_callback_origin
+{
+    e_guest_callback_source m_source = e_guest_callback_source::unknown;
+    uint32_t m_registration_thread_id = 0u;
+    uint32_t m_registration_pc = 0u;
+    uint32_t m_registration_ra = 0u;
+    uint32_t m_registration_gp = 0u;
+    uint32_t m_registration_a0 = 0u;
+    uint32_t m_registration_a1 = 0u;
+    uint32_t m_registration_a2 = 0u;
+    uint32_t m_registration_a3 = 0u;
+    uint32_t m_registration_recent_count = 0u;
+    uint32_t m_registration_recent_pc[8]{};
+    uint32_t m_registration_recent_opcode[8]{};
+};
+
 struct s_kernel_thread
 {
     uint32_t m_id = 0u;
@@ -54,9 +80,16 @@ struct s_kernel_thread
     uint32_t m_option = 0u;
     uint32_t m_entry = 0u;
     uint32_t m_gp = 0u;
+    // Host-only origin. When created inside a guest syscall, m_creator_pc
+    // is the executing R3000's resume/continuation PC, not a fabricated
+    // guest callsite. Zero creator means host-originated module/IRQ/callback.
+    uint32_t m_creator_thread_id = 0u;
+    uint32_t m_creator_pc = 0u;
+    uint64_t m_created_cycle = 0u;
     uint32_t m_wakeup_count = 0u;
     bool m_delete_on_exit = false;
     bool m_hle_guest_callback = false;
+    s_guest_callback_origin m_callback_origin{};
     bool m_interrupt_callback = false;
     uint32_t m_interrupt_line = 0u;
     // INTRMAN suspension is part of this guest thread's context.
@@ -254,8 +287,10 @@ public:
     bool schedule_hle_event(uint64_t ticks, std::function<void()> callback);
     // Execute the original R3000 guest function as a bounded one-shot
     // callback with a real MIPS return trampoline, not a host fake.
+    s_guest_callback_origin make_guest_callback_origin(
+        e_guest_callback_source source) const;
     bool start_guest_callback(uint32_t callback, uint32_t gp,
-                              uint32_t argument);
+        uint32_t argument, const s_guest_callback_origin& origin = {});
 
     void bind_syscall(t_kernel_syscall handler);
     // INTRMAN registrations resolve actual pending device IRQs to guest

@@ -1,10 +1,15 @@
 #include "iop_cdvdman_bridge.h"
+#include "iop_sifman_bridge.h"
+#include "iop_sifcmd_bridge.h"
+#include "iop_kernel_hle_bridge.h"
 
 #include <chrono>
 #include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <cstring>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -723,6 +728,146 @@ int main()
             iop::c_cdvdman_bridge::k_service_base + 24u))
     {
         return fail("CDVDMAN clock read crossed IOP RAM");
+    }
+
+    // The retail PADMAN failure was an HLE stub collision:
+    // SIFMAN #5 = 0x18700 + 5*0x20 and old CDVDMAN #37 =
+    // 0x18300 + 37*0x20 both occupied 0x000187a0. A guest
+    // sceSifInit was therefore misexecuted as sceCdCallback and
+    // registered a PADMAN diagnostic string as executable code.
+    // Check *all* composed service stubs, regardless of install order.
+    for (const bool cdvd_first : {false, true})
+    {
+        iop::c_kernel composed{};
+        ee::c_ee_sif mailbox{};
+        mailbox.reset();
+        iop::c_kernel_hle_bridge hle(composed);
+        iop::c_sifman_bridge sifman(composed, mailbox);
+        iop::c_sifcmd_bridge sifcmd(composed, mailbox);
+        iop::c_cdvdman_bridge cdvd(composed, media);
+        if (!hle.install() ||
+            (cdvd_first &&
+             (!cdvd.install() || !sifcmd.install() ||
+              !sifman.install())) ||
+            (!cdvd_first &&
+             (!sifman.install() || !sifcmd.install() ||
+              !cdvd.install())))
+        {
+            return fail("composed IOP HLE provider installation failed");
+        }
+        std::set<uint32_t> occupied{};
+        const auto verify = [&](const char* library,
+            uint16_t ordinal, uint32_t expected)
+        {
+            uint32_t entry = 0u;
+            if (!composed.lookup_library(library, ordinal, &entry) ||
+                !occupied.insert(entry).second ||
+                entry < 0x00014000u || entry >= 0x0001a000u)
+            {
+                return false;
+            }
+            const uint32_t instructions[5] =
+            {
+                0x3c020000u | (expected >> 16u),
+                0x34420000u | (expected & 0xffffu),
+                0x0000000cu, 0x03e00008u, 0u
+            };
+            for (uint32_t index = 0u; index < 5u; ++index)
+            {
+                uint32_t actual = 0u;
+                if (!composed.cpu().read32(entry + index * 4u, &actual) ||
+                    actual != instructions[index])
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        for (const uint16_t ordinal : {
+                 4u, 5u, 6u, 7u, 8u, 21u, 22u, 23u,
+                 24u, 25u, 26u, 27u, 29u, 32u
+             })
+        {
+            if (!verify("sifman", ordinal,
+                iop::c_sifman_bridge::k_service_base + ordinal))
+            {
+                return fail("SIFMAN stub was overwritten by HLE provider");
+            }
+        }
+        for (const uint16_t ordinal : {
+                 4u, 6u, 7u, 12u, 14u, 15u, 16u, 17u,
+                 18u, 19u, 22u, 23u, 24u, 25u, 28u
+             })
+        {
+            if (!verify("sifcmd", ordinal,
+                iop::c_sifcmd_bridge::k_service_base + ordinal))
+            {
+                return fail("SIFCMD stub was overwritten by HLE provider");
+            }
+        }
+        for (const uint16_t ordinal : {
+                 4u, 5u, 6u, 8u, 10u, 11u, 12u, 13u,
+                 15u, 24u, 28u, 37u, 38u, 75u
+             })
+        {
+            if (!verify("cdvdman", ordinal,
+                iop::c_cdvdman_bridge::k_service_base + ordinal))
+            {
+                return fail("CDVDMAN stub overlaps another HLE provider");
+            }
+        }
+        if (!verify("stdio", 4u,
+            iop::c_kernel_hle_bridge::k_service_base + 0x304u))
+        {
+            return fail("STDIO HLE stub was overwritten");
+        }
+        uint32_t sif_init = 0u;
+        uint32_t cd_callback = 0u;
+        if (!composed.lookup_library("sifman", 5u, &sif_init) ||
+            !composed.lookup_library("cdvdman", 37u, &cd_callback) ||
+            sif_init != 0x000187a0u ||
+            cd_callback == sif_init ||
+            cd_callback != iop::c_cdvdman_bridge::k_extra_stub_base +
+                37u * 0x20u ||
+            iop::c_cdvdman_bridge::k_search_file_stub != 0x00018200u)
+        {
+            return fail("retail PADMAN SIFMAN/CDVDMAN collision persists");
+        }
+
+        // Exercise the *linked* SIFMAN #5 import through original R3000
+        // guest code after all three providers have installed. This
+        // must run sceSifInit, not set the CDVDMAN callback pointer.
+        std::vector<uint8_t> sif_init_irx = make_irx(5u);
+        std::memset(sif_init_irx.data() + 0x12cu, 0u, 8u);
+        std::memcpy(sif_init_irx.data() + 0x12cu, "sifman", 6u);
+        const iop::s_module_load_result sif_module =
+            composed.load_module(sif_init_irx);
+        if (sif_module.m_status != iop::e_irx_load_result::success)
+        {
+            return fail("linked SIFMAN #5 synthetic module not accepted");
+        }
+        const uint32_t thread_id =
+            composed.create_module_thread(sif_module.m_id, 1u);
+        if (thread_id == 0u || !composed.start_thread(thread_id))
+        {
+            return fail("linked SIFMAN #5 thread could not start");
+        }
+        composed.bind_syscall(
+            [&](iop::c_kernel& active, uint32_t service)
+            {
+                return sifman.handle_syscall(active, service);
+            }
+        );
+        const iop::s_kernel_run_result sif_result =
+            composed.run(64u, 64u);
+        uint32_t dma_pcr2 = 0u;
+        if (sif_result.m_stop != iop::e_kernel_stop::budget_exhausted ||
+            !composed.hardware().read(
+                iop::c_hw::k_dma_pcr2, 4u, &dma_pcr2) ||
+            (dma_pcr2 & 0x8800u) != 0x8800u)
+        {
+            return fail("linked SIFMAN #5 did not execute sceSifInit");
+        }
     }
 
     std::printf("IOP CDVDMAN search/clock/media guest imports: PASS\n");

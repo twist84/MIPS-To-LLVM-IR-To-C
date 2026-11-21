@@ -82,6 +82,8 @@ bool c_cdvdman_bridge::install()
     m_sync_waiters.clear();
     m_callback = 0u;
     m_callback_gp = 0u;
+    m_callback_origin = {};
+    m_callback_registration_reports = 0u;
     m_requested_media_mode = 0u;
     m_initialized = false;
     m_last_error = 0u;
@@ -174,21 +176,25 @@ bool c_cdvdman_bridge::handle_read_clock(uint32_t destination)
         return false;
     }
     const std::time_t in_japan = now + k_jst_offset;
-    const std::tm* calendar = std::gmtime(&in_japan);
-    if (calendar == nullptr)
+    std::tm calendar{};
+#if defined(_WIN32)
+    if (::gmtime_s(&calendar, &in_japan) != 0)
+#else
+    if (::gmtime_r(&in_japan, &calendar) == nullptr)
+#endif
     {
         return false;
     }
     const uint32_t year = static_cast<uint32_t>(
-        (calendar->tm_year + 1900) % 100);
+        (calendar.tm_year + 1900) % 100);
     const std::array<uint8_t, 8u> rtc = {
         0u,
-        decimal_to_bcd(static_cast<uint32_t>(calendar->tm_sec)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar->tm_min)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar->tm_hour)),
+        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_sec)),
+        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_min)),
+        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_hour)),
         0u,
-        decimal_to_bcd(static_cast<uint32_t>(calendar->tm_mday)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar->tm_mon + 1)),
+        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_mday)),
+        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_mon + 1)),
         decimal_to_bcd(year)
     };
     for (uint32_t i = 0u; i < rtc.size(); ++i)
@@ -238,7 +244,7 @@ void c_cdvdman_bridge::complete_read()
     // if its guest entry cannot be scheduled.
     if (m_callback != 0u &&
         !m_kernel.start_guest_callback(
-            m_callback, m_callback_gp, 1u))
+            m_callback, m_callback_gp, 1u, m_callback_origin))
     {
         m_last_error = 1u;
     }
@@ -405,6 +411,23 @@ bool c_cdvdman_bridge::handle_syscall(
         const uint32_t previous = m_callback;
         m_callback = callback;
         m_callback_gp = callback != 0u ? state.m_gpr[28] : 0u;
+        m_callback_origin = callback != 0u ?
+            m_kernel.make_guest_callback_origin(
+                e_guest_callback_source::cdvdman_read) :
+            s_guest_callback_origin{};
+        if (m_callback_registration_reports < 32u)
+        {
+            ++m_callback_registration_reports;
+            std::fprintf(stderr,
+                "IOP CDVDMAN callback registered: "
+                "callback=0x%08x first_word=0x%08x previous=0x%08x "
+                "thread=%u syscall_pc=0x%08x ra=0x%08x gp=0x%08x\n",
+                callback, opcode, previous,
+                m_callback_origin.m_registration_thread_id,
+                m_callback_origin.m_registration_pc,
+                m_callback_origin.m_registration_ra,
+                m_callback_origin.m_registration_gp);
+        }
         state.m_gpr[2] = previous;
         return true;
     }

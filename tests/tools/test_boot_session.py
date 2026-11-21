@@ -255,27 +255,250 @@ def test_windows_launcher_preserves_guest_cache():
     assert "if not errorlevel 1 (" in probe, "failed relink must not reuse"
     assert "full IR rebuild required" in probe
 
+    # A failed exact-cache check and safe relink must never silently
+    # overwrite previously emitted guest IR. The caller must reach the
+    # confirmation before launching even the first full expansion pass.
+    confirm_call = probe.index("if not defined CACHE_FLAG (")
+    assert confirm_call > recovery
+    assert 'call :confirm_guest_cache_rebuild' in probe[confirm_call:]
+    assert 'if errorlevel 1 exit /b 1' in probe[confirm_call:]
+    assert launcher.index('call :confirm_guest_cache_rebuild') < (
+        launcher.index("echo === Starting extracted-disc")
+    )
+
+    # Safe cache hits skip the prompt, and completely fresh directories
+    # have nothing to invalidate. Include partial/orphaned cached outputs
+    # so that missing translation-cache.json never silently authorizes
+    # removal of previously generated .ll files and host objects.
+    confirmation = launcher.split(
+        "\n:confirm_guest_cache_rebuild\n", 1
+    )[1]
+    for artifact in (
+        "translation-cache.json", "ir\\ee_functions.json",
+        "ir\\*.ll", "objects\\objects.json",
+        "objects\\*.o", "game-translated.dll",
+    ):
+        assert f'if exist "%WORK_DIR%\\{artifact}" ' in confirmation, artifact
+    assert 'if not defined SAVED_GUEST_TRANSLATION exit /b 0' in confirmation
+    assert "WARNING: The existing guest LLVM IR cache could not be reused." in confirmation
+    assert "may DELETE existing .ll modules and REPLACE" in confirmation
+    assert "Back up this directory" in confirmation
+
+    choice_pos = confirmation.index('choice /C YN /N /M')
+    cancel_pos = confirmation.index('if errorlevel 2 (')
+    approve_pos = confirmation.index('if errorlevel 1 (')
+    assert choice_pos < cancel_pos < approve_pos
+    assert "Guest translation rebuild cancelled;" in confirmation
+    assert "Guest translation rebuild explicitly authorized." in confirmation
+    assert "exit /b 1" in confirmation[cancel_pos:approve_pos]
+    assert "exit /b 0" in confirmation[approve_pos:]
+    # Even CHOICE failures (for example, no usable console) must abort.
+    assert "Cache rebuild confirmation was not received." in confirmation
+
     # The full retail replay must be able to continue genuine guest IOP
     # execution past the old fixed 100k ceiling; quick probes stay short.
     assert 'set "DEFAULT_MAX_DISPATCHES=100000"' in launcher
-    assert 'set "DEFAULT_MAX_DISPATCHES=500000"' in launcher
+    assert 'set "DEFAULT_MAX_DISPATCHES=6000000"' in launcher
     assert 'if not defined MAX_DISPATCHES set "MAX_DISPATCHES=%DEFAULT_MAX_DISPATCHES%"' in launcher
     assert '--max-dispatches=%MAX_DISPATCHES%' in launcher
     assert '--timeout-seconds=%BOOT_TIMEOUT_SECONDS%' in launcher
     assert '--max-dispatches=100000 ^' not in launcher
-    assert 'if /I "%~1"=="--quick" set "SESSION_ARGS=--quick-probe --no-iop-catalog"' in launcher
-    # There are two --quick checks: early WebGPU override and late
-    # session-mode selection. Only compare the latter with cache/full.
+    assert (
+        'if /I "%REQUESTED_SESSION_MODE%"=="quick" '
+        'set "SESSION_ARGS=--quick-probe --no-iop-catalog"'
+    ) in launcher
     quick_session = launcher.index(
-        'if /I "%~1"=="--quick" set "SESSION_ARGS=--quick-probe --no-iop-catalog"')
+        'if /I "%REQUESTED_SESSION_MODE%"=="quick" '
+        'set "SESSION_ARGS=--quick-probe --no-iop-catalog"'
+    )
     assert launcher.index('if not defined CACHE_FLAG set "SESSION_ARGS="') < quick_session
-    assert quick_session < launcher.index('if /I "%~1"=="--full"')
+    # There is also an earlier --full block configuring WebGPU
+    # defaults. Compare the two session-mode assignments specifically.
+    assert quick_session < launcher.index(
+        'if /I "%REQUESTED_SESSION_MODE%"=="full" set "SESSION_ARGS="'
+    )
     assert 'set "EE_WEBGPU_SNAPSHOT=0"' in launcher
     assert 'set "EE_WEBGPU_WINDOW=0"' in launcher
     assert launcher.index('set "EE_WEBGPU_SNAPSHOT=0"') < launcher.index(
         'if /I "%EE_WEBGPU_SNAPSHOT%"=="1"')
     assert launcher.index('set "EE_WEBGPU_WINDOW=0"') < launcher.index(
         'if /I "%EE_WEBGPU_WINDOW%"=="1"')
+
+    # The user's repeatable 6M / 600s SDBZ graphics replay should not
+    # require entering a dozen SET commands before every full run.
+    # Existing caller-set overrides are respected; --quick stays headless
+    # with its original 100k/120s default budget.
+    assert 'if /I "%REQUESTED_SESSION_MODE%"=="full" (\n' in launcher
+    assert 'if not defined EE_WEBGPU_SNAPSHOT set "EE_WEBGPU_SNAPSHOT=1"' in launcher
+    assert 'if not defined EE_WEBGPU_WINDOW set "EE_WEBGPU_WINDOW=1"' in launcher
+    assert launcher.index('if /I "%REQUESTED_SESSION_MODE%"=="full" (') < (
+        launcher.index('if not defined EE_WEBGPU_SNAPSHOT')
+    )
+    assert 'if /I "%REQUESTED_SESSION_MODE%"=="quick" (\n' in launcher
+    assert 'if not defined SDBZ_REPORT_SNAPSHOT_MS set "SDBZ_REPORT_SNAPSHOT_MS=2000"' in launcher
+    assert 'if not defined SDBZ_DISPATCH_TRACE_EVERY set "SDBZ_DISPATCH_TRACE_EVERY=1024"' in launcher
+    assert 'if not defined LOOP_YIELD_RESUMES set "LOOP_YIELD_RESUMES=16"' in launcher
+    assert 'if /I "%REPORT_NAME%"=="first-boot.json" (' in launcher
+    assert 'set "BOOT_TIMEOUT_SECONDS=600"' in launcher
+    assert 'set "BOOT_TIMEOUT_SECONDS=120"' in launcher
+    assert '--loop-yield-resumes=%LOOP_YIELD_RESUMES%' in launcher
+    assert '--max-dispatches=%MAX_DISPATCHES%' in launcher
+
+    # Cross experiments are an explicit option; neutral can clear
+    # inherited manual pad injection, without changing the caller's
+    # variables because the launcher is wrapped in SETLOCAL.
+    assert 'set "REQUESTED_PAD_PROFILE="' in launcher
+    assert 'if /I "%~1"=="--cross" (' in launcher
+    assert 'if /I "%~1"=="--neutral" (' in launcher
+    assert 'set "SDBZ_PAD0_CROSS_FIRST_POLL=200"' in launcher
+    assert 'set "SDBZ_PAD0_CROSS_POLL_COUNT=8"' in launcher
+    assert 'set "SDBZ_PAD0_CROSS_FIRST_POLL="' in launcher
+    assert 'set "SDBZ_PAD0_CROSS_POLL_COUNT="' in launcher
+    assert 'set "CAPTURE_PROFILE=neutral"' in launcher
+    assert 'set "CAPTURE_PROFILE=pad-custom"' in launcher
+    assert 'set "CAPTURE_PROFILE=cross"' in launcher
+
+    # A full run always captures a uniquely named upload-ready archive.
+    # It must never silently overwrite the neutral/Cross evidence nor
+    # include the expensive cached guest .ll or .o files.
+    archive = launcher.split("\n:archive_full_run\n", 1)[1].split(
+        "\n:confirm_guest_cache_rebuild\n", 1
+    )[0]
+    assert "Get-ChildItem -LiteralPath '%WORK_DIR%' -File" in archive
+    for diagnostic in (
+        "boot.log", "expansion.log", "first-boot.json",
+        "translation-cache.json", "iop-disc-catalog.json",
+        "gs-display.ppm", "gs-webgpu.ppm", "gs-upload.ppm",
+    ):
+        assert f"'{diagnostic}'" in archive
+    assert "Get-Date -Format 'yyyyMMdd-HHmmssfff'" in archive
+    assert "sdbz-graphics-pr148-%CAPTURE_PROFILE%-" in archive
+    assert "Compress-Archive -LiteralPath $files.FullName" in archive
+    assert "-Force" not in archive
+    assert "'*.ll'" not in archive and "'*.o'" not in archive
+    assert 'set "EXIT_CODE=%ERRORLEVEL%"' in launcher
+    assert 'if /I "%REPORT_NAME%"=="first-boot.json" call :archive_full_run' in launcher
+    assert 'exit /b %EXIT_CODE%' in launcher
+    assert launcher.index('set "EXIT_CODE=%ERRORLEVEL%"') < launcher.index(
+        'call :archive_full_run'
+    )
+    assert launcher.index('if exist "%WORK_DIR%\\%%F" del /q "%WORK_DIR%\\%%F"') < (
+        launcher.index('python tools\\run_boot_session.py "%GAME_ELF%"')
+    )
+    # Earlier cache protections remain ahead of any destructive build.
+    assert launcher.index('call :confirm_guest_cache_rebuild') < (
+        launcher.index('call :archive_full_run')
+    )
+
+
+def test_clean_ctrl_c_cancellation():
+    # The real subprocess.run implementation kills its direct child when
+    # KeyboardInterrupt propagates out of communicate(). The orchestration
+    # layer must convert that interrupt to exit 130, not show a traceback.
+    with tempfile.TemporaryDirectory(prefix="ee-boot-interrupt-") as temp:
+        work = Path(temp)
+        log = work / "interrupt.log"
+        def interrupt_with_partial_output(command, **kwargs):
+            # Check that in-progress child output is preserved even when
+            # subprocess.run raises while waiting for the child.
+            assert kwargs["stdout"].write(b"already emitted guest diagnostics\\n")
+            kwargs["stdout"].flush()
+            raise KeyboardInterrupt
+
+        with patch.object(SESSION.subprocess, "run",
+                          side_effect=interrupt_with_partial_output):
+            code, output, elapsed = SESSION.run_session(
+                ["fake-ee-game", "--auto-expand=2"], log
+            )
+        assert code == 130
+        assert elapsed >= 0.0
+        assert "already emitted guest diagnostics" in output
+        assert "cancelled by user (Ctrl+C)" in output
+        assert "already emitted guest diagnostics" in log.read_text(
+            encoding="utf-8")
+        assert "cancelled by user (Ctrl+C)" in log.read_text(encoding="utf-8")
+        assert "fake-ee-game" in log.read_text(encoding="utf-8")
+
+    for quick_probe in (False, True):
+        with tempfile.TemporaryDirectory(prefix="ee-boot-interrupt-") as temp:
+            work = Path(temp) / "work"
+            work.mkdir()
+            report = work / ("quick-probe.json" if quick_probe else "first-boot.json")
+            report.write_text('{"stale":true}', encoding="utf-8")
+            elf = Path(temp) / "synthetic.elf"
+            elf.write_bytes(b"synthetic")
+            argv = [
+                str(elf), "--work-dir", str(work),
+                "--report", str(report), "--expansion-passes=2",
+                "--driver", str(ROOT / "tools" / "run_game.py"),
+                "--no-iop-catalog",
+            ]
+            if quick_probe:
+                argv.append("--quick-probe")
+            cancelled_stderr = io.StringIO()
+            with patch.object(SESSION.subprocess, "run",
+                              side_effect=KeyboardInterrupt) as subprocess_call:
+                with patch("sys.stderr", cancelled_stderr):
+                    code = SESSION.main(argv)
+            assert code == 130
+            assert subprocess_call.call_count == 1, "must not start another guest pass"
+            assert not report.exists(), "stale previous guest report must be removed"
+            output = (work / ("quick-probe.log" if quick_probe else "boot.log")
+                      ).read_text(encoding="utf-8")
+            assert "cancelled by user (Ctrl+C)" in output
+            assert "cancelled by user (Ctrl+C)" in cancelled_stderr.getvalue()
+            if not quick_probe:
+                expansion = (work / "expansion.log").read_text(encoding="utf-8")
+                assert "exit=130" in expansion
+
+    # Interruption during the final traced replay must not be interpreted
+    # as a normal DISPATCH/GPU exit or trigger further guest work.
+    with tempfile.TemporaryDirectory(prefix="ee-boot-final-interrupt-") as temp:
+        work = Path(temp) / "work"
+        work.mkdir()
+        report = work / "first-boot.json"
+        elf = Path(temp) / "synthetic.elf"
+        elf.write_bytes(b"synthetic")
+        seen = []
+
+        def interrupted_final(command, **kwargs):
+            seen.append(list(map(str, command)))
+            if len(seen) == 1:
+                report.write_text(json.dumps({
+                    "schema": "ee-game-run-report-v1",
+                    "dispatches": 500,
+                    "exit_reason": 5,
+                    "dispatch_status": 0,
+                    "final_pc": 0x00109ba0
+                }), encoding="utf-8")
+                return SimpleNamespace(returncode=3, stdout="expansion complete\\n")
+            raise KeyboardInterrupt
+
+        argv = [
+            str(elf), "--work-dir", str(work),
+            "--report", str(report), "--expansion-passes=1",
+            "--driver", str(ROOT / "tools" / "run_game.py"),
+            "--no-iop-catalog",
+        ]
+        cancelled_stderr = io.StringIO()
+        with patch.object(SESSION.subprocess, "run", side_effect=interrupted_final):
+            with patch("sys.stderr", cancelled_stderr):
+                code = SESSION.main(argv)
+        assert code == 130 and len(seen) == 2
+        assert "--trace" in seen[1]
+        assert "expansion complete" in (work / "expansion.log").read_text(
+            encoding="utf-8")
+        assert "cancelled by user (Ctrl+C)" in (work / "boot.log").read_text(
+            encoding="utf-8")
+        assert "no guest completion is inferred" in cancelled_stderr.getvalue()
+        assert not report.exists(), "interrupted final run must not retain prior state"
+
+    # Ctrl+C during catalog/setup (outside a child) must also exit cleanly.
+    cancelled_stderr = io.StringIO()
+    with patch.object(SESSION, "main", side_effect=KeyboardInterrupt):
+        with patch("sys.stderr", cancelled_stderr):
+            assert SESSION.cli_main([]) == 130
+    assert "Native boot cancelled by user" in cancelled_stderr.getvalue()
 
 
 def test_guest_rpc_snapshots_in_cached_probe():
@@ -291,6 +514,7 @@ def test_guest_rpc_snapshots_in_cached_probe():
 
 
 def main():
+    test_clean_ctrl_c_cancellation()
     test_guest_rpc_snapshots_in_cached_probe()
     test_windows_launcher_preserves_guest_cache()
     test_ll_counter()

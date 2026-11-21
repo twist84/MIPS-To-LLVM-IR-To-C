@@ -366,6 +366,17 @@ e_step_result c_cpu::step(uint32_t* opcode)
     }
 
     const uint32_t pc = m_state.m_pc;
+    // Capture even a fail-closed unsupported opcode. The circular history
+    // belongs to the saved IOP guest thread state and is not CPU-visible.
+    const uint32_t history_slot = m_state.m_recent_next;
+    m_state.m_recent_pc[history_slot] = pc;
+    m_state.m_recent_opcode[history_slot] = word;
+    m_state.m_recent_next =
+        (history_slot + 1u) % s_cpu_state::k_recent_pc_capacity;
+    if (m_state.m_recent_count < s_cpu_state::k_recent_pc_capacity)
+    {
+        ++m_state.m_recent_count;
+    }
     const uint32_t op = word >> 26;
     const uint32_t rs = (word >> 21) & 31u;
     const uint32_t rt = (word >> 16) & 31u;

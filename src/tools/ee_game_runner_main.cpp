@@ -5,12 +5,15 @@
 #include "ee_hw_bus.h"
 #include "ee_host_timers.h"
 #include "ee_hot_loop_diagnostics.h"
+#include "ee_host_loop_yield_budget.h"
 #include "ee_reached_isa_inventory.h"
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
+#include "ee_sdbz_pad_return_probe.h"
 #include "ee_gif.h"
 #include "ee_gs.h"
 #include "ee_gs_display.h"
+#include "ee_gs_presentation_probe.h"
 #ifdef EE_ENABLE_WEBGPU
 #include "ee_webgpu_bridge.h"
 #endif
@@ -19,6 +22,7 @@
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
+#include "iop_guest_fault_probe.h"
 #include "iop_cdvd.h"
 #include "iop_folder_sector_source.h"
 #include "iop_cdvdman_bridge.h"
@@ -60,6 +64,53 @@
 
 namespace
 {
+
+// Host-only CRT adapters: never change emitted guest LLVM IR or cache keys.
+FILE* open_host_file(const char* path, const char* mode)
+{
+    FILE* result = nullptr;
+#if defined(_WIN32)
+    if (path != nullptr && mode != nullptr)
+    {
+        (void)::fopen_s(&result, path, mode);
+    }
+#else
+    if (path != nullptr && mode != nullptr)
+    {
+        result = std::fopen(path, mode);
+    }
+#endif
+    return result;
+}
+
+const char* read_host_environment(
+    const char* name, std::string* storage
+)
+{
+    const char* result = nullptr;
+    if (name != nullptr && storage != nullptr)
+    {
+#if defined(_WIN32)
+        char* allocated = nullptr;
+        size_t length = 0u;
+        if (::_dupenv_s(&allocated, &length, name) == 0 &&
+            allocated != nullptr)
+        {
+            *storage = allocated;
+            result = storage->c_str();
+        }
+        std::free(allocated);
+#else
+        const char* value = std::getenv(name);
+        if (value != nullptr)
+        {
+            *storage = value;
+            result = storage->c_str();
+        }
+#endif
+    }
+    return result;
+}
 
 constexpr uint32_t k_ee_ram_size = 32u * 1024u * 1024u;
 constexpr uint32_t k_default_stack = 0x01fff000u;
@@ -495,7 +546,7 @@ bool write_gs_ppm(
     {
         return false;
     }
-    FILE* output = std::fopen(path, "wb");
+    FILE* output = open_host_file(path, "wb");
     if (output == nullptr)
     {
         return false;
@@ -695,7 +746,7 @@ const char* ee_cycle_source_name(ee::e_ee_cycle_source source)
     }
 }
 
-// This is a read-only summary of committed GIF PATH2/PATH3 work. It never
+// This is a read-only summary of committed GIF PATH1/PATH2/PATH3 work. It never
 // treats the current primitive's vertex count as an entire-boot total.
 void write_gs_sprite_sample_json(
     FILE* output, const ee::s_ee_gs_sprite_sample& sample)
@@ -726,7 +777,7 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
 {
     std::fprintf(output,
         "{\n    \"schema\": \"ee-m2-gif-gs-v1\","
-        "\n    \"scope\": \"committed_gif_paths_2_and_3\","
+        "\n    \"scope\": \"committed_gif_paths_1_2_and_3\","
         "\n    \"accepted_batches\": %llu,"
         "\n    \"accepted_tags\": %llu,"
         "\n    \"prim_writes_total\": %llu,"
@@ -810,9 +861,60 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
     std::fputs(
         "\"does_not_include_unexecuted_vu1_path1_xgkick\", "
         "\"does_not_imply_rasterization_or_present\", "
-        "\"samples_are_bounded_committed_path2_and_path3_sprite_pairs\", "
+        "\"samples_are_bounded_committed_path1_path2_path3_sprite_pairs\", "
         "\"coordinates_and_registers_are_uninterpreted_raw_gs_values\", "
         "\"current_primitive_and_transfer_counters_reset\"]\n  }", output);
+}
+
+// Parser instances are distinct: VU1 XGKICK -> PATH1, VIF1 DIRECT ->
+// PATH2, and GIF DMA channel 2 -> PATH3. A valid VIF1 DMA without a
+// resulting GIF packet does not increment either PATH1 or PATH2.
+void write_gif_path_counters_json(
+    FILE* output, const char* name,
+    const ee::s_ee_gif_path_counters& counters, bool comma)
+{
+    std::fprintf(output,
+        "%s\n      \"%s\": {"
+        "\"accepted_batches\": %llu, \"rejected_batches\": %llu, "
+        "\"accepted_input_qwc\": %llu, "
+        "\"committed_tags\": %llu, "
+        "\"committed_prim_events\": %llu, "
+        "\"committed_packed_events\": %llu, "
+        "\"committed_reglist_events\": %llu, "
+        "\"committed_image_events\": %llu, "
+        "\"committed_image_qwc\": %llu}",
+        comma ? "," : "", name,
+        static_cast<unsigned long long>(counters.m_accepted_batches),
+        static_cast<unsigned long long>(counters.m_rejected_batches),
+        static_cast<unsigned long long>(counters.m_input_qwc),
+        static_cast<unsigned long long>(counters.m_tags),
+        static_cast<unsigned long long>(counters.m_primitive_events),
+        static_cast<unsigned long long>(counters.m_packed_events),
+        static_cast<unsigned long long>(counters.m_reglist_events),
+        static_cast<unsigned long long>(counters.m_image_events),
+        static_cast<unsigned long long>(counters.m_image_qwc));
+}
+
+void write_gif_paths_json(
+    FILE* output, const ee::c_ee_gif_path3& path1,
+    const ee::c_ee_gif_path3& path2, const ee::c_ee_gif_path3& path3)
+{
+    std::fputs(
+        "{\n    \"schema\": \"ee-gif-path-provenance-v1\","
+        "\n    \"scope\": \"parser_accepted_committed_gs_sink_events\","
+        "\n    \"paths\": {", output);
+    write_gif_path_counters_json(output, "vu1_xgkick_path1",
+        path1.counters(), false);
+    write_gif_path_counters_json(output, "vif1_direct_path2",
+        path2.counters(), true);
+    write_gif_path_counters_json(output, "gif_dma_path3",
+        path3.counters(), true);
+    std::fputs(
+        "\n    },\n    \"limitations\": ["
+        "\"accepted_batches_are_parser_consume_calls_not_complete_packets\", "
+        "\"input_qwc_is_consumed_gif_bytes_not_whole_vif_dma\", "
+        "\"zero_counts_do_not_imply_guest_never_attempted_path\"]\n  }",
+        output);
 }
 
 bool write_report(
@@ -830,12 +932,19 @@ bool write_report(
     const std::vector<s_dispatch_sample>& history,
     const std::vector<s_syscall_sample>& syscall_history,
     const ee::s_ee_gs_state& gs,
+    const ee::c_ee_gif_path3& gif_path1,
+    const ee::c_ee_gif_path3& gif_path2,
+    const ee::c_ee_gif_path3& gif_path3,
+    const ee::c_ee_gs_presentation_probe& graphics_probe,
+    const iop::c_iop_guest_fault_probe& iop_fault_probe,
+    const iop::c_kernel* guest_iop_kernel,
     const ee::c_ee_sdbz_dma_wait_probe& dma_wait_probe,
+    const ee::c_ee_sdbz_pad_return_probe& pad_return_probe,
     const ee::c_ee_dispatch_hotspots& hotspots,
     bool in_progress
 )
 {
-    FILE* output = std::fopen(path, "wb");
+    FILE* output = open_host_file(path, "wb");
     if (output == nullptr)
     {
         std::fprintf(stderr, "failed to create runner report: %s\n", path);
@@ -928,8 +1037,115 @@ bool write_report(
     hotspots.write_json(output);
     std::fputs(",\n  \"m2_gif_gs\": ", output);
     write_gs_diagnostics_json(output, gs);
+    std::fputs(",\n  \"m2_gif_paths\": ", output);
+    write_gif_paths_json(output, gif_path1, gif_path2, gif_path3);
+    std::fputs(",\n  \"m2_gs_presentation\": ", output);
+    graphics_probe.write_json(output, hardware.scanout().fields_started());
+    std::fputs(",\n  \"m2_iop_guest_fault\": ", output);
+    iop_fault_probe.write_json(output);
+    // Observe actual IOP SIO2 transactions, not module-load success.
+    // A virtual neutral pad does not imply the game has polled a button.
+    std::fputs(",\n  \"m2_iop_sio2\": ", output);
+    if (guest_iop_kernel == nullptr)
+    {
+        std::fputs("null", output);
+    }
+    else
+    {
+        const iop::c_hw& sio2 = guest_iop_kernel->hardware();
+        const iop::c_hw::s_sio2_diagnostics detail =
+            sio2.sio2_diagnostics();
+        std::fprintf(output,
+            "{\"schema\":\"ee-iop-sio2-input-observation-v1\","
+            "\"ctrl_starts\":%u,\"packets\":%u,"
+            "\"completed_transfers\":%u,"
+            "\"transfer_requested\":%s,"
+            "\"pending_tx_bytes\":%zu,"
+            "\"queued_rx_bytes\":%zu,"
+            "\"empty_rx_reads\":%u,"
+            "\"pad0_polls\":%u,\"pad0_cross_pressed_polls\":%u,"
+            "\"pad0_cross_first_poll\":%u,"
+            "\"pad0_cross_poll_count\":%u,"
+            "\"pad0_cross_bytes_pio_read\":%u,"
+            "\"pad0_cross_bytes_dma_written\":%u,"
+            "\"pad0_cross_bytes_fifo_discarded\":%u,"
+            "\"packet_index\":%u,\"ctrl_word\":%u,\"stat_word\":%u,"
+            "\"intr_word\":%u,"
+            "\"last_rejection\":\"%s\",\"last_rejection_code\":%u,"
+            "\"rejected_starts\":%u,"
+            "\"send3\":[",
+            sio2.sio2_ctrl_starts(),
+            sio2.sio2_packets(),
+            sio2.sio2_completed_transfers(),
+            sio2.sio2_transfer_requested() ? "true" : "false",
+            detail.m_tx_bytes, detail.m_rx_bytes,
+            detail.m_empty_rx_reads,
+            detail.m_pad0_polls, detail.m_pad0_cross_pressed_polls,
+            detail.m_pad0_cross_first_poll, detail.m_pad0_cross_poll_count,
+            detail.m_pad0_cross_bytes_pio_read,
+            detail.m_pad0_cross_bytes_dma_written,
+            detail.m_pad0_cross_bytes_fifo_discarded,
+            detail.m_packet_index, detail.m_ctrl, detail.m_stat,
+            detail.m_intr, sio2.sio2_rejection_name(),
+            static_cast<uint32_t>(detail.m_last_rejection),
+            detail.m_rejected_starts);
+        for (uint32_t index = 0u; index < 4u; ++index)
+        {
+            std::fprintf(output, "%s%u",
+                index != 0u ? "," : "", detail.m_send3[index]);
+        }
+        std::fputs("],\"dma11\":[", output);
+        for (uint32_t index = 0u; index < 3u; ++index)
+        {
+            std::fprintf(output, "%s%u",
+                index != 0u ? "," : "", detail.m_dma11[index]);
+        }
+        std::fputs("],\"dma12\":[", output);
+        for (uint32_t index = 0u; index < 3u; ++index)
+        {
+            std::fprintf(output, "%s%u",
+                index != 0u ? "," : "", detail.m_dma12[index]);
+        }
+        std::fprintf(output,
+            "],\"last_start_guest_pc\":%u,"
+            "\"last_start_guest_ra\":%u,"
+            "\"packets_at_last_start\":%u,"
+            "\"tx_bytes_at_last_start\":%zu,"
+            "\"rx_bytes_at_last_start\":%zu,"
+            "\"first_packets\":[",
+            detail.m_last_start_guest_pc,
+            detail.m_last_start_guest_ra,
+            detail.m_packets_at_last_start,
+            detail.m_tx_bytes_at_last_start,
+            detail.m_rx_bytes_at_last_start);
+        for (uint32_t index = 0u;
+             index < detail.m_first_packet_count; ++index)
+        {
+            const iop::c_hw::s_sio2_packet_observation& packet =
+                detail.m_first_packets[index];
+            std::fprintf(output,
+                "%s{\"port\":%u,\"send3\":%u,"
+                "\"input_size\":%u,\"output_size\":%u,"
+                "\"first_tx_byte\":%u,\"command\":%u,"
+                "\"pad_present\":%s}",
+                index != 0u ? "," : "",
+                packet.m_port, packet.m_send3,
+                packet.m_input_size, packet.m_output_size,
+                packet.m_first_tx_byte, packet.m_command,
+                packet.m_pad_present ? "true" : "false");
+        }
+        std::fputs(
+            "],\"limitations\":["
+            "\"hardware_counters_not_pad_button_state\","
+            "\"module_load_does_not_prove_controller_poll\","
+            "\"no_virtual_memory_card_attached\","
+            "\"rejected_ctrl_start_does_not_raise_irq17\"]}",
+            output);
+    }
     std::fputs(",\n  \"m2_sdbz_dma_wait\": ", output);
     dma_wait_probe.write_json(output);
+    std::fputs(",\n  \"m2_sdbz_ee_pad_return\": ", output);
+    pad_return_probe.write_json(output);
     std::fputs("\n}\n", output);
     const bool no_write_error = std::ferror(output) == 0;
     const bool closed = std::fclose(output) == 0;
@@ -943,7 +1159,7 @@ bool write_report(
 
 bool load_kernel_ram_snapshot(const char* path, ee::ee_memory* memory)
 {
-    FILE* input = std::fopen(path, "rb");
+    FILE* input = open_host_file(path, "rb");
     if (input == nullptr)
     {
         std::fprintf(stderr, "could not open EE kernel RAM snapshot: %s\n", path);
@@ -1057,6 +1273,8 @@ int main(int argc, char** argv)
     bool instruction_trace_window_seen = false;
     std::vector<std::string> iop_irx_paths;
     const char* iop_rom0_path = nullptr;
+    // Retain ownership when Windows allocates the environment value.
+    std::string iop_rom0_environment;
     const char* disc_image_path = nullptr;
     const char* disc_folder_path = nullptr;
     bool iop_start_all = false;
@@ -1399,7 +1617,8 @@ int main(int argc, char** argv)
         // Host-only boot configuration: run_game.py can pass this
         // through unchanged without invalidating the existing EE
         // translation provenance / --no-recompile cache.
-        iop_rom0_path = std::getenv("SDBZ_IOP_ROM0");
+        iop_rom0_path = read_host_environment(
+            "SDBZ_IOP_ROM0", &iop_rom0_environment);
     }
     if (iop_rom0_path != nullptr && iop_rom0_path[0] == '\0')
     {
@@ -1414,7 +1633,9 @@ int main(int argc, char** argv)
         // This bounded quantum gives firmware time to actually execute;
         // it does not invent SIF register values or claim cycle accuracy.
         iop_quantum = 65536u;
-        const char* configured = std::getenv("SDBZ_IOP_ROM0_QUANTUM");
+        std::string quantum_environment;
+        const char* configured = read_host_environment(
+            "SDBZ_IOP_ROM0_QUANTUM", &quantum_environment);
         if (configured != nullptr &&
             !parse_u32(configured, &iop_quantum))
         {
@@ -1457,11 +1678,60 @@ int main(int argc, char** argv)
         }
     }
 
+    // A full cached replay can execute millions of dispatches while
+    // reporting every one of them verbatim. An opt-in host-only cadence
+    // reduces trace I/O without affecting guest dispatch cadence, IRQ
+    // sampling, RPC scheduling, report snapshots or saved histories.
+    uint32_t dispatch_trace_every = 1u;
+    std::string dispatch_trace_environment;
+    const char* dispatch_trace_setting = read_host_environment(
+        "SDBZ_DISPATCH_TRACE_EVERY", &dispatch_trace_environment);
+    if (dispatch_trace_setting != nullptr &&
+        (!parse_u32(dispatch_trace_setting, &dispatch_trace_every) ||
+         dispatch_trace_every == 0u))
+    {
+        std::fprintf(stderr,
+            "invalid SDBZ_DISPATCH_TRACE_EVERY "
+            "(expected a positive integer)\n");
+        return 2;
+    }
+    // Reproducible, explicitly requested controller response to a real
+    // guest SIO2 pad poll. Never press Cross by default.
+    uint32_t pad0_cross_first_poll = 0u;
+    uint32_t pad0_cross_poll_count = 0u;
+    std::string pad0_cross_first_environment;
+    std::string pad0_cross_count_environment;
+    const char* pad0_first = read_host_environment(
+        "SDBZ_PAD0_CROSS_FIRST_POLL", &pad0_cross_first_environment);
+    const char* pad0_count = read_host_environment(
+        "SDBZ_PAD0_CROSS_POLL_COUNT", &pad0_cross_count_environment);
+    if ((pad0_first == nullptr) != (pad0_count == nullptr) ||
+        (pad0_first != nullptr &&
+         (!parse_u32(pad0_first, &pad0_cross_first_poll) ||
+          !parse_u32(pad0_count, &pad0_cross_poll_count) ||
+          pad0_cross_first_poll == 0u ||
+          pad0_cross_poll_count == 0u ||
+          pad0_cross_poll_count > 120u)))
+    {
+        std::fprintf(stderr,
+            "SDBZ_PAD0_CROSS_FIRST_POLL and "
+            "SDBZ_PAD0_CROSS_POLL_COUNT must both be set; "
+            "expected positive first poll and 1..120 held polls\n");
+        return 2;
+    }
     if (trace)
     {
         // Preserve recent trace lines when the Python host kills a timed-out
         // process: redirected stdout is normally fully buffered on Windows.
         std::setvbuf(stdout, nullptr, _IONBF, 0);
+        if (dispatch_trace_every > 1u)
+        {
+            std::printf(
+                "EE dispatch trace cadence: first 64, every %u, "
+                "and every non-DISPATCH/non-RETURN or failing transition "
+                "(host-only; full hotspots/history retained)\n",
+                dispatch_trace_every);
+        }
     }
 
     ee::elf_loader image;
@@ -1582,6 +1852,8 @@ int main(int argc, char** argv)
         });
     hardware.bind_device_download(&gs_state, &ee::c_ee_gs_state::dma_download);
 
+    ee::c_ee_gs_presentation_probe graphics_probe{};
+    graphics_probe.set_window_requested(gs_webgpu_window);
 #ifdef EE_ENABLE_WEBGPU
     ee::c_ee_webgpu_bridge webgpu_bridge{};
     if (gs_webgpu_snapshot_path != nullptr || gs_webgpu_window)
@@ -1610,6 +1882,7 @@ int main(int argc, char** argv)
     // rendezvous, NOT EE/IOP hardware cycle synchronization: the native
     // dispatcher does not yet expose an accurate EE-cycle clock.
     std::unique_ptr<iop::c_kernel> iop_kernel;
+    iop::c_iop_guest_fault_probe iop_fault_probe{};
     std::unique_ptr<iop::c_sif1_dma_transport> iop_sif1_transport;
     std::unique_ptr<iop::c_sif0_dma_transport> iop_sif0_transport;
     std::unique_ptr<iop::c_sifman_bridge> iop_sifman;
@@ -1728,6 +2001,15 @@ int main(int argc, char** argv)
             {
                 std::fprintf(stderr, "IOP HLE MMIO attachment failed\n");
                 return 1;
+            }
+            if (pad0_cross_poll_count != 0u)
+            {
+                iop_kernel->hardware().configure_sio2_pad0_cross_pulse(
+                    pad0_cross_first_poll, pad0_cross_poll_count);
+                std::printf(
+                    "IOP SIO2 opt-in pad0 Cross pulse: first_poll=%u "
+                    "hold_polls=%u (only real port0 0x42 replies)\n",
+                    pad0_cross_first_poll, pad0_cross_poll_count);
             }
             iop_hle = std::make_unique<iop::c_kernel_hle_bridge>(
                 *iop_kernel);
@@ -2058,6 +2340,10 @@ int main(int argc, char** argv)
     // pair without reading MMIO, changing RAM, or issuing any completion.
     ee::c_ee_sdbz_dma_wait_probe dma_wait_probe{};
 
+    // Original USA game pad-read return continuation at 0x00109ba0.
+    // Observe guest EE stack bytes only; do not alter device responses.
+    ee::c_ee_sdbz_pad_return_probe pad_return_probe{};
+
     struct s_kernel_thread
     {
         bool m_used = false;
@@ -2258,6 +2544,9 @@ int main(int argc, char** argv)
     uint32_t status = 0;
     uint32_t reason = cpu.m_exit_reason;
     uint32_t completed_loop_yields = 0u;
+    // A total-session cap was wrong: genuine VBlank, GIF and IOP RPC
+    // progress must reopen a finite set of native watchdog resumes.
+    ee::c_host_loop_yield_budget loop_yield_budget{};
     uint64_t last_snapshot_dispatch = 0;
     uint64_t last_progress_dispatch = 0;
     bool last_snapshot_callback_active = false;
@@ -2266,7 +2555,9 @@ int main(int argc, char** argv)
     // the guest still returns to the host after EVERY native dispatch while
     // --report is enabled, so DMA/interrupt/callback scheduling is unchanged.
     uint32_t report_snapshot_milliseconds = 0u;
-    const char* snapshot_interval = std::getenv("SDBZ_REPORT_SNAPSHOT_MS");
+    std::string snapshot_environment;
+    const char* snapshot_interval = read_host_environment(
+        "SDBZ_REPORT_SNAPSHOT_MS", &snapshot_environment);
     if (snapshot_interval != nullptr && *snapshot_interval != '\0')
     {
         char* end = nullptr;
@@ -2296,6 +2587,10 @@ int main(int argc, char** argv)
     uint32_t slowest_native_pc = 0u;
     while (remaining != 0)
     {
+        if (pad0_cross_poll_count != 0u && iop_kernel != nullptr)
+        {
+            iop_kernel->hardware().set_pad_trace_dispatch(dispatched);
+        }
         // This catches HLE handoffs and interpreter observations that
         // returned via a host continuation rather than native dispatch.
         if (runtime.m_timing_observer_failed != 0u)
@@ -2374,6 +2669,12 @@ int main(int argc, char** argv)
                         progressed.m_thread_id,
                         static_cast<uint32_t>(progressed.m_stop),
                         progressed.m_guest_pc, progressed.m_opcode);
+                    // Preserve the actual IOP failure, not the EE PC
+                    // where host scheduling happened to observe it.
+                    if (iop_fault_probe.capture(*iop_kernel, progressed))
+                    {
+                        iop_fault_probe.write_text(stderr);
+                    }
                     reason = static_cast<uint32_t>(
                         ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED);
                     status = 0u;
@@ -2509,12 +2810,18 @@ int main(int argc, char** argv)
             // avoid repeated JSON I/O in fast guest paths, without using host
             // time to advance any EE, IOP, DMA, scanout or interrupt state.
             const auto report_start = std::chrono::steady_clock::now();
+#ifdef EE_ENABLE_WEBGPU
+            graphics_probe.set_gpu_progress(
+                webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
+#endif
             const bool report_ok = write_report(
                 report_path, image, cpu, entry, dispatched,
                 runtime.m_guest_instruction_attempts,
                 runtime, hardware, vsync_flags,
                 reason, status, history, syscall_history, gs_state.state(),
-                dma_wait_probe, hotspots, true
+                gif_path1, gif_path2, gif_path3,
+                graphics_probe, iop_fault_probe, iop_kernel.get(),
+                dma_wait_probe, pad_return_probe, hotspots, true
             );
             report_time_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - report_start
@@ -2588,6 +2895,24 @@ int main(int argc, char** argv)
         }
 
         const uint32_t from_pc = cpu.m_pc;
+        if (report_path != nullptr)
+        {
+            const bool sampled = pad_return_probe.observe(
+                from_pc, dispatched + 1u,
+                cpu.m_gpr[29u].m_lo, cpu.m_gpr[2u].m_lo,
+                memory.get());
+            if (sampled && iop_kernel != nullptr &&
+                iop_kernel->hardware().pad_trace_window())
+            {
+                const auto& sample = pad_return_probe.last_sample();
+                std::fprintf(stderr,
+                    "PAD EE dispatch=%llu poll=%u buffer=%08x return=%u bytes=%02x %02x %02x %02x\n",
+                    static_cast<unsigned long long>(sample.m_dispatch),
+                    iop_kernel->hardware().pad0_polls(), sample.m_buffer_address,
+                    sample.m_return_value, sample.m_bytes[0], sample.m_bytes[1],
+                    sample.m_bytes[2], sample.m_bytes[3]);
+            }
+        }
         if (report_path != nullptr &&
             dma_wait_probe.observe(
                 from_pc, dispatched + 1u, current_thread_id,
@@ -2703,7 +3028,10 @@ int main(int argc, char** argv)
             ? static_cast<uint32_t>(cpu.m_gpr[30].m_lo) : 0u;
         uint32_t count = 0;
         uint32_t out_pc = from_pc;
-        const uint32_t slice = (trace || report_path != nullptr) ? 1u : remaining;
+        // HLE services the IOP and pending callbacks between EE dispatches.
+        // Batching across this boundary changes guest timing in a quiet run.
+        const uint32_t slice =
+            (hle_startup || trace || report_path != nullptr) ? 1u : remaining;
         const auto native_start = std::chrono::steady_clock::now();
         // A given native function can branch internally forever without
         // returning to the dispatcher. Reset a per-invocation loop-header
@@ -2815,7 +3143,7 @@ int main(int argc, char** argv)
                 webgpu_bridge,
                 hardware.gs_display_registers(),
                 hardware.gs_crt_mode(),
-                hardware.scanout().fields_started());
+                hardware.scanout().fields_started(), &graphics_probe);
         }
 #endif
         if (has_watch_word && count != 0u)
@@ -2898,23 +3226,39 @@ int main(int argc, char** argv)
             last_progress_dispatch = dispatched;
         }
 
-        if (trace)
+        // The complete dispatch statistics and last-64 transition
+        // history above remain unsampled. Only the verbose text stream
+        // is thinned during long-running, non-failing host loops.
+        const bool ordinary_transition =
+            reason == static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
+            reason == static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_RETURN);
+        if (trace && (dispatch_trace_every == 1u ||
+            dispatched <= 64u ||
+            dispatched % dispatch_trace_every == 0u ||
+            !ordinary_transition || status != 1u))
         {
             std::printf("dispatch=%llu pc=0x%08x -> 0x%08x reason=%s(%u) status=%u\n",
                         static_cast<unsigned long long>(dispatched), from_pc,
                         out_pc, exit_name(reason), reason, status);
         }
 
-        // A translated-loop yield has already committed the preceding
-        // branch, delay slot, and architectural register writes. Resume
-        // only within this explicitly bounded host option. Do not turn
-        // yield counts or instruction attempts into EE cycles; neither
-        // GS/INTC VBlank nor DMA readiness is manufactured here.
+        // Each HOST_YIELD has committed its original guest branch,
+        // delay slot and register writes. Bound subsequent native
+        // watchdog resumes until a *real* GS field, GIF write, or IOP
+        // RPC completion is observed. Guest instruction attempts and
+        // dispatch count alone are not a progress signal. The host
+        // never manufactures cycles, IRQs, DMA, responses, or frames.
         if (reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD))
         {
             if (count == 0u || status == 2u ||
-                completed_loop_yields >= loop_yield_resumes)
+                !loop_yield_budget.try_resume(
+                    loop_yield_resumes,
+                    hardware.scanout().fields_started(),
+                    last_iop_rpc_sequence,
+                    hardware.dmac().gif_trace_count()))
             {
                 break;
             }
@@ -2922,10 +3266,22 @@ int main(int argc, char** argv)
             runtime.m_ee_cycle_scheduler.record_scheduler_yield();
             if (trace)
             {
-                std::printf("EE host loop resume: count=%u/%u pc=0x%08x "
-                            "(guest EE cycles unchanged)\n",
-                            completed_loop_yields,
-                            loop_yield_resumes, cpu.m_pc);
+                std::printf(
+                    "EE host loop resume: count=%u/%u total=%u "
+                    "progress_resets=%llu pc=0x%08x fields=%llu "
+                    "rpc=%llu gif_writes=%llu "
+                    "(guest EE cycles unchanged)\n",
+                    loop_yield_budget.without_progress(),
+                    loop_yield_resumes, completed_loop_yields,
+                    static_cast<unsigned long long>(
+                        loop_yield_budget.progress_resets()),
+                    cpu.m_pc,
+                    static_cast<unsigned long long>(
+                        hardware.scanout().fields_started()),
+                    static_cast<unsigned long long>(
+                        last_iop_rpc_sequence),
+                    static_cast<unsigned long long>(
+                        hardware.dmac().gif_trace_count()));
             }
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
@@ -4804,6 +5160,13 @@ int main(int argc, char** argv)
                                     "[iop] HLE MMIO reattachment failed\n");
                                 break;
                             }
+                            if (pad0_cross_poll_count != 0u)
+                            {
+                                iop_kernel->hardware()
+                                    .configure_sio2_pad0_cross_pulse(
+                                        pad0_cross_first_poll,
+                                        pad0_cross_poll_count);
+                            }
                             if (cdvd != nullptr && cdvd->m_source != nullptr)
                             {
                                 cdvd->m_transport =
@@ -5756,6 +6119,7 @@ int main(int argc, char** argv)
 
     if (gs_snapshot_path != nullptr)
     {
+        graphics_probe.request_capture(ee::e_ee_gs_capture_kind::cpu_display);
         std::vector<uint32_t> pixels;
         uint32_t width = 0u;
         uint32_t height = 0u;
@@ -5764,8 +6128,14 @@ int main(int argc, char** argv)
                 gs_state, hardware.gs_display_registers(),
                 hardware.gs_crt_mode(), pixels, width, height))
         {
+            graphics_probe.record_capture(
+                ee::e_ee_gs_capture_kind::cpu_display,
+                pixels, width, height, &hardware.gs_display_registers(),
+                hardware.gs_crt_mode());
             if (write_gs_ppm(gs_snapshot_path, pixels, width, height))
             {
+                graphics_probe.record_file_written(
+                    ee::e_ee_gs_capture_kind::cpu_display, true);
                 std::printf(
                     "GS diagnostic display VRAM: %ux%u path=%s "
                     "(not a rendered frame; no VBlank generated)\n",
@@ -5790,15 +6160,26 @@ int main(int argc, char** argv)
 #ifdef EE_ENABLE_WEBGPU
     if (gs_webgpu_snapshot_path != nullptr)
     {
+        graphics_probe.request_capture(ee::e_ee_gs_capture_kind::gpu_display);
         std::vector<uint32_t> pixels;
         uint32_t width = 0u;
         uint32_t height = 0u;
         std::remove(gs_webgpu_snapshot_path);
-        if (webgpu_bridge.readback(
-                hardware.gs_display_registers(), hardware.gs_crt_mode(),
-                pixels, width, height) &&
+        const bool readback_succeeded = webgpu_bridge.readback(
+            hardware.gs_display_registers(), hardware.gs_crt_mode(),
+            pixels, width, height);
+        if (readback_succeeded)
+        {
+            graphics_probe.record_capture(
+                ee::e_ee_gs_capture_kind::gpu_display,
+                pixels, width, height, &hardware.gs_display_registers(),
+                hardware.gs_crt_mode());
+        }
+        if (readback_succeeded &&
             write_gs_ppm(gs_webgpu_snapshot_path, pixels, width, height))
         {
+            graphics_probe.record_file_written(
+                ee::e_ee_gs_capture_kind::gpu_display, true);
             std::printf(
                 "GS native WebGPU raster readback: %ux%u path=%s "
                 "draws=%llu (GPU-processed GS VRAM; not a present event)\n",
@@ -5817,6 +6198,7 @@ int main(int argc, char** argv)
 
     if (gs_upload_snapshot_path != nullptr)
     {
+        graphics_probe.request_capture(ee::e_ee_gs_capture_kind::upload);
         std::vector<uint32_t> pixels;
         uint32_t width = 0u;
         uint32_t height = 0u;
@@ -5824,8 +6206,12 @@ int main(int argc, char** argv)
         if (ee::c_ee_gs_display::readback_upload(
                 gs_state, pixels, width, height))
         {
+            graphics_probe.record_capture(
+                ee::e_ee_gs_capture_kind::upload, pixels, width, height);
             if (write_gs_ppm(gs_upload_snapshot_path, pixels, width, height))
             {
+                graphics_probe.record_file_written(
+                    ee::e_ee_gs_capture_kind::upload, true);
                 std::printf(
                     "GS diagnostic completed upload VRAM: %ux%u path=%s "
                     "(texture transfer, NOT a rendered frame)\n",
@@ -5916,18 +6302,24 @@ int main(int argc, char** argv)
             );
         }
     }
+#ifdef EE_ENABLE_WEBGPU
+    graphics_probe.set_gpu_progress(
+        webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
+#endif
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,
                       runtime.m_guest_instruction_attempts,
                       runtime, hardware, vsync_flags,
                       reason, status, history, syscall_history, gs_state.state(),
-                       dma_wait_probe, hotspots, false))
+                      gif_path1, gif_path2, gif_path3,
+                      graphics_probe, iop_fault_probe, iop_kernel.get(),
+                      dma_wait_probe, pad_return_probe, hotspots, false))
     {
         return 1;
     }
     if (instruction_trace_path != nullptr)
     {
-        FILE* output = std::fopen(instruction_trace_path, "wb");
+        FILE* output = open_host_file(instruction_trace_path, "wb");
         if (output == nullptr)
         {
             std::fprintf(stderr, "failed to write instruction trace: %s\n",
@@ -6018,8 +6410,19 @@ int main(int argc, char** argv)
     {
         std::fprintf(stderr,
             "guest host loop yield cap reached: pc=0x%08x "
-            "resumes=%u cap=%u (clock=%s)\n",
-            cpu.m_pc, completed_loop_yields, loop_yield_resumes,
+            "resumes_without_progress=%u cap=%u total_resumes=%u "
+            "progress_resets=%llu fields=%llu rpc=%llu gif_writes=%llu "
+            "(clock=%s)\n",
+            cpu.m_pc, loop_yield_budget.without_progress(),
+            loop_yield_resumes, completed_loop_yields,
+            static_cast<unsigned long long>(
+                loop_yield_budget.progress_resets()),
+            static_cast<unsigned long long>(
+                hardware.scanout().fields_started()),
+            static_cast<unsigned long long>(
+                last_iop_rpc_sequence),
+            static_cast<unsigned long long>(
+                hardware.dmac().gif_trace_count()),
             ee_cycle_source_name(runtime.m_ee_cycle_scheduler.source()));
         // A repeated guest loop may be waiting for DMA, an IOP response,
         // an MMIO bit, or an ordinary RAM flag. More time or extra VBlank

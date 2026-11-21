@@ -7,11 +7,13 @@ must not throw away previously compiled guest functions.
 """
 import argparse
 import json
+import locale
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -113,25 +115,50 @@ def run_session(command, log_path, append=False, progress=None):
         )
         worker.start()
     try:
-        result = subprocess.run(
-            [str(item) for item in command],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
-            check=False,
-        )
+        # A temporary binary spool survives Ctrl+C while subprocess.run()
+        # waits on the child. PIPE/communicate loses the child's buffered
+        # output if Windows raises KeyboardInterrupt during text decoding.
+        # Read and transcode once after the child exits (or is killed).
+        with tempfile.TemporaryFile(mode="w+b") as capture:
+            result = None
+            interrupted = False
+            try:
+                result = subprocess.run(
+                    [str(item) for item in command],
+                    stdout=capture,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    errors="replace",
+                    check=False,
+                )
+            except KeyboardInterrupt:
+                # subprocess.run() terminates/reaps its direct child on
+                # cancellation; no further guest expansion should start.
+                interrupted = True
+            capture.flush()
+            capture.seek(0)
+            output = capture.read().decode(
+                locale.getpreferredencoding(False), errors="replace"
+            )
+            if interrupted:
+                code = 130
+                output += "\n# Native boot cancelled by user (Ctrl+C).\n"
+            else:
+                code = result.returncode
+                # Preserve the previous mock/fallback semantics as well as
+                # the production file-backed stdout capture.
+                if result.stdout is not None:
+                    output = result.stdout
     finally:
         if worker is not None:
             stopped.set()
             worker.join()
             progress.refresh()
             progress.finish_line()
-    output = result.stdout or ""
     with log_path.open("a" if append else "w", encoding="utf-8") as log:
         log.write("+ " + subprocess.list2cmdline([str(item) for item in command]) + "\n")
         log.write(output)
-    return result.returncode, output, time.monotonic() - started
+    return code, output, time.monotonic() - started
 
 
 def main(argv=None):
@@ -342,6 +369,16 @@ def main(argv=None):
         with expansion_log.open("a", encoding="utf-8") as log:
             log.write("# " + summary + "\n")
 
+        if code == 130:
+            if not args.quick_probe:
+                shutil.copyfile(expansion_log, boot_log)
+            print(
+                "Native boot cancelled by user (Ctrl+C); no further "
+                f"expansion or guest replay. Log: {boot_log}",
+                file=sys.stderr, flush=True,
+            )
+            return 130
+
         if code not in (0, 3, 4):
             if not args.quick_probe:
                 shutil.copyfile(expansion_log, boot_log)
@@ -401,6 +438,13 @@ def main(argv=None):
     code, final_output, elapsed = run_session(
         final_command, boot_log, **progress_kwargs
     )
+    if code == 130:
+        print(
+            "Native final replay cancelled by user (Ctrl+C); "
+            f"no guest completion is inferred. Log: {boot_log}",
+            file=sys.stderr, flush=True,
+        )
+        return 130
     if catalog is not None:
         try:
             reconcile_runtime_loadfile(catalog, final_output)
@@ -431,5 +475,18 @@ def main(argv=None):
     return code
 
 
+def cli_main(argv=None):
+    try:
+        return main(argv)
+    except KeyboardInterrupt:
+        # Also handle Ctrl+C outside a child replay (catalogue, reports,
+        # progress setup) without printing a Python traceback.
+        print(
+            "\nNative boot cancelled by user (Ctrl+C).",
+            file=sys.stderr, flush=True,
+        )
+        return 130
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(cli_main())

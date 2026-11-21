@@ -1870,6 +1870,47 @@ def main():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert metadata["function_count"] == 2, metadata
 
+        # The USA resource wrapper jumps to a block which consumes both
+        # incoming arguments with doubleword arithmetic, then reuses a0.
+        with tempfile.TemporaryDirectory(prefix="ee-native-tail-arguments-") as tmp:
+            root = Path(tmp)
+            elf = root / "tail-arguments.elf"
+            make_elf(elf)
+            image = bytearray(elf.read_bytes())
+            words = (
+                0x24040029,  # addiu a0,zero,41
+                0x08040007,  # j 0x10001c
+                0x24050001,  # delay slot: addiu a1,zero,1
+                0, 0,
+                0x0085402d,  # daddu t0,a0,a1
+                0x0080482d,  # daddu t1,a0,zero
+                0x0085502f,  # dsubu t2,a0,a1
+                0x00a4582f,  # dsubu t3,a1,a0
+                0x24040000,  # addiu a0,zero,0
+                0x0c04000e,  # jal 0x100038
+                0x24050000,  # delay slot: addiu a1,zero,0
+                0x00000008, 0,  # jr zero; nop (also the callee)
+            )
+            struct.pack_into("<14I", image, 0x108, *words)
+            elf.write_bytes(image)
+            report = root / "tail.json"
+            command = [
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--functions=all", "--max-dispatches=8", "--hle-startup",
+                "--trace-entry=0x00100038",
+            ]
+            reported = subprocess.run(command + ["--report", str(report)],
+                                      capture_output=True, text=True)
+            state = json.loads(report.read_text())
+            assert state["gpr_lo"][8:12] == [42, 41, 40, (1 << 64) - 40], state
+            quiet = subprocess.run(command + ["--no-recompile"],
+                                   capture_output=True, text=True)
+            entry = "EE trace-entry: dispatch=2 pc=0x00100038"
+            assert entry in reported.stdout, reported.stdout + reported.stderr
+            assert entry in quiet.stdout, quiet.stdout + quiet.stderr
+            assert quiet.returncode == reported.returncode
+
         # Batch two related explicit function entries from one cache reload,
         # then publish one merged metadata file. Existing IR stays untouched.
         with tempfile.TemporaryDirectory(prefix="ee-native-batch-append-") as tmp:

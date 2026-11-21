@@ -19,7 +19,14 @@ public:
     static constexpr uint32_t k_search_file_stub = 0x00018200u;
     static constexpr uint32_t k_search_file_syscall = 0x494f020au;
     static constexpr uint32_t k_service_base = 0x494f0200u;
-    static constexpr uint32_t k_extra_stub_base = 0x00018300u;
+    // Separate 0x19000..0x1997f range. The previous 0x18300 + ordinal*32
+    // overlapped SIFMAN #5 at 0x187a0 (CDVDMAN #37) and #6 at 0x187c0
+    // (CDVDMAN #38), overwriting *already linked* guest import stubs.
+    // Keep the historical #10 search-file stub at 0x18200.
+    // SIFCMD's last extra stub is below 0x18ea0; its RPC finish
+    // trampoline is at 0x18f80. No guest module allocations start
+    // until 0x20000.
+    static constexpr uint32_t k_extra_stub_base = 0x00019000u;
 
     c_cdvdman_bridge(c_kernel& kernel, c_folder_sector_source& source);
     bool install();
@@ -40,6 +47,8 @@ private:
     std::vector<uint32_t> m_sync_waiters;
     uint32_t m_callback = 0u;
     uint32_t m_callback_gp = 0u;
+    s_guest_callback_origin m_callback_origin{};
+    uint32_t m_callback_registration_reports = 0u;
     uint32_t m_requested_media_mode = 0u;
     bool m_initialized = false;
     uint32_t m_last_error = 0u;
