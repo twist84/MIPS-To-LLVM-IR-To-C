@@ -7517,6 +7517,58 @@ int main(int argc, char** argv)
             }
             std::printf("\n");
         }
+        if ((exception_code == 4u || exception_code == 5u) &&
+            has_instruction)
+        {
+            // Address errors need a guest register/instruction context,
+            // not a fabricated memory read or an exception workaround.
+            // The immediate is sign-extended for regular base+offset
+            // loads/stores. This remains diagnostic for other opcodes.
+            const uint32_t base_register = (instruction >> 21u) & 31u;
+            const int32_t offset = static_cast<int16_t>(instruction & 0xffffu);
+            const uint64_t base_value = cpu.m_gpr[base_register].m_lo;
+            const uint32_t effective_address = static_cast<uint32_t>(
+                base_value + static_cast<int64_t>(offset));
+            std::printf(
+                "EE address fault: base=r%u value=0x%016llx offset=%d "
+                "effective=0x%08x badvaddr=0x%08x "
+                "sp=0x%08x ra=0x%08x gp=0x%08x\n",
+                base_register,
+                static_cast<unsigned long long>(base_value),
+                offset, effective_address, cpu.m_cop0[8],
+                static_cast<uint32_t>(cpu.m_gpr[29].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[31].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[28].m_lo)
+            );
+            std::printf("EE address fault saved registers:");
+            for (uint32_t index = 16u; index <= 23u; ++index)
+            {
+                std::printf(" s%u=%08x", index - 16u,
+                    static_cast<uint32_t>(cpu.m_gpr[index].m_lo));
+            }
+            std::printf("\n");
+            std::printf("EE address fault nearby instructions "
+                        "(guest image, raw opcodes):\n");
+            for (int32_t delta = -6; delta <= 6; ++delta)
+            {
+                const int64_t candidate =
+                    static_cast<int64_t>(epc) +
+                    static_cast<int64_t>(delta) * 4;
+                if (candidate < 0 || candidate > UINT32_MAX)
+                {
+                    continue;
+                }
+                const uint32_t candidate_pc =
+                    static_cast<uint32_t>(candidate);
+                uint32_t candidate_word = 0u;
+                if (image.read32_at(candidate_pc, &candidate_word))
+                {
+                    std::printf("  %c 0x%08x: 0x%08x\n",
+                        delta == 0 ? '>' : ' ', candidate_pc,
+                        candidate_word);
+                }
+            }
+        }
         if (exception_code == 8u)
         {
             std::printf(
