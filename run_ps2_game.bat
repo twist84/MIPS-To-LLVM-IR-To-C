@@ -12,6 +12,8 @@ rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
 rem --replay-after-expand opts out of in-process live cache-miss resume.
+rem --live-full-relink disables PR #152's fast overlay DLLs for live misses.
+rem PRECOMPILE_ALL=0 disables cold whole-image precompilation.
 rem --matched executes a CPU-only neutral/Cross pair with known cached IR,
 rem never running guest function discovery or auto-expansion.
 rem Full retail diagnostics use the usual local replay settings below.
@@ -22,6 +24,7 @@ set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
 set "CACHE_MISS_ARGS="
+set "LIVE_RELINK_ARG="
 :parse_launcher_options
 if "%~1"=="" goto :launcher_options_ready
 if /I "%~1"=="--full" (
@@ -54,6 +57,11 @@ if /I "%~1"=="--replay-after-expand" (
     shift
     goto :parse_launcher_options
 )
+if /I "%~1"=="--live-full-relink" (
+    set "LIVE_RELINK_ARG=--live-full-relink"
+    shift
+    goto :parse_launcher_options
+)
 if /I "%~1"=="--cross" (
     set "REQUESTED_PAD_PROFILE=cross"
     shift
@@ -65,7 +73,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand]
+echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
@@ -87,6 +95,18 @@ if defined CACHE_MISS_ARGS if /I "%REQUESTED_SESSION_MODE%"=="recover" (
 )
 if defined CACHE_MISS_ARGS if /I "%REQUESTED_SESSION_MODE%"=="matched" (
     echo ERROR: --replay-after-expand has no meaning during matched replays.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if /I "%REQUESTED_SESSION_MODE%"=="recover" (
+    echo ERROR: --live-full-relink has no meaning during cache recovery.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if /I "%REQUESTED_SESSION_MODE%"=="matched" (
+    echo ERROR: --live-full-relink has no meaning during matched replays.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if defined CACHE_MISS_ARGS (
+    echo ERROR: --live-full-relink requires live cache-miss resume.
     exit /b 2
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="cross" (
@@ -403,6 +423,8 @@ rem cached passes and the final replay always run with --no-recompile.
 set "FUNCTIONS_ARG="
 if not defined CACHE_FLAG if not "%PRECOMPILE_ALL%"=="0" set "FUNCTIONS_ARG=--functions=all"
 if defined FUNCTIONS_ARG echo Cold translation: precompiling all statically discovered EE functions
+if defined LIVE_RELINK_ARG echo Live cache misses: legacy full-library relink
+if not defined LIVE_RELINK_ARG if not defined CACHE_MISS_ARGS echo Live cache misses: fast overlay DLLs
 
 rem Display live LLVM IR file count and percentage in both quick and full
 rem sessions; the orchestrator keeps in-place updates out of boot logs.
@@ -424,7 +446,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.

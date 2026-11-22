@@ -64,6 +64,7 @@ BUILD_OPTIONS = (
     Option("--extra-functions", "Comma-separated guest PCs to translate."),
     Option("--auto-expand", "Maximum new functions (0–1024); pauses and resumes live by default.", default="0"),
     Option("--replay-after-expand", "Use legacy restart after each cache miss instead of live resume.", "flag"),
+    Option("--live-full-relink", "Relink the full game library after each live cache miss instead of loading fast overlays.", "flag"),
     Option("--auto-expand-table", "Maximum sibling function pointers prefetched per replay.", default="24"),
     Option("--pdb", "Generate a Windows PDB with Clang/LLD.", "flag"),
     Option("--emit-opt", "LLVM native object optimization level.", default="0", choices=("0", "1", "2", "3")),
@@ -85,6 +86,7 @@ TOOL_OPTIONS = {
             Option("--expansion-passes", "Maximum auto-expansion passes (1–64).", default="2"),
             Option("--expansion-per-pass", "Maximum new functions per pass (1–1024).", default="128"),
             Option("--replay-after-expand", "Legacy mode: restart the game after each cache miss rather than resuming its live state.", "flag"),
+            Option("--live-full-relink", "Disable fast overlays; relink the entire translated library at every live miss.", "flag"),
             Option("--no-recompile", "Reuse compiled guest code without rebuilding it.", "flag"),
             Option("--quick-probe", "Use the last expansion pass as the final report. Skips traced replay.", "flag"),
             Option("--ll-progress", "Show the live LLVM IR file count on a terminal.", "flag"),
@@ -99,7 +101,8 @@ TOOL_OPTIONS = {
         ),
         "Runtime": LIMITS + (TIMEOUT,),
         "Translation": tuple(option for option in BUILD_OPTIONS if option.name not in
-                             ("--auto-expand", "--no-recompile", "--link-only", "--replay-after-expand")),
+                             ("--auto-expand", "--no-recompile", "--link-only",
+                              "--replay-after-expand", "--live-full-relink")),
         "Trace": TRACE_OPTIONS[1:],
     },
     "Game runner (Python)": {

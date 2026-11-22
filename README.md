@@ -93,8 +93,11 @@ shoulder buttons are mapped. The launcher shows the build and game
 log and saves it to `build/ps2-launcher.log`.
 
 **Game** exposes all batch flags, including quick probe, matched replay
-and cache recovery. **Limits and diagnostics** controls dispatch budgets,
-timeouts, custom Cross pulses and trace settings. **Direct command**
+and cache recovery. **Performance** exposes PR #152's cold precompilation,
+fast live-overlay DLLs and compile-job count. Indexed guest-PC dispatch is
+always enabled for new native libraries. **Limits and diagnostics** controls
+dispatch budgets, timeouts, custom Cross pulses and trace settings.
+**Direct command**
 shows separate tabbed forms for `run_boot_session.py`, `run_game.py`, and
 `ee_game_runner.exe`. Each tool retains its own inputs. Hover over a
 field for help or use **Show --help** for the selected tool’s CLI help.
@@ -108,10 +111,23 @@ from `build/ps2-launcher-settings.json`. It saves on launch and when
 you close the window. Clear a numeric field to use the script’s
 automatic value.
 
+The **Performance** tab defaults to **Precompile all functions on a cold
+cache** and **Fast live overlays**. On a cold cache, the batch launcher
+translates the whole statically discovered guest function set once; a valid
+existing cache stays intact. A live cache miss links only new function objects
+into a small DLL, then folds the overlays into the full cache on exit.
+Uncheck **Fast live overlays** to use `--live-full-relink` for comparisons
+(the Game tab must still have **Resume after cache miss** checked).
+The Compile jobs field is blank by default, allowing the batch script to
+select the host CPU count. Existing saved numeric overrides are retained.
+For direct runs, the Boot session and Game runner forms independently expose
+`--functions=all` and `--live-full-relink` along with their other controls.
+
 The **Game** tab now includes **Resume after cache miss**, enabled by default.
 When an uncached EE function is reached, compilation and native-library
 replacement happen without restarting the current game process or repeating
-the controller input. Uncheck it to use the original restart-on-miss path.
+the controller input; on the fast path this uses overlay libraries rather
+than a full-library relink each time. Uncheck it to use the original restart-on-miss path.
 The **Limits and diagnostics** tab accepts up to 1024 functions per expansion
 pass (128 by default). The **Direct command** forms for both the boot session
 and Python game runner expose `--replay-after-expand`. This is not a persistent
