@@ -1013,6 +1013,14 @@ struct s_dispatch_sample
     uint32_t m_to = 0;
     uint32_t m_reason = 0;
     uint32_t m_status = 0;
+    // Read-only register snapshots at native dispatch boundaries.
+    // These are not per-instruction values inside a translated function.
+    uint32_t m_s0_before = 0;
+    uint32_t m_s0_after = 0;
+    uint32_t m_s1_before = 0;
+    uint32_t m_s1_after = 0;
+    uint32_t m_s2_before = 0;
+    uint32_t m_s2_after = 0;
 };
 
 const char* ee_cycle_source_name(ee::e_ee_cycle_source source)
@@ -1364,9 +1372,15 @@ bool write_report(
         const auto& item = history[i];
         std::fprintf(output,
             "%s\n    {\"dispatch\": %llu, \"from_pc\": %u,"
-            " \"to_pc\": %u, \"reason\": %u, \"status\": %u}",
+            " \"to_pc\": %u, \"reason\": %u, \"status\": %u,"
+            " \"s0_before\": %u, \"s0_after\": %u,"
+            " \"s1_before\": %u, \"s1_after\": %u,"
+            " \"s2_before\": %u, \"s2_after\": %u}",
             i ? "," : "", static_cast<unsigned long long>(item.m_index),
-            item.m_from, item.m_to, item.m_reason, item.m_status);
+            item.m_from, item.m_to, item.m_reason, item.m_status,
+            item.m_s0_before, item.m_s0_after,
+            item.m_s1_before, item.m_s1_after,
+            item.m_s2_before, item.m_s2_after);
     }
     std::fputs(history.empty() ? "]," : "\n  ],", output);
     std::fputs("\n  \"syscall_history\": [", output);
@@ -4099,7 +4113,15 @@ int main(int argc, char** argv)
             {
                 history.erase(history.begin());
             }
-            history.push_back({dispatched, from_pc, out_pc, reason, status});
+            history.push_back({
+                dispatched, from_pc, out_pc, reason, status,
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[16].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[16].m_lo),
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[17].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[17].m_lo),
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[18].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[18].m_lo)
+            });
             // Host read-only observations, not synthetic guest events.
             const auto gif_channel = hardware.dmac().gif_channel_state();
             const ee::s_ee_hot_loop_state state{
@@ -7540,6 +7562,24 @@ int main(int argc, char** argv)
                 static_cast<uint32_t>(cpu.m_gpr[31].m_lo),
                 static_cast<uint32_t>(cpu.m_gpr[28].m_lo)
             );
+            std::printf("EE address fault native dispatch history "
+                        "(last 24 boundaries; before/after are not "
+                        "per-instruction values):\n");
+            const size_t first = history.size() > 24u
+                ? history.size() - 24u : 0u;
+            for (size_t index = first; index < history.size(); ++index)
+            {
+                const s_dispatch_sample& sample = history[index];
+                std::printf(
+                    "  dispatch=%llu from=0x%08x to=0x%08x"
+                    " s0=%08x/%08x s1=%08x/%08x s2=%08x/%08x\n",
+                    static_cast<unsigned long long>(sample.m_index),
+                    sample.m_from, sample.m_to,
+                    sample.m_s0_before, sample.m_s0_after,
+                    sample.m_s1_before, sample.m_s1_after,
+                    sample.m_s2_before, sample.m_s2_after
+                );
+            }
             std::printf("EE address fault saved registers:");
             for (uint32_t index = 16u; index <= 23u; ++index)
             {
@@ -7549,7 +7589,7 @@ int main(int argc, char** argv)
             std::printf("\n");
             std::printf("EE address fault nearby instructions "
                         "(guest image, raw opcodes):\n");
-            for (int32_t delta = -6; delta <= 6; ++delta)
+            for (int32_t delta = -24; delta <= 12; ++delta)
             {
                 const int64_t candidate =
                     static_cast<int64_t>(epc) +
