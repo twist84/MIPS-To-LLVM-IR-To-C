@@ -418,10 +418,17 @@ int run_syscall_case(uint32_t size, uint32_t count,
             const uint8_t expected = index < size
                 ? pattern(index + n, size)
                 : index < padded ? 0xa5u : 0xcdu;
-            if (actual != expected ||
-                memory.read8(src + index) !=
-                    (index < size ? pattern(index + n, size) : 0xa5u))
+            const uint8_t expected_source = index < size
+                ? pattern(index + n, size) : 0xa5u;
+            const uint8_t observed_source = memory.read8(src + index);
+            if (actual != expected || observed_source != expected_source)
             {
+                std::fprintf(stderr,
+                    "SIF1 guest DMA mismatch: descriptor=%u offset=%u "
+                    "dst=0x%08x expected=0x%02x actual=0x%02x "
+                    "src=0x%08x src_expected=0x%02x src_actual=0x%02x\n",
+                    n, index, dst + index, expected, actual, src + index,
+                    expected_source, observed_source);
                 return fail("guest payload, padding or guard mismatch", size);
             }
         }
