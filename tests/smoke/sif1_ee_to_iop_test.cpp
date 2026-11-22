@@ -250,7 +250,7 @@ int run_case(uint32_t size, bool sender_first)
 int run_syscall_case(uint32_t size, uint32_t count,
                      uint32_t final_attributes)
 {
-    constexpr uint32_t k_descriptor = 0x00110000u;
+    constexpr uint32_t k_descriptor = 0x00110004u;
     constexpr uint32_t k_data = 0x00120000u;
     constexpr uint32_t k_borrowed_stage = 0x01c00000u;
     ee::ee_memory memory(32u * 1024u * 1024u);
@@ -291,10 +291,10 @@ int run_syscall_case(uint32_t size, uint32_t count,
     for (uint32_t n = 0u; n < count; ++n)
     {
         const uint32_t src = k_data + n * 0x1000u;
-        const uint32_t dst = k_destination + n * 0x1000u;
+        const uint32_t dst = k_destination + 4u + n * 0x1000u;
         memory.write32(k_descriptor + n * 16u, src);
         memory.write32(k_descriptor + n * 16u + 4u, dst);
-        memory.write32(k_descriptor + n * 16u + 8u, size);
+        memory.write32(k_descriptor + n * 16u + 8u, 0x80000000u | size);
         memory.write32(k_descriptor + n * 16u + 12u,
                        n + 1u == count ? final_attributes : 0u);
         for (uint32_t index = 0u; index < padded + 16u; ++index)
@@ -351,6 +351,18 @@ int run_syscall_case(uint32_t size, uint32_t count,
         memory.write32(k_descriptor + 12u, 0u);
     }
 
+    if (transport.set_dma(k_descriptor + 1u, count, &id) ||
+        id != 0xdeadbeefu || dmac.status() != 0u)
+    {
+        return fail("non-word-aligned descriptor list accepted", size);
+    }
+    memory.write32(k_descriptor + 4u, k_destination + 5u);
+    if (transport.set_dma(k_descriptor, count, &id) ||
+        id != 0xdeadbeefu || dmac.status() != 0u)
+    {
+        return fail("non-word-aligned IOP destination accepted", size);
+    }
+    memory.write32(k_descriptor + 4u, k_destination + 4u);
     if (!transport.set_dma(k_descriptor, count, &id) || id != 1u)
     {
         return fail("real syscall DMA6->DMA10 failed", size);

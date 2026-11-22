@@ -286,7 +286,8 @@ bool c_sif1_dma_transport::set_dma(
     const uint32_t list_address = m_ee_ram.translate_direct_address(list);
     if (dma_id == nullptr || m_next_dma_id == 0u ||
         count == 0u || count > 64u ||
-        (list & 15u) != 0u ||
+        // A descriptor list is word-aligned; DMA payloads remain quadword-aligned.
+        (list & 3u) != 0u ||
         list_address >= 0x02000000u ||
         !m_ee_ram.contains(list_address, static_cast<size_t>(count) * 16u) ||
         !m_ee_ram.contains(k_stage, k_stage_capacity) ||
@@ -306,7 +307,7 @@ bool c_sif1_dma_transport::set_dma(
         const uint32_t descriptor = list_address + index * 16u;
         const uint32_t source = m_ee_ram.read32(descriptor);
         const uint32_t destination = m_ee_ram.read32(descriptor + 4u);
-        const uint32_t size = m_ee_ram.read32(descriptor + 8u);
+        const uint32_t size = m_ee_ram.read32(descriptor + 8u) & 0x7fffffffu;
         const uint32_t attributes = m_ee_ram.read32(descriptor + 12u);
         const uint32_t source_address =
             m_ee_ram.translate_direct_address(source);
@@ -324,7 +325,7 @@ bool c_sif1_dma_transport::set_dma(
             (attributes == 0x44u && index + 1u == count);
         if (!supported_attributes || size == 0u || size > 65536u ||
             (source & 15u) != 0u ||
-            (destination & 15u) != 0u ||
+            (destination & 3u) != 0u ||
             (destination_region != 0u &&
              destination_region != 0x80000000u &&
              destination_region != 0xa0000000u) ||
