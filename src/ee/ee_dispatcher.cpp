@@ -1,14 +1,88 @@
 #include "ee_dispatcher.h"
+#include "ee_dispatch_index.h"
 #include "ee_exceptions.h"
+
+#include <algorithm>
 
 namespace ee
 {
 
-s_ee_dispatch_result ee_dispatch_run(
+s_ee_dispatch_index ee_build_dispatch_index(const s_recompiled_elf& compiled)
+{
+    s_ee_dispatch_index index{};
+    size_t total = 0;
+    for (const auto& fn : compiled.functions)
+    {
+        total += fn.block_pcs.size();
+    }
+    index.pcs.reserve(total);
+
+    const uint32_t count = static_cast<uint32_t>(compiled.functions.size());
+    for (uint32_t i = 0; i < count; ++i)
+    {
+        const s_recompiled_fn& fn = compiled.functions[i];
+        // find_recompiled_function() answers PC zero with the first function
+        // that is either the ELF entry or lists zero as a block PC.
+        if (!index.has_zero_owner &&
+            (fn.vaddr == compiled.entry_point ||
+             std::find(fn.block_pcs.begin(), fn.block_pcs.end(), 0u) !=
+                 fn.block_pcs.end()))
+        {
+            index.has_zero_owner = true;
+            index.zero_owner = i;
+        }
+        for (const uint32_t pc : fn.block_pcs)
+        {
+            index.pcs.emplace_back(pc, i);
+        }
+    }
+
+    // Sort by PC, then by function index, and keep the first owner of each
+    // PC: identical to the linear scan's first-match rule for overlaps.
+    std::sort(index.pcs.begin(), index.pcs.end());
+    index.pcs.erase(
+        std::unique(index.pcs.begin(), index.pcs.end(),
+                    [](const auto& a, const auto& b) { return a.first == b.first; }),
+        index.pcs.end());
+    return index;
+}
+
+const s_recompiled_fn* ee_find_dispatch_owner(
+    const s_recompiled_elf& compiled,
+    const s_ee_dispatch_index& index,
+    uint32_t guest_pc)
+{
+    if (guest_pc == 0u)
+    {
+        return index.has_zero_owner &&
+               index.zero_owner < compiled.functions.size()
+            ? &compiled.functions[index.zero_owner]
+            : nullptr;
+    }
+    const auto found = std::lower_bound(
+        index.pcs.begin(), index.pcs.end(), guest_pc,
+        [](const std::pair<uint32_t, uint32_t>& entry, uint32_t pc)
+        {
+            return entry.first < pc;
+        });
+    if (found == index.pcs.end() || found->first != guest_pc ||
+        found->second >= compiled.functions.size())
+    {
+        return nullptr;
+    }
+    return &compiled.functions[found->second];
+}
+
+namespace
+{
+
+template <typename t_find_owner>
+s_ee_dispatch_result dispatch_run_impl(
     s_ee_cpu_state* cpu,
     s_ee_runtime* runtime,
     const s_ee_dispatch_table& table,
-    uint32_t max_dispatches)
+    uint32_t max_dispatches,
+    const t_find_owner& find_owner)
 {
     s_ee_dispatch_result result{};
 
@@ -44,8 +118,7 @@ s_ee_dispatch_result ee_dispatch_run(
             return result;
         }
 
-        const s_recompiled_fn* const owner =
-            find_recompiled_function(*table.compiled, cpu->m_pc);
+        const s_recompiled_fn* const owner = find_owner(cpu->m_pc);
 
         if (owner == nullptr)
         {
@@ -120,6 +193,37 @@ s_ee_dispatch_result ee_dispatch_run(
         // can lead to another translated function. Resolve both through the
         // same block-PC ownership table on the next iteration.
     }
+}
+
+} // namespace
+
+s_ee_dispatch_result ee_dispatch_run(
+    s_ee_cpu_state* cpu,
+    s_ee_runtime* runtime,
+    const s_ee_dispatch_table& table,
+    uint32_t max_dispatches)
+{
+    return dispatch_run_impl(
+        cpu, runtime, table, max_dispatches,
+        [&table](uint32_t pc)
+        {
+            return find_recompiled_function(*table.compiled, pc);
+        });
+}
+
+s_ee_dispatch_result ee_dispatch_run_indexed(
+    s_ee_cpu_state* cpu,
+    s_ee_runtime* runtime,
+    const s_ee_dispatch_table& table,
+    const s_ee_dispatch_index& index,
+    uint32_t max_dispatches)
+{
+    return dispatch_run_impl(
+        cpu, runtime, table, max_dispatches,
+        [&table, &index](uint32_t pc)
+        {
+            return ee_find_dispatch_owner(*table.compiled, index, pc);
+        });
 }
 
 } // namespace ee

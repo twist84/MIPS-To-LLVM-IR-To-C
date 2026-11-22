@@ -57,6 +57,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -481,17 +482,22 @@ struct c_native_module
 // preserves EE/IOP memory, pending callbacks, DMA, GPU, timers, and pad/card
 // state in their owning objects.  Unique request IDs and atomic file renames
 // prevent consumption of stale or incomplete responses.
+// A response of "overlay=<path>" names a small library holding ONLY the newly
+// translated functions. The runner keeps the current module loaded and adds
+// the overlay behind it, instead of swapping in a full relinked library.
 bool request_hot_expand(
     const std::filesystem::path& directory,
     uint32_t sequence,
     uint32_t pc,
     std::filesystem::path* library,
+    bool* overlay,
     std::string* failure)
 {
-    if (library == nullptr || failure == nullptr)
+    if (library == nullptr || overlay == nullptr || failure == nullptr)
     {
         return false;
     }
+    *overlay = false;
     const std::string key = std::to_string(sequence);
     const std::filesystem::path request = directory / ("request-" + key + ".txt");
     const std::filesystem::path pending = directory / ("request-" + key + ".tmp");
@@ -552,6 +558,12 @@ bool request_hot_expand(
                 *failure = result;
                 return false;
             }
+            static const std::string overlay_prefix = "overlay=";
+            if (result.compare(0, overlay_prefix.size(), overlay_prefix) == 0)
+            {
+                *overlay = true;
+                result.erase(0, overlay_prefix.size());
+            }
             *library = std::filesystem::path(result);
             if (!library->is_absolute() ||
                 !std::filesystem::is_regular_file(*library))
@@ -561,7 +573,9 @@ bool request_hot_expand(
             }
             return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        // The compiler answers in well under a second once only new
+        // functions are linked; a coarse poll would dominate that latency.
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     *failure = "timed out waiting for hot-expand compiler";
     return false;
@@ -3001,6 +3015,12 @@ int main(int argc, char** argv)
     uint32_t remaining = budget;
     uint64_t dispatched = 0;
     uint32_t hot_expand_sequence = 0u;
+    // Live cache-miss overlays hold only newly translated functions. They are
+    // consulted after the base module reports an unowned PC, so a miss links
+    // a few objects instead of relinking the whole translated image.
+    std::vector<std::unique_ptr<c_native_module>> overlay_modules;
+    std::vector<t_game_run> overlay_runs;
+    std::unordered_map<uint32_t, size_t> overlay_owner_by_pc;
     // Diagnose an unready IOP SIF handshake. Real ROM0 execution advances
     // on each read; the guard never manufactures a readiness value.
     uint32_t last_sif_smflag_epc = 0u;
@@ -3070,6 +3090,10 @@ int main(int argc, char** argv)
     const auto wall_start = std::chrono::steady_clock::now();
     double report_time_ms = 0.0;
     double native_time_ms = 0.0;
+    // Host-cost breakdown for reports: IOP emulation between EE dispatches,
+    // and time paused waiting for live cache-miss compilation.
+    double iop_time_ms = 0.0;
+    double compile_wait_ms = 0.0;
     double slowest_native_ms = 0.0;
     uint32_t slowest_native_pc = 0u;
 #ifdef EE_ENABLE_RAYLIB_WINDOW
@@ -3295,6 +3319,9 @@ int main(int argc, char** argv)
         // elapsed EE cycle, including polling, timer, and idle periods.
         // Dividing by eight is reference compatibility timing, not an
         // assertion of verified R5900 cycle accuracy.
+        const auto iop_start = report_path != nullptr
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         if (hle_startup && iop_rom0_path == nullptr &&
             iop_kernel != nullptr)
         {
@@ -3423,6 +3450,11 @@ int main(int argc, char** argv)
             {
                 guest_rpc_idle_diagnostic_reported = false;
             }
+        }
+        if (report_path != nullptr)
+        {
+            iop_time_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - iop_start).count();
         }
 
         // Kernel HLE services completed device interrupts before handing
@@ -3815,7 +3847,48 @@ int main(int argc, char** argv)
             runtime.m_loop_safepoint_remaining =
                 runtime.m_loop_safepoint_limit;
             const auto native_start = std::chrono::steady_clock::now();
+            const uint32_t exit_reason_before = cpu.m_exit_reason;
             reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
+            // A module that does not own the PC returns EXITED with zero
+            // dispatches and leaves the CPU, PC and exit reason untouched.
+            // Only then consult the live cache-miss overlays (each owns
+            // disjoint, newly translated block PCs). A resolved overlay PC
+            // is cached so hot overlay code costs one map lookup, not a scan.
+            const auto unowned = [&]()
+            {
+                return count == 0u && status == 0u &&
+                       reason == exit_reason_before &&
+                       out_pc == from_pc && cpu.m_pc == from_pc &&
+                       runtime.m_guest_instruction_attempts ==
+                           instructions_before_dispatch;
+            };
+            if (!overlay_runs.empty() && unowned())
+            {
+                const auto cached = overlay_owner_by_pc.find(from_pc);
+                if (cached != overlay_owner_by_pc.end())
+                {
+                    runtime.m_loop_safepoint_remaining =
+                        runtime.m_loop_safepoint_limit;
+                    reason = overlay_runs[cached->second](
+                        &cpu, &runtime, slice, &count, &out_pc, &status);
+                }
+                else
+                {
+                    for (size_t overlay = 0;
+                         overlay < overlay_runs.size() && unowned();
+                         ++overlay)
+                    {
+                        runtime.m_loop_safepoint_remaining =
+                            runtime.m_loop_safepoint_limit;
+                        reason = overlay_runs[overlay](
+                            &cpu, &runtime, slice, &count, &out_pc, &status);
+                        if (!unowned())
+                        {
+                            overlay_owner_by_pc.emplace(from_pc, overlay);
+                        }
+                    }
+                }
+            }
             if (runtime.m_timing_observer_failed != 0u)
             {
                 std::fprintf(stderr,
@@ -3862,10 +3935,15 @@ int main(int argc, char** argv)
                 return 1;
             }
             std::filesystem::path replacement;
+            bool replacement_is_overlay = false;
             std::string failure;
-            if (!request_hot_expand(
-                    hot_expand_dir, ++hot_expand_sequence, from_pc,
-                    &replacement, &failure))
+            const auto compile_start = std::chrono::steady_clock::now();
+            const bool expanded = request_hot_expand(
+                hot_expand_dir, ++hot_expand_sequence, from_pc,
+                &replacement, &replacement_is_overlay, &failure);
+            compile_wait_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - compile_start).count();
+            if (!expanded)
             {
                 std::fprintf(stderr, "EE hot-expand failed: %s\n",
                              failure.c_str());
@@ -3879,28 +3957,41 @@ int main(int argc, char** argv)
                 hot_expand_budget_reached = true;
                 break;
             }
-            c_native_module candidate;
-            if (!candidate.open(replacement.string().c_str()))
+            auto candidate = std::make_unique<c_native_module>();
+            if (!candidate->open(replacement.string().c_str()))
             {
-                candidate.print_error();
+                candidate->print_error();
                 return 1;
             }
-            const t_game_run replacement_entry = candidate.entry();
+            const t_game_run replacement_entry = candidate->entry();
             if (replacement_entry == nullptr)
             {
                 std::fprintf(stderr,
                     "EE hot-expand replacement lacks ee_game_run\n");
                 return 1;
             }
-            module.swap(candidate);
-            native_run = replacement_entry;
+            if (replacement_is_overlay)
+            {
+                overlay_modules.push_back(std::move(candidate));
+                overlay_runs.push_back(replacement_entry);
+            }
+            else
+            {
+                // A full replacement already contains every overlay.
+                overlay_owner_by_pc.clear();
+                overlay_runs.clear();
+                overlay_modules.clear();
+                module.swap(*candidate);
+                native_run = replacement_entry;
+            }
             cpu = cpu_before_dispatch;
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             std::printf(
                 "EE hot-expand: resumed guest pc=0x%08x "
-                "with replacement=%s (no replay)\n",
-                from_pc, replacement.string().c_str());
+                "with %s=%s (no replay)\n",
+                from_pc, replacement_is_overlay ? "overlay" : "replacement",
+                replacement.string().c_str());
             std::fflush(stdout);
         }
         if (hot_expand_budget_reached)
@@ -4036,10 +4127,12 @@ int main(int argc, char** argv)
                 stderr,
                 "EE progress: dispatched=%llu pc=0x%08x "
                 "elapsed_ms=%.1f native_ms=%.1f report_ms=%.1f "
-                "slowest_native_pc=0x%08x slowest_native_ms=%.3f\n",
+                "slowest_native_pc=0x%08x slowest_native_ms=%.3f "
+                "iop_ms=%.1f compile_wait_ms=%.1f\n",
                 static_cast<unsigned long long>(dispatched),
                 cpu.m_pc, elapsed_ms, native_time_ms, report_time_ms,
-                slowest_native_pc, slowest_native_ms
+                slowest_native_pc, slowest_native_ms,
+                iop_time_ms, compile_wait_ms
             );
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
@@ -7150,10 +7243,11 @@ int main(int argc, char** argv)
             stderr,
             "EE timing: dispatched=%llu elapsed_ms=%.1f native_ms=%.1f "
             "report_ms=%.1f slowest_native_pc=0x%08x "
-            "slowest_native_ms=%.3f\n",
+            "slowest_native_ms=%.3f iop_ms=%.1f compile_wait_ms=%.1f\n",
             static_cast<unsigned long long>(dispatched), elapsed_ms,
             native_time_ms, report_time_ms,
-            slowest_native_pc, slowest_native_ms
+            slowest_native_pc, slowest_native_ms,
+            iop_time_ms, compile_wait_ms
         );
     }
 

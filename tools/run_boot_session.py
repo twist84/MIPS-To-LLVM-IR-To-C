@@ -34,6 +34,8 @@ def read_function_count(path):
 
 
 REPLAY_PATTERN = re.compile(r"== Executing translated EE code \(replay (\d+)\) ==")
+# Shared by restart replays "(replay N)" and the live cache-miss session.
+EXECUTION_HEADER_PREFIX = "== Executing translated EE code ("
 
 
 def read_report(path):
@@ -382,8 +384,12 @@ def main(argv=None):
         final_pc = state.get("final_pc")
         pc_text = f"0x{final_pc:08x}" if isinstance(final_pc, int) else "unknown"
         if not reuse:
+            # The baseline is the last link before the FIRST execution,
+            # whether a restart replay or a live cache-miss session. Live
+            # mode relinks after its header; counting those links as the
+            # baseline reports new_functions=0 and skips later passes.
             initial_links = LINKED_COUNT_PATTERN.findall(
-                output.split("== Executing translated EE code (replay ", 1)[0]
+                output.split(EXECUTION_HEADER_PREFIX, 1)[0]
             )
             prior_count = int(initial_links[-1]) if initial_links else None
         current_count = read_function_count(metadata_path)

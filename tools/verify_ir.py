@@ -274,7 +274,8 @@ def main():
         else:
             print(
                 f"verify_ir: reused {len(reused)}/{len(files)} cached object(s); "
-                f"emitting {len(pending)} with {min(jobs, max(1, len(pending)))} worker(s)",
+                f"emitting {len(pending)} with "
+                f"{min(jobs, max(1, len(pending)), max(1, len(pending) // 6))} worker(s)",
                 flush=True,
             )
 
@@ -313,8 +314,13 @@ def main():
                 f"elapsed={time.monotonic() - start:.1f}s", flush=True,
             )
 
-    if jobs > 1 and len(pending) > 1:
-        with ProcessPoolExecutor(max_workers=min(jobs, len(pending))) as executor:
+    # Each Windows worker is a spawned interpreter that re-imports llvmlite
+    # (~0.2 s). A live cache-miss batch has only a few dozen modules; one
+    # worker per ~6 modules measured fastest (25 modules: 1.51 s with one
+    # worker, 0.87 s with four, 1.14 s with sixteen).
+    workers = min(jobs, len(pending), max(1, len(pending) // 6))
+    if workers > 1:
+        with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(compile_module, filename, emit_opt, emit_dir, target_triple)
                 for filename in pending

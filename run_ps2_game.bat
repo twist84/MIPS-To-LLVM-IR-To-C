@@ -106,7 +106,14 @@ set "DISC_ROOT=%CD%\PS2_GAME"
 if defined SDBZ_DISC_ROOT set "DISC_ROOT=%SDBZ_DISC_ROOT%"
 set "BASE_WORK_DIR=build\ps2-game-hle"
 set "WORK_DIR=%BASE_WORK_DIR%"
+if not defined EMIT_JOBS set "EMIT_JOBS=%NUMBER_OF_PROCESSORS%"
 if not defined EMIT_JOBS set "EMIT_JOBS=8"
+rem Cold builds translate every statically discovered EE function once
+rem (about two minutes with parallel object emission) instead of pausing the
+rem guest for a ~3 s compile and relink at each cache miss. Live cache-miss
+rem expansion still covers PCs that static discovery missed.
+rem PRECOMPILE_ALL=0 restores the entry-only cold start.
+if not defined PRECOMPILE_ALL set "PRECOMPILE_ALL=1"
 if not defined SIF_POLL_LIMIT set "SIF_POLL_LIMIT=2048"
 rem Bound each native auto-expansion session; both limits are configurable.
 rem EXPANSION_PASSES: 1..64, number of bounded passes (default 8).
@@ -157,6 +164,13 @@ if errorlevel 1 exit /b 1
 if not defined CXX (
     if exist "C:\Program Files\LLVM\bin\clang++.exe" (
         set "CXX=C:\Program Files\LLVM\bin\clang++.exe"
+    )
+)
+rem CMake 4.x refuses to configure when C/ASM resolve to MSVC cl.exe
+rem while CXX is clang++ ("mixes Clang and MSVC"). Pair CC with clang.
+if not defined CC (
+    if exist "C:\Program Files\LLVM\bin\clang.exe" (
+        set "CC=C:\Program Files\LLVM\bin\clang.exe"
     )
 )
 where cmake >nul 2>nul
@@ -384,6 +398,12 @@ if /I "%REPORT_NAME%"=="first-boot.json" (
     )
 )
 
+rem Only a cold translation (no reusable cache) honors --functions=all;
+rem cached passes and the final replay always run with --no-recompile.
+set "FUNCTIONS_ARG="
+if not defined CACHE_FLAG if not "%PRECOMPILE_ALL%"=="0" set "FUNCTIONS_ARG=--functions=all"
+if defined FUNCTIONS_ARG echo Cold translation: precompiling all statically discovered EE functions
+
 rem Display live LLVM IR file count and percentage in both quick and full
 rem sessions; the orchestrator keeps in-place updates out of boot logs.
 python tools\run_boot_session.py "%GAME_ELF%" ^
@@ -404,7 +424,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %SESSION_ARGS% %CACHE_MISS_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.

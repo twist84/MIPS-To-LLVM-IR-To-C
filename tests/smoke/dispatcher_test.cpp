@@ -1,4 +1,5 @@
 #include "ee_dispatcher.h"
+#include "ee_dispatch_index.h"
 
 #include <cstdio>
 #include <initializer_list>
@@ -367,6 +368,57 @@ int main()
         check(result.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
               result.dispatch_count == 0u,
               "reject mismatched dispatcher metadata and code arrays");
+    }
+
+    // The O(log n) dispatch index must pick exactly the function the linear
+    // lookup picks: first owner in table order for overlapping block PCs,
+    // and the PC-zero sentinel (ELF entry, or an explicit zero block PC).
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.entry_point = 0x00200000u;
+        compiled.functions.push_back(
+            make_function("a", 0x00100000u, {0x00100010u, 0x00100000u, 0x00100008u}));
+        compiled.functions.push_back(
+            make_function("overlap", 0x00100008u, {0x00100008u, 0x00100020u}));
+        compiled.functions.push_back(
+            make_function("entry", 0x00200000u, {0x00200000u, 0x00200004u}));
+        compiled.functions.push_back(
+            make_function("late_zero", 0x00300000u, {0x00000000u, 0x00300000u}));
+        const ee::s_ee_dispatch_index index = ee::ee_build_dispatch_index(compiled);
+
+        bool same = true;
+        for (uint32_t pc : {0x00000000u, 0x00100000u, 0x00100008u, 0x00100010u,
+                            0x00100020u, 0x00100004u, 0x00200000u, 0x00200004u,
+                            0x00300000u, 0x00300004u, 0xFFFFFFFCu})
+        {
+            same = same && ee::ee_find_dispatch_owner(compiled, index, pc) ==
+                ee::find_recompiled_function(compiled, pc);
+        }
+        check(same, "dispatch index matches linear owner lookup");
+        check(ee::ee_find_dispatch_owner(compiled, index, 0x00100008u) ==
+                  &compiled.functions[0],
+              "dispatch index keeps first owner of an overlapping block PC");
+        check(ee::ee_find_dispatch_owner(compiled, index, 0u) ==
+                  &compiled.functions[2],
+              "dispatch index maps PC zero to the first entry/zero owner");
+
+        // An indexed table dispatches the same way as an unindexed one.
+        ee::s_recompiled_elf calls{};
+        calls.functions.push_back(
+            make_function("caller", 0x00100000u, {0x00100000u, 0x00100008u}));
+        calls.functions.push_back(
+            make_function("callee", 0x00102000u, {0x00102000u}));
+        const ee::t_ee_translated_entry entries[] = {caller_entry, callee_entry};
+        const ee::s_ee_dispatch_index call_index = ee::ee_build_dispatch_index(calls);
+        const ee::s_ee_dispatch_table table{&calls, entries, 2u};
+        ee::s_ee_cpu_state cpu{};
+        cpu.m_pc = 0x00100000u;
+        const ee::s_ee_dispatch_result result =
+            ee::ee_dispatch_run_indexed(&cpu, nullptr, table, call_index, 8u);
+        check(result.status == e_ee_dispatch_status::EXITED &&
+              result.dispatch_count == 3u && cpu.m_gpr[2].m_lo == 0x55u &&
+              result.guest_pc == 0xDEAD0000u,
+              "indexed dispatch table runs caller, callee and continuation");
     }
 
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);

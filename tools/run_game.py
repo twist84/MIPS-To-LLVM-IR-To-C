@@ -11,6 +11,7 @@ Examples:
   python tools/run_game.py SLUS_214.42 --functions=all --work-dir=build/sdbz
 """
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -490,18 +491,21 @@ def executable_segments(path):
     return ranges
 
 
-def pointer_table_siblings(elf_path, target, executable_ranges, limit):
-    """Prefetch code pointers from a table containing a guest-reached PC.
+def _elf_cache_key(elf_path, executable_ranges):
+    path = Path(elf_path).resolve()
+    stat = path.stat()
+    return (str(path), stat.st_size, stat.st_mtime_ns,
+            tuple(tuple(item) for item in executable_ranges))
 
-    The ELF may mix data and code in one executable PT_LOAD segment. Do
-    not treat every pointer-shaped word as a function. A table is trusted
-    only after real guest execution reaches one of its entries and at
-    least four distinct executable targets occur in a contiguous array.
+
+@functools.lru_cache(maxsize=4)
+def _pointer_runs(path, size, mtime_ns, executable_ranges):
+    """Every maximal run of executable pointer words with >= 4 distinct values.
+
+    Returns (runs, {pc: [run index, ...]}) in scan order: exactly the
+    candidates pointer_table_siblings() previously rebuilt on every call.
     """
-    if limit <= 0 or target & 3:
-        return []
-
-    image = elf_path.read_bytes()
+    image = Path(path).read_bytes()
     if len(image) < 52 or image[:4] != b"\x7fELF" or image[4:6] != b"\x01\x01":
         raise ValueError("function-pointer discovery requires little-endian ELF32")
     program_offset = struct.unpack_from("<I", image, 28)[0]
@@ -515,8 +519,17 @@ def pointer_table_siblings(elf_path, target, executable_ranges, limit):
             start <= pc < end for start, end in executable_ranges
         )
 
-    selected = None
-    best_score = None
+    runs = []
+    by_pc = {}
+
+    def consider(run):
+        if len(run) < 4 or len(set(run)) < 4:
+            return
+        index = len(runs)
+        runs.append(tuple(run))
+        for pc in set(run):
+            by_pc.setdefault(pc, []).append(index)
+
     for segment in range(program_count):
         header = program_offset + program_size * segment
         kind, file_offset, virtual_address, _, file_size, _, _, _ = (
@@ -526,29 +539,43 @@ def pointer_table_siblings(elf_path, target, executable_ranges, limit):
             continue
         if file_offset + file_size > len(image):
             raise ValueError("ELF PT_LOAD exceeds file bounds")
-
-        run = []
-        def consider():
-            nonlocal selected, best_score
-            if len(run) < 4 or target not in run:
-                return
-            unique = len(set(run))
-            if unique < 4:
-                return
-            score = (unique, -len(run))
-            if best_score is None or score > best_score:
-                selected = run[:]
-                best_score = score
-
         first = (-virtual_address) & 3
-        for offset in range(first, file_size - 3, 4):
-            candidate = struct.unpack_from("<I", image, file_offset + offset)[0]
+        words = struct.unpack_from(
+            f"<{(file_size - first) // 4}I", image, file_offset + first
+        )
+        run = []
+        for candidate in words:
             if executable(candidate):
                 run.append(candidate)
             else:
-                consider()
+                consider(run)
                 run = []
-        consider()
+        consider(run)
+    return runs, by_pc
+
+
+def pointer_table_siblings(elf_path, target, executable_ranges, limit):
+    """Prefetch code pointers from a table containing a guest-reached PC.
+
+    The ELF may mix data and code in one executable PT_LOAD segment. Do
+    not treat every pointer-shaped word as a function. A table is trusted
+    only after real guest execution reaches one of its entries and at
+    least four distinct executable targets occur in a contiguous array.
+    """
+    if limit <= 0 or target & 3:
+        return []
+
+    # The whole-image run scan is identical for every miss in a session;
+    # compute it once per (ELF, executable ranges), then look up the target.
+    runs, by_pc = _pointer_runs(*_elf_cache_key(elf_path, executable_ranges))
+    selected = None
+    best_score = None
+    for index in by_pc.get(target, ()):
+        run = runs[index]
+        score = (len(set(run)), -len(run))
+        if best_score is None or score > best_score:
+            selected = list(run)
+            best_score = score
 
     if selected is None:
         return []
@@ -571,21 +598,15 @@ def pointer_table_siblings(elf_path, target, executable_ranges, limit):
 
 
 
-def branch_anchored_jump_table_siblings(elf_path, target, executable_ranges, limit):
-    """Find a small bounded switch only through its actual MIPS JR consumer.
+@functools.lru_cache(maxsize=4)
+def _jump_tables(path, size, mtime_ns, executable_ranges):
+    """Every guarded MIPS JR jump table whose words are all executable.
 
-    Unlike generic function-pointer discovery, this requires the compiler's
-    guarded indexed dispatch sequence: SLTIU/BEQ, LUI/SLL/ADDIU/ADDU,
-    LW and JR. The SLTIU bound supplies the *exact* table size. A reachable
-    target must occur inside that file-backed table; otherwise no pointers
-    are promoted to native entries. Do not weaken pointer_table_siblings().
+    Scan order is preserved; branch_anchored_jump_table_siblings() returns
+    the first table containing the guest-reached target, as it always did.
     """
-    if limit <= 0 or target == 0 or target & 3 or not any(
-        start <= target < end for start, end in executable_ranges
-    ):
-        return []
-
-    image = elf_path.read_bytes()
+    tables = []
+    image = Path(path).read_bytes()
     if len(image) < 52 or image[:6] != b"\x7fELF\x01\x01":
         raise ValueError("jump-table discovery requires little-endian ELF32")
     header_offset = struct.unpack_from("<I", image, 28)[0]
@@ -687,22 +708,44 @@ def branch_anchored_jump_table_siblings(elf_path, target, executable_ranges, lim
             table_base = (((upper & 0xffff) << 16) +
                           signed16(lower)) & 0xffffffff
             words = table_words(table_base, count)
-            if words is None or target not in words or not all(
+            if words is None or not all(
                 executable(candidate) for candidate in words
             ):
                 continue
-            anchor = words.index(target)
-            order = sorted(range(count), key=lambda i: (abs(i - anchor), i))
-            siblings = []
-            seen = {target}
-            for index in order:
-                candidate = words[index]
-                if candidate not in seen:
-                    seen.add(candidate)
-                    siblings.append(candidate)
-                    if len(siblings) >= limit:
-                        break
-            return siblings
+            tables.append(words)
+    return tuple(tables)
+
+
+def branch_anchored_jump_table_siblings(elf_path, target, executable_ranges, limit):
+    """Find a small bounded switch only through its actual MIPS JR consumer.
+
+    Unlike generic function-pointer discovery, this requires the compiler's
+    guarded indexed dispatch sequence: SLTIU/BEQ, LUI/SLL/ADDIU/ADDU,
+    LW and JR. The SLTIU bound supplies the *exact* table size. A reachable
+    target must occur inside that file-backed table; otherwise no pointers
+    are promoted to native entries. Do not weaken pointer_table_siblings().
+    """
+    if limit <= 0 or target == 0 or target & 3 or not any(
+        start <= target < end for start, end in executable_ranges
+    ):
+        return []
+
+    for words in _jump_tables(*_elf_cache_key(elf_path, executable_ranges)):
+        if target not in words:
+            continue
+        count = len(words)
+        anchor = words.index(target)
+        order = sorted(range(count), key=lambda i: (abs(i - anchor), i))
+        siblings = []
+        seen = {target}
+        for index in order:
+            candidate = words[index]
+            if candidate not in seen:
+                seen.add(candidate)
+                siblings.append(candidate)
+                if len(siblings) >= limit:
+                    break
+        return siblings
     return []
 
 
@@ -909,7 +952,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
 
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
-                         appended_ir=None, cache_base=None):
+                         appended_ir=None, cache_base=None, emit_only=False):
     if not reuse_objects:
         # Full verification is mandatory on the initial build. An append
         # pass has already validated the existing provenance and only new
@@ -930,6 +973,8 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
                 raise ValueError("cannot append an empty IR batch")
             command.append("--append-only")
         run(command)
+    if emit_only:
+        return
     command = [
         sys.executable, source_root / "tools" / "link_native_objects.py",
         metadata_path, object_dir, library,
@@ -941,6 +986,62 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
         command.append(f"--cache-base={cache_base}")
     run(command)
 
+
+def build_overlay_library(source_root, metadata_path, object_dir, new_ir,
+                          overlay_dir, output, cache_base):
+    """Link ONLY newly appended guest objects into a small overlay library.
+
+    The objects were already emitted and recorded in object_dir/objects.json.
+    A live runner keeps its current module and consults the overlay for PCs
+    the base does not own, so a cache miss links a handful of objects instead
+    of the whole (~8,000-object) image. The authoritative full library is
+    relinked once when the live session ends.
+    """
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    wanted = {Path(path).name for path in new_ir}
+    functions = [
+        function for function in metadata["functions"]
+        if Path(function["ir_path"]).name in wanted
+    ]
+    if len(functions) != len(wanted):
+        raise ValueError("overlay functions missing from metadata")
+    manifest = json.loads((object_dir / "objects.json").read_text(encoding="utf-8"))
+    by_input = {Path(item["input"]).name: item for item in manifest["objects"]}
+    objects = []
+    for function in functions:
+        item = by_input.get(Path(function["ir_path"]).name)
+        if item is None:
+            raise ValueError(f"overlay object missing for {function['ir_path']}")
+        item = dict(item)
+        # Absolute paths: the overlay manifest lives outside object_dir.
+        item["object"] = str((object_dir / item["object"]).resolve())
+        objects.append(item)
+
+    overlay_objects = overlay_dir / "objects"
+    overlay_objects.mkdir(parents=True, exist_ok=False)
+    overlay_metadata = {
+        key: value for key, value in metadata.items()
+        if not isinstance(value, (list, dict))
+    }
+    overlay_metadata["functions"] = functions
+    overlay_metadata["function_count"] = len(functions)
+    overlay_metadata_path = overlay_dir / "ee_functions.json"
+    overlay_metadata_path.write_text(json.dumps(overlay_metadata) + "\n",
+                                     encoding="utf-8")
+    overlay_manifest = {
+        key: value for key, value in manifest.items() if key != "objects"
+    }
+    overlay_manifest["objects"] = objects
+    overlay_manifest["object_count"] = len(objects)
+    (overlay_objects / "objects.json").write_text(
+        json.dumps(overlay_manifest) + "\n", encoding="utf-8"
+    )
+    run([
+        sys.executable, source_root / "tools" / "link_native_objects.py",
+        overlay_metadata_path, overlay_objects, output,
+        "--source-root", source_root, f"--cache-base={cache_base}",
+        "--data-dispatch",
+    ])
 
 
 def run_hot_expand(command, directory, timeout_seconds, compile_missing):
@@ -981,7 +1082,12 @@ def run_hot_expand(command, directory, timeout_seconds, compile_missing):
                             # wall clock. The 30-minute native handshake timeout
                             # remains an independent fail-safe.
                             active_start += time.monotonic() - compile_start
-                        result = "STOP" if replacement is None else str(replacement.resolve())
+                        if replacement is None:
+                            result = "STOP"
+                        elif isinstance(replacement, str):
+                            result = replacement  # e.g. "overlay=<absolute path>"
+                        else:
+                            result = str(replacement.resolve())
                     except Exception as exc:
                         result = "ERROR: " + str(exc).replace("\r", " ").replace("\n", " ")
                         print(f"run_game: hot expansion failed: {exc}",
@@ -1000,7 +1106,9 @@ def run_hot_expand(command, directory, timeout_seconds, compile_missing):
                     process.kill()
                     timed_out = True
                     break
-                time.sleep(0.1)
+                # Overlay links answer a miss in well under a second; a coarse
+                # poll would add up to 100 ms of pure latency per miss.
+                time.sleep(0.005)
             process.wait()
         finally:
             if process.poll() is None:
@@ -1035,6 +1143,9 @@ def main(argv=None):
     )
     parser.add_argument("--replay-after-expand", action="store_true",
                         help="Use legacy reboot/replay after each new IR function")
+    parser.add_argument("--live-full-relink", action="store_true",
+                        help="Relink the whole library on each live cache miss "
+                             "instead of loading a small overlay of new functions")
     parser.add_argument(
         "--auto-expand-table", type=int, default=24,
         help="prefetch up to N sibling function pointers per replay when anchored by a guest-reached entry (0=off)",
@@ -1244,8 +1355,13 @@ def main(argv=None):
                     "Use --functions=entry or --functions=all."
                 )
 
-            if extra:
-                batch_append_functions(recomp, elf, work, metadata_path, extra)
+            # One discovery transaction accepts at most 128 entries. Seeding a
+            # cold --functions=all build with previously reached live PCs can
+            # exceed that, so append in ordered 128-entry batches.
+            for start in range(0, len(extra), 128):
+                batch_append_functions(
+                    recomp, elf, work, metadata_path, extra[start:start + 128]
+                )
             build_linked_library(
                 source_root, work, metadata_path, object_dir, library,
                 args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs
@@ -1426,6 +1542,8 @@ def main(argv=None):
         if args.auto_expand and not args.replay_after_expand:
             ranges = executable_segments(elf)
             expanded_count = 0
+            overlay_count = 0
+            use_overlays = not args.live_full_relink
             last_library = None
             with tempfile.TemporaryDirectory(
                 prefix="ee-live-expand-", dir=work
@@ -1434,7 +1552,7 @@ def main(argv=None):
                 hot_command = [*command, f"--hot-expand-dir={session}"]
 
                 def compile_live_miss(address, sequence):
-                    nonlocal expanded_count, last_library
+                    nonlocal expanded_count, last_library, overlay_count
                     if expanded_count >= args.auto_expand:
                         print("live cache-miss: expansion limit reached; "
                               "preserving stopped replay report", flush=True)
@@ -1496,25 +1614,56 @@ def main(argv=None):
                     replacement = session / f"game-translated-live-{sequence:04d}{suffix}"
                     # Never overwrite the DLL loaded by a running Windows
                     # process. Each new generation is a unique host library.
-                    build_linked_library(
-                        source_root, work, metadata_path, object_dir,
-                        replacement, args.emit_opt, pdb=args.pdb,
-                        emit_jobs=args.emit_jobs, appended_ir=new_modules,
-                        cache_base=library
-                    )
+                    if use_overlays:
+                        # Emit only the new objects, then link them alone.
+                        build_linked_library(
+                            source_root, work, metadata_path, object_dir,
+                            None, args.emit_opt, emit_jobs=args.emit_jobs,
+                            appended_ir=new_modules, emit_only=True,
+                        )
+                        build_overlay_library(
+                            source_root, metadata_path, object_dir,
+                            new_modules, session / f"overlay-{sequence:04d}",
+                            replacement, library,
+                        )
+                    else:
+                        build_linked_library(
+                            source_root, work, metadata_path, object_dir,
+                            replacement, args.emit_opt, pdb=args.pdb,
+                            emit_jobs=args.emit_jobs, appended_ir=new_modules,
+                            cache_base=library
+                        )
                     if (translation_inputs(elf, recomp, source_root) != inputs or
                             ir_generation_inputs(elf, source_root) != ir_sources):
                         raise ValueError(
                             "ELF or translation sources changed during hot relink"
                         )
                     expanded_count += len(new_modules)
+                    if use_overlays:
+                        overlay_count += 1
+                        return "overlay=" + str(replacement.resolve())
                     last_library = replacement
                     return replacement
 
+                # run_boot_session.py measures a fresh pass's baseline from
+                # links printed before this header. Live relinks follow it.
+                print("\n== Executing translated EE code "
+                      "(live cache-miss resume) ==", flush=True)
                 result = run_hot_expand(
                     hot_command, session, args.timeout_seconds,
                     compile_live_miss
                 )
+                if overlay_count and result.returncode != 1:
+                    # The runner has exited and unloaded every module. Fold
+                    # the overlays into one full library exactly once; all of
+                    # its objects are re-verified against objects.json.
+                    final_library = session / f"game-translated-live-final{library.suffix}"
+                    build_linked_library(
+                        source_root, work, metadata_path, object_dir,
+                        final_library, args.emit_opt, pdb=args.pdb,
+                        reuse_objects=True, cache_base=library,
+                    )
+                    last_library = final_library
                 if last_library is not None and result.returncode != 1:
                     # The runner has exited and unloaded its modules. Publish
                     # the latest linked library to the normal cache atomically.
@@ -1542,7 +1691,7 @@ def main(argv=None):
                     print(f"live cache-miss: published {expanded_count} "
                           "new guest module(s) to translation cache",
                           flush=True)
-                if last_library is not None and result.returncode == 1:
+                if (last_library is not None or overlay_count) and result.returncode == 1:
                     print("run_game: not publishing failed live expansion; "
                           "use cache recovery/relink on the next run",
                           file=sys.stderr, flush=True)

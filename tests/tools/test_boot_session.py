@@ -64,10 +64,14 @@ def run_case(passes, initial_reuse=False, diagnostics=False,
                     encoding="utf-8",
                 )
             replay = item.get("replay")
-            output = (
-                f"== Executing translated EE code (replay {replay}) ==\\n"
-                if replay is not None else ""
-            ) + item.get("message", "EE stopped")
+            if item.get("live"):
+                header = ("== Executing translated EE code "
+                          "(live cache-miss resume) ==\\n")
+            elif replay is not None:
+                header = f"== Executing translated EE code (replay {replay}) ==\\n"
+            else:
+                header = ""
+            output = header + item.get("message", "EE stopped")
             if "initial_link" in item:
                 output = (
                     f"link_native_objects: PASS ({item['initial_link']} functions, "
@@ -601,6 +605,26 @@ def main():
     assert code == 3 and len(calls) == 3
     assert "new_functions=128" in expansion
     assert "new_functions=9" in expansion
+    assert "--no-recompile" in calls[1]
+    assert "FINAL TRACE" in boot
+
+    # Live cache-miss sessions never print "(replay N)" and relink after
+    # their header. A fresh pass must measure from the initial link, not
+    # the last live relink, or the cap is missed and passes are skipped.
+    code, calls, expansion, boot = run_case([
+        {"trace": False, "live": True, "initial_link": 1,
+         "function_count": 129,
+         "message": "link_native_objects: PASS (2 functions, fixture)\\n"
+                    "link_native_objects: PASS (129 functions, fixture)\\n"
+                    "EE hot-expand: expansion budget reached"},
+        {"trace": False, "live": True, "function_count": 140,
+         "exit_reason": 1, "message": "REAL BLOCKER"},
+        {"trace": True, "replay": 0, "exit_reason": 1,
+         "message": "FINAL TRACE"},
+    ], expansion_per_pass=128)
+    assert code == 3 and len(calls) == 3, calls
+    assert "new_functions=128" in expansion, expansion
+    assert "new_functions=11" in expansion, expansion
     assert "--no-recompile" in calls[1]
     assert "FINAL TRACE" in boot
 
