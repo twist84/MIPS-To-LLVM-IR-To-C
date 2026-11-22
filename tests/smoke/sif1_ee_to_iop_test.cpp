@@ -417,7 +417,7 @@ int run_syscall_case(uint32_t size, uint32_t count,
                 read_word >> ((index & 3u) * 8u));
             const uint8_t expected = index < size
                 ? pattern(index + n, size)
-                : index < padded ? 0u : 0xcdu;
+                : index < padded ? 0xa5u : 0xcdu;
             if (actual != expected ||
                 memory.read8(src + index) !=
                     (index < size ? pattern(index + n, size) : 0xa5u))
