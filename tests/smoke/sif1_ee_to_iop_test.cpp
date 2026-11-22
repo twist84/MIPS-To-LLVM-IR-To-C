@@ -404,7 +404,7 @@ int run_syscall_case(uint32_t size, uint32_t count,
     for (uint32_t n = 0u; n < count; ++n)
     {
         const uint32_t src = k_data + n * 0x1000u;
-        const uint32_t dst = k_destination + n * 0x1000u;
+        const uint32_t dst = k_destination + 4u + n * 0x1000u;
         for (uint32_t index = 0u; index < padded + 16u; ++index)
         {
             uint32_t read_word = 0u;
