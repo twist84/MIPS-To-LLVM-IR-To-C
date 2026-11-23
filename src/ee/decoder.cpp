@@ -222,9 +222,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             break;
         case e_ee_opcode::FUNCT_DADD:
         case e_ee_opcode::FUNCT_DSUB:
-            // Signed arithmetic must raise the guest overflow exception.
-            // The current LLVM lowering is wrapping arithmetic, so fail closed.
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            // Exact LLVM signed overflow and guest EX_Ov entry are supported.
+            insn.valid = insn.sa == 0
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
             set_mnemonic(insn, "signed_arith");
             break;
         case e_ee_opcode::FUNCT_ADDU:
@@ -272,7 +272,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         case e_ee_opcode::FUNCT_TLTU:
         case e_ee_opcode::FUNCT_TEQ:
         case e_ee_opcode::FUNCT_TNE:
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            // Code bits in the reserved-looking middle field are permitted
+            // trap-code operands; only the signed/unsigned predicate matters.
+            insn.valid = e_ee_valid::VALID;
             set_mnemonic(insn, "trap");
             break;
         case e_ee_opcode::FUNCT_MFSA:
@@ -408,7 +410,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         case e_ee_opcode::REGIMM_TNEI:
             insn.flow = e_ee_flow::FLOW_NONE;
             insn.has_delay_slot = false;
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            insn.valid = e_ee_valid::VALID;
             set_mnemonic(insn, "regimm_trap");
             break;
         case e_ee_opcode::REGIMM_MTSAB:
@@ -436,7 +438,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         insn.type = e_ee_op_type::OP_TYPE_ITYPE;
         insn.opcode = e_ee_opcode::OP_ADDI;
         insn.flow = e_ee_flow::FLOW_NONE;
-        insn.valid = e_ee_valid::UNSUPPORTED; // overflow exception is not modelled
+        insn.valid = e_ee_valid::VALID; // checked 32-bit overflow -> EX_Ov
         set_mnemonic(insn, "addi");
         break;
 
@@ -1086,7 +1088,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         insn.type = e_ee_op_type::OP_TYPE_ITYPE;
         insn.opcode = e_ee_opcode::OP_DADDI;
         insn.flow = e_ee_flow::FLOW_NONE;
-        insn.valid = e_ee_valid::UNSUPPORTED; // overflow exception is not modelled
+        insn.valid = e_ee_valid::VALID; // checked 64-bit overflow -> EX_Ov
         set_mnemonic(insn, "daddi");
         break;
 
