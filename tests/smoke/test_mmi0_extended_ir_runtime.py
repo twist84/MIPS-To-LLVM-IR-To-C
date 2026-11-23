@@ -232,6 +232,7 @@ def main():
                     ("_alias_rt", 5), ("_zero", 0)
                 ):
                     full_mode = base + suffix
+                    print(f"MMI0 case: O{opt_level} {full_mode}", flush=True)
                     fn, engine, module = compile_guest(
                         fixture, pathlib.Path(tmp), full_mode,
                         opt_level, target_machine,
