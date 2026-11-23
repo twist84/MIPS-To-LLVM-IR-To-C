@@ -91,6 +91,46 @@ int main()
     expect("special reserved", R(0x00, 4, 5, 6, 0, 0x01),
            "special_rsvd", X);
     // MMI groups: funct 0x08=MMI0, 0x28=MMI1, 0x09=MMI2, 0x29=MMI3; sub-op in sa.
+    // The packed shifts have reserved rs=0 and independent lane
+    // sizes. PLZCW consumes rs but writes only the first two rd words.
+    expect("plzcw", R(0x1c,4,0,6,0,0x04), "plzcw", V);
+    expect("plzcw reserved rt", R(0x1c,4,5,6,0,0x04), "plzcw", U);
+    expect("plzcw reserved sa", R(0x1c,4,0,6,1,0x04), "plzcw", U);
+    for (uint32_t funct : {0x34u, 0x36u, 0x37u,
+                           0x3cu, 0x3eu, 0x3fu})
+    {
+        const auto good = decode(0x00160000, R(0x1c,0,5,6,31,funct));
+        const auto bad = decode(0x00160000, R(0x1c,4,5,6,31,funct));
+        const bool ok = good.valid == V &&
+                        lift(good).kind == LOP_MMI_SHIFT &&
+                        bad.valid == U;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL MMI packed shift 0x%x valid/reserved\n", funct);
+        }
+    }
+    // Exhaustive non-reserved MMI0 selector classification. The special
+    // PEXT5/PPAC5 forms are unary and must reject rs != zero.
+    for (uint32_t subop = 0u; subop < 32u; ++subop)
+    {
+        const bool named = subop <= 0x0au ||
+            (subop >= 0x10u && subop <= 0x1bu) ||
+            subop == 0x1eu || subop == 0x1fu;
+        const uint32_t rs = subop >= 0x1eu ? 0u : 4u;
+        const auto instruction = decode(
+            0x00160000, R(0x1c,rs,5,6,subop,0x08));
+        const bool accepted = instruction.valid == V &&
+            lift(instruction).kind != LOP_UNSUPPORTED;
+        const bool ok = named ? accepted : instruction.valid == X;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL MMI0 selector %u decode/lift\n", subop);
+        }
+    }
+    expect("pext5 bad rs", R(0x1c,4,5,6,0x1e,0x08), "pext5", U);
+    expect("ppac5 bad rs", R(0x1c,4,5,6,0x1f,0x08), "ppac5", U);
     expect("paddw",   R(0x1c,4,5,6,0x00,0x08), "paddw",  V);
     expect("psubh",   R(0x1c,4,5,6,0x05,0x08), "psubh",  V);
     expect("pmaxh",   R(0x1c,4,5,6,0x07,0x08), "pmaxh",  V);
@@ -145,8 +185,8 @@ int main()
     expect("mtlo1",   R(0x1c,4,0,0,0,0x13),    "mtlo1",  V);
     // Real ops that are NOT lowered exactly must never be VALID (previously a
     // silent fallback add/and/or/move was emitted for them).
-    expect("paddsw",  R(0x1c,4,5,6,0x10,0x08), "paddsw", U);   // saturating: was plain add
-    expect("pextlw",  R(0x1c,4,5,6,0x12,0x08), "pextlw", U);   // was lowered as OR
+    expect("paddsw",  R(0x1c,4,5,6,0x10,0x08), "paddsw", V);   // saturating, not plain add
+    expect("pextlw",  R(0x1c,4,5,6,0x12,0x08), "pextlw", V);   // exact rt/rs interleave
     expect("pcpyld",  R(0x1c,4,5,6,0x0e,0x09), "pcpyld", V);   // exact lower-64 interleave
     expect("pcpyh",   R(0x1c,0,5,6,0x1b,0x29), "pcpyh",  V);   // independent halfword broadcast
     expect("pcpyh-bad-rs", R(0x1c,4,5,6,0x1b,0x29), "pcpyh", U); // unary instruction requires rs=0
