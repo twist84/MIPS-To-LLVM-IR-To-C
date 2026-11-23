@@ -419,7 +419,7 @@ int main()
         }
     }
     expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
-    expect("mmi3 reserved variable sa3", R(0x1c,4,5,6,3,0x29), "reserved", X);
+    expect("psravw remains unlowered", R(0x1c,4,5,6,3,0x29), "psravw", U);
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
     // MMI2 halfword multiply/add/sub and horizontal pair variants.

@@ -122,7 +122,7 @@ def run_case(fn, mode, pattern):
             prefix + "GPR result or alias mismatch: " +
             str([hex(actual_rs), hex(actual_rt), hex(actual_dest)]) +
             " expected " +
-            str([hex(expected_rs), hex(expected_rt), hex(expected_dest]))
+            str([hex(expected_rs), hex(expected_rt), hex(expected_dest)]))
     )
     require((cpu.lo, cpu.hi, cpu.lo1, cpu.hi1) ==
             (lo0, hi0, lo1, hi1), prefix + "HI/LO banks changed")
