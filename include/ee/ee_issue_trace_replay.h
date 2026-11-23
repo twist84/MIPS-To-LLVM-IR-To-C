@@ -505,26 +505,33 @@ private:
                     return true;
                 }
                 default:
-                    // Retain the previously modeled packed MMI2/MMI3
-                    // operations instead of aliasing them to MFHI1/MFLO1.
+                {
+                    // These MMI2 rt-only shuffle operations must be
+                    // recognized inside the MMI2/MMI3 dispatch (rather
+                    // than in the top-level fallback), with no rs hazard.
+                    const bool unary_rt =
+                        operation == 0x09u &&
+                        (decoded.sa == 0x1au || decoded.sa == 0x1bu ||
+                         decoded.sa == 0x1eu || decoded.sa == 0x1fu);
+                    const bool copy_h = operation == 0x29u &&
+                                        decoded.sa == 0x1bu;
                     if (m_profile.m_packed_mmi_latency == 0u ||
                         (decoded.sa != 0x0eu && decoded.sa != 0x12u &&
-                         decoded.sa != 0x13u &&
-                         !(operation == 0x29u && decoded.sa == 0x1bu)))
+                         decoded.sa != 0x13u && !copy_h && !unary_rt))
                     {
                         return false;
                     }
                     instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
                     instruction->m_result_latency =
                         m_profile.m_packed_mmi_latency;
-                    instruction->m_gpr_read_mask = rt |
-                        (operation == 0x29u && decoded.sa == 0x1bu
-                             ? 0u : rs);
+                    instruction->m_gpr_read_mask =
+                        rt | ((unary_rt || copy_h) ? 0u : rs);
                     instruction->m_gpr_write_mask = rd;
                     instruction->m_gpr_128_read_mask =
                         instruction->m_gpr_read_mask;
                     instruction->m_gpr_128_write_mask = rd;
                     return true;
+                }
                 }
             case 0x10u: case 0x12u: // MFHI1 / MFLO1
                 if (m_profile.m_hilo_transfer_latency == 0u)
@@ -642,15 +649,10 @@ private:
                             break;
                         }
                         break;
-                    case 0x09u: // MMI2: logical, copy and unary permutations
-                        unary_rt = decoded.sa == 26u ||
-                                   decoded.sa == 27u ||
-                                   decoded.sa == 30u ||
-                                   decoded.sa == 31u;
+                    case 0x09u: // MMI2: PCPYLD/PAND/PXOR
                         packed_supported = decoded.sa == 14u ||
                                            decoded.sa == 18u ||
-                                           decoded.sa == 19u ||
-                                           unary_rt;
+                                           decoded.sa == 19u;
                         break;
                     case 0x29u: // MMI3: PCPYUD/POR/PNOR/PCPYH
                         unary_rt = decoded.sa == 27u;
