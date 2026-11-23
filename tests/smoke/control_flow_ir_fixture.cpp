@@ -66,6 +66,15 @@ int main(int argc, char** argv)
         delay_word = make_i(0x09, 0, 31, 0x1234);
         function_name = "guest_jr_return_test";
     }
+    else if (mode == "jr_daddu")
+    {
+        // The sound pool returns a pointer using DADDU v0,s3,zero.
+        // Preserve the full pointer through a native JR boundary rather
+        // than reusing a prior callee's scalar status value.
+        control_word = make_r(31, 0, 0, 0, 0x08);
+        delay_word = make_r(19, 0, 2, 0, 0x2d);
+        function_name = "guest_jr_daddu_return_test";
+    }
     else if (mode == "jal")
     {
         // JAL writes $ra before its delay slot; the slot reads that link value.
