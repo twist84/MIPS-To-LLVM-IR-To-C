@@ -436,6 +436,8 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
     case K::LOP_MMI0_EXACT:
     case K::LOP_MMI_SHIFT:
     case K::LOP_MMI_PLZCW:
+    case K::LOP_MMI_PMFHL:
+    case K::LOP_MMI_PMTHL:
         // The legacy source generator cannot implement precise exceptions
         // or the newly decoded packed MMI operations. Fail closed.
         out_ += "    #error Checked EE op requires LLVM lowering\n";
