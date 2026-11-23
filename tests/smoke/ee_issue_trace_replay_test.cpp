@@ -709,13 +709,20 @@ int main()
           replay.last_event_candidate_cycle() == 5u,
           "PSLLVW reads prior 128-bit rs rather than an immediate shift");
     packed_profile.m_packed_mmi_latency = 0u;
-    replay.configure(packed_profile);
-    check(replay.observe(record(1u, 0x7150u, mmi_psllvw, 0u, 1u)) ==
-          e_ee_issue_replay_status::UNMODELED_INSTRUCTION &&
-          replay.observe(record(2u, 0x7154u, mmi_psrlvw, 0u, 2u)) ==
-          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+    bool unprofiled_variable_shifts = true;
+    for (const uint32_t opcode : variable_readers)
+    {
+        // An UNMODELED_INSTRUCTION halts the replay until reconfigured.
+        // Each unsupported instruction needs an independently fresh trace.
+        replay.configure(packed_profile);
+        unprofiled_variable_shifts &=
+            replay.observe(record(1u, 0x7150u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(unprofiled_variable_shifts,
           "variable shifts require explicit packed latency");
     packed_profile.m_packed_mmi_latency = 5u;
+    replay.configure(packed_profile);
 
     const uint32_t mmi_zero_dest = mmi(8u, 9u, 0u, 0u, 0x08u);
     check(replay.observe(record(1u, 0x7100u, mmi_zero_dest, 0u, 1u)) ==
