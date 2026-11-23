@@ -430,6 +430,24 @@ private:
                     instruction->m_result_latency = latency;
                     return true;
                 }
+                case 0x1du: // PDIVBW: rs[3:0] / signed rt[15:0] -> LO/HI
+                {
+                    if (operation != 0x09u ||
+                        m_profile.m_packed_mmi_latency == 0u ||
+                        m_profile.m_hilo_divide_latency == 0u)
+                    {
+                        return false;
+                    }
+                    // Candidate dependencies only: hardware PDIVBW issue
+                    // latency must be supplied, never inferred from scalar DIV.
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency =
+                        m_profile.m_hilo_divide_latency;
+                    return true;
+                }
                 case 0x0cu: case 0x0du: // PMULTW/UW, PDIVW/UW
                 {
                     const bool multiply = decoded.sa == 0x0cu;

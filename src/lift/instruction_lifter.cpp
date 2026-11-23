@@ -213,7 +213,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
                 op.kind = LOP_MMI_PACKED_HALF; break;
             case 0x08: case 0x09: op.kind = LOP_MMI_HILO_PAIR_TRANSFER; break;
             case 0x0c: op.kind = LOP_MMI_PACKED_MULT; break;
-            case 0x0d: op.kind = LOP_MMI_PACKED_DIV; break;
+            case 0x0d: case 0x1d: op.kind = LOP_MMI_PACKED_DIV; break;
             case 0x0e: op.kind = LOP_MMI_COPY_LOWER_D; break;
             case 0x12: op.kind = LOP_MMI_AND; break;
             case 0x13: op.kind = LOP_MMI_XOR; break;

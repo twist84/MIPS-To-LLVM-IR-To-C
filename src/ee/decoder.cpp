@@ -167,6 +167,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
         case 0x0c:                                      // PMULTW (signed)
             return true;
         case 0x0d:                                      // PDIVW (signed)
+        case 0x1d:                                      // PDIVBW (four signed words / rt low halfword)
             return rd == 0;
         case 0x0e: case 0x12: case 0x13:               // PCPYLD / PAND / PXOR
             return true;

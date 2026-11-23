@@ -127,6 +127,13 @@ int main(int argc, char** argv)
         zero_rt = true;
     }
 
+    bool same_source = false;
+    if (ends_with(mode, "_same_source"))
+    {
+        mode.resize(mode.size() - std::string("_same_source").size());
+        same_source = true;
+    }
+
     bool repeat = false;
     if (ends_with(mode, "_twice"))
     {
@@ -166,6 +173,12 @@ int main(int argc, char** argv)
              mode == "pmsubh" ? 0x14u :
              mode == "phmsbh" ? 0x15u : 0x1cu;
     }
+    else if (mode == "pdivbw")
+    {
+        funct = 0x09u;
+        sa = 0x1du;
+        rd = 0u; // PDIVBW writes HI/LO only, never a GPR.
+    }
     else if (mode == "pmultw" || mode == "pmultuw" ||
              mode == "pdivw" || mode == "pdivuw")
     {
@@ -198,7 +211,7 @@ int main(int argc, char** argv)
     }
 
     rs = zero_rs ? 0u : rs;
-    rt = zero_rt ? 0u : rt;
+    rt = zero_rt ? 0u : (same_source ? rs : rt);
     words.push_back(make_mmi(rs, rt, rd, sa, funct));
     if (repeat)
     {

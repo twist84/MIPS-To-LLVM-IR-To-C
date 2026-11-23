@@ -3805,6 +3805,102 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
+    // PDIVBW (MMI2 sa=0x1d): four signed i32 numerators from rs are
+    // divided independently by ONE signed i16 denominator from rt[15:0].
+    // Each 32-bit quotient replaces a word of the 128-bit LO bank; each
+    // corresponding remainder replaces the same word of HI. rd is unused.
+    // PCSX2 specifies deterministic zero-divisor results, although the
+    // EE hardware manuals do not define divide-by-zero behaviour.
+    // Perform division in i64 to make INT_MIN/-1 well-defined in LLVM.
+    if (fn == 0x09 && sa == 0x1d)
+    {
+        const std::string numerators = build4i32(a.first, a.second);
+        const std::string divisor16 = newtemp();
+        const std::string divisor64 = newtemp();
+        const std::string divisor_zero = newtemp();
+        const std::string safe_divisor = newtemp();
+        m_out += "  " + divisor16 + " = trunc i64 " + b.first + " to i16\n";
+        m_out += "  " + divisor64 + " = sext i16 " +
+                 divisor16 + " to i64\n";
+        m_out += "  " + divisor_zero + " = icmp eq i16 " +
+                 divisor16 + ", 0\n";
+        m_out += "  " + safe_divisor + " = select i1 " +
+                 divisor_zero + ", i64 1, i64 " + divisor64 + "\n";
+
+        std::string packed_quotients = "undef";
+        std::string packed_remainders = "undef";
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            const std::string numerator32 = newtemp();
+            const std::string numerator64 = newtemp();
+            const std::string quotient64 = newtemp();
+            const std::string remainder64 = newtemp();
+            const std::string quotient32 = newtemp();
+            const std::string remainder32 = newtemp();
+            const std::string numerator_negative = newtemp();
+            const std::string zero_quotient = newtemp();
+            const std::string selected_quotient = newtemp();
+            const std::string selected_remainder = newtemp();
+            const std::string next_quotients = newtemp();
+            const std::string next_remainders = newtemp();
+
+            m_out += "  " + numerator32 + " = extractelement <4 x i32> " +
+                     numerators + ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + numerator64 + " = sext i32 " +
+                     numerator32 + " to i64\n";
+            m_out += "  " + quotient64 + " = sdiv i64 " +
+                     numerator64 + ", " + safe_divisor + "\n";
+            m_out += "  " + remainder64 + " = srem i64 " +
+                     numerator64 + ", " + safe_divisor + "\n";
+            m_out += "  " + quotient32 + " = trunc i64 " +
+                     quotient64 + " to i32\n";
+            m_out += "  " + remainder32 + " = trunc i64 " +
+                     remainder64 + " to i32\n";
+            m_out += "  " + numerator_negative + " = icmp slt i32 " +
+                     numerator32 + ", 0\n";
+            m_out += "  " + zero_quotient + " = select i1 " +
+                     numerator_negative + ", i32 1, i32 -1\n";
+            m_out += "  " + selected_quotient + " = select i1 " +
+                     divisor_zero + ", i32 " + zero_quotient +
+                     ", i32 " + quotient32 + "\n";
+            m_out += "  " + selected_remainder + " = select i1 " +
+                     divisor_zero + ", i32 " + numerator32 +
+                     ", i32 " + remainder32 + "\n";
+            m_out += "  " + next_quotients + " = insertelement <4 x i32> " +
+                     packed_quotients + ", i32 " + selected_quotient +
+                     ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + next_remainders + " = insertelement <4 x i32> " +
+                     packed_remainders + ", i32 " + selected_remainder +
+                     ", i32 " + std::to_string(lane) + "\n";
+            packed_quotients = next_quotients;
+            packed_remainders = next_remainders;
+        }
+
+        // Bitcast preserves all four 32-bit words including upper 32-bit
+        // halves of each 64-bit bank. Unlike PDIVW, sign extension of
+        // individual HI/LO words to 64 bits would lose two result lanes.
+        const std::string quotient_banks = newtemp();
+        const std::string remainder_banks = newtemp();
+        m_out += "  " + quotient_banks + " = bitcast <4 x i32> " +
+                 packed_quotients + " to <2 x i64>\n";
+        m_out += "  " + remainder_banks + " = bitcast <4 x i32> " +
+                 packed_remainders + " to <2 x i64>\n";
+        for (uint32_t bank = 0u; bank < 2u; ++bank)
+        {
+            const std::string quotient_bank = newtemp();
+            const std::string remainder_bank = newtemp();
+            m_out += "  " + quotient_bank + " = extractelement <2 x i64> " +
+                     quotient_banks + ", i32 " + std::to_string(bank) + "\n";
+            m_out += "  " + remainder_bank + " = extractelement <2 x i64> " +
+                     remainder_banks + ", i32 " + std::to_string(bank) + "\n";
+            m_out += "  store i64 " + quotient_bank + ", ptr " +
+                     state_field(bank == 0u ? 2u : 4u) + "\n";
+            m_out += "  store i64 " + remainder_bank + ", ptr " +
+                     state_field(bank == 0u ? 1u : 3u) + "\n";
+        }
+        return;
+    }
+
     // Halfword MMI2 multiplies eight signed i16 lanes into eight i32
     // accumulator words (LO0[0:1], HI0[0:1], LO1[0:1], HI1[0:1]).
     // PMADDH/PMSUBH wrap independently per 32-bit word and read prior

@@ -358,6 +358,25 @@ int main()
     expect("pmtlo bad rd", R(0x1c,4,0,6,9,0x29), "pmtlo", U);
     expect("pdivw bad rd", R(0x1c,4,5,6,0xd,0x09), "pdivw", U);
     expect("pdivuw bad rd", R(0x1c,4,5,6,0xd,0x29), "pdivuw", U);
+    for (const uint32_t rs : {0u, 4u})
+    {
+        for (const uint32_t rt : {0u, 4u, 5u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,rs,rt,0u,0x1du,0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_DIV;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL PDIVBW rs=%u rt=%u decoder/lifter\n",
+                            rs, rt);
+            }
+        }
+    }
+    expect("pdivbw bad rd", R(0x1c,4,5,6,0x1d,0x09), "pdivbw", U);
+    expect("pdivbw reserved MMI3", R(0x1c,4,5,0,0x1d,0x29), "reserved", X);
+    expect("pdivbw reserved neighbor", R(0x1c,4,5,0,0x17,0x09), "reserved", X);
     expect("pmultw zero rd", R(0x1c,4,5,0,0xc,0x09), "pmultw", V);
     expect("pmultuw zero rd", R(0x1c,4,5,0,0xc,0x29), "pmultuw", V);
     // Signed/unsigned packed word accumulation: independent MAC class.

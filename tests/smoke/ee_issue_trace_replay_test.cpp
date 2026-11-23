@@ -779,6 +779,29 @@ int main()
     }
     check(divide_profiled,
           "PDIVW/PDIVUW write both LO banks and block PMFLO until ready");
+    // PDIVBW produces four independent quotient and remainder words
+    // across the full LO/HI banks, has no GPR destination, and requires
+    // an explicitly supplied packed/HI-LO division latency.
+    const uint32_t mmi_pdivbw = mmi(8u, 9u, 0u, 0x1du, 0x09u);
+    packed_profile.m_hilo_divide_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7350u, mmi_pdivbw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PDIVBW has no inferred divide timing");
+    packed_profile.m_hilo_divide_latency = 11u;
+    bool divbw_profiled = true;
+    for (const uint32_t hilo_read : {mmi_pmflo, mmi_pmfhi})
+    {
+        replay.configure(packed_profile);
+        divbw_profiled &=
+            replay.observe(record(1u, 0x7350u, mmi_pdivbw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7354u, hilo_read, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 11u;
+    }
+    check(divbw_profiled,
+          "PDIVBW full-bank quotient/remainder RAW dependencies");
     packed_profile.m_hilo_transfer_latency = 0u;
     packed_profile.m_hilo_multiply_latency = 0u;
     packed_profile.m_hilo_divide_latency = 0u;
