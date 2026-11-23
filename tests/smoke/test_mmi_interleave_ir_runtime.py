@@ -39,6 +39,13 @@ def make_halfwords(words):
                for index, word in enumerate(words))
 
 
+def make_source(low_word, high_word, low_unused=0, high_unused=0):
+    # Build two 64-bit portions with distinct low/high 32-bit fields.
+    lo = (low_word & MASK32) | ((low_unused & MASK32) << 32)
+    hi = (high_word & MASK32) | ((high_unused & MASK32) << 32)
+    return lo | (hi << 64)
+
+
 def reference(opcode, source_a, source_b):
     # Independent scalar model of PCSX2's halfword selection.
     a = [(source_a >> (16 * i)) & 0xffff for i in range(8)]
@@ -142,22 +149,22 @@ def main():
          0xFFEEDDCCBBAA9988, 0x7766554433221100,
          make_halfwords([0, 1, 2, 3, 4, 5, 6, 7]),
          make_halfwords([7, 6, 5, 4, 3, 2, 1, 0])),
-        # Explicit 0, 31 shift amounts with sign-sensitive input words.
+        # Distinct halfwords in the low word of each 64-bit source.
         (0, 0, 0, 0,
          make_source(0, 31), make_source(0x80000000, 0xffffffff)),
         (0, 0, 0, 0,
          make_source(31, 0), make_source(0x00000001, 0x80000000)),
-        # 32, 33 and 63 are masked to 0, 1 and 31.
+        # Cross-bank upper/lower-word separation and sign-bit patterns.
         (MASK64, 0, MASK64, 0,
          make_source(32, 33), make_source(0x80000000, 0x7fffffff)),
         (MASK64, MASK64, MASK64, MASK64,
          make_source(63, 32), make_source(0xffffffff, 0x80000000)),
-        # High halves of rs/rt doublewords are ignored.
+        # Different upper/lower words ensure all eight halfwords matter.
         (0xCAFEBABEDEADBEEF, 0x123456789ABCDEF0,
          0x1122334455667788, 0x8877665544332211,
          make_source(1, 31, 0xffffffff, 0x87654321),
          make_source(0xc0000001, 0x80000001, 0x12345678, 0xffffffff)),
-        # Each lane derives shift count from the corresponding rs word.
+        # Different halfword contents in the two 64-bit banks.
         (0, MASK64, MASK64, 0,
          make_source(3, 17), make_source(0x12345678, 0x98765432)),
         (0x7FFFFFFF80000000, 0xAAAAAAAA55555555,
