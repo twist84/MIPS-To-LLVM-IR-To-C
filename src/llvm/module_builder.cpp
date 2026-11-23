@@ -546,6 +546,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             break;
         case e_ee_opcode::OP_ADDI:
         case e_ee_opcode::OP_ADDIU:
+        case e_ee_opcode::OP_DADDI:
         case e_ee_opcode::OP_DADDIU:
         case e_ee_opcode::OP_ANDI:
         case ee::e_ee_opcode::OP_ORI:
@@ -836,6 +837,7 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 written_so_far.insert(31);
             break;
         case e_ee_opcode::OP_ADDI:
+        case e_ee_opcode::OP_DADDI:
             consider_read(ins.rs);
             if (ins.rt != 0) written_so_far.insert(ins.rt);
             break;
@@ -983,8 +985,66 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         m_out += aligned + ":\n";
     };
 
+    // Precise conditional exception: publish prior SSA state before
+    // exception entry, but do not commit a faulting arithmetic result.
+    const auto emit_checked_exception =
+        [&](const std::string& condition, uint32_t excode)
+    {
+        const std::set<uint8_t> dirty(m_dirty_regs.begin(), m_dirty_regs.end());
+        store_dirty_regs(dirty);
+        reset_tracking();
+        const std::string suffix = std::to_string(m_temp_counter++);
+        const std::string fault = "checked_fault_" + suffix;
+        const std::string normal = "checked_continue_" + suffix;
+        m_out += "  br i1 " + condition + ", label %" + fault +
+                 ", label %" + normal + "\n";
+        m_out += fault + ":\n";
+        m_out += "  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 " +
+                 std::to_string(excode) + ", i32 " + std::to_string(ins.pc) +
+                 ", i32 " + std::to_string(in_delay_slot ? 1u : 0u) +
+                 ", i32 0)\n";
+        m_out += "  ret i32 1\n";
+        m_out += normal + ":\n";
+    };
+
     switch (ins.opcode)
     {
+    case ee::e_ee_opcode::OP_ADDI:
+    case ee::e_ee_opcode::OP_DADDI:
+    {
+        // Signed 32-bit ADDI and 64-bit DADDI overflow before the write.
+        const bool word = ins.opcode == ee::e_ee_opcode::OP_ADDI;
+        const std::string lhs = word
+            ? trunc32_sext64(src_lo(ins.rs)) : src_lo(ins.rs);
+        const std::string rhs = std::to_string(ins.immediate);
+        const std::string overflow = newtemp();
+        if (word)
+        {
+            const std::string wide = newtemp();
+            m_out += "  " + wide + " = add i64 " + lhs + ", " + rhs + "\n";
+            const std::string result = trunc32_sext64(wide);
+            m_out += "  " + overflow + " = icmp ne i64 " +
+                     result + ", " + wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rt, result);
+        }
+        else
+        {
+            const std::string source_wide = newtemp();
+            const std::string wide = newtemp();
+            const std::string result = newtemp();
+            const std::string result_wide = newtemp();
+            m_out += "  " + source_wide + " = sext i64 " + lhs + " to i128\n";
+            m_out += "  " + wide + " = add i128 " + source_wide + ", " + rhs + "\n";
+            m_out += "  " + result + " = trunc i128 " + wide + " to i64\n";
+            m_out += "  " + result_wide + " = sext i64 " + result + " to i128\n";
+            m_out += "  " + overflow + " = icmp ne i128 " +
+                     wide + ", " + result_wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rt, result);
+        }
+        break;
+    }
     case ee::e_ee_opcode::OP_ADDIU:
     {
         // 32-bit add, result sign-extended into low 64; upper 64 preserved.
@@ -1371,17 +1431,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             else if (rt == ee::e_ee_opcode::REGIMM_TNEI) pred = "ne";
             m_out += "  " + cmp + " = icmp " + std::string(pred) + " i64 " +
                      src_lo(ins.rs) + ", " + imm64 + "\n";
-            char pcbuf[32];
-            std::snprintf(pcbuf, sizeof(pcbuf), "%u", (unsigned)ins.pc);
-            m_out += "  br i1 " + cmp + ", label %trap_ri_" + std::string(pcbuf) +
-                     ", label %trap_ri_cont_" + std::string(pcbuf) + "\n";
-            m_out += "trap_ri_" + std::string(pcbuf) + ":\n";
-            std::string vec = newtemp();
-            m_out += "  " + vec +
-                     " = call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 13, i32 " +
-                     std::string(pcbuf) + ", i32 0, i32 0)\n";
-            m_out += "  ret i32 1\n";
-            m_out += "trap_ri_cont_" + std::string(pcbuf) + ":\n";
+            emit_checked_exception(cmp, 13u);
             break;
         }
         // Branches: BLTZ/BGEZ family including link (*AL) and likely (*L/*ALL).
@@ -1773,37 +1823,41 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                  funct == ee::e_ee_opcode::FUNCT_TEQ ||
                  funct == ee::e_ee_opcode::FUNCT_TNE)
         {
-            // Conditional trap → EX_Tr (13) if condition holds.
-            std::string cmp = newtemp();
             const char* pred = "eq";
             if (funct == ee::e_ee_opcode::FUNCT_TGE) pred = "sge";
             else if (funct == ee::e_ee_opcode::FUNCT_TGEU) pred = "uge";
             else if (funct == ee::e_ee_opcode::FUNCT_TLT) pred = "slt";
             else if (funct == ee::e_ee_opcode::FUNCT_TLTU) pred = "ult";
             else if (funct == ee::e_ee_opcode::FUNCT_TNE) pred = "ne";
-            m_out += "  " + cmp + " = icmp " + std::string(pred) + " i64 " +
+            const std::string cmp = newtemp();
+            m_out += "  " + cmp + " = icmp " + pred + " i64 " +
                      src_lo(ins.rs) + ", " + src_lo(ins.rt) + "\n";
-            // Branch to trap block vs fallthrough (inline).
-            std::string t_yes = newtemp();
-            std::string t_no = newtemp();
-            // Simple: always emit raise call under select by branching labels.
-            // Text IR: use br i1.
-            char pcbuf[32];
-            std::snprintf(pcbuf, sizeof(pcbuf), "%u", (unsigned)ins.pc);
-            // Materialize trap as: if cmp then raise else continue — for
-            // mid-block we only raise when last, otherwise leave a note.
-            m_out += "  ; trap " + std::string(pred) + " @ " + pcbuf + "\n";
-            std::string vec = newtemp();
-            // Always call helper only when condition true is hard in pure text
-            // without splitting blocks; approximate by unconditional check
-            // via select of exit — host can refine. Prefer correct when taken:
-            m_out += "  br i1 " + cmp + ", label %trap_" + std::string(pcbuf) +
-                     ", label %trap_cont_" + std::string(pcbuf) + "\n";
-            m_out += "trap_" + std::string(pcbuf) + ":\n";
-            m_out += "  " + vec + " = call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 13, i32 " +
-                     std::string(pcbuf) + ", i32 0, i32 0)\n";
-            m_out += "  ret i32 1\n";
-            m_out += "trap_cont_" + std::string(pcbuf) + ":\n";
+            emit_checked_exception(cmp, 13u);
+        }
+        else if (funct == ee::e_ee_opcode::FUNCT_DADD ||
+                 funct == ee::e_ee_opcode::FUNCT_DSUB)
+        {
+            // Exact signed i64 overflow detection without LLVM poison.
+            const std::string lhs = src_lo(ins.rs);
+            const std::string rhs = src_lo(ins.rt);
+            const std::string lhs_wide = newtemp();
+            const std::string rhs_wide = newtemp();
+            const std::string wide = newtemp();
+            const std::string result = newtemp();
+            const std::string result_wide = newtemp();
+            const std::string overflow = newtemp();
+            const char* op = funct == ee::e_ee_opcode::FUNCT_DADD
+                ? "add" : "sub";
+            m_out += "  " + lhs_wide + " = sext i64 " + lhs + " to i128\n";
+            m_out += "  " + rhs_wide + " = sext i64 " + rhs + " to i128\n";
+            m_out += "  " + wide + " = " + op + " i128 " +
+                     lhs_wide + ", " + rhs_wide + "\n";
+            m_out += "  " + result + " = trunc i128 " + wide + " to i64\n";
+            m_out += "  " + result_wide + " = sext i64 " + result + " to i128\n";
+            m_out += "  " + overflow + " = icmp ne i128 " +
+                     result_wide + ", " + wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rd, result);
         }
         else if (funct == e_ee_opcode::FUNCT_ADD || funct == e_ee_opcode::FUNCT_SUB)
         {
