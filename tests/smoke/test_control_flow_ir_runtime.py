@@ -202,6 +202,53 @@ def main():
                  "guest_branch_liveness_test", check_branch_liveness,
                  verify_branch_liveness, expected_exit=0)
 
+        def check_mov_liveness(state, condition):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[8].lo = 0x004581e0
+            state.gpr[9].lo = condition
+            state.gpr[19].lo = 0  # stale S3 must not reach the next block
+            state.gpr[2].lo = 1
+            state.gpr[2].hi = 0x2222333344445555
+
+        def verify_mov_liveness(state):
+            require(state.pc == 0x00300000,
+                    f"conditional move: wrong PC 0x{state.pc:08x}")
+            require(state.gpr[2].lo == 0x004581e0,
+                    f"conditional move saw stale source 0x{state.gpr[2].lo:x}")
+            require(state.gpr[2].hi == 0x2222333344445555,
+                    "conditional move clobbered upper register half")
+            require(state.gpr[18].lo == 0x55,
+                    "conditional move JR delay slot did not execute")
+
+        run_case(fixture_exe, temp_dir, target, retained, "movz_liveness",
+                 "guest_movz_liveness_test",
+                 lambda state: check_mov_liveness(state, 0),
+                 verify_mov_liveness, expected_exit=0)
+        run_case(fixture_exe, temp_dir, target, retained, "movn_liveness",
+                 "guest_movn_liveness_test",
+                 lambda state: check_mov_liveness(state, 1),
+                 verify_mov_liveness, expected_exit=0)
+
+        def check_srav_liveness(state):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[8].lo = 1
+            state.gpr[17].lo = 0x80000000
+            state.gpr[19].lo = 0  # stale S3 would shift by zero
+            state.gpr[2].lo = 0
+            state.gpr[2].hi = 0x2222333344445555
+
+        def verify_srav_liveness(state):
+            require(state.pc == 0x00300000,
+                    f"SRAV: wrong PC 0x{state.pc:08x}")
+            require(state.gpr[2].lo == 0xffffffffc0000000,
+                    f"SRAV cross-block shift count lost: 0x{state.gpr[2].lo:x}")
+            require(state.gpr[2].hi == 0x2222333344445555,
+                    "SRAV overwrote upper register half")
+
+        run_case(fixture_exe, temp_dir, target, retained, "srav_liveness",
+                 "guest_srav_liveness_test", check_srav_liveness,
+                 verify_srav_liveness, expected_exit=0)
+
         def check_jal(state):
             state.gpr[31].lo = 0xDEADBEEF
             state.gpr[31].hi = 0x3131313131313131
