@@ -103,12 +103,12 @@ bool cop1_s_lowered_exactly(uint32_t funct)
 }
 
 bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
-                         uint32_t rt)
+                         uint32_t rt, uint32_t rd)
 {
     switch (funct)
     {
     case 0x04:                                          // PLZCW uses rs only
-        return rt == 0 && sa == 0;
+        return rt == 0 && rd == 0 && sa == 0;
     case 0x34: case 0x36: case 0x37:                    // packed halfword shifts
     case 0x3c: case 0x3e: case 0x3f:                    // packed word shifts
         return rs == 0;
@@ -118,6 +118,10 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
         return sa == 0;
     case 0x10: case 0x11: case 0x12: case 0x13:        // mfhi1 mthi1 mflo1 mtlo1
         return true;
+    case 0x30: // PMFHL: rd <- HI/LO words, sa selects five layouts
+        return rs == 0 && rt == 0 && sa <= 4;
+    case 0x31: // PMTHL: HI/LO selected words <- rs; sa must be zero
+        return rt == 0 && sa == 0;
     case 0x08:                                          // MMI0
         // All named MMI0 packed arithmetic, comparisons, interleaves,
         // packs and color conversions have exact native LLVM lowering.
@@ -726,7 +730,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         if (std::string_view(name) == "reserved")
             insn.valid = e_ee_valid::INVALID;
         else
-            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs, insn.rt)
+            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs, insn.rt, insn.rd)
                          ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
         break;
     }
