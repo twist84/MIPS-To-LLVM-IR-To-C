@@ -123,6 +123,16 @@ select the host CPU count. Existing saved numeric overrides are retained.
 For direct runs, the Boot session and Game runner forms independently expose
 `--functions=all` and `--live-full-relink` along with their other controls.
 
+The **Performance** tab includes optional guest provenance diagnostics:
+**Watch guest word**, **Trace guest stores**, and **Trace V0 writes**.
+To investigate the SDBZ sound-handle field, use `0x0044081c` for the
+first two fields and `0x00137970:0x00137d18` for the V0 trace range.
+The standard GUI and batch launcher forward these read-only probes to
+both the expansion phase and final graphics replay. They are blank by
+default and never repair an invalid guest pointer or suppress an EE
+exception. The V0/store instruction probes emit up to 64 matching
+events each; a new retail run is needed to confirm a handle's provenance.
+
 The **Game** tab now includes **Resume after cache miss**, enabled by default.
 When an uncached EE function is reached, compilation and native-library
 replacement happen without restarting the current game process or repeating
