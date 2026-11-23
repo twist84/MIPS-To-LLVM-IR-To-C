@@ -3513,9 +3513,21 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         const std::string input = halfword
             ? build8i16(b.first, b.second) : build4i32(b.first, b.second);
         const std::string type = halfword ? "<8 x i16>" : "<4 x i32>";
+        const std::string scalar_type = halfword ? "i16" : "i32";
+        const uint32_t lanes = halfword ? 8u : 4u;
+        const uint32_t shift = sa & (halfword ? 15u : 31u);
+        std::string amounts = "<";
+        for (uint32_t lane = 0u; lane < lanes; ++lane)
+        {
+            if (lane != 0u)
+            {
+                amounts += ", ";
+            }
+            amounts += scalar_type + " " + std::to_string(shift);
+        }
+        amounts += ">";
         m_out += "  " + result + " = " + operation + " " + type +
-                 " " + input + ", " +
-                 std::to_string(sa & (halfword ? 15u : 31u)) + "\n";
+                 " " + input + ", " + amounts + "\n";
         if (halfword)
         {
             store_vec8i16(result);
