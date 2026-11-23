@@ -58,7 +58,10 @@ enum e_lift_op_kind
     LOP_MMI_SHIFT,
     LOP_MMI_PLZCW,
     LOP_MMI_PMFHL,
-    LOP_MMI_PMTHL
+    LOP_MMI_PMTHL,
+    LOP_MMI_HILO_PAIR_TRANSFER,
+    LOP_MMI_PACKED_MULT,
+    LOP_MMI_PACKED_DIV
 };
 
 struct s_lifted_op
