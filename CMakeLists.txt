@@ -590,6 +590,11 @@ add_executable(ee_mmi_hilo_ir_fixture
     tests/smoke/mmi_hilo_ir_fixture.cpp)
 target_link_libraries(ee_mmi_hilo_ir_fixture PRIVATE ee_core)
 
+# Exact MMI2/MMI3 full HI/LO moves, PMULTW/UW and PDIVW/UW.
+add_executable(ee_mmi_word_ir_fixture
+    tests/smoke/mmi_word_ir_fixture.cpp)
+target_link_libraries(ee_mmi_word_ir_fixture PRIVATE ee_core)
+
 # Dedicated JIT runtime coverage for the EE's second divide pipeline.
 add_executable(ee_div1_ir_fixture tests/smoke/div1_ir_fixture.cpp)
 target_link_libraries(ee_div1_ir_fixture PRIVATE ee_core)
@@ -940,6 +945,10 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_hilo_ir_runtime.py
                 $<TARGET_FILE:ee_mmi_hilo_ir_fixture>)
+    add_test(NAME mmi_word_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_word_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
 else()
     message(STATUS "llvmlite not found: omitting mmi_ir_runtime CTest")
 endif()
