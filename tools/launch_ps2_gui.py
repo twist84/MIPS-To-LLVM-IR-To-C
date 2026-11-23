@@ -448,7 +448,7 @@ class Launcher(ttk.Frame):
         settings, warning = load_settings(SETTINGS_PATH)
         self.fields = {
             key: (tk.BooleanVar if isinstance(value, bool) else tk.StringVar)(value=value)
-            for key, value in settings.items() if key not in ("numeric", "arguments", "tool_options")
+            for key, value in settings.items() if key not in ("numeric", "arguments", "tool_options", "diagnostics")
         }
         self.disc = self.fields["disc"]
         self.card = self.fields["card"]
