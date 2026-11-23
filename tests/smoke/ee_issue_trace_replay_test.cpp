@@ -622,7 +622,11 @@ int main()
     const uint32_t mmi_pcpyud = mmi(10u, 11u, 16u, 14u, 0x29u);
     const uint32_t mmi_pcpyh = mmi(0u, 10u, 17u, 27u, 0x29u);
     const uint32_t mmi_qfsrv = mmi(10u, 11u, 18u, 27u, 0x28u);
-    const uint32_t mmi_unsupported = mmi(8u, 9u, 10u, 2u, 0x08u);
+    const uint32_t mmi_pcgtw = mmi(8u, 9u, 10u, 2u, 0x08u);
+    const uint32_t mmi_ppacb = mmi(8u, 9u, 10u, 27u, 0x08u);
+    const uint32_t mmi_psrlh = mmi(0u, 9u, 10u, 15u, 0x36u);
+    const uint32_t mmi_plzcw = mmi(8u, 0u, 10u, 0u, 0x04u);
+    const uint32_t mmi_unsupported = mmi(8u, 9u, 10u, 11u, 0x08u);
     ee::s_ee_issue_replay_profile packed_profile{1u, 3u};
 
     replay.configure(packed_profile);
@@ -661,7 +665,8 @@ int main()
 
     replay.configure(packed_profile);
     const uint32_t packed_families[] = {
-        mmi_pabsw, mmi_pextuw, mmi_pcpyld, mmi_pcpyud, mmi_pcpyh
+        mmi_pabsw, mmi_pextuw, mmi_pcpyld, mmi_pcpyud, mmi_pcpyh,
+        mmi_pcgtw, mmi_ppacb, mmi_psrlh, mmi_plzcw
     };
     bool family_covered = true;
     for (const uint32_t opcode : packed_families)
@@ -672,7 +677,7 @@ int main()
             e_ee_issue_replay_status::ISSUED;
     }
     check(family_covered,
-          "decoder-verified MMI0/1/2/3 subset uses explicit packed profile");
+          "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
 
     replay.configure(packed_profile);
     const uint32_t mmi_zero_dest = mmi(8u, 9u, 0u, 0u, 0x08u);
