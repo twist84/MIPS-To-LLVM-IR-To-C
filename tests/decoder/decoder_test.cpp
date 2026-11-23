@@ -24,6 +24,47 @@ static void expect(const char* what, uint32_t word, const char* mn, e_ee_valid v
 int main()
 {
     const auto V = e_ee_valid::VALID, U = e_ee_valid::UNSUPPORTED, X = e_ee_valid::INVALID;
+    // Signed-overflow arithmetic and both integer trap families now
+    // enter the real native EX_Ov / EX_Tr exception path. The independent
+    // legacy C++ emitter must not alias them to unchecked arithmetic/ERET.
+    for (uint32_t funct : {0x20u, 0x22u, 0x2cu, 0x2eu})
+    {
+        const auto ins = decode(0x00150000u, R(0x00, 4, 5, 6, 0, funct));
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_SIGNED;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL signed checked SPECIAL 0x%x\n", funct);
+    }
+    expect("DADD bad sa", R(0x00,4,5,6,1,0x2c), "signed_arith", U);
+    expect("DSUB bad sa", R(0x00,4,5,6,1,0x2e), "signed_arith", U);
+    for (uint32_t opcode : {0x08u, 0x18u})
+    {
+        const auto ins = decode(0x00150000u,
+            (opcode << 26) | (4u << 21) | (6u << 16) | 0xFFFFu);
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_SIGNED;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked immediate 0x%x\n", opcode);
+    }
+    for (uint32_t funct : {0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x36u})
+    {
+        // Non-zero ten-bit trap-code fields are architecturally allowed.
+        const auto ins = decode(0x00150000u, R(0x00,4,5,6,17,funct));
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_TRAP;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked SPECIAL trap 0x%x\n", funct);
+    }
+    for (uint32_t rt : {0x08u,0x09u,0x0au,0x0bu,0x0cu,0x0eu})
+    {
+        const auto ins = decode(0x00150000u,
+            (0x01u << 26) | (4u << 21) | (rt << 16) | 0xFFFFu);
+        const bool ok = ins.valid == V &&
+            ins.flow == e_ee_flow::FLOW_NONE && !ins.has_delay_slot &&
+            lift(ins).kind == LOP_CHECKED_TRAP;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked REGIMM trap 0x%x\n", rt);
+    }
     // Scalar comparisons are lowered exactly as 64-bit signed/unsigned tests.
     expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
     expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
