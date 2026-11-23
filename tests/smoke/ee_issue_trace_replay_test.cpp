@@ -681,6 +681,42 @@ int main()
           "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
 
     replay.configure(packed_profile);
+    // MMI2 variable-word shifts read both 128-bit sources, write a
+    // 128-bit destination, and never reserve the HI/LO banks.
+    const uint32_t mmi_psllvw = mmi(8u, 9u, 10u, 2u, 0x09u);
+    const uint32_t mmi_psrlvw = mmi(8u, 9u, 10u, 3u, 0x09u);
+    const uint32_t mmi_psllvw_read_prior = mmi(10u, 9u, 11u, 2u, 0x09u);
+    const uint32_t variable_readers[] = {mmi_psllvw, mmi_psrlvw};
+    bool variable_producers_profiled = true;
+    for (const uint32_t opcode : variable_readers)
+    {
+        replay.configure(packed_profile);
+        variable_producers_profiled &=
+            replay.observe(record(1u, 0x7150u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7154u, addiu_from_packed, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(variable_producers_profiled,
+          "PSLLVW/PSRLVW publish full-128 GPR result at packed latency");
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7150u, mmi_paddw, 0u, 1u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(2u, 0x7154u,
+              mmi_psllvw_read_prior, 0u, 2u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.last_event_candidate_cycle() == 5u,
+          "PSLLVW reads prior 128-bit rs rather than an immediate shift");
+    packed_profile.m_packed_mmi_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7150u, mmi_psllvw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION &&
+          replay.observe(record(2u, 0x7154u, mmi_psrlvw, 0u, 2u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "variable shifts require explicit packed latency");
+    packed_profile.m_packed_mmi_latency = 5u;
+
     const uint32_t mmi_zero_dest = mmi(8u, 9u, 0u, 0u, 0x08u);
     check(replay.observe(record(1u, 0x7100u, mmi_zero_dest, 0u, 1u)) ==
           e_ee_issue_replay_status::ISSUED &&

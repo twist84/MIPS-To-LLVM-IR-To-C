@@ -945,6 +945,10 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_hilo_ir_runtime.py
                 $<TARGET_FILE:ee_mmi_hilo_ir_fixture>)
+    add_test(NAME mmi_var_shift_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_var_shift_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
     add_test(NAME mmi_divbw_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_divbw_ir_runtime.py

@@ -127,6 +127,14 @@ int main(int argc, char** argv)
         zero_rt = true;
     }
 
+    bool source_prior_rt = false;
+    if (ends_with(mode, "_from_prior_rt_cross"))
+    {
+        mode.resize(mode.size() - std::string("_from_prior_rt_cross").size());
+        source_prior_rt = true;
+        cross_block = true;
+    }
+
     bool same_source = false;
     if (ends_with(mode, "_same_source"))
     {
@@ -173,6 +181,11 @@ int main(int argc, char** argv)
              mode == "pmsubh" ? 0x14u :
              mode == "phmsbh" ? 0x15u : 0x1cu;
     }
+    else if (mode == "psllvw" || mode == "psrlvw")
+    {
+        funct = 0x09u;
+        sa = mode == "psllvw" ? 0x02u : 0x03u;
+    }
     else if (mode == "pdivbw")
     {
         funct = 0x09u;
@@ -203,6 +216,10 @@ int main(int argc, char** argv)
     if (source_prior)
     {
         words.push_back(make_i(0x09u, 0u, 4u, 0x1234));
+    }
+    if (source_prior_rt)
+    {
+        words.push_back(make_i(0x09u, 0u, 5u, 0x4321));
     }
     if (cross_block)
     {

@@ -400,6 +400,26 @@ int main()
             }
         }
     }
+    // PSLLVW/PSRLVW: two 32-bit word shifts with sign-extended
+    // 64-bit destination lanes, not four independent 32-bit shifts.
+    for (const uint32_t subop : {0x02u, 0x03u})
+    {
+        for (const uint32_t destination : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,4,5,destination,subop,0x09));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_SHIFT;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed variable shift sa=%02x rd=%u\n",
+                            subop, destination);
+            }
+        }
+    }
+    expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
+    expect("mmi3 reserved variable sa3", R(0x1c,4,5,6,3,0x29), "reserved", X);
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
     // MMI2 halfword multiply/add/sub and horizontal pair variants.
