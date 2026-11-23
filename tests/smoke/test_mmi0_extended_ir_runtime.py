@@ -129,7 +129,10 @@ def reference(mode, source_a, source_b, original_dest):
     raise AssertionError("missing independent semantics for " + mode)
 
 
-def compile_guest(fixture, directory, mode, optimization, target_machine):
+def compile_guest(fixture, directory, mode, optimization, target):
+    # MCJIT takes native ownership of its TargetMachine; never reuse one
+    # across engines that may be finalized/destroyed between test cases.
+    target_machine = target.create_target_machine(opt=0)
     name = mode + "_o" + str(optimization)
     ir_file = directory / (name + ".ll")
     subprocess.run(
@@ -148,7 +151,7 @@ def compile_guest(fixture, directory, mode, optimization, target_machine):
     fn = ctypes.CFUNCTYPE(
         ctypes.c_uint32, ctypes.POINTER(EEState), ctypes.c_void_p
     )(address)
-    return fn, engine, module
+    return fn, engine, module, target_machine
 
 
 def run_case(fn, full_mode, source_a, source_b, rd):
@@ -209,7 +212,7 @@ def main():
     register_ee_diagnostic_stubs()
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
-    target_machine = llvm.Target.from_default_triple().create_target_machine(opt=0)
+    target = llvm.Target.from_default_triple()
     rng = random.Random(0x5900)
     patterns = [
         (0, 0),
@@ -233,14 +236,14 @@ def main():
                 ):
                     full_mode = base + suffix
                     print(f"MMI0 case: O{opt_level} {full_mode}", flush=True)
-                    fn, engine, module = compile_guest(
+                    fn, engine, module, target_machine = compile_guest(
                         fixture, pathlib.Path(tmp), full_mode,
-                        opt_level, target_machine,
+                        opt_level, target,
                     )
                     for a, b in patterns:
                         run_case(fn, full_mode, a, b, destination)
                         executions += 1
-                    _ = engine, module
+                    _ = engine, module, target_machine
 
     print(f"mmi0_extended_ir_runtime: PASS ({executions} executions; "
           "O0/O3, signed saturation, packed lanes, 128-bit aliases/zero)")
