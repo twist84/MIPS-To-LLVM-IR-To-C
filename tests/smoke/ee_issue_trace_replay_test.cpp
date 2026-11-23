@@ -696,13 +696,29 @@ int main()
             replay.observe(record(2u, 0x7134u, depends_on_rt, 0u, 2u)) ==
                 e_ee_issue_replay_status::ISSUED &&
             replay.last_event_candidate_cycle() == 5u;
+        // A packed producer can occupy the candidate pipe beyond
+        // cycle 2 even when there is no GPR dependency. Compare two
+        // scalar producers with identical profiles instead of assuming
+        // a fixed packed issue interval.
+        const uint32_t unrelated_r10 =
+            (0x09u << 26u) | (10u << 16u) | 1u; // ADDIU $10,$zero,1
+        const uint32_t unrelated_r12 =
+            (0x09u << 26u) | (12u << 16u) | 1u; // ADDIU $12,$zero,1
         replay.configure(packed_profile);
-        permutation_no_rs_hazards &=
-            replay.observe(record(1u, 0x7130u, mmi_paddw, 0u, 1u)) ==
+        const bool with_r10 =
+            replay.observe(record(1u, 0x7130u, unrelated_r10, 0u, 1u)) ==
                 e_ee_issue_replay_status::ISSUED &&
             replay.observe(record(2u, 0x7134u, independent, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED;
+        const uint64_t r10_cycle = replay.last_event_candidate_cycle();
+        replay.configure(packed_profile);
+        const bool with_r12 =
+            replay.observe(record(1u, 0x7130u, unrelated_r12, 0u, 1u)) ==
                 e_ee_issue_replay_status::ISSUED &&
-            replay.last_event_candidate_cycle() == 2u;
+            replay.observe(record(2u, 0x7134u, independent, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED;
+        permutation_no_rs_hazards &= with_r10 && with_r12 &&
+            r10_cycle == replay.last_event_candidate_cycle();
         ee::s_ee_issue_replay_profile unprofiled = packed_profile;
         unprofiled.m_packed_mmi_latency = 0u;
         replay.configure(unprofiled);
@@ -713,7 +729,7 @@ int main()
     check(permutation_rt_hazards,
           "MMI2 unary permutations consume full-128 rt result hazards");
     check(permutation_no_rs_hazards,
-          "MMI2 unary permutations do not invent rs dependencies");
+          "MMI2 unary permutations have no unrelated scalar GPR hazards");
     check(permutation_unprofiled,
           "MMI2 unary permutations require explicit packed candidate latency");
 
