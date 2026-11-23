@@ -50,7 +50,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
     case e_ee_opcode::OP_SB: op.kind = LOP_SB; break;
     case e_ee_opcode::OP_SH: op.kind = LOP_SH; break;
     case e_ee_opcode::OP_SD: op.kind = LOP_SD; break;
-    case e_ee_opcode::OP_ADDI: op.kind = LOP_ADDIU; break;
+    case e_ee_opcode::OP_ADDI: op.kind = LOP_CHECKED_SIGNED; break;
     case e_ee_opcode::OP_BEQ: op.kind = LOP_BEQ; break;
     case e_ee_opcode::OP_BNE: op.kind = LOP_BNE; break;
     case e_ee_opcode::OP_BEQL: op.kind = LOP_BEQ; break;
@@ -59,7 +59,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
     case e_ee_opcode::OP_BGTZ: op.kind = LOP_BGEZ; break; // rs > 0 (approx)
     case e_ee_opcode::OP_BLEZL: op.kind = LOP_BLTZ; break;
     case e_ee_opcode::OP_BGTZL: op.kind = LOP_BGEZ; break;
-    case e_ee_opcode::OP_DADDI: op.kind = LOP_DADDIU; break;
+    case e_ee_opcode::OP_DADDI: op.kind = LOP_CHECKED_SIGNED; break;
     case e_ee_opcode::OP_LDL: op.kind = LOP_LDL; break;
     case e_ee_opcode::OP_LDR: op.kind = LOP_LDR; break;
     case e_ee_opcode::OP_SWR: op.kind = LOP_SWR; break;
@@ -87,13 +87,14 @@ s_lifted_op lift(const s_ee_instruction& insn)
         case e_ee_opcode::FUNCT_SLLV: op.kind = LOP_SLL; break;
         case e_ee_opcode::FUNCT_SRLV: op.kind = LOP_SRL; break;
         case e_ee_opcode::FUNCT_ADD:
-        case e_ee_opcode::FUNCT_ADDU: op.kind = LOP_ADDU; break;
         case e_ee_opcode::FUNCT_SUB:
-        case e_ee_opcode::FUNCT_SUBU: op.kind = LOP_SUBU; break;
         case e_ee_opcode::FUNCT_DADD:
-        case e_ee_opcode::FUNCT_DADDU: op.kind = LOP_ADDU; break; // 64-bit add
         case e_ee_opcode::FUNCT_DSUB:
-        case e_ee_opcode::FUNCT_DSUBU: op.kind = LOP_SUBU; break; // 64-bit sub
+            op.kind = LOP_CHECKED_SIGNED; break;
+        case e_ee_opcode::FUNCT_ADDU:
+        case e_ee_opcode::FUNCT_DADDU: op.kind = LOP_ADDU; break;
+        case e_ee_opcode::FUNCT_SUBU:
+        case e_ee_opcode::FUNCT_DSUBU: op.kind = LOP_SUBU; break;
         case e_ee_opcode::FUNCT_AND: op.kind = LOP_AND; break;
         case e_ee_opcode::FUNCT_OR: op.kind = LOP_OR; break;
         case e_ee_opcode::FUNCT_XOR: op.kind = LOP_XOR; break;
@@ -131,7 +132,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
         case e_ee_opcode::FUNCT_TLTU:
         case e_ee_opcode::FUNCT_TEQ:
         case e_ee_opcode::FUNCT_TNE:
-            op.kind = LOP_ERET; break; // exception-class supported
+            op.kind = LOP_CHECKED_TRAP; break;
         default:
             op.kind = LOP_UNSUPPORTED;
             break;
@@ -235,7 +236,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
         case e_ee_opcode::REGIMM_TLTIU:
         case e_ee_opcode::REGIMM_TEQI:
         case e_ee_opcode::REGIMM_TNEI:
-            op.kind = LOP_ERET; break;
+            op.kind = LOP_CHECKED_TRAP; break;
         case e_ee_opcode::REGIMM_MTSAB:
             op.kind = LOP_MTSAB; break;
         case e_ee_opcode::REGIMM_MTSAH:
