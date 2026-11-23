@@ -4124,11 +4124,29 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
             {
                 continue;
             }
-            // An overflow handler can observe every incoming register,
-            // including the faulting destination before its normal write.
-            if (ins.opcode == e_ee_opcode::OP_SPECIAL &&
+            // A precise EX_Ov/EX_Tr handler can inspect every incoming
+            // register, including values not read by the trapping opcode.
+            const bool signed_immediate =
+                ins.opcode == e_ee_opcode::OP_ADDI ||
+                ins.opcode == e_ee_opcode::OP_DADDI;
+            const bool regimm_trap =
+                ins.opcode == e_ee_opcode::OP_REGIMM &&
+                (ins.rt == 0x08 || ins.rt == 0x09 ||
+                 ins.rt == 0x0a || ins.rt == 0x0b ||
+                 ins.rt == 0x0c || ins.rt == 0x0e);
+            const bool special_fault =
+                ins.opcode == e_ee_opcode::OP_SPECIAL &&
                 (ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_ADD) ||
-                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_SUB)))
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_SUB) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_DADD) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_DSUB) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TGE) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TGEU) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TLT) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TLTU) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TEQ) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TNE));
+            if (signed_immediate || regimm_trap || special_fault)
             {
                 for (uint8_t reg = 1; reg < 32; ++reg)
                 {
