@@ -313,6 +313,58 @@ int main()
     expect("pmthl bad rt", R(0x1c,4,5,0,0,0x31), "pmthl", U);
     expect("pmthl bad rd", R(0x1c,4,0,6,0,0x31), "pmthl", U);
     expect("pmthl bad sa", R(0x1c,4,0,0,1,0x31), "pmthl", U);
+    // MMI2/MMI3 packed word arithmetic uses two independent low words,
+    // with HI0/LO0 and HI1/LO1 as the destination accumulators.
+    // PMFHI/PMFLO and PMTHI/PMTLO transfer full 128-bit banks.
+    for (uint32_t funct : {0x09u, 0x29u})
+    {
+        for (uint32_t subop : {0x08u, 0x09u, 0x0cu, 0x0du})
+        {
+            uint32_t rs = 4u, rt = 5u, rd = 6u;
+            if (funct == 0x09u && subop <= 0x09u)
+            {
+                rs = 0u;
+                rt = 0u;
+            }
+            else if (funct == 0x29u && subop <= 0x09u)
+            {
+                rt = 0u;
+                rd = 0u;
+            }
+            else if (subop == 0x0du)
+            {
+                rd = 0u;
+            }
+
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,rs,rt,rd,subop,funct));
+            const auto kind = lift(ins).kind;
+            const bool right_class = subop <= 0x09u
+                ? kind == LOP_MMI_HILO_PAIR_TRANSFER
+                : subop == 0x0cu ? kind == LOP_MMI_PACKED_MULT
+                                  : kind == LOP_MMI_PACKED_DIV;
+            const bool ok = ins.valid == V && right_class;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed word MMI funct=%02x sa=%02x\n",
+                            funct, subop);
+            }
+        }
+    }
+    expect("pmfhi bad rs", R(0x1c,4,0,6,8,0x09), "pmfhi", U);
+    expect("pmflo bad rt", R(0x1c,0,5,6,9,0x09), "pmflo", U);
+    expect("pmthi bad rt", R(0x1c,4,5,0,8,0x29), "pmthi", U);
+    expect("pmtlo bad rd", R(0x1c,4,0,6,9,0x29), "pmtlo", U);
+    expect("pdivw bad rd", R(0x1c,4,5,6,0xd,0x09), "pdivw", U);
+    expect("pdivuw bad rd", R(0x1c,4,5,6,0xd,0x29), "pdivuw", U);
+    expect("pmultw zero rd", R(0x1c,4,5,0,0xc,0x09), "pmultw", V);
+    expect("pmultuw zero rd", R(0x1c,4,5,0,0xc,0x29), "pmultuw", V);
+    // Accumulator forms with PCSX2-specific arithmetic corrections remain
+    // unsupported until independently verified; do not alias to PMULT.
+    expect("pmaddw pending", R(0x1c,4,5,6,0,0x09), "pmaddw", U);
+    expect("pmsubw pending", R(0x1c,4,5,6,4,0x09), "pmsubw", U);
+    expect("pmadduw pending", R(0x1c,4,5,6,0,0x29), "pmadduw", U);
     expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0
