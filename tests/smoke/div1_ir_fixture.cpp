@@ -12,14 +12,18 @@
 
 namespace
 {
-uint32_t make_mmi(uint8_t rs, uint8_t rt, uint8_t rd, uint8_t sa, uint8_t funct)
+uint32_t make_special(uint8_t rs, uint8_t rt, uint8_t rd, uint8_t sa, uint8_t funct)
 {
-    return (0x1cu << 26) |
-           (static_cast<uint32_t>(rs) << 21) |
+    return (static_cast<uint32_t>(rs) << 21) |
            (static_cast<uint32_t>(rt) << 16) |
            (static_cast<uint32_t>(rd) << 11) |
            (static_cast<uint32_t>(sa) << 6) |
            funct;
+}
+
+uint32_t make_mmi(uint8_t rs, uint8_t rt, uint8_t rd, uint8_t sa, uint8_t funct)
+{
+    return (0x1cu << 26) | make_special(rs, rt, rd, sa, funct);
 }
 }
 
@@ -33,18 +37,25 @@ int main(int argc, char** argv)
 
     const int opt_level = std::atoi(argv[2]);
     const int test_case = std::atoi(argv[3]);
-    if (opt_level < 0 || opt_level > 3 || test_case < 0 || test_case > 4)
+    if (opt_level < 0 || opt_level > 3 || test_case < 0 || test_case > 11)
     {
-        std::fprintf(stderr, "opt_level must be 0..3 and case must be 0..4\n");
+        std::fprintf(stderr, "opt_level must be 0..3 and case must be 0..11\n");
         return 2;
     }
 
-    const uint8_t funct = test_case >= 3 ? 0x1b : 0x1a;
+    // Cases 0..4 exercise MMI DIV1/DIVU1. Cases 5..11 exercise SPECIAL
+    // DIV/DIVU with the same signed/unsigned edge cases plus 0/0.
+    const bool primary = test_case >= 5;
+    const int variant = primary ? test_case - 5 : test_case;
+    const uint8_t funct = variant >= 3 && variant != 5 ? 0x1b : 0x1a;
     const std::vector<uint32_t> words =
     {
-        make_mmi(4, 5, 0, 0, funct), // DIV1 or DIVU1
-        make_mmi(0, 0, 6, 0, 0x10),  // MFHI1 $a2
-        make_mmi(0, 0, 7, 0, 0x12)   // MFLO1 $a3
+        primary ? make_special(4, 5, 0, 0, funct)
+                : make_mmi(4, 5, 0, 0, funct),    // DIV/DIVU or DIV1/DIVU1
+        primary ? make_special(0, 0, 6, 0, 0x10)
+                : make_mmi(0, 0, 6, 0, 0x10),     // MFHI $a2 / MFHI1
+        primary ? make_special(0, 0, 7, 0, 0x12)
+                : make_mmi(0, 0, 7, 0, 0x12)      // MFLO $a3 / MFLO1
     };
 
     constexpr uint32_t entry_pc = 0x00110000u;
