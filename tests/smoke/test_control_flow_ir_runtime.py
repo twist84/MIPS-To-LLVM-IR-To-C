@@ -162,6 +162,25 @@ def main():
         run_case(fixture_exe, temp_dir, target, retained, "jrra",
                  "guest_jr_return_test", check_jrra, verify_jrra, expected_exit=0)
 
+        def check_jr_daddu(state):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[19].lo = 0x004581e0
+            state.gpr[19].hi = 0x1919191919191919
+            state.gpr[2].lo = 1
+            state.gpr[2].hi = 0x2222333344445555
+
+        def verify_jr_daddu(state):
+            require(state.pc == 0x00300000,
+                    f"DADDU return: wrong continuation 0x{state.pc:08x}")
+            require(state.gpr[2].lo == 0x004581e0,
+                    f"DADDU return: expected pointer, got 0x{state.gpr[2].lo:x}")
+            require(state.gpr[2].hi == 0x2222333344445555,
+                    "DADDU return: upper V0 register half was overwritten")
+
+        run_case(fixture_exe, temp_dir, target, retained, "jr_daddu",
+                 "guest_jr_daddu_return_test", check_jr_daddu, verify_jr_daddu,
+                 expected_exit=0)
+
         def check_jal(state):
             state.gpr[31].lo = 0xDEADBEEF
             state.gpr[31].hi = 0x3131313131313131
