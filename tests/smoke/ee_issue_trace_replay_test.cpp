@@ -690,6 +690,27 @@ int main()
           replay.last_event_candidate_cycle() == 1u,
           "packed GPR0 destination does not create artificial zero hazards");
 
+    // PMTHL modifies the low words of all four HI/LO halves. PMFHL
+    // consumes those same halves and produces a full 128-bit GPR value.
+    // Both require an explicit transfer latency; never infer hardware
+    // cycles from the generic packed or scalar integer candidate.
+    const uint32_t mmi_pmthl = mmi(10u, 0u, 0u, 0u, 0x31u);
+    const uint32_t mmi_pmfhl = mmi(0u, 0u, 11u, 4u, 0x30u);
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7200u, mmi_pmthl, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMTHL cannot invent an HI/LO transfer latency");
+
+    packed_profile.m_hilo_transfer_latency = 7u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7200u, mmi_pmthl, 0u, 1u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(2u, 0x7204u, mmi_pmfhl, 0u, 2u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.last_event_candidate_cycle() == 7u,
+          "PMTHL partial HI/LO producer stalls PMFHL on all four banks");
+    packed_profile.m_hilo_transfer_latency = 0u;
+
     packed_profile.m_allow_ordered_waw_overlap = true;
     replay.configure(packed_profile);
     check(replay.observe(record(1u, 0x7100u, mmi_paddw, 0u, 1u)) ==
