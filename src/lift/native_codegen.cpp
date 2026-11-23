@@ -436,7 +436,7 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
         // The legacy source generator has no precise delay-slot exception
         // context. Fail at compile time rather than emitting an incorrect
         // unguarded ADD or treating a trap as ERET / no-op.
-        out_ += "    #error Checked EE EX_Ov/EX_Tr requires LLVM lowering\\n";
+        out_ += "    #error Checked EE EX_Ov/EX_Tr requires LLVM lowering\n";
         break;
     case K::LOP_DIV:
     case K::LOP_DIVU:
