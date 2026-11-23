@@ -348,6 +348,64 @@ private:
                 instruction->m_hilo_result_latency =
                     m_profile.m_hilo_transfer_latency;
                 return true;
+            case 0x09u: case 0x29u: // MMI2 / MMI3 packed-word HI/LO
+                switch (decoded.sa)
+                {
+                case 0x08u: case 0x09u: // PMFHI/PMFLO, PMTHI/PMTLO
+                    if (m_profile.m_hilo_transfer_latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    if (operation == 0x09u) // PMFHI / PMFLO
+                    {
+                        instruction->m_hilo_read_mask =
+                            decoded.sa == 0x08u ? 0x05u : 0x0au;
+                        instruction->m_gpr_write_mask = rd;
+                        instruction->m_gpr_128_write_mask = rd;
+                        instruction->m_result_latency =
+                            m_profile.m_hilo_transfer_latency;
+                    }
+                    else // PMTHI / PMTLO
+                    {
+                        instruction->m_gpr_read_mask = rs;
+                        instruction->m_gpr_128_read_mask = rs;
+                        instruction->m_hilo_write_mask =
+                            decoded.sa == 0x08u ? 0x05u : 0x0au;
+                        instruction->m_hilo_result_latency =
+                            m_profile.m_hilo_transfer_latency;
+                    }
+                    return true;
+                case 0x0cu: case 0x0du: // PMULTW/UW, PDIVW/UW
+                {
+                    const bool multiply = decoded.sa == 0x0cu;
+                    const uint32_t latency = multiply
+                        ? m_profile.m_hilo_multiply_latency
+                        : m_profile.m_hilo_divide_latency;
+                    // A scalar MAC latency alone is insufficient evidence
+                    // for two-wide MMI2/MMI3 issue behaviour.
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency = latency;
+                    if (multiply)
+                    {
+                        instruction->m_gpr_write_mask = rd;
+                        instruction->m_gpr_128_write_mask = rd;
+                        instruction->m_result_latency = latency;
+                    }
+                    return true;
+                }
+                default:
+                    break;
+                }
+                [[fallthrough]];
             case 0x10u: case 0x12u: // MFHI1 / MFLO1
                 if (m_profile.m_hilo_transfer_latency == 0u)
                 {
