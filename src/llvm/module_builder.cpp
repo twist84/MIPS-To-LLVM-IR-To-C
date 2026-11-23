@@ -648,7 +648,15 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             case 0x1a: // DIV1: writes HI1/LO1, not rd
             case 0x1b: // DIVU1: writes HI1/LO1, not rd
                 break;
-            default: // packed MMI operations write rd
+            default: // packed MMI operations usually write rd
+                // Divides and MMI3 full-bank transfers have no rd write.
+                if ((ins.funct == 0x09 || ins.funct == 0x29) &&
+                    (ins.sa == 0x0d ||
+                     (ins.funct == 0x29 &&
+                      (ins.sa == 0x08 || ins.sa == 0x09))))
+                {
+                    break;
+                }
                 if (ins.rd != 0) w.insert(ins.rd);
                 break;
             }
@@ -891,6 +899,27 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 consider_read(ins.rs);
                 consider_read(ins.rt);
                 break;
+            case 0x09: // MMI2: PMFHI / PMFLO / PMULTW / PDIVW
+            case 0x29: // MMI3: PMTHI / PMTLO / PMULTUW / PDIVUW
+                if (ins.sa == 0x08 || ins.sa == 0x09)
+                {
+                    if (ins.funct == 0x29)
+                    {
+                        consider_read(ins.rs);
+                    }
+                    else if (ins.rd != 0)
+                    {
+                        written_so_far.insert(ins.rd);
+                    }
+                    break;
+                }
+                if (ins.sa == 0x0d) // PDIV* never writes rd
+                {
+                    consider_read(ins.rs);
+                    consider_read(ins.rt);
+                    break;
+                }
+                [[fallthrough]];
             default: // packed MMI operations read rs/rt and write rd
                 consider_read(ins.rs);
                 consider_read(ins.rt);
