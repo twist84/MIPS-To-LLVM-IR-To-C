@@ -102,10 +102,16 @@ bool cop1_s_lowered_exactly(uint32_t funct)
            funct == 0x34 || funct == 0x36;
 }
 
-bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs)
+bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
+                         uint32_t rt)
 {
     switch (funct)
     {
+    case 0x04:                                          // PLZCW uses rs only
+        return rt == 0 && sa == 0;
+    case 0x34: case 0x36: case 0x37:                    // packed halfword shifts
+    case 0x3c: case 0x3e: case 0x3f:                    // packed word shifts
+        return rs == 0;
     case 0x00: case 0x01: case 0x20: case 0x21:        // madd/maddu, pipeline 0/1
     case 0x18: case 0x19:                                // mult/multu, pipeline 1
     case 0x1a: case 0x1b:                                // div/divu, pipeline 1
@@ -113,8 +119,23 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs)
     case 0x10: case 0x11: case 0x12: case 0x13:        // mfhi1 mthi1 mflo1 mtlo1
         return true;
     case 0x08:                                          // MMI0
-        return sa == 0 || sa == 1 || sa == 3 || sa == 4 || sa == 5 || sa == 7 ||
-               sa == 8 || sa == 9;                      // paddw psubw pmaxw paddh psubh pmaxh paddb psubb
+        // All named MMI0 packed arithmetic, comparisons, interleaves,
+        // packs and color conversions have exact native LLVM lowering.
+        // Reserved sub-opcodes remain INVALID via kMmi0.
+        switch (sa)
+        {
+        case 0x00: case 0x01: case 0x02: case 0x03:
+        case 0x04: case 0x05: case 0x06: case 0x07:
+        case 0x08: case 0x09: case 0x0a:
+        case 0x10: case 0x11: case 0x12: case 0x13:
+        case 0x14: case 0x15: case 0x16: case 0x17:
+        case 0x18: case 0x19: case 0x1a: case 0x1b:
+            return true;
+        case 0x1e: case 0x1f: // PEXT5/PPAC5 use rt only
+            return rs == 0;
+        default:
+            return false;
+        }
     case 0x28:                                          // MMI1
         switch (sa)
         {
@@ -705,7 +726,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         if (std::string_view(name) == "reserved")
             insn.valid = e_ee_valid::INVALID;
         else
-            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs)
+            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs, insn.rt)
                          ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
         break;
     }
