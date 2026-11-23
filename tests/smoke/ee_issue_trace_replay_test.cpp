@@ -711,6 +711,77 @@ int main()
           "PMTHL partial HI/LO producer stalls PMFHL on all four banks");
     packed_profile.m_hilo_transfer_latency = 0u;
 
+    // Full-bank MMI2/MMI3 HI/LO transfers require explicit transfer
+    // latency, and packed multiply/divide require a separately provided
+    // packed-MMI profile in addition to their HI/LO result latency.
+    const uint32_t mmi_pmthi = mmi(10u, 0u, 0u, 8u, 0x29u);
+    const uint32_t mmi_pmfhi = mmi(0u, 0u, 11u, 8u, 0x09u);
+    const uint32_t mmi_pmtlo = mmi(10u, 0u, 0u, 9u, 0x29u);
+    const uint32_t mmi_pmflo = mmi(0u, 0u, 11u, 9u, 0x09u);
+    const uint32_t mmi_pmultw = mmi(8u, 9u, 10u, 12u, 0x09u);
+    const uint32_t mmi_pmultuw = mmi(8u, 9u, 10u, 12u, 0x29u);
+    const uint32_t mmi_pdivw = mmi(8u, 9u, 0u, 13u, 0x09u);
+    const uint32_t mmi_pdivuw = mmi(8u, 9u, 0u, 13u, 0x29u);
+
+    packed_profile.m_hilo_transfer_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmthi, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMTHI requires independently supplied HI/LO transfer latency");
+
+    packed_profile.m_hilo_transfer_latency = 7u;
+    for (const auto pair :
+        {std::pair<uint32_t,uint32_t>{mmi_pmthi, mmi_pmfhi},
+         std::pair<uint32_t,uint32_t>{mmi_pmtlo, mmi_pmflo}})
+    {
+        replay.configure(packed_profile);
+        check(replay.observe(record(1u, 0x7300u, pair.first, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x7304u, pair.second, 0u, 2u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 7u,
+              "MMI3 full-bank write delays MMI2 full-bank read");
+    }
+
+    packed_profile.m_hilo_multiply_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmultw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMULTW has no implicit scalar or packed arithmetic timing");
+
+    packed_profile.m_hilo_multiply_latency = 9u;
+    bool multiply_profiled = true;
+    for (const uint32_t opcode : {mmi_pmultw, mmi_pmultuw})
+    {
+        replay.configure(packed_profile);
+        multiply_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmfhi, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 9u;
+    }
+    check(multiply_profiled,
+          "PMULTW/PMULTUW write both HI banks and block PMFHI until ready");
+
+    packed_profile.m_hilo_divide_latency = 11u;
+    bool divide_profiled = true;
+    for (const uint32_t opcode : {mmi_pdivw, mmi_pdivuw})
+    {
+        replay.configure(packed_profile);
+        divide_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmflo, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 11u;
+    }
+    check(divide_profiled,
+          "PDIVW/PDIVUW write both LO banks and block PMFLO until ready");
+    packed_profile.m_hilo_transfer_latency = 0u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_divide_latency = 0u;
+
     packed_profile.m_allow_ordered_waw_overlap = true;
     replay.configure(packed_profile);
     check(replay.observe(record(1u, 0x7100u, mmi_paddw, 0u, 1u)) ==
