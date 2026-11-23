@@ -181,6 +181,27 @@ def main():
                  "guest_jr_daddu_return_test", check_jr_daddu, verify_jr_daddu,
                  expected_exit=0)
 
+        def check_branch_liveness(state):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[2].lo = 0  # stale state must not drive BEQL
+            state.gpr[2].hi = 0x2222333344445555
+            state.gpr[19].lo = 0x004581e0
+            state.gpr[19].hi = 0x1919191919191919
+
+        def verify_branch_liveness(state):
+            require(state.pc == 0x00300000,
+                    f"cross-block return: wrong PC 0x{state.pc:08x}")
+            require(state.gpr[2].lo == 0x004581e0,
+                    f"cross-block DADDU value lost: 0x{state.gpr[2].lo:x}")
+            require(state.gpr[2].hi == 0x2222333344445555,
+                    "cross-block DADDU clobbered upper GPR half")
+            require(state.gpr[17].lo == 0x66,
+                    f"BEQL used stale V0 / wrong route: s1=0x{state.gpr[17].lo:x}")
+
+        run_case(fixture_exe, temp_dir, target, retained, "branch_liveness",
+                 "guest_branch_liveness_test", check_branch_liveness,
+                 verify_branch_liveness, expected_exit=0)
+
         def check_jal(state):
             state.gpr[31].lo = 0xDEADBEEF
             state.gpr[31].hi = 0x3131313131313131
