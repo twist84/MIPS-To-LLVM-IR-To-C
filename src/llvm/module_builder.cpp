@@ -594,6 +594,9 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             case e_ee_opcode::FUNCT_DSLLV:
             case e_ee_opcode::FUNCT_DSRLV:
             case e_ee_opcode::FUNCT_DSRAV:
+            case e_ee_opcode::FUNCT_SRAV:
+            case e_ee_opcode::FUNCT_MOVZ:
+            case e_ee_opcode::FUNCT_MOVN:
             case e_ee_opcode::FUNCT_AND:
             case e_ee_opcode::FUNCT_OR:
             case e_ee_opcode::FUNCT_XOR:
@@ -759,6 +762,26 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 // Doubleword shifts read rt and preserve the upper half of rd.
                 consider_read(ins.rt);
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
+            case e_ee_opcode::FUNCT_SRAV:
+                consider_read(ins.rs);
+                consider_read(ins.rt);
+                if (ins.rd != 0)
+                {
+                    written_so_far.insert(ins.rd);
+                }
+                break;
+            case e_ee_opcode::FUNCT_MOVZ:
+            case e_ee_opcode::FUNCT_MOVN:
+                // Conditional register moves preserve rd when their predicate
+                // is false, so the old destination is an architectural input.
+                consider_read(ins.rs);
+                consider_read(ins.rt);
+                consider_read(ins.rd);
+                if (ins.rd != 0)
+                {
+                    written_so_far.insert(ins.rd);
+                }
                 break;
             case e_ee_opcode::FUNCT_DADD:
             case e_ee_opcode::FUNCT_DADDU:
