@@ -544,6 +544,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             if (ins.rt >= 0x10 && ins.rt <= 0x13)
                 w.insert(31);
             break;
+        case e_ee_opcode::OP_ADDI:
         case e_ee_opcode::OP_ADDIU:
         case e_ee_opcode::OP_DADDIU:
         case e_ee_opcode::OP_ANDI:
@@ -559,6 +560,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
         case ee::e_ee_opcode::OP_LW:
         case ee::e_ee_opcode::OP_LWU:
         case ee::e_ee_opcode::OP_LD:
+        case ee::e_ee_opcode::OP_LQ:
         case ee::e_ee_opcode::OP_LWL:
         case ee::e_ee_opcode::OP_LWR:
         case ee::e_ee_opcode::OP_LDL:
@@ -579,7 +581,9 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             case e_ee_opcode::FUNCT_ADDU:
             case e_ee_opcode::FUNCT_SUB:
             case e_ee_opcode::FUNCT_SUBU:
+            case e_ee_opcode::FUNCT_DADD:
             case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUB:
             case e_ee_opcode::FUNCT_DSUBU:
             case e_ee_opcode::FUNCT_DSLL:
             case e_ee_opcode::FUNCT_DSRL:
@@ -681,6 +685,7 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_LW:
         case e_ee_opcode::OP_LWU:
         case e_ee_opcode::OP_LD:
+        case e_ee_opcode::OP_LQ:
         case e_ee_opcode::OP_LWL:
         case e_ee_opcode::OP_LWR:
         case e_ee_opcode::OP_LDL:
@@ -703,12 +708,20 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_SB:
         case e_ee_opcode::OP_SH:
         case e_ee_opcode::OP_SD:
+        case e_ee_opcode::OP_SQ:
         case e_ee_opcode::OP_SWL:
         case e_ee_opcode::OP_SDL:
         case e_ee_opcode::OP_SWR:
         case e_ee_opcode::OP_SDR:
             consider_read(ins.rs);
             consider_read(ins.rt);
+            break;
+        case e_ee_opcode::OP_LWC1:
+        case e_ee_opcode::OP_SWC1:
+        case e_ee_opcode::OP_LQC2:
+        case e_ee_opcode::OP_SQC2:
+            // These transfers read a GPR address base but have no GPR result.
+            consider_read(ins.rs);
             break;
         case e_ee_opcode::OP_SPECIAL:
             switch (static_cast<e_ee_opcode>(ins.funct))
@@ -747,7 +760,9 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 consider_read(ins.rt);
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
+            case e_ee_opcode::FUNCT_DADD:
             case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUB:
             case e_ee_opcode::FUNCT_DSUBU:
                 // Scalar doubleword results preserve the upper 64 bits of rd.
                 consider_read(ins.rs);
@@ -779,8 +794,16 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             break;
         case e_ee_opcode::OP_BEQ:
         case e_ee_opcode::OP_BNE:
+        case e_ee_opcode::OP_BEQL:
+        case e_ee_opcode::OP_BNEL:
             consider_read(ins.rs);
             consider_read(ins.rt);
+            break;
+        case e_ee_opcode::OP_BLEZ:
+        case e_ee_opcode::OP_BGTZ:
+        case e_ee_opcode::OP_BLEZL:
+        case e_ee_opcode::OP_BGTZL:
+            consider_read(ins.rs);
             break;
         case e_ee_opcode::OP_REGIMM:
             consider_read(ins.rs);
@@ -3125,6 +3148,7 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         case e_ee_opcode::OP_LW:
         case e_ee_opcode::OP_LWU:
         case e_ee_opcode::OP_LD:
+        case e_ee_opcode::OP_LQ:
         case e_ee_opcode::OP_LWL:
         case e_ee_opcode::OP_LWR:
         case e_ee_opcode::OP_LDL:
@@ -3136,12 +3160,22 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         case e_ee_opcode::OP_SB:
         case e_ee_opcode::OP_SH:
         case e_ee_opcode::OP_SD:
+        case e_ee_opcode::OP_SQ:
         case e_ee_opcode::OP_SWL:
         case e_ee_opcode::OP_SDL:
         case e_ee_opcode::OP_SWR:
         case e_ee_opcode::OP_SDR:
             if (ins.rs != 0) touched.insert(ins.rs);
             touched.insert(ins.rt);
+            break;
+        case e_ee_opcode::OP_LWC1:
+        case e_ee_opcode::OP_SWC1:
+        case e_ee_opcode::OP_LQC2:
+        case e_ee_opcode::OP_SQC2:
+            if (ins.rs != 0)
+            {
+                touched.insert(ins.rs);
+            }
             break;
         case e_ee_opcode::OP_SPECIAL:
             switch (static_cast<ee::e_ee_opcode>(ins.funct))
