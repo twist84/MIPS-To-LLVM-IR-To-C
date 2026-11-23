@@ -155,6 +155,10 @@ s_lifted_op lift(const s_ee_instruction& insn)
         case 0x11: op.kind = LOP_MTHI1; break;
         case 0x12: op.kind = LOP_MFLO1; break;
         case 0x13: op.kind = LOP_MTLO1; break;
+        case 0x04: op.kind = LOP_MMI_PLZCW; break;
+        case 0x34: case 0x36: case 0x37:
+        case 0x3c: case 0x3e: case 0x3f:
+            op.kind = LOP_MMI_SHIFT; break;
         case 0x08: // MMI0
             switch (insn.sa & 31)
             {
@@ -166,6 +170,12 @@ s_lifted_op lift(const s_ee_instruction& insn)
             case 7: op.kind = LOP_MMI_MAXS_H; break;
             case 8: op.kind = LOP_MMI_ADD_B; break;
             case 9: op.kind = LOP_MMI_SUB_B; break;
+            case 0x02: case 0x06: case 0x0a:
+            case 0x10: case 0x11: case 0x12: case 0x13:
+            case 0x14: case 0x15: case 0x16: case 0x17:
+            case 0x18: case 0x19: case 0x1a: case 0x1b:
+            case 0x1e: case 0x1f:
+                op.kind = LOP_MMI0_EXACT; break;
             default: op.kind = LOP_UNSUPPORTED; break;
             }
             break;
