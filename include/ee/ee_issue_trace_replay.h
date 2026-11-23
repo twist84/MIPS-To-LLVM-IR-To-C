@@ -399,6 +399,37 @@ private:
                     instruction->m_result_latency =
                         m_profile.m_hilo_accumulate_latency;
                     return true;
+                case 0x10u: case 0x11u: // PMADDH, PHMADH
+                case 0x14u: case 0x15u: // PMSUBH, PHMSBH
+                case 0x1cu:             // PMULTH
+                {
+                    if (operation != 0x09u)
+                    {
+                        return false;
+                    }
+                    const bool accumulate =
+                        decoded.sa == 0x10u || decoded.sa == 0x14u;
+                    const uint32_t latency = accumulate
+                        ? m_profile.m_hilo_accumulate_latency
+                        : m_profile.m_hilo_multiply_latency;
+                    // Only explicit packed and HI/LO profiles may produce
+                    // a candidate issue trace. These are not EE cycle values.
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_hilo_read_mask = accumulate ? 0x0fu : 0u;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency = latency;
+                    instruction->m_result_latency = latency;
+                    return true;
+                }
                 case 0x0cu: case 0x0du: // PMULTW/UW, PDIVW/UW
                 {
                     const bool multiply = decoded.sa == 0x0cu;

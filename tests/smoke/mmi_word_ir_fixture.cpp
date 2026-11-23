@@ -157,6 +157,15 @@ int main(int argc, char** argv)
         funct = mode == "pmadduw" ? 0x29u : 0x09u;
         sa = mode == "pmsubw" ? 0x04u : 0x00u;
     }
+    else if (mode == "pmaddh" || mode == "pmsubh" ||
+             mode == "phmadh" || mode == "phmsbh" || mode == "pmulth")
+    {
+        funct = 0x09u;
+        sa = mode == "pmaddh" ? 0x10u :
+             mode == "phmadh" ? 0x11u :
+             mode == "pmsubh" ? 0x14u :
+             mode == "phmsbh" ? 0x15u : 0x1cu;
+    }
     else if (mode == "pmultw" || mode == "pmultuw" ||
              mode == "pdivw" || mode == "pdivuw")
     {

@@ -808,6 +808,56 @@ int main()
     packed_profile.m_hilo_accumulate_latency = 0u;
     packed_profile.m_hilo_transfer_latency = 0u;
 
+    // Halfword MMI2 variants touch every 32-bit word of both HI/LO
+    // banks. The two accumulating forms also read the original banks;
+    // horizontal and multiply forms do not.
+    const uint32_t halfword_ops[] = {0x10u, 0x11u, 0x14u, 0x15u, 0x1cu};
+    packed_profile.m_hilo_transfer_latency = 7u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7400u,
+          mmi(8u, 9u, 10u, 0x10u, 0x09u), 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMADDH cannot guess an accumulator latency");
+
+    packed_profile.m_hilo_multiply_latency = 9u;
+    packed_profile.m_hilo_accumulate_latency = 13u;
+    bool halfword_profiled = true;
+    for (uint32_t subop : halfword_ops)
+    {
+        const uint32_t opcode = mmi(8u, 9u, 10u, subop, 0x09u);
+        const uint32_t latency = (subop == 0x10u || subop == 0x14u)
+            ? 13u : 9u;
+        replay.configure(packed_profile);
+        halfword_profiled &=
+            replay.observe(record(1u, 0x7400u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7404u, mmi_pmflo, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == latency;
+    }
+    check(halfword_profiled,
+          "halfword MMI2 writes all HI/LO halves and produces rd");
+
+    bool halfword_read_dependence = true;
+    for (uint32_t subop : {0x10u, 0x14u})
+    {
+        replay.configure(packed_profile);
+        halfword_read_dependence &=
+            replay.observe(record(1u, 0x7500u, mmi_pmthi, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7504u,
+                mmi(8u, 9u, 10u, subop, 0x09u), 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 7u;
+    }
+    check(halfword_read_dependence,
+          "PMADDH/PMSUBH read four existing HI/LO halves");
+    packed_profile.m_hilo_transfer_latency = 0u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_accumulate_latency = 0u;
+
     packed_profile.m_allow_ordered_waw_overlap = true;
     replay.configure(packed_profile);
     check(replay.observe(record(1u, 0x7100u, mmi_paddw, 0u, 1u)) ==

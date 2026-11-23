@@ -62,7 +62,8 @@ enum e_lift_op_kind
     LOP_MMI_HILO_PAIR_TRANSFER,
     LOP_MMI_PACKED_MULT,
     LOP_MMI_PACKED_DIV,
-    LOP_MMI_PACKED_MAC
+    LOP_MMI_PACKED_MAC,
+    LOP_MMI_PACKED_HALF
 };
 
 struct s_lifted_op

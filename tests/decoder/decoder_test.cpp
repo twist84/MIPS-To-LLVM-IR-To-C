@@ -383,6 +383,26 @@ int main()
     }
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
+    // MMI2 halfword multiply/add/sub and horizontal pair variants.
+    for (const uint32_t subop : {0x10u, 0x11u, 0x14u, 0x15u, 0x1cu})
+    {
+        for (const uint32_t dest : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c, 4, 5, dest, subop, 0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_HALF;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL halfword MMI2 sa=%02x rd=%u\n",
+                            subop, dest);
+            }
+        }
+    }
+    expect("mmi2 reserved half sa16", R(0x1c,4,5,6,0x16,0x09), "reserved", X);
+    expect("mmi3 reserved half sa10", R(0x1c,4,5,6,0x10,0x29), "reserved", X);
+    expect("mmi3 reserved half sa1c", R(0x1c,4,5,6,0x1c,0x29), "reserved", X);
     expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0

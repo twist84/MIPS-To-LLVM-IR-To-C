@@ -3805,6 +3805,122 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
+    // Halfword MMI2 multiplies eight signed i16 lanes into eight i32
+    // accumulator words (LO0[0:1], HI0[0:1], LO1[0:1], HI1[0:1]).
+    // PMADDH/PMSUBH wrap independently per 32-bit word and read prior
+    // accumulators. PMULTH, PHMADH and PHMSBH replace all eight words.
+    // PHMADH/PHMSBH upper words follow the PCSX2 interpreter and x86
+    // recompiler's deterministic model; hardware marks them undocumented.
+    if (fn == 0x09 &&
+        (sa == 0x10 || sa == 0x11 || sa == 0x14 ||
+         sa == 0x15 || sa == 0x1c))
+    {
+        const std::string lhs_vec = build8i16(a.first, a.second);
+        const std::string rhs_vec = build8i16(b.first, b.second);
+        const uint32_t field_indices[4] = {2u, 1u, 4u, 3u};
+        std::string even_results[4];
+
+        for (uint32_t bank = 0u; bank < 4u; ++bank)
+        {
+            std::string products[2];
+            for (uint32_t half = 0u; half < 2u; ++half)
+            {
+                const uint32_t index = bank * 2u + half;
+                const std::string lhs16 = newtemp();
+                const std::string rhs16 = newtemp();
+                const std::string lhs32 = newtemp();
+                const std::string rhs32 = newtemp();
+                const std::string product = newtemp();
+
+                m_out += "  " + lhs16 + " = extractelement <8 x i16> " +
+                         lhs_vec + ", i32 " + std::to_string(index) + "\n";
+                m_out += "  " + rhs16 + " = extractelement <8 x i16> " +
+                         rhs_vec + ", i32 " + std::to_string(index) + "\n";
+                m_out += "  " + lhs32 + " = sext i16 " + lhs16 + " to i32\n";
+                m_out += "  " + rhs32 + " = sext i16 " + rhs16 + " to i32\n";
+                m_out += "  " + product + " = mul i32 " + lhs32 +
+                         ", " + rhs32 + "\n";
+                products[half] = product;
+            }
+
+            std::string lower_word;
+            std::string upper_word;
+            if (sa == 0x10 || sa == 0x14) // PMADDH / PMSUBH
+            {
+                const std::string prior = newtemp();
+                const std::string prior_upper_shifted = newtemp();
+                const std::string prior_lower = newtemp();
+                const std::string prior_upper = newtemp();
+                lower_word = newtemp();
+                upper_word = newtemp();
+                m_out += "  " + prior + " = load i64, ptr " +
+                         state_field(field_indices[bank]) + "\n";
+                m_out += "  " + prior_lower + " = trunc i64 " +
+                         prior + " to i32\n";
+                m_out += "  " + prior_upper_shifted + " = lshr i64 " +
+                         prior + ", 32\n";
+                m_out += "  " + prior_upper + " = trunc i64 " +
+                         prior_upper_shifted + " to i32\n";
+                const char* arithmetic = sa == 0x10 ? "add" : "sub";
+                m_out += "  " + lower_word + " = " + arithmetic +
+                         " i32 " + prior_lower + ", " + products[0] + "\n";
+                m_out += "  " + upper_word + " = " + arithmetic +
+                         " i32 " + prior_upper + ", " + products[1] + "\n";
+            }
+            else if (sa == 0x11) // PHMADH
+            {
+                lower_word = newtemp();
+                m_out += "  " + lower_word + " = add i32 " + products[0] +
+                         ", " + products[1] + "\n";
+                upper_word = products[1];
+            }
+            else if (sa == 0x15) // PHMSBH
+            {
+                lower_word = newtemp();
+                upper_word = newtemp();
+                m_out += "  " + lower_word + " = sub i32 " + products[1] +
+                         ", " + products[0] + "\n";
+                m_out += "  " + upper_word + " = xor i32 " + products[1] +
+                         ", -1\n";
+            }
+            else // PMULTH
+            {
+                lower_word = products[0];
+                upper_word = products[1];
+            }
+
+            const std::string lower_bits = newtemp();
+            const std::string upper_bits = newtemp();
+            const std::string upper_shifted = newtemp();
+            const std::string combined = newtemp();
+            m_out += "  " + lower_bits + " = zext i32 " + lower_word +
+                     " to i64\n";
+            m_out += "  " + upper_bits + " = zext i32 " + upper_word +
+                     " to i64\n";
+            m_out += "  " + upper_shifted + " = shl i64 " + upper_bits +
+                     ", 32\n";
+            m_out += "  " + combined + " = or i64 " + upper_shifted +
+                     ", " + lower_bits + "\n";
+            m_out += "  store i64 " + combined + ", ptr " +
+                     state_field(field_indices[bank]) + "\n";
+            even_results[bank] = lower_word;
+        }
+
+        // GPR rd contains only the even accumulator words, interleaved
+        // LO0[0], HI0[0], LO1[0], HI1[0] in four packed 32-bit lanes.
+        std::string destination = "undef";
+        for (uint32_t word = 0u; word < 4u; ++word)
+        {
+            const std::string next = newtemp();
+            m_out += "  " + next + " = insertelement <4 x i32> " +
+                     destination + ", i32 " + even_results[word] +
+                     ", i32 " + std::to_string(word) + "\n";
+            destination = next;
+        }
+        store_vec4i32(destination);
+        return;
+    }
+
     // PMADDW, PMSUBW and PMADDUW reconstruct two 64-bit HI:LO
     // accumulators from the low words of each sign-extended bank.
     // PCSX2's x86 recompiler uses wrapping 64-bit arithmetic; its older

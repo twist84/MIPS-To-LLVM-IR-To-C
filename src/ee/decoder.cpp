@@ -159,6 +159,9 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
         {
         case 0x00: case 0x04:                            // PMADDW / PMSUBW
             return true;
+        case 0x10: case 0x11: case 0x14: case 0x15:      // PMADDH / PHMADH / PMSUBH / PHMSBH
+        case 0x1c:                                      // PMULTH
+            return true;
         case 0x08: case 0x09:                            // PMFHI / PMFLO
             return rs == 0 && rt == 0;
         case 0x0c:                                      // PMULTW (signed)
