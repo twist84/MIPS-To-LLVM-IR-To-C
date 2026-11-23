@@ -180,10 +180,37 @@ static ee::s_ee_cpu_state ref_op(const ee::s_lifted_op& op,
     }
     case K::LOP_DIV:
     {
-        int64_t a64 = sext32(cpu.m_gpr[op.rs].m_lo);
-        int64_t b64 = sext32(cpu.m_gpr[op.rt].m_lo);
-        cpu.m_lo = (uint64_t)(int32_t)(a64 / b64);
-        cpu.m_hi = (uint64_t)(int32_t)(a64 % b64); break;
+        const int64_t lhs = sext32(cpu.m_gpr[op.rs].m_lo);
+        const int64_t rhs = sext32(cpu.m_gpr[op.rt].m_lo);
+        if (rhs != 0)
+        {
+            if (lhs == -2147483648LL && rhs == -1)
+            {
+                cpu.m_lo = 0xffffffff80000000ULL;
+                cpu.m_hi = 0;
+            }
+            else
+            {
+                cpu.m_lo = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(lhs / rhs)));
+                cpu.m_hi = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(lhs % rhs)));
+            }
+        }
+        break;
+    }
+    case K::LOP_DIVU:
+    {
+        const uint64_t lhs = static_cast<uint32_t>(cpu.m_gpr[op.rs].m_lo);
+        const uint64_t rhs = static_cast<uint32_t>(cpu.m_gpr[op.rt].m_lo);
+        if (rhs != 0)
+        {
+            const uint32_t quotient = static_cast<uint32_t>(lhs / rhs);
+            const uint32_t remainder = static_cast<uint32_t>(lhs % rhs);
+            cpu.m_lo = (quotient & 0x80000000u) ?
+                (0xffffffff00000000ULL | quotient) : quotient;
+            cpu.m_hi = (remainder & 0x80000000u) ?
+                (0xffffffff00000000ULL | remainder) : remainder;
+        }
+        break;
     }
     case K::LOP_MMI_ADD_B:
     case K::LOP_MMI_ADD_H:
@@ -305,6 +332,8 @@ static bool build_and_run_multi_test(const std::vector<TestFn>& tests)
             cpp_file << "        ee_mem_write32(&rt, " << u32hex(kv.first) << ", " << u32hex(kv.second) << "u);\n";
         }
         cpp_file << "        ee::s_ee_cpu_state cpu = {};\n";
+        cpp_file << "        cpu.m_hi = 0x1122334455667788ULL;\n";
+        cpp_file << "        cpu.m_lo = 0x8877665544332211ULL;\n";
         cpp_file << "        cpu.m_pc = " << u32hex(t.entry_pc) << ";\n";
         cpp_file << "        cpu.m_gpr[31].m_lo = " << u64hex(t.init_gpr.count(31) ? t.init_gpr.at(31) : kTestRet) << ";\n";
         cpp_file << "        cpu.m_gpr[31].m_hi = 0;\n";
@@ -341,6 +370,12 @@ static bool build_and_run_multi_test(const std::vector<TestFn>& tests)
         cpp_file << "                    (unsigned long long)ref.m_gpr[r].m_lo, (unsigned long long)ref.m_gpr[r].m_hi);\n";
         cpp_file << "                ++failures;\n";
         cpp_file << "            }\n";
+        cpp_file << "        }\n";
+        cpp_file << "        if (ref.m_hi != cpu.m_hi || ref.m_lo != cpu.m_lo) {\n";
+        cpp_file << "            std::printf(\"FAIL: test " << ti << " HI/LO native=%llx/%llx ref=%llx/%llx\\n\",\n";
+        cpp_file << "                (unsigned long long)cpu.m_hi, (unsigned long long)cpu.m_lo,\n";
+        cpp_file << "                (unsigned long long)ref.m_hi, (unsigned long long)ref.m_lo);\n";
+        cpp_file << "            ++failures;\n";
         cpp_file << "        }\n";
         cpp_file << "        if (ref.m_pc != cpu.m_pc) {\n";
         cpp_file << "            std::printf(\"FAIL: test " << ti << " pc native=%llx ref=%llx\\n\",\n";
@@ -476,6 +511,39 @@ int main()
         gpr[31] = kTestRet;
         gpr[4] = 0xDEADBEEFu;
         tests.push_back({"fn_cop0", ops2, 0x00100000, gpr, {}});
+    }
+
+    // The legacy straight-line code generator is still built, so make its
+    // DIV/DIVU behaviour agree with the LLVM backend's explicit edge policy.
+    struct s_div_case
+    {
+        const char* m_name;
+        ee::e_lift_op_kind m_kind;
+        uint64_t m_lhs;
+        uint64_t m_rhs;
+    };
+    const s_div_case div_cases[] =
+    {
+        {"fn_div_signed_normal", ee::LOP_DIV, 0xffffffffffffffefULL, 5},
+        {"fn_div_signed_overflow", ee::LOP_DIV, 0x80000000ULL, 0xffffffffULL},
+        {"fn_div_signed_zero", ee::LOP_DIV, 0xfffffffffffffff0ULL, 0},
+        {"fn_div_signed_zero_zero", ee::LOP_DIV, 0, 0},
+        {"fn_div_unsigned_normal", ee::LOP_DIVU, 0xfffffffeULL, 3},
+        {"fn_div_unsigned_highbit", ee::LOP_DIVU, 0xffffffffULL, 1},
+        {"fn_div_unsigned_zero", ee::LOP_DIVU, 0xfffffffeULL, 0},
+        {"fn_div_unsigned_zero_zero", ee::LOP_DIVU, 0, 0}
+    };
+    for (const s_div_case& test_case : div_cases)
+    {
+        ee::s_lifted_op op{};
+        op.pc = 0x00100000u;
+        op.kind = test_case.m_kind;
+        op.rs = 4;
+        op.rt = 5;
+        std::map<uint8_t, uint64_t> gpr;
+        gpr[4] = test_case.m_lhs;
+        gpr[5] = test_case.m_rhs;
+        tests.push_back({test_case.m_name, {op}, 0x00100000u, gpr, {}});
     }
 
     std::printf("\n-- multi-function compilation and linking --\n");
