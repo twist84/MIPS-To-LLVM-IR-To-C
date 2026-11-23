@@ -42,6 +42,44 @@ NUMERIC_SETTINGS = {
 }
 COMMAND_TOOLS = ("Boot session", "Game runner (Python)", "Native runner")
 
+DIAGNOSTIC_SETTINGS = {
+    "Watch guest word": ("SDBZ_WATCH_WORD", "word"),
+    "Trace guest stores": ("SDBZ_TRACE_STORE", "word"),
+    "Trace V0 writes": ("SDBZ_TRACE_V0", "range"),
+}
+
+
+def diagnostic_overrides(values):
+    """Validate optional read-only native guest diagnostics."""
+    result = {}
+    for label, (key, kind) in DIAGNOSTIC_SETTINGS.items():
+        raw = values.get(label, "").strip()
+        if not raw:
+            continue
+        try:
+            if kind == "word":
+                address = int(raw, 0)
+                if not 0 <= address <= 0xffffffff or (address & 3):
+                    raise ValueError
+                result[key] = f"0x{address:08x}"
+            else:
+                first, last = raw.split(":", 1)
+                start = int(first, 0)
+                end = int(last, 0)
+                if (start < 0 or end > 0xffffffff or
+                        start > end or end - start > 0x2000 or
+                        (start & 3) or (end & 3)):
+                    raise ValueError
+                result[key] = f"0x{start:08x}:0x{end:08x}"
+        except (ValueError, TypeError):
+            requirement = (
+                "a 4-byte-aligned 32-bit address" if kind == "word" else
+                "an aligned START:END range no larger than 0x2000 bytes"
+            )
+            raise ValueError(f"{label} must be {requirement}.") from None
+    return result
+
+
 OPTION_HELP = {
     "Extracted disc": "Folder containing the extracted game files and SYSTEM.CNF.",
     "Memory card": "Optional raw 8,650,752-byte PS2 card image for slot 1. Game writes may be saved to this file.",
@@ -95,6 +133,9 @@ OPTION_HELP = {
     "Loop watchdog resumes": "How many times to resume the native loop watchdog between progress events. Zero stops on the first watchdog hit.",
     "Trace every N dispatches": "Sample ordinary verbose dispatch lines at this interval. One logs every dispatch.",
     "Report snapshot interval (ms)": "Interval between periodic JSON reports, in milliseconds. Zero uses dispatch-based checkpoints.",
+    "Watch guest word": "Track changes between native dispatches. Example: 0x0044081c (sound-object handle).",
+    "Trace guest stores": "Capture the exact guest STORE PCs and operands modifying this word (first 64 events). Example: 0x0044081c.",
+    "Trace V0 writes": "Trace low-64-bit V0 assignments within an aligned guest PC range START:END (first 64 events). Example: 0x00137970:0x00137d18.",
     "Tool": "Choose the boot session orchestrator, Python game runner, or native executable for a direct command.",
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
@@ -169,6 +210,7 @@ def default_settings():
         "cache_miss_resume": True,
         "precompile_all": True,
         "fast_overlays": True,
+        "diagnostics": {label: "" for label in DIAGNOSTIC_SETTINGS},
         "tool": COMMAND_TOOLS[0],
         "executable": str(runner),
         "arguments": "",
@@ -264,11 +306,16 @@ def load_settings(path):
         return settings, f"Invalid {path.name}. Loaded defaults."
     for key, default in settings.items():
         value = saved.get(key)
-        if type(value) is type(default) and key not in ("numeric", "tool_options"):
+        if type(value) is type(default) and key not in ("numeric", "tool_options", "diagnostics"):
             settings[key] = value
     for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS)):
         if settings[key] not in choices:
             settings[key] = default_settings()[key]
+    saved_diagnostics = saved.get("diagnostics")
+    if isinstance(saved_diagnostics, dict):
+        for label in DIAGNOSTIC_SETTINGS:
+            if isinstance(saved_diagnostics.get(label), str):
+                settings["diagnostics"][label] = saved_diagnostics[label]
     saved_numeric = saved.get("numeric")
     numeric = settings["numeric"]
     numeric["MAX_DISPATCHES"], numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
@@ -319,7 +366,7 @@ def save_settings(path, settings):
 
 def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
                      resume_on_cache_miss=True, precompile_all=True,
-                     fast_overlays=True):
+                     fast_overlays=True, diagnostics=None):
     args = []
     mode_flag = SESSION_MODES[mode]
     if mode_flag:
@@ -336,6 +383,7 @@ def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
     env = {}
     if supports_expansion:
         env["PRECOMPILE_ALL"] = str(int(precompile_all))
+        env.update(diagnostic_overrides(diagnostics or {}))
     if mode in ("Automatic", "Full replay"):
         env["EE_WEBGPU_WINDOW"] = str(int(window))
         env["EE_WEBGPU_SNAPSHOT"] = str(int(snapshot))
@@ -415,6 +463,10 @@ class Launcher(ttk.Frame):
         self.cache_miss_resume = self.fields["cache_miss_resume"]
         self.precompile_all = self.fields["precompile_all"]
         self.fast_overlays = self.fields["fast_overlays"]
+        self.diagnostics = {
+            label: tk.StringVar(value=settings["diagnostics"][label])
+            for label in DIAGNOSTIC_SETTINGS
+        }
         self.performance_description = tk.StringVar()
         self.tool = self.fields["tool"]
         self.executable = self.fields["executable"]
@@ -531,6 +583,17 @@ class Launcher(ttk.Frame):
             self.performance, textvariable=self.performance_description,
             wraplength=670,
         ).grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            self.performance,
+            text="Optional guest memory / return-value probes (blank = off)",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(18, 8))
+        for offset, (label, variable) in enumerate(self.diagnostics.items(), 7):
+            caption = ttk.Label(self.performance, text=label)
+            caption.grid(row=offset, column=0, sticky="w", padx=(0, 12), pady=3)
+            entry = ttk.Entry(self.performance, textvariable=variable)
+            entry.grid(row=offset, column=1, columnspan=2, sticky="ew", pady=3)
+            Tooltip(caption, OPTION_HELP[label])
+            Tooltip(entry, OPTION_HELP[label])
 
         self.cross_entries = []
         for row, (label, variable) in enumerate(self.numeric.items()):
@@ -692,6 +755,9 @@ class Launcher(ttk.Frame):
         settings["numeric"] = {
             key: self.numeric[label].get() for label, (key, _, _) in NUMERIC_SETTINGS.items()
         }
+        settings["diagnostics"] = {
+            label: var.get() for label, var in self.diagnostics.items()
+        }
         settings["tool_options"] = {
             tool: dict(self.direct_values(tool), extra=extra.get("1.0", "end-1c"))
             for tool, extra in self.tool_extra.items()
@@ -793,8 +859,11 @@ class Launcher(ttk.Frame):
             resume_on_cache_miss=self.cache_miss_resume.get(),
             precompile_all=self.precompile_all.get(),
             fast_overlays=self.fast_overlays.get(),
+            diagnostics={label: var.get() for label, var in self.diagnostics.items()},
         )
         for key, _, _ in NUMERIC_SETTINGS.values():
+            env.pop(key, None)
+        for key, _ in DIAGNOSTIC_SETTINGS.values():
             env.pop(key, None)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
                    SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))
