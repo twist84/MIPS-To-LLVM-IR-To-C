@@ -432,12 +432,48 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
         break;
     }
     case K::LOP_DIV:
+    case K::LOP_DIVU:
     {
+        const std::string a = "g_cpu.m_gpr[" + std::to_string(op.rs) + "].m_lo";
+        const std::string b = "g_cpu.m_gpr[" + std::to_string(op.rt) + "].m_lo";
         out_ += "    {\n";
-        out_ += "        int64_t __a = " + sext32_expr("g_cpu.m_gpr[" + std::to_string(op.rs) + "].m_lo") + ";\n";
-        out_ += "        int64_t __b = " + sext32_expr("g_cpu.m_gpr[" + std::to_string(op.rt) + "].m_lo") + ";\n";
-        out_ += "        g_cpu.m_lo = (uint64_t)(int32_t)(__a / __b);\n";
-        out_ += "        g_cpu.m_hi = (uint64_t)(int32_t)(__a % __b);\n";
+        if (op.kind == K::LOP_DIV)
+        {
+            // Use signed 64-bit intermediates for 32-bit operands. The
+            // INT_MIN/-1 result is specified explicitly so it never depends
+            // on a narrowing conversion outside int32_t's range.
+            out_ += "        int64_t __a = " + sext32_expr(a) + ";\n";
+            out_ += "        int64_t __b = " + sext32_expr(b) + ";\n";
+            out_ += "        if (__b != 0)\n";
+            out_ += "        {\n";
+            out_ += "            if (__a == -2147483648LL && __b == -1)\n";
+            out_ += "            {\n";
+            out_ += "                g_cpu.m_lo = 0xffffffff80000000ULL;\n";
+            out_ += "                g_cpu.m_hi = 0;\n";
+            out_ += "            }\n";
+            out_ += "            else\n";
+            out_ += "            {\n";
+            out_ += "                g_cpu.m_lo = (uint64_t)(int64_t)(int32_t)(__a / __b);\n";
+            out_ += "                g_cpu.m_hi = (uint64_t)(int64_t)(int32_t)(__a % __b);\n";
+            out_ += "            }\n";
+            out_ += "        }\n";
+        }
+        else
+        {
+            // Unsigned word division still sign-extends its low 32-bit
+            // quotient/remainder into the 64-bit EE HI/LO registers.
+            out_ += "        uint64_t __a = (uint32_t)(" + a + ");\n";
+            out_ += "        uint64_t __b = (uint32_t)(" + b + ");\n";
+            out_ += "        if (__b != 0)\n";
+            out_ += "        {\n";
+            out_ += "            uint32_t __q = (uint32_t)(__a / __b);\n";
+            out_ += "            uint32_t __r = (uint32_t)(__a % __b);\n";
+            out_ += "            g_cpu.m_lo = (__q & 0x80000000u) ? (0xffffffff00000000ULL | __q) : __q;\n";
+            out_ += "            g_cpu.m_hi = (__r & 0x80000000u) ? (0xffffffff00000000ULL | __r) : __r;\n";
+            out_ += "        }\n";
+        }
+        // The manual leaves divide-by-zero outputs undefined; matching the
+        // LLVM and DIV1 paths, preserve the prior HI/LO bank deterministically.
         out_ += "    }\n";
         break;
     }
