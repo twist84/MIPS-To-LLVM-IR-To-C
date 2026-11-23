@@ -49,6 +49,18 @@ int main(int argc, char** argv)
     }
 
     std::string mode = argv[2];
+    const auto ends_with = [](const std::string& value,
+                              const std::string& suffix) -> bool
+    {
+        return value.size() >= suffix.size() &&
+               value.compare(value.size() - suffix.size(),
+                             suffix.size(), suffix) == 0;
+    };
+    const auto starts_with = [](const std::string& value,
+                                const std::string& prefix) -> bool
+    {
+        return value.compare(0, prefix.size(), prefix) == 0;
+    };
     const std::string rs_alias = "_alias_rs";
     const std::string rt_alias = "_alias_rt";
     const std::string zero_dest = "_zero_dest";
@@ -68,13 +80,13 @@ int main(int argc, char** argv)
              mode == "pmtlo_from_prior" || mode == "pmtlo_from_prior_cross" ||
              mode == "pmultw_from_prior_cross")
     {
-        cross_block = mode.ends_with("_cross");
+        cross_block = ends_with(mode, "_cross");
         source_prior = true;
-        if (mode.starts_with("pmthi"))
+        if (starts_with(mode, "pmthi"))
         {
             mode = "pmthi";
         }
-        else if (mode.starts_with("pmtlo"))
+        else if (starts_with(mode, "pmtlo"))
         {
             mode = "pmtlo";
         }
@@ -83,27 +95,27 @@ int main(int argc, char** argv)
             mode = "pmultw";
         }
     }
-    else if (mode.ends_with(rs_alias))
+    else if (ends_with(mode, rs_alias))
     {
         mode.resize(mode.size() - rs_alias.size());
         rd = 4u;
     }
-    else if (mode.ends_with(rt_alias))
+    else if (ends_with(mode, rt_alias))
     {
         mode.resize(mode.size() - rt_alias.size());
         rd = 5u;
     }
-    else if (mode.ends_with(zero_dest))
+    else if (ends_with(mode, zero_dest))
     {
         mode.resize(mode.size() - zero_dest.size());
         rd = 0u;
     }
-    else if (mode.ends_with("_zero_rs"))
+    else if (ends_with(mode, "_zero_rs"))
     {
         mode.resize(mode.size() - 8u);
         zero_rs = true;
     }
-    else if (mode.ends_with("_zero_rt"))
+    else if (ends_with(mode, "_zero_rt"))
     {
         mode.resize(mode.size() - 8u);
         zero_rt = true;
@@ -131,7 +143,7 @@ int main(int argc, char** argv)
              mode == "pdivw" || mode == "pdivuw")
     {
         funct = mode == "pmultw" || mode == "pdivw" ? 0x09u : 0x29u;
-        sa = mode.starts_with("pmult") ? 0x0cu : 0x0du;
+        sa = starts_with(mode, "pmult") ? 0x0cu : 0x0du;
         if (sa == 0x0du)
         {
             rd = 0u;
