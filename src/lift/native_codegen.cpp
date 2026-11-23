@@ -433,10 +433,12 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
     }
     case K::LOP_CHECKED_SIGNED:
     case K::LOP_CHECKED_TRAP:
-        // The legacy source generator has no precise delay-slot exception
-        // context. Fail at compile time rather than emitting an incorrect
-        // unguarded ADD or treating a trap as ERET / no-op.
-        out_ += "    #error Checked EE EX_Ov/EX_Tr requires LLVM lowering\n";
+    case K::LOP_MMI0_EXACT:
+    case K::LOP_MMI_SHIFT:
+    case K::LOP_MMI_PLZCW:
+        // The legacy source generator cannot implement precise exceptions
+        // or the newly decoded packed MMI operations. Fail closed.
+        out_ += "    #error Checked EE op requires LLVM lowering\n";
         break;
     case K::LOP_DIV:
     case K::LOP_DIVU:
