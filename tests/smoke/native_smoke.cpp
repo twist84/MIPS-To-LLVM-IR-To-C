@@ -399,18 +399,38 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_DIV:
     {
-        int64_t a = sext32(cpu.m_gpr[op.rs].m_lo);
-        int64_t b = sext32(cpu.m_gpr[op.rt].m_lo);
-        cpu.m_lo = (uint64_t)(int32_t)(a / b);
-        cpu.m_hi = (uint64_t)(int32_t)(a % b);
+        const int64_t lhs = sext32(cpu.m_gpr[op.rs].m_lo);
+        const int64_t rhs = sext32(cpu.m_gpr[op.rt].m_lo);
+        // The R5900 does not define divide-by-zero outputs. Keep HI/LO
+        // intact, matching the LLVM and generated-C++ execution paths.
+        if (rhs != 0)
+        {
+            if (lhs == -2147483648LL && rhs == -1)
+            {
+                cpu.m_lo = 0xffffffff80000000ULL;
+                cpu.m_hi = 0;
+            }
+            else
+            {
+                cpu.m_lo = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(lhs / rhs)));
+                cpu.m_hi = static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(lhs % rhs)));
+            }
+        }
         break;
     }
     case LOP_DIVU:
     {
-        uint64_t a = cpu.m_gpr[op.rs].m_lo;
-        uint64_t b = cpu.m_gpr[op.rt].m_lo;
-        cpu.m_lo = a / b;
-        cpu.m_hi = a % b;
+        const uint64_t lhs = static_cast<uint32_t>(cpu.m_gpr[op.rs].m_lo);
+        const uint64_t rhs = static_cast<uint32_t>(cpu.m_gpr[op.rt].m_lo);
+        if (rhs != 0)
+        {
+            const uint32_t quotient = static_cast<uint32_t>(lhs / rhs);
+            const uint32_t remainder = static_cast<uint32_t>(lhs % rhs);
+            cpu.m_lo = (quotient & 0x80000000u) ?
+                (0xffffffff00000000ULL | quotient) : quotient;
+            cpu.m_hi = (remainder & 0x80000000u) ?
+                (0xffffffff00000000ULL | remainder) : remainder;
+        }
         break;
     }
 
