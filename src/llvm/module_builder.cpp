@@ -579,6 +579,17 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             case e_ee_opcode::FUNCT_ADDU:
             case e_ee_opcode::FUNCT_SUB:
             case e_ee_opcode::FUNCT_SUBU:
+            case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUBU:
+            case e_ee_opcode::FUNCT_DSLL:
+            case e_ee_opcode::FUNCT_DSRL:
+            case e_ee_opcode::FUNCT_DSRA:
+            case e_ee_opcode::FUNCT_DSLL32:
+            case e_ee_opcode::FUNCT_DSRL32:
+            case e_ee_opcode::FUNCT_DSRA32:
+            case e_ee_opcode::FUNCT_DSLLV:
+            case e_ee_opcode::FUNCT_DSRLV:
+            case e_ee_opcode::FUNCT_DSRAV:
             case e_ee_opcode::FUNCT_AND:
             case e_ee_opcode::FUNCT_OR:
             case e_ee_opcode::FUNCT_XOR:
@@ -734,12 +745,14 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             case e_ee_opcode::FUNCT_DSRA32:
                 // Doubleword shifts read rt and preserve the upper half of rd.
                 consider_read(ins.rt);
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
             case e_ee_opcode::FUNCT_DADDU:
             case e_ee_opcode::FUNCT_DSUBU:
                 // Scalar doubleword results preserve the upper 64 bits of rd.
                 consider_read(ins.rs);
                 consider_read(ins.rt);
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
             case e_ee_opcode::FUNCT_ADD:
             case e_ee_opcode::FUNCT_ADDU:
