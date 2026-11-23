@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
@@ -70,12 +71,18 @@ bool instruction_for(const std::string& mode, uint32_t& word)
 
 int main(int argc, char** argv)
 {
-    if (argc != 3)
+    if (argc != 4)
     {
-        std::fprintf(stderr, "usage: ee_checked_ir_fixture output.ll mode[_delay]\n");
+        std::fprintf(stderr, "usage: ee_checked_ir_fixture output.ll mode[_delay] opt_level\n");
         return 2;
     }
 
+    const int opt_level = std::atoi(argv[3]);
+    if (opt_level < 0 || opt_level > 3)
+    {
+        std::fprintf(stderr, "opt_level must be 0..3\n");
+        return 2;
+    }
     const std::string full_mode = argv[2];
     const std::string suffix = "_delay";
     const bool delayed = full_mode.size() > suffix.size() &&
@@ -127,7 +134,7 @@ int main(int argc, char** argv)
     }
 
     llvm::llvm_context context("ee_checked_exception_test");
-    llvm::module_builder builder(context);
+    llvm::module_builder builder(context, opt_level);
     builder.emit_function_cfg(functions[0], instructions,
                               "guest_checked_exception_test");
     if (!context.write_ir_to_file(argv[1]))
