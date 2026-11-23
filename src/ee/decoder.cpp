@@ -410,6 +410,10 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         case e_ee_opcode::REGIMM_TNEI:
             insn.flow = e_ee_flow::FLOW_NONE;
             insn.has_delay_slot = false;
+            // REGIMM initially computes a branch target for every rt form.
+            // Immediate traps have no target or delay slot and must not
+            // appear as synthetic control-flow references.
+            insn.branch_target = 0;
             insn.valid = e_ee_valid::VALID;
             set_mnemonic(insn, "regimm_trap");
             break;
