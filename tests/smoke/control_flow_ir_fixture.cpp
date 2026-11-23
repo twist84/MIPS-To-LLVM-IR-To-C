@@ -49,6 +49,7 @@ int main(int argc, char** argv)
     bool has_continuation = false;
     bool is_recursive = false;
     bool is_branch_liveness = false;
+    bool is_cross_block_special = false;
     const char* function_name = nullptr;
 
     if (mode == "jr")
@@ -84,6 +85,21 @@ int main(int argc, char** argv)
         delay_word = make_r(19, 0, 2, 0, 0x2d); // daddu v0,s3,zero
         is_branch_liveness = true;
         function_name = "guest_branch_liveness_test";
+    }
+    else if (mode == "movz_liveness" || mode == "movn_liveness" ||
+             mode == "srav_liveness")
+    {
+        // Internal CFG edge: producer is a branch delay-slot DADDU,
+        // and a following basic block consumes the value. If SPECIAL
+        // read-before-write accounting misses this, the consumer sees
+        // the original architectural value instead of the SSA result.
+        control_word = make_i(0x04, 0, 0, 1); // beq zero,zero,entry+8
+        delay_word = make_r(8, 0, 19, 0, 0x2d); // daddu s3,t0,zero
+        is_cross_block_special = true;
+        function_name =
+            mode == "movz_liveness" ? "guest_movz_liveness_test" :
+            mode == "movn_liveness" ? "guest_movn_liveness_test" :
+            "guest_srav_liveness_test";
     }
     else if (mode == "jal")
     {
@@ -265,6 +281,31 @@ int main(int argc, char** argv)
         }
     }
 
+    if (is_cross_block_special)
+    {
+        const uint32_t special =
+            mode == "movz_liveness" ? make_r(19, 9, 2, 0, 0x0a) :
+            mode == "movn_liveness" ? make_r(19, 9, 2, 0, 0x0b) :
+            make_r(19, 17, 2, 0, 0x07);
+        const uint32_t pcs[] = {entry_pc + 8u, entry_pc + 12u, entry_pc + 16u};
+        const uint32_t words[] =
+        {
+            special,
+            make_r(31, 0, 0, 0, 0x08), // jr ra
+            make_i(0x09, 0, 18, 0x55)  // delay-slot marker
+        };
+        for (size_t index = 0; index < sizeof(pcs) / sizeof(pcs[0]); ++index)
+        {
+            const ee::s_ee_instruction extra = ee::decode(pcs[index], words[index]);
+            if (extra.valid != ee::e_ee_valid::VALID)
+            {
+                std::fprintf(stderr, "special liveness instruction at 0x%08x failed to decode\n",
+                             pcs[index]);
+                return 6;
+            }
+            insn_map.emplace(extra.pc, extra);
+        }
+    }
     if (is_branch_liveness)
     {
         const uint32_t pcs[] =
@@ -299,7 +340,7 @@ int main(int argc, char** argv)
     const auto functions = analyzer.analyze(insn_map, {function_entry_pc});
     const size_t expected_blocks =
         (is_recursive || is_branch_liveness) ? 4u :
-        has_continuation ? 2u : 1u;
+        (has_continuation || is_cross_block_special) ? 2u : 1u;
     bool block_layout_valid =
         !functions.empty() && functions[0].blocks.size() == expected_blocks &&
         !functions[0].blocks.empty() &&
@@ -317,6 +358,13 @@ int main(int argc, char** argv)
             blocks[1].start_pc == entry_pc + 8u && blocks[1].insn_indices.size() == 2 &&
             blocks[2].start_pc == entry_pc + 20u && blocks[2].insn_indices.size() == 3 &&
             blocks[3].start_pc == entry_pc + 32u && blocks[3].insn_indices.size() == 2;
+    }
+    if (block_layout_valid && is_cross_block_special)
+    {
+        const auto& blocks = functions[0].blocks;
+        block_layout_valid =
+            blocks[1].start_pc == entry_pc + 8u &&
+            blocks[1].insn_indices.size() == 3u;
     }
     if (block_layout_valid && is_branch_liveness)
     {
