@@ -2714,6 +2714,13 @@ int main(int argc, char** argv)
     {
         instruction_trace.resize(k_instruction_trace_limit);
     }
+    // Preserve the most recent guest stores, not just the first 64
+    // printed matches. This ring is host-owned and disabled by default.
+    std::vector<ee::s_ee_guest_store_trace_entry> recent_guest_stores;
+    if (has_trace_store)
+    {
+        recent_guest_stores.resize(64u);
+    }
     ee::s_ee_runtime runtime{};
     if (hle_startup && compatibility_clock)
     {
@@ -2754,6 +2761,10 @@ int main(int argc, char** argv)
     runtime.m_guest_store_trace_enabled = has_trace_store;
     runtime.m_guest_store_trace_word = trace_store;
     runtime.m_guest_store_trace_remaining = has_trace_store ? 64u : 0u;
+    runtime.m_guest_store_trace_recent = recent_guest_stores.empty() ?
+        nullptr : recent_guest_stores.data();
+    runtime.m_guest_store_trace_capacity =
+        static_cast<uint32_t>(recent_guest_stores.size());
     runtime.m_guest_v0_trace_first_pc = trace_v0_first_pc;
     runtime.m_guest_v0_trace_last_pc = trace_v0_last_pc;
     runtime.m_guest_v0_trace_remaining = has_trace_v0 ? 64u : 0u;
@@ -7621,6 +7632,37 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(cpu.m_gpr[5].m_lo),
                 static_cast<unsigned long long>(cpu.m_gpr[6].m_lo),
                 static_cast<unsigned long long>(cpu.m_gpr[7].m_lo)
+            );
+        }
+    }
+    if (runtime.m_guest_store_trace_count != 0u)
+    {
+        // Dump the actual last stores, oldest first, for both a crashing
+        // guest and a successful capped replay. A source operand is not
+        // represented as an observed post-write value.
+        const uint32_t stored = runtime.m_guest_store_trace_count;
+        const uint32_t capacity = runtime.m_guest_store_trace_capacity;
+        const uint32_t oldest = stored == capacity ?
+            runtime.m_guest_store_trace_next : 0u;
+        std::printf(
+            "EE guest-store recent: addr=0x%08x count=%u"
+            " (before-store operands; oldest first)\n",
+            runtime.m_guest_store_trace_word, stored
+        );
+        for (uint32_t index = 0u; index < stored; ++index)
+        {
+            const ee::s_ee_guest_store_trace_entry& entry =
+                runtime.m_guest_store_trace_recent[(oldest + index) % capacity];
+            std::printf(
+                "  guest-store pc=0x%08x opcode=0x%08x"
+                " effective=0x%08x affected=0x%08x width=%u"
+                " lane=%u source=0x%016llx base=0x%016llx"
+                " sp=%08x fp=%08x ra=%08x\n",
+                entry.m_pc, entry.m_opcode, entry.m_effective_address,
+                entry.m_affected_address, entry.m_width, entry.m_source_lane,
+                static_cast<unsigned long long>(entry.m_source_value),
+                static_cast<unsigned long long>(entry.m_base_value),
+                entry.m_sp, entry.m_fp, entry.m_ra
             );
         }
     }
