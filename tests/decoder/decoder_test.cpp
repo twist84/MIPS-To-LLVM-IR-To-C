@@ -24,6 +24,48 @@ static void expect(const char* what, uint32_t word, const char* mn, e_ee_valid v
 int main()
 {
     const auto V = e_ee_valid::VALID, U = e_ee_valid::UNSUPPORTED, X = e_ee_valid::INVALID;
+    // Signed-overflow arithmetic and both integer trap families now
+    // enter the real native EX_Ov / EX_Tr exception path. The independent
+    // legacy C++ emitter must not alias them to unchecked arithmetic/ERET.
+    for (uint32_t funct : {0x20u, 0x22u, 0x2cu, 0x2eu})
+    {
+        const auto ins = decode(0x00150000u, R(0x00, 4, 5, 6, 0, funct));
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_SIGNED;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL signed checked SPECIAL 0x%x\n", funct);
+    }
+    expect("DADD bad sa", R(0x00,4,5,6,1,0x2c), "signed_arith", U);
+    expect("DSUB bad sa", R(0x00,4,5,6,1,0x2e), "signed_arith", U);
+    for (uint32_t opcode : {0x08u, 0x18u})
+    {
+        const auto ins = decode(0x00150000u,
+            (opcode << 26) | (4u << 21) | (6u << 16) | 0xFFFFu);
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_SIGNED;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked immediate 0x%x\n", opcode);
+    }
+    for (uint32_t funct : {0x30u, 0x31u, 0x32u, 0x33u, 0x34u, 0x36u})
+    {
+        // Non-zero ten-bit trap-code fields are architecturally allowed.
+        const auto ins = decode(0x00150000u, R(0x00,4,5,6,17,funct));
+        const bool ok = ins.valid == V &&
+            lift(ins).kind == LOP_CHECKED_TRAP;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked SPECIAL trap 0x%x\n", funct);
+    }
+    for (uint32_t rt : {0x08u,0x09u,0x0au,0x0bu,0x0cu,0x0eu})
+    {
+        const auto ins = decode(0x00150000u,
+            (0x01u << 26) | (4u << 21) | (rt << 16) | 0xFFFFu);
+        const bool ok = ins.valid == V &&
+            ins.flow == e_ee_flow::FLOW_NONE && !ins.has_delay_slot &&
+            ins.branch_target == 0 &&
+            lift(ins).kind == LOP_CHECKED_TRAP;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok) std::printf("FAIL checked REGIMM trap 0x%x\n", rt);
+    }
     // Scalar comparisons are lowered exactly as 64-bit signed/unsigned tests.
     expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
     expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
@@ -49,6 +91,46 @@ int main()
     expect("special reserved", R(0x00, 4, 5, 6, 0, 0x01),
            "special_rsvd", X);
     // MMI groups: funct 0x08=MMI0, 0x28=MMI1, 0x09=MMI2, 0x29=MMI3; sub-op in sa.
+    // The packed shifts have reserved rs=0 and independent lane
+    // sizes. PLZCW consumes rs but writes only the first two rd words.
+    expect("plzcw", R(0x1c,4,0,6,0,0x04), "plzcw", V);
+    expect("plzcw reserved rt", R(0x1c,4,5,6,0,0x04), "plzcw", U);
+    expect("plzcw reserved sa", R(0x1c,4,0,6,1,0x04), "plzcw", U);
+    for (uint32_t funct : {0x34u, 0x36u, 0x37u,
+                           0x3cu, 0x3eu, 0x3fu})
+    {
+        const auto good = decode(0x00160000, R(0x1c,0,5,6,31,funct));
+        const auto bad = decode(0x00160000, R(0x1c,4,5,6,31,funct));
+        const bool ok = good.valid == V &&
+                        lift(good).kind == LOP_MMI_SHIFT &&
+                        bad.valid == U;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL MMI packed shift 0x%x valid/reserved\n", funct);
+        }
+    }
+    // Exhaustive non-reserved MMI0 selector classification. The special
+    // PEXT5/PPAC5 forms are unary and must reject rs != zero.
+    for (uint32_t subop = 0u; subop < 32u; ++subop)
+    {
+        const bool named = subop <= 0x0au ||
+            (subop >= 0x10u && subop <= 0x1bu) ||
+            subop == 0x1eu || subop == 0x1fu;
+        const uint32_t rs = subop >= 0x1eu ? 0u : 4u;
+        const auto instruction = decode(
+            0x00160000, R(0x1c,rs,5,6,subop,0x08));
+        const bool accepted = instruction.valid == V &&
+            lift(instruction).kind != LOP_UNSUPPORTED;
+        const bool ok = named ? accepted : instruction.valid == X;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL MMI0 selector %u decode/lift\n", subop);
+        }
+    }
+    expect("pext5 bad rs", R(0x1c,4,5,6,0x1e,0x08), "pext5", U);
+    expect("ppac5 bad rs", R(0x1c,4,5,6,0x1f,0x08), "ppac5", U);
     expect("paddw",   R(0x1c,4,5,6,0x00,0x08), "paddw",  V);
     expect("psubh",   R(0x1c,4,5,6,0x05,0x08), "psubh",  V);
     expect("pmaxh",   R(0x1c,4,5,6,0x07,0x08), "pmaxh",  V);
@@ -103,8 +185,8 @@ int main()
     expect("mtlo1",   R(0x1c,4,0,0,0,0x13),    "mtlo1",  V);
     // Real ops that are NOT lowered exactly must never be VALID (previously a
     // silent fallback add/and/or/move was emitted for them).
-    expect("paddsw",  R(0x1c,4,5,6,0x10,0x08), "paddsw", U);   // saturating: was plain add
-    expect("pextlw",  R(0x1c,4,5,6,0x12,0x08), "pextlw", U);   // was lowered as OR
+    expect("paddsw",  R(0x1c,4,5,6,0x10,0x08), "paddsw", V);   // saturating, not plain add
+    expect("pextlw",  R(0x1c,4,5,6,0x12,0x08), "pextlw", V);   // exact rt/rs interleave
     expect("pcpyld",  R(0x1c,4,5,6,0x0e,0x09), "pcpyld", V);   // exact lower-64 interleave
     expect("pcpyh",   R(0x1c,0,5,6,0x1b,0x29), "pcpyh",  V);   // independent halfword broadcast
     expect("pcpyh-bad-rs", R(0x1c,4,5,6,0x1b,0x29), "pcpyh", U); // unary instruction requires rs=0
@@ -200,8 +282,228 @@ int main()
     expect("div1 bad sa", R(0x1c,4,5,6,1,0x1a), "div1", U);
     expect("divu1 bad sa", R(0x1c,4,5,6,1,0x1b), "divu1", U);
     expect("mult1 bad sa", R(0x1c,4,5,6,1,0x18), "mult1", U);
-    expect("pmfhl",   R(0x1c,0,0,6,0,0x30),    "pmfhl",  U);
-    expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  U);
+    // PMFHL uses five legal format selectors; its operands are HI/LO.
+    // PMTHL reads rs and selectively writes four HI/LO low words.
+    for (uint32_t mode = 0u; mode <= 4u; ++mode)
+    {
+        const auto ins = decode(0x00170000u, R(0x1c,0,0,6,mode,0x30));
+        const bool ok = ins.valid == V &&
+                        lift(ins).kind == LOP_MMI_PMFHL;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL PMFHL mode %u decoder/lifter\n", mode);
+        }
+    }
+    expect("pmfhl mode 5", R(0x1c,0,0,6,5,0x30), "pmfhl", U);
+    expect("pmfhl mode 31", R(0x1c,0,0,6,31,0x30), "pmfhl", U);
+    expect("pmfhl bad rs", R(0x1c,4,0,6,0,0x30), "pmfhl", U);
+    expect("pmfhl bad rt", R(0x1c,0,4,6,0,0x30), "pmfhl", U);
+    {
+        const auto ins = decode(0x00170000u, R(0x1c,4,0,0,0,0x31));
+        const bool ok = ins.valid == V &&
+                        lift(ins).kind == LOP_MMI_PMTHL;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL PMTHL mode zero decoder/lifter\n");
+        }
+    }
+    expect("pmthl rs zero", R(0x1c,0,0,0,0,0x31), "pmthl", V);
+    expect("pmthl bad rt", R(0x1c,4,5,0,0,0x31), "pmthl", U);
+    expect("pmthl bad rd", R(0x1c,4,0,6,0,0x31), "pmthl", U);
+    expect("pmthl bad sa", R(0x1c,4,0,0,1,0x31), "pmthl", U);
+    // MMI2/MMI3 packed word arithmetic uses two independent low words,
+    // with HI0/LO0 and HI1/LO1 as the destination accumulators.
+    // PMFHI/PMFLO and PMTHI/PMTLO transfer full 128-bit banks.
+    for (uint32_t funct : {0x09u, 0x29u})
+    {
+        for (uint32_t subop : {0x08u, 0x09u, 0x0cu, 0x0du})
+        {
+            uint32_t rs = 4u, rt = 5u, rd = 6u;
+            if (funct == 0x09u && subop <= 0x09u)
+            {
+                rs = 0u;
+                rt = 0u;
+            }
+            else if (funct == 0x29u && subop <= 0x09u)
+            {
+                rt = 0u;
+                rd = 0u;
+            }
+            else if (subop == 0x0du)
+            {
+                rd = 0u;
+            }
+
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,rs,rt,rd,subop,funct));
+            const auto kind = lift(ins).kind;
+            const bool right_class = subop <= 0x09u
+                ? kind == LOP_MMI_HILO_PAIR_TRANSFER
+                : subop == 0x0cu ? kind == LOP_MMI_PACKED_MULT
+                                  : kind == LOP_MMI_PACKED_DIV;
+            const bool ok = ins.valid == V && right_class;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed word MMI funct=%02x sa=%02x\n",
+                            funct, subop);
+            }
+        }
+    }
+    expect("pmfhi bad rs", R(0x1c,4,0,6,8,0x09), "pmfhi", U);
+    expect("pmflo bad rt", R(0x1c,0,5,6,9,0x09), "pmflo", U);
+    expect("pmthi bad rt", R(0x1c,4,5,0,8,0x29), "pmthi", U);
+    expect("pmtlo bad rd", R(0x1c,4,0,6,9,0x29), "pmtlo", U);
+    expect("pdivw bad rd", R(0x1c,4,5,6,0xd,0x09), "pdivw", U);
+    expect("pdivuw bad rd", R(0x1c,4,5,6,0xd,0x29), "pdivuw", U);
+    for (const uint32_t rs : {0u, 4u})
+    {
+        for (const uint32_t rt : {0u, 4u, 5u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,rs,rt,0u,0x1du,0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_DIV;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL PDIVBW rs=%u rt=%u decoder/lifter\n",
+                            rs, rt);
+            }
+        }
+    }
+    expect("pdivbw bad rd", R(0x1c,4,5,6,0x1d,0x09), "pdivbw", U);
+    expect("pdivbw reserved MMI3", R(0x1c,4,5,0,0x1d,0x29), "reserved", X);
+    expect("pdivbw reserved neighbor", R(0x1c,4,5,0,0x17,0x09), "reserved", X);
+    expect("pmultw zero rd", R(0x1c,4,5,0,0xc,0x09), "pmultw", V);
+    expect("pmultuw zero rd", R(0x1c,4,5,0,0xc,0x29), "pmultuw", V);
+    // Signed/unsigned packed word accumulation: independent MAC class.
+    for (const auto encoding :
+         {std::pair<uint32_t,uint32_t>{0x09u, 0x00u},
+          std::pair<uint32_t,uint32_t>{0x09u, 0x04u},
+          std::pair<uint32_t,uint32_t>{0x29u, 0x00u}})
+    {
+        for (const uint32_t destination : {6u, 0u, 4u, 5u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c, 4, 5, destination,
+                                      encoding.second, encoding.first));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_MAC;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed MAC funct=%02x sa=%02x rd=%u\n",
+                            encoding.first, encoding.second, destination);
+            }
+        }
+    }
+    // PSLLVW/PSRLVW: two 32-bit word shifts with sign-extended
+    // 64-bit destination lanes, not four independent 32-bit shifts.
+    for (const uint32_t subop : {0x02u, 0x03u})
+    {
+        for (const uint32_t destination : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,4,5,destination,subop,0x09));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_SHIFT;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed variable shift sa=%02x rd=%u\n",
+                            subop, destination);
+            }
+        }
+    }
+    for (const uint32_t source : {0u, 4u, 5u})
+    {
+        for (const uint32_t destination : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,source,5,destination,3,0x29));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_SHIFT;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL PSRAVW rs=%u rd=%u decoder/lifter\n",
+                            source, destination);
+            }
+        }
+    }
+    // MMI2 PINTH and MMI3 PINTEH interleave eight halfword elements.
+    // Both use all source/destination aliases, including $zero.
+    for (const uint32_t function : {0x09u, 0x29u})
+    {
+        for (const uint32_t rs : {0u, 4u, 5u})
+        {
+            for (const uint32_t rd : {0u, 4u, 5u, 6u})
+            {
+                const auto ins = decode(0x00180000u,
+                    R(0x1c, rs, 5u, rd, 0x0au, function));
+                const bool valid = ins.valid == V &&
+                    lift(ins).kind == LOP_MMI_INTERLEAVE;
+                valid ? ++g_pass : ++g_fail;
+                if (!valid)
+                {
+                    std::printf("FAIL halfword interleave fn=%02x rs=%u rd=%u\n",
+                                function, rs, rd);
+                }
+            }
+        }
+    }
+    expect("mmi2 reserved interleave sa0b",
+           R(0x1c,4,5,6,0x0b,0x09), "reserved", X);
+    expect("mmi3 reserved interleave sa0b",
+           R(0x1c,4,5,6,0x0b,0x29), "reserved", X);
+    // Only MMI2 unary permutation encodings with rs=$zero are valid.
+    for (const uint32_t subop : {0x1au, 0x1bu, 0x1eu, 0x1fu})
+    {
+        for (const uint32_t rd : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,0u,5u,rd,subop,0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PERMUTE;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL MMI2 unary permutation sa=%u rd=%u\n",
+                            subop, rd);
+            }
+        }
+    }
+    expect("pexeh with reserved rs", R(0x1c,4,5,6,0x1a,0x09), "pexeh", U);
+    expect("prevh with reserved rs", R(0x1c,4,5,6,0x1b,0x09), "prevh", U);
+    expect("pexew with reserved rs", R(0x1c,4,5,6,0x1e,0x09), "pexew", U);
+    expect("prot3w with reserved rs", R(0x1c,4,5,6,0x1f,0x09), "prot3w", U);
+    expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
+    expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
+    expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
+    // MMI2 halfword multiply/add/sub and horizontal pair variants.
+    for (const uint32_t subop : {0x10u, 0x11u, 0x14u, 0x15u, 0x1cu})
+    {
+        for (const uint32_t dest : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c, 4, 5, dest, subop, 0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_HALF;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL halfword MMI2 sa=%02x rd=%u\n",
+                            subop, dest);
+            }
+        }
+    }
+    expect("mmi2 reserved half sa16", R(0x1c,4,5,6,0x16,0x09), "reserved", X);
+    expect("mmi3 reserved half sa10", R(0x1c,4,5,6,0x10,0x29), "reserved", X);
+    expect("mmi3 reserved half sa1c", R(0x1c,4,5,6,0x1c,0x29), "reserved", X);
+    expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0
     // macro mode; the low funct/sa fields are only interpreted inside macro mode.
@@ -504,26 +806,26 @@ int main()
     expect("fmt.l", R(0x11,0x15,5,6,7,0x00), "cop1_reserved", X);
     expect("bc1 rt=4", R(0x11,0x08,4,0,0,0x00), "cop1_reserved", X);
 
-    // Signed word register operations raise Ov. Immediate and doubleword
-    // overflow encodings remain gated until their exception paths are modelled.
-    expect("addi overflow", R(0x08,4,5,0,0,0), "addi", U);
-    expect("daddi overflow", R(0x18,4,5,0,0,0), "daddi", U);
+    // Signed word/doubleword arithmetic and integer traps now have
+    // checked LLVM lowering and precise EX_Ov/EX_Tr exception entry.
+    expect("addi overflow", R(0x08,4,5,0,0,0), "addi", V);
+    expect("daddi overflow", R(0x18,4,5,0,0,0), "daddi", V);
     expect("slti", R(0x0a,4,5,0,0,0), "slti", V);
     expect("sltiu", R(0x0b,4,5,0,0,0), "sltiu", V);
     expect("add", R(0x00,4,5,6,0,0x20), "signed_arith", V);
     expect("sub", R(0x00,4,5,6,0,0x22), "signed_arith", V);
     expect("sub reserved shift", R(0x00,4,5,6,1,0x22), "signed_arith", U);
-    expect("dadd overflow", R(0x00,4,5,6,0,0x2c), "signed_arith", U);
+    expect("dadd overflow", R(0x00,4,5,6,0,0x2c), "signed_arith", V);
     expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
     expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
-    expect("tge", R(0x00,4,5,0,0,0x30), "trap", U);
+    expect("tge", R(0x00,4,5,0,0,0x30), "trap", V);
     expect("bltzal", R(0x01,4,0x10,0,0,0), "bltzal", V);
     expect("bgezal", R(0x01,4,0x11,0,0,0), "bgezal", V);
     expect("bltzall", R(0x01,4,0x12,0,0,0), "bltzall", V);
     expect("bgezall", R(0x01,4,0x13,0,0,0), "bgezall", V);
     expect("bltzal rs=ra", R(0x01,31,0x10,0,0,0), "bltzal", U);
     expect("bltzall rs=ra", R(0x01,31,0x12,0,0,0), "bltzall", U);
-    expect("tgei", R(0x01,4,0x08,0,0,0), "regimm_trap", U);
+    expect("tgei", R(0x01,4,0x08,0,0,0), "regimm_trap", V);
     expect("mtsab", R(0x01,4,0x18,0,0,0), "mtsab", V);
     expect("mtsah", R(0x01,4,0x19,0,0,0), "mtsah", V);
     expect("reserved regimm", R(0x01,4,0x1f,0,0,0), "regimm_reserved", X);

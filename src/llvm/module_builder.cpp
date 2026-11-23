@@ -80,6 +80,7 @@ void module_builder::declare_memory_helpers()
     m_out += "declare void @ee_mem_swr(ptr, i32, i64)\n";
     m_out += "declare void @ee_mem_sdl(ptr, i32, i64)\n";
     m_out += "declare void @ee_mem_sdr(ptr, i32, i64)\n";
+    m_out += "declare i32 @llvm.ctlz.i32(i32, i1)\n";
     m_out += "declare float @llvm.sqrt.f32(float)\n";
     m_out += "declare float @llvm.fabs.f32(float)\n";
     m_out += "declare i32 @ee_raise_exception(ptr, ptr, i32, i32, i32, i32)\n";
@@ -544,7 +545,9 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             if (ins.rt >= 0x10 && ins.rt <= 0x13)
                 w.insert(31);
             break;
+        case e_ee_opcode::OP_ADDI:
         case e_ee_opcode::OP_ADDIU:
+        case e_ee_opcode::OP_DADDI:
         case e_ee_opcode::OP_DADDIU:
         case e_ee_opcode::OP_ANDI:
         case ee::e_ee_opcode::OP_ORI:
@@ -559,6 +562,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
         case ee::e_ee_opcode::OP_LW:
         case ee::e_ee_opcode::OP_LWU:
         case ee::e_ee_opcode::OP_LD:
+        case ee::e_ee_opcode::OP_LQ:
         case ee::e_ee_opcode::OP_LWL:
         case ee::e_ee_opcode::OP_LWR:
         case ee::e_ee_opcode::OP_LDL:
@@ -579,6 +583,22 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             case e_ee_opcode::FUNCT_ADDU:
             case e_ee_opcode::FUNCT_SUB:
             case e_ee_opcode::FUNCT_SUBU:
+            case e_ee_opcode::FUNCT_DADD:
+            case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUB:
+            case e_ee_opcode::FUNCT_DSUBU:
+            case e_ee_opcode::FUNCT_DSLL:
+            case e_ee_opcode::FUNCT_DSRL:
+            case e_ee_opcode::FUNCT_DSRA:
+            case e_ee_opcode::FUNCT_DSLL32:
+            case e_ee_opcode::FUNCT_DSRL32:
+            case e_ee_opcode::FUNCT_DSRA32:
+            case e_ee_opcode::FUNCT_DSLLV:
+            case e_ee_opcode::FUNCT_DSRLV:
+            case e_ee_opcode::FUNCT_DSRAV:
+            case e_ee_opcode::FUNCT_SRAV:
+            case e_ee_opcode::FUNCT_MOVZ:
+            case e_ee_opcode::FUNCT_MOVN:
             case e_ee_opcode::FUNCT_AND:
             case e_ee_opcode::FUNCT_OR:
             case e_ee_opcode::FUNCT_XOR:
@@ -624,10 +644,19 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
                 break;
             case 0x11: // MTHI1: HI1 = rs
             case 0x13: // MTLO1: LO1 = rs
+            case 0x31: // PMTHL: updates HI/LO, never rd
             case 0x1a: // DIV1: writes HI1/LO1, not rd
             case 0x1b: // DIVU1: writes HI1/LO1, not rd
                 break;
-            default: // packed MMI operations write rd
+            default: // packed MMI operations usually write rd
+                // Divides and MMI3 full-bank transfers have no rd write.
+                if ((ins.funct == 0x09 || ins.funct == 0x29) &&
+                    (ins.sa == 0x0d ||
+                     (ins.funct == 0x29 &&
+                      (ins.sa == 0x08 || ins.sa == 0x09))))
+                {
+                    break;
+                }
                 if (ins.rd != 0) w.insert(ins.rd);
                 break;
             }
@@ -670,6 +699,7 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_LW:
         case e_ee_opcode::OP_LWU:
         case e_ee_opcode::OP_LD:
+        case e_ee_opcode::OP_LQ:
         case e_ee_opcode::OP_LWL:
         case e_ee_opcode::OP_LWR:
         case e_ee_opcode::OP_LDL:
@@ -692,12 +722,20 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_SB:
         case e_ee_opcode::OP_SH:
         case e_ee_opcode::OP_SD:
+        case e_ee_opcode::OP_SQ:
         case e_ee_opcode::OP_SWL:
         case e_ee_opcode::OP_SDL:
         case e_ee_opcode::OP_SWR:
         case e_ee_opcode::OP_SDR:
             consider_read(ins.rs);
             consider_read(ins.rt);
+            break;
+        case e_ee_opcode::OP_LWC1:
+        case e_ee_opcode::OP_SWC1:
+        case e_ee_opcode::OP_LQC2:
+        case e_ee_opcode::OP_SQC2:
+            // These transfers read a GPR address base but have no GPR result.
+            consider_read(ins.rs);
             break;
         case e_ee_opcode::OP_SPECIAL:
             switch (static_cast<e_ee_opcode>(ins.funct))
@@ -734,12 +772,36 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             case e_ee_opcode::FUNCT_DSRA32:
                 // Doubleword shifts read rt and preserve the upper half of rd.
                 consider_read(ins.rt);
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
+            case e_ee_opcode::FUNCT_SRAV:
+                consider_read(ins.rs);
+                consider_read(ins.rt);
+                if (ins.rd != 0)
+                {
+                    written_so_far.insert(ins.rd);
+                }
+                break;
+            case e_ee_opcode::FUNCT_MOVZ:
+            case e_ee_opcode::FUNCT_MOVN:
+                // Conditional register moves preserve rd when their predicate
+                // is false, so the old destination is an architectural input.
+                consider_read(ins.rs);
+                consider_read(ins.rt);
+                consider_read(ins.rd);
+                if (ins.rd != 0)
+                {
+                    written_so_far.insert(ins.rd);
+                }
+                break;
+            case e_ee_opcode::FUNCT_DADD:
             case e_ee_opcode::FUNCT_DADDU:
+            case e_ee_opcode::FUNCT_DSUB:
             case e_ee_opcode::FUNCT_DSUBU:
                 // Scalar doubleword results preserve the upper 64 bits of rd.
                 consider_read(ins.rs);
                 consider_read(ins.rt);
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
                 break;
             case e_ee_opcode::FUNCT_ADD:
             case e_ee_opcode::FUNCT_ADDU:
@@ -766,8 +828,16 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             break;
         case e_ee_opcode::OP_BEQ:
         case e_ee_opcode::OP_BNE:
+        case e_ee_opcode::OP_BEQL:
+        case e_ee_opcode::OP_BNEL:
             consider_read(ins.rs);
             consider_read(ins.rt);
+            break;
+        case e_ee_opcode::OP_BLEZ:
+        case e_ee_opcode::OP_BGTZ:
+        case e_ee_opcode::OP_BLEZL:
+        case e_ee_opcode::OP_BGTZL:
+            consider_read(ins.rs);
             break;
         case e_ee_opcode::OP_REGIMM:
             consider_read(ins.rs);
@@ -777,6 +847,7 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 written_so_far.insert(31);
             break;
         case e_ee_opcode::OP_ADDI:
+        case e_ee_opcode::OP_DADDI:
             consider_read(ins.rs);
             if (ins.rt != 0) written_so_far.insert(ins.rt);
             break;
@@ -808,9 +879,18 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_MMI:
             switch (ins.funct)
             {
+            case 0x04: // PLZCW updates only rd's low doubleword.
+                consider_read(ins.rs);
+                consider_read(ins.rd); // preserve previous upper 64 bits
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
             case 0x10: // MFHI1: rd = HI1
             case 0x12: // MFLO1: rd = LO1
+            case 0x30: // PMFHL: writes all 128 bits of rd
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
+            case 0x31: // PMTHL: only reads rs; no GPR destination
+                consider_read(ins.rs);
                 break;
             case 0x11: // MTHI1: HI1 = rs
             case 0x13: // MTLO1: LO1 = rs
@@ -819,6 +899,27 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 consider_read(ins.rs);
                 consider_read(ins.rt);
                 break;
+            case 0x09: // MMI2: PMFHI / PMFLO / PMULTW / PDIVW
+            case 0x29: // MMI3: PMTHI / PMTLO / PMULTUW / PDIVUW
+                if (ins.sa == 0x08 || ins.sa == 0x09)
+                {
+                    if (ins.funct == 0x29)
+                    {
+                        consider_read(ins.rs);
+                    }
+                    else if (ins.rd != 0)
+                    {
+                        written_so_far.insert(ins.rd);
+                    }
+                    break;
+                }
+                if (ins.sa == 0x0d) // PDIV* never writes rd
+                {
+                    consider_read(ins.rs);
+                    consider_read(ins.rt);
+                    break;
+                }
+                [[fallthrough]];
             default: // packed MMI operations read rs/rt and write rd
                 consider_read(ins.rs);
                 consider_read(ins.rt);
@@ -924,8 +1025,66 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         m_out += aligned + ":\n";
     };
 
+    // Precise conditional exception: publish prior SSA state before
+    // exception entry, but do not commit a faulting arithmetic result.
+    const auto emit_checked_exception =
+        [&](const std::string& condition, uint32_t excode)
+    {
+        const std::set<uint8_t> dirty(m_dirty_regs.begin(), m_dirty_regs.end());
+        store_dirty_regs(dirty);
+        reset_tracking();
+        const std::string suffix = std::to_string(m_temp_counter++);
+        const std::string fault = "checked_fault_" + suffix;
+        const std::string normal = "checked_continue_" + suffix;
+        m_out += "  br i1 " + condition + ", label %" + fault +
+                 ", label %" + normal + "\n";
+        m_out += fault + ":\n";
+        m_out += "  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 " +
+                 std::to_string(excode) + ", i32 " + std::to_string(ins.pc) +
+                 ", i32 " + std::to_string(in_delay_slot ? 1u : 0u) +
+                 ", i32 0)\n";
+        m_out += "  ret i32 1\n";
+        m_out += normal + ":\n";
+    };
+
     switch (ins.opcode)
     {
+    case ee::e_ee_opcode::OP_ADDI:
+    case ee::e_ee_opcode::OP_DADDI:
+    {
+        // Signed 32-bit ADDI and 64-bit DADDI overflow before the write.
+        const bool word = ins.opcode == ee::e_ee_opcode::OP_ADDI;
+        const std::string lhs = word
+            ? trunc32_sext64(src_lo(ins.rs)) : src_lo(ins.rs);
+        const std::string rhs = std::to_string(ins.immediate);
+        const std::string overflow = newtemp();
+        if (word)
+        {
+            const std::string wide = newtemp();
+            m_out += "  " + wide + " = add i64 " + lhs + ", " + rhs + "\n";
+            const std::string result = trunc32_sext64(wide);
+            m_out += "  " + overflow + " = icmp ne i64 " +
+                     result + ", " + wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rt, result);
+        }
+        else
+        {
+            const std::string source_wide = newtemp();
+            const std::string wide = newtemp();
+            const std::string result = newtemp();
+            const std::string result_wide = newtemp();
+            m_out += "  " + source_wide + " = sext i64 " + lhs + " to i128\n";
+            m_out += "  " + wide + " = add i128 " + source_wide + ", " + rhs + "\n";
+            m_out += "  " + result + " = trunc i128 " + wide + " to i64\n";
+            m_out += "  " + result_wide + " = sext i64 " + result + " to i128\n";
+            m_out += "  " + overflow + " = icmp ne i128 " +
+                     wide + ", " + result_wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rt, result);
+        }
+        break;
+    }
     case ee::e_ee_opcode::OP_ADDIU:
     {
         // 32-bit add, result sign-extended into low 64; upper 64 preserved.
@@ -1312,17 +1471,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             else if (rt == ee::e_ee_opcode::REGIMM_TNEI) pred = "ne";
             m_out += "  " + cmp + " = icmp " + std::string(pred) + " i64 " +
                      src_lo(ins.rs) + ", " + imm64 + "\n";
-            char pcbuf[32];
-            std::snprintf(pcbuf, sizeof(pcbuf), "%u", (unsigned)ins.pc);
-            m_out += "  br i1 " + cmp + ", label %trap_ri_" + std::string(pcbuf) +
-                     ", label %trap_ri_cont_" + std::string(pcbuf) + "\n";
-            m_out += "trap_ri_" + std::string(pcbuf) + ":\n";
-            std::string vec = newtemp();
-            m_out += "  " + vec +
-                     " = call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 13, i32 " +
-                     std::string(pcbuf) + ", i32 0, i32 0)\n";
-            m_out += "  ret i32 1\n";
-            m_out += "trap_ri_cont_" + std::string(pcbuf) + ":\n";
+            emit_checked_exception(cmp, 13u);
             break;
         }
         // Branches: BLTZ/BGEZ family including link (*AL) and likely (*L/*ALL).
@@ -1602,28 +1751,77 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         else if (funct == ee::e_ee_opcode::FUNCT_DIV ||
                  funct == ee::e_ee_opcode::FUNCT_DIVU)
         {
-            // 32-bit divide: LO = quot, HI = rem (each sign-extended to 64).
-            std::string a32 = newtemp();
-            std::string b32 = newtemp();
-            std::string q32 = newtemp();
-            std::string r32 = newtemp();
-            std::string q64 = newtemp();
-            std::string r64 = newtemp();
-            m_out += "  " + a32 + " = trunc i64 " + src_lo(ins.rs) + " to i32\n";
-            m_out += "  " + b32 + " = trunc i64 " + src_lo(ins.rt) + " to i32\n";
-            // Skip div-by-zero: host would fault; emit udiv/sdiv anyway (runtime
-            // can trap). Prefer sdiv/udiv matching the instruction.
-            if (funct == ee::e_ee_opcode::FUNCT_DIV) {
-                m_out += "  " + q32 + " = sdiv i32 " + a32 + ", " + b32 + "\n";
-                m_out += "  " + r32 + " = srem i32 " + a32 + ", " + b32 + "\n";
-            } else {
-                m_out += "  " + q32 + " = udiv i32 " + a32 + ", " + b32 + "\n";
-                m_out += "  " + r32 + " = urem i32 " + a32 + ", " + b32 + "\n";
+            // DIV/DIVU operate on low 32-bit words and sign-extend both HI
+            // (remainder) and LO (quotient). LLVM division by zero and signed
+            // INT_MIN / -1 are undefined, so neither case may reach sdiv/srem.
+            // The EE's divide-by-zero result is architecturally undefined:
+            // preserve HI/LO deterministically, matching DIV1/DIVU1.
+            const bool is_unsigned = funct == ee::e_ee_opcode::FUNCT_DIVU;
+            const std::string lhs32 = newtemp();
+            const std::string rhs32 = newtemp();
+            const std::string div_zero = newtemp();
+            const std::string safe_rhs = newtemp();
+            const std::string quotient_raw = newtemp();
+            const std::string remainder_raw = newtemp();
+            std::string quotient = quotient_raw;
+            std::string remainder = remainder_raw;
+            const std::string hi_ptr = state_field(1);
+            const std::string lo_ptr = state_field(2);
+
+            m_out += "  " + lhs32 + " = trunc i64 " + src_lo(ins.rs) + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + src_lo(ins.rt) + " to i32\n";
+            m_out += "  " + div_zero + " = icmp eq i32 " + rhs32 + ", 0\n";
+            m_out += "  " + safe_rhs + " = select i1 " + div_zero +
+                     ", i32 1, i32 " + rhs32 + "\n";
+            if (is_unsigned)
+            {
+                m_out += "  " + quotient_raw + " = udiv i32 " + lhs32 + ", " + safe_rhs + "\n";
+                m_out += "  " + remainder_raw + " = urem i32 " + lhs32 + ", " + safe_rhs + "\n";
             }
-            m_out += "  " + q64 + " = sext i32 " + q32 + " to i64\n";
-            m_out += "  " + r64 + " = sext i32 " + r32 + " to i64\n";
-            m_out += "  store i64 " + q64 + ", ptr " + state_field(2) + "\n";
-            m_out += "  store i64 " + r64 + ", ptr " + state_field(1) + "\n";
+            else
+            {
+                // R5900 signed INT_MIN / -1 produces quotient INT_MIN and
+                // remainder zero. Use safe operands to avoid LLVM poison.
+                const std::string is_min = newtemp();
+                const std::string is_neg_one = newtemp();
+                const std::string overflow = newtemp();
+                const std::string safe_lhs = newtemp();
+                const std::string safe_signed_rhs = newtemp();
+                quotient = newtemp();
+                remainder = newtemp();
+                m_out += "  " + is_min + " = icmp eq i32 " + lhs32 + ", -2147483648\n";
+                m_out += "  " + is_neg_one + " = icmp eq i32 " + rhs32 + ", -1\n";
+                m_out += "  " + overflow + " = and i1 " + is_min + ", " + is_neg_one + "\n";
+                m_out += "  " + safe_lhs + " = select i1 " + overflow +
+                         ", i32 0, i32 " + lhs32 + "\n";
+                m_out += "  " + safe_signed_rhs + " = select i1 " + overflow +
+                         ", i32 1, i32 " + safe_rhs + "\n";
+                m_out += "  " + quotient_raw + " = sdiv i32 " +
+                         safe_lhs + ", " + safe_signed_rhs + "\n";
+                m_out += "  " + remainder_raw + " = srem i32 " +
+                         safe_lhs + ", " + safe_signed_rhs + "\n";
+                m_out += "  " + quotient + " = select i1 " + overflow +
+                         ", i32 -2147483648, i32 " + quotient_raw + "\n";
+                m_out += "  " + remainder + " = select i1 " + overflow +
+                         ", i32 0, i32 " + remainder_raw + "\n";
+            }
+
+            const std::string quotient64 = newtemp();
+            const std::string remainder64 = newtemp();
+            const std::string old_hi = newtemp();
+            const std::string old_lo = newtemp();
+            const std::string final_hi = newtemp();
+            const std::string final_lo = newtemp();
+            m_out += "  " + quotient64 + " = sext i32 " + quotient + " to i64\n";
+            m_out += "  " + remainder64 + " = sext i32 " + remainder + " to i64\n";
+            m_out += "  " + old_hi + " = load i64, ptr " + hi_ptr + "\n";
+            m_out += "  " + old_lo + " = load i64, ptr " + lo_ptr + "\n";
+            m_out += "  " + final_hi + " = select i1 " + div_zero +
+                     ", i64 " + old_hi + ", i64 " + remainder64 + "\n";
+            m_out += "  " + final_lo + " = select i1 " + div_zero +
+                     ", i64 " + old_lo + ", i64 " + quotient64 + "\n";
+            m_out += "  store i64 " + final_hi + ", ptr " + hi_ptr + "\n";
+            m_out += "  store i64 " + final_lo + ", ptr " + lo_ptr + "\n";
         }
         else if (funct == ee::e_ee_opcode::FUNCT_SLT ||
                  funct == ee::e_ee_opcode::FUNCT_SLTU)
@@ -1665,37 +1863,41 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                  funct == ee::e_ee_opcode::FUNCT_TEQ ||
                  funct == ee::e_ee_opcode::FUNCT_TNE)
         {
-            // Conditional trap → EX_Tr (13) if condition holds.
-            std::string cmp = newtemp();
             const char* pred = "eq";
             if (funct == ee::e_ee_opcode::FUNCT_TGE) pred = "sge";
             else if (funct == ee::e_ee_opcode::FUNCT_TGEU) pred = "uge";
             else if (funct == ee::e_ee_opcode::FUNCT_TLT) pred = "slt";
             else if (funct == ee::e_ee_opcode::FUNCT_TLTU) pred = "ult";
             else if (funct == ee::e_ee_opcode::FUNCT_TNE) pred = "ne";
-            m_out += "  " + cmp + " = icmp " + std::string(pred) + " i64 " +
+            const std::string cmp = newtemp();
+            m_out += "  " + cmp + " = icmp " + pred + " i64 " +
                      src_lo(ins.rs) + ", " + src_lo(ins.rt) + "\n";
-            // Branch to trap block vs fallthrough (inline).
-            std::string t_yes = newtemp();
-            std::string t_no = newtemp();
-            // Simple: always emit raise call under select by branching labels.
-            // Text IR: use br i1.
-            char pcbuf[32];
-            std::snprintf(pcbuf, sizeof(pcbuf), "%u", (unsigned)ins.pc);
-            // Materialize trap as: if cmp then raise else continue — for
-            // mid-block we only raise when last, otherwise leave a note.
-            m_out += "  ; trap " + std::string(pred) + " @ " + pcbuf + "\n";
-            std::string vec = newtemp();
-            // Always call helper only when condition true is hard in pure text
-            // without splitting blocks; approximate by unconditional check
-            // via select of exit — host can refine. Prefer correct when taken:
-            m_out += "  br i1 " + cmp + ", label %trap_" + std::string(pcbuf) +
-                     ", label %trap_cont_" + std::string(pcbuf) + "\n";
-            m_out += "trap_" + std::string(pcbuf) + ":\n";
-            m_out += "  " + vec + " = call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 13, i32 " +
-                     std::string(pcbuf) + ", i32 0, i32 0)\n";
-            m_out += "  ret i32 1\n";
-            m_out += "trap_cont_" + std::string(pcbuf) + ":\n";
+            emit_checked_exception(cmp, 13u);
+        }
+        else if (funct == ee::e_ee_opcode::FUNCT_DADD ||
+                 funct == ee::e_ee_opcode::FUNCT_DSUB)
+        {
+            // Exact signed i64 overflow detection without LLVM poison.
+            const std::string lhs = src_lo(ins.rs);
+            const std::string rhs = src_lo(ins.rt);
+            const std::string lhs_wide = newtemp();
+            const std::string rhs_wide = newtemp();
+            const std::string wide = newtemp();
+            const std::string result = newtemp();
+            const std::string result_wide = newtemp();
+            const std::string overflow = newtemp();
+            const char* op = funct == ee::e_ee_opcode::FUNCT_DADD
+                ? "add" : "sub";
+            m_out += "  " + lhs_wide + " = sext i64 " + lhs + " to i128\n";
+            m_out += "  " + rhs_wide + " = sext i64 " + rhs + " to i128\n";
+            m_out += "  " + wide + " = " + op + " i128 " +
+                     lhs_wide + ", " + rhs_wide + "\n";
+            m_out += "  " + result + " = trunc i128 " + wide + " to i64\n";
+            m_out += "  " + result_wide + " = sext i64 " + result + " to i128\n";
+            m_out += "  " + overflow + " = icmp ne i128 " +
+                     result_wide + ", " + wide + "\n";
+            emit_checked_exception(overflow, 12u);
+            set_gpr_lo64(ins.rd, result);
         }
         else if (funct == e_ee_opcode::FUNCT_ADD || funct == e_ee_opcode::FUNCT_SUB)
         {
@@ -3112,6 +3314,7 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         case e_ee_opcode::OP_LW:
         case e_ee_opcode::OP_LWU:
         case e_ee_opcode::OP_LD:
+        case e_ee_opcode::OP_LQ:
         case e_ee_opcode::OP_LWL:
         case e_ee_opcode::OP_LWR:
         case e_ee_opcode::OP_LDL:
@@ -3123,12 +3326,22 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         case e_ee_opcode::OP_SB:
         case e_ee_opcode::OP_SH:
         case e_ee_opcode::OP_SD:
+        case e_ee_opcode::OP_SQ:
         case e_ee_opcode::OP_SWL:
         case e_ee_opcode::OP_SDL:
         case e_ee_opcode::OP_SWR:
         case e_ee_opcode::OP_SDR:
             if (ins.rs != 0) touched.insert(ins.rs);
             touched.insert(ins.rt);
+            break;
+        case e_ee_opcode::OP_LWC1:
+        case e_ee_opcode::OP_SWC1:
+        case e_ee_opcode::OP_LQC2:
+        case e_ee_opcode::OP_SQC2:
+            if (ins.rs != 0)
+            {
+                touched.insert(ins.rs);
+            }
             break;
         case e_ee_opcode::OP_SPECIAL:
             switch (static_cast<ee::e_ee_opcode>(ins.funct))
@@ -3327,6 +3540,681 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
     const uint8_t fn = ins.funct;
     const uint8_t sa = ins.sa & 31;
 
+    // Primary MMI packed shifts operate on all lanes of rt (not rs).
+    // The hardware masks halfword shifts to four bits, word shifts to five.
+    if (fn == 0x34 || fn == 0x36 || fn == 0x37 ||
+        fn == 0x3c || fn == 0x3e || fn == 0x3f)
+    {
+        const bool halfword = fn == 0x34 || fn == 0x36 || fn == 0x37;
+        const char* operation = (fn == 0x34 || fn == 0x3c) ? "shl" :
+                                (fn == 0x36 || fn == 0x3e) ? "lshr" : "ashr";
+        const std::string result = newtemp();
+        const std::string input = halfword
+            ? build8i16(b.first, b.second) : build4i32(b.first, b.second);
+        const std::string type = halfword ? "<8 x i16>" : "<4 x i32>";
+        const std::string scalar_type = halfword ? "i16" : "i32";
+        const uint32_t lanes = halfword ? 8u : 4u;
+        const uint32_t shift = sa & (halfword ? 15u : 31u);
+        std::string amounts = "<";
+        for (uint32_t lane = 0u; lane < lanes; ++lane)
+        {
+            if (lane != 0u)
+            {
+                amounts += ", ";
+            }
+            amounts += scalar_type + " " + std::to_string(shift);
+        }
+        amounts += ">";
+        m_out += "  " + result + " = " + operation + " " + type +
+                 " " + input + ", " + amounts + "\n";
+        if (halfword)
+        {
+            store_vec8i16(result);
+        }
+        else
+        {
+            store_vec4i32(result);
+        }
+        return;
+    }
+
+    if (fn == 0x04) // PLZCW: count leading sign bits except the sign bit.
+    {
+        // The R5900 writes only rd words 0 and 1, preserving words 2/3.
+        const std::string source = build4i32(a.first, a.second);
+        std::string halves[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string word = newtemp();
+            const std::string sign = newtemp();
+            const std::string normalized = newtemp();
+            const std::string leading = newtemp();
+            const std::string count = newtemp();
+            const std::string extended = newtemp();
+            m_out += "  " + word + " = extractelement <4 x i32> " +
+                     source + ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + sign + " = ashr i32 " + word + ", 31\n";
+            m_out += "  " + normalized + " = xor i32 " + word + ", " +
+                     sign + "\n";
+            m_out += "  " + leading + " = call i32 @llvm.ctlz.i32(i32 " +
+                     normalized + ", i1 false)\n";
+            m_out += "  " + count + " = sub i32 " + leading + ", 1\n";
+            m_out += "  " + extended + " = zext i32 " + count + " to i64\n";
+            halves[lane] = extended;
+        }
+        const std::string upper = newtemp();
+        const std::string result = newtemp();
+        m_out += "  " + upper + " = shl i64 " + halves[1] + ", 32\n";
+        m_out += "  " + result + " = or i64 " + halves[0] + ", " + upper + "\n";
+        set_gpr_lo64(ins.rd, result);
+        return;
+    }
+
+    // PMFHL reads both 128-bit HI and LO register banks. The EE state
+    // exposes each bank as two i64 fields: HI (1), LO (2), HI1 (3), LO1 (4).
+    // The five submodes reproduce PCSX2's MMI interpreter word layout.
+    if (fn == 0x30)
+    {
+        const std::string hi0 = newtemp();
+        const std::string lo0 = newtemp();
+        const std::string hi1 = newtemp();
+        const std::string lo1 = newtemp();
+        m_out += "  " + hi0 + " = load i64, ptr " + state_field(1) + "\n";
+        m_out += "  " + lo0 + " = load i64, ptr " + state_field(2) + "\n";
+        m_out += "  " + hi1 + " = load i64, ptr " + state_field(3) + "\n";
+        m_out += "  " + lo1 + " = load i64, ptr " + state_field(4) + "\n";
+        const std::string halves[2][2] = {{lo0, hi0}, {lo1, hi1}};
+
+        if (sa == 0 || sa == 1) // PMFHL.LW / PMFHL.UW
+        {
+            std::string vector = "undef";
+            for (uint32_t lane = 0; lane < 4; ++lane)
+            {
+                const std::string& source = halves[lane / 2][lane % 2];
+                std::string word_source = source;
+                if (sa == 1)
+                {
+                    const std::string shifted = newtemp();
+                    m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                    word_source = shifted;
+                }
+                const std::string word = newtemp();
+                const std::string updated = newtemp();
+                m_out += "  " + word + " = trunc i64 " + word_source + " to i32\n";
+                m_out += "  " + updated + " = insertelement <4 x i32> " +
+                         vector + ", i32 " + word + ", i32 " +
+                         std::to_string(lane) + "\n";
+                vector = updated;
+            }
+            store_vec4i32(vector);
+            return;
+        }
+
+        if (sa == 2) // PMFHL.SLW: signed 64-bit pair -> saturated 32-bit
+        {
+            std::string outputs[2];
+            for (uint32_t index = 0; index < 2; ++index)
+            {
+                const std::string low_word = newtemp();
+                const std::string high_word = newtemp();
+                const std::string high_shifted = newtemp();
+                const std::string pair = newtemp();
+                const std::string too_high = newtemp();
+                const std::string too_low = newtemp();
+                const std::string upper_clamp = newtemp();
+                const std::string lower_clamp = newtemp();
+
+                m_out += "  " + low_word + " = and i64 " + halves[index][0] +
+                         ", 4294967295\n";
+                m_out += "  " + high_word + " = and i64 " + halves[index][1] +
+                         ", 4294967295\n";
+                m_out += "  " + high_shifted + " = shl i64 " + high_word +
+                         ", 32\n";
+                m_out += "  " + pair + " = or i64 " + high_shifted +
+                         ", " + low_word + "\n";
+                m_out += "  " + too_high + " = icmp sgt i64 " + pair +
+                         ", 2147483647\n";
+                m_out += "  " + too_low + " = icmp slt i64 " + pair +
+                         ", -2147483648\n";
+                m_out += "  " + upper_clamp + " = select i1 " + too_high +
+                         ", i64 2147483647, i64 " + pair + "\n";
+                m_out += "  " + lower_clamp + " = select i1 " + too_low +
+                         ", i64 -2147483648, i64 " + upper_clamp + "\n";
+                outputs[index] = lower_clamp;
+            }
+            store_gpr(ins.rd, outputs[0], outputs[1]);
+            return;
+        }
+
+        if (sa == 3 || sa == 4) // PMFHL.LH / PMFHL.SH
+        {
+            std::string vector = "undef";
+            for (uint32_t lane = 0; lane < 8; ++lane)
+            {
+                const uint32_t bank = lane / 4;
+                const uint32_t word = lane % 4;
+                const std::string& source = halves[bank][word / 2];
+                std::string source_word = source;
+                if ((word & 1u) != 0)
+                {
+                    const std::string shifted = newtemp();
+                    m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                    source_word = shifted;
+                }
+
+                std::string value;
+                if (sa == 3)
+                {
+                    value = newtemp();
+                    m_out += "  " + value + " = trunc i64 " + source_word +
+                             " to i16\n";
+                }
+                else
+                {
+                    // PMFHL.SH saturates each signed 32-bit source word
+                    // independently, without touching any HI/LO field.
+                    const std::string word32 = newtemp();
+                    const std::string word64 = newtemp();
+                    const std::string too_high = newtemp();
+                    const std::string too_low = newtemp();
+                    const std::string high_clamp = newtemp();
+                    const std::string low_clamp = newtemp();
+                    value = newtemp();
+                    m_out += "  " + word32 + " = trunc i64 " +
+                             source_word + " to i32\n";
+                    m_out += "  " + word64 + " = sext i32 " + word32 +
+                             " to i64\n";
+                    m_out += "  " + too_high + " = icmp sgt i64 " +
+                             word64 + ", 32767\n";
+                    m_out += "  " + too_low + " = icmp slt i64 " +
+                             word64 + ", -32768\n";
+                    m_out += "  " + high_clamp + " = select i1 " +
+                             too_high + ", i64 32767, i64 " + word64 + "\n";
+                    m_out += "  " + low_clamp + " = select i1 " +
+                             too_low + ", i64 -32768, i64 " + high_clamp + "\n";
+                    m_out += "  " + value + " = trunc i64 " + low_clamp +
+                             " to i16\n";
+                }
+
+                const std::string next = newtemp();
+                m_out += "  " + next + " = insertelement <8 x i16> " +
+                         vector + ", i16 " + value + ", i32 " +
+                         std::to_string(lane) + "\n";
+                vector = next;
+            }
+            store_vec8i16(vector);
+            return;
+        }
+    }
+
+    if (fn == 0x31) // PMTHL.LW: write low words, preserve upper 32 bits
+    {
+        const std::string sources[4] = {a.first, a.first, a.second, a.second};
+        const int field_indices[4] = {2, 1, 4, 3}; // LO0, HI0, LO1, HI1
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            std::string source = sources[lane];
+            if ((lane & 1u) != 0)
+            {
+                const std::string shifted = newtemp();
+                m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                source = shifted;
+            }
+            const std::string low_word = newtemp();
+            const std::string previous = newtemp();
+            const std::string retained = newtemp();
+            const std::string result = newtemp();
+            m_out += "  " + low_word + " = and i64 " + source +
+                     ", 4294967295\n";
+            m_out += "  " + previous + " = load i64, ptr " +
+                     state_field(field_indices[lane]) + "\n";
+            m_out += "  " + retained + " = and i64 " + previous +
+                     ", -4294967296\n";
+            m_out += "  " + result + " = or i64 " + retained +
+                     ", " + low_word + "\n";
+            m_out += "  store i64 " + result + ", ptr " +
+                     state_field(field_indices[lane]) + "\n";
+        }
+        return;
+    }
+
+    // PSLLVW / PSRLVW / PSRAVW: two 32-bit shifts, one per doubleword.
+    // Each low 32-bit source word comes from rt[31:0] or rt[95:64];
+    // the corresponding low word of rs supplies a masked five-bit count.
+    // The shifted i32 result is SIGN-extended to the complete i64 rd lane.
+    // PSRLVW shifts logically, PSRAVW shifts arithmetically; every
+    // final i32-to-i64 extension is signed, including PSRLVW.
+    // No HI/LO bank is read or modified, and rd=$zero discards the result.
+    if ((fn == 0x09 && (sa == 0x02 || sa == 0x03)) ||
+        (fn == 0x29 && sa == 0x03))
+    {
+        std::string results[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string& count_source = lane == 0u ? a.first : a.second;
+            const std::string& value_source = lane == 0u ? b.first : b.second;
+            const std::string count32 = newtemp();
+            const std::string count = newtemp();
+            const std::string value32 = newtemp();
+            const std::string shifted32 = newtemp();
+            const std::string extended64 = newtemp();
+            m_out += "  " + count32 + " = trunc i64 " + count_source +
+                     " to i32\n";
+            m_out += "  " + count + " = and i32 " + count32 + ", 31\n";
+            m_out += "  " + value32 + " = trunc i64 " + value_source +
+                     " to i32\n";
+            m_out += "  " + shifted32 + " = " +
+                     (fn == 0x29 ? "ashr" : sa == 0x02 ? "shl" : "lshr") +
+                     " i32 " +
+                     value32 + ", " + count + "\n";
+            m_out += "  " + extended64 + " = sext i32 " +
+                     shifted32 + " to i64\n";
+            results[lane] = extended64;
+        }
+        store_gpr(ins.rd, results[0], results[1]);
+        return;
+    }
+
+    // MMI2 / MMI3 share one architectural 128-bit HI/LO register pair.
+    // MMI lanes 0 and 1 map to HI0:LO0 and HI1:LO1 respectively; each
+    // accumulator half contains a sign-extended 32-bit word for PMULT/PDIV.
+    if ((fn == 0x09 || fn == 0x29) &&
+        (sa == 0x08 || sa == 0x09)) // PMFHI, PMFLO, PMTHI, PMTLO
+    {
+        const bool hi_bank = sa == 0x08;
+        const uint32_t lower_field = hi_bank ? 1u : 2u;
+        const uint32_t upper_field = hi_bank ? 3u : 4u;
+        const std::string ptr_lo = state_field(lower_field);
+        const std::string ptr_hi = state_field(upper_field);
+        if (fn == 0x09) // PMFHI / PMFLO: full 128-bit GPR result
+        {
+            const std::string result_lo = newtemp();
+            const std::string result_hi = newtemp();
+            m_out += "  " + result_lo + " = load i64, ptr " + ptr_lo + "\n";
+            m_out += "  " + result_hi + " = load i64, ptr " + ptr_hi + "\n";
+            store_gpr(ins.rd, result_lo, result_hi);
+        }
+        else // PMTHI / PMTLO: source GPR -> full 128-bit accumulator
+        {
+            m_out += "  store i64 " + a.first + ", ptr " + ptr_lo + "\n";
+            m_out += "  store i64 " + a.second + ", ptr " + ptr_hi + "\n";
+        }
+        return;
+    }
+
+    // PDIVBW (MMI2 sa=0x1d): four signed i32 numerators from rs are
+    // divided independently by ONE signed i16 denominator from rt[15:0].
+    // Each 32-bit quotient replaces a word of the 128-bit LO bank; each
+    // corresponding remainder replaces the same word of HI. rd is unused.
+    // PCSX2 specifies deterministic zero-divisor results, although the
+    // EE hardware manuals do not define divide-by-zero behaviour.
+    // Perform division in i64 to make INT_MIN/-1 well-defined in LLVM.
+    if (fn == 0x09 && sa == 0x1d)
+    {
+        const std::string numerators = build4i32(a.first, a.second);
+        const std::string divisor16 = newtemp();
+        const std::string divisor64 = newtemp();
+        const std::string divisor_zero = newtemp();
+        const std::string safe_divisor = newtemp();
+        m_out += "  " + divisor16 + " = trunc i64 " + b.first + " to i16\n";
+        m_out += "  " + divisor64 + " = sext i16 " +
+                 divisor16 + " to i64\n";
+        m_out += "  " + divisor_zero + " = icmp eq i16 " +
+                 divisor16 + ", 0\n";
+        m_out += "  " + safe_divisor + " = select i1 " +
+                 divisor_zero + ", i64 1, i64 " + divisor64 + "\n";
+
+        std::string packed_quotients = "undef";
+        std::string packed_remainders = "undef";
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            const std::string numerator32 = newtemp();
+            const std::string numerator64 = newtemp();
+            const std::string quotient64 = newtemp();
+            const std::string remainder64 = newtemp();
+            const std::string quotient32 = newtemp();
+            const std::string remainder32 = newtemp();
+            const std::string numerator_negative = newtemp();
+            const std::string zero_quotient = newtemp();
+            const std::string selected_quotient = newtemp();
+            const std::string selected_remainder = newtemp();
+            const std::string next_quotients = newtemp();
+            const std::string next_remainders = newtemp();
+
+            m_out += "  " + numerator32 + " = extractelement <4 x i32> " +
+                     numerators + ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + numerator64 + " = sext i32 " +
+                     numerator32 + " to i64\n";
+            m_out += "  " + quotient64 + " = sdiv i64 " +
+                     numerator64 + ", " + safe_divisor + "\n";
+            m_out += "  " + remainder64 + " = srem i64 " +
+                     numerator64 + ", " + safe_divisor + "\n";
+            m_out += "  " + quotient32 + " = trunc i64 " +
+                     quotient64 + " to i32\n";
+            m_out += "  " + remainder32 + " = trunc i64 " +
+                     remainder64 + " to i32\n";
+            m_out += "  " + numerator_negative + " = icmp slt i32 " +
+                     numerator32 + ", 0\n";
+            m_out += "  " + zero_quotient + " = select i1 " +
+                     numerator_negative + ", i32 1, i32 -1\n";
+            m_out += "  " + selected_quotient + " = select i1 " +
+                     divisor_zero + ", i32 " + zero_quotient +
+                     ", i32 " + quotient32 + "\n";
+            m_out += "  " + selected_remainder + " = select i1 " +
+                     divisor_zero + ", i32 " + numerator32 +
+                     ", i32 " + remainder32 + "\n";
+            m_out += "  " + next_quotients + " = insertelement <4 x i32> " +
+                     packed_quotients + ", i32 " + selected_quotient +
+                     ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + next_remainders + " = insertelement <4 x i32> " +
+                     packed_remainders + ", i32 " + selected_remainder +
+                     ", i32 " + std::to_string(lane) + "\n";
+            packed_quotients = next_quotients;
+            packed_remainders = next_remainders;
+        }
+
+        // Bitcast preserves all four 32-bit words including upper 32-bit
+        // halves of each 64-bit bank. Unlike PDIVW, sign extension of
+        // individual HI/LO words to 64 bits would lose two result lanes.
+        const std::string quotient_banks = newtemp();
+        const std::string remainder_banks = newtemp();
+        m_out += "  " + quotient_banks + " = bitcast <4 x i32> " +
+                 packed_quotients + " to <2 x i64>\n";
+        m_out += "  " + remainder_banks + " = bitcast <4 x i32> " +
+                 packed_remainders + " to <2 x i64>\n";
+        for (uint32_t bank = 0u; bank < 2u; ++bank)
+        {
+            const std::string quotient_bank = newtemp();
+            const std::string remainder_bank = newtemp();
+            m_out += "  " + quotient_bank + " = extractelement <2 x i64> " +
+                     quotient_banks + ", i32 " + std::to_string(bank) + "\n";
+            m_out += "  " + remainder_bank + " = extractelement <2 x i64> " +
+                     remainder_banks + ", i32 " + std::to_string(bank) + "\n";
+            m_out += "  store i64 " + quotient_bank + ", ptr " +
+                     state_field(bank == 0u ? 2u : 4u) + "\n";
+            m_out += "  store i64 " + remainder_bank + ", ptr " +
+                     state_field(bank == 0u ? 1u : 3u) + "\n";
+        }
+        return;
+    }
+
+    // Halfword MMI2 multiplies eight signed i16 lanes into eight i32
+    // accumulator words (LO0[0:1], HI0[0:1], LO1[0:1], HI1[0:1]).
+    // PMADDH/PMSUBH wrap independently per 32-bit word and read prior
+    // accumulators. PMULTH, PHMADH and PHMSBH replace all eight words.
+    // PHMADH/PHMSBH upper words follow the PCSX2 interpreter and x86
+    // recompiler's deterministic model; hardware marks them undocumented.
+    if (fn == 0x09 &&
+        (sa == 0x10 || sa == 0x11 || sa == 0x14 ||
+         sa == 0x15 || sa == 0x1c))
+    {
+        const std::string lhs_vec = build8i16(a.first, a.second);
+        const std::string rhs_vec = build8i16(b.first, b.second);
+        const uint32_t field_indices[4] = {2u, 1u, 4u, 3u};
+        std::string even_results[4];
+
+        for (uint32_t bank = 0u; bank < 4u; ++bank)
+        {
+            std::string products[2];
+            for (uint32_t half = 0u; half < 2u; ++half)
+            {
+                const uint32_t index = bank * 2u + half;
+                const std::string lhs16 = newtemp();
+                const std::string rhs16 = newtemp();
+                const std::string lhs32 = newtemp();
+                const std::string rhs32 = newtemp();
+                const std::string product = newtemp();
+
+                m_out += "  " + lhs16 + " = extractelement <8 x i16> " +
+                         lhs_vec + ", i32 " + std::to_string(index) + "\n";
+                m_out += "  " + rhs16 + " = extractelement <8 x i16> " +
+                         rhs_vec + ", i32 " + std::to_string(index) + "\n";
+                m_out += "  " + lhs32 + " = sext i16 " + lhs16 + " to i32\n";
+                m_out += "  " + rhs32 + " = sext i16 " + rhs16 + " to i32\n";
+                m_out += "  " + product + " = mul i32 " + lhs32 +
+                         ", " + rhs32 + "\n";
+                products[half] = product;
+            }
+
+            std::string lower_word;
+            std::string upper_word;
+            if (sa == 0x10 || sa == 0x14) // PMADDH / PMSUBH
+            {
+                const std::string prior = newtemp();
+                const std::string prior_upper_shifted = newtemp();
+                const std::string prior_lower = newtemp();
+                const std::string prior_upper = newtemp();
+                lower_word = newtemp();
+                upper_word = newtemp();
+                m_out += "  " + prior + " = load i64, ptr " +
+                         state_field(field_indices[bank]) + "\n";
+                m_out += "  " + prior_lower + " = trunc i64 " +
+                         prior + " to i32\n";
+                m_out += "  " + prior_upper_shifted + " = lshr i64 " +
+                         prior + ", 32\n";
+                m_out += "  " + prior_upper + " = trunc i64 " +
+                         prior_upper_shifted + " to i32\n";
+                const char* arithmetic = sa == 0x10 ? "add" : "sub";
+                m_out += "  " + lower_word + " = " + arithmetic +
+                         " i32 " + prior_lower + ", " + products[0] + "\n";
+                m_out += "  " + upper_word + " = " + arithmetic +
+                         " i32 " + prior_upper + ", " + products[1] + "\n";
+            }
+            else if (sa == 0x11) // PHMADH
+            {
+                lower_word = newtemp();
+                m_out += "  " + lower_word + " = add i32 " + products[0] +
+                         ", " + products[1] + "\n";
+                upper_word = products[1];
+            }
+            else if (sa == 0x15) // PHMSBH
+            {
+                lower_word = newtemp();
+                upper_word = newtemp();
+                m_out += "  " + lower_word + " = sub i32 " + products[1] +
+                         ", " + products[0] + "\n";
+                m_out += "  " + upper_word + " = xor i32 " + products[1] +
+                         ", -1\n";
+            }
+            else // PMULTH
+            {
+                lower_word = products[0];
+                upper_word = products[1];
+            }
+
+            const std::string lower_bits = newtemp();
+            const std::string upper_bits = newtemp();
+            const std::string upper_shifted = newtemp();
+            const std::string combined = newtemp();
+            m_out += "  " + lower_bits + " = zext i32 " + lower_word +
+                     " to i64\n";
+            m_out += "  " + upper_bits + " = zext i32 " + upper_word +
+                     " to i64\n";
+            m_out += "  " + upper_shifted + " = shl i64 " + upper_bits +
+                     ", 32\n";
+            m_out += "  " + combined + " = or i64 " + upper_shifted +
+                     ", " + lower_bits + "\n";
+            m_out += "  store i64 " + combined + ", ptr " +
+                     state_field(field_indices[bank]) + "\n";
+            even_results[bank] = lower_word;
+        }
+
+        // GPR rd contains only the even accumulator words, interleaved
+        // LO0[0], HI0[0], LO1[0], HI1[0] in four packed 32-bit lanes.
+        std::string destination = "undef";
+        for (uint32_t word = 0u; word < 4u; ++word)
+        {
+            const std::string next = newtemp();
+            m_out += "  " + next + " = insertelement <4 x i32> " +
+                     destination + ", i32 " + even_results[word] +
+                     ", i32 " + std::to_string(word) + "\n";
+            destination = next;
+        }
+        store_vec4i32(destination);
+        return;
+    }
+
+    // PMADDW, PMSUBW and PMADDUW reconstruct two 64-bit HI:LO
+    // accumulators from the low words of each sign-extended bank.
+    // PCSX2's x86 recompiler uses wrapping 64-bit arithmetic; its older
+    // interpreter contains unexplained signed MAC correction heuristics.
+    // This is the independently testable recompiler model, not a claim
+    // of bit-exact hardware multiply behaviour.
+    if ((fn == 0x09 && (sa == 0x00 || sa == 0x04)) ||
+        (fn == 0x29 && sa == 0x00))
+    {
+        const bool unsigned_product = fn == 0x29;
+        const bool subtract = sa == 0x04;
+        const char* extension = unsigned_product ? "zext" : "sext";
+        std::string results[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string& lhs = lane == 0u ? a.first : a.second;
+            const std::string& rhs = lane == 0u ? b.first : b.second;
+            const std::string lo_ptr = state_field(lane == 0u ? 2u : 4u);
+            const std::string hi_ptr = state_field(lane == 0u ? 1u : 3u);
+            const std::string lhs32 = newtemp(), rhs32 = newtemp();
+            const std::string lhs64 = newtemp(), rhs64 = newtemp();
+            const std::string lo_before = newtemp(), hi_before = newtemp();
+            const std::string lo32_before = newtemp(), hi32_before = newtemp();
+            const std::string lo_bits = newtemp(), hi_bits = newtemp();
+            const std::string hi_shifted = newtemp(), accum = newtemp();
+            const std::string product = newtemp(), updated = newtemp();
+            const std::string lo32_after = newtemp(), hi_shifted_after = newtemp();
+            const std::string hi32_after = newtemp();
+            const std::string lo_after = newtemp(), hi_after = newtemp();
+
+            m_out += "  " + lhs32 + " = trunc i64 " + lhs + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + rhs + " to i32\n";
+            m_out += "  " + lhs64 + " = " + extension + " i32 " + lhs32 + " to i64\n";
+            m_out += "  " + rhs64 + " = " + extension + " i32 " + rhs32 + " to i64\n";
+            m_out += "  " + lo_before + " = load i64, ptr " + lo_ptr + "\n";
+            m_out += "  " + hi_before + " = load i64, ptr " + hi_ptr + "\n";
+            m_out += "  " + lo32_before + " = trunc i64 " + lo_before + " to i32\n";
+            m_out += "  " + hi32_before + " = trunc i64 " + hi_before + " to i32\n";
+            m_out += "  " + lo_bits + " = zext i32 " + lo32_before + " to i64\n";
+            m_out += "  " + hi_bits + " = zext i32 " + hi32_before + " to i64\n";
+            m_out += "  " + hi_shifted + " = shl i64 " + hi_bits + ", 32\n";
+            m_out += "  " + accum + " = or i64 " + hi_shifted + ", " + lo_bits + "\n";
+            m_out += "  " + product + " = mul i64 " + lhs64 + ", " + rhs64 + "\n";
+            // No LLVM nsw/nuw: two's-complement arithmetic wraps modulo 2^64.
+            m_out += "  " + updated + " = " + (subtract ? "sub" : "add") +
+                     " i64 " + accum + ", " + product + "\n";
+            m_out += "  " + lo32_after + " = trunc i64 " + updated + " to i32\n";
+            m_out += "  " + hi_shifted_after + " = lshr i64 " + updated + ", 32\n";
+            m_out += "  " + hi32_after + " = trunc i64 " + hi_shifted_after + " to i32\n";
+            m_out += "  " + lo_after + " = sext i32 " + lo32_after + " to i64\n";
+            m_out += "  " + hi_after + " = sext i32 " + hi32_after + " to i64\n";
+            m_out += "  store i64 " + lo_after + ", ptr " + lo_ptr + "\n";
+            m_out += "  store i64 " + hi_after + ", ptr " + hi_ptr + "\n";
+            results[lane] = updated;
+        }
+        store_gpr(ins.rd, results[0], results[1]);
+        return;
+    }
+
+    if ((fn == 0x09 || fn == 0x29) &&
+        (sa == 0x0c || sa == 0x0d)) // PMULTW/UW and PDIVW/UW
+    {
+        const bool is_unsigned = fn == 0x29;
+        const bool multiply = sa == 0x0c;
+        const char* extension = is_unsigned ? "zext" : "sext";
+        std::string full_results[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string& lhs = lane == 0u ? a.first : a.second;
+            const std::string& rhs = lane == 0u ? b.first : b.second;
+            const std::string lhs32 = newtemp();
+            const std::string rhs32 = newtemp();
+            const std::string lhs64 = newtemp();
+            const std::string rhs64 = newtemp();
+            m_out += "  " + lhs32 + " = trunc i64 " + lhs + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + rhs + " to i32\n";
+            m_out += "  " + lhs64 + " = " + extension + " i32 " +
+                     lhs32 + " to i64\n";
+            m_out += "  " + rhs64 + " = " + extension + " i32 " +
+                     rhs32 + " to i64\n";
+
+            std::string lo32;
+            std::string hi32;
+            if (multiply)
+            {
+                const std::string product = newtemp();
+                const std::string high_shift = newtemp();
+                lo32 = newtemp();
+                hi32 = newtemp();
+                m_out += "  " + product + " = mul i64 " + lhs64 +
+                         ", " + rhs64 + "\n";
+                m_out += "  " + lo32 + " = trunc i64 " + product + " to i32\n";
+                m_out += "  " + high_shift + " = lshr i64 " + product + ", 32\n";
+                m_out += "  " + hi32 + " = trunc i64 " + high_shift +
+                         " to i32\n";
+                full_results[lane] = product;
+            }
+            else
+            {
+                // All hardware division-by-zero results are undefined.
+                // Follow PCSX2's explicit deterministic values rather than
+                // generate LLVM's undefined sdiv/udiv on a zero divisor.
+                // Signed INT_MIN/-1 is evaluated in i64, then narrowed.
+                const std::string zero = newtemp();
+                const std::string safe_rhs = newtemp();
+                const std::string quotient = newtemp();
+                const std::string remainder = newtemp();
+                const std::string quotient32 = newtemp();
+                const std::string remainder32 = newtemp();
+                const std::string fallback_q = newtemp();
+                lo32 = newtemp();
+                hi32 = newtemp();
+                m_out += "  " + zero + " = icmp eq i32 " + rhs32 + ", 0\n";
+                m_out += "  " + safe_rhs + " = select i1 " + zero +
+                         ", i64 1, i64 " + rhs64 + "\n";
+                m_out += "  " + quotient + " = " +
+                         (is_unsigned ? "udiv" : "sdiv") +
+                         " i64 " + lhs64 + ", " + safe_rhs + "\n";
+                m_out += "  " + remainder + " = " +
+                         (is_unsigned ? "urem" : "srem") +
+                         " i64 " + lhs64 + ", " + safe_rhs + "\n";
+                m_out += "  " + quotient32 + " = trunc i64 " +
+                         quotient + " to i32\n";
+                m_out += "  " + remainder32 + " = trunc i64 " +
+                         remainder + " to i32\n";
+                if (is_unsigned)
+                {
+                    m_out += "  " + fallback_q + " = or i32 0, -1\n";
+                }
+                else
+                {
+                    const std::string negative = newtemp();
+                    m_out += "  " + negative + " = icmp slt i32 " +
+                             lhs32 + ", 0\n";
+                    m_out += "  " + fallback_q + " = select i1 " +
+                             negative + ", i32 1, i32 -1\n";
+                }
+                m_out += "  " + lo32 + " = select i1 " + zero +
+                         ", i32 " + fallback_q + ", i32 " +
+                         quotient32 + "\n";
+                m_out += "  " + hi32 + " = select i1 " + zero +
+                         ", i32 " + lhs32 + ", i32 " +
+                         remainder32 + "\n";
+            }
+
+            const std::string lo64 = newtemp();
+            const std::string hi64 = newtemp();
+            m_out += "  " + lo64 + " = sext i32 " + lo32 + " to i64\n";
+            m_out += "  " + hi64 + " = sext i32 " + hi32 + " to i64\n";
+            m_out += "  store i64 " + lo64 + ", ptr " +
+                     state_field(lane == 0u ? 2u : 4u) + "\n";
+            m_out += "  store i64 " + hi64 + ", ptr " +
+                     state_field(lane == 0u ? 1u : 3u) + "\n";
+        }
+        if (multiply) // PDIVW/UW has no GPR destination.
+        {
+            store_gpr(ins.rd, full_results[0], full_results[1]);
+        }
+        return;
+    }
+
     // Top-level MMI (not class)
     if (fn == 0x18 || fn == 0x19)
     {
@@ -3507,8 +4395,113 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
-        // MMI0 (0x08): parallel arith / pack by sa
+        // Unary MMI2 lane permutations use rt exclusively. The 128-bit
+        // value is assembled before writing rd, including rd==rt.
+        if (fn == 0x09 &&
+            (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f))
+        {
+            const bool halfword = sa == 0x1a || sa == 0x1b;
+            const char* mask = sa == 0x1a
+                ? "<i32 2, i32 1, i32 0, i32 3, i32 6, i32 5, i32 4, i32 7>"
+                : sa == 0x1b
+                ? "<i32 3, i32 2, i32 1, i32 0, i32 7, i32 6, i32 5, i32 4>"
+                : sa == 0x1e
+                ? "<i32 2, i32 1, i32 0, i32 3>"
+                : "<i32 1, i32 2, i32 0, i32 3>";
+            const std::string type = halfword ? "<8 x i16>" : "<4 x i32>";
+            const std::string& input = halfword ? vb8 : vb4;
+            const std::string result = newtemp();
+            m_out += "  " + result + " = shufflevector " + type + " " +
+                     input + ", " + type + " " + input + ", " +
+                     (halfword ? "<8 x i32> " : "<4 x i32> ") +
+                     mask + "\n";
+            if (halfword)
+            {
+                store_vec8i16(result);
+            }
+            else
+            {
+                store_vec4i32(result);
+            }
+            return;
+        }
+
+        // MMI2 PINTH and MMI3 PINTEH use distinct full-128-bit
+        // halfword interleaves. Element indexes 0..7 refer to rs;
+        // indexes 8..15 refer to rt. Snapshot both sources before
+        // writing rd so aliases with rs/rt remain exact.
+        if ((fn == 0x09 || fn == 0x29) && sa == 0x0a)
+        {
+            const std::string result = newtemp();
+            const char* mask = fn == 0x09
+                ? "<i32 8, i32 4, i32 9, i32 5, i32 10, i32 6, i32 11, i32 7>"
+                : "<i32 8, i32 0, i32 10, i32 2, i32 12, i32 4, i32 14, i32 6>";
+            m_out += "  " + result + " = shufflevector <8 x i16> " +
+                     va8 + ", <8 x i16> " + vb8 + ", <8 x i32> " +
+                     mask + "\n";
+            store_vec8i16(result);
+            return;
+        }
+
+        // MMI0 (0x08): independent packed lanes. Saturating operations
+        // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {
+            const auto splat = [](const std::string& scalar, uint32_t lanes,
+                                  int64_t value) -> std::string
+            {
+                std::string result = "<";
+                for (uint32_t lane = 0u; lane < lanes; ++lane)
+                {
+                    if (lane != 0u)
+                    {
+                        result += ", ";
+                    }
+                    result += std::string(scalar) + " " + std::to_string(value);
+                }
+                return result + ">";
+            };
+            const auto emit_signed_saturation =
+                [&](const std::string& lhs, const std::string& rhs,
+                    const std::string& narrow_type,
+                    const std::string& wide_type,
+                    const std::string& wide_scalar,
+                    uint32_t lanes, int64_t low, int64_t high,
+                    bool addition) -> std::string
+            {
+                const std::string lhs_wide = newtemp();
+                const std::string rhs_wide = newtemp();
+                const std::string calculated = newtemp();
+                const std::string above = newtemp();
+                const std::string below = newtemp();
+                const std::string capped = newtemp();
+                const std::string clamped = newtemp();
+                const std::string result = newtemp();
+                const std::string predicate_type =
+                    "<" + std::to_string(lanes) + " x i1>";
+                const std::string limits_high = splat(wide_scalar, lanes, high);
+                const std::string limits_low = splat(wide_scalar, lanes, low);
+                m_out += "  " + lhs_wide + " = sext " + narrow_type +
+                         " " + lhs + " to " + wide_type + "\n";
+                m_out += "  " + rhs_wide + " = sext " + narrow_type +
+                         " " + rhs + " to " + wide_type + "\n";
+                m_out += "  " + calculated + " = " +
+                         (addition ? "add" : "sub") + " " + wide_type +
+                         " " + lhs_wide + ", " + rhs_wide + "\n";
+                m_out += "  " + above + " = icmp sgt " + wide_type +
+                         " " + calculated + ", " + limits_high + "\n";
+                m_out += "  " + below + " = icmp slt " + wide_type +
+                         " " + calculated + ", " + limits_low + "\n";
+                m_out += "  " + capped + " = select " + predicate_type +
+                         " " + above + ", " + wide_type + " " +
+                         limits_high + ", " + wide_type + " " +
+                         calculated + "\n";
+                m_out += "  " + clamped + " = select " + predicate_type +
+                         " " + below + ", " + wide_type + " " +
+                         limits_low + ", " + wide_type + " " + capped + "\n";
+                m_out += "  " + result + " = trunc " + wide_type + " " +
+                         clamped + " to " + narrow_type + "\n";
+                return result;
+            };
             switch (sa) {
             case 0: // PADDW
                 m_out += "  " + vr + " = add <4 x i32> " + va4 + ", " + vb4 + "\n";
@@ -3516,6 +4509,17 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 1: // PSUBW
                 m_out += "  " + vr + " = sub <4 x i32> " + va4 + ", " + vb4 + "\n";
                 store_vec4i32(vr); return;
+            case 2: // PCGTW (signed greater-than; true lanes all ones)
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <4 x i32> " +
+                         va4 + ", " + vb4 + "\n";
+                m_out += "  " + result + " = sext <4 x i1> " +
+                         predicate + " to <4 x i32>\n";
+                store_vec4i32(result);
+                return;
+            }
             case 3: // PMAXW (signed)
                 m_out += "  " + vr + " = call <4 x i32> @llvm.smax.v4i32(<4 x i32> " + va4 + ", <4 x i32> " + vb4 + ")\n";
                 store_vec4i32(vr); return;
@@ -3525,6 +4529,17 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 5: // PSUBH
                 m_out += "  " + vr + " = sub <8 x i16> " + va8 + ", " + vb8 + "\n";
                 store_vec8i16(vr); return;
+            case 6: // PCGTH
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <8 x i16> " +
+                         va8 + ", " + vb8 + "\n";
+                m_out += "  " + result + " = sext <8 x i1> " +
+                         predicate + " to <8 x i16>\n";
+                store_vec8i16(result);
+                return;
+            }
             case 7: // PMAXH
                 m_out += "  " + vr + " = call <8 x i16> @llvm.smax.v8i16(<8 x i16> " + va8 + ", <8 x i16> " + vb8 + ")\n";
                 store_vec8i16(vr); return;
@@ -3534,28 +4549,127 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 9: // PSUBB
                 m_out += "  " + vr + " = sub <16 x i8> " + va16 + ", " + vb16 + "\n";
                 store_vec16i8(vr); return;
-            case 16: case 17: // PADDSW/PSUBSW — non-sat approx
-                m_out += "  " + vr + " = " + (sa == 16 ? "add" : "sub") + " <4 x i32> " + va4 + ", " + vb4 + "\n";
-                store_vec4i32(vr); return;
-            case 18: // PEXTLW — interleave low words: approx or of halves
-                m_out += "  " + vr + " = or <2 x i64> " + va2 + ", " + vb2 + "\n";
-                store_vec2i64(vr); return;
-            case 19: // PPACW — pack words: low32 of each
-                {
-                    std::string alo = newtemp(), blo = newtemp(), r = newtemp();
-                    m_out += "  " + alo + " = and i64 " + a.first + ", 4294967295\n";
-                    m_out += "  " + blo + " = and i64 " + b.first + ", 4294967295\n";
-                    m_out += "  " + r + " = or i64 " + alo + ", " + blo + "\n";
-                    set_gpr_lo64(ins.rd, r);
-                    // hi: use upper halves approx
-                    std::string ahi = newtemp(), bhi = newtemp(), rh = newtemp();
-                    m_out += "  " + ahi + " = and i64 " + a.second + ", 4294967295\n";
-                    m_out += "  " + bhi + " = and i64 " + b.second + ", 4294967295\n";
-                    m_out += "  " + rh + " = or i64 " + ahi + ", " + bhi + "\n";
-                    // full write
-                    store_gpr(ins.rd, r, rh);
-                }
+            case 10: // PCGTB
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <16 x i8> " +
+                         va16 + ", " + vb16 + "\n";
+                m_out += "  " + result + " = sext <16 x i1> " +
+                         predicate + " to <16 x i8>\n";
+                store_vec16i8(result);
                 return;
+            }
+            case 16: case 17: // PADDSW/PSUBSW
+                store_vec4i32(emit_signed_saturation(
+                    va4, vb4, "<4 x i32>", "<4 x i64>", "i64", 4u,
+                    -2147483648LL, 2147483647LL, sa == 16u));
+                return;
+            case 18: // PEXTLW: low-word interleave rt0,rs0,rt1,rs1
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <4 x i32> " +
+                         va4 + ", <4 x i32> " + vb4 +
+                         ", <4 x i32> <i32 4, i32 0, i32 5, i32 1>\n";
+                store_vec4i32(result);
+                return;
+            }
+            case 19: // PPACW: rt even words, then rs even words
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <4 x i32> " +
+                         va4 + ", <4 x i32> " + vb4 +
+                         ", <4 x i32> <i32 4, i32 6, i32 0, i32 2>\n";
+                store_vec4i32(result);
+                return;
+            }
+            case 20: case 21: // PADDSH/PSUBSH
+                store_vec8i16(emit_signed_saturation(
+                    va8, vb8, "<8 x i16>", "<8 x i32>", "i32", 8u,
+                    -32768LL, 32767LL, sa == 20u));
+                return;
+            case 22: // PEXTLH: low-halfword interleave
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <8 x i16> " +
+                         va8 + ", <8 x i16> " + vb8 +
+                         ", <8 x i32> <i32 8, i32 0, i32 9, i32 1, i32 10, i32 2, i32 11, i32 3>\n";
+                store_vec8i16(result);
+                return;
+            }
+            case 23: // PPACH: packed even halfwords
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <8 x i16> " +
+                         va8 + ", <8 x i16> " + vb8 +
+                         ", <8 x i32> <i32 8, i32 10, i32 12, i32 14, i32 0, i32 2, i32 4, i32 6>\n";
+                store_vec8i16(result);
+                return;
+            }
+            case 24: case 25: // PADDSB/PSUBSB
+                store_vec16i8(emit_signed_saturation(
+                    va16, vb16, "<16 x i8>", "<16 x i16>", "i16", 16u,
+                    -128LL, 127LL, sa == 24u));
+                return;
+            case 26: // PEXTLB: low-byte interleave
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <16 x i8> " +
+                         va16 + ", <16 x i8> " + vb16 +
+                         ", <16 x i32> <i32 16, i32 0, i32 17, i32 1, i32 18, i32 2, i32 19, i32 3, i32 20, i32 4, i32 21, i32 5, i32 22, i32 6, i32 23, i32 7>\n";
+                store_vec16i8(result);
+                return;
+            }
+            case 27: // PPACB: rt even bytes, then rs even bytes
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <16 x i8> " +
+                         va16 + ", <16 x i8> " + vb16 +
+                         ", <16 x i32> <i32 16, i32 18, i32 20, i32 22, i32 24, i32 26, i32 28, i32 30, i32 0, i32 2, i32 4, i32 6, i32 8, i32 10, i32 12, i32 14>\n";
+                store_vec16i8(result);
+                return;
+            }
+            case 30: case 31: // PEXT5 / PPAC5, unary pixel conversion
+            {
+                const bool pack = sa == 31u;
+                const uint32_t masks[] = {0x1fu, 0x3e0u, 0x7c00u, 0x8000u};
+                const uint32_t shifts[] = {3u, 6u, 9u, 16u};
+                std::string combined;
+                for (uint32_t component = 0u; component < 4u; ++component)
+                {
+                    const std::string intermediate = newtemp();
+                    const std::string next = newtemp();
+                    const std::string shifted = newtemp();
+                    const std::string lane_mask = splat("i32", 4u, masks[component]);
+                    const std::string lane_shift = splat("i32", 4u, shifts[component]);
+                    if (pack)
+                    {
+                        m_out += "  " + shifted + " = lshr <4 x i32> " + vb4 +
+                                 ", " + lane_shift + "\n";
+                        m_out += "  " + intermediate + " = and <4 x i32> " +
+                                 shifted + ", " + lane_mask + "\n";
+                    }
+                    else
+                    {
+                        m_out += "  " + shifted + " = and <4 x i32> " + vb4 +
+                                 ", " + lane_mask + "\n";
+                        m_out += "  " + intermediate + " = shl <4 x i32> " +
+                                 shifted + ", " + lane_shift + "\n";
+                    }
+                    if (component == 0u)
+                    {
+                        combined = intermediate;
+                    }
+                    else
+                    {
+                        m_out += "  " + next + " = or <4 x i32> " + combined +
+                                 ", " + intermediate + "\n";
+                        combined = next;
+                    }
+                }
+                store_vec4i32(combined);
+                return;
+            }
             default:
                 // Generic: 32-bit parallel add as fallback
                 m_out += "  " + vr + " = add <4 x i32> " + va4 + ", " + vb4 + "\n";
@@ -3951,11 +5065,29 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
             {
                 continue;
             }
-            // An overflow handler can observe every incoming register,
-            // including the faulting destination before its normal write.
-            if (ins.opcode == e_ee_opcode::OP_SPECIAL &&
+            // A precise EX_Ov/EX_Tr handler can inspect every incoming
+            // register, including values not read by the trapping opcode.
+            const bool signed_immediate =
+                ins.opcode == e_ee_opcode::OP_ADDI ||
+                ins.opcode == e_ee_opcode::OP_DADDI;
+            const bool regimm_trap =
+                ins.opcode == e_ee_opcode::OP_REGIMM &&
+                (ins.rt == 0x08 || ins.rt == 0x09 ||
+                 ins.rt == 0x0a || ins.rt == 0x0b ||
+                 ins.rt == 0x0c || ins.rt == 0x0e);
+            const bool special_fault =
+                ins.opcode == e_ee_opcode::OP_SPECIAL &&
                 (ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_ADD) ||
-                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_SUB)))
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_SUB) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_DADD) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_DSUB) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TGE) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TGEU) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TLT) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TLTU) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TEQ) ||
+                 ins.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_TNE));
+            if (signed_immediate || regimm_trap || special_fault)
             {
                 for (uint8_t reg = 1; reg < 32; ++reg)
                 {

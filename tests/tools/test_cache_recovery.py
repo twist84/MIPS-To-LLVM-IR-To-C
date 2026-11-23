@@ -192,16 +192,19 @@ def test_link_or_validation_failure_does_not_activate():
         assert len(builds) == 2
 
 
-def test_launcher_recovers_before_destructive_confirmation():
+def test_launcher_recovers_before_automatic_rebuild():
     batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--recover-cache" (' in batch
     assert 'if /I "%~1"=="--accept-new-ir" (' in batch
     assert "--print-active" in batch
     assert 'set "BASE_WORK_DIR=build\\ps2-game-hle"' in batch
     strict = batch.index("rem Strict unattended recovery")
-    confirm = batch.index("call :confirm_guest_cache_rebuild")
-    assert strict < confirm
-    section = batch[strict:confirm]
+    automatic = batch.index(
+        'if not defined CACHE_FLAG (\n'
+        '    echo Guest translation cache is not reusable; regenerating IR automatically.'
+    )
+    assert strict < automatic
+    section = batch[strict:automatic]
     assert "recover_translation_cache.py --elf" in section
     assert "if not errorlevel 1 (" in section
     assert "set \"CACHE_FLAG=--no-recompile\"" in section
@@ -211,6 +214,8 @@ def test_launcher_recovers_before_destructive_confirmation():
     assert recover < strict
     assert "exit /b\n)" in batch[recover:strict]
     assert "run_boot_session.py" not in batch[recover:strict]
+    assert "call :confirm_guest_cache_rebuild" not in batch
+    assert "choice /C YN" not in batch
 
 
 def main():
@@ -218,7 +223,7 @@ def main():
     test_changed_lowering_requires_explicit_opt_in()
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
-    test_launcher_recovers_before_destructive_confirmation()
+    test_launcher_recovers_before_automatic_rebuild()
     print("safe known-function cache recovery: PASS")
 
 

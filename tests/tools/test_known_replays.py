@@ -277,13 +277,18 @@ def test_matched_launcher_never_falls_back_to_guest_rebuild():
     assert 'if /I "%~1"=="--matched" (' in launcher
     assert 'if /I "%REQUESTED_SESSION_MODE%"=="matched" (' in launcher
     assert 'python tools\\run_known_replays.py ^' in launcher
-    # Mode must branch BEFORE the existing interactive rebuild fallback.
+    # Mode must branch BEFORE the normal automatic IR rebuild fallback.
     matched = launcher.index(
         'rem A paired experiment MUST use the existing guest IR'
     )
-    confirm = launcher.index('call :confirm_guest_cache_rebuild')
-    assert matched < confirm
-    section = launcher[matched:confirm]
+    automatic = launcher.index(
+        'if not defined CACHE_FLAG (\n'
+        '    echo Guest translation cache is not reusable; regenerating IR automatically.'
+    )
+    assert matched < automatic
+    section = launcher[matched:automatic]
+    assert "call :confirm_guest_cache_rebuild" not in launcher
+    assert "choice /C YN" not in launcher
     assert 'if not defined CACHE_FLAG (' in section
     assert 'exit /b 1' in section
     assert 'exit /b\n)' in section

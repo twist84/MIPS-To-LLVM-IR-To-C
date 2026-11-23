@@ -244,6 +244,11 @@ add_executable(ee_vu0_transfer_ir_fixture
 )
 target_link_libraries(ee_vu0_transfer_ir_fixture PRIVATE ee_core)
 
+# Real decoded R5900 signed arithmetic and integer trap JIT fixture.
+add_executable(ee_checked_ir_fixture
+    tests/smoke/ee_checked_ir_fixture.cpp)
+target_link_libraries(ee_checked_ir_fixture PRIVATE ee_core)
+
 add_executable(ee_min_test
     tests/smoke/min_test.cpp
 )
@@ -575,6 +580,20 @@ target_link_libraries(ee_decoder_test PRIVATE ee_core)
 # core C++ build remains usable without the Python LLVM binding.
 add_executable(ee_mmi_ir_fixture tests/smoke/mmi_ir_fixture.cpp)
 target_link_libraries(ee_mmi_ir_fixture PRIVATE ee_core)
+# Focused decoded MMI0, packed shifts and PLZCW JIT fixture.
+add_executable(ee_mmi0_extended_ir_fixture
+    tests/smoke/mmi0_extended_ir_fixture.cpp)
+target_link_libraries(ee_mmi0_extended_ir_fixture PRIVATE ee_core)
+
+# Exact five-mode PMFHL and partial-word PMTHL HI/LO register transfers.
+add_executable(ee_mmi_hilo_ir_fixture
+    tests/smoke/mmi_hilo_ir_fixture.cpp)
+target_link_libraries(ee_mmi_hilo_ir_fixture PRIVATE ee_core)
+
+# Exact MMI2/MMI3 full HI/LO moves, PMULTW/UW and PDIVW/UW.
+add_executable(ee_mmi_word_ir_fixture
+    tests/smoke/mmi_word_ir_fixture.cpp)
+target_link_libraries(ee_mmi_word_ir_fixture PRIVATE ee_core)
 
 # Dedicated JIT runtime coverage for the EE's second divide pipeline.
 add_executable(ee_div1_ir_fixture tests/smoke/div1_ir_fixture.cpp)
@@ -830,6 +849,11 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_alignment_ir_runtime.py
                 $<TARGET_FILE:ee_vu0_transfer_ir_fixture>
                 $<TARGET_FILE:ee_cop0_jit_helpers>)
+    add_test(NAME ee_checked_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_checked_ir_runtime.py
+                $<TARGET_FILE:ee_checked_ir_fixture>
+                $<TARGET_FILE:ee_cop0_jit_helpers>)
     add_test(NAME compare_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_compare_ir_runtime.py
@@ -913,6 +937,46 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_ir_runtime.py
                 $<TARGET_FILE:ee_mmi_ir_fixture>)
+    add_test(NAME mmi0_extended_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi0_extended_ir_runtime.py
+                $<TARGET_FILE:ee_mmi0_extended_ir_fixture>)
+    add_test(NAME mmi_hilo_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_hilo_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_hilo_ir_fixture>)
+    add_test(NAME mmi_var_shift_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_var_shift_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
+    add_test(NAME mmi_psravw_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_var_shift_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture> psravw)
+    add_test(NAME mmi_interleave_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_interleave_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
+    add_test(NAME mmi2_permute_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_permute_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture> mmi2)
+    add_test(NAME mmi_divbw_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_divbw_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
+    add_test(NAME mmi_halfword_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_halfword_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
+    add_test(NAME mmi_mac_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_mac_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
+    add_test(NAME mmi_word_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_word_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture>)
 else()
     message(STATUS "llvmlite not found: omitting mmi_ir_runtime CTest")
 endif()

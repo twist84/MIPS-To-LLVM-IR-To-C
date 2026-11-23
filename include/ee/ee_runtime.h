@@ -224,6 +224,24 @@ struct s_ee_instruction_trace_entry
     uint32_t m_hle_service = 0u;
 };
 
+// Most-recent matching guest stores, recorded immediately before each
+// translated STORE. Source values are SSA operands, not claimed post-store
+// memory content. The host owns the ring; zero capacity means disabled.
+struct s_ee_guest_store_trace_entry
+{
+    uint32_t m_pc = 0u;
+    uint32_t m_opcode = 0u;
+    uint32_t m_effective_address = 0u;
+    uint32_t m_affected_address = 0u;
+    uint32_t m_width = 0u;
+    uint32_t m_source_lane = 0u;
+    uint64_t m_source_value = 0u;
+    uint64_t m_base_value = 0u;
+    uint32_t m_sp = 0u;
+    uint32_t m_fp = 0u;
+    uint32_t m_ra = 0u;
+};
+
 // Pure observation only. Implementations may compare externally validated
 // reference issue timestamps, but cannot enable hardware time themselves.
 // Returning false latches a host-side failure, never a guest exception.
@@ -317,6 +335,13 @@ struct s_ee_runtime
     void* m_timing_observer_user = nullptr;
     t_ee_timing_observer m_timing_observer = nullptr;
     uint32_t m_timing_observer_failed = 0u;
+
+    // Host-only diagnostic ring, appended after all existing runtime fields
+    // so already cached native guest IR retains its ABI offsets.
+    s_ee_guest_store_trace_entry* m_guest_store_trace_recent = nullptr;
+    uint32_t m_guest_store_trace_capacity = 0u;
+    uint32_t m_guest_store_trace_count = 0u;
+    uint32_t m_guest_store_trace_next = 0u;
 };
 
 // Never infer cycles from these observations or implicitly install

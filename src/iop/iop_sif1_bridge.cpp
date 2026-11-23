@@ -128,7 +128,8 @@ bool c_sif1_bridge::set_dma(
     if (dma_id == nullptr ||
         m_next_dma_id == 0u ||
         count == 0u || count > 64u ||
-        (list & 0x0fu) != 0u ||
+        // SifDmaTransfer is four 32-bit fields; the list needs 4-byte alignment.
+        (list & 3u) != 0u ||
         !normalize_ee_address(list, &list_physical) ||
         !m_ee_ram.contains(list_physical, count * 16u))
     {
@@ -145,7 +146,7 @@ bool c_sif1_bridge::set_dma(
         const uint32_t descriptor = list_physical + index * 16u;
         const uint32_t source = m_ee_ram.read32(descriptor);
         const uint32_t destination = m_ee_ram.read32(descriptor + 4u);
-        const uint32_t size = m_ee_ram.read32(descriptor + 8u);
+        const uint32_t size = m_ee_ram.read32(descriptor + 8u) & 0x7fffffffu;
         const uint32_t attributes = m_ee_ram.read32(descriptor + 12u);
 
         uint32_t ee_source = 0u;
@@ -206,7 +207,7 @@ bool c_sif1_bridge::set_dma(
             // A reset request is not an ordinary IOP RAM write.
             return refuse(e_sif1_dma_failure::unsupported_iop_reboot);
         }
-        if ((destination & 0x0fu) != 0u ||
+        if ((destination & 3u) != 0u ||
             (!rpc_payload &&
              !normalize_iop_address(destination, &iop_destination)) ||
             (!rpc_payload &&

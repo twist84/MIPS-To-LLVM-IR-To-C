@@ -12,6 +12,8 @@ rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
 rem --replay-after-expand opts out of in-process live cache-miss resume.
+rem --live-full-relink disables PR #152's fast overlay DLLs for live misses.
+rem PRECOMPILE_ALL=0 disables cold whole-image precompilation.
 rem --matched executes a CPU-only neutral/Cross pair with known cached IR,
 rem never running guest function discovery or auto-expansion.
 rem Full retail diagnostics use the usual local replay settings below.
@@ -22,6 +24,7 @@ set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
 set "CACHE_MISS_ARGS="
+set "LIVE_RELINK_ARG="
 :parse_launcher_options
 if "%~1"=="" goto :launcher_options_ready
 if /I "%~1"=="--full" (
@@ -54,6 +57,11 @@ if /I "%~1"=="--replay-after-expand" (
     shift
     goto :parse_launcher_options
 )
+if /I "%~1"=="--live-full-relink" (
+    set "LIVE_RELINK_ARG=--live-full-relink"
+    shift
+    goto :parse_launcher_options
+)
 if /I "%~1"=="--cross" (
     set "REQUESTED_PAD_PROFILE=cross"
     shift
@@ -65,7 +73,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand]
+echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
@@ -87,6 +95,18 @@ if defined CACHE_MISS_ARGS if /I "%REQUESTED_SESSION_MODE%"=="recover" (
 )
 if defined CACHE_MISS_ARGS if /I "%REQUESTED_SESSION_MODE%"=="matched" (
     echo ERROR: --replay-after-expand has no meaning during matched replays.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if /I "%REQUESTED_SESSION_MODE%"=="recover" (
+    echo ERROR: --live-full-relink has no meaning during cache recovery.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if /I "%REQUESTED_SESSION_MODE%"=="matched" (
+    echo ERROR: --live-full-relink has no meaning during matched replays.
+    exit /b 2
+)
+if defined LIVE_RELINK_ARG if defined CACHE_MISS_ARGS (
+    echo ERROR: --live-full-relink requires live cache-miss resume.
     exit /b 2
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="cross" (
@@ -329,13 +349,11 @@ if /I "%REQUESTED_SESSION_MODE%"=="matched" (
     exit /b
 )
 
-rem This is the only fallback that can wipe and regenerate old guest IR.
-rem A failed exact-cache validation AND failed safe relink are not permission
-rem to delete saved translations. Require an explicit affirmative response
-rem if ANY previously generated guest translation artifact still exists.
+rem Normal boots may regenerate guest IR automatically when exact reuse,
+rem host-only relinking and strict non-destructive recovery all fail.
+rem --matched and --recover-cache already take their separate paths above.
 if not defined CACHE_FLAG (
-    call :confirm_guest_cache_rebuild
-    if errorlevel 1 exit /b 1
+    echo Guest translation cache is not reusable; regenerating IR automatically.
 )
 
 echo === Starting extracted-disc HLE boot session ===
@@ -403,6 +421,15 @@ rem cached passes and the final replay always run with --no-recompile.
 set "FUNCTIONS_ARG="
 if not defined CACHE_FLAG if not "%PRECOMPILE_ALL%"=="0" set "FUNCTIONS_ARG=--functions=all"
 if defined FUNCTIONS_ARG echo Cold translation: precompiling all statically discovered EE functions
+if defined LIVE_RELINK_ARG echo Live cache misses: legacy full-library relink
+if not defined LIVE_RELINK_ARG if not defined CACHE_MISS_ARGS echo Live cache misses: fast overlay DLLs
+
+rem Optional guest memory traces. These are host-only and never repair
+rem invalid pointers or alter emulated guest instructions.
+set "GUEST_TRACE_ARGS="
+if defined SDBZ_WATCH_WORD set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --watch-word=%SDBZ_WATCH_WORD%"
+if defined SDBZ_TRACE_STORE set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --trace-store=%SDBZ_TRACE_STORE%"
+if defined SDBZ_TRACE_V0 set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --trace-v0=%SDBZ_TRACE_V0%"
 
 rem Display live LLVM IR file count and percentage in both quick and full
 rem sessions; the orchestrator keeps in-place updates out of boot logs.
@@ -424,7 +451,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.
@@ -445,41 +472,3 @@ if errorlevel 1 (
     exit /b 1
 )
 exit /b 0
-
-:confirm_guest_cache_rebuild
-rem Fresh builds with no saved guest output need no confirmation.
-rem Detect remnants even when translation-cache.json itself was removed.
-set "SAVED_GUEST_TRANSLATION="
-if exist "%WORK_DIR%\translation-cache.json" set "SAVED_GUEST_TRANSLATION=1"
-if exist "%WORK_DIR%\ir\ee_functions.json" set "SAVED_GUEST_TRANSLATION=1"
-if exist "%WORK_DIR%\ir\*.ll" set "SAVED_GUEST_TRANSLATION=1"
-if exist "%WORK_DIR%\objects\objects.json" set "SAVED_GUEST_TRANSLATION=1"
-if exist "%WORK_DIR%\objects\*.o" set "SAVED_GUEST_TRANSLATION=1"
-if exist "%WORK_DIR%\game-translated.dll" set "SAVED_GUEST_TRANSLATION=1"
-if not defined SAVED_GUEST_TRANSLATION exit /b 0
-
-echo.
-echo ================================================================
-echo WARNING: The existing guest LLVM IR cache could not be reused.
-echo Both exact cache validation and safe host-only relinking failed,
-echo or saved translation metadata is missing.
-echo.
-echo A full rebuild may DELETE existing .ll modules and REPLACE the
-echo translated game library, objects, and translation-cache.json in:
-echo   "%WORK_DIR%"
-echo.
-echo Back up this directory before continuing if you need its contents.
-echo Press Y to authorize the rebuild, or N to abort without rebuilding.
-echo ================================================================
-choice /C YN /N /M "Rebuild saved guest translations? [Y/N] "
-rem CHOICE: Y=1; N=2; error/no-console=255. Anything but Y aborts.
-if errorlevel 2 (
-    echo Guest translation rebuild cancelled; saved IR was not regenerated.
-    exit /b 1
-)
-if errorlevel 1 (
-    echo Guest translation rebuild explicitly authorized.
-    exit /b 0
-)
-echo ERROR: Cache rebuild confirmation was not received.
-exit /b 1

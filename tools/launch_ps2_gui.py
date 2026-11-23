@@ -42,6 +42,44 @@ NUMERIC_SETTINGS = {
 }
 COMMAND_TOOLS = ("Boot session", "Game runner (Python)", "Native runner")
 
+DIAGNOSTIC_SETTINGS = {
+    "Watch guest word": ("SDBZ_WATCH_WORD", "word"),
+    "Trace guest stores": ("SDBZ_TRACE_STORE", "word"),
+    "Trace V0 writes": ("SDBZ_TRACE_V0", "range"),
+}
+
+
+def diagnostic_overrides(values):
+    """Validate optional read-only native guest diagnostics."""
+    result = {}
+    for label, (key, kind) in DIAGNOSTIC_SETTINGS.items():
+        raw = values.get(label, "").strip()
+        if not raw:
+            continue
+        try:
+            if kind == "word":
+                address = int(raw, 0)
+                if not 0 <= address <= 0xffffffff or (address & 3):
+                    raise ValueError
+                result[key] = f"0x{address:08x}"
+            else:
+                first, last = raw.split(":", 1)
+                start = int(first, 0)
+                end = int(last, 0)
+                if (start < 0 or end > 0xffffffff or
+                        start > end or end - start > 0x2000 or
+                        (start & 3) or (end & 3)):
+                    raise ValueError
+                result[key] = f"0x{start:08x}:0x{end:08x}"
+        except (ValueError, TypeError):
+            requirement = (
+                "a 4-byte-aligned 32-bit address" if kind == "word" else
+                "an aligned START:END range no larger than 0x2000 bytes"
+            )
+            raise ValueError(f"{label} must be {requirement}.") from None
+    return result
+
+
 OPTION_HELP = {
     "Extracted disc": "Folder containing the extracted game files and SYSTEM.CNF.",
     "Memory card": "Optional raw 8,650,752-byte PS2 card image for slot 1. Game writes may be saved to this file.",
@@ -66,7 +104,19 @@ OPTION_HELP = {
         "Keep the current game process and guest state alive while an absent EE function "
         "is compiled and hot-loaded. Available during Automatic, Full replay and Quick probe. "
         "This is not a persistent savestate: closing the process loses its state. "
-        "Uncheck to restart each replay after compiling a missing function."
+        "Uncheck to restart each replay after compiling a missing function. "
+        "The Performance tab selects fast overlays or full relinks for live misses."
+    ),
+    "Precompile all functions on a cold cache": (
+        "On a genuinely cold translation, compile all statically discovered EE functions "
+        "before boot instead of repeatedly pausing for them. Existing valid caches are reused "
+        "without retranslating. Uncheck to compile the entry point first."
+    ),
+    "Fast live overlays": (
+        "After a live cache miss, compile and load only the newly discovered EE functions "
+        "as an overlay DLL. This is PR #152's fast path, enabled by default. "
+        "Uncheck to use the legacy whole-library relink on each live miss. "
+        "Requires Resume after cache miss on the Game tab."
     ),
     "Accept changed IR hashes": "Allow cache recovery to accept IR hashes that differ from the saved manifest.",
     "Cross first poll": "The first port 1 controller poll that receives scripted Cross. Select the Custom profile to use it.",
@@ -83,6 +133,9 @@ OPTION_HELP = {
     "Loop watchdog resumes": "How many times to resume the native loop watchdog between progress events. Zero stops on the first watchdog hit.",
     "Trace every N dispatches": "Sample ordinary verbose dispatch lines at this interval. One logs every dispatch.",
     "Report snapshot interval (ms)": "Interval between periodic JSON reports, in milliseconds. Zero uses dispatch-based checkpoints.",
+    "Watch guest word": "Track changes between native dispatches. Example: 0x0044081c (sound-object handle).",
+    "Trace guest stores": "Capture the exact guest STORE PCs and operands modifying this word (first 64 events). Example: 0x0044081c.",
+    "Trace V0 writes": "Trace low-64-bit V0 assignments within an aligned guest PC range START:END (first 64 events). Example: 0x00137970:0x00137d18.",
     "Tool": "Choose the boot session orchestrator, Python game runner, or native executable for a direct command.",
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
@@ -155,6 +208,9 @@ def default_settings():
         "snapshot": True,
         "speed": "100%",
         "cache_miss_resume": True,
+        "precompile_all": True,
+        "fast_overlays": True,
+        "diagnostics": {label: "" for label in DIAGNOSTIC_SETTINGS},
         "tool": COMMAND_TOOLS[0],
         "executable": str(runner),
         "arguments": "",
@@ -166,7 +222,7 @@ def default_settings():
             "BOOT_TIMEOUT_SECONDS": timeout,
             "EXPANSION_PASSES": "8",
             "EXPANSION_PER_PASS": "128",
-            "EMIT_JOBS": "8",
+            "EMIT_JOBS": "",
             "SIF_POLL_LIMIT": "2048",
             "LOOP_YIELD_RESUMES": "16",
             "SDBZ_DISPATCH_TRACE_EVERY": "1024",
@@ -203,8 +259,9 @@ def batch_tool_defaults(disc):
         "--build-dir": "build",
         "--config": "Release",
         "--work-dir": str(work),
-        "--emit-jobs": numeric["EMIT_JOBS"],
+        "--emit-jobs": numeric["EMIT_JOBS"] or str(min(32, os.cpu_count() or 8)),
         "--emit-opt": "0",
+        "--functions": "all",
         "--timeout-seconds": numeric["BOOT_TIMEOUT_SECONDS"],
     }
     defaults = {
@@ -214,12 +271,14 @@ def batch_tool_defaults(disc):
             "--expansion-passes": numeric["EXPANSION_PASSES"],
             "--expansion-per-pass": numeric["EXPANSION_PER_PASS"],
             "--replay-after-expand": False,
+            "--live-full-relink": False,
             "--ll-progress": True,
         },
         "Game runner (Python)": {
             **python_defaults,
             "--auto-expand": numeric["EXPANSION_PER_PASS"],
             "--replay-after-expand": False,
+            "--live-full-relink": False,
             "--trace": True,
         },
         "Native runner": {
@@ -247,11 +306,16 @@ def load_settings(path):
         return settings, f"Invalid {path.name}. Loaded defaults."
     for key, default in settings.items():
         value = saved.get(key)
-        if type(value) is type(default) and key not in ("numeric", "tool_options"):
+        if type(value) is type(default) and key not in ("numeric", "tool_options", "diagnostics"):
             settings[key] = value
     for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS)):
         if settings[key] not in choices:
             settings[key] = default_settings()[key]
+    saved_diagnostics = saved.get("diagnostics")
+    if isinstance(saved_diagnostics, dict):
+        for label in DIAGNOSTIC_SETTINGS:
+            if isinstance(saved_diagnostics.get(label), str):
+                settings["diagnostics"][label] = saved_diagnostics[label]
     saved_numeric = saved.get("numeric")
     numeric = settings["numeric"]
     numeric["MAX_DISPATCHES"], numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
@@ -301,17 +365,25 @@ def save_settings(path, settings):
 
 
 def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
-                     resume_on_cache_miss=True):
+                     resume_on_cache_miss=True, precompile_all=True,
+                     fast_overlays=True, diagnostics=None):
     args = []
     mode_flag = SESSION_MODES[mode]
     if mode_flag:
         args.append(mode_flag)
     if mode == "Recover translation cache" and accept_new_ir:
         args.append("--accept-new-ir")
-    if not resume_on_cache_miss and mode not in (
-            "Matched neutral/Cross", "Recover translation cache"):
+    supports_expansion = mode not in (
+        "Matched neutral/Cross", "Recover translation cache"
+    )
+    if not resume_on_cache_miss and supports_expansion:
         args.append("--replay-after-expand")
+    if resume_on_cache_miss and supports_expansion and not fast_overlays:
+        args.append("--live-full-relink")
     env = {}
+    if supports_expansion:
+        env["PRECOMPILE_ALL"] = str(int(precompile_all))
+        env.update(diagnostic_overrides(diagnostics or {}))
     if mode in ("Automatic", "Full replay"):
         env["EE_WEBGPU_WINDOW"] = str(int(window))
         env["EE_WEBGPU_SNAPSHOT"] = str(int(snapshot))
@@ -376,7 +448,7 @@ class Launcher(ttk.Frame):
         settings, warning = load_settings(SETTINGS_PATH)
         self.fields = {
             key: (tk.BooleanVar if isinstance(value, bool) else tk.StringVar)(value=value)
-            for key, value in settings.items() if key not in ("numeric", "arguments", "tool_options")
+            for key, value in settings.items() if key not in ("numeric", "arguments", "tool_options", "diagnostics")
         }
         self.disc = self.fields["disc"]
         self.card = self.fields["card"]
@@ -389,6 +461,13 @@ class Launcher(ttk.Frame):
         self.speed = self.fields["speed"]
         self.speed_status = tk.StringVar()
         self.cache_miss_resume = self.fields["cache_miss_resume"]
+        self.precompile_all = self.fields["precompile_all"]
+        self.fast_overlays = self.fields["fast_overlays"]
+        self.diagnostics = {
+            label: tk.StringVar(value=settings["diagnostics"][label])
+            for label in DIAGNOSTIC_SETTINGS
+        }
+        self.performance_description = tk.StringVar()
         self.tool = self.fields["tool"]
         self.executable = self.fields["executable"]
         self.status = tk.StringVar(value=warning)
@@ -404,10 +483,12 @@ class Launcher(ttk.Frame):
         self.tabs.grid(row=0, column=0, columnspan=3, sticky="nsew", pady=(0, 10))
         self.setup = ttk.Frame(self.tabs, padding=10)
         self.game_view = ttk.Frame(self.tabs, padding=6)
+        self.performance = ttk.Frame(self.tabs, padding=10)
         self.limits = ttk.Frame(self.tabs, padding=10)
         self.direct = ttk.Frame(self.tabs, padding=10)
         for tab, title in (
             (self.setup, "Game"), (self.game_view, "Game window"),
+            (self.performance, "Performance"),
             (self.limits, "Limits and diagnostics"),
             (self.direct, "Direct command"),
         ):
@@ -463,8 +544,61 @@ class Launcher(ttk.Frame):
         Tooltip(self.ir_picker, OPTION_HELP["Accept changed IR hashes"])
         self.speed_picker = self.choice_row(self.setup, 10, "Speed", self.speed, SPEEDS)
         ttk.Label(self.setup, textvariable=self.speed_status).grid(row=11, column=1, sticky="w")
+        ttk.Label(
+            self.performance,
+            text="Native dispatch uses the indexed guest-PC lookup from PR #152.",
+            wraplength=670,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        self.precompile_picker = ttk.Checkbutton(
+            self.performance, text="Precompile all functions on a cold cache",
+            variable=self.precompile_all,
+        )
+        self.precompile_picker.grid(row=1, column=0, columnspan=3, sticky="w", pady=4)
+        Tooltip(self.precompile_picker, OPTION_HELP["Precompile all functions on a cold cache"])
+        self.overlay_picker = ttk.Checkbutton(
+            self.performance, text="Fast live overlays (instead of full DLL relinks)",
+            variable=self.fast_overlays,
+        )
+        self.overlay_picker.grid(row=2, column=0, columnspan=3, sticky="w", pady=4)
+        Tooltip(self.overlay_picker, OPTION_HELP["Fast live overlays"])
+        compile_caption = ttk.Label(self.performance, text="Compile jobs")
+        compile_caption.grid(row=3, column=0, sticky="w", pady=(12, 0), padx=(0, 12))
+        Tooltip(compile_caption, OPTION_HELP["Compile jobs"])
+        self.compile_jobs_entry = ttk.Entry(
+            self.performance, textvariable=self.numeric["Compile jobs"]
+        )
+        self.compile_jobs_entry.grid(row=3, column=1, sticky="ew", pady=(12, 0))
+        Tooltip(
+            self.compile_jobs_entry,
+            "Leave blank to let the batch launcher use the CPU count. "
+            "Enter a number to override it.",
+        )
+        ttk.Label(
+            self.performance,
+            text="Blank uses the batch launcher's automatic CPU count. "
+                 "Direct command has independent translation options.",
+            foreground="gray", wraplength=670,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 14))
+        ttk.Label(
+            self.performance, textvariable=self.performance_description,
+            wraplength=670,
+        ).grid(row=5, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            self.performance,
+            text="Optional guest memory / return-value probes (blank = off)",
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(18, 8))
+        for offset, (label, variable) in enumerate(self.diagnostics.items(), 7):
+            caption = ttk.Label(self.performance, text=label)
+            caption.grid(row=offset, column=0, sticky="w", padx=(0, 12), pady=3)
+            entry = ttk.Entry(self.performance, textvariable=variable)
+            entry.grid(row=offset, column=1, columnspan=2, sticky="ew", pady=3)
+            Tooltip(caption, OPTION_HELP[label])
+            Tooltip(entry, OPTION_HELP[label])
+
         self.cross_entries = []
         for row, (label, variable) in enumerate(self.numeric.items()):
+            if label == "Compile jobs":
+                continue
             caption = ttk.Label(self.limits, text=label)
             caption.grid(row=row, column=0, sticky="w", padx=(0, 12))
             Tooltip(caption, OPTION_HELP[label])
@@ -521,6 +655,9 @@ class Launcher(ttk.Frame):
         Tooltip(defaults_button, "Apply the full-replay defaults from run_ps2_game.bat to this tool.")
         self.mode.trace_add("write", self.change_mode)
         self.window.trace_add("write", self.update_fields)
+        self.cache_miss_resume.trace_add("write", self.update_fields)
+        self.precompile_all.trace_add("write", self.update_fields)
+        self.fast_overlays.trace_add("write", self.update_fields)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.pad.trace_add("write", self.update_fields)
         self.update_fields()
@@ -618,6 +755,9 @@ class Launcher(ttk.Frame):
         settings["numeric"] = {
             key: self.numeric[label].get() for label, (key, _, _) in NUMERIC_SETTINGS.items()
         }
+        settings["diagnostics"] = {
+            label: var.get() for label, var in self.diagnostics.items()
+        }
         settings["tool_options"] = {
             tool: dict(self.direct_values(tool), extra=extra.get("1.0", "end-1c"))
             for tool, extra in self.tool_extra.items()
@@ -656,6 +796,30 @@ class Launcher(ttk.Frame):
         self.cache_miss_picker.state(
             ["disabled"] if special else ["!disabled"]
         )
+        self.precompile_picker.state(["disabled"] if special else ["!disabled"])
+        overlays_available = not special and self.cache_miss_resume.get()
+        self.overlay_picker.state(
+            ["!disabled"] if overlays_available else ["disabled"]
+        )
+        if special:
+            self.performance_description.set(
+                "This session uses existing cached code; cold precompilation "
+                "and live overlay settings do not apply."
+            )
+        elif not self.cache_miss_resume.get():
+            self.performance_description.set(
+                "Cache misses restart the replay (legacy mode); "
+                "the overlay setting is not used."
+            )
+        else:
+            self.performance_description.set(
+                "Live cache misses: " +
+                ("fast overlay DLLs" if self.fast_overlays.get()
+                 else "whole-library relinks") +
+                ". Cold cache: " +
+                ("precompile all discovered functions." if self.precompile_all.get()
+                 else "translate entry first.")
+            )
         cross_state = ["!disabled"] if not special and self.pad.get() == "Custom" else ["disabled"]
         for entry in self.cross_entries:
             entry.state(cross_state)
@@ -693,8 +857,13 @@ class Launcher(ttk.Frame):
             self.mode.get(), self.pad.get(), self.accept_ir.get(), self.window.get(),
             self.snapshot.get(), {label: value.get() for label, value in self.numeric.items()},
             resume_on_cache_miss=self.cache_miss_resume.get(),
+            precompile_all=self.precompile_all.get(),
+            fast_overlays=self.fast_overlays.get(),
+            diagnostics={label: var.get() for label, var in self.diagnostics.items()},
         )
         for key, _, _ in NUMERIC_SETTINGS.values():
+            env.pop(key, None)
+        for key, _ in DIAGNOSTIC_SETTINGS.values():
             env.pop(key, None)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
                    SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))

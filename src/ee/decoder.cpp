@@ -102,19 +102,44 @@ bool cop1_s_lowered_exactly(uint32_t funct)
            funct == 0x34 || funct == 0x36;
 }
 
-bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs)
+bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
+                         uint32_t rt, uint32_t rd)
 {
     switch (funct)
     {
+    case 0x04:                                          // PLZCW uses rs only
+        return rt == 0 && sa == 0;
+    case 0x34: case 0x36: case 0x37:                    // packed halfword shifts
+    case 0x3c: case 0x3e: case 0x3f:                    // packed word shifts
+        return rs == 0;
     case 0x00: case 0x01: case 0x20: case 0x21:        // madd/maddu, pipeline 0/1
     case 0x18: case 0x19:                                // mult/multu, pipeline 1
     case 0x1a: case 0x1b:                                // div/divu, pipeline 1
         return sa == 0;
     case 0x10: case 0x11: case 0x12: case 0x13:        // mfhi1 mthi1 mflo1 mtlo1
         return true;
+    case 0x30: // PMFHL: rd <- HI/LO words, sa selects five layouts
+        return rs == 0 && rt == 0 && sa <= 4;
+    case 0x31: // PMTHL: HI/LO selected words <- rs; sa must be zero
+        return rt == 0 && rd == 0 && sa == 0;
     case 0x08:                                          // MMI0
-        return sa == 0 || sa == 1 || sa == 3 || sa == 4 || sa == 5 || sa == 7 ||
-               sa == 8 || sa == 9;                      // paddw psubw pmaxw paddh psubh pmaxh paddb psubb
+        // All named MMI0 packed arithmetic, comparisons, interleaves,
+        // packs and color conversions have exact native LLVM lowering.
+        // Reserved sub-opcodes remain INVALID via kMmi0.
+        switch (sa)
+        {
+        case 0x00: case 0x01: case 0x02: case 0x03:
+        case 0x04: case 0x05: case 0x06: case 0x07:
+        case 0x08: case 0x09: case 0x0a:
+        case 0x10: case 0x11: case 0x12: case 0x13:
+        case 0x14: case 0x15: case 0x16: case 0x17:
+        case 0x18: case 0x19: case 0x1a: case 0x1b:
+            return true;
+        case 0x1e: case 0x1f: // PEXT5/PPAC5 use rt only
+            return rs == 0;
+        default:
+            return false;
+        }
     case 0x28:                                          // MMI1
         switch (sa)
         {
@@ -130,13 +155,49 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs)
             return false;
         }
     case 0x09:                                          // MMI2
-        return sa == 0x0e || sa == 0x12 || sa == 0x13;  // pcpyld pand pxor
-    case 0x29:                                          // MMI3
-        if (sa == 0x1b)                                 // pcpyh uses rt only
+        switch (sa)
         {
+        case 0x00: case 0x04:                            // PMADDW / PMSUBW
+        case 0x02: case 0x03:                            // PSLLVW / PSRLVW
+        case 0x0a:                                      // PINTH
+            return true;
+        case 0x10: case 0x11: case 0x14: case 0x15:      // PMADDH / PHMADH / PMSUBH / PHMSBH
+        case 0x1c:                                      // PMULTH
+            return true;
+        case 0x08: case 0x09:                            // PMFHI / PMFLO
+            return rs == 0 && rt == 0;
+        case 0x0c:                                      // PMULTW (signed)
+            return true;
+        case 0x0d:                                      // PDIVW (signed)
+        case 0x1d:                                      // PDIVBW (four signed words / rt low halfword)
+            return rd == 0;
+        case 0x0e: case 0x12: case 0x13:               // PCPYLD / PAND / PXOR
+            return true;
+        case 0x1a: case 0x1b: case 0x1e: case 0x1f:   // PEXEH/PREVH/PEXEW/PROT3W
             return rs == 0;
+        default:
+            return false;
         }
-        return sa == 0x0e || sa == 0x12 || sa == 0x13; // pcpyud por pnor
+    case 0x29:                                          // MMI3
+        switch (sa)
+        {
+        case 0x03:                                      // PSRAVW: signed variable shift
+        case 0x0a:                                      // PINTEH
+        case 0x00:                                      // PMADDUW
+            return true;
+        case 0x08: case 0x09:                            // PMTHI / PMTLO
+            return rt == 0 && rd == 0;
+        case 0x0c:                                      // PMULTUW (unsigned)
+            return true;
+        case 0x0d:                                      // PDIVUW (unsigned)
+            return rd == 0;
+        case 0x0e: case 0x12: case 0x13:               // PCPYUD / POR / PNOR
+            return true;
+        case 0x1b:                                      // PCPYH uses rt only
+            return rs == 0;
+        default:
+            return false;
+        }
     default:
         return false;
     }
@@ -222,9 +283,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             break;
         case e_ee_opcode::FUNCT_DADD:
         case e_ee_opcode::FUNCT_DSUB:
-            // Signed arithmetic must raise the guest overflow exception.
-            // The current LLVM lowering is wrapping arithmetic, so fail closed.
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            // Exact LLVM signed overflow and guest EX_Ov entry are supported.
+            insn.valid = insn.sa == 0
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
             set_mnemonic(insn, "signed_arith");
             break;
         case e_ee_opcode::FUNCT_ADDU:
@@ -272,7 +333,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         case e_ee_opcode::FUNCT_TLTU:
         case e_ee_opcode::FUNCT_TEQ:
         case e_ee_opcode::FUNCT_TNE:
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            // Code bits in the reserved-looking middle field are permitted
+            // trap-code operands; only the signed/unsigned predicate matters.
+            insn.valid = e_ee_valid::VALID;
             set_mnemonic(insn, "trap");
             break;
         case e_ee_opcode::FUNCT_MFSA:
@@ -408,7 +471,11 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         case e_ee_opcode::REGIMM_TNEI:
             insn.flow = e_ee_flow::FLOW_NONE;
             insn.has_delay_slot = false;
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            // REGIMM initially computes a branch target for every rt form.
+            // Immediate traps have no target or delay slot and must not
+            // appear as synthetic control-flow references.
+            insn.branch_target = 0;
+            insn.valid = e_ee_valid::VALID;
             set_mnemonic(insn, "regimm_trap");
             break;
         case e_ee_opcode::REGIMM_MTSAB:
@@ -436,7 +503,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         insn.type = e_ee_op_type::OP_TYPE_ITYPE;
         insn.opcode = e_ee_opcode::OP_ADDI;
         insn.flow = e_ee_flow::FLOW_NONE;
-        insn.valid = e_ee_valid::UNSUPPORTED; // overflow exception is not modelled
+        insn.valid = e_ee_valid::VALID; // checked 32-bit overflow -> EX_Ov
         set_mnemonic(insn, "addi");
         break;
 
@@ -699,7 +766,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         if (std::string_view(name) == "reserved")
             insn.valid = e_ee_valid::INVALID;
         else
-            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs)
+            insn.valid = mmi_lowered_exactly(insn.funct, insn.sa & 31, insn.rs, insn.rt, insn.rd)
                          ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
         break;
     }
@@ -1086,7 +1153,7 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         insn.type = e_ee_op_type::OP_TYPE_ITYPE;
         insn.opcode = e_ee_opcode::OP_DADDI;
         insn.flow = e_ee_flow::FLOW_NONE;
-        insn.valid = e_ee_valid::UNSUPPORTED; // overflow exception is not modelled
+        insn.valid = e_ee_valid::VALID; // checked 64-bit overflow -> EX_Ov
         set_mnemonic(insn, "daddi");
         break;
 

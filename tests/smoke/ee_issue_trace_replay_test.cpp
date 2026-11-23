@@ -1,6 +1,7 @@
 #include "ee_issue_trace_replay.h"
 
 #include <cstdio>
+#include <utility>
 
 namespace
 {
@@ -622,7 +623,11 @@ int main()
     const uint32_t mmi_pcpyud = mmi(10u, 11u, 16u, 14u, 0x29u);
     const uint32_t mmi_pcpyh = mmi(0u, 10u, 17u, 27u, 0x29u);
     const uint32_t mmi_qfsrv = mmi(10u, 11u, 18u, 27u, 0x28u);
-    const uint32_t mmi_unsupported = mmi(8u, 9u, 10u, 2u, 0x08u);
+    const uint32_t mmi_pcgtw = mmi(8u, 9u, 10u, 2u, 0x08u);
+    const uint32_t mmi_ppacb = mmi(8u, 9u, 10u, 27u, 0x08u);
+    const uint32_t mmi_psrlh = mmi(0u, 9u, 10u, 15u, 0x36u);
+    const uint32_t mmi_plzcw = mmi(8u, 0u, 10u, 0u, 0x04u);
+    const uint32_t mmi_unsupported = mmi(8u, 9u, 10u, 11u, 0x08u);
     ee::s_ee_issue_replay_profile packed_profile{1u, 3u};
 
     replay.configure(packed_profile);
@@ -661,7 +666,8 @@ int main()
 
     replay.configure(packed_profile);
     const uint32_t packed_families[] = {
-        mmi_pabsw, mmi_pextuw, mmi_pcpyld, mmi_pcpyud, mmi_pcpyh
+        mmi_pabsw, mmi_pextuw, mmi_pcpyld, mmi_pcpyud, mmi_pcpyh,
+        mmi_pcgtw, mmi_ppacb, mmi_psrlh, mmi_plzcw
     };
     bool family_covered = true;
     for (const uint32_t opcode : packed_families)
@@ -672,9 +678,163 @@ int main()
             e_ee_issue_replay_status::ISSUED;
     }
     check(family_covered,
-          "decoder-verified MMI0/1/2/3 subset uses explicit packed profile");
+          "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
+
+    // MMI2 unary permutations read rt, NOT rs. Check both the full
+    // 128-bit dependency and absence of an artificial rs dependency.
+    bool permutation_rt_hazards = true;
+    bool permutation_no_rs_hazards = true;
+    bool permutation_unprofiled = true;
+    for (const uint32_t subop : {0x1au, 0x1bu, 0x1eu, 0x1fu})
+    {
+        const uint32_t depends_on_rt = mmi(0u, 10u, 11u, subop, 0x09u);
+        const uint32_t independent = mmi(0u, 9u, 11u, subop, 0x09u);
+        replay.configure(packed_profile);
+        permutation_rt_hazards &=
+            replay.observe(record(1u, 0x7130u, mmi_paddw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7134u, depends_on_rt, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+        // A packed producer can occupy the candidate pipe beyond
+        // cycle 2 even when there is no GPR dependency. Compare two
+        // scalar producers with identical profiles instead of assuming
+        // a fixed packed issue interval.
+        const uint32_t unrelated_r10 =
+            (0x09u << 26u) | (10u << 16u) | 1u; // ADDIU $10,$zero,1
+        const uint32_t unrelated_r12 =
+            (0x09u << 26u) | (12u << 16u) | 1u; // ADDIU $12,$zero,1
+        replay.configure(packed_profile);
+        const bool with_r10 =
+            replay.observe(record(1u, 0x7130u, unrelated_r10, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7134u, independent, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED;
+        const uint64_t r10_cycle = replay.last_event_candidate_cycle();
+        replay.configure(packed_profile);
+        const bool with_r12 =
+            replay.observe(record(1u, 0x7130u, unrelated_r12, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7134u, independent, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED;
+        permutation_no_rs_hazards &= with_r10 && with_r12 &&
+            r10_cycle == replay.last_event_candidate_cycle();
+        ee::s_ee_issue_replay_profile unprofiled = packed_profile;
+        unprofiled.m_packed_mmi_latency = 0u;
+        replay.configure(unprofiled);
+        permutation_unprofiled &=
+            replay.observe(record(1u, 0x7130u, independent, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(permutation_rt_hazards,
+          "MMI2 unary permutations consume full-128 rt result hazards");
+    check(permutation_no_rs_hazards,
+          "MMI2 unary permutations have no unrelated scalar GPR hazards");
+    check(permutation_unprofiled,
+          "MMI2 unary permutations require explicit packed candidate latency");
 
     replay.configure(packed_profile);
+    // PINTH/PINTEH interleave both full-width source GPRs and produce
+    // a full-width destination, without touching HI/LO. Both operations
+    // require the explicitly supplied packed-MMI latency candidate.
+    const uint32_t mmi_pinth = mmi(8u, 9u, 10u, 0x0au, 0x09u);
+    const uint32_t mmi_pinteh = mmi(8u, 9u, 10u, 0x0au, 0x29u);
+    const uint32_t mmi_pinth_from_prior_rt =
+        mmi(8u, 10u, 11u, 0x0au, 0x09u);
+    const uint32_t mmi_pinteh_from_prior_rs =
+        mmi(10u, 9u, 11u, 0x0au, 0x29u);
+    bool interleave_profiles = true;
+    for (const uint32_t opcode : {mmi_pinth, mmi_pinteh})
+    {
+        replay.configure(packed_profile);
+        interleave_profiles &=
+            replay.observe(record(1u, 0x7140u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7144u, addiu_from_packed, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(interleave_profiles,
+          "PINTH/PINTEH full-128 destination requires packed latency");
+    bool interleave_sources = true;
+    for (const uint32_t opcode : {mmi_pinth_from_prior_rt,
+                                  mmi_pinteh_from_prior_rs})
+    {
+        replay.configure(packed_profile);
+        interleave_sources &=
+            replay.observe(record(1u, 0x7140u, mmi_paddw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7144u, opcode, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(interleave_sources,
+          "PINTH/PINTEH consume full 128-bit rs/rt source dependencies");
+    packed_profile.m_packed_mmi_latency = 0u;
+    bool interleave_unprofiled = true;
+    for (const uint32_t opcode : {mmi_pinth, mmi_pinteh})
+    {
+        replay.configure(packed_profile);
+        interleave_unprofiled &=
+            replay.observe(record(1u, 0x7140u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(interleave_unprofiled,
+          "PINTH/PINTEH do not invent packed-MMI hardware cycles");
+    packed_profile.m_packed_mmi_latency = 5u;
+    replay.configure(packed_profile);
+
+    // MMI2/MMI3 variable-word shifts read both 128-bit sources, write
+    // a 128-bit destination, and never reserve the HI/LO banks.
+    const uint32_t mmi_psllvw = mmi(8u, 9u, 10u, 2u, 0x09u);
+    const uint32_t mmi_psrlvw = mmi(8u, 9u, 10u, 3u, 0x09u);
+    const uint32_t mmi_psravw = mmi(8u, 9u, 10u, 3u, 0x29u);
+    const uint32_t mmi_psllvw_read_prior = mmi(10u, 9u, 11u, 2u, 0x09u);
+    const uint32_t mmi_psravw_read_prior = mmi(10u, 9u, 11u, 3u, 0x29u);
+    const uint32_t variable_readers[] =
+    {
+        mmi_psllvw, mmi_psrlvw, mmi_psravw
+    };
+    bool variable_producers_profiled = true;
+    for (const uint32_t opcode : variable_readers)
+    {
+        replay.configure(packed_profile);
+        variable_producers_profiled &=
+            replay.observe(record(1u, 0x7150u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7154u, addiu_from_packed, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(variable_producers_profiled,
+          "PSLLVW/PSRLVW/PSRAVW publish full-128 GPR at packed latency");
+    for (const uint32_t opcode : {mmi_psllvw_read_prior,
+                                  mmi_psravw_read_prior})
+    {
+        replay.configure(packed_profile);
+        check(replay.observe(record(1u, 0x7150u, mmi_paddw, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x7154u, opcode, 0u, 2u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 5u,
+              "variable shifts read prior 128-bit rs GPR");
+    }
+    packed_profile.m_packed_mmi_latency = 0u;
+    bool unprofiled_variable_shifts = true;
+    for (const uint32_t opcode : variable_readers)
+    {
+        // An UNMODELED_INSTRUCTION halts the replay until reconfigured.
+        // Each unsupported instruction needs an independently fresh trace.
+        replay.configure(packed_profile);
+        unprofiled_variable_shifts &=
+            replay.observe(record(1u, 0x7150u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(unprofiled_variable_shifts,
+          "variable shifts require explicit packed latency");
+    packed_profile.m_packed_mmi_latency = 5u;
+    replay.configure(packed_profile);
+
     const uint32_t mmi_zero_dest = mmi(8u, 9u, 0u, 0u, 0x08u);
     check(replay.observe(record(1u, 0x7100u, mmi_zero_dest, 0u, 1u)) ==
           e_ee_issue_replay_status::ISSUED &&
@@ -684,6 +844,196 @@ int main()
           e_ee_issue_replay_status::ISSUED &&
           replay.last_event_candidate_cycle() == 1u,
           "packed GPR0 destination does not create artificial zero hazards");
+
+    // PMTHL modifies the low words of all four HI/LO halves. PMFHL
+    // consumes those same halves and produces a full 128-bit GPR value.
+    // Both require an explicit transfer latency; never infer hardware
+    // cycles from the generic packed or scalar integer candidate.
+    const uint32_t mmi_pmthl = mmi(10u, 0u, 0u, 0u, 0x31u);
+    const uint32_t mmi_pmfhl = mmi(0u, 0u, 11u, 4u, 0x30u);
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7200u, mmi_pmthl, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMTHL cannot invent an HI/LO transfer latency");
+
+    packed_profile.m_hilo_transfer_latency = 7u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7200u, mmi_pmthl, 0u, 1u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(2u, 0x7204u, mmi_pmfhl, 0u, 2u)) ==
+          e_ee_issue_replay_status::ISSUED &&
+          replay.last_event_candidate_cycle() == 7u,
+          "PMTHL partial HI/LO producer stalls PMFHL on all four banks");
+    packed_profile.m_hilo_transfer_latency = 0u;
+
+    // Full-bank MMI2/MMI3 HI/LO transfers require explicit transfer
+    // latency, and packed multiply/divide require a separately provided
+    // packed-MMI profile in addition to their HI/LO result latency.
+    const uint32_t mmi_pmthi = mmi(10u, 0u, 0u, 8u, 0x29u);
+    const uint32_t mmi_pmfhi = mmi(0u, 0u, 11u, 8u, 0x09u);
+    const uint32_t mmi_pmtlo = mmi(10u, 0u, 0u, 9u, 0x29u);
+    const uint32_t mmi_pmflo = mmi(0u, 0u, 11u, 9u, 0x09u);
+    const uint32_t mmi_pmultw = mmi(8u, 9u, 10u, 12u, 0x09u);
+    const uint32_t mmi_pmultuw = mmi(8u, 9u, 10u, 12u, 0x29u);
+    const uint32_t mmi_pdivw = mmi(8u, 9u, 0u, 13u, 0x09u);
+    const uint32_t mmi_pdivuw = mmi(8u, 9u, 0u, 13u, 0x29u);
+
+    packed_profile.m_hilo_transfer_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmthi, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMTHI requires independently supplied HI/LO transfer latency");
+
+    packed_profile.m_hilo_transfer_latency = 7u;
+    for (const auto pair :
+        {std::pair<uint32_t,uint32_t>{mmi_pmthi, mmi_pmfhi},
+         std::pair<uint32_t,uint32_t>{mmi_pmtlo, mmi_pmflo}})
+    {
+        replay.configure(packed_profile);
+        check(replay.observe(record(1u, 0x7300u, pair.first, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x7304u, pair.second, 0u, 2u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 7u,
+              "MMI3 full-bank write delays MMI2 full-bank read");
+    }
+
+    packed_profile.m_hilo_multiply_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmultw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMULTW has no implicit scalar or packed arithmetic timing");
+
+    packed_profile.m_hilo_multiply_latency = 9u;
+    bool multiply_profiled = true;
+    for (const uint32_t opcode : {mmi_pmultw, mmi_pmultuw})
+    {
+        replay.configure(packed_profile);
+        multiply_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmfhi, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 9u;
+    }
+    check(multiply_profiled,
+          "PMULTW/PMULTUW write both HI banks and block PMFHI until ready");
+
+    packed_profile.m_hilo_divide_latency = 11u;
+    bool divide_profiled = true;
+    for (const uint32_t opcode : {mmi_pdivw, mmi_pdivuw})
+    {
+        replay.configure(packed_profile);
+        divide_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmflo, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 11u;
+    }
+    check(divide_profiled,
+          "PDIVW/PDIVUW write both LO banks and block PMFLO until ready");
+    // PDIVBW produces four independent quotient and remainder words
+    // across the full LO/HI banks, has no GPR destination, and requires
+    // an explicitly supplied packed/HI-LO division latency.
+    const uint32_t mmi_pdivbw = mmi(8u, 9u, 0u, 0x1du, 0x09u);
+    packed_profile.m_hilo_divide_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7350u, mmi_pdivbw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PDIVBW has no inferred divide timing");
+    packed_profile.m_hilo_divide_latency = 11u;
+    bool divbw_profiled = true;
+    for (const uint32_t hilo_read : {mmi_pmflo, mmi_pmfhi})
+    {
+        replay.configure(packed_profile);
+        divbw_profiled &=
+            replay.observe(record(1u, 0x7350u, mmi_pdivbw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7354u, hilo_read, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 11u;
+    }
+    check(divbw_profiled,
+          "PDIVBW full-bank quotient/remainder RAW dependencies");
+    packed_profile.m_hilo_transfer_latency = 0u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_divide_latency = 0u;
+
+    const uint32_t mmi_pmaddw = mmi(8u, 9u, 10u, 0u, 0x09u);
+    const uint32_t mmi_pmsubw = mmi(8u, 9u, 10u, 4u, 0x09u);
+    const uint32_t mmi_pmadduw = mmi(8u, 9u, 10u, 0u, 0x29u);
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmaddw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "packed MAC cannot infer accumulator timing");
+    packed_profile.m_hilo_accumulate_latency = 13u;
+    packed_profile.m_hilo_transfer_latency = 7u;
+    bool mac_profiled = true;
+    for (const uint32_t opcode : {mmi_pmaddw, mmi_pmsubw, mmi_pmadduw})
+    {
+        replay.configure(packed_profile);
+        mac_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmfhi, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 13u;
+    }
+    check(mac_profiled, "packed MAC four-bank RAW timing dependencies");
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    packed_profile.m_hilo_transfer_latency = 0u;
+
+    // Halfword MMI2 variants touch every 32-bit word of both HI/LO
+    // banks. The two accumulating forms also read the original banks;
+    // horizontal and multiply forms do not.
+    const uint32_t halfword_ops[] = {0x10u, 0x11u, 0x14u, 0x15u, 0x1cu};
+    packed_profile.m_hilo_transfer_latency = 7u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7400u,
+          mmi(8u, 9u, 10u, 0x10u, 0x09u), 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "PMADDH cannot guess an accumulator latency");
+
+    packed_profile.m_hilo_multiply_latency = 9u;
+    packed_profile.m_hilo_accumulate_latency = 13u;
+    bool halfword_profiled = true;
+    for (uint32_t subop : halfword_ops)
+    {
+        const uint32_t opcode = mmi(8u, 9u, 10u, subop, 0x09u);
+        const uint32_t latency = (subop == 0x10u || subop == 0x14u)
+            ? 13u : 9u;
+        replay.configure(packed_profile);
+        halfword_profiled &=
+            replay.observe(record(1u, 0x7400u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7404u, mmi_pmflo, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == latency;
+    }
+    check(halfword_profiled,
+          "halfword MMI2 writes all HI/LO halves and produces rd");
+
+    bool halfword_read_dependence = true;
+    for (uint32_t subop : {0x10u, 0x14u})
+    {
+        replay.configure(packed_profile);
+        halfword_read_dependence &=
+            replay.observe(record(1u, 0x7500u, mmi_pmthi, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7504u,
+                mmi(8u, 9u, 10u, subop, 0x09u), 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 7u;
+    }
+    check(halfword_read_dependence,
+          "PMADDH/PMSUBH read four existing HI/LO halves");
+    packed_profile.m_hilo_transfer_latency = 0u;
+    packed_profile.m_hilo_multiply_latency = 0u;
+    packed_profile.m_hilo_accumulate_latency = 0u;
 
     packed_profile.m_allow_ordered_waw_overlap = true;
     replay.configure(packed_profile);

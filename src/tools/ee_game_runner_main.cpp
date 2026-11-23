@@ -1013,6 +1013,14 @@ struct s_dispatch_sample
     uint32_t m_to = 0;
     uint32_t m_reason = 0;
     uint32_t m_status = 0;
+    // Read-only register snapshots at native dispatch boundaries.
+    // These are not per-instruction values inside a translated function.
+    uint32_t m_s0_before = 0;
+    uint32_t m_s0_after = 0;
+    uint32_t m_s1_before = 0;
+    uint32_t m_s1_after = 0;
+    uint32_t m_s2_before = 0;
+    uint32_t m_s2_after = 0;
 };
 
 const char* ee_cycle_source_name(ee::e_ee_cycle_source source)
@@ -1364,9 +1372,15 @@ bool write_report(
         const auto& item = history[i];
         std::fprintf(output,
             "%s\n    {\"dispatch\": %llu, \"from_pc\": %u,"
-            " \"to_pc\": %u, \"reason\": %u, \"status\": %u}",
+            " \"to_pc\": %u, \"reason\": %u, \"status\": %u,"
+            " \"s0_before\": %u, \"s0_after\": %u,"
+            " \"s1_before\": %u, \"s1_after\": %u,"
+            " \"s2_before\": %u, \"s2_after\": %u}",
             i ? "," : "", static_cast<unsigned long long>(item.m_index),
-            item.m_from, item.m_to, item.m_reason, item.m_status);
+            item.m_from, item.m_to, item.m_reason, item.m_status,
+            item.m_s0_before, item.m_s0_after,
+            item.m_s1_before, item.m_s1_after,
+            item.m_s2_before, item.m_s2_after);
     }
     std::fputs(history.empty() ? "]," : "\n  ],", output);
     std::fputs("\n  \"syscall_history\": [", output);
@@ -2700,6 +2714,13 @@ int main(int argc, char** argv)
     {
         instruction_trace.resize(k_instruction_trace_limit);
     }
+    // Preserve the most recent guest stores, not just the first 64
+    // printed matches. This ring is host-owned and disabled by default.
+    std::vector<ee::s_ee_guest_store_trace_entry> recent_guest_stores;
+    if (has_trace_store)
+    {
+        recent_guest_stores.resize(64u);
+    }
     ee::s_ee_runtime runtime{};
     if (hle_startup && compatibility_clock)
     {
@@ -2740,6 +2761,10 @@ int main(int argc, char** argv)
     runtime.m_guest_store_trace_enabled = has_trace_store;
     runtime.m_guest_store_trace_word = trace_store;
     runtime.m_guest_store_trace_remaining = has_trace_store ? 64u : 0u;
+    runtime.m_guest_store_trace_recent = recent_guest_stores.empty() ?
+        nullptr : recent_guest_stores.data();
+    runtime.m_guest_store_trace_capacity =
+        static_cast<uint32_t>(recent_guest_stores.size());
     runtime.m_guest_v0_trace_first_pc = trace_v0_first_pc;
     runtime.m_guest_v0_trace_last_pc = trace_v0_last_pc;
     runtime.m_guest_v0_trace_remaining = has_trace_v0 ? 64u : 0u;
@@ -4099,7 +4124,15 @@ int main(int argc, char** argv)
             {
                 history.erase(history.begin());
             }
-            history.push_back({dispatched, from_pc, out_pc, reason, status});
+            history.push_back({
+                dispatched, from_pc, out_pc, reason, status,
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[16].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[16].m_lo),
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[17].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[17].m_lo),
+                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[18].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[18].m_lo)
+            });
             // Host read-only observations, not synthetic guest events.
             const auto gif_channel = hardware.dmac().gif_channel_state();
             const ee::s_ee_hot_loop_state state{
@@ -7517,6 +7550,76 @@ int main(int argc, char** argv)
             }
             std::printf("\n");
         }
+        if ((exception_code == 4u || exception_code == 5u) &&
+            has_instruction)
+        {
+            // Address errors need a guest register/instruction context,
+            // not a fabricated memory read or an exception workaround.
+            // The immediate is sign-extended for regular base+offset
+            // loads/stores. This remains diagnostic for other opcodes.
+            const uint32_t base_register = (instruction >> 21u) & 31u;
+            const int32_t offset = static_cast<int16_t>(instruction & 0xffffu);
+            const uint64_t base_value = cpu.m_gpr[base_register].m_lo;
+            const uint32_t effective_address = static_cast<uint32_t>(
+                base_value + static_cast<int64_t>(offset));
+            std::printf(
+                "EE address fault: base=r%u value=0x%016llx offset=%d "
+                "effective=0x%08x badvaddr=0x%08x "
+                "sp=0x%08x ra=0x%08x gp=0x%08x\n",
+                base_register,
+                static_cast<unsigned long long>(base_value),
+                offset, effective_address, cpu.m_cop0[8],
+                static_cast<uint32_t>(cpu.m_gpr[29].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[31].m_lo),
+                static_cast<uint32_t>(cpu.m_gpr[28].m_lo)
+            );
+            std::printf("EE address fault native dispatch history "
+                        "(last 24 boundaries; before/after are not "
+                        "per-instruction values):\n");
+            const size_t first = history.size() > 24u
+                ? history.size() - 24u : 0u;
+            for (size_t index = first; index < history.size(); ++index)
+            {
+                const s_dispatch_sample& sample = history[index];
+                std::printf(
+                    "  dispatch=%llu from=0x%08x to=0x%08x"
+                    " s0=%08x/%08x s1=%08x/%08x s2=%08x/%08x\n",
+                    static_cast<unsigned long long>(sample.m_index),
+                    sample.m_from, sample.m_to,
+                    sample.m_s0_before, sample.m_s0_after,
+                    sample.m_s1_before, sample.m_s1_after,
+                    sample.m_s2_before, sample.m_s2_after
+                );
+            }
+            std::printf("EE address fault saved registers:");
+            for (uint32_t index = 16u; index <= 23u; ++index)
+            {
+                std::printf(" s%u=%08x", index - 16u,
+                    static_cast<uint32_t>(cpu.m_gpr[index].m_lo));
+            }
+            std::printf("\n");
+            std::printf("EE address fault nearby instructions "
+                        "(guest image, raw opcodes):\n");
+            for (int32_t delta = -24; delta <= 12; ++delta)
+            {
+                const int64_t candidate =
+                    static_cast<int64_t>(epc) +
+                    static_cast<int64_t>(delta) * 4;
+                if (candidate < 0 || candidate > UINT32_MAX)
+                {
+                    continue;
+                }
+                const uint32_t candidate_pc =
+                    static_cast<uint32_t>(candidate);
+                uint32_t candidate_word = 0u;
+                if (image.read32_at(candidate_pc, &candidate_word))
+                {
+                    std::printf("  %c 0x%08x: 0x%08x\n",
+                        delta == 0 ? '>' : ' ', candidate_pc,
+                        candidate_word);
+                }
+            }
+        }
         if (exception_code == 8u)
         {
             std::printf(
@@ -7529,6 +7632,37 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(cpu.m_gpr[5].m_lo),
                 static_cast<unsigned long long>(cpu.m_gpr[6].m_lo),
                 static_cast<unsigned long long>(cpu.m_gpr[7].m_lo)
+            );
+        }
+    }
+    if (runtime.m_guest_store_trace_count != 0u)
+    {
+        // Dump the actual last stores, oldest first, for both a crashing
+        // guest and a successful capped replay. A source operand is not
+        // represented as an observed post-write value.
+        const uint32_t stored = runtime.m_guest_store_trace_count;
+        const uint32_t capacity = runtime.m_guest_store_trace_capacity;
+        const uint32_t oldest = stored == capacity ?
+            runtime.m_guest_store_trace_next : 0u;
+        std::printf(
+            "EE guest-store recent: addr=0x%08x count=%u"
+            " (before-store operands; oldest first)\n",
+            runtime.m_guest_store_trace_word, stored
+        );
+        for (uint32_t index = 0u; index < stored; ++index)
+        {
+            const ee::s_ee_guest_store_trace_entry& entry =
+                runtime.m_guest_store_trace_recent[(oldest + index) % capacity];
+            std::printf(
+                "  guest-store pc=0x%08x opcode=0x%08x"
+                " effective=0x%08x affected=0x%08x width=%u"
+                " lane=%u source=0x%016llx base=0x%016llx"
+                " sp=%08x fp=%08x ra=%08x\n",
+                entry.m_pc, entry.m_opcode, entry.m_effective_address,
+                entry.m_affected_address, entry.m_width, entry.m_source_lane,
+                static_cast<unsigned long long>(entry.m_source_value),
+                static_cast<unsigned long long>(entry.m_base_value),
+                entry.m_sp, entry.m_fp, entry.m_ra
             );
         }
     }

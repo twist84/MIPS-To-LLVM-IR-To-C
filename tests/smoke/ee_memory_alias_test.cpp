@@ -1,4 +1,5 @@
 #include "ee_memory.h"
+#include "ee_runtime.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +60,40 @@ int main()
         std::fprintf(stderr, "KSEG aliases cannot be disabled\n");
         return 1;
     }
-    std::printf("EE KSEG0/KSEG1 RAM alias regression: PASS\n");
+    // Reaching the initial console-print limit must not stop the recent
+    // host-side guest STORE ring. Its entries are pre-store SSA operands.
+    ee::s_ee_guest_store_trace_entry recent[3]{};
+    ee::s_ee_runtime runtime{};
+    runtime.m_guest_store_trace_enabled = true;
+    runtime.m_guest_store_trace_word = 0x80u;
+    runtime.m_guest_store_trace_remaining = 0u;
+    runtime.m_guest_store_trace_recent = recent;
+    runtime.m_guest_store_trace_capacity = 3u;
+    for (uint32_t index = 0u; index < 5u; ++index)
+    {
+        ee::ee_trace_guest_store(
+            &runtime, 0x1000u + index * 4u, 0xac88000cu,
+            0x80u, 0x80u, 4u, index + 1u, 0u,
+            0x80u, 0x2000u, 0x3000u, 0x4000u
+        );
+    }
+    ee::ee_trace_guest_store(
+        &runtime, 0x2000u, 0xac88000cu,
+        0x100u, 0x100u, 4u, 99u, 0u,
+        0x100u, 0x2000u, 0x3000u, 0x4000u
+    );
+    if (runtime.m_guest_store_trace_count != 3u ||
+        runtime.m_guest_store_trace_next != 2u ||
+        runtime.m_guest_store_trace_remaining != 0u ||
+        recent[2].m_pc != 0x1008u ||
+        recent[0].m_pc != 0x100cu ||
+        recent[1].m_pc != 0x1010u ||
+        recent[1].m_source_value != 5u ||
+        recent[1].m_ra != 0x4000u)
+    {
+        std::fprintf(stderr, "guest STORE recent ring did not wrap correctly\n");
+        return 1;
+    }
+    std::printf("EE KSEG0/KSEG1 RAM alias and guest-store ring regression: PASS\n");
     return 0;
 }

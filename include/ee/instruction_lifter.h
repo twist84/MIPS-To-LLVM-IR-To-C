@@ -48,7 +48,24 @@ enum e_lift_op_kind
     LOP_MMI_QFSRV, LOP_MTSAB, LOP_MTSAH, LOP_MMI_SHUFFLE, LOP_MMI_PACK,
     LOP_MMI_COPY_H, LOP_MMI_COPY_LOWER_D, LOP_MMI_COPY_UPPER_D,
     LOP_EXIT_RETURN,
-    LOP_UNSUPPORTED
+    LOP_UNSUPPORTED,
+    // Added after UNSUPPORTED to preserve existing e_lift_op_kind values.
+    // The LLVM IR builder (not the legacy straight-line C++ emitter)
+    // implements precise EX_Ov and EX_Tr semantics for these classes.
+    LOP_CHECKED_SIGNED,
+    LOP_CHECKED_TRAP,
+    LOP_MMI0_EXACT,
+    LOP_MMI_SHIFT,
+    LOP_MMI_PLZCW,
+    LOP_MMI_PMFHL,
+    LOP_MMI_PMTHL,
+    LOP_MMI_HILO_PAIR_TRANSFER,
+    LOP_MMI_PACKED_MULT,
+    LOP_MMI_PACKED_DIV,
+    LOP_MMI_PACKED_MAC,
+    LOP_MMI_PACKED_HALF,
+    LOP_MMI_INTERLEAVE,
+    LOP_MMI_PERMUTE
 };
 
 struct s_lifted_op

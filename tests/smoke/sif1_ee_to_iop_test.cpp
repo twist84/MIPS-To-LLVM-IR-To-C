@@ -250,7 +250,7 @@ int run_case(uint32_t size, bool sender_first)
 int run_syscall_case(uint32_t size, uint32_t count,
                      uint32_t final_attributes)
 {
-    constexpr uint32_t k_descriptor = 0x00110000u;
+    constexpr uint32_t k_descriptor = 0x00110004u;
     constexpr uint32_t k_data = 0x00120000u;
     constexpr uint32_t k_borrowed_stage = 0x01c00000u;
     ee::ee_memory memory(32u * 1024u * 1024u);
@@ -291,10 +291,10 @@ int run_syscall_case(uint32_t size, uint32_t count,
     for (uint32_t n = 0u; n < count; ++n)
     {
         const uint32_t src = k_data + n * 0x1000u;
-        const uint32_t dst = k_destination + n * 0x1000u;
+        const uint32_t dst = k_destination + 4u + n * 0x1000u;
         memory.write32(k_descriptor + n * 16u, src);
         memory.write32(k_descriptor + n * 16u + 4u, dst);
-        memory.write32(k_descriptor + n * 16u + 8u, size);
+        memory.write32(k_descriptor + n * 16u + 8u, 0x80000000u | size);
         memory.write32(k_descriptor + n * 16u + 12u,
                        n + 1u == count ? final_attributes : 0u);
         for (uint32_t index = 0u; index < padded + 16u; ++index)
@@ -351,6 +351,18 @@ int run_syscall_case(uint32_t size, uint32_t count,
         memory.write32(k_descriptor + 12u, 0u);
     }
 
+    if (transport.set_dma(k_descriptor + 1u, count, &id) ||
+        id != 0xdeadbeefu || dmac.status() != 0u)
+    {
+        return fail("non-word-aligned descriptor list accepted", size);
+    }
+    memory.write32(k_descriptor + 4u, k_destination + 5u);
+    if (transport.set_dma(k_descriptor, count, &id) ||
+        id != 0xdeadbeefu || dmac.status() != 0u)
+    {
+        return fail("non-word-aligned IOP destination accepted", size);
+    }
+    memory.write32(k_descriptor + 4u, k_destination + 4u);
     if (!transport.set_dma(k_descriptor, count, &id) || id != 1u)
     {
         return fail("real syscall DMA6->DMA10 failed", size);
@@ -392,7 +404,7 @@ int run_syscall_case(uint32_t size, uint32_t count,
     for (uint32_t n = 0u; n < count; ++n)
     {
         const uint32_t src = k_data + n * 0x1000u;
-        const uint32_t dst = k_destination + n * 0x1000u;
+        const uint32_t dst = k_destination + 4u + n * 0x1000u;
         for (uint32_t index = 0u; index < padded + 16u; ++index)
         {
             uint32_t read_word = 0u;
@@ -405,11 +417,18 @@ int run_syscall_case(uint32_t size, uint32_t count,
                 read_word >> ((index & 3u) * 8u));
             const uint8_t expected = index < size
                 ? pattern(index + n, size)
-                : index < padded ? 0u : 0xcdu;
-            if (actual != expected ||
-                memory.read8(src + index) !=
-                    (index < size ? pattern(index + n, size) : 0xa5u))
+                : index < padded ? 0xa5u : 0xcdu;
+            const uint8_t expected_source = index < size
+                ? pattern(index + n, size) : 0xa5u;
+            const uint8_t observed_source = memory.read8(src + index);
+            if (actual != expected || observed_source != expected_source)
             {
+                std::fprintf(stderr,
+                    "SIF1 guest DMA mismatch: descriptor=%u offset=%u "
+                    "dst=0x%08x expected=0x%02x actual=0x%02x "
+                    "src=0x%08x src_expected=0x%02x src_actual=0x%02x\n",
+                    n, index, dst + index, expected, actual, src + index,
+                    expected_source, observed_source);
                 return fail("guest payload, padding or guard mismatch", size);
             }
         }

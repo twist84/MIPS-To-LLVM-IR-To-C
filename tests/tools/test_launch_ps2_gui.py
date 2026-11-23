@@ -57,6 +57,10 @@ def gui_values(settings):
 def test_defaults_and_compatibility():
     defaults = GUI.default_settings()
     assert defaults["cache_miss_resume"] is True
+    assert defaults["precompile_all"] is True
+    assert defaults["fast_overlays"] is True
+    assert defaults["numeric"]["EMIT_JOBS"] == ""
+    assert defaults["diagnostics"] == {label: "" for label in GUI.DIAGNOSTIC_SETTINGS}
     assert defaults["embed_game_window"] is True
     assert GUI.NUMERIC_SETTINGS["Functions per expansion"][2] == 1024
     with tempfile.TemporaryDirectory() as temporary:
@@ -64,15 +68,24 @@ def test_defaults_and_compatibility():
         # Old GUI settings do not contain the new key. Migration must
         # default to live state-preserving resume rather than legacy replay.
         old = {key: value for key, value in defaults.items()
-               if key != "cache_miss_resume"}
+               if key not in ("cache_miss_resume", "precompile_all", "fast_overlays")}
         settings_path.write_text(json.dumps(old), encoding="utf-8")
         restored, warning = GUI.load_settings(settings_path)
         assert not warning and restored["cache_miss_resume"] is True
+        assert restored["precompile_all"] is True
+        assert restored["fast_overlays"] is True
+        assert all(not value for value in restored["diagnostics"].values())
+        restored["diagnostics"]["Trace guest stores"] = "0x0044081c"
         restored["cache_miss_resume"] = False
+        restored["precompile_all"] = False
+        restored["fast_overlays"] = False
         restored["numeric"]["EXPANSION_PER_PASS"] = "1024"
         GUI.save_settings(settings_path, restored)
         again, warning = GUI.load_settings(settings_path)
         assert not warning and again["cache_miss_resume"] is False
+        assert again["precompile_all"] is False
+        assert again["fast_overlays"] is False
+        assert again["diagnostics"]["Trace guest stores"] == "0x0044081c"
         assert again["numeric"]["EXPANSION_PER_PASS"] == "1024"
 
 
@@ -83,6 +96,8 @@ def test_launcher_flags_and_bounds():
             mode, "Neutral", False, True, True, values
         )
         assert "--replay-after-expand" not in args
+        assert "--live-full-relink" not in args
+        assert env["PRECOMPILE_ALL"] == "1"
         assert env["EXPANSION_PER_PASS"] == "128"
         args, env = GUI.launcher_options(
             mode, "Neutral", False, True, True, values,
@@ -90,11 +105,29 @@ def test_launcher_flags_and_bounds():
         )
         assert args.count("--replay-after-expand") == 1
     for mode in ("Matched neutral/Cross", "Recover translation cache"):
-        args, _ = GUI.launcher_options(
+        args, env = GUI.launcher_options(
             mode, "Neutral", False, False, False, values,
-            resume_on_cache_miss=False
+            resume_on_cache_miss=False,
+            precompile_all=False, fast_overlays=False,
         )
         assert "--replay-after-expand" not in args
+        assert "--live-full-relink" not in args
+        assert "PRECOMPILE_ALL" not in env
+
+    for mode in ("Full replay", "Automatic", "Quick probe"):
+        args, env = GUI.launcher_options(
+            mode, "Neutral", False, False, False, values,
+            precompile_all=False, fast_overlays=False,
+        )
+        assert "--live-full-relink" in args
+        assert "--replay-after-expand" not in args
+        assert env["PRECOMPILE_ALL"] == "0"
+        args, _ = GUI.launcher_options(
+            mode, "Neutral", False, False, False, values,
+            resume_on_cache_miss=False, fast_overlays=False,
+        )
+        assert "--live-full-relink" not in args
+        assert "--replay-after-expand" in args
 
     values["Functions per expansion"] = "1024"
     args, env = GUI.launcher_options(
@@ -112,6 +145,41 @@ def test_launcher_flags_and_bounds():
         raise AssertionError("accepted an expansion count above 1024")
 
 
+def test_diagnostic_validation():
+    values = gui_values(GUI.default_settings())
+    target = {
+        "Watch guest word": "0x0044081c",
+        "Trace guest stores": "0x0044081C",
+        "Trace V0 writes": "0x00137970:0x00137d18",
+    }
+    args, env = GUI.launcher_options(
+        "Full replay", "Neutral", False, True, True, values,
+        diagnostics=target,
+    )
+    assert "--full" in args
+    assert env["SDBZ_WATCH_WORD"] == "0x0044081c"
+    assert env["SDBZ_TRACE_STORE"] == "0x0044081c"
+    assert env["SDBZ_TRACE_V0"] == "0x00137970:0x00137d18"
+    assert not any("TRACE" in key or "WATCH" in key
+                   for key in GUI.launcher_options(
+                       "Recover translation cache", "Neutral", False,
+                       False, False, values, diagnostics=target)[1])
+    for invalid in ("5", "0x0044081d", "-1", "0x100000000", "unknown"):
+        try:
+            GUI.diagnostic_overrides({"Trace guest stores": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid store watch: {invalid}")
+    for invalid in ("0x1:0x2", "0x4000:0x3000", "0x1000:0x4000", "abc"):
+        try:
+            GUI.diagnostic_overrides({"Trace V0 writes": invalid})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid V0 range: {invalid}")
+
+
 def test_game_tab_command_and_environment():
     with tempfile.TemporaryDirectory() as temporary:
         disc = Path(temporary)
@@ -127,6 +195,12 @@ def test_game_tab_command_and_environment():
             "snapshot": c_fake_variable(True),
             "speed": c_fake_variable("150%"),
             "cache_miss_resume": c_fake_variable(False),
+            "precompile_all": c_fake_variable(True),
+            "fast_overlays": c_fake_variable(True),
+            "diagnostics": {
+                label: c_fake_variable("")
+                for label in GUI.DIAGNOSTIC_SETTINGS
+            },
             "numeric": {label: c_fake_variable(value)
                         for label, value in gui_values(GUI.default_settings()).items()},
         }
@@ -140,11 +214,27 @@ def test_game_tab_command_and_environment():
         assert env["EXPANSION_PER_PASS"] == "128"
         assert env["SDBZ_DISC_ROOT"] == str(disc.resolve())
         assert env["SDBZ_SPEED_PERCENT"] == "150"
+        assert env["PRECOMPILE_ALL"] == "1"
+        assert "--live-full-relink" not in command
         assert GUI.default_settings()["speed"] == "100%"
 
         instance.cache_miss_resume = c_fake_variable(True)
+        instance.fast_overlays = c_fake_variable(False)
+        instance.precompile_all = c_fake_variable(False)
         command = GUI.Launcher.game_command(instance, env)
         assert "--replay-after-expand" not in command
+        assert "--live-full-relink" in command
+        assert env["PRECOMPILE_ALL"] == "0"
+        instance.fast_overlays = c_fake_variable(True)
+        command = GUI.Launcher.game_command(instance, env)
+        assert "--live-full-relink" not in command
+        instance.diagnostics["Trace guest stores"] = c_fake_variable("0x0044081c")
+        command = GUI.Launcher.game_command(instance, env)
+        assert "--live-full-relink" not in command
+        assert env["SDBZ_TRACE_STORE"] == "0x0044081c"
+        instance.diagnostics["Trace guest stores"] = c_fake_variable("")
+        GUI.Launcher.game_command(instance, env)
+        assert "SDBZ_TRACE_STORE" not in env
 
 
 def test_game_window_environment():
@@ -174,12 +264,18 @@ def test_direct_commands():
     assert "--trace" not in direct["Boot session"]
     assert direct["Boot session"]["--replay-after-expand"] is False
     assert direct["Game runner (Python)"]["--replay-after-expand"] is False
+    assert direct["Boot session"]["--live-full-relink"] is False
+    assert direct["Game runner (Python)"]["--live-full-relink"] is False
+    assert direct["Boot session"]["--functions"] == "all"
+    assert direct["Game runner (Python)"]["--functions"] == "all"
+    assert 1 <= int(direct["Boot session"]["--emit-jobs"]) <= 32
     assert direct["Game runner (Python)"]["--auto-expand"] == "128"
     for tool in ("Boot session", "Game runner (Python)"):
         choices = [opt for options in TOOL_OPTIONS[tool].values()
                    for opt in options]
         names = [opt.name for opt in choices]
         assert names.count("--replay-after-expand") == 1
+        assert names.count("--live-full-relink") == 1
         values = {**direct[tool], "--replay-after-expand": True}
         # The required source ELF is supplied by the UI's user-selected
         # disc file. We only test token generation, not loading the game.
@@ -188,16 +284,31 @@ def test_direct_commands():
         assert args.count("--replay-after-expand") == 1
         values["--replay-after-expand"] = False
         assert "--replay-after-expand" not in tool_arguments(tool, values, "")
+        values["--live-full-relink"] = True
+        assert tool_arguments(tool, values, "").count("--live-full-relink") == 1
+        values["--live-full-relink"] = False
+        assert "--live-full-relink" not in tool_arguments(tool, values, "")
 
 
 def test_batch_route():
     batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    assert '--watch-word=%SDBZ_WATCH_WORD%' in batch
+    assert '--trace-store=%SDBZ_TRACE_STORE%' in batch
+    assert '--trace-v0=%SDBZ_TRACE_V0%' in batch
+    assert '%GUEST_TRACE_ARGS%' in batch
     assert 'if /I "%~1"=="--replay-after-expand" (' in batch
     assert 'set "CACHE_MISS_ARGS=--replay-after-expand"' in batch
-    assert '%SESSION_ARGS% %CACHE_MISS_ARGS%' in batch
+    assert '%SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG%' in batch
+    assert 'if /I "%~1"=="--live-full-relink" (' in batch
+    assert 'set "LIVE_RELINK_ARG=--live-full-relink"' in batch
+    assert 'if not defined CACHE_FLAG if not "%PRECOMPILE_ALL%"=="0"' in batch
+    assert 'if not defined EMIT_JOBS set "EMIT_JOBS=%NUMBER_OF_PROCESSORS%"' in batch
     # Matched and recovery modes have no auto-expansion to resume.
     assert 'ERROR: --replay-after-expand has no meaning during cache recovery.' in batch
     assert 'ERROR: --replay-after-expand has no meaning during matched replays.' in batch
+    assert 'ERROR: --live-full-relink has no meaning during cache recovery.' in batch
+    assert 'ERROR: --live-full-relink has no meaning during matched replays.' in batch
+    assert 'ERROR: --live-full-relink requires live cache-miss resume.' in batch
     # Boot-session argv is forwarded to the game translation driver,
     # which owns the implementation of --replay-after-expand.
     session = (ROOT / "tools" / "run_boot_session.py").read_text(
@@ -205,6 +316,10 @@ def test_batch_route():
     )
     assert 'f"--report={report}", *forwarded,' in session
     assert '*(["--replay-after-expand"] if args.replay_after_expand else []),' in session
+    assert '*forwarded,' in session
+    driver = (ROOT / "tools" / "run_game.py").read_text(encoding="utf-8")
+    assert 'parser.add_argument("--live-full-relink", action="store_true"' in driver
+    assert 'use_overlays = not args.live_full_relink' in driver
 
 
 def main():

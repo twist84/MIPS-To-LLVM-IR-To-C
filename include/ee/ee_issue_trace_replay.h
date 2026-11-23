@@ -320,6 +320,219 @@ private:
             }
             switch (operation)
             {
+            case 0x30u: // PMFHL: read both 128-bit HI/LO banks
+                if (m_profile.m_hilo_transfer_latency == 0u)
+                {
+                    return false;
+                }
+                // Full GPR result is a packed transfer; both accumulators
+                // supply words/halfwords and must be ready before issue.
+                instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                instruction->m_hilo_read_mask = 0x0fu;
+                instruction->m_gpr_write_mask = rd;
+                instruction->m_gpr_128_write_mask = rd;
+                instruction->m_result_latency =
+                    m_profile.m_hilo_transfer_latency;
+                return true;
+            case 0x31u: // PMTHL: read rs, partially update all four halves
+                if (m_profile.m_hilo_transfer_latency == 0u)
+                {
+                    return false;
+                }
+                // Conservatively reserve all four HI/LO halves; the
+                // instruction preserves each upper 32-bit word.
+                instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                instruction->m_gpr_read_mask = rs;
+                instruction->m_gpr_128_read_mask = rs;
+                instruction->m_hilo_write_mask = 0x0fu;
+                instruction->m_hilo_result_latency =
+                    m_profile.m_hilo_transfer_latency;
+                return true;
+            case 0x09u: case 0x29u: // MMI2 / MMI3 packed-word HI/LO
+                switch (decoded.sa)
+                {
+                case 0x08u: case 0x09u: // PMFHI/PMFLO, PMTHI/PMTLO
+                    if (m_profile.m_hilo_transfer_latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    if (operation == 0x09u) // PMFHI / PMFLO
+                    {
+                        instruction->m_hilo_read_mask =
+                            decoded.sa == 0x08u ? 0x05u : 0x0au;
+                        instruction->m_gpr_write_mask = rd;
+                        instruction->m_gpr_128_write_mask = rd;
+                        instruction->m_result_latency =
+                            m_profile.m_hilo_transfer_latency;
+                    }
+                    else // PMTHI / PMTLO
+                    {
+                        instruction->m_gpr_read_mask = rs;
+                        instruction->m_gpr_128_read_mask = rs;
+                        instruction->m_hilo_write_mask =
+                            decoded.sa == 0x08u ? 0x05u : 0x0au;
+                        instruction->m_hilo_result_latency =
+                            m_profile.m_hilo_transfer_latency;
+                    }
+                    return true;
+                case 0x0au: // PINTH / PINTEH
+                    if (m_profile.m_packed_mmi_latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_result_latency =
+                        m_profile.m_packed_mmi_latency;
+                    return true;
+                case 0x02u: case 0x03u: // PSLLVW, PSRLVW / PSRAVW
+                    if ((operation == 0x29u && decoded.sa != 0x03u) ||
+                        (operation != 0x09u && operation != 0x29u) ||
+                        m_profile.m_packed_mmi_latency == 0u)
+                    {
+                        return false;
+                    }
+                    // Independent packed shift candidate latency only.
+                    // Two signed-extended GPR results; no HI/LO effects.
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_result_latency =
+                        m_profile.m_packed_mmi_latency;
+                    return true;
+                case 0x00u: case 0x04u: // PMADDW, PMSUBW, PMADDUW
+                    if (decoded.sa == 0x04u && operation != 0x09u)
+                    {
+                        return false;
+                    }
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        m_profile.m_hilo_accumulate_latency == 0u)
+                    {
+                        return false;
+                    }
+                    // Candidate hazards only, not measured PS2 cycles.
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_hilo_read_mask = 0x0fu;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency =
+                        m_profile.m_hilo_accumulate_latency;
+                    instruction->m_result_latency =
+                        m_profile.m_hilo_accumulate_latency;
+                    return true;
+                case 0x10u: case 0x11u: // PMADDH, PHMADH
+                case 0x14u: case 0x15u: // PMSUBH, PHMSBH
+                case 0x1cu:             // PMULTH
+                {
+                    if (operation != 0x09u)
+                    {
+                        return false;
+                    }
+                    const bool accumulate =
+                        decoded.sa == 0x10u || decoded.sa == 0x14u;
+                    const uint32_t latency = accumulate
+                        ? m_profile.m_hilo_accumulate_latency
+                        : m_profile.m_hilo_multiply_latency;
+                    // Only explicit packed and HI/LO profiles may produce
+                    // a candidate issue trace. These are not EE cycle values.
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_hilo_read_mask = accumulate ? 0x0fu : 0u;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency = latency;
+                    instruction->m_result_latency = latency;
+                    return true;
+                }
+                case 0x1du: // PDIVBW: rs[3:0] / signed rt[15:0] -> LO/HI
+                {
+                    if (operation != 0x09u ||
+                        m_profile.m_packed_mmi_latency == 0u ||
+                        m_profile.m_hilo_divide_latency == 0u)
+                    {
+                        return false;
+                    }
+                    // Candidate dependencies only: hardware PDIVBW issue
+                    // latency must be supplied, never inferred from scalar DIV.
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency =
+                        m_profile.m_hilo_divide_latency;
+                    return true;
+                }
+                case 0x0cu: case 0x0du: // PMULTW/UW, PDIVW/UW
+                {
+                    const bool multiply = decoded.sa == 0x0cu;
+                    const uint32_t latency = multiply
+                        ? m_profile.m_hilo_multiply_latency
+                        : m_profile.m_hilo_divide_latency;
+                    // A scalar MAC latency alone is insufficient evidence
+                    // for two-wide MMI2/MMI3 issue behaviour.
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency = latency;
+                    if (multiply)
+                    {
+                        instruction->m_gpr_write_mask = rd;
+                        instruction->m_gpr_128_write_mask = rd;
+                        instruction->m_result_latency = latency;
+                    }
+                    return true;
+                }
+                default:
+                {
+                    // These MMI2 rt-only shuffle operations must be
+                    // recognized inside the MMI2/MMI3 dispatch (rather
+                    // than in the top-level fallback), with no rs hazard.
+                    const bool unary_rt =
+                        operation == 0x09u &&
+                        (decoded.sa == 0x1au || decoded.sa == 0x1bu ||
+                         decoded.sa == 0x1eu || decoded.sa == 0x1fu);
+                    const bool copy_h = operation == 0x29u &&
+                                        decoded.sa == 0x1bu;
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        (decoded.sa != 0x0eu && decoded.sa != 0x12u &&
+                         decoded.sa != 0x13u && !copy_h && !unary_rt))
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_result_latency =
+                        m_profile.m_packed_mmi_latency;
+                    instruction->m_gpr_read_mask =
+                        rt | ((unary_rt || copy_h) ? 0u : rs);
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_read_mask =
+                        instruction->m_gpr_read_mask;
+                    instruction->m_gpr_128_write_mask = rd;
+                    return true;
+                }
+                }
             case 0x10u: case 0x12u: // MFHI1 / MFLO1
                 if (m_profile.m_hilo_transfer_latency == 0u)
                 {
@@ -402,15 +615,24 @@ private:
                 }
                 {
                     bool unary_rt = false;
+                    bool plzcw = false;
                     bool packed_supported = false;
                     switch (operation)
                     {
-                    case 0x08u: // MMI0: PADD*/PSUB*/PMAX*
-                        packed_supported =
-                            decoded.sa == 0u || decoded.sa == 1u ||
-                            decoded.sa == 3u || decoded.sa == 4u ||
-                            decoded.sa == 5u || decoded.sa == 7u ||
-                            decoded.sa == 8u || decoded.sa == 9u;
+                    case 0x04u: // PLZCW: reads rs, writes low doubleword of rd
+                        plzcw = true;
+                        packed_supported = true;
+                        break;
+                    case 0x34u: case 0x36u: case 0x37u: // PS*H
+                    case 0x3cu: case 0x3eu: case 0x3fu: // PS*W
+                        unary_rt = true;
+                        packed_supported = true;
+                        break;
+                    case 0x08u: // MMI0: all decoder-accepted packed lanes
+                        unary_rt = decoded.sa == 30u || decoded.sa == 31u;
+                        packed_supported = decoded.sa <= 10u ||
+                            (decoded.sa >= 16u && decoded.sa <= 27u) ||
+                            decoded.sa == 30u || decoded.sa == 31u;
                         break;
                     case 0x28u: // MMI1: parallel arithmetic and extensions
                         unary_rt = decoded.sa == 1u || decoded.sa == 5u;
@@ -449,14 +671,16 @@ private:
                     instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
                     instruction->m_result_latency =
                         m_profile.m_packed_mmi_latency;
-                    instruction->m_gpr_read_mask = rt | (unary_rt ? 0u : rs);
+                    instruction->m_gpr_read_mask =
+                        plzcw ? rs : (rt | (unary_rt ? 0u : rs));
                     instruction->m_gpr_write_mask = rd;
-                    // A packed SIMD instruction reads/writes complete
-                    // 128-bit GPRs, not just its low 64-bit subregisters.
+                    // PLZCW only touches words 0/1 of rd, preserving its
+                    // upper 64 bits. Every other accepted packed op here
+                    // reads/writes complete 128-bit GPRs.
                     instruction->m_gpr_128_read_mask =
-                        instruction->m_gpr_read_mask;
+                        plzcw ? 0u : instruction->m_gpr_read_mask;
                     instruction->m_gpr_128_write_mask =
-                        instruction->m_gpr_write_mask;
+                        plzcw ? 0u : instruction->m_gpr_write_mask;
                     return true;
                 }
             }
