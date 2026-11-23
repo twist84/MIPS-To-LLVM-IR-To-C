@@ -282,7 +282,37 @@ int main()
     expect("div1 bad sa", R(0x1c,4,5,6,1,0x1a), "div1", U);
     expect("divu1 bad sa", R(0x1c,4,5,6,1,0x1b), "divu1", U);
     expect("mult1 bad sa", R(0x1c,4,5,6,1,0x18), "mult1", U);
-    expect("pmfhl",   R(0x1c,0,0,6,0,0x30),    "pmfhl",  U);
+    // PMFHL uses five legal format selectors; its operands are HI/LO.
+    // PMTHL reads rs and selectively writes four HI/LO low words.
+    for (uint32_t mode = 0u; mode <= 4u; ++mode)
+    {
+        const auto ins = decode(0x00170000u, R(0x1c,0,0,6,mode,0x30));
+        const bool ok = ins.valid == V &&
+                        lift(ins).kind == LOP_MMI_PMFHL;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL PMFHL mode %u decoder/lifter\n", mode);
+        }
+    }
+    expect("pmfhl mode 5", R(0x1c,0,0,6,5,0x30), "pmfhl", U);
+    expect("pmfhl mode 31", R(0x1c,0,0,6,31,0x30), "pmfhl", U);
+    expect("pmfhl bad rs", R(0x1c,4,0,6,0,0x30), "pmfhl", U);
+    expect("pmfhl bad rt", R(0x1c,0,4,6,0,0x30), "pmfhl", U);
+    {
+        const auto ins = decode(0x00170000u, R(0x1c,4,0,0,0,0x31));
+        const bool ok = ins.valid == V &&
+                        lift(ins).kind == LOP_MMI_PMTHL;
+        ok ? ++g_pass : ++g_fail;
+        if (!ok)
+        {
+            std::printf("FAIL PMTHL mode zero decoder/lifter\n");
+        }
+    }
+    expect("pmthl rs zero", R(0x1c,0,0,0,0,0x31), "pmthl", V);
+    expect("pmthl bad rt", R(0x1c,4,5,0,0,0x31), "pmthl", U);
+    expect("pmthl bad rd", R(0x1c,4,0,6,0,0x31), "pmthl", U);
+    expect("pmthl bad sa", R(0x1c,4,0,0,1,0x31), "pmthl", U);
     expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0
