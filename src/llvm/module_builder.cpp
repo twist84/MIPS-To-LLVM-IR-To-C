@@ -3576,6 +3576,174 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
+    // PMFHL reads both 128-bit HI and LO register banks. The EE state
+    // exposes each bank as two i64 fields: HI (1), LO (2), HI1 (3), LO1 (4).
+    // The five submodes reproduce PCSX2's MMI interpreter word layout.
+    if (fn == 0x30)
+    {
+        const std::string hi0 = newtemp();
+        const std::string lo0 = newtemp();
+        const std::string hi1 = newtemp();
+        const std::string lo1 = newtemp();
+        m_out += "  " + hi0 + " = load i64, ptr " + state_field(1) + "\n";
+        m_out += "  " + lo0 + " = load i64, ptr " + state_field(2) + "\n";
+        m_out += "  " + hi1 + " = load i64, ptr " + state_field(3) + "\n";
+        m_out += "  " + lo1 + " = load i64, ptr " + state_field(4) + "\n";
+        const std::string halves[2][2] = {{lo0, hi0}, {lo1, hi1}};
+
+        if (sa == 0 || sa == 1) // PMFHL.LW / PMFHL.UW
+        {
+            std::string vector = "undef";
+            for (uint32_t lane = 0; lane < 4; ++lane)
+            {
+                const std::string& source = halves[lane / 2][lane % 2];
+                std::string word_source = source;
+                if (sa == 1)
+                {
+                    const std::string shifted = newtemp();
+                    m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                    word_source = shifted;
+                }
+                const std::string word = newtemp();
+                const std::string updated = newtemp();
+                m_out += "  " + word + " = trunc i64 " + word_source + " to i32\n";
+                m_out += "  " + updated + " = insertelement <4 x i32> " +
+                         vector + ", i32 " + word + ", i32 " +
+                         std::to_string(lane) + "\n";
+                vector = updated;
+            }
+            store_vec4i32(vector);
+            return;
+        }
+
+        if (sa == 2) // PMFHL.SLW: signed 64-bit pair -> saturated 32-bit
+        {
+            std::string outputs[2];
+            for (uint32_t index = 0; index < 2; ++index)
+            {
+                const std::string low_word = newtemp();
+                const std::string high_word = newtemp();
+                const std::string high_shifted = newtemp();
+                const std::string pair = newtemp();
+                const std::string too_high = newtemp();
+                const std::string too_low = newtemp();
+                const std::string upper_clamp = newtemp();
+                const std::string lower_clamp = newtemp();
+
+                m_out += "  " + low_word + " = and i64 " + halves[index][0] +
+                         ", 4294967295\n";
+                m_out += "  " + high_word + " = and i64 " + halves[index][1] +
+                         ", 4294967295\n";
+                m_out += "  " + high_shifted + " = shl i64 " + high_word +
+                         ", 32\n";
+                m_out += "  " + pair + " = or i64 " + high_shifted +
+                         ", " + low_word + "\n";
+                m_out += "  " + too_high + " = icmp sgt i64 " + pair +
+                         ", 2147483647\n";
+                m_out += "  " + too_low + " = icmp slt i64 " + pair +
+                         ", -2147483648\n";
+                m_out += "  " + upper_clamp + " = select i1 " + too_high +
+                         ", i64 2147483647, i64 " + pair + "\n";
+                m_out += "  " + lower_clamp + " = select i1 " + too_low +
+                         ", i64 -2147483648, i64 " + upper_clamp + "\n";
+                outputs[index] = lower_clamp;
+            }
+            store_gpr(ins.rd, outputs[0], outputs[1]);
+            return;
+        }
+
+        if (sa == 3 || sa == 4) // PMFHL.LH / PMFHL.SH
+        {
+            std::string vector = "undef";
+            for (uint32_t lane = 0; lane < 8; ++lane)
+            {
+                const uint32_t bank = lane / 4;
+                const uint32_t word = lane % 4;
+                const std::string& source = halves[bank][word / 2];
+                std::string source_word = source;
+                if ((word & 1u) != 0)
+                {
+                    const std::string shifted = newtemp();
+                    m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                    source_word = shifted;
+                }
+
+                std::string value;
+                if (sa == 3)
+                {
+                    value = newtemp();
+                    m_out += "  " + value + " = trunc i64 " + source_word +
+                             " to i16\n";
+                }
+                else
+                {
+                    // PMFHL.SH saturates each signed 32-bit source word
+                    // independently, without touching any HI/LO field.
+                    const std::string word32 = newtemp();
+                    const std::string word64 = newtemp();
+                    const std::string too_high = newtemp();
+                    const std::string too_low = newtemp();
+                    const std::string high_clamp = newtemp();
+                    const std::string low_clamp = newtemp();
+                    value = newtemp();
+                    m_out += "  " + word32 + " = trunc i64 " +
+                             source_word + " to i32\n";
+                    m_out += "  " + word64 + " = sext i32 " + word32 +
+                             " to i64\n";
+                    m_out += "  " + too_high + " = icmp sgt i64 " +
+                             word64 + ", 32767\n";
+                    m_out += "  " + too_low + " = icmp slt i64 " +
+                             word64 + ", -32768\n";
+                    m_out += "  " + high_clamp + " = select i1 " +
+                             too_high + ", i64 32767, i64 " + word64 + "\n";
+                    m_out += "  " + low_clamp + " = select i1 " +
+                             too_low + ", i64 -32768, i64 " + high_clamp + "\n";
+                    m_out += "  " + value + " = trunc i64 " + low_clamp +
+                             " to i16\n";
+                }
+
+                const std::string next = newtemp();
+                m_out += "  " + next + " = insertelement <8 x i16> " +
+                         vector + ", i16 " + value + ", i32 " +
+                         std::to_string(lane) + "\n";
+                vector = next;
+            }
+            store_vec8i16(vector);
+            return;
+        }
+    }
+
+    if (fn == 0x31) // PMTHL.LW: write low words, preserve upper 32 bits
+    {
+        const std::string sources[4] = {a.first, a.first, a.second, a.second};
+        const int field_indices[4] = {2, 1, 4, 3}; // LO0, HI0, LO1, HI1
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            std::string source = sources[lane];
+            if ((lane & 1u) != 0)
+            {
+                const std::string shifted = newtemp();
+                m_out += "  " + shifted + " = lshr i64 " + source + ", 32\n";
+                source = shifted;
+            }
+            const std::string low_word = newtemp();
+            const std::string previous = newtemp();
+            const std::string retained = newtemp();
+            const std::string result = newtemp();
+            m_out += "  " + low_word + " = and i64 " + source +
+                     ", 4294967295\n";
+            m_out += "  " + previous + " = load i64, ptr " +
+                     state_field(field_indices[lane]) + "\n";
+            m_out += "  " + retained + " = and i64 " + previous +
+                     ", -4294967296\n";
+            m_out += "  " + result + " = or i64 " + retained +
+                     ", " + low_word + "\n";
+            m_out += "  store i64 " + result + ", ptr " +
+                     state_field(field_indices[lane]) + "\n";
+        }
+        return;
+    }
+
     // Top-level MMI (not class)
     if (fn == 0x18 || fn == 0x19)
     {
