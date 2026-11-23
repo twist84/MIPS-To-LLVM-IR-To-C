@@ -376,6 +376,29 @@ private:
                             m_profile.m_hilo_transfer_latency;
                     }
                     return true;
+                case 0x00u: case 0x04u: // PMADDW, PMSUBW, PMADDUW
+                    if (decoded.sa == 0x04u && operation != 0x09u)
+                    {
+                        return false;
+                    }
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        m_profile.m_hilo_accumulate_latency == 0u)
+                    {
+                        return false;
+                    }
+                    // Candidate hazards only, not measured PS2 cycles.
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_hilo_read_mask = 0x0fu;
+                    instruction->m_hilo_write_mask = 0x0fu;
+                    instruction->m_hilo_result_latency =
+                        m_profile.m_hilo_accumulate_latency;
+                    instruction->m_result_latency =
+                        m_profile.m_hilo_accumulate_latency;
+                    return true;
                 case 0x0cu: case 0x0du: // PMULTW/UW, PDIVW/UW
                 {
                     const bool multiply = decoded.sa == 0x0cu;

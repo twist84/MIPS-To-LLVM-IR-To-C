@@ -157,6 +157,8 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
     case 0x09:                                          // MMI2
         switch (sa)
         {
+        case 0x00: case 0x04:                            // PMADDW / PMSUBW
+            return true;
         case 0x08: case 0x09:                            // PMFHI / PMFLO
             return rs == 0 && rt == 0;
         case 0x0c:                                      // PMULTW (signed)
@@ -171,6 +173,8 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
     case 0x29:                                          // MMI3
         switch (sa)
         {
+        case 0x00:                                      // PMADDUW
+            return true;
         case 0x08: case 0x09:                            // PMTHI / PMTLO
             return rt == 0 && rd == 0;
         case 0x0c:                                      // PMULTUW (unsigned)

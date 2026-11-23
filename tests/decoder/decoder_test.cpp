@@ -360,11 +360,29 @@ int main()
     expect("pdivuw bad rd", R(0x1c,4,5,6,0xd,0x29), "pdivuw", U);
     expect("pmultw zero rd", R(0x1c,4,5,0,0xc,0x09), "pmultw", V);
     expect("pmultuw zero rd", R(0x1c,4,5,0,0xc,0x29), "pmultuw", V);
-    // Accumulator forms with PCSX2-specific arithmetic corrections remain
-    // unsupported until independently verified; do not alias to PMULT.
-    expect("pmaddw pending", R(0x1c,4,5,6,0,0x09), "pmaddw", U);
-    expect("pmsubw pending", R(0x1c,4,5,6,4,0x09), "pmsubw", U);
-    expect("pmadduw pending", R(0x1c,4,5,6,0,0x29), "pmadduw", U);
+    // Signed/unsigned packed word accumulation: independent MAC class.
+    for (const auto encoding :
+         {std::pair<uint32_t,uint32_t>{0x09u, 0x00u},
+          std::pair<uint32_t,uint32_t>{0x09u, 0x04u},
+          std::pair<uint32_t,uint32_t>{0x29u, 0x00u}})
+    {
+        for (const uint32_t destination : {6u, 0u, 4u, 5u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c, 4, 5, destination,
+                                      encoding.second, encoding.first));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PACKED_MAC;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL packed MAC funct=%02x sa=%02x rd=%u\n",
+                            encoding.first, encoding.second, destination);
+            }
+        }
+    }
+    expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
+    expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
     expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0

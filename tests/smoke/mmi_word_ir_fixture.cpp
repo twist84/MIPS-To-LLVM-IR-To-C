@@ -95,6 +95,12 @@ int main(int argc, char** argv)
             mode = "pmultw";
         }
     }
+    else if (ends_with(mode, "_from_prior_cross"))
+    {
+        mode.resize(mode.size() - std::string("_from_prior_cross").size());
+        source_prior = true;
+        cross_block = true;
+    }
     else if (ends_with(mode, rs_alias))
     {
         mode.resize(mode.size() - rs_alias.size());
@@ -121,6 +127,13 @@ int main(int argc, char** argv)
         zero_rt = true;
     }
 
+    bool repeat = false;
+    if (ends_with(mode, "_twice"))
+    {
+        mode.resize(mode.size() - std::string("_twice").size());
+        repeat = true;
+    }
+
     uint8_t funct = 0u;
     uint8_t sa = 0u;
     uint8_t rs = 4u;
@@ -138,6 +151,11 @@ int main(int argc, char** argv)
         sa = mode == "pmthi" ? 0x08u : 0x09u;
         rt = 0u;
         rd = 0u;
+    }
+    else if (mode == "pmaddw" || mode == "pmsubw" || mode == "pmadduw")
+    {
+        funct = mode == "pmadduw" ? 0x29u : 0x09u;
+        sa = mode == "pmsubw" ? 0x04u : 0x00u;
     }
     else if (mode == "pmultw" || mode == "pmultuw" ||
              mode == "pdivw" || mode == "pdivuw")
@@ -173,6 +191,10 @@ int main(int argc, char** argv)
     rs = zero_rs ? 0u : rs;
     rt = zero_rt ? 0u : rt;
     words.push_back(make_mmi(rs, rt, rd, sa, funct));
+    if (repeat)
+    {
+        words.push_back(make_mmi(rs, rt, rd, sa, funct));
+    }
     if (chain)
     {
         const bool hi = sa == 0x08u;

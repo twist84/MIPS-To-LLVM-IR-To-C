@@ -783,6 +783,31 @@ int main()
     packed_profile.m_hilo_multiply_latency = 0u;
     packed_profile.m_hilo_divide_latency = 0u;
 
+    const uint32_t mmi_pmaddw = mmi(8u, 9u, 10u, 0u, 0x09u);
+    const uint32_t mmi_pmsubw = mmi(8u, 9u, 10u, 4u, 0x09u);
+    const uint32_t mmi_pmadduw = mmi(8u, 9u, 10u, 0u, 0x29u);
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    replay.configure(packed_profile);
+    check(replay.observe(record(1u, 0x7300u, mmi_pmaddw, 0u, 1u)) ==
+          e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+          "packed MAC cannot infer accumulator timing");
+    packed_profile.m_hilo_accumulate_latency = 13u;
+    packed_profile.m_hilo_transfer_latency = 7u;
+    bool mac_profiled = true;
+    for (const uint32_t opcode : {mmi_pmaddw, mmi_pmsubw, mmi_pmadduw})
+    {
+        replay.configure(packed_profile);
+        mac_profiled &=
+            replay.observe(record(1u, 0x7300u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7304u, mmi_pmfhi, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 13u;
+    }
+    check(mac_profiled, "packed MAC four-bank RAW timing dependencies");
+    packed_profile.m_hilo_accumulate_latency = 0u;
+    packed_profile.m_hilo_transfer_latency = 0u;
+
     packed_profile.m_allow_ordered_waw_overlap = true;
     replay.configure(packed_profile);
     check(replay.observe(record(1u, 0x7100u, mmi_paddw, 0u, 1u)) ==

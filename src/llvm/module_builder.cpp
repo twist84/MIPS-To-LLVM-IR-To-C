@@ -3805,6 +3805,65 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
+    // PMADDW, PMSUBW and PMADDUW reconstruct two 64-bit HI:LO
+    // accumulators from the low words of each sign-extended bank.
+    // PCSX2's x86 recompiler uses wrapping 64-bit arithmetic; its older
+    // interpreter contains unexplained signed MAC correction heuristics.
+    // This is the independently testable recompiler model, not a claim
+    // of bit-exact hardware multiply behaviour.
+    if ((fn == 0x09 && (sa == 0x00 || sa == 0x04)) ||
+        (fn == 0x29 && sa == 0x00))
+    {
+        const bool unsigned_product = fn == 0x29;
+        const bool subtract = sa == 0x04;
+        const char* extension = unsigned_product ? "zext" : "sext";
+        std::string results[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string& lhs = lane == 0u ? a.first : a.second;
+            const std::string& rhs = lane == 0u ? b.first : b.second;
+            const std::string lo_ptr = state_field(lane == 0u ? 2u : 4u);
+            const std::string hi_ptr = state_field(lane == 0u ? 1u : 3u);
+            const std::string lhs32 = newtemp(), rhs32 = newtemp();
+            const std::string lhs64 = newtemp(), rhs64 = newtemp();
+            const std::string lo_before = newtemp(), hi_before = newtemp();
+            const std::string lo32_before = newtemp(), hi32_before = newtemp();
+            const std::string lo_bits = newtemp(), hi_bits = newtemp();
+            const std::string hi_shifted = newtemp(), accum = newtemp();
+            const std::string product = newtemp(), updated = newtemp();
+            const std::string lo32_after = newtemp(), hi_shifted_after = newtemp();
+            const std::string hi32_after = newtemp();
+            const std::string lo_after = newtemp(), hi_after = newtemp();
+
+            m_out += "  " + lhs32 + " = trunc i64 " + lhs + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + rhs + " to i32\n";
+            m_out += "  " + lhs64 + " = " + extension + " i32 " + lhs32 + " to i64\n";
+            m_out += "  " + rhs64 + " = " + extension + " i32 " + rhs32 + " to i64\n";
+            m_out += "  " + lo_before + " = load i64, ptr " + lo_ptr + "\n";
+            m_out += "  " + hi_before + " = load i64, ptr " + hi_ptr + "\n";
+            m_out += "  " + lo32_before + " = trunc i64 " + lo_before + " to i32\n";
+            m_out += "  " + hi32_before + " = trunc i64 " + hi_before + " to i32\n";
+            m_out += "  " + lo_bits + " = zext i32 " + lo32_before + " to i64\n";
+            m_out += "  " + hi_bits + " = zext i32 " + hi32_before + " to i64\n";
+            m_out += "  " + hi_shifted + " = shl i64 " + hi_bits + ", 32\n";
+            m_out += "  " + accum + " = or i64 " + hi_shifted + ", " + lo_bits + "\n";
+            m_out += "  " + product + " = mul i64 " + lhs64 + ", " + rhs64 + "\n";
+            // No LLVM nsw/nuw: two's-complement arithmetic wraps modulo 2^64.
+            m_out += "  " + updated + " = " + (subtract ? "sub" : "add") +
+                     " i64 " + accum + ", " + product + "\n";
+            m_out += "  " + lo32_after + " = trunc i64 " + updated + " to i32\n";
+            m_out += "  " + hi_shifted_after + " = lshr i64 " + updated + ", 32\n";
+            m_out += "  " + hi32_after + " = trunc i64 " + hi_shifted_after + " to i32\n";
+            m_out += "  " + lo_after + " = sext i32 " + lo32_after + " to i64\n";
+            m_out += "  " + hi_after + " = sext i32 " + hi32_after + " to i64\n";
+            m_out += "  store i64 " + lo_after + ", ptr " + lo_ptr + "\n";
+            m_out += "  store i64 " + hi_after + ", ptr " + hi_ptr + "\n";
+            results[lane] = updated;
+        }
+        store_gpr(ins.rd, results[0], results[1]);
+        return;
+    }
+
     if ((fn == 0x09 || fn == 0x29) &&
         (sa == 0x0c || sa == 0x0d)) // PMULTW/UW and PDIVW/UW
     {
