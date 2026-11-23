@@ -61,6 +61,7 @@ int main()
             (0x01u << 26) | (4u << 21) | (rt << 16) | 0xFFFFu);
         const bool ok = ins.valid == V &&
             ins.flow == e_ee_flow::FLOW_NONE && !ins.has_delay_slot &&
+            ins.branch_target == 0 &&
             lift(ins).kind == LOP_CHECKED_TRAP;
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL checked REGIMM trap 0x%x\n", rt);
