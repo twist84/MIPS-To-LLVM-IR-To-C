@@ -1661,28 +1661,77 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         else if (funct == ee::e_ee_opcode::FUNCT_DIV ||
                  funct == ee::e_ee_opcode::FUNCT_DIVU)
         {
-            // 32-bit divide: LO = quot, HI = rem (each sign-extended to 64).
-            std::string a32 = newtemp();
-            std::string b32 = newtemp();
-            std::string q32 = newtemp();
-            std::string r32 = newtemp();
-            std::string q64 = newtemp();
-            std::string r64 = newtemp();
-            m_out += "  " + a32 + " = trunc i64 " + src_lo(ins.rs) + " to i32\n";
-            m_out += "  " + b32 + " = trunc i64 " + src_lo(ins.rt) + " to i32\n";
-            // Skip div-by-zero: host would fault; emit udiv/sdiv anyway (runtime
-            // can trap). Prefer sdiv/udiv matching the instruction.
-            if (funct == ee::e_ee_opcode::FUNCT_DIV) {
-                m_out += "  " + q32 + " = sdiv i32 " + a32 + ", " + b32 + "\n";
-                m_out += "  " + r32 + " = srem i32 " + a32 + ", " + b32 + "\n";
-            } else {
-                m_out += "  " + q32 + " = udiv i32 " + a32 + ", " + b32 + "\n";
-                m_out += "  " + r32 + " = urem i32 " + a32 + ", " + b32 + "\n";
+            // DIV/DIVU operate on low 32-bit words and sign-extend both HI
+            // (remainder) and LO (quotient). LLVM division by zero and signed
+            // INT_MIN / -1 are undefined, so neither case may reach sdiv/srem.
+            // The EE's divide-by-zero result is architecturally undefined:
+            // preserve HI/LO deterministically, matching DIV1/DIVU1.
+            const bool is_unsigned = funct == ee::e_ee_opcode::FUNCT_DIVU;
+            const std::string lhs32 = newtemp();
+            const std::string rhs32 = newtemp();
+            const std::string div_zero = newtemp();
+            const std::string safe_rhs = newtemp();
+            const std::string quotient_raw = newtemp();
+            const std::string remainder_raw = newtemp();
+            std::string quotient = quotient_raw;
+            std::string remainder = remainder_raw;
+            const std::string hi_ptr = state_field(1);
+            const std::string lo_ptr = state_field(2);
+
+            m_out += "  " + lhs32 + " = trunc i64 " + src_lo(ins.rs) + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + src_lo(ins.rt) + " to i32\n";
+            m_out += "  " + div_zero + " = icmp eq i32 " + rhs32 + ", 0\n";
+            m_out += "  " + safe_rhs + " = select i1 " + div_zero +
+                     ", i32 1, i32 " + rhs32 + "\n";
+            if (is_unsigned)
+            {
+                m_out += "  " + quotient_raw + " = udiv i32 " + lhs32 + ", " + safe_rhs + "\n";
+                m_out += "  " + remainder_raw + " = urem i32 " + lhs32 + ", " + safe_rhs + "\n";
             }
-            m_out += "  " + q64 + " = sext i32 " + q32 + " to i64\n";
-            m_out += "  " + r64 + " = sext i32 " + r32 + " to i64\n";
-            m_out += "  store i64 " + q64 + ", ptr " + state_field(2) + "\n";
-            m_out += "  store i64 " + r64 + ", ptr " + state_field(1) + "\n";
+            else
+            {
+                // R5900 signed INT_MIN / -1 produces quotient INT_MIN and
+                // remainder zero. Use safe operands to avoid LLVM poison.
+                const std::string is_min = newtemp();
+                const std::string is_neg_one = newtemp();
+                const std::string overflow = newtemp();
+                const std::string safe_lhs = newtemp();
+                const std::string safe_signed_rhs = newtemp();
+                quotient = newtemp();
+                remainder = newtemp();
+                m_out += "  " + is_min + " = icmp eq i32 " + lhs32 + ", -2147483648\n";
+                m_out += "  " + is_neg_one + " = icmp eq i32 " + rhs32 + ", -1\n";
+                m_out += "  " + overflow + " = and i1 " + is_min + ", " + is_neg_one + "\n";
+                m_out += "  " + safe_lhs + " = select i1 " + overflow +
+                         ", i32 0, i32 " + lhs32 + "\n";
+                m_out += "  " + safe_signed_rhs + " = select i1 " + overflow +
+                         ", i32 1, i32 " + safe_rhs + "\n";
+                m_out += "  " + quotient_raw + " = sdiv i32 " +
+                         safe_lhs + ", " + safe_signed_rhs + "\n";
+                m_out += "  " + remainder_raw + " = srem i32 " +
+                         safe_lhs + ", " + safe_signed_rhs + "\n";
+                m_out += "  " + quotient + " = select i1 " + overflow +
+                         ", i32 -2147483648, i32 " + quotient_raw + "\n";
+                m_out += "  " + remainder + " = select i1 " + overflow +
+                         ", i32 0, i32 " + remainder_raw + "\n";
+            }
+
+            const std::string quotient64 = newtemp();
+            const std::string remainder64 = newtemp();
+            const std::string old_hi = newtemp();
+            const std::string old_lo = newtemp();
+            const std::string final_hi = newtemp();
+            const std::string final_lo = newtemp();
+            m_out += "  " + quotient64 + " = sext i32 " + quotient + " to i64\n";
+            m_out += "  " + remainder64 + " = sext i32 " + remainder + " to i64\n";
+            m_out += "  " + old_hi + " = load i64, ptr " + hi_ptr + "\n";
+            m_out += "  " + old_lo + " = load i64, ptr " + lo_ptr + "\n";
+            m_out += "  " + final_hi + " = select i1 " + div_zero +
+                     ", i64 " + old_hi + ", i64 " + remainder64 + "\n";
+            m_out += "  " + final_lo + " = select i1 " + div_zero +
+                     ", i64 " + old_lo + ", i64 " + quotient64 + "\n";
+            m_out += "  store i64 " + final_hi + ", ptr " + hi_ptr + "\n";
+            m_out += "  store i64 " + final_lo + ", ptr " + lo_ptr + "\n";
         }
         else if (funct == ee::e_ee_opcode::FUNCT_SLT ||
                  funct == ee::e_ee_opcode::FUNCT_SLTU)
