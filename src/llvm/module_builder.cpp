@@ -3749,6 +3749,135 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
+    // MMI2 / MMI3 share one architectural 128-bit HI/LO register pair.
+    // MMI lanes 0 and 1 map to HI0:LO0 and HI1:LO1 respectively; each
+    // accumulator half contains a sign-extended 32-bit word for PMULT/PDIV.
+    if ((fn == 0x09 || fn == 0x29) &&
+        (sa == 0x08 || sa == 0x09)) // PMFHI, PMFLO, PMTHI, PMTLO
+    {
+        const bool hi_bank = sa == 0x08;
+        const uint32_t lower_field = hi_bank ? 1u : 2u;
+        const uint32_t upper_field = hi_bank ? 3u : 4u;
+        const std::string ptr_lo = state_field(lower_field);
+        const std::string ptr_hi = state_field(upper_field);
+        if (fn == 0x09) // PMFHI / PMFLO: full 128-bit GPR result
+        {
+            const std::string result_lo = newtemp();
+            const std::string result_hi = newtemp();
+            m_out += "  " + result_lo + " = load i64, ptr " + ptr_lo + "\n";
+            m_out += "  " + result_hi + " = load i64, ptr " + ptr_hi + "\n";
+            store_gpr(ins.rd, result_lo, result_hi);
+        }
+        else // PMTHI / PMTLO: source GPR -> full 128-bit accumulator
+        {
+            m_out += "  store i64 " + a.first + ", ptr " + ptr_lo + "\n";
+            m_out += "  store i64 " + a.second + ", ptr " + ptr_hi + "\n";
+        }
+        return;
+    }
+
+    if ((fn == 0x09 || fn == 0x29) &&
+        (sa == 0x0c || sa == 0x0d)) // PMULTW/UW and PDIVW/UW
+    {
+        const bool is_unsigned = fn == 0x29;
+        const bool multiply = sa == 0x0c;
+        const char* extension = is_unsigned ? "zext" : "sext";
+        std::string full_results[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string& lhs = lane == 0u ? a.first : a.second;
+            const std::string& rhs = lane == 0u ? b.first : b.second;
+            const std::string lhs32 = newtemp();
+            const std::string rhs32 = newtemp();
+            const std::string lhs64 = newtemp();
+            const std::string rhs64 = newtemp();
+            m_out += "  " + lhs32 + " = trunc i64 " + lhs + " to i32\n";
+            m_out += "  " + rhs32 + " = trunc i64 " + rhs + " to i32\n";
+            m_out += "  " + lhs64 + " = " + extension + " i32 " +
+                     lhs32 + " to i64\n";
+            m_out += "  " + rhs64 + " = " + extension + " i32 " +
+                     rhs32 + " to i64\n";
+
+            std::string lo32;
+            std::string hi32;
+            if (multiply)
+            {
+                const std::string product = newtemp();
+                const std::string high_shift = newtemp();
+                lo32 = newtemp();
+                hi32 = newtemp();
+                m_out += "  " + product + " = mul i64 " + lhs64 +
+                         ", " + rhs64 + "\n";
+                m_out += "  " + lo32 + " = trunc i64 " + product + " to i32\n";
+                m_out += "  " + high_shift + " = lshr i64 " + product + ", 32\n";
+                m_out += "  " + hi32 + " = trunc i64 " + high_shift +
+                         " to i32\n";
+                full_results[lane] = product;
+            }
+            else
+            {
+                // All hardware division-by-zero results are undefined.
+                // Follow PCSX2's explicit deterministic values rather than
+                // generate LLVM's undefined sdiv/udiv on a zero divisor.
+                // Signed INT_MIN/-1 is evaluated in i64, then narrowed.
+                const std::string zero = newtemp();
+                const std::string safe_rhs = newtemp();
+                const std::string quotient = newtemp();
+                const std::string remainder = newtemp();
+                const std::string quotient32 = newtemp();
+                const std::string remainder32 = newtemp();
+                const std::string fallback_q = newtemp();
+                lo32 = newtemp();
+                hi32 = newtemp();
+                m_out += "  " + zero + " = icmp eq i32 " + rhs32 + ", 0\n";
+                m_out += "  " + safe_rhs + " = select i1 " + zero +
+                         ", i64 1, i64 " + rhs64 + "\n";
+                m_out += "  " + quotient + " = " +
+                         (is_unsigned ? "udiv" : "sdiv") +
+                         " i64 " + lhs64 + ", " + safe_rhs + "\n";
+                m_out += "  " + remainder + " = " +
+                         (is_unsigned ? "urem" : "srem") +
+                         " i64 " + lhs64 + ", " + safe_rhs + "\n";
+                m_out += "  " + quotient32 + " = trunc i64 " +
+                         quotient + " to i32\n";
+                m_out += "  " + remainder32 + " = trunc i64 " +
+                         remainder + " to i32\n";
+                if (is_unsigned)
+                {
+                    m_out += "  " + fallback_q + " = or i32 0, -1\n";
+                }
+                else
+                {
+                    const std::string negative = newtemp();
+                    m_out += "  " + negative + " = icmp slt i32 " +
+                             lhs32 + ", 0\n";
+                    m_out += "  " + fallback_q + " = select i1 " +
+                             negative + ", i32 1, i32 -1\n";
+                }
+                m_out += "  " + lo32 + " = select i1 " + zero +
+                         ", i32 " + fallback_q + ", i32 " +
+                         quotient32 + "\n";
+                m_out += "  " + hi32 + " = select i1 " + zero +
+                         ", i32 " + lhs32 + ", i32 " +
+                         remainder32 + "\n";
+            }
+
+            const std::string lo64 = newtemp();
+            const std::string hi64 = newtemp();
+            m_out += "  " + lo64 + " = sext i32 " + lo32 + " to i64\n";
+            m_out += "  " + hi64 + " = sext i32 " + hi32 + " to i64\n";
+            m_out += "  store i64 " + lo64 + ", ptr " +
+                     state_field(lane == 0u ? 2u : 4u) + "\n";
+            m_out += "  store i64 " + hi64 + ", ptr " +
+                     state_field(lane == 0u ? 1u : 3u) + "\n";
+        }
+        if (multiply) // PDIVW/UW has no GPR destination.
+        {
+            store_gpr(ins.rd, full_results[0], full_results[1]);
+        }
+        return;
+    }
+
     // Top-level MMI (not class)
     if (fn == 0x18 || fn == 0x19)
     {
