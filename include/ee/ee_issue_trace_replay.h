@@ -402,15 +402,24 @@ private:
                 }
                 {
                     bool unary_rt = false;
+                    bool plzcw = false;
                     bool packed_supported = false;
                     switch (operation)
                     {
-                    case 0x08u: // MMI0: PADD*/PSUB*/PMAX*
-                        packed_supported =
-                            decoded.sa == 0u || decoded.sa == 1u ||
-                            decoded.sa == 3u || decoded.sa == 4u ||
-                            decoded.sa == 5u || decoded.sa == 7u ||
-                            decoded.sa == 8u || decoded.sa == 9u;
+                    case 0x04u: // PLZCW: reads rs, writes low doubleword of rd
+                        plzcw = true;
+                        packed_supported = true;
+                        break;
+                    case 0x34u: case 0x36u: case 0x37u: // PS*H
+                    case 0x3cu: case 0x3eu: case 0x3fu: // PS*W
+                        unary_rt = true;
+                        packed_supported = true;
+                        break;
+                    case 0x08u: // MMI0: all decoder-accepted packed lanes
+                        unary_rt = decoded.sa == 30u || decoded.sa == 31u;
+                        packed_supported = decoded.sa <= 10u ||
+                            (decoded.sa >= 16u && decoded.sa <= 27u) ||
+                            decoded.sa == 30u || decoded.sa == 31u;
                         break;
                     case 0x28u: // MMI1: parallel arithmetic and extensions
                         unary_rt = decoded.sa == 1u || decoded.sa == 5u;
@@ -449,14 +458,16 @@ private:
                     instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
                     instruction->m_result_latency =
                         m_profile.m_packed_mmi_latency;
-                    instruction->m_gpr_read_mask = rt | (unary_rt ? 0u : rs);
+                    instruction->m_gpr_read_mask =
+                        plzcw ? rs : (rt | (unary_rt ? 0u : rs));
                     instruction->m_gpr_write_mask = rd;
-                    // A packed SIMD instruction reads/writes complete
-                    // 128-bit GPRs, not just its low 64-bit subregisters.
+                    // PLZCW only touches words 0/1 of rd, preserving its
+                    // upper 64 bits. Every other accepted packed op here
+                    // reads/writes complete 128-bit GPRs.
                     instruction->m_gpr_128_read_mask =
-                        instruction->m_gpr_read_mask;
+                        plzcw ? 0u : instruction->m_gpr_read_mask;
                     instruction->m_gpr_128_write_mask =
-                        instruction->m_gpr_write_mask;
+                        plzcw ? 0u : instruction->m_gpr_write_mask;
                     return true;
                 }
             }
