@@ -403,9 +403,27 @@ private:
                     return true;
                 }
                 default:
-                    break;
+                    // Retain the previously modeled packed MMI2/MMI3
+                    // operations instead of aliasing them to MFHI1/MFLO1.
+                    if (m_profile.m_packed_mmi_latency == 0u ||
+                        (decoded.sa != 0x0eu && decoded.sa != 0x12u &&
+                         decoded.sa != 0x13u &&
+                         !(operation == 0x29u && decoded.sa == 0x1bu)))
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_result_latency =
+                        m_profile.m_packed_mmi_latency;
+                    instruction->m_gpr_read_mask = rt |
+                        (operation == 0x29u && decoded.sa == 0x1bu
+                             ? 0u : rs);
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_read_mask =
+                        instruction->m_gpr_read_mask;
+                    instruction->m_gpr_128_write_mask = rd;
+                    return true;
                 }
-                [[fallthrough]];
             case 0x10u: case 0x12u: // MFHI1 / MFLO1
                 if (m_profile.m_hilo_transfer_latency == 0u)
                 {
