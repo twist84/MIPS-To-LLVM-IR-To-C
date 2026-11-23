@@ -545,26 +545,26 @@ int main()
     expect("fmt.l", R(0x11,0x15,5,6,7,0x00), "cop1_reserved", X);
     expect("bc1 rt=4", R(0x11,0x08,4,0,0,0x00), "cop1_reserved", X);
 
-    // Signed word register operations raise Ov. Immediate and doubleword
-    // overflow encodings remain gated until their exception paths are modelled.
-    expect("addi overflow", R(0x08,4,5,0,0,0), "addi", U);
-    expect("daddi overflow", R(0x18,4,5,0,0,0), "daddi", U);
+    // Signed word/doubleword arithmetic and integer traps now have
+    // checked LLVM lowering and precise EX_Ov/EX_Tr exception entry.
+    expect("addi overflow", R(0x08,4,5,0,0,0), "addi", V);
+    expect("daddi overflow", R(0x18,4,5,0,0,0), "daddi", V);
     expect("slti", R(0x0a,4,5,0,0,0), "slti", V);
     expect("sltiu", R(0x0b,4,5,0,0,0), "sltiu", V);
     expect("add", R(0x00,4,5,6,0,0x20), "signed_arith", V);
     expect("sub", R(0x00,4,5,6,0,0x22), "signed_arith", V);
     expect("sub reserved shift", R(0x00,4,5,6,1,0x22), "signed_arith", U);
-    expect("dadd overflow", R(0x00,4,5,6,0,0x2c), "signed_arith", U);
+    expect("dadd overflow", R(0x00,4,5,6,0,0x2c), "signed_arith", V);
     expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
     expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
-    expect("tge", R(0x00,4,5,0,0,0x30), "trap", U);
+    expect("tge", R(0x00,4,5,0,0,0x30), "trap", V);
     expect("bltzal", R(0x01,4,0x10,0,0,0), "bltzal", V);
     expect("bgezal", R(0x01,4,0x11,0,0,0), "bgezal", V);
     expect("bltzall", R(0x01,4,0x12,0,0,0), "bltzall", V);
     expect("bgezall", R(0x01,4,0x13,0,0,0), "bgezall", V);
     expect("bltzal rs=ra", R(0x01,31,0x10,0,0,0), "bltzal", U);
     expect("bltzall rs=ra", R(0x01,31,0x12,0,0,0), "bltzall", U);
-    expect("tgei", R(0x01,4,0x08,0,0,0), "regimm_trap", U);
+    expect("tgei", R(0x01,4,0x08,0,0,0), "regimm_trap", V);
     expect("mtsab", R(0x01,4,0x18,0,0,0), "mtsab", V);
     expect("mtsah", R(0x01,4,0x19,0,0,0), "mtsah", V);
     expect("reserved regimm", R(0x01,4,0x1f,0,0,0), "regimm_reserved", X);
