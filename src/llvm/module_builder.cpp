@@ -644,6 +644,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
                 break;
             case 0x11: // MTHI1: HI1 = rs
             case 0x13: // MTLO1: LO1 = rs
+            case 0x31: // PMTHL: updates HI/LO, never rd
             case 0x1a: // DIV1: writes HI1/LO1, not rd
             case 0x1b: // DIVU1: writes HI1/LO1, not rd
                 break;
@@ -877,7 +878,11 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
                 break;
             case 0x10: // MFHI1: rd = HI1
             case 0x12: // MFLO1: rd = LO1
+            case 0x30: // PMFHL: writes all 128 bits of rd
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
+            case 0x31: // PMTHL: only reads rs; no GPR destination
+                consider_read(ins.rs);
                 break;
             case 0x11: // MTHI1: HI1 = rs
             case 0x13: // MTLO1: LO1 = rs
