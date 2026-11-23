@@ -4395,6 +4395,23 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
+        // MMI2 PINTH and MMI3 PINTEH use distinct full-128-bit
+        // halfword interleaves. Element indexes 0..7 refer to rs;
+        // indexes 8..15 refer to rt. Snapshot both sources before
+        // writing rd so aliases with rs/rt remain exact.
+        if ((fn == 0x09 || fn == 0x29) && sa == 0x0a)
+        {
+            const std::string result = newtemp();
+            const char* mask = fn == 0x09
+                ? "<i32 8, i32 4, i32 9, i32 5, i32 10, i32 6, i32 11, i32 7>"
+                : "<i32 8, i32 0, i32 10, i32 2, i32 12, i32 4, i32 14, i32 6>";
+            m_out += "  " + result + " = shufflevector <8 x i16> " +
+                     va8 + ", <8 x i16> " + vb8 + ", <8 x i32> " +
+                     mask + "\n";
+            store_vec8i16(result);
+            return;
+        }
+
         // MMI0 (0x08): independent packed lanes. Saturating operations
         // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {

@@ -159,6 +159,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
         {
         case 0x00: case 0x04:                            // PMADDW / PMSUBW
         case 0x02: case 0x03:                            // PSLLVW / PSRLVW
+        case 0x0a:                                      // PINTH
             return true;
         case 0x10: case 0x11: case 0x14: case 0x15:      // PMADDH / PHMADH / PMSUBH / PHMSBH
         case 0x1c:                                      // PMULTH
@@ -179,6 +180,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
         switch (sa)
         {
         case 0x03:                                      // PSRAVW: signed variable shift
+        case 0x0a:                                      // PINTEH
         case 0x00:                                      // PMADDUW
             return true;
         case 0x08: case 0x09:                            // PMTHI / PMTLO

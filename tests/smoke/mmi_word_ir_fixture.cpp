@@ -186,6 +186,11 @@ int main(int argc, char** argv)
         funct = mode == "psravw" ? 0x29u : 0x09u;
         sa = mode == "psllvw" ? 0x02u : 0x03u;
     }
+    else if (mode == "pinth" || mode == "pinteh")
+    {
+        funct = mode == "pinth" ? 0x09u : 0x29u;
+        sa = 0x0au;
+    }
     else if (mode == "pdivbw")
     {
         funct = 0x09u;

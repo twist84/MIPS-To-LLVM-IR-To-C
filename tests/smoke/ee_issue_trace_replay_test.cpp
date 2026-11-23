@@ -681,6 +681,56 @@ int main()
           "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
 
     replay.configure(packed_profile);
+    // PINTH/PINTEH interleave both full-width source GPRs and produce
+    // a full-width destination, without touching HI/LO. Both operations
+    // require the explicitly supplied packed-MMI latency candidate.
+    const uint32_t mmi_pinth = mmi(8u, 9u, 10u, 0x0au, 0x09u);
+    const uint32_t mmi_pinteh = mmi(8u, 9u, 10u, 0x0au, 0x29u);
+    const uint32_t mmi_pinth_from_prior_rt =
+        mmi(8u, 10u, 11u, 0x0au, 0x09u);
+    const uint32_t mmi_pinteh_from_prior_rs =
+        mmi(10u, 9u, 11u, 0x0au, 0x29u);
+    bool interleave_profiles = true;
+    for (const uint32_t opcode : {mmi_pinth, mmi_pinteh})
+    {
+        replay.configure(packed_profile);
+        interleave_profiles &=
+            replay.observe(record(1u, 0x7140u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7144u, addiu_from_packed, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(interleave_profiles,
+          "PINTH/PINTEH full-128 destination requires packed latency");
+    bool interleave_sources = true;
+    for (const uint32_t opcode : {mmi_pinth_from_prior_rt,
+                                  mmi_pinteh_from_prior_rs})
+    {
+        replay.configure(packed_profile);
+        interleave_sources &=
+            replay.observe(record(1u, 0x7140u, mmi_paddw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7144u, opcode, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+    }
+    check(interleave_sources,
+          "PINTH/PINTEH consume full 128-bit rs/rt source dependencies");
+    packed_profile.m_packed_mmi_latency = 0u;
+    bool interleave_unprofiled = true;
+    for (const uint32_t opcode : {mmi_pinth, mmi_pinteh})
+    {
+        replay.configure(packed_profile);
+        interleave_unprofiled &=
+            replay.observe(record(1u, 0x7140u, opcode, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(interleave_unprofiled,
+          "PINTH/PINTEH do not invent packed-MMI hardware cycles");
+    packed_profile.m_packed_mmi_latency = 5u;
+    replay.configure(packed_profile);
+
     // MMI2/MMI3 variable-word shifts read both 128-bit sources, write
     // a 128-bit destination, and never reserve the HI/LO banks.
     const uint32_t mmi_psllvw = mmi(8u, 9u, 10u, 2u, 0x09u);

@@ -434,6 +434,31 @@ int main()
             }
         }
     }
+    // MMI2 PINTH and MMI3 PINTEH interleave eight halfword elements.
+    // Both use all source/destination aliases, including $zero.
+    for (const uint32_t function : {0x09u, 0x29u})
+    {
+        for (const uint32_t rs : {0u, 4u, 5u})
+        {
+            for (const uint32_t rd : {0u, 4u, 5u, 6u})
+            {
+                const auto ins = decode(0x00180000u,
+                    R(0x1c, rs, 5u, rd, 0x0au, function));
+                const bool valid = ins.valid == V &&
+                    lift(ins).kind == LOP_MMI_INTERLEAVE;
+                valid ? ++g_pass : ++g_fail;
+                if (!valid)
+                {
+                    std::printf("FAIL halfword interleave fn=%02x rs=%u rd=%u\n",
+                                function, rs, rd);
+                }
+            }
+        }
+    }
+    expect("mmi2 reserved interleave sa0b",
+           R(0x1c,4,5,6,0x0b,0x09), "reserved", X);
+    expect("mmi3 reserved interleave sa0b",
+           R(0x1c,4,5,6,0x0b,0x29), "reserved", X);
     expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);

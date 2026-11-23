@@ -376,6 +376,19 @@ private:
                             m_profile.m_hilo_transfer_latency;
                     }
                     return true;
+                case 0x0au: // PINTH / PINTEH
+                    if (m_profile.m_packed_mmi_latency == 0u)
+                    {
+                        return false;
+                    }
+                    instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                    instruction->m_gpr_read_mask = rs | rt;
+                    instruction->m_gpr_128_read_mask = rs | rt;
+                    instruction->m_gpr_write_mask = rd;
+                    instruction->m_gpr_128_write_mask = rd;
+                    instruction->m_result_latency =
+                        m_profile.m_packed_mmi_latency;
+                    return true;
                 case 0x02u: case 0x03u: // PSLLVW, PSRLVW / PSRAVW
                     if ((operation == 0x29u && decoded.sa != 0x03u) ||
                         (operation != 0x09u && operation != 0x29u) ||
