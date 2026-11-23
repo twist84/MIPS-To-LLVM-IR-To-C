@@ -283,7 +283,7 @@ int main()
     expect("divu1 bad sa", R(0x1c,4,5,6,1,0x1b), "divu1", U);
     expect("mult1 bad sa", R(0x1c,4,5,6,1,0x18), "mult1", U);
     expect("pmfhl",   R(0x1c,0,0,6,0,0x30),    "pmfhl",  U);
-    expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  U);
+    expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
     expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0
     // macro mode; the low funct/sa fields are only interpreted inside macro mode.
