@@ -870,6 +870,11 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
         case e_ee_opcode::OP_MMI:
             switch (ins.funct)
             {
+            case 0x04: // PLZCW updates only rd's low doubleword.
+                consider_read(ins.rs);
+                consider_read(ins.rd); // preserve previous upper 64 bits
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
             case 0x10: // MFHI1: rd = HI1
             case 0x12: // MFLO1: rd = LO1
                 if (ins.rd != 0) written_so_far.insert(ins.rd);
