@@ -130,8 +130,11 @@ first two fields and `0x00137970:0x00137d18` for the V0 trace range.
 The standard GUI and batch launcher forward these read-only probes to
 both the expansion phase and final graphics replay. They are blank by
 default and never repair an invalid guest pointer or suppress an EE
-exception. The V0/store instruction probes emit up to 64 matching
-events each; a new retail run is needed to confirm a handle's provenance.
+exception. The V0 probe prints up to 64 matching assignments. The
+STORE probe prints the first 64 matches and retains the most recent 64
+guest STORE instruction operands in a host-only ring, which is dumped
+at the end of either a successful or faulting replay. A new retail run
+is needed to confirm the handle's provenance.
 
 The **Game** tab now includes **Resume after cache miss**, enabled by default.
 When an uncached EE function is reached, compilation and native-library
