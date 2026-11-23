@@ -155,13 +155,35 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
             return false;
         }
     case 0x09:                                          // MMI2
-        return sa == 0x0e || sa == 0x12 || sa == 0x13;  // pcpyld pand pxor
-    case 0x29:                                          // MMI3
-        if (sa == 0x1b)                                 // pcpyh uses rt only
+        switch (sa)
         {
-            return rs == 0;
+        case 0x08: case 0x09:                            // PMFHI / PMFLO
+            return rs == 0 && rt == 0;
+        case 0x0c:                                      // PMULTW (signed)
+            return true;
+        case 0x0d:                                      // PDIVW (signed)
+            return rd == 0;
+        case 0x0e: case 0x12: case 0x13:               // PCPYLD / PAND / PXOR
+            return true;
+        default:
+            return false;
         }
-        return sa == 0x0e || sa == 0x12 || sa == 0x13; // pcpyud por pnor
+    case 0x29:                                          // MMI3
+        switch (sa)
+        {
+        case 0x08: case 0x09:                            // PMTHI / PMTLO
+            return rt == 0 && rd == 0;
+        case 0x0c:                                      // PMULTUW (unsigned)
+            return true;
+        case 0x0d:                                      // PDIVUW (unsigned)
+            return rd == 0;
+        case 0x0e: case 0x12: case 0x13:               // PCPYUD / POR / PNOR
+            return true;
+        case 0x1b:                                      // PCPYH uses rt only
+            return rs == 0;
+        default:
+            return false;
+        }
     default:
         return false;
     }
