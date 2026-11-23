@@ -426,6 +426,13 @@ if defined FUNCTIONS_ARG echo Cold translation: precompiling all statically disc
 if defined LIVE_RELINK_ARG echo Live cache misses: legacy full-library relink
 if not defined LIVE_RELINK_ARG if not defined CACHE_MISS_ARGS echo Live cache misses: fast overlay DLLs
 
+rem Optional guest memory traces. These are host-only and never repair
+rem invalid pointers or alter emulated guest instructions.
+set "GUEST_TRACE_ARGS="
+if defined SDBZ_WATCH_WORD set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --watch-word=%SDBZ_WATCH_WORD%"
+if defined SDBZ_TRACE_STORE set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --trace-store=%SDBZ_TRACE_STORE%"
+if defined SDBZ_TRACE_V0 set "GUEST_TRACE_ARGS=%GUEST_TRACE_ARGS% --trace-v0=%SDBZ_TRACE_V0%"
+
 rem Display live LLVM IR file count and percentage in both quick and full
 rem sessions; the orchestrator keeps in-place updates out of boot logs.
 python tools\run_boot_session.py "%GAME_ELF%" ^
@@ -446,7 +453,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.
