@@ -459,6 +459,27 @@ int main()
            R(0x1c,4,5,6,0x0b,0x09), "reserved", X);
     expect("mmi3 reserved interleave sa0b",
            R(0x1c,4,5,6,0x0b,0x29), "reserved", X);
+    // Only MMI2 unary permutation encodings with rs=$zero are valid.
+    for (const uint32_t subop : {0x1au, 0x1bu, 0x1eu, 0x1fu})
+    {
+        for (const uint32_t rd : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,0u,5u,rd,subop,0x09u));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_PERMUTE;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL MMI2 unary permutation sa=%u rd=%u\n",
+                            subop, rd);
+            }
+        }
+    }
+    expect("pexeh with reserved rs", R(0x1c,4,5,6,0x1a,0x09), "pexeh", U);
+    expect("prevh with reserved rs", R(0x1c,4,5,6,0x1b,0x09), "prevh", U);
+    expect("pexew with reserved rs", R(0x1c,4,5,6,0x1e,0x09), "pexew", U);
+    expect("prot3w with reserved rs", R(0x1c,4,5,6,0x1f,0x09), "prot3w", U);
     expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);

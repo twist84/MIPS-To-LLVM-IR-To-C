@@ -642,10 +642,15 @@ private:
                             break;
                         }
                         break;
-                    case 0x09u: // MMI2: PCPYLD/PAND/PXOR
+                    case 0x09u: // MMI2: logical, copy and unary permutations
+                        unary_rt = decoded.sa == 26u ||
+                                   decoded.sa == 27u ||
+                                   decoded.sa == 30u ||
+                                   decoded.sa == 31u;
                         packed_supported = decoded.sa == 14u ||
                                            decoded.sa == 18u ||
-                                           decoded.sa == 19u;
+                                           decoded.sa == 19u ||
+                                           unary_rt;
                         break;
                     case 0x29u: // MMI3: PCPYUD/POR/PNOR/PCPYH
                         unary_rt = decoded.sa == 27u;

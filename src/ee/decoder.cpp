@@ -173,6 +173,8 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
             return rd == 0;
         case 0x0e: case 0x12: case 0x13:               // PCPYLD / PAND / PXOR
             return true;
+        case 0x1a: case 0x1b: case 0x1e: case 0x1f:   // PEXEH/PREVH/PEXEW/PROT3W
+            return rs == 0;
         default:
             return false;
         }

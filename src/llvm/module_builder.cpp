@@ -4395,6 +4395,37 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
+        // Unary MMI2 lane permutations use rt exclusively. The 128-bit
+        // value is assembled before writing rd, including rd==rt.
+        if (fn == 0x09 &&
+            (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f))
+        {
+            const bool halfword = sa == 0x1a || sa == 0x1b;
+            const char* mask = sa == 0x1a
+                ? "<i32 2, i32 1, i32 0, i32 3, i32 6, i32 5, i32 4, i32 7>"
+                : sa == 0x1b
+                ? "<i32 3, i32 2, i32 1, i32 0, i32 7, i32 6, i32 5, i32 4>"
+                : sa == 0x1e
+                ? "<i32 2, i32 1, i32 0, i32 3>"
+                : "<i32 1, i32 2, i32 0, i32 3>";
+            const std::string type = halfword ? "<8 x i16>" : "<4 x i32>";
+            const std::string& input = halfword ? vb8 : vb4;
+            const std::string result = newtemp();
+            m_out += "  " + result + " = shufflevector " + type + " " +
+                     input + ", " + type + " " + input + ", " +
+                     (halfword ? "<8 x i32> " : "<4 x i32> ") +
+                     mask + "\n";
+            if (halfword)
+            {
+                store_vec8i16(result);
+            }
+            else
+            {
+                store_vec4i32(result);
+            }
+            return;
+        }
+
         // MMI2 PINTH and MMI3 PINTEH use distinct full-128-bit
         // halfword interleaves. Element indexes 0..7 refer to rs;
         // indexes 8..15 refer to rt. Snapshot both sources before

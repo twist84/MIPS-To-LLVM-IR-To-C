@@ -680,6 +680,43 @@ int main()
     check(family_covered,
           "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
 
+    // MMI2 unary permutations read rt, NOT rs. Check both the full
+    // 128-bit dependency and absence of an artificial rs dependency.
+    bool permutation_rt_hazards = true;
+    bool permutation_no_rs_hazards = true;
+    bool permutation_unprofiled = true;
+    for (const uint32_t subop : {0x1au, 0x1bu, 0x1eu, 0x1fu})
+    {
+        const uint32_t depends_on_rt = mmi(0u, 10u, 11u, subop, 0x09u);
+        const uint32_t independent = mmi(0u, 9u, 11u, subop, 0x09u);
+        replay.configure(packed_profile);
+        permutation_rt_hazards &=
+            replay.observe(record(1u, 0x7130u, mmi_paddw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7134u, depends_on_rt, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 5u;
+        replay.configure(packed_profile);
+        permutation_no_rs_hazards &=
+            replay.observe(record(1u, 0x7130u, mmi_paddw, 0u, 1u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.observe(record(2u, 0x7134u, independent, 0u, 2u)) ==
+                e_ee_issue_replay_status::ISSUED &&
+            replay.last_event_candidate_cycle() == 2u;
+        ee::s_ee_issue_replay_profile unprofiled = packed_profile;
+        unprofiled.m_packed_mmi_latency = 0u;
+        replay.configure(unprofiled);
+        permutation_unprofiled &=
+            replay.observe(record(1u, 0x7130u, independent, 0u, 1u)) ==
+                e_ee_issue_replay_status::UNMODELED_INSTRUCTION;
+    }
+    check(permutation_rt_hazards,
+          "MMI2 unary permutations consume full-128 rt result hazards");
+    check(permutation_no_rs_hazards,
+          "MMI2 unary permutations do not invent rs dependencies");
+    check(permutation_unprofiled,
+          "MMI2 unary permutations require explicit packed candidate latency");
+
     replay.configure(packed_profile);
     // PINTH/PINTEH interleave both full-width source GPRs and produce
     // a full-width destination, without touching HI/LO. Both operations

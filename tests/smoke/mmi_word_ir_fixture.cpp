@@ -191,6 +191,15 @@ int main(int argc, char** argv)
         funct = mode == "pinth" ? 0x09u : 0x29u;
         sa = 0x0au;
     }
+    else if (mode == "pexeh" || mode == "prevh" ||
+             mode == "pexew" || mode == "prot3w")
+    {
+        funct = 0x09u;
+        sa = mode == "pexeh" ? 0x1au :
+             mode == "prevh" ? 0x1bu :
+             mode == "pexew" ? 0x1eu : 0x1fu;
+        rs = 0u; // All four permutations read only rt.
+    }
     else if (mode == "pdivbw")
     {
         funct = 0x09u;
