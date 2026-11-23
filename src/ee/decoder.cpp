@@ -108,7 +108,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
     switch (funct)
     {
     case 0x04:                                          // PLZCW uses rs only
-        return rt == 0 && rd == 0 && sa == 0;
+        return rt == 0 && sa == 0;
     case 0x34: case 0x36: case 0x37:                    // packed halfword shifts
     case 0x3c: case 0x3e: case 0x3f:                    // packed word shifts
         return rs == 0;
@@ -121,7 +121,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
     case 0x30: // PMFHL: rd <- HI/LO words, sa selects five layouts
         return rs == 0 && rt == 0 && sa <= 4;
     case 0x31: // PMTHL: HI/LO selected words <- rs; sa must be zero
-        return rt == 0 && sa == 0;
+        return rt == 0 && rd == 0 && sa == 0;
     case 0x08:                                          // MMI0
         // All named MMI0 packed arithmetic, comparisons, interleaves,
         // packs and color conversions have exact native LLVM lowering.
