@@ -48,6 +48,7 @@ int main(int argc, char** argv)
     uint32_t continuation_word = 0;
     bool has_continuation = false;
     bool is_recursive = false;
+    bool is_branch_liveness = false;
     const char* function_name = nullptr;
 
     if (mode == "jr")
@@ -74,6 +75,15 @@ int main(int argc, char** argv)
         control_word = make_r(31, 0, 0, 0, 0x08);
         delay_word = make_r(19, 0, 2, 0, 0x2d);
         function_name = "guest_jr_daddu_return_test";
+    }
+    else if (mode == "branch_liveness")
+    {
+        // A pointer written by a branch delay slot must reach BEQL in the
+        // next block, even though BEQL's own delay slot writes the same GPR.
+        control_word = make_i(0x04, 0, 0, 1); // beq zero,zero,entry+8
+        delay_word = make_r(19, 0, 2, 0, 0x2d); // daddu v0,s3,zero
+        is_branch_liveness = true;
+        function_name = "guest_branch_liveness_test";
     }
     else if (mode == "jal")
     {
@@ -255,9 +265,41 @@ int main(int argc, char** argv)
         }
     }
 
+    if (is_branch_liveness)
+    {
+        const uint32_t pcs[] =
+        {
+            entry_pc + 8u, entry_pc + 12u,
+            entry_pc + 16u, entry_pc + 20u,
+            entry_pc + 24u, entry_pc + 28u
+        };
+        const uint32_t words[] =
+        {
+            make_i(0x14, 2, 0, 3),     // beql v0,zero,entry+24
+            make_i(0x09, 0, 2, 0x15),  // taken slot: overwrite v0
+            make_r(31, 0, 0, 0, 0x08), // not-taken: jr ra
+            make_i(0x09, 0, 17, 0x66), // not-taken marker
+            make_r(31, 0, 0, 0, 0x08), // taken: jr ra
+            make_i(0x09, 0, 17, 0x77)  // taken marker
+        };
+        for (size_t i = 0; i < sizeof(pcs) / sizeof(pcs[0]); ++i)
+        {
+            const ee::s_ee_instruction extra = ee::decode(pcs[i], words[i]);
+            if (extra.valid != ee::e_ee_valid::VALID)
+            {
+                std::fprintf(stderr, "branch-liveness instruction at 0x%08x failed to decode\n",
+                             pcs[i]);
+                return 6;
+            }
+            insn_map.emplace(extra.pc, extra);
+        }
+    }
+
     ee::function_analyzer analyzer;
     const auto functions = analyzer.analyze(insn_map, {function_entry_pc});
-    const size_t expected_blocks = is_recursive ? 4u : has_continuation ? 2u : 1u;
+    const size_t expected_blocks =
+        (is_recursive || is_branch_liveness) ? 4u :
+        has_continuation ? 2u : 1u;
     bool block_layout_valid =
         !functions.empty() && functions[0].blocks.size() == expected_blocks &&
         !functions[0].blocks.empty() &&
@@ -275,6 +317,18 @@ int main(int argc, char** argv)
             blocks[1].start_pc == entry_pc + 8u && blocks[1].insn_indices.size() == 2 &&
             blocks[2].start_pc == entry_pc + 20u && blocks[2].insn_indices.size() == 3 &&
             blocks[3].start_pc == entry_pc + 32u && blocks[3].insn_indices.size() == 2;
+    }
+    if (block_layout_valid && is_branch_liveness)
+    {
+        const auto& blocks = functions[0].blocks;
+        for (size_t index = 1; index < 4u; ++index)
+        {
+            if (blocks[index].start_pc != entry_pc + static_cast<uint32_t>(index * 8u) ||
+                blocks[index].insn_indices.size() != 2u)
+            {
+                block_layout_valid = false;
+            }
+        }
     }
     if (functions.size() != 1 || !block_layout_valid)
     {
