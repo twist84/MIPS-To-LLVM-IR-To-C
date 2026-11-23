@@ -1,6 +1,7 @@
 #include "ee_issue_trace_replay.h"
 
 #include <cstdio>
+#include <utility>
 
 namespace
 {
