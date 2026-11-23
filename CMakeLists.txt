@@ -244,6 +244,11 @@ add_executable(ee_vu0_transfer_ir_fixture
 )
 target_link_libraries(ee_vu0_transfer_ir_fixture PRIVATE ee_core)
 
+# Real decoded R5900 signed arithmetic and integer trap JIT fixture.
+add_executable(ee_checked_ir_fixture
+    tests/smoke/ee_checked_ir_fixture.cpp)
+target_link_libraries(ee_checked_ir_fixture PRIVATE ee_core)
+
 add_executable(ee_min_test
     tests/smoke/min_test.cpp
 )
@@ -829,6 +834,11 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_alignment_ir_runtime.py
                 $<TARGET_FILE:ee_vu0_transfer_ir_fixture>
+                $<TARGET_FILE:ee_cop0_jit_helpers>)
+    add_test(NAME ee_checked_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_checked_ir_runtime.py
+                $<TARGET_FILE:ee_checked_ir_fixture>
                 $<TARGET_FILE:ee_cop0_jit_helpers>)
     add_test(NAME compare_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
