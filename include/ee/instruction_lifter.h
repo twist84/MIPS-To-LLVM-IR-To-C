@@ -53,7 +53,10 @@ enum e_lift_op_kind
     // The LLVM IR builder (not the legacy straight-line C++ emitter)
     // implements precise EX_Ov and EX_Tr semantics for these classes.
     LOP_CHECKED_SIGNED,
-    LOP_CHECKED_TRAP
+    LOP_CHECKED_TRAP,
+    LOP_MMI0_EXACT,
+    LOP_MMI_SHIFT,
+    LOP_MMI_PLZCW
 };
 
 struct s_lifted_op
