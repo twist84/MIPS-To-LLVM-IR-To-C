@@ -3759,7 +3759,7 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         // MMI0 (0x08): independent packed lanes. Saturating operations
         // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {
-            const auto splat = [](const char* scalar, uint32_t lanes,
+            const auto splat = [](const std::string& scalar, uint32_t lanes,
                                   int64_t value) -> std::string
             {
                 std::string result = "<";
