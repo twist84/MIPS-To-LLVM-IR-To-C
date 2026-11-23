@@ -56,7 +56,9 @@ enum e_lift_op_kind
     LOP_CHECKED_TRAP,
     LOP_MMI0_EXACT,
     LOP_MMI_SHIFT,
-    LOP_MMI_PLZCW
+    LOP_MMI_PLZCW,
+    LOP_MMI_PMFHL,
+    LOP_MMI_PMTHL
 };
 
 struct s_lifted_op
