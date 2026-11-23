@@ -418,8 +418,23 @@ int main()
             }
         }
     }
+    for (const uint32_t source : {0u, 4u, 5u})
+    {
+        for (const uint32_t destination : {0u, 4u, 5u, 6u})
+        {
+            const auto ins = decode(0x00180000u,
+                                    R(0x1c,source,5,destination,3,0x29));
+            const bool ok = ins.valid == V &&
+                            lift(ins).kind == LOP_MMI_SHIFT;
+            ok ? ++g_pass : ++g_fail;
+            if (!ok)
+            {
+                std::printf("FAIL PSRAVW rs=%u rd=%u decoder/lifter\n",
+                            source, destination);
+            }
+        }
+    }
     expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
-    expect("psravw remains unlowered", R(0x1c,4,5,6,3,0x29), "psravw", U);
     expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
     expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
     // MMI2 halfword multiply/add/sub and horizontal pair variants.

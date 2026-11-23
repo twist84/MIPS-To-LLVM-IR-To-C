@@ -53,6 +53,9 @@ def reference(opcode, source_a, source_b):
             shifted = (value << count) & MASK32
         elif opcode == "psrlvw":
             shifted = value >> count
+        elif opcode == "psravw":
+            signed_value = value - (1 << 32) if value & 0x80000000 else value
+            shifted = signed_value >> count
         else:
             raise AssertionError("unexpected variable-shift opcode")
         result |= sext32(shifted) << (64 * lane)
@@ -129,9 +132,12 @@ def run_case(fn, mode, pattern):
 
 
 def main():
-    require(len(sys.argv) == 2,
-            "usage: test_mmi_var_shift_ir_runtime.py fixture")
+    require(len(sys.argv) in (2, 3) and
+            (len(sys.argv) == 2 or sys.argv[2] == "psravw"),
+            "usage: test_mmi_var_shift_ir_runtime.py fixture [psravw]")
     fixture = pathlib.Path(sys.argv[1]).resolve()
+    selected_modes = (MODES if len(sys.argv) == 2 else
+                      ["psravw" + suffix for suffix in SUFFIXES])
     register_ee_diagnostic_stubs()
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
@@ -176,7 +182,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ee-mmi-var-shift-") as directory:
         directory = pathlib.Path(directory)
         for optimization in (0, 3):
-            for mode in MODES:
+            for mode in selected_modes:
                 fn, engine, module, machine = compile_guest(
                     fixture, directory, mode, optimization, target)
                 for pattern in patterns:
@@ -184,7 +190,8 @@ def main():
                     executions += 1
                 _ = engine, module, machine
 
-    print("mmi_var_shift_ir_runtime: PASS (" + str(executions) +
+    print(("mmi_psravw_ir_runtime" if len(sys.argv) == 3 else
+           "mmi_var_shift_ir_runtime") + ": PASS (" + str(executions) +
           " O0/O3 native executions; lane-specific counts, 5-bit mask, " +
           "signed i64 output, $zero/aliases, HI/LO preservation, CFG)")
 

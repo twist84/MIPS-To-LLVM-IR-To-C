@@ -3778,13 +3778,15 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         return;
     }
 
-    // PSLLVW / PSRLVW: two scalar 32-bit word shifts, one per doubleword.
+    // PSLLVW / PSRLVW / PSRAVW: two 32-bit shifts, one per doubleword.
     // Each low 32-bit source word comes from rt[31:0] or rt[95:64];
     // the corresponding low word of rs supplies a masked five-bit count.
     // The shifted i32 result is SIGN-extended to the complete i64 rd lane.
-    // PSRLVW's shift is logical, but its final i32-to-i64 extension is signed.
+    // PSRLVW shifts logically, PSRAVW shifts arithmetically; every
+    // final i32-to-i64 extension is signed, including PSRLVW.
     // No HI/LO bank is read or modified, and rd=$zero discards the result.
-    if (fn == 0x09 && (sa == 0x02 || sa == 0x03))
+    if ((fn == 0x09 && (sa == 0x02 || sa == 0x03)) ||
+        (fn == 0x29 && sa == 0x03))
     {
         std::string results[2];
         for (uint32_t lane = 0u; lane < 2u; ++lane)
@@ -3802,7 +3804,8 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             m_out += "  " + value32 + " = trunc i64 " + value_source +
                      " to i32\n";
             m_out += "  " + shifted32 + " = " +
-                     (sa == 0x02 ? "shl" : "lshr") + " i32 " +
+                     (fn == 0x29 ? "ashr" : sa == 0x02 ? "shl" : "lshr") +
+                     " i32 " +
                      value32 + ", " + count + "\n";
             m_out += "  " + extended64 + " = sext i32 " +
                      shifted32 + " to i64\n";

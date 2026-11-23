@@ -681,12 +681,17 @@ int main()
           "decoder-verified MMI, MMI0/1/2/3, shifts and PLZCW use explicit packed profile");
 
     replay.configure(packed_profile);
-    // MMI2 variable-word shifts read both 128-bit sources, write a
-    // 128-bit destination, and never reserve the HI/LO banks.
+    // MMI2/MMI3 variable-word shifts read both 128-bit sources, write
+    // a 128-bit destination, and never reserve the HI/LO banks.
     const uint32_t mmi_psllvw = mmi(8u, 9u, 10u, 2u, 0x09u);
     const uint32_t mmi_psrlvw = mmi(8u, 9u, 10u, 3u, 0x09u);
+    const uint32_t mmi_psravw = mmi(8u, 9u, 10u, 3u, 0x29u);
     const uint32_t mmi_psllvw_read_prior = mmi(10u, 9u, 11u, 2u, 0x09u);
-    const uint32_t variable_readers[] = {mmi_psllvw, mmi_psrlvw};
+    const uint32_t mmi_psravw_read_prior = mmi(10u, 9u, 11u, 3u, 0x29u);
+    const uint32_t variable_readers[] =
+    {
+        mmi_psllvw, mmi_psrlvw, mmi_psravw
+    };
     bool variable_producers_profiled = true;
     for (const uint32_t opcode : variable_readers)
     {
@@ -699,15 +704,18 @@ int main()
             replay.last_event_candidate_cycle() == 5u;
     }
     check(variable_producers_profiled,
-          "PSLLVW/PSRLVW publish full-128 GPR result at packed latency");
-    replay.configure(packed_profile);
-    check(replay.observe(record(1u, 0x7150u, mmi_paddw, 0u, 1u)) ==
-          e_ee_issue_replay_status::ISSUED &&
-          replay.observe(record(2u, 0x7154u,
-              mmi_psllvw_read_prior, 0u, 2u)) ==
-          e_ee_issue_replay_status::ISSUED &&
-          replay.last_event_candidate_cycle() == 5u,
-          "PSLLVW reads prior 128-bit rs rather than an immediate shift");
+          "PSLLVW/PSRLVW/PSRAVW publish full-128 GPR at packed latency");
+    for (const uint32_t opcode : {mmi_psllvw_read_prior,
+                                  mmi_psravw_read_prior})
+    {
+        replay.configure(packed_profile);
+        check(replay.observe(record(1u, 0x7150u, mmi_paddw, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x7154u, opcode, 0u, 2u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 5u,
+              "variable shifts read prior 128-bit rs GPR");
+    }
     packed_profile.m_packed_mmi_latency = 0u;
     bool unprofiled_variable_shifts = true;
     for (const uint32_t opcode : variable_readers)

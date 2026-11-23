@@ -376,8 +376,9 @@ private:
                             m_profile.m_hilo_transfer_latency;
                     }
                     return true;
-                case 0x02u: case 0x03u: // PSLLVW / PSRLVW (MMI2 only)
-                    if (operation != 0x09u ||
+                case 0x02u: case 0x03u: // PSLLVW, PSRLVW / PSRAVW
+                    if ((operation == 0x29u && decoded.sa != 0x03u) ||
+                        (operation != 0x09u && operation != 0x29u) ||
                         m_profile.m_packed_mmi_latency == 0u)
                     {
                         return false;

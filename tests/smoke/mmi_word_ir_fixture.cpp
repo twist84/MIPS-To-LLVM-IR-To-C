@@ -181,9 +181,9 @@ int main(int argc, char** argv)
              mode == "pmsubh" ? 0x14u :
              mode == "phmsbh" ? 0x15u : 0x1cu;
     }
-    else if (mode == "psllvw" || mode == "psrlvw")
+    else if (mode == "psllvw" || mode == "psrlvw" || mode == "psravw")
     {
-        funct = 0x09u;
+        funct = mode == "psravw" ? 0x29u : 0x09u;
         sa = mode == "psllvw" ? 0x02u : 0x03u;
     }
     else if (mode == "pdivbw")

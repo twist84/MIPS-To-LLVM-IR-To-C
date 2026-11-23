@@ -178,6 +178,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
     case 0x29:                                          // MMI3
         switch (sa)
         {
+        case 0x03:                                      // PSRAVW: signed variable shift
         case 0x00:                                      // PMADDUW
             return true;
         case 0x08: case 0x09:                            // PMTHI / PMTLO
