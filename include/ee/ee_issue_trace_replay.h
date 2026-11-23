@@ -320,6 +320,34 @@ private:
             }
             switch (operation)
             {
+            case 0x30u: // PMFHL: read both 128-bit HI/LO banks
+                if (m_profile.m_hilo_transfer_latency == 0u)
+                {
+                    return false;
+                }
+                // Full GPR result is a packed transfer; both accumulators
+                // supply words/halfwords and must be ready before issue.
+                instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                instruction->m_hilo_read_mask = 0x0fu;
+                instruction->m_gpr_write_mask = rd;
+                instruction->m_gpr_128_write_mask = rd;
+                instruction->m_result_latency =
+                    m_profile.m_hilo_transfer_latency;
+                return true;
+            case 0x31u: // PMTHL: read rs, partially update all four halves
+                if (m_profile.m_hilo_transfer_latency == 0u)
+                {
+                    return false;
+                }
+                // Conservatively reserve all four HI/LO halves; the
+                // instruction preserves each upper 32-bit word.
+                instruction->m_pipe = e_ee_probe_pipe::PACKED_MMI;
+                instruction->m_gpr_read_mask = rs;
+                instruction->m_gpr_128_read_mask = rs;
+                instruction->m_hilo_write_mask = 0x0fu;
+                instruction->m_hilo_result_latency =
+                    m_profile.m_hilo_transfer_latency;
+                return true;
             case 0x10u: case 0x12u: // MFHI1 / MFLO1
                 if (m_profile.m_hilo_transfer_latency == 0u)
                 {
