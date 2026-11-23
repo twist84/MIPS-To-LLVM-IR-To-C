@@ -80,6 +80,7 @@ void module_builder::declare_memory_helpers()
     m_out += "declare void @ee_mem_swr(ptr, i32, i64)\n";
     m_out += "declare void @ee_mem_sdl(ptr, i32, i64)\n";
     m_out += "declare void @ee_mem_sdr(ptr, i32, i64)\n";
+    m_out += "declare i32 @llvm.ctlz.i32(i32, i1)\n";
     m_out += "declare float @llvm.sqrt.f32(float)\n";
     m_out += "declare float @llvm.fabs.f32(float)\n";
     m_out += "declare i32 @ee_raise_exception(ptr, ptr, i32, i32, i32, i32)\n";
@@ -3499,6 +3500,64 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
 
     const uint8_t fn = ins.funct;
     const uint8_t sa = ins.sa & 31;
+
+    // Primary MMI packed shifts operate on all lanes of rt (not rs).
+    // The hardware masks halfword shifts to four bits, word shifts to five.
+    if (fn == 0x34 || fn == 0x36 || fn == 0x37 ||
+        fn == 0x3c || fn == 0x3e || fn == 0x3f)
+    {
+        const bool halfword = fn == 0x34 || fn == 0x36 || fn == 0x37;
+        const char* operation = (fn == 0x34 || fn == 0x3c) ? "shl" :
+                                (fn == 0x36 || fn == 0x3e) ? "lshr" : "ashr";
+        const std::string result = newtemp();
+        const std::string input = halfword
+            ? build8i16(b.first, b.second) : build4i32(b.first, b.second);
+        const std::string type = halfword ? "<8 x i16>" : "<4 x i32>";
+        m_out += "  " + result + " = " + operation + " " + type +
+                 " " + input + ", " +
+                 std::to_string(sa & (halfword ? 15u : 31u)) + "\n";
+        if (halfword)
+        {
+            store_vec8i16(result);
+        }
+        else
+        {
+            store_vec4i32(result);
+        }
+        return;
+    }
+
+    if (fn == 0x04) // PLZCW: count leading sign bits except the sign bit.
+    {
+        // The R5900 writes only rd words 0 and 1, preserving words 2/3.
+        const std::string source = build4i32(a.first, a.second);
+        std::string halves[2];
+        for (uint32_t lane = 0u; lane < 2u; ++lane)
+        {
+            const std::string word = newtemp();
+            const std::string sign = newtemp();
+            const std::string normalized = newtemp();
+            const std::string leading = newtemp();
+            const std::string count = newtemp();
+            const std::string extended = newtemp();
+            m_out += "  " + word + " = extractelement <4 x i32> " +
+                     source + ", i32 " + std::to_string(lane) + "\n";
+            m_out += "  " + sign + " = ashr i32 " + word + ", 31\n";
+            m_out += "  " + normalized + " = xor i32 " + word + ", " +
+                     sign + "\n";
+            m_out += "  " + leading + " = call i32 @llvm.ctlz.i32(i32 " +
+                     normalized + ", i1 false)\n";
+            m_out += "  " + count + " = sub i32 " + leading + ", 1\n";
+            m_out += "  " + extended + " = zext i32 " + count + " to i64\n";
+            halves[lane] = extended;
+        }
+        const std::string upper = newtemp();
+        const std::string result = newtemp();
+        m_out += "  " + upper + " = shl i64 " + halves[1] + ", 32\n";
+        m_out += "  " + result + " = or i64 " + halves[0] + ", " + upper + "\n";
+        set_gpr_lo64(ins.rd, result);
+        return;
+    }
 
     // Top-level MMI (not class)
     if (fn == 0x18 || fn == 0x19)
