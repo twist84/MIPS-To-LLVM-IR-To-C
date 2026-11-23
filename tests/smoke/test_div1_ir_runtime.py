@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JIT-test DIV1/DIVU1 semantics, including zero and signed overflow."""
+"""JIT-test DIV/DIVU and DIV1/DIVU1, including zero and signed overflow."""
 
 import ctypes
 import pathlib
@@ -67,42 +67,82 @@ def run_case(fixture, temp_dir, opt_level, case, target_machine):
 
     backing, state = make_aligned_state()
     _ = backing
-    state.hi1 = 0x1111222233334444
-    state.lo1 = 0x5555666677778888
+    primary = case >= 5
+    variant = case - 5 if primary else case
+    initial_hi = 0x9999AAAABBBBCCCC
+    initial_lo = 0xDDDDEEEEFFFF0000
+    initial_hi1 = 0x1111222233334444
+    initial_lo1 = 0x5555666677778888
+    state.hi, state.lo = initial_hi, initial_lo
+    state.hi1, state.lo1 = initial_hi1, initial_lo1
+    state.gpr[4].hi = 0xABCDABCDABCDABCD
+    state.gpr[5].hi = 0x1234123412341234
+    state.gpr[6].hi = 0x1111111122222222
+    state.gpr[7].hi = 0x3333333344444444
 
-    if case == 0:  # signed -17 / 5
+    if variant == 0:  # signed -17 / 5
         state.gpr[4].lo = (-17) & 0xFFFFFFFFFFFFFFFF
         state.gpr[5].lo = 5
         expected_hi, expected_lo = 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFD
-    elif case == 1:  # signed INT_MIN / -1: defined overflow result
+    elif variant == 1:  # signed INT_MIN / -1 (never reach unsafe sdiv)
         state.gpr[4].lo = 0x80000000
         state.gpr[5].lo = 0xFFFFFFFF
         expected_hi, expected_lo = 0, 0xFFFFFFFF80000000
-    elif case == 2:  # signed divide by zero: deterministic no-op
+    elif variant == 2:  # signed nonzero dividend / zero
         state.gpr[4].lo = (-17) & 0xFFFFFFFFFFFFFFFF
         state.gpr[5].lo = 0
-        expected_hi, expected_lo = 0x1111222233334444, 0x5555666677778888
-    elif case == 3:  # unsigned 0xfffffffe / 3
+        expected_hi = initial_hi if primary else initial_hi1
+        expected_lo = initial_lo if primary else initial_lo1
+    elif variant == 3:  # unsigned 0xfffffffe / 3
         state.gpr[4].lo = 0xFFFFFFFE
         state.gpr[5].lo = 3
         expected_hi, expected_lo = 2, 0x55555554
-    else:  # unsigned divide by zero: deterministic no-op
+    elif variant == 4:  # unsigned nonzero dividend / zero
         state.gpr[4].lo = 0xFFFFFFFE
         state.gpr[5].lo = 0
-        expected_hi, expected_lo = 0x1111222233334444, 0x5555666677778888
+        expected_hi = initial_hi if primary else initial_hi1
+        expected_lo = initial_lo if primary else initial_lo1
+    elif variant == 5:  # signed zero / zero
+        state.gpr[4].lo = 0
+        state.gpr[5].lo = 0
+        expected_hi, expected_lo = initial_hi, initial_lo
+    else:  # unsigned zero / zero
+        state.gpr[4].lo = 0
+        state.gpr[5].lo = 0
+        expected_hi, expected_lo = initial_hi, initial_lo
 
+    original_rs = state.gpr[4].lo
+    original_rt = state.gpr[5].lo
     result = guest_fn(ctypes.pointer(state), None)
-    prefix = f"O{opt_level} case {case}: "
+    prefix = f"O{opt_level} case {case} ({'DIV/DIVU' if primary else 'DIV1/DIVU1'}): "
     require(result == 3, prefix + f"unexpected exit result {result}")
     require(state.exit_reason == 3, prefix + f"unexpected exit reason {state.exit_reason}")
-    require(state.hi1 == expected_hi,
-            prefix + f"HI1 got 0x{state.hi1:016x}, expected 0x{expected_hi:016x}")
-    require(state.lo1 == expected_lo,
-            prefix + f"LO1 got 0x{state.lo1:016x}, expected 0x{expected_lo:016x}")
+    if primary:
+        require(state.hi == expected_hi,
+                prefix + f"HI got 0x{state.hi:016x}, expected 0x{expected_hi:016x}")
+        require(state.lo == expected_lo,
+                prefix + f"LO got 0x{state.lo:016x}, expected 0x{expected_lo:016x}")
+        require(state.hi1 == initial_hi1 and state.lo1 == initial_lo1,
+                prefix + "DIV/DIVU changed the independent HI1/LO1 pair")
+    else:
+        require(state.hi1 == expected_hi,
+                prefix + f"HI1 got 0x{state.hi1:016x}, expected 0x{expected_hi:016x}")
+        require(state.lo1 == expected_lo,
+                prefix + f"LO1 got 0x{state.lo1:016x}, expected 0x{expected_lo:016x}")
+        require(state.hi == initial_hi and state.lo == initial_lo,
+                prefix + "DIV1/DIVU1 changed the independent HI/LO pair")
     require(state.gpr[6].lo == expected_hi,
-            prefix + f"MFHI1 got 0x{state.gpr[6].lo:016x}")
+            prefix + f"MFHI got 0x{state.gpr[6].lo:016x}")
     require(state.gpr[7].lo == expected_lo,
-            prefix + f"MFLO1 got 0x{state.gpr[7].lo:016x}")
+            prefix + f"MFLO got 0x{state.gpr[7].lo:016x}")
+    require(state.gpr[6].hi == 0x1111111122222222
+            and state.gpr[7].hi == 0x3333333344444444,
+            prefix + "MFHI/MFLO overwrote an upper GPR half")
+    require(state.gpr[4].lo == original_rs and state.gpr[5].lo == original_rt,
+            prefix + "division unexpectedly changed source GPRs")
+    require(state.gpr[4].hi == 0xABCDABCDABCDABCD
+            and state.gpr[5].hi == 0x1234123412341234,
+            prefix + "division unexpectedly changed source upper halves")
     return engine, module
 
 
@@ -117,7 +157,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ee_div1_ir_") as directory:
         temp_dir = pathlib.Path(directory)
         for opt_level in range(4):
-            for case in range(5):
+            for case in range(12):
                 # MCJIT takes ownership of backend resources; give each engine
                 # its own target machine rather than sharing one across engines.
                 target_machine = target.create_target_machine(opt=0)
@@ -128,7 +168,7 @@ def main():
                 engines.append(engine)
                 modules.append(module)
 
-    print("div1_ir_runtime: PASS (O0-O3; DIV1/DIVU1; signed quotient/remainder; INT_MIN/-1; divide-by-zero preservation)")
+    print("div1_ir_runtime: PASS (O0-O3; DIV/DIVU and DIV1/DIVU1; signed quotient/remainder; INT_MIN/-1; zero divisors; independent HI/LO banks)")
 
 
 if __name__ == "__main__":
