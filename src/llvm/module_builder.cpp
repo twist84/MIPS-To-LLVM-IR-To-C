@@ -3751,8 +3751,65 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
-        // MMI0 (0x08): parallel arith / pack by sa
+        // MMI0 (0x08): independent packed lanes. Saturating operations
+        // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {
+            const auto splat = [](const char* scalar, uint32_t lanes,
+                                  uint64_t value) -> std::string
+            {
+                std::string result = "<";
+                for (uint32_t lane = 0u; lane < lanes; ++lane)
+                {
+                    if (lane != 0u)
+                    {
+                        result += ", ";
+                    }
+                    result += std::string(scalar) + " " + std::to_string(value);
+                }
+                return result + ">";
+            };
+            const auto emit_signed_saturation =
+                [&](const std::string& lhs, const std::string& rhs,
+                    const std::string& narrow_type,
+                    const std::string& wide_type,
+                    const std::string& wide_scalar,
+                    uint32_t lanes, int64_t low, int64_t high,
+                    bool addition) -> std::string
+            {
+                const std::string lhs_wide = newtemp();
+                const std::string rhs_wide = newtemp();
+                const std::string calculated = newtemp();
+                const std::string above = newtemp();
+                const std::string below = newtemp();
+                const std::string capped = newtemp();
+                const std::string clamped = newtemp();
+                const std::string result = newtemp();
+                const std::string predicate_type =
+                    "<" + std::to_string(lanes) + " x i1>";
+                const std::string limits_high = splat(wide_scalar, lanes, high);
+                const std::string limits_low = splat(wide_scalar, lanes, low);
+                m_out += "  " + lhs_wide + " = sext " + narrow_type +
+                         " " + lhs + " to " + wide_type + "\n";
+                m_out += "  " + rhs_wide + " = sext " + narrow_type +
+                         " " + rhs + " to " + wide_type + "\n";
+                m_out += "  " + calculated + " = " +
+                         (addition ? "add" : "sub") + " " + wide_type +
+                         " " + lhs_wide + ", " + rhs_wide + "\n";
+                m_out += "  " + above + " = icmp sgt " + wide_type +
+                         " " + calculated + ", " + limits_high + "\n";
+                m_out += "  " + below + " = icmp slt " + wide_type +
+                         " " + calculated + ", " + limits_low + "\n";
+                m_out += "  " + capped + " = select " + predicate_type +
+                         " " + above + ", " + wide_type + " " +
+                         limits_high + ", " + wide_type + " " +
+                         calculated + "\n";
+                m_out += "  " + clamped + " = select " + predicate_type +
+                         " " + below + ", " + wide_type + " " +
+                         limits_low + ", " + wide_type + " " + capped + "\n";
+                m_out += "  " + result + " = trunc " + wide_type + " " +
+                         clamped + " to " + narrow_type + "\n";
+                return result;
+            };
             switch (sa) {
             case 0: // PADDW
                 m_out += "  " + vr + " = add <4 x i32> " + va4 + ", " + vb4 + "\n";
@@ -3760,6 +3817,17 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 1: // PSUBW
                 m_out += "  " + vr + " = sub <4 x i32> " + va4 + ", " + vb4 + "\n";
                 store_vec4i32(vr); return;
+            case 2: // PCGTW (signed greater-than; true lanes all ones)
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <4 x i32> " +
+                         va4 + ", " + vb4 + "\n";
+                m_out += "  " + result + " = sext <4 x i1> " +
+                         predicate + " to <4 x i32>\n";
+                store_vec4i32(result);
+                return;
+            }
             case 3: // PMAXW (signed)
                 m_out += "  " + vr + " = call <4 x i32> @llvm.smax.v4i32(<4 x i32> " + va4 + ", <4 x i32> " + vb4 + ")\n";
                 store_vec4i32(vr); return;
@@ -3769,6 +3837,17 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 5: // PSUBH
                 m_out += "  " + vr + " = sub <8 x i16> " + va8 + ", " + vb8 + "\n";
                 store_vec8i16(vr); return;
+            case 6: // PCGTH
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <8 x i16> " +
+                         va8 + ", " + vb8 + "\n";
+                m_out += "  " + result + " = sext <8 x i1> " +
+                         predicate + " to <8 x i16>\n";
+                store_vec8i16(result);
+                return;
+            }
             case 7: // PMAXH
                 m_out += "  " + vr + " = call <8 x i16> @llvm.smax.v8i16(<8 x i16> " + va8 + ", <8 x i16> " + vb8 + ")\n";
                 store_vec8i16(vr); return;
@@ -3778,28 +3857,127 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             case 9: // PSUBB
                 m_out += "  " + vr + " = sub <16 x i8> " + va16 + ", " + vb16 + "\n";
                 store_vec16i8(vr); return;
-            case 16: case 17: // PADDSW/PSUBSW — non-sat approx
-                m_out += "  " + vr + " = " + (sa == 16 ? "add" : "sub") + " <4 x i32> " + va4 + ", " + vb4 + "\n";
-                store_vec4i32(vr); return;
-            case 18: // PEXTLW — interleave low words: approx or of halves
-                m_out += "  " + vr + " = or <2 x i64> " + va2 + ", " + vb2 + "\n";
-                store_vec2i64(vr); return;
-            case 19: // PPACW — pack words: low32 of each
-                {
-                    std::string alo = newtemp(), blo = newtemp(), r = newtemp();
-                    m_out += "  " + alo + " = and i64 " + a.first + ", 4294967295\n";
-                    m_out += "  " + blo + " = and i64 " + b.first + ", 4294967295\n";
-                    m_out += "  " + r + " = or i64 " + alo + ", " + blo + "\n";
-                    set_gpr_lo64(ins.rd, r);
-                    // hi: use upper halves approx
-                    std::string ahi = newtemp(), bhi = newtemp(), rh = newtemp();
-                    m_out += "  " + ahi + " = and i64 " + a.second + ", 4294967295\n";
-                    m_out += "  " + bhi + " = and i64 " + b.second + ", 4294967295\n";
-                    m_out += "  " + rh + " = or i64 " + ahi + ", " + bhi + "\n";
-                    // full write
-                    store_gpr(ins.rd, r, rh);
-                }
+            case 10: // PCGTB
+            {
+                const std::string predicate = newtemp();
+                const std::string result = newtemp();
+                m_out += "  " + predicate + " = icmp sgt <16 x i8> " +
+                         va16 + ", " + vb16 + "\n";
+                m_out += "  " + result + " = sext <16 x i1> " +
+                         predicate + " to <16 x i8>\n";
+                store_vec16i8(result);
                 return;
+            }
+            case 16: case 17: // PADDSW/PSUBSW
+                store_vec4i32(emit_signed_saturation(
+                    va4, vb4, "<4 x i32>", "<4 x i64>", "i64", 4u,
+                    -2147483648LL, 2147483647LL, sa == 16u));
+                return;
+            case 18: // PEXTLW: low-word interleave rt0,rs0,rt1,rs1
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <4 x i32> " +
+                         va4 + ", <4 x i32> " + vb4 +
+                         ", <4 x i32> <i32 4, i32 0, i32 5, i32 1>\n";
+                store_vec4i32(result);
+                return;
+            }
+            case 19: // PPACW: rt even words, then rs even words
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <4 x i32> " +
+                         va4 + ", <4 x i32> " + vb4 +
+                         ", <4 x i32> <i32 4, i32 6, i32 0, i32 2>\n";
+                store_vec4i32(result);
+                return;
+            }
+            case 20: case 21: // PADDSH/PSUBSH
+                store_vec8i16(emit_signed_saturation(
+                    va8, vb8, "<8 x i16>", "<8 x i32>", "i32", 8u,
+                    -32768LL, 32767LL, sa == 20u));
+                return;
+            case 22: // PEXTLH: low-halfword interleave
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <8 x i16> " +
+                         va8 + ", <8 x i16> " + vb8 +
+                         ", <8 x i32> <i32 8, i32 0, i32 9, i32 1, i32 10, i32 2, i32 11, i32 3>\n";
+                store_vec8i16(result);
+                return;
+            }
+            case 23: // PPACH: packed even halfwords
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <8 x i16> " +
+                         va8 + ", <8 x i16> " + vb8 +
+                         ", <8 x i32> <i32 8, i32 10, i32 12, i32 14, i32 0, i32 2, i32 4, i32 6>\n";
+                store_vec8i16(result);
+                return;
+            }
+            case 24: case 25: // PADDSB/PSUBSB
+                store_vec16i8(emit_signed_saturation(
+                    va16, vb16, "<16 x i8>", "<16 x i16>", "i16", 16u,
+                    -128LL, 127LL, sa == 24u));
+                return;
+            case 26: // PEXTLB: low-byte interleave
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <16 x i8> " +
+                         va16 + ", <16 x i8> " + vb16 +
+                         ", <16 x i32> <i32 16, i32 0, i32 17, i32 1, i32 18, i32 2, i32 19, i32 3, i32 20, i32 4, i32 21, i32 5, i32 22, i32 6, i32 23, i32 7>\n";
+                store_vec16i8(result);
+                return;
+            }
+            case 27: // PPACB: rt even bytes, then rs even bytes
+            {
+                const std::string result = newtemp();
+                m_out += "  " + result + " = shufflevector <16 x i8> " +
+                         va16 + ", <16 x i8> " + vb16 +
+                         ", <16 x i32> <i32 16, i32 18, i32 20, i32 22, i32 24, i32 26, i32 28, i32 30, i32 0, i32 2, i32 4, i32 6, i32 8, i32 10, i32 12, i32 14>\n";
+                store_vec16i8(result);
+                return;
+            }
+            case 30: case 31: // PEXT5 / PPAC5, unary pixel conversion
+            {
+                const bool pack = sa == 31u;
+                const uint32_t masks[] = {0x1fu, 0x3e0u, 0x7c00u, 0x8000u};
+                const uint32_t shifts[] = {3u, 6u, 9u, 16u};
+                std::string combined;
+                for (uint32_t component = 0u; component < 4u; ++component)
+                {
+                    const std::string intermediate = newtemp();
+                    const std::string next = newtemp();
+                    const std::string shifted = newtemp();
+                    const std::string lane_mask = splat("i32", 4u, masks[component]);
+                    const std::string lane_shift = splat("i32", 4u, shifts[component]);
+                    if (pack)
+                    {
+                        m_out += "  " + shifted + " = lshr <4 x i32> " + vb4 +
+                                 ", " + lane_shift + "\n";
+                        m_out += "  " + intermediate + " = and <4 x i32> " +
+                                 shifted + ", " + lane_mask + "\n";
+                    }
+                    else
+                    {
+                        m_out += "  " + shifted + " = and <4 x i32> " + vb4 +
+                                 ", " + lane_mask + "\n";
+                        m_out += "  " + intermediate + " = shl <4 x i32> " +
+                                 shifted + ", " + lane_shift + "\n";
+                    }
+                    if (component == 0u)
+                    {
+                        combined = intermediate;
+                    }
+                    else
+                    {
+                        m_out += "  " + next + " = or <4 x i32> " + combined +
+                                 ", " + intermediate + "\n";
+                        combined = next;
+                    }
+                }
+                store_vec4i32(combined);
+                return;
+            }
             default:
                 // Generic: 32-bit parallel add as fallback
                 m_out += "  " + vr + " = add <4 x i32> " + va4 + ", " + vb4 + "\n";
