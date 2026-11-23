@@ -559,7 +559,10 @@ void ee_trace_guest_store(
 )
 {
     if (runtime == nullptr || !runtime->m_guest_store_trace_enabled ||
-        runtime->m_guest_store_trace_remaining == 0u || width == 0u)
+        width == 0u ||
+        (runtime->m_guest_store_trace_remaining == 0u &&
+         (runtime->m_guest_store_trace_recent == nullptr ||
+          runtime->m_guest_store_trace_capacity == 0u)))
     {
         return;
     }
@@ -576,6 +579,31 @@ void ee_trace_guest_store(
         return;
     }
 
+    // Keep the last N matching stores even when the first-N console trace
+    // has exhausted its budget. This is host state, never guest memory.
+    if (runtime->m_guest_store_trace_recent != nullptr &&
+        runtime->m_guest_store_trace_capacity != 0u)
+    {
+        const uint32_t slot = runtime->m_guest_store_trace_next;
+        runtime->m_guest_store_trace_recent[slot] =
+        {
+            pc, opcode, effective_address, affected_address,
+            width, source_lane, source_value, base_value,
+            static_cast<uint32_t>(sp), static_cast<uint32_t>(fp),
+            static_cast<uint32_t>(ra)
+        };
+        runtime->m_guest_store_trace_next =
+            slot + 1u == runtime->m_guest_store_trace_capacity ? 0u : slot + 1u;
+        if (runtime->m_guest_store_trace_count <
+            runtime->m_guest_store_trace_capacity)
+        {
+            ++runtime->m_guest_store_trace_count;
+        }
+    }
+    if (runtime->m_guest_store_trace_remaining == 0u)
+    {
+        return;
+    }
     --runtime->m_guest_store_trace_remaining;
 
     // The raw primary opcode distinguishes store classes without relying on
