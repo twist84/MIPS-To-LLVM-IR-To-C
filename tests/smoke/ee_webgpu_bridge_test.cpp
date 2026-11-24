@@ -18,6 +18,9 @@ int s_local_copies = 0;
 int s_clut_loads = 0;
 int s_texflushes = 0;
 int s_presents = 0;
+int s_resizes = 0;
+uint32_t s_surface_width = 0u;
+uint32_t s_surface_height = 0u;
 ps2::gs::State s_last_state{};
 ps2::gs::Vertex s_last_vertex{};
 ps2::gs::gpu::DisplaySource s_last_source{};
@@ -83,6 +86,13 @@ bool read_clut_checked(uint32_t*, size_t)
 void texflush()
 {
     ++s_texflushes;
+}
+
+void resize_surface(uint32_t width, uint32_t height)
+{
+    ++s_resizes;
+    s_surface_width = width;
+    s_surface_height = height;
 }
 
 bool present(const DisplaySource& src)
@@ -316,6 +326,15 @@ int main()
     if (bridge.present(display, 2u) || s_presents != 2)
     {
         fail("unsupported indexed display source was presented");
+        return 1;
+    }
+
+    if (!bridge.resize_surface(640u, 480u) ||
+        !bridge.resize_surface(640u, 480u) ||
+        !bridge.resize_surface(800u, 600u) ||
+        s_resizes != 2 || s_surface_width != 800u || s_surface_height != 600u)
+    {
+        fail("surface resize fence or repeated-size suppression");
         return 1;
     }
 
