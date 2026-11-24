@@ -563,6 +563,36 @@ int main()
               "resolved single-entry execution matches indexed dispatch including interrupts");
     }
 
+    // Exhaust all control-bit combinations and individual interrupt lines,
+    // with the pending line either masked or unmasked.
+    bool eligibility_same = !ee::ee_interrupts_enabled_inline(nullptr);
+    for (uint32_t bits = 0u; bits < 16u; ++bits)
+    {
+        const uint32_t control =
+            ((bits & 1u) ? ee::STATUS_IE : 0u) |
+            ((bits & 2u) ? ee::STATUS_EIE : 0u) |
+            ((bits & 4u) ? ee::STATUS_EXL : 0u) |
+            ((bits & 8u) ? ee::STATUS_ERL : 0u);
+        for (uint32_t line = 0u; line < 8u; ++line)
+        {
+            const uint32_t mask = 1u << (ee::CAUSE_IP_SHIFT + line);
+            for (bool unmasked : {false, true})
+            {
+                for (bool pending : {false, true})
+                {
+                    ee::s_ee_cpu_state cpu{};
+                    cpu.m_cop0[ee::COP0_Status] = control | (unmasked ? mask : 0u);
+                    cpu.m_cop0[ee::COP0_Cause] = pending ? mask : 0u;
+                    const bool expected = bits == 3u && unmasked && pending;
+                    eligibility_same = eligibility_same &&
+                        ee::ee_interrupts_enabled_inline(&cpu) == expected &&
+                        ee::ee_interrupts_enabled(&cpu) == expected;
+                }
+            }
+        }
+    }
+    check(eligibility_same, "inline interrupt eligibility matches architectural control and mask bits");
+
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

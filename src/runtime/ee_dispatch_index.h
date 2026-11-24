@@ -5,7 +5,7 @@
 // fingerprint, and a dispatcher lookup change must not invalidate cached IR.
 
 #include "ee_dispatcher.h"
-#include "ee_exceptions.h"
+#include "ee_interrupt_fast.h"
 
 #include <cstdint>
 #include <utility>
@@ -72,7 +72,7 @@ inline s_ee_dispatch_result ee_dispatch_run_resolved_inline(
         {
             result.status = e_ee_dispatch_status::EXITED;
             if (guest_pc != 0u &&
-                ee_check_interrupts(cpu, runtime, guest_pc, 0u) != 0u)
+                ee_check_interrupts_inline(cpu, runtime, guest_pc, 0u) != 0u)
             {
                 result.exit_reason = static_cast<uint32_t>(
                     e_ee_exit_reason::EE_EXIT_EXCEPTION);
