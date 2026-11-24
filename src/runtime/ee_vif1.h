@@ -81,7 +81,10 @@ public:
     void bind_path3(const c_ee_gif_path3* path3);
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
-    const s_diagnostic& diagnostic() const;
+    const s_diagnostic& diagnostic() const
+    {
+        return m_diagnostic;
+    }
 
     // Host-side opt-in staged transfer. No guest completion is implied by
     // pending; the caller must serialize conflicting device operations.

@@ -3642,6 +3642,28 @@ int main(int argc, char** argv)
     auto pace_time = std::chrono::steady_clock::now();
     auto sample_time = pace_time;
 #endif
+#ifdef EE_ENABLE_WEBGPU
+    // Read diagnostic configuration once, outside the device service
+    // hot path. A disabled frame dump requires no local-static guard.
+    const std::pair<std::string, uint64_t> s_frame_dump = []
+    {
+        const char* text = std::getenv("SDBZ_FRAME_DUMP");
+        if (text == nullptr)
+        {
+            return std::pair<std::string, uint64_t>{};
+        }
+        const std::string spec(text);
+        const size_t colon = spec.rfind(':');
+        if (colon == std::string::npos || colon == 0u)
+        {
+            return std::pair<std::string, uint64_t>{};
+        }
+        return std::pair<std::string, uint64_t>{
+            spec.substr(0u, colon),
+            std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
+    }();
+    uint64_t s_frame_dump_next = 0u;
+#endif
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
@@ -3699,24 +3721,6 @@ int main(int argc, char** argv)
         // SDBZ_FRAME_DUMP=DIR:EVERY_FIELDS writes DIR/field-NNNNNNNN.ppm
         // from the WebGPU raster every EVERY_FIELDS fields (diagnostic).
         {
-            static const std::pair<std::string, uint64_t> s_frame_dump = []
-            {
-                const char* text = std::getenv("SDBZ_FRAME_DUMP");
-                if (text == nullptr)
-                {
-                    return std::pair<std::string, uint64_t>{};
-                }
-                const std::string spec(text);
-                const size_t colon = spec.rfind(':');
-                if (colon == std::string::npos || colon == 0u)
-                {
-                    return std::pair<std::string, uint64_t>{};
-                }
-                return std::pair<std::string, uint64_t>{
-                    spec.substr(0u, colon),
-                    std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
-            }();
-            static uint64_t s_frame_dump_next = 0u;
             if (s_frame_dump.second != 0u)
             {
                 const uint64_t field = hardware.scanout().fields_started();
@@ -3826,6 +3830,7 @@ int main(int argc, char** argv)
 #endif
 #ifdef EE_ENABLE_WEBGPU
         if (gs_field_probe.m_file != nullptr &&
+            hardware.scanout().fields_started() > gs_field_probe.m_last_field &&
             !capture_gs_field(
                 gs_field_probe, webgpu_bridge, gs_state, graphics_probe,
                 hardware.gs_display_registers(),

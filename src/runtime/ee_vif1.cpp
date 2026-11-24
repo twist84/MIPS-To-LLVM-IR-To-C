@@ -87,11 +87,6 @@ void c_ee_vif1::reset()
     m_diagnostic = {};
 }
 
-const c_ee_vif1::s_diagnostic& c_ee_vif1::diagnostic() const
-{
-    return m_diagnostic;
-}
-
 const uint8_t* c_ee_vif1::vu1_data() const
 {
     return m_machine.m_vu1->m_data.data();
