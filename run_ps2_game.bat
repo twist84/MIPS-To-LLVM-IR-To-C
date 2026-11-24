@@ -79,8 +79,8 @@ exit /b 2
 :launcher_options_ready
 rem Optimized native object variants never replace the O0 baseline.
 if not defined SDBZ_EE_OPT set "SDBZ_EE_OPT=0"
-if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" if not "%SDBZ_EE_OPT%"=="4" (
-    echo ERROR: SDBZ_EE_OPT must be 0..3 or 4 ^(O2 IR + O2 backend^).
+if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" if not "%SDBZ_EE_OPT%"=="4" if not "%SDBZ_EE_OPT%"=="5" (
+    echo ERROR: SDBZ_EE_OPT must be 0..5 ^(4=O2 IR + O2 backend, 5=host-native O2 backend^).
     exit /b 2
 )
 if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
@@ -400,6 +400,19 @@ if not "%SDBZ_EE_OPT%"=="0" (
             --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-IR-O2"
+    ) else if "%SDBZ_EE_OPT%"=="5" (
+        rem Isolate host CPU targeting from the IR optimization experiment.
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O2" ^
+            --emit-opt=2 --emit-jobs=%EMIT_JOBS%
+        if errorlevel 1 exit /b 1
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%-O2" --source-opt=2 ^
+            --work-dir "%WORK_DIR%-O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%-O2-native"
     ) else (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
@@ -412,6 +425,8 @@ if not "%SDBZ_EE_OPT%"=="0" (
 if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%WORK_DIR%\gs-webgpu.ppm"
 if "%SDBZ_EE_OPT%"=="4" (
     echo EE native object optimization: O2 IR pipeline + O2 backend
+) else if "%SDBZ_EE_OPT%"=="5" (
+    echo EE native object optimization: host-native O2 backend
 ) else (
     echo EE native object optimization: O%SDBZ_EE_OPT%
 )

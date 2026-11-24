@@ -40,6 +40,13 @@ def ir_pipeline_id(profile):
     return "llvm-default-O2-v1" if profile == 4 else None
 
 
+def native_target_identity(profile):
+    if profile != 5:
+        return None
+    from verify_ir import native_target_identity as target_identity
+    return target_identity(profile)
+
+
 def sha256_path(path):
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -258,6 +265,8 @@ def validate_preserved_translation(path, inputs, ir_sources,
     if (snapshot.get("emit_opt") != emit_opt or
             snapshot.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
         raise ValueError("preserved translation uses a different --emit-opt or IR pipeline")
+    if snapshot.get("native_target") != native_target_identity(emit_opt):
+        raise ValueError("preserved translation uses a different host CPU target")
     metadata_changed = (
         snapshot.get("metadata_sha256") != sha256_path(metadata_path)
     )
@@ -362,7 +371,8 @@ def validate_preserved_translation(path, inputs, ir_sources,
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (not manifest.get("complete") or
             manifest.get("optimization_level") != emit_opt or
-            manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
+            manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
+            manifest.get("native_target") != native_target_identity(emit_opt)):
         raise ValueError("preserved object manifest incomplete or incompatible")
     objects = manifest.get("objects")
     if not isinstance(objects, list):
@@ -439,6 +449,7 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
         "inputs": inputs,
         "emit_opt": emit_opt,
         "ir_pipeline": ir_pipeline_id(emit_opt),
+        "native_target": native_target_identity(emit_opt),
         "metadata_sha256": sha256_path(metadata_path),
         "library_sha256": sha256_path(library),
         "ir_sources": ir_sources,
@@ -489,6 +500,8 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
             "cached translation uses a different --emit-opt or IR pipeline; "
             "rerun without --no-recompile"
         )
+    if snapshot.get("native_target") != native_target_identity(emit_opt):
+        raise ValueError("cached translation uses a different host CPU target")
     for name, file_path in (("metadata_sha256", metadata_path),
                             ("library_sha256", library)):
         if snapshot.get(name) != sha256_path(file_path):
@@ -1193,9 +1206,9 @@ def main(argv=None):
     )
     parser.add_argument("--pdb", action="store_true",
                         help="Generate game-translated.pdb using Windows Clang/LLD")
-    parser.add_argument("--emit-opt", type=int, choices=range(5), default=0,
-                        metavar="{0,1,2,3,4}",
-                        help="LLVM backend O0..O3; profile 4 runs O2 IR + O2 backend")
+    parser.add_argument("--emit-opt", type=int, choices=range(6), default=0,
+                        metavar="{0,1,2,3,4,5}",
+                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend")
     parser.add_argument("--emit-jobs", type=int, default=2,
                         help="parallel LLVM object-emission processes (default: 2)")
     parser.add_argument("--max-dispatches", type=int, default=10000)

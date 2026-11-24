@@ -39,6 +39,7 @@ _worker_machines = {}
 # Profile 4 is not a backend O4 level: it is the LLVM default O2
 # middle-end pipeline followed by O2 machine code generation.
 IR_PIPELINE_PROFILE = 4
+HOST_NATIVE_PROFILE = 5
 IR_PIPELINE_ID = "llvm-default-O2-v1"
 # Bound process-local LLVM/allocator retention during whole-image builds.
 IR_PIPELINE_WORKER_MODULES = 128
@@ -49,7 +50,19 @@ def ir_pipeline_id(profile):
 
 
 def backend_opt(profile):
-    return 2 if profile == IR_PIPELINE_PROFILE else profile
+    return 2 if profile in (IR_PIPELINE_PROFILE, HOST_NATIVE_PROFILE) else profile
+
+
+def native_target_identity(profile):
+    """Exact host CPU feature provenance for nonportable guest objects."""
+    if profile != HOST_NATIVE_PROFILE:
+        return None
+    return {
+        "cpu": llvm.get_host_cpu_name(),
+        "features": llvm.get_host_cpu_features().flatten(),
+        "triple": llvm.get_default_triple(),
+        "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+    }
 
 
 def optimize_guest_ir(module, target_machine):
@@ -79,8 +92,11 @@ def get_target_machine(emit_opt, target_triple):
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
         target = llvm.Target.from_triple(target_triple)
+        identity = native_target_identity(emit_opt)
+        tuning = ({"cpu": identity["cpu"], "features": identity["features"]}
+                  if identity is not None else {})
         _worker_machines[key] = target.create_target_machine(
-            opt=backend_opt(emit_opt), reloc="pic", codemodel="default"
+            opt=backend_opt(emit_opt), reloc="pic", codemodel="default", **tuning
         )
     return _worker_machines[key]
 
@@ -170,6 +186,7 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
             not manifest.get("complete")
             or manifest.get("optimization_level") != emit_opt
             or manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)
+            or manifest.get("native_target") != native_target_identity(emit_opt)
             or manifest.get("target_triple") != target_triple
             or manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))
         ):
@@ -221,6 +238,7 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
     if (manifest.get("complete") is not True or
         manifest.get("optimization_level") != emit_opt or
         manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
+        manifest.get("native_target") != native_target_identity(emit_opt) or
         manifest.get("target_triple") != target_triple or
         manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))):
         raise ValueError("append-only object manifest is stale or incompatible")
@@ -281,8 +299,8 @@ def main():
             emit_opt = 2
         elif arg.startswith("--emit-opt="):
             emit_opt = int(arg.split("=", 1)[1])
-            if not 0 <= emit_opt <= IR_PIPELINE_PROFILE:
-                raise SystemExit("--emit-opt must be 0..3 (backend only) or 4 (O2 IR + O2 backend)")
+            if not 0 <= emit_opt <= HOST_NATIVE_PROFILE:
+                raise SystemExit("--emit-opt must be 0..3 (backend only), 4 (O2 IR + O2 backend), or 5 (host-native O2 backend)")
         elif arg.startswith("--emit-dir="):
             emit_dir = Path(arg.split("=", 1)[1])
             if emit_opt is None:
@@ -310,6 +328,15 @@ def main():
         return 2
 
     target_triple = llvm.get_default_triple() if emit_opt is not None else None
+    if emit_opt == HOST_NATIVE_PROFILE:
+        try:
+            identity = native_target_identity(emit_opt)
+            get_target_machine(emit_opt, target_triple)
+            print(f"verify_ir: host-native O2 CPU={identity['cpu']} "
+                  f"features={identity['features']}", flush=True)
+        except Exception as exc:
+            print(f"verify_ir: host-native target setup failed: {exc}", file=sys.stderr)
+            return 1
     if emit_opt == IR_PIPELINE_PROFILE:
         try:
             preflight_ir_pipeline(target_triple)
@@ -428,6 +455,7 @@ def main():
             "target_triple": target_triple,
             "optimization_level": emit_opt,
             "ir_pipeline": ir_pipeline_id(emit_opt),
+            "native_target": native_target_identity(emit_opt),
             "backend_optimization_level": backend_opt(emit_opt),
             "input_module_count": len(manifest_order),
             "object_count": len(emitted),

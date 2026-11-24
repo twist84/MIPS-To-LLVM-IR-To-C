@@ -237,7 +237,47 @@ def test_pipeline_worker_recycling():
         print("PASS: recycled workers preserve all object and IR provenance")
 
 
+def test_native_target_profile():
+    with tempfile.TemporaryDirectory(prefix="ee-native-target-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        obj_dir = root / "objects"
+        first = ir_dir / "first.ll"
+        write_ir(first, 1)
+        original = first.read_bytes()
+        _, baseline = run_emitter(ir_dir, obj_dir, opt=2)
+        out, native = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 0/1" in out and "host-native O2 CPU=" in out
+        assert native["optimization_level"] == 5
+        assert native["backend_optimization_level"] == 2
+        assert native["ir_pipeline"] is None
+        assert native["native_target"]["cpu"]
+        assert native["native_target"]["features"] is not None
+        assert native["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
+        assert first.read_bytes() == original
+        out, _ = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 1/1" in out
+        manifest_path = obj_dir / "objects.json"
+        native["native_target"]["cpu"] = "wrong-host"
+        manifest_path.write_text(json.dumps(native), encoding="utf-8")
+        previous = manifest_path.read_bytes()
+        second = ir_dir / "second.ll"
+        write_ir(second, 2)
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), str(second), f"--emit-dir={obj_dir}",
+            "--emit-opt=5", "--incremental", "--append-only"
+        ], capture_output=True, text=True)
+        assert result.returncode != 0 and "stale or incompatible" in result.stderr
+        assert manifest_path.read_bytes() == previous
+        out, fixed = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 0/2" in out and fixed["object_count"] == 2
+        assert first.read_bytes() == original
+        print("PASS: host-native O2 profile, CPU provenance and immutable IR")
+
+
 if __name__ == "__main__":
+    test_native_target_profile()
     test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
