@@ -167,12 +167,16 @@ void c_ee_webgpu_bridge::write_worker_statistics(FILE* output) const
         const auto stats = m_worker->statistics();
         std::fprintf(output,
             "GS async worker: submitted=%llu completed=%llu oversized=%llu "
-            "execution_ns=%llu backpressure_ns=%llu backpressure_waits=%llu "
+            "execution_ns=%llu copy_ns=%llu fence_ns=%llu fence_calls=%llu "
+            "backpressure_ns=%llu backpressure_waits=%llu "
             "peak_bytes=%llu peak_jobs=%llu event_bytes=%llu image_bytes=%llu healthy=%u\n",
             static_cast<unsigned long long>(stats.m_submitted),
             static_cast<unsigned long long>(stats.m_completed),
             static_cast<unsigned long long>(m_oversized_batches),
             static_cast<unsigned long long>(stats.m_execution_ns),
+            static_cast<unsigned long long>(stats.m_submit_copy_ns),
+            static_cast<unsigned long long>(stats.m_fence_wait_ns),
+            static_cast<unsigned long long>(stats.m_fence_calls),
             static_cast<unsigned long long>(stats.m_backpressure_ns),
             static_cast<unsigned long long>(stats.m_backpressure_waits),
             static_cast<unsigned long long>(stats.m_peak_bytes),

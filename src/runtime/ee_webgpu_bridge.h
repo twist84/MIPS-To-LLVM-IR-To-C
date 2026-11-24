@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <cstddef>
+#include <cstdio>
 #include <memory>
 #include <cstdint>
 #include <vector>

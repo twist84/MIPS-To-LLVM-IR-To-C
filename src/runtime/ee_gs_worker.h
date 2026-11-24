@@ -9,6 +9,7 @@
 #include <limits>
 #include <mutex>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace ee
@@ -33,6 +34,9 @@ public:
         uint64_t m_submitted = 0u;
         uint64_t m_completed = 0u;
         uint64_t m_execution_ns = 0u;
+        uint64_t m_submit_copy_ns = 0u;
+        uint64_t m_fence_wait_ns = 0u;
+        uint64_t m_fence_calls = 0u;
         uint64_t m_backpressure_ns = 0u;
         uint64_t m_backpressure_waits = 0u;
         uint64_t m_peak_bytes = 0u;
@@ -79,6 +83,7 @@ public:
         {
             return e_submit::invalid;
         }
+        const uint64_t prepare_start = now_ns();
         const size_t input_bytes = static_cast<size_t>(qwc) * 16u;
         const size_t event_bytes = count * sizeof(s_ee_gif_event);
         size_t image_bytes = 0u;
@@ -104,6 +109,7 @@ public:
             return e_submit::too_large;
         }
         const size_t bytes = event_bytes + image_bytes;
+        const uint64_t preflight_ns = now_ns() - prepare_start;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             const auto can_submit = [this, bytes]()
@@ -126,6 +132,7 @@ public:
 
         // Only this producer can reserve another slot; the worker can
         // merely free slots while this owned copy is constructed.
+        const uint64_t copy_start = now_ns();
         s_batch batch{};
         try
         {
@@ -155,6 +162,7 @@ public:
             m_bytes += bytes;
             ++m_jobs;
             ++m_statistics.m_submitted;
+            m_statistics.m_submit_copy_ns += preflight_ns + now_ns() - copy_start;
             m_statistics.m_event_bytes += event_bytes;
             m_statistics.m_image_bytes += image_bytes;
             if (m_bytes > m_statistics.m_peak_bytes)
@@ -176,11 +184,14 @@ public:
 
     bool drain()
     {
+        const uint64_t begin = now_ns();
         std::unique_lock<std::mutex> lock(m_mutex);
         m_changed.wait(lock, [this]()
         {
             return m_jobs == 0u || m_failed.load(std::memory_order_relaxed);
         });
+        ++m_statistics.m_fence_calls;
+        m_statistics.m_fence_wait_ns += now_ns() - begin;
         return !m_failed.load(std::memory_order_relaxed);
     }
 
