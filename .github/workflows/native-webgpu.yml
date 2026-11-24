@@ -174,7 +174,13 @@ jobs:
           }
       - name: Compile clang++ native WebGPU and raylib runner
         shell: pwsh
-        run: cmake --build build-clang --target ee_game_runner --config Release --parallel 2
+        run: cmake --build build-clang --target ee_game_runner vu1_recomp ee_vu1_aot_fixture --config Release --parallel 2
+      - name: Compile and execute Windows VU1 AOT DLLs at O0 and O3
+        shell: pwsh
+        run: |
+          $env:PATH = (Join-Path $env:RUNNER_TEMP 'llvm-22/bin') + ';' + $env:PATH
+          python tests/smoke/test_vu1_aot_runtime.py build-clang/ee_vu1_aot_fixture.exe build-clang/vu1_recomp.exe tools/build_vu1_aot.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify clang++ runner stack reserve and actual startup
         shell: pwsh
         run: |

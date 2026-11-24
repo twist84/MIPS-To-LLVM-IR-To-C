@@ -1773,6 +1773,10 @@ std::string vu1_aot_module_ir(
         const auto at = program.m_ir.find("define dso_local i32 @ee_vu1_program");
         program.m_ir.replace(at, sizeof("define dso_local ") - 1u,
             "define " + linkage);
+        // COFF codegen references the MSVC floating-point marker when
+        // DIV/SQRT/RSQRT lower to host FP. These DLLs intentionally have
+        // no CRT or entry point; supply the marker locally in each DLL.
+        program.m_ir += "\n@_fltused = dso_local global i32 9875, align 4\n";
     }
     program.m_ir += "\n@vu1_metadata = private constant [5 x i32] [i32 " +
         std::to_string(k_vu1_aot_abi) + ", i32 " + std::to_string(start) +
