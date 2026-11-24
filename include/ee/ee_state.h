@@ -102,7 +102,7 @@ struct alignas(16) s_ee_vu0_state
     uint32_t m_q_pending;
 };
 
-static_assert(offsetof(s_ee_vu0_state, m_q_ready_cycle) == 8624);
+static_assert(offsetof(s_ee_vu0_state, m_q_ready_cycle) == 8616);
 static_assert(sizeof(s_ee_vu0_state) == 8640);
 
 // Architectural EE CPU state. GPRs are 128 bits wide in the lifter (i128);

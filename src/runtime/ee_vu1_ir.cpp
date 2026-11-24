@@ -2,6 +2,8 @@
 #include "ee_vu1_dependency.h"
 #include "ee_vu1_aot.h"
 #include "../llvm/ee_cop1_rsqrt_ir.h"
+#include "../llvm/ee_cop1_add_ir.h"
+#include "../llvm/ee_cop1_mul_ir.h"
 
 #include <utility>
 #include <bitset>
@@ -45,151 +47,66 @@ define internal i32 @vu_pack(i32 %sign, i32 %e, i32 %m) alwaysinline {
   ret i32 %result
 }
 
-define internal i32 @vu_add(i32 %a0, i32 %b0) alwaysinline {
-  %a = call i32 @vu_flush(i32 %a0)
-  %b = call i32 @vu_flush(i32 %b0)
-  %am = and i32 %a, 2147483647
-  %bm = and i32 %b, 2147483647
-  %az = icmp eq i32 %am, 0
-  %bz = icmp eq i32 %bm, 0
-  br i1 %bz, label %zero_b, label %check_a
-zero_b:
-  %both_sign = and i32 %a, %b
-  %zero_result = select i1 %az, i32 %both_sign, i32 %a
-  ret i32 %zero_result
-check_a:
-  br i1 %az, label %zero_a, label %calc
-zero_a:
-  ret i32 %b
-calc:
-  %swap = icmp ugt i32 %bm, %am
-  %large = select i1 %swap, i32 %b, i32 %a
-  %small = select i1 %swap, i32 %a, i32 %b
-  %large_mag = and i32 %large, 2147483647
-  %small_mag = and i32 %small, 2147483647
-  %e = lshr i32 %large_mag, 23
-  %se = lshr i32 %small_mag, 23
-  %diff = sub i32 %e, %se
-  %far = icmp ugt i32 %diff, 25
-  %safe_diff = select i1 %far, i32 0, i32 %diff
-  %ma0 = and i32 %large_mag, 8388607
-  %mb0 = and i32 %small_mag, 8388607
-  %ma1 = or i32 %ma0, 8388608
-  %mb1 = or i32 %mb0, 8388608
-  %ma = shl i32 %ma1, 1
-  %mb2 = shl i32 %mb1, 1
-  %mb3 = lshr i32 %mb2, %safe_diff
-  %mb = select i1 %far, i32 0, i32 %mb3
-  %sign = and i32 %large, -2147483648
-  %xor = xor i32 %large, %small
-  %opposite = icmp slt i32 %xor, 0
-  br i1 %opposite, label %subtract, label %same
-subtract:
-  %delta = sub i32 %ma, %mb
-  %cancel = icmp eq i32 %delta, 0
-  br i1 %cancel, label %cancelled, label %normalize
-cancelled:
-  ret i32 0
-normalize:
-  %lz = call i32 @llvm.ctlz.i32(i32 %delta, i1 false)
-  %shift = sub i32 %lz, 7
-  %norm = shl i32 %delta, %shift
-  %ne = sub i32 %e, %shift
-  %nm = lshr i32 %norm, 1
-  %nr = call i32 @vu_pack(i32 %sign, i32 %ne, i32 %nm)
-  ret i32 %nr
-same:
-  %sum = add i32 %ma, %mb
-  %carry_bit = and i32 %sum, 33554432
-  %carry = icmp ne i32 %carry_bit, 0
-  %half = lshr i32 %sum, 1
-  %adjust = select i1 %carry, i32 %half, i32 %sum
-  %inc = zext i1 %carry to i32
-  %ee = add i32 %e, %inc
-  %mm = lshr i32 %adjust, 1
-  %rr = call i32 @vu_pack(i32 %sign, i32 %ee, i32 %mm)
-  ret i32 %rr
-}
-
-define internal i32 @vu_sub(i32 %a, i32 %b) alwaysinline {
-  %neg = xor i32 %b, -2147483648
-  %r = call i32 @vu_add(i32 %a, i32 %neg)
-  ret i32 %r
-}
-
-define internal i32 @vu_mul(i32 %a, i32 %b) alwaysinline {
-  %xor = xor i32 %a, %b
-  %sign = and i32 %xor, -2147483648
-  %ae = lshr i32 %a, 23
-  %be = lshr i32 %b, 23
-  %ea = and i32 %ae, 255
-  %eb = and i32 %be, 255
-  %az = icmp eq i32 %ea, 0
-  %bz = icmp eq i32 %eb, 0
-  %zero = or i1 %az, %bz
-  br i1 %zero, label %signed_zero, label %calc
-signed_zero:
-  ret i32 %sign
-calc:
-  %a0 = and i32 %a, 8388607
-  %b0 = and i32 %b, 8388607
-  %a1 = or i32 %a0, 8388608
-  %b1 = or i32 %b0, 8388608
-  %a2 = zext i32 %a1 to i64
-  %b2 = zext i32 %b1 to i64
-  %product = mul i64 %a2, %b2
-  %high = lshr i64 %product, 47
-  %carry = icmp ne i64 %high, 0
-  %shift = select i1 %carry, i64 24, i64 23
-  %mantissa = lshr i64 %product, %shift
-  %m = trunc i64 %mantissa to i32
-  %e0 = add i32 %ea, %eb
-  %e1 = sub i32 %e0, 127
-  %inc = zext i1 %carry to i32
-  %e = add i32 %e1, %inc
-  %r = call i32 @vu_pack(i32 %sign, i32 %e, i32 %m)
-  ret i32 %r
-}
-
-; Four independent full-width products. Constant shifts enable SIMD on
-; hosts without per-lane variable shifts; zero lanes retain the XOR sign.
-define internal <4 x i32> @vu_mul4(<4 x i32> %a, <4 x i32> %b) alwaysinline {
-  %xor = xor <4 x i32> %a, %b
-  %sign = and <4 x i32> %xor, <i32 -2147483648, i32 -2147483648, i32 -2147483648, i32 -2147483648>
-  %ae = lshr <4 x i32> %a, <i32 23, i32 23, i32 23, i32 23>
-  %be = lshr <4 x i32> %b, <i32 23, i32 23, i32 23, i32 23>
-  %ea = and <4 x i32> %ae, <i32 255, i32 255, i32 255, i32 255>
-  %eb = and <4 x i32> %be, <i32 255, i32 255, i32 255, i32 255>
-  %az = icmp eq <4 x i32> %ea, zeroinitializer
-  %bz = icmp eq <4 x i32> %eb, zeroinitializer
-  %zero = or <4 x i1> %az, %bz
-  %a0 = and <4 x i32> %a, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
-  %b0 = and <4 x i32> %b, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
-  %a1 = or <4 x i32> %a0, <i32 8388608, i32 8388608, i32 8388608, i32 8388608>
-  %b1 = or <4 x i32> %b0, <i32 8388608, i32 8388608, i32 8388608, i32 8388608>
-  %a2 = zext <4 x i32> %a1 to <4 x i64>
-  %b2 = zext <4 x i32> %b1 to <4 x i64>
-  %product = mul <4 x i64> %a2, %b2
-  %high = lshr <4 x i64> %product, <i64 47, i64 47, i64 47, i64 47>
-  %inc = trunc <4 x i64> %high to <4 x i32>
-  %carry = icmp ne <4 x i32> %inc, zeroinitializer
-  %m0 = lshr <4 x i64> %product, <i64 23, i64 23, i64 23, i64 23>
-  %m1 = trunc <4 x i64> %m0 to <4 x i32>
-  %m2 = lshr <4 x i32> %m1, <i32 1, i32 1, i32 1, i32 1>
-  %m3 = select <4 x i1> %carry, <4 x i32> %m2, <4 x i32> %m1
-  %mantissa = and <4 x i32> %m3, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
-  %e0 = add <4 x i32> %ea, %eb
-  %e1 = sub <4 x i32> %e0, <i32 127, i32 127, i32 127, i32 127>
-  %e = add <4 x i32> %e1, %inc
-  %overflow = icmp sgt <4 x i32> %e, <i32 255, i32 255, i32 255, i32 255>
-  %underflow = icmp sle <4 x i32> %e, zeroinitializer
-  %exp = shl <4 x i32> %e, <i32 23, i32 23, i32 23, i32 23>
-  %bits = or <4 x i32> %exp, %mantissa
-  %normal = select <4 x i1> %underflow, <4 x i32> zeroinitializer, <4 x i32> %bits
-  %mag = select <4 x i1> %overflow, <4 x i32> <i32 2147483647, i32 2147483647, i32 2147483647, i32 2147483647>, <4 x i32> %normal
-  %nonzero = select <4 x i1> %zero, <4 x i32> zeroinitializer, <4 x i32> %mag
-  %result = or <4 x i32> %sign, %nonzero
-  ret <4 x i32> %result
+; Reuse the EE integer helpers. The result includes true range errors,
+; rather than guessing exceptions from the final saturated word.
+define internal { i32, i1, i1, i32 } @vu_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i1 %latched) alwaysinline {
+entry:
+  %is_add = icmp ult i32 %op, 2
+  br i1 %is_add, label %add, label %product
+add:
+  %subtract = icmp eq i32 %op, 1
+  %sum = call { i32, i1, i1 } @ee_cop1_add_bits(i32 %a, i32 %b, i1 %subtract)
+  br label %plain
+product:
+  %p = call { i32, i1, i1 } @ee_cop1_mul_bits(i32 %a, i32 %b)
+  %is_mul = icmp eq i32 %op, 2
+  br i1 %is_mul, label %plain, label %mac
+plain:
+  %plain_result = phi { i32, i1, i1 } [ %sum, %add ], [ %p, %product ]
+  %plain_bits = extractvalue { i32, i1, i1 } %plain_result, 0
+  %plain_o = extractvalue { i32, i1, i1 } %plain_result, 1
+  %plain_u = extractvalue { i32, i1, i1 } %plain_result, 2
+  %r0 = insertvalue { i32, i1, i1, i32 } zeroinitializer, i32 %plain_bits, 0
+  %r1 = insertvalue { i32, i1, i1, i32 } %r0, i1 %plain_o, 1
+  %r2 = insertvalue { i32, i1, i1, i32 } %r1, i1 %plain_u, 2
+  ret { i32, i1, i1, i32 } %r2
+mac:
+  %pb = extractvalue { i32, i1, i1 } %p, 0
+  %po = extractvalue { i32, i1, i1 } %p, 1
+  %pu = extractvalue { i32, i1, i1 } %p, 2
+  %sub = icmp eq i32 %op, 4
+  %acc_sum = call { i32, i1, i1 } @ee_cop1_add_bits(i32 %acc, i32 %pb, i1 %sub)
+  %sb = extractvalue { i32, i1, i1 } %acc_sum, 0
+  %so = extractvalue { i32, i1, i1 } %acc_sum, 1
+  %su = extractvalue { i32, i1, i1 } %acc_sum, 2
+  %sub_sign = select i1 %sub, i32 -2147483648, i32 0
+  %signed_product = xor i32 %pb, %sub_sign
+  %acc_sign = and i32 %acc, -2147483648
+  %acc_sat = or i32 %acc_sign, 2147483647
+  %acc_or_sum = select i1 %latched, i32 %acc_sat, i32 %sb
+  %bits = select i1 %po, i32 %signed_product, i32 %acc_or_sum
+  %prior = or i1 %po, %latched
+  %overflow = or i1 %prior, %so
+  %no_prior = xor i1 %prior, true
+  %underflow = and i1 %no_prior, %su
+  %exception = or i1 %overflow, %underflow
+  %no_po = xor i1 %po, true
+  %product_events = and i1 %exception, %no_po
+  %pexp = and i32 %pb, 2139095040
+  %pz = icmp eq i32 %pexp, 0
+  %ps = icmp slt i32 %pb, 0
+  %z_event = and i1 %pz, %product_events
+  %s_event = and i1 %ps, %product_events
+  %z_sticky = select i1 %z_event, i32 64, i32 0
+  %s_sticky = select i1 %s_event, i32 128, i32 0
+  %u_sticky = select i1 %pu, i32 256, i32 0
+  %zs = or i32 %z_sticky, %s_sticky
+  %sticky = or i32 %zs, %u_sticky
+  %m0 = insertvalue { i32, i1, i1, i32 } poison, i32 %bits, 0
+  %m1 = insertvalue { i32, i1, i1, i32 } %m0, i1 %overflow, 1
+  %m2 = insertvalue { i32, i1, i1, i32 } %m1, i1 %underflow, 2
+  %m3 = insertvalue { i32, i1, i1, i32 } %m2, i32 %sticky, 3
+  ret { i32, i1, i1, i32 } %m3
 }
 
 define internal i32 @vu_key(i32 %raw) alwaysinline {
@@ -498,12 +415,14 @@ public:
     c_straight_line_emitter()
     {
         m_ir = llvm::k_ee_cop1_rsqrt_ir;
+        m_ir += llvm::k_ee_cop1_add_ir;
+        m_ir += llvm::k_ee_cop1_mul_ir;
         m_ir += k_fp_ir;
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, ptr %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
             "ptr %last_pc_out, ptr %acc, ptr %clip, ptr %kick, "
-            "ptr %kick_context, ptr %p, ptr %r, ptr %efu) {\nentry:\n";
+            "ptr %kick_context, ptr %p, ptr %r, ptr %efu, ptr %acc_overflow) {\nentry:\n";
     }
 
     // The dynamic path uses the same per-pair arithmetic emitter as the
@@ -1342,6 +1261,16 @@ private:
                 {
                     line("store i32 " + m_upper_values[lane] + ", ptr " +
                         acc_pointer(lane) + ", align 4");
+                    if (m_upper_flags)
+                    {
+                        const auto latch = operation("load i32, ptr %acc_overflow, align 4");
+                        const uint32_t bit = 8u >> lane;
+                        const auto cleared = operation("and i32 " + latch + ", " + std::to_string(~bit));
+                        const auto flag = operation("select i1 " + m_upper_overflow[lane] +
+                            ", i32 " + std::to_string(bit) + ", i32 0");
+                        const auto next = operation("or i32 " + cleared + ", " + flag);
+                        line("store i32 " + next + ", ptr %acc_overflow, align 4");
+                    }
                 }
             }
         }
@@ -1368,10 +1297,11 @@ private:
             const auto exp = operation("and i32 " + values[lane] + ", 2139095040");
             const auto zero = operation("icmp eq i32 " + exp + ", 0");
             const auto sign = operation("icmp slt i32 " + values[lane] + ", 0");
-            const auto mag = operation("and i32 " + values[lane] + ", 2147483647");
-            const auto overflow = operation("icmp eq i32 " + mag + ", 2147483647");
+            const auto& overflow = m_upper_overflow[lane];
+            const auto& underflow = m_upper_underflow[lane];
             for (const auto& test : {std::make_pair(zero, bit),
                                      std::make_pair(sign, bit << 4u),
+                                     std::make_pair(underflow, bit << 8u),
                                      std::make_pair(overflow, bit << 12u)})
             {
                 const auto flag = operation("select i1 " + test.first +
@@ -1382,6 +1312,13 @@ private:
         line("store i32 " + mac + ", ptr %mac, align 4");
         const auto old = operation("load i32, ptr %status, align 4");
         auto status = operation("and i32 " + old + ", 4080");
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                status = operation("or i32 " + status + ", " + m_upper_sticky[lane]);
+            }
+        }
         for (uint32_t group = 0u; group < 4u; ++group)
         {
             const auto bits = operation("and i32 " + mac + ", " +
@@ -1505,35 +1442,12 @@ private:
             op == 0x22u || op == 0x23u || op == 0x26u || op == 0x27u;
         const uint32_t write_mask = cross ? 0xeu : mask;
         std::array<std::string, 4> values{};
-        // Read every source before lower execution and upper writeback.
-        // MADD/MSUB use separate PS2-rounded MUL and ADD/SUB, never FMA.
-        // Only full-width products use the SIMD helper; masked and cross
-        // products keep the scalar path and its original lane selection.
-        std::string vector_product;
-        if (write_mask == 15u && !conversion && !abs && !cross &&
-            (mul || madd || msub))
-        {
-            const auto lhs = vf_vector(fs);
-            const auto rhs = op <= 0x1bu ? splat(vf(ft, funct & 3u)) :
-                uses_q ? splat(operation("load i32, ptr %q, align 4")) :
-                uses_i ? splat(operation("load i32, ptr %i, align 4")) :
-                vf_vector(ft);
-            vector_product = operation("call <4 x i32> @vu_mul4(<4 x i32> " +
-                lhs + ", <4 x i32> " + rhs + ")");
-        }
+        // Stage all lane results and exception tuples before lower execution.
+        // Scalar Booth helpers remain in generated IR; no host callbacks.
         for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
             if ((write_mask & (8u >> lane)) == 0u)
             {
-                continue;
-            }
-            if (!vector_product.empty())
-            {
-                const auto product = operation("extractelement <4 x i32> " +
-                    vector_product + ", i32 " + std::to_string(lane));
-                values[lane] = madd || msub ?
-                    fp_binary(madd ? "vu_add" : "vu_sub", acc(lane), product) :
-                    product;
                 continue;
             }
             const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);
@@ -1553,11 +1467,28 @@ private:
                     op <= 0x1bu ? vf(ft, funct & 3u) :
                     uses_q ? operation("load i32, ptr %q, align 4") : uses_i ?
                     operation("load i32, ptr %i, align 4") : vf(ft, lane);
-                if (cross || madd || msub)
+                if (flags)
                 {
-                    const auto product = fp_binary("vu_mul", lhs, rhs);
-                    values[lane] = cross && special ? product :
-                        fp_binary(madd ? "vu_add" : "vu_sub", acc(lane), product);
+                    const uint32_t kind = (cross && special) || mul ? 2u :
+                        madd ? 3u : (msub || cross) ? 4u :
+                        std::string(helper) == "vu_sub" ? 1u : 0u;
+                    const bool mac = kind >= 3u;
+                    const auto acc_value = mac ? acc(lane) : std::string("0");
+                    std::string latched = "false";
+                    if (mac)
+                    {
+                        const auto latch = operation("load i32, ptr %acc_overflow, align 4");
+                        const auto bit = operation("and i32 " + latch + ", " + std::to_string(8u >> lane));
+                        latched = operation("icmp ne i32 " + bit + ", 0");
+                    }
+                    const auto tuple = operation("call { i32, i1, i1, i32 } @vu_fmac(i32 " +
+                        std::to_string(kind) + ", i32 " + acc_value + ", i32 " + lhs +
+                        ", i32 " + rhs + ", i1 " + latched + ")");
+                    const std::string type = "extractvalue { i32, i1, i1, i32 } ";
+                    values[lane] = operation(type + tuple + ", 0");
+                    m_upper_overflow[lane] = operation(type + tuple + ", 1");
+                    m_upper_underflow[lane] = operation(type + tuple + ", 2");
+                    m_upper_sticky[lane] = operation(type + tuple + ", 3");
                 }
                 else
                 {
@@ -1627,6 +1558,9 @@ private:
 
     std::string m_ir;
     std::array<std::string, 4> m_upper_values{};
+    std::array<std::string, 4> m_upper_overflow{};
+    std::array<std::string, 4> m_upper_underflow{};
+    std::array<std::string, 4> m_upper_sticky{};
     uint32_t m_upper_target = 0u;
     uint32_t m_upper_mask = 0u;
     bool m_upper_flags = false;

@@ -194,7 +194,7 @@ bool same(const s_outcome& a, const s_outcome& b)
     const auto& i = a.m_issue;
     const auto& j = b.m_issue;
     return a.m_ok && b.m_ok && x.m_vf == y.m_vf && x.m_vi == y.m_vi &&
-        x.m_acc == y.m_acc && x.m_i == y.m_i && x.m_q == y.m_q &&
+        x.m_acc == y.m_acc && x.m_acc_overflow_mask == y.m_acc_overflow_mask && x.m_i == y.m_i && x.m_q == y.m_q &&
         x.m_p == y.m_p && x.m_r == y.m_r && x.m_mac == y.m_mac &&
         x.m_status == y.m_status && x.m_clip == y.m_clip &&
         x.m_tpc == y.m_tpc && x.m_initialized == y.m_initialized &&
@@ -304,6 +304,7 @@ int main(int argc, char** argv)
     if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, path1, issue) ||
         candidate.m_vi != original.m_vi || candidate.m_vf != original.m_vf ||
         candidate.m_acc != original.m_acc ||
+        candidate.m_acc_overflow_mask != original.m_acc_overflow_mask ||
         candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
         candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
         candidate.m_clip != original.m_clip || candidate.m_q != original.m_q ||

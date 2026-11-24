@@ -454,6 +454,7 @@ int main(int argc, char** argv)
     {
         std::printf(" %u", value);
     }
+    std::printf(" %u", state.m_acc_overflow_mask);
     for (uint8_t value : data)
     {
         std::printf(" %u", static_cast<unsigned>(value));

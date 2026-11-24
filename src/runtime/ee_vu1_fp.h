@@ -3,6 +3,7 @@
 #pragma once
 
 #include "ee_vu_scalar_fp.h"
+#include "ee_vu_fmac_fp.h"
 
 #include <cstring>
 #include <cmath>
@@ -45,51 +46,19 @@ inline std::uint32_t pack(std::uint32_t sign, int e, std::uint32_t m) {
     return sign | (static_cast<std::uint32_t>(e) << 23) | (m & 0x7FFFFFu);
 }
 
-inline std::uint32_t add(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b);
-    std::uint32_t aa = a & kAbs, ba = b & kAbs;
-    if (!ba) return aa ? a : (a & b);
-    if (!aa) return b;
-    if (ba > aa) {
-        std::swap(a, b);
-        std::swap(aa, ba);
-    }
-    int e = static_cast<int>(aa >> 23);
-    const int diff = e - static_cast<int>(ba >> 23);
-    std::uint32_t ma = mantissa(aa) << 1;
-    const std::uint32_t mb = diff > 25 ? 0u : (mantissa(ba) << 1) >> diff;
-    if ((a ^ b) & kSign) {
-        ma -= mb;
-        if (!ma) return 0;
-        const int shift = leading_zeroes(ma) - 7;
-        ma <<= shift;
-        e -= shift;
-    } else {
-        ma += mb;
-        if (ma & 0x2000000u) {
-            ma >>= 1;
-            ++e;
-        }
-    }
-    return pack(a & kSign, e, ma >> 1);
+inline std::uint32_t add(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::add(a, b, false).m_bits;
 }
 
-inline std::uint32_t sub(std::uint32_t a, std::uint32_t b) { return add(a, b ^ kSign); }
+inline std::uint32_t sub(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::add(a, b, true).m_bits;
+}
 
-inline std::uint32_t mul(std::uint32_t a, std::uint32_t b) {
-    const std::uint32_t sign = (a ^ b) & kSign;
-    const int ea = static_cast<int>(exponent(a)), eb = static_cast<int>(exponent(b));
-    if (!ea || !eb) return sign;
-    std::uint64_t m = static_cast<std::uint64_t>(mantissa(a)) * mantissa(b);
-    int e = ea + eb - 127;
-    if (m >> 47) {
-        m >>= 24;
-        ++e;
-    } else {
-        m >>= 23;
-    }
-    return pack(sign, e, static_cast<std::uint32_t>(m));
+inline std::uint32_t mul(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::mul(a, b).m_bits;
 }
 
 inline double to_double(std::uint32_t x) {

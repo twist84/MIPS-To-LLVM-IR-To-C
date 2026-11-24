@@ -10,41 +10,45 @@ import tempfile
 import llvmlite.binding as llvm
 
 
-def verify_mul4(ir):
-    # Test the emitted helper itself, independently of the instruction
-    # fixture's interpreter comparison. All four lanes vary independently.
-    assert "call <4 x i32> @vu_mul4(" in ir
+def verify_fmac(ir):
+    # Exercise the generated result/exception tuple independently of
+    # the interpreter differential, at both optimization levels.
+    assert "@vu_fmac(" in ir
     wrapper = """
-define void @test_mul4(ptr %a, ptr %b, ptr %out) {
-  %va = load <4 x i32>, ptr %a, align 4
-  %vb = load <4 x i32>, ptr %b, align 4
-  %r = call <4 x i32> @vu_mul4(<4 x i32> %va, <4 x i32> %vb)
-  store <4 x i32> %r, ptr %out, align 4
+define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) {
+  %latched = icmp ne i32 %latch, 0
+  %r = call { i32, i1, i1, i32 } @vu_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i1 %latched)
+  %bits = extractvalue { i32, i1, i1, i32 } %r, 0
+  %o = extractvalue { i32, i1, i1, i32 } %r, 1
+  %u = extractvalue { i32, i1, i1, i32 } %r, 2
+  %sticky = extractvalue { i32, i1, i1, i32 } %r, 3
+  %oi = zext i1 %o to i32
+  %ui = zext i1 %u to i32
+  %p1 = getelementptr i32, ptr %out, i32 1
+  %p2 = getelementptr i32, ptr %out, i32 2
+  %p3 = getelementptr i32, ptr %out, i32 3
+  store i32 %bits, ptr %out
+  store i32 %oi, ptr %p1
+  store i32 %ui, ptr %p2
+  store i32 %sticky, ptr %p3
   ret void
 }
 """
-    def scalar(a, b):
-        sign = (a ^ b) & 0x80000000
-        ea, eb = (a >> 23) & 255, (b >> 23) & 255
-        if not ea or not eb:
-            return sign
-        product = ((a & 0x7fffff) | 0x800000) * ((b & 0x7fffff) | 0x800000)
-        carry = product >> 47
-        exponent = ea + eb - 127 + carry
-        if exponent > 255:
-            return sign | 0x7fffffff
-        if exponent <= 0:
-            return sign
-        return sign | (exponent << 23) | ((product >> (23 + carry)) & 0x7fffff)
-
-    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x80800000,
-             0x3f7fffff, 0xbf7fffff, 0x3f800000, 0xbf800000,
-             0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000,
-             0x7fffffff, 0xffffffff]
-    rng = random.Random(0x12345678)
-    pairs = [(a, b) for a in edges for b in edges]
-    pairs += [(rng.getrandbits(32), rng.getrandbits(32)) for _ in range(16384)]
-    lanes = ctypes.c_uint32 * 4
+    # Literal hardware cancellation/multiplier vectors and modeled MAC
+    # priority controls. The latter require additional console validation.
+    cases = [
+        ((1, 0, 0x0080008b, 0x008000ea, 0), (0x803e0000, 0, 1, 0)),
+        ((0, 0, 0x8080002c, 0x008000ec, 0), (0x00400000, 0, 1, 0)),
+        ((0, 0, 0x80800036, 0x00829f6a, 0), (0x0027cd00, 0, 1, 0)),
+        ((0, 0, 0x80c1aa65, 0x01200000, 0), (0x007cab36, 0, 1, 0)),
+        ((2, 0, 0x3fffffff, 0x3f800000, 0), (0x3fffffff, 0, 0, 0)),
+        ((2, 0, 0x3f800000, 0x3fffffff, 0), (0x3ffffffe, 0, 0, 0)),
+        ((2, 0, 0x7fffffff, 0x3f800000, 0), (0x7fffffff, 0, 0, 0)),
+        ((2, 0, 0x16a08bd5, 0x03f4fe21, 0), (0, 0, 1, 0)),
+        ((3, 0x01000000, 0x00800000, 0x3f000000, 0), (0x01000000, 0, 0, 0x100)),
+        ((3, 0x7fffffff, 0x7fffffff, 0xbf800000, 1), (0x7fffffff, 1, 0, 0x80)),
+        ((4, 0x7fffffff, 0x7fffffff, 0x40000000, 1), (0xffffffff, 1, 0, 0)),
+    ]
     for opt in (0, 3):
         module = llvm.parse_assembly(ir + wrapper)
         module.verify()
@@ -54,15 +58,14 @@ define void @test_mul4(ptr %a, ptr %b, ptr %out) {
         engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), target)
         engine.add_module(module)
         engine.finalize_object()
-        address = engine.get_function_address("test_mul4")
+        address = engine.get_function_address("test_fmac")
         assert address
-        function = ctypes.CFUNCTYPE(None, *([ctypes.POINTER(ctypes.c_uint32)] * 3))(address)
-        out = lanes()
-        for i in range(0, len(pairs), 4):
-            group = pairs[i:i + 4]
-            a, b = zip(*group)
-            function(lanes(*a), lanes(*b), out)
-            assert list(out) == [scalar(x, y) for x, y in group], (opt, group)
+        function = ctypes.CFUNCTYPE(None, *([ctypes.c_uint32] * 5),
+                                    ctypes.POINTER(ctypes.c_uint32))(address)
+        out = (ctypes.c_uint32 * 4)()
+        for args, expected in cases:
+            function(*args, out)
+            assert tuple(out) == expected, (opt, args, tuple(out), expected)
 
 
 def verify_minmax(ir):
@@ -117,7 +120,7 @@ def main():
                 [sys.argv[1], str(path), case], text=True).split()))
             ir = path.read_text(encoding="utf-8")
             if case == "acc":
-                verify_mul4(ir)
+                verify_fmac(ir)
                 verify_minmax(ir)
             for opt in (0, 3):
                 module = llvm.parse_assembly(ir)
@@ -144,7 +147,7 @@ def main():
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.c_void_p, ctypes.c_void_p,
                     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
-                    ctypes.c_void_p)(address)
+                    ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32))(address)
                 vi = (ctypes.c_uint16 * 16)(0, 0xfffe, 5)
                 immediate = ctypes.c_uint32(0x12345678)
                 tpc = ctypes.c_uint32(0)
@@ -185,13 +188,14 @@ def main():
                         data[offset:offset + 4] = value.to_bytes(4, "little")
                 cycles = ctypes.c_uint32(0)
                 last_pc = ctypes.c_uint32(0)
+                acc_overflow = ctypes.c_uint32(0)
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
                                  0x12345, 0x23456, vf, ctypes.byref(q),
                                  ctypes.byref(mac), ctypes.byref(status), data,
                                  ctypes.byref(cycles), ctypes.byref(last_pc), acc, ctypes.byref(clip), None, None,
-                                 ctypes.byref(p), ctypes.byref(r), None)
+                                 ctypes.byref(p), ctypes.byref(r), None, ctypes.byref(acc_overflow))
                 actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
-                          *vi, *vf, mac.value, status.value, clip.value, q.value, p.value, r.value, *acc, *data]
+                          *vi, *vf, mac.value, status.value, clip.value, q.value, p.value, r.value, *acc, acc_overflow.value, *data]
                 assert actual == expected, (case, opt, actual, expected)
     print("VU1 integer LLVM interpreter differential: PASS")
 

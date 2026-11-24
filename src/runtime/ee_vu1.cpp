@@ -157,6 +157,9 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
 struct s_upper_write
 {
     std::array<uint32_t, 4> m_values{};
+    uint32_t m_overflow = 0u;
+    uint32_t m_underflow = 0u;
+    uint32_t m_product_sticky = 0u;
     uint32_t m_target = 0u;
     uint32_t m_mask = 0u;
     uint32_t m_clip = 0u;
@@ -168,7 +171,8 @@ struct s_upper_write
 
 // VU FMAC and status calculations ported from vu_micro.cpp::set_flags.
 void set_mac_flags(s_ee_vu1_state& state,
-                   const std::array<uint32_t, 4>& value, uint32_t mask)
+                   const std::array<uint32_t, 4>& value, uint32_t mask,
+                   uint32_t overflow, uint32_t underflow, uint32_t product_sticky)
 {
     uint32_t mac = 0u;
     for (uint32_t lane = 0u; lane < 4u; ++lane)
@@ -187,13 +191,17 @@ void set_mac_flags(s_ee_vu1_state& state,
         {
             mac |= 1u << (bit + 4u);
         }
-        if ((x & 0x7fffffffu) == 0x7fffffffu)
+        if ((underflow & (1u << bit)) != 0u)
+        {
+            mac |= 1u << (bit + 8u);
+        }
+        if ((overflow & (1u << bit)) != 0u)
         {
             mac |= 1u << (bit + 12u);
         }
     }
     state.m_mac = mac;
-    uint32_t status = state.m_status & 0xff0u;
+    uint32_t status = (state.m_status & 0xff0u) | product_sticky;
     if ((mac & 0x000fu) != 0u) { status |= 1u; }
     if ((mac & 0x00f0u) != 0u) { status |= 2u; }
     if ((mac & 0x0f00u) != 0u) { status |= 4u; }
@@ -283,6 +291,9 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
             uses_i ? state.m_i : state.m_vf[ft][lane];
         const uint32_t acc = state.m_acc[lane];
         uint32_t result = 0u;
+        vu_fmac_fp::s_fmac_result arithmetic{};
+        const uint32_t lane_bit = 8u >> lane;
+        const bool latched = (state.m_acc_overflow_mask & lane_bit) != 0u;
 
         if (conversion)
         {
@@ -302,28 +313,40 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
         }
         else if (cross)
         {
-            const uint32_t product = fp::mul(lhs, rhs_cross);
-            result = special ? product : fp::sub(acc, product);
+            if (special)
+            {
+                arithmetic = vu_fmac_fp::mul(lhs, rhs_cross);
+            }
+            else
+            {
+                const auto mac = vu_fmac_fp::mac(acc, lhs, rhs_cross, true, latched);
+                arithmetic = mac.m_final;
+                write.m_product_sticky |= mac.m_sticky;
+            }
         }
         else if (op <= 0x03u || op == 0x20u ||
                  op == 0x22u || op == 0x28u)
         {
-            result = fp::add(lhs, rhs);
+            arithmetic = vu_fmac_fp::add(lhs, rhs, false);
         }
         else if ((op >= 0x04u && op <= 0x07u) ||
                  op == 0x24u || op == 0x26u || op == 0x2cu)
         {
-            result = fp::sub(lhs, rhs);
+            arithmetic = vu_fmac_fp::add(lhs, rhs, true);
         }
         else if ((op >= 0x08u && op <= 0x0bu) ||
                  op == 0x21u || op == 0x23u || op == 0x29u)
         {
-            result = fp::add(acc, fp::mul(lhs, rhs));
+            const auto mac = vu_fmac_fp::mac(acc, lhs, rhs, false, latched);
+            arithmetic = mac.m_final;
+            write.m_product_sticky |= mac.m_sticky;
         }
         else if ((op >= 0x0cu && op <= 0x0fu) ||
                  op == 0x25u || op == 0x27u || op == 0x2du)
         {
-            result = fp::sub(acc, fp::mul(lhs, rhs));
+            const auto mac = vu_fmac_fp::mac(acc, lhs, rhs, true, latched);
+            arithmetic = mac.m_final;
+            write.m_product_sticky |= mac.m_sticky;
         }
         else if ((op >= 0x10u && op <= 0x13u) ||
                  op == 0x1du || op == 0x2bu)
@@ -338,11 +361,17 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
         else if ((op >= 0x18u && op <= 0x1cu) ||
                  op == 0x1eu || op == 0x2au)
         {
-            result = fp::mul(lhs, rhs);
+            arithmetic = vu_fmac_fp::mul(lhs, rhs);
         }
         else
         {
             return false;
+        }
+        if (is_arithmetic)
+        {
+            result = arithmetic.m_bits;
+            if (arithmetic.m_overflow) { write.m_overflow |= lane_bit; }
+            if (arithmetic.m_underflow) { write.m_underflow |= lane_bit; }
         }
         write.m_values[lane] = result;
     }
@@ -1061,7 +1090,13 @@ bool c_ee_vu1::run(
             }
             if (pending.m_flags)
             {
-                set_mac_flags(state, pending.m_values, pending.m_mask);
+                if (pending.m_acc)
+                {
+                    state.m_acc_overflow_mask = (state.m_acc_overflow_mask & ~pending.m_mask) |
+                        pending.m_overflow;
+                }
+                set_mac_flags(state, pending.m_values, pending.m_mask,
+                    pending.m_overflow, pending.m_underflow, pending.m_product_sticky);
                 pipe.set_mac(state.m_mac, state.m_status);
             }
         }

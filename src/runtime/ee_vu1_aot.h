@@ -9,12 +9,12 @@
 namespace ee
 {
 // ABI changes invalidate native VU1 libraries, never the EE IR cache.
-inline constexpr uint32_t k_vu1_aot_abi = 11u; // Q-unit arithmetic and status semantics changed.
+inline constexpr uint32_t k_vu1_aot_abi = 12u; // FMAC exception tuples and persistent ACC latch.
 using t_vu1_aot_kick = uint32_t (*)(void*, uint32_t);
 using t_vu1_aot_efu = uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,
     uint32_t, uint32_t, uint32_t*, uint32_t*, uint32_t*, uint32_t*, uint8_t*, uint32_t*, uint32_t*, uint32_t*, uint32_t*,
-    t_vu1_aot_kick, void*, uint32_t*, uint32_t*, t_vu1_aot_efu);
+    t_vu1_aot_kick, void*, uint32_t*, uint32_t*, t_vu1_aot_efu, uint32_t*);
 using t_vu1_aot_info = const uint32_t* (*)();
 using t_vu1_aot_code = const uint8_t* (*)();
 using t_vu1_code = std::array<uint8_t, c_ee_vu1::k_memory_size>;

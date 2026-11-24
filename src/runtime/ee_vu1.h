@@ -23,6 +23,7 @@ struct s_ee_vu1_state
     uint32_t m_clip = 0u;
     uint32_t m_tpc = 0u;
     bool m_initialized = false;
+    uint32_t m_acc_overflow_mask = 0u;
 };
 
 // Single value owner for VU1 code, data and execution context.

@@ -175,6 +175,28 @@ int main()
         }
     }
 
+    // Result flags must distinguish an exact finite maximum from overflow;
+    // cancellation and multiplication underflow both set MAC Z/U.
+    {
+        ee::s_ee_vu1_state state{};
+        state.m_initialized = true;
+        state.m_vf[2] = {0x7fffffffu, 0x00800000u, 0x3f800000u, 0u};
+        state.m_vf[3] = {0x3f800000u, 0x3f000000u, 0x3fffffffu, 0u};
+        if (!check(run(state, {
+                       {k_lower_nop, upper(0x2au, 4u, 2u, 3u, 14u)},
+                       {k_lower_nop, k_upper_end},
+                       {k_lower_nop, k_upper_nop}
+                   }, data, issue) &&
+                   state.m_vf[4][0] == 0x7fffffffu &&
+                   state.m_vf[4][1] == 0u &&
+                   state.m_vf[4][2] == 0x3ffffffeu &&
+                   state.m_mac == 0x0404u && state.m_status == 0x145u,
+                   "FMAC true range flags and asymmetric multiplication"))
+        {
+            return 1;
+        }
+    }
+
     // The EFU producer updates P after ESUM latency. MFP must first
     // observe old P and then new P only after WAITP.
     ee::s_ee_vu1_state p{};
