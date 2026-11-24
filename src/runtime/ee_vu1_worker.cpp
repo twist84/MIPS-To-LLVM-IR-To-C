@@ -25,7 +25,8 @@ c_ee_vu1_worker::~c_ee_vu1_worker()
     m_thread.join();
 }
 
-bool c_ee_vu1_worker::submit(std::unique_ptr<s_ee_vu1_job>& job)
+bool c_ee_vu1_worker::submit(std::unique_ptr<s_ee_vu1_job>& job,
+    uint64_t* submitted_ns)
 {
     bool submitted = false;
     {
@@ -37,6 +38,10 @@ bool c_ee_vu1_worker::submit(std::unique_ptr<s_ee_vu1_job>& job)
             m_started_ns.store(0u, std::memory_order_relaxed);
             m_finished_ns.store(0u, std::memory_order_relaxed);
             job->m_submitted_ns = clock_ns();
+            if (submitted_ns != nullptr)
+            {
+                *submitted_ns = job->m_submitted_ns;
+            }
             m_pending = std::move(job);
             m_busy = true;
             submitted = true;

@@ -50,7 +50,8 @@ public:
 
     // On failure the caller retains the job. On success it must not
     // keep references into the transferred object.
-    bool submit(std::unique_ptr<s_ee_vu1_job>& job);
+    bool submit(std::unique_ptr<s_ee_vu1_job>& job,
+        uint64_t* submitted_ns = nullptr);
     std::unique_ptr<s_ee_vu1_job> try_take();
     std::unique_ptr<s_ee_vu1_job> wait_take();
     bool busy() const;
@@ -58,6 +59,7 @@ public:
     // It neither consumes work nor changes guest-visible state.
     bool ready() const { return m_ready.load(std::memory_order_acquire); }
     static uint64_t clock_ns();
+    uint64_t finished_ns() const { return m_finished_ns.load(std::memory_order_acquire); }
     std::pair<uint64_t, uint64_t> execution_interval() const;
     void write_aot_json(FILE* output) const;
 

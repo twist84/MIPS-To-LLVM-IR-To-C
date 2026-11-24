@@ -596,9 +596,10 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
             job->m_resident = std::move(next.m_vu1);
             job->m_path1.swap(tx.m_path1);
             next.m_code = code;
-            const uint64_t handoff = m_native_executing ?
-                c_ee_vu1_worker::clock_ns() : 0u;
-            if (worker->submit(job))
+            uint64_t handoff = 0u;
+            // The worker cannot start before its submission timestamp.
+            // Reuse that timestamp as the EE interval lower bound.
+            if (worker->submit(job, m_native_executing ? &handoff : nullptr))
             {
                 ++m_worker_profile.m_submitted;
                 m_native_interval_start = handoff;
@@ -926,7 +927,16 @@ void c_ee_vif1::native_execution_begin()
         if (m_deferred != nullptr)
         {
             ++m_worker_profile.m_native_pending_boundaries;
-            m_native_interval_start = c_ee_vu1_worker::clock_ns();
+            if (m_worker->finished_ns() != 0u)
+            {
+                // An outstanding transaction can hold an already finished
+                // job; no new execution-window intersection is possible.
+                ++m_worker_profile.m_native_completed_at_entry;
+            }
+            else
+            {
+                m_native_interval_start = c_ee_vu1_worker::clock_ns();
+            }
         }
     }
 }
@@ -954,7 +964,19 @@ void c_ee_vif1::native_execution_end()
     {
         if (m_native_interval_start != 0u)
         {
-            record_native_overlap(c_ee_vu1_worker::clock_ns());
+            const uint64_t finished = m_worker->finished_ns();
+            if (finished != 0u)
+            {
+                // We are already past the worker's finish. Its timestamp
+                // is the exact upper bound, so another host clock read
+                // cannot contribute to the intersection.
+                ++m_worker_profile.m_native_completed_at_exit;
+                record_native_overlap(finished);
+            }
+            else
+            {
+                record_native_overlap(c_ee_vu1_worker::clock_ns());
+            }
         }
         m_native_executing = false;
     }
@@ -976,7 +998,7 @@ std::unique_ptr<s_ee_vu1_job> c_ee_vif1::take_worker_job(bool wait)
     auto result = m_worker->try_take();
     if (result != nullptr && m_native_interval_start != 0u)
     {
-        record_native_overlap(c_ee_vu1_worker::clock_ns());
+        record_native_overlap(result->m_finished_ns);
     }
     return result;
 }
@@ -1021,7 +1043,9 @@ void c_ee_vif1::write_worker_json(FILE* output) const
         "\"controller_wait_ns\":%llu,\"controller_wait_calls\":%llu,"
         "\"controller_poll_calls\":%llu,\"controller_empty_polls\":%llu,"
         "\"ee_native_overlap_wall_ns\":%llu,\"ee_native_overlap_intervals\":%llu,"
-        "\"ee_native_pending_boundaries\":%llu}",
+        "\"ee_native_pending_boundaries\":%llu,"
+        "\"ee_native_completed_at_entry\":%llu,"
+        "\"ee_native_completed_at_exit\":%llu}",
         m_worker != nullptr ? "true" : "false",
         m_deferred != nullptr ? "true" : "false",
         static_cast<unsigned long long>(p.m_submitted),
@@ -1041,7 +1065,9 @@ void c_ee_vif1::write_worker_json(FILE* output) const
         static_cast<unsigned long long>(p.m_empty_polls),
         static_cast<unsigned long long>(p.m_native_overlap_ns),
         static_cast<unsigned long long>(p.m_native_overlap_intervals),
-        static_cast<unsigned long long>(p.m_native_pending_boundaries));
+        static_cast<unsigned long long>(p.m_native_pending_boundaries),
+        static_cast<unsigned long long>(p.m_native_completed_at_entry),
+        static_cast<unsigned long long>(p.m_native_completed_at_exit));
 }
 
 uint32_t c_ee_vif1::read_register(uint32_t offset) const

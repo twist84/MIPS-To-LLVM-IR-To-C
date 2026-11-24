@@ -52,6 +52,7 @@ int main()
     ee::c_ee_vu1_worker worker;
     auto job = fixture();
     auto reference = *job;
+    uint64_t submitted_ns = 0u;
     auto& resident = reference.m_resident;
     if (!check(ee::c_ee_vu1::run(
             resident.m_state, resident.m_code, resident.m_data, 0u, 0u, 0u,
@@ -59,7 +60,7 @@ int main()
             "synchronous fixture failed") ||
         !check(!worker.busy() && !worker.ready() && !worker.try_take() && !worker.wait_take(),
             "empty worker returned stale result") ||
-        !check(worker.submit(job) && !job && worker.busy(),
+        !check(worker.submit(job, &submitted_ns) && submitted_ns != 0u && !job && worker.busy(),
             "worker did not take exclusive ownership"))
     {
         return 1;
@@ -80,6 +81,10 @@ int main()
         result = worker.wait_take();
     }
     if (!check(result && result->m_accepted && !result->m_host_failed &&
+            result->m_submitted_ns == submitted_ns &&
+            result->m_started_ns >= submitted_ns &&
+            result->m_finished_ns >= result->m_started_ns &&
+            worker.finished_ns() == result->m_finished_ns &&
             result->m_resident.m_state.m_vi == resident.m_state.m_vi &&
             result->m_resident.m_state.m_vf == resident.m_state.m_vf &&
             result->m_resident.m_state.m_tpc == resident.m_state.m_tpc &&

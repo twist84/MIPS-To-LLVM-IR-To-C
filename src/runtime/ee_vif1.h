@@ -232,6 +232,8 @@ private:
         uint64_t m_native_overlap_ns = 0u;
         uint64_t m_native_overlap_intervals = 0u;
         uint64_t m_native_pending_boundaries = 0u;
+        uint64_t m_native_completed_at_entry = 0u;
+        uint64_t m_native_completed_at_exit = 0u;
     } m_worker_profile{};
     bool m_native_executing = false;
     uint64_t m_native_interval_start = 0u;
