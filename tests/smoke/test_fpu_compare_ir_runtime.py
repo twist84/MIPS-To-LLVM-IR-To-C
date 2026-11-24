@@ -897,9 +897,58 @@ def main():
          0xA592B456, 0xA592745E, "positive subnormal result flushes and sets U|SU"),
         (0x80800000, 0x3F000000, 0x80000000,
          0xA592B456, 0xA592745E, "negative subnormal result flushes and sets U|SU"),
-        (0x7F7FFFFF, 0x40000000, 0x7F7FFFFF,
-         0xA592744E, 0xA592F45E, "multiplication overflow clamps to FMAX"),
+        (0x7F7FFFFF, 0x40000000, 0x7FFFFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
+        (0x7FFFFFFF, 0x40000000, 0x7FFFFFFF,
+         0xA592744E, 0xA592F45E, "multiplication overflow saturates"),
+        (0x3FFFFFFF, 0x3FFFFFFF, 0x407FFFFE,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "truncated full significand product"),
     ]
+    # Distinct physical-console MUL/MULA result words from muldiv.expected.
+    mul_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x80000000),
+        (0x80000000, 0x00000000, 0x80000000),
+        (0x80000000, 0x80000000, 0x00000000),
+        (0x00000000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x00000000, 0x00000000),
+        (0x40000000, 0x40000000, 0x40800000),
+        (0x40400000, 0x3F800000, 0x40400000),
+        (0x40400000, 0x40400000, 0x41100000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0x00000000, 0x00000000),
+        (0x00000000, 0x7FFFFFFF, 0x00000000),
+        (0x00000000, 0x7F800000, 0x00000000),
+        (0x7F800000, 0x7F800000, 0x7FFFFFFF),
+        (0xFF800000, 0x7F800000, 0xFFFFFFFF),
+        (0x3F800000, 0xBF800000, 0xBF800000),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3FFFFFFF, 0x3FFFFFFE),
+        (0x3F800000, 0x7F800001, 0x7F800001),
+        (0x3F800000, 0x00000001, 0x00000000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x7FFFFFFE),
+        (0x3F800000, 0xFFFFFFFF, 0xFFFFFFFE),
+        (0x00001337, 0xDEADBEEF, 0x80000000),
+    ]
+    for lhs, rhs, expected in mul_hardware_words:
+        overflow = ((lhs & 0x7F800000) == 0x7F800000
+                    and (rhs & 0x7F800000) == 0x7F800000)
+        for initial in (0xA5903456, fpu_normal_flags):
+            flags = (initial | 0x8010) if overflow else (initial & ~0xC000)
+            mul_cases.append((lhs, rhs, expected, initial, flags, "hardware MUL"))
+            mula_cases.append((lhs, rhs, 0xAABBCCDD, expected, initial, flags,
+                               "hardware MULA"))
+    for lhs, rhs, expected, initial, flags, label in mul_cases[:6]:
+        mula_cases.append((lhs, rhs, 0xAABBCCDD, expected, initial, flags,
+                           "accumulator " + label))
     div_cases = [
         (0x40400000, 0x40000000, 0x3FC00000,
          0xA592F45E, 0xA592F45E, "normal division leaves FCSR untouched"),
@@ -1091,7 +1140,8 @@ def main():
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases, opt)
             run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases, opt)
-        run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases)
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases, opt)
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases, opt)
         run_cop1_transfer_cases(fixture, temp_dir, target)
@@ -1099,7 +1149,8 @@ def main():
         for opt in (0, 3):
             run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases, opt)
             run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases, opt)
-        run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases)
+        for opt in (0, 3):
+            run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases, opt)
         run_accumulator_cases(fixture, temp_dir, target, "madd_s", madd_cases)
         run_accumulator_cases(fixture, temp_dir, target, "msub_s", msub_cases)
         run_accumulator_cases(fixture, temp_dir, target, "madda_s", madda_cases)
