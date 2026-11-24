@@ -752,6 +752,35 @@ def main():
             assert "compilation failed" in summary
             assert "dispatches=? stop=unknown" in summary
 
+    # Keep the reproducible P40 retail profiling preset identical to the
+    # manually validated replay environment, and propagate launcher failure.
+    preset = (ROOT / "run_sdbz_p40.bat").read_text(encoding="utf-8")
+    assert 'cd /d "%~dp0"' in preset
+    assert "git pull --ff-only\nif errorlevel 1 exit /b 1" in preset
+    assert preset.index("git pull --ff-only") < preset.index('set "SDBZ_EE_OPT=5"')
+    assert [line for line in preset.splitlines() if line.startswith('set "')] == [
+        "set \"SDBZ_EE_OPT=5\"",
+        "set \"SDBZ_SKIP_HEADLESS_EXPANSION=1\"",
+        "set \"SDBZ_SPEED_PERCENT=0\"",
+        "set \"MAX_DISPATCHES=40000000\"",
+        "set \"MAX_EXPANSION_DISPATCHES=40000000\"",
+        "set \"MAX_REPLAY_DISPATCHES=40000000\"",
+        "set \"BOOT_TIMEOUT_SECONDS=600\"",
+        "set \"SDBZ_RUNTIME_PROFILE=1\"",
+        "set \"SDBZ_TRACE_BUFFERED=1\"",
+        "set \"SDBZ_REPORT_SNAPSHOT_MS=2000\"",
+        "set \"SDBZ_DISPATCH_TRACE_EVERY=1024\"",
+        "set \"SDBZ_EE_DIRECT_DISPATCH=1\"",
+        "set \"SDBZ_VU1_ASYNC=1\"",
+        "set \"SDBZ_GS_ASYNC=1\"",
+        "set \"SDBZ_VU1_AOT=%CD%\\build\\vu1-native-v12\"",
+        "set \"SDBZ_VU1_AOT_CAPTURE=\"",
+        "set \"SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\\build\\vu1-misses\"",
+        "set \"EE_WEBGPU_SNAPSHOT=1\"",
+        "set \"EE_WEBGPU_WINDOW=1\"",
+    ]
+    assert preset.endswith("call run_ps2_game.bat --full --neutral\nexit /b %ERRORLEVEL%\n")
+
     print("boot session orchestration: PASS")
 
 
