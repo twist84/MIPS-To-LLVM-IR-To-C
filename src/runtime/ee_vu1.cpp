@@ -84,8 +84,8 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
             s_ee_vu1_issue& issue)
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vu1_xgkick);
-    std::vector<uint8_t> packet;
-    uint32_t qword = address & 0x3ffu;
+    const uint32_t start = qword_offset(address);
+    uint32_t count = 0u;
     bool finished = false;
     const auto reject = [&](e_ee_vu1_kick_reject reason, uint32_t at,
                             uint64_t tag, uint32_t packet_qwc)
@@ -100,9 +100,9 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
     };
     uint32_t last_at = 0u;
     uint64_t last_tag = 0u;
-    for (uint32_t count = 0u; count < 1024u && !finished;)
+    for (; count < 1024u && !finished;)
     {
-        const uint32_t at = qword_offset(qword++);
+        const uint32_t at = qword_offset(address + count);
         const uint64_t tag = read64(data.data() + at);
         last_at = at;
         last_tag = tag;
@@ -120,34 +120,37 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
             return reject(e_ee_vu1_kick_reject::packet_qwc_limit,
                           at, tag, count + body + 1u);
         }
-        packet.insert(packet.end(), data.data() + at, data.data() + at + 16u);
-        ++count;
-        for (uint32_t i = 0u; i < body; ++i)
-        {
-            const uint32_t body_at = qword_offset(qword++);
-            packet.insert(packet.end(),
-                          data.data() + body_at, data.data() + body_at + 16u);
-            ++count;
-        }
+        // Only tags need inspection. Every body is a consecutive
+        // range of qwords in the same circular VU RAM.
+        count += body + 1u;
         finished = (tag & 0x8000u) != 0u;
     }
     if (!finished)
     {
         return reject(e_ee_vu1_kick_reject::missing_eop, last_at, last_tag,
-                      static_cast<uint32_t>(packet.size() / 16u));
+                      count);
     }
     // PATH1 accumulates output from many independent kicks and MSCNT
     // continuations in the same staged VIF transaction. Its aggregate
     // budget must agree with the GIF/GS consumer, not VU1 memory size.
     constexpr size_t k_max_batch_bytes =
         static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
+    const size_t bytes = static_cast<size_t>(count) * 16u;
     if (output.size() > k_max_batch_bytes ||
-        packet.size() > k_max_batch_bytes - output.size())
+        bytes > k_max_batch_bytes - output.size())
     {
         return reject(e_ee_vu1_kick_reject::batch_qwc_limit, last_at, last_tag,
-                      static_cast<uint32_t>(packet.size() / 16u));
+                      count);
     }
-    output.insert(output.end(), packet.begin(), packet.end());
+    // After complete validation, append the packet directly from RAM.
+    // At most one wrap is possible under the single-kick qword limit.
+    const size_t first = std::min(bytes, data.size() - start);
+    output.insert(output.end(), data.data() + start,
+                  data.data() + start + first);
+    if (bytes != first)
+    {
+        output.insert(output.end(), data.data(), data.data() + bytes - first);
+    }
     return true;
 }
 

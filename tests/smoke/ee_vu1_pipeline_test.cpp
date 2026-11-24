@@ -458,6 +458,38 @@ int main()
         {
             return 1;
         }
+        // A mixed-format packet crosses the RAM boundary after
+        // its first tag. Verify all payload bytes, not just its length.
+        memory.fill(0xa5u);
+        const uint64_t packed = 0x2000000000000001ull;
+        // FLG=1, NREG=3, NLOOP=3: ceil(9/2)=5 body qwords.
+        const uint64_t reglist = 0x3400000000000003ull;
+        const uint64_t image = 0x0800000000008002ull;
+        std::memcpy(memory.data() + 0x3ff0u, &packed, sizeof(packed));
+        std::memcpy(memory.data() + 32u, &reglist, sizeof(reglist));
+        std::memcpy(memory.data() + 128u, &image, sizeof(image));
+        output.assign(16u, 0x77u);
+        std::vector<uint8_t> expected = output;
+        expected.insert(expected.end(), memory.end() - 16, memory.end());
+        expected.insert(expected.end(), memory.begin(), memory.begin() + 176);
+        if (!check(execute() && output == expected,
+                   "mixed-format wrapped XGKICK payload differs"))
+        {
+            return 1;
+        }
+
+        // A valid single IMAGE tag can describe all of circular RAM.
+        // No bytes may be lost or duplicated when the packet wraps.
+        const uint64_t full = 0x08000000000083ffull;
+        std::memcpy(memory.data() + 0x3ff0u, &full, sizeof(full));
+        output.clear();
+        expected.assign(memory.end() - 16, memory.end());
+        expected.insert(expected.end(), memory.begin(), memory.end() - 16);
+        if (!check(execute() && output == expected,
+                   "full circular XGKICK payload differs"))
+        {
+            return 1;
+        }
         output.clear();
         const uint64_t oversize = 0x1000000000008400ull;
         std::memcpy(memory.data() + 0x3ff0u, &oversize, sizeof(oversize));
