@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 import run_game
 import shared_ee_ir as shared_ir
@@ -33,11 +34,13 @@ def verify_modules(work, metadata, hashes):
         raise ValueError("unowned IR modules in cache directory")
 
 
-def refresh_profile(elf, build, config, work, opt, jobs, inputs, library):
+def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
+                    *, verified_ir_hashes=None):
     metadata = shared_ir.ir_directory(work) / "ee_functions.json"
     cache = work / "translation-cache.json"
     try:
-        run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+        run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                            verified_ir_hashes=verified_ir_hashes)
     except ValueError:
         result = run_game.main([
             str(elf), "--build-dir", str(build), "--config", config,
@@ -181,9 +184,11 @@ def validate_source_ir(elf, source_work, source_opt, ir_sources):
                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata_path)):
             raise ValueError("source IR provenance is stale; recover the source cache explicitly")
         hashes = snapshot["ir_hashes"]
+    started = time.monotonic()
     verify_modules(source_work, metadata, hashes)
     shared_ir.publish(metadata_path, ir_sources, hashes)
-    print(f"Shared EE IR: verified {len(hashes)} modules (no source DLL relink)", flush=True)
+    print(f"Shared EE IR: verified {len(hashes)} modules (no source DLL relink) "
+          f"in {time.monotonic() - started:.3f}s", flush=True)
     return metadata_path, hashes
 
 
@@ -201,11 +206,16 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)
     cache = work / "translation-cache.json"
     library = work / library_name
     if work.exists():
+        fresh_hashes = hashes
         if shared_ir.ir_directory(work) == work / "ir":
             migrate_legacy(work, metadata_path, ir_sources, inputs, opt)
+            # Migration can append a verified legacy suffix. Do not use
+            # the original map's hashes for the now-extended source.
+            fresh_hashes = None
         elif shared_ir.ir_directory(work) != metadata_path.parent:
             raise ValueError("optimized profile references another shared IR store")
-        refresh_profile(elf, build, config, work, opt, jobs, inputs, library)
+        refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
+                        verified_ir_hashes=fresh_hashes)
         snapshot = shared_ir.read_json(cache)
         remove_verified_duplicates(work, metadata_path, snapshot["ir_hashes"])
         print(f"Reusing verified O{opt} EE cache: {work}", flush=True)

@@ -483,8 +483,15 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
             temporary.unlink()
 
 
-def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
-    """Never reuse a translated DLL whose guest code provenance is unknown."""
+def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
+                               *, verified_ir_hashes=None):
+    """Never reuse a translated DLL whose guest code provenance is unknown.
+
+    Only the profile builder may supply freshly verified IR hashes from
+    the same shared-store lock scope. Independent invocations always
+    hash the IR again; no persistent shortcut or timestamp trust.
+    """
+    started = time.monotonic()
     if not path.is_file():
         raise ValueError(
             "cached translation has no provenance record; "
@@ -525,13 +532,24 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
                 f"cached translation {file_path.name} changed; "
                 "rerun without --no-recompile"
             )
+    library_checked = time.monotonic()
     if shared_ir.active(metadata_path):
-        current = translated_ir_hashes(metadata_path)
+        current = (translated_ir_hashes(metadata_path) if verified_ir_hashes is None
+                   else verified_ir_hashes)
         shared_ir.current_state(metadata_path, snapshot.get("ir_sources"), current)
         if current != snapshot.get("ir_hashes"):
             raise ValueError("cached native profile IR does not match shared source")
+    elif verified_ir_hashes is not None:
+        raise ValueError("preverified hashes require a shared EE IR store")
+    ir_checked = time.monotonic()
     # A valid cache created before snapshot support is also preserved.
     archive_known_function_manifest(path, snapshot)
+    print(f"EE cache validation: profile={emit_opt} "
+          f"metadata/library={library_checked - started:.3f}s "
+          f"shared_ir={ir_checked - library_checked:.3f}s "
+          f"archive={time.monotonic() - ir_checked:.3f}s "
+          f"ir_scan={'fresh' if verified_ir_hashes is None else 'already-verified'}",
+          flush=True)
 
 
 
@@ -1450,8 +1468,11 @@ def main(argv=None):
         library = work / library_name
         recomp = native_executable(build, "ee_recomp", args.config)
         cache_path = work / "translation-cache.json"
+        fingerprints_started = time.monotonic()
         inputs = translation_inputs(elf, recomp, source_root)
         ir_sources = ir_generation_inputs(elf, source_root)
+        print(f"EE input fingerprints: {time.monotonic() - fingerprints_started:.3f}s",
+              flush=True)
 
         if args.no_recompile and shared_ir.active(metadata_path) and cache_path.is_file():
             snapshot = shared_ir.read_json(cache_path)
@@ -1795,10 +1816,14 @@ def main(argv=None):
                 # links printed before this header. Live relinks follow it.
                 print("\n== Executing translated EE code "
                       "(live cache-miss resume) ==", flush=True)
+                execution_started = time.monotonic()
                 result = run_hot_expand(
                     hot_command, session, args.timeout_seconds,
                     compile_live_miss
                 )
+                execution_finished = time.monotonic()
+                print(f"EE native process wall: {execution_finished - execution_started:.3f}s",
+                      flush=True)
                 if overlay_count and result.returncode != 1:
                     # The runner has exited and unloaded every module. Fold
                     # the overlays into one full library exactly once; all of
@@ -1836,6 +1861,9 @@ def main(argv=None):
                     )
                     print(f"live cache-miss: published {expanded_count} "
                           "new guest module(s) to translation cache",
+                          flush=True)
+                    print(f"EE post-replay consolidation and cache publication: "
+                          f"{time.monotonic() - execution_finished:.3f}s",
                           flush=True)
                 if (last_library is not None or overlay_count) and result.returncode == 1:
                     print("run_game: not publishing failed live expansion; "

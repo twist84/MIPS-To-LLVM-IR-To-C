@@ -2371,6 +2371,8 @@ def main():
                     assert result.returncode == 0, result.stdout + result.stderr
                     assert expected_message in result.stdout, result.stdout
                     assert "no source DLL relink" in result.stdout
+                    if expected_message.startswith("Reusing"):
+                        assert "ir_scan=already-verified" in result.stdout, result.stdout
                     assert not base_library.exists()
                     assert original_cache.read_bytes() == original_bytes
                     assert metadata_path.read_bytes() == original_map
@@ -2404,6 +2406,7 @@ def main():
             module.write_bytes(module.read_bytes() + b"\n; modified\n")
             refused = subprocess.run(prepare, capture_output=True, text=True, check=False)
             assert refused.returncode != 0, refused.stdout + refused.stderr
+            assert "verified IR hashes do not match" in refused.stderr
             assert original_cache.read_bytes() == original_bytes
 
         # Signed word ALU ops consume the low words. A delay-slot overflow
