@@ -1989,6 +1989,23 @@ def main():
             } == preserved_ir
             repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
 
+            # Modern provenance allows a direct relink without repeating
+            # the emitter's IR/object scan. The linker must still reject
+            # damaged objects and the incremental fallback repairs them.
+            direct = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False)
+            assert direct.returncode == 0, direct.stdout + direct.stderr
+            assert "skipping redundant emission scan" in direct.stdout
+            assert "verify_ir: reused" not in direct.stdout
+            object_path = next((root / "out" / "objects").glob("*.o"))
+            object_path.write_bytes(object_path.read_bytes() + b"damaged")
+            repaired_object = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False)
+            assert repaired_object.returncode == 0, repaired_object.stdout + repaired_object.stderr
+            assert "direct relink failed; verifying and repairing objects" in repaired_object.stdout
+            assert "reused 0/1 cached object(s)" in repaired_object.stdout
+            repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
             # Unknown historical header content cannot be silently accepted.
             old_diagnostics["inputs"][old_key] = "0" * 64
             old_diagnostics["ir_sources"][old_key] = "0" * 64

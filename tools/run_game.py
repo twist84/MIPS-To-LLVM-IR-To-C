@@ -1034,6 +1034,35 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
           f"discovery and metadata transaction", flush=True)
     return [destination for _, destination, _ in pending]
 
+def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
+                                metadata_path, object_dir):
+    """Avoid a redundant emission pass after full preserved-IR verification.
+
+    The linker still reads and hashes every guest object before linking.
+    Retain the old incremental path for legacy provenance, incompatible
+    LLVM/emitter versions, or a changed function map.
+    """
+    try:
+        snapshot = shared_ir.read_json(cache_path)
+        if (snapshot.get("ir_sources") != ir_sources or
+                snapshot.get("metadata_sha256") != sha256_path(metadata_path) or
+                snapshot.get("inputs", {}).get("tools/verify_ir.py") !=
+                    inputs.get("tools/verify_ir.py")):
+            return False
+        from verify_ir import append_cached_objects, llvm
+        records = append_cached_objects(object_dir, emit_opt,
+                                        llvm.get_default_triple(), [])
+        metadata = shared_ir.read_json(metadata_path)
+        return (
+            {str(Path(fn["ir_path"]).resolve()) for fn in metadata["functions"]} ==
+            {str(Path(name).resolve()) for name in records} and
+            {Path(name).name: item["ir_sha256"] for name, item in records.items()} ==
+                snapshot.get("ir_hashes")
+        )
+    except (OSError, ValueError, KeyError, TypeError, ImportError):
+        return False
+
+
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
                          appended_ir=None, cache_base=None, emit_only=False):
@@ -1504,15 +1533,34 @@ def main(argv=None):
                         "run_game: preserving guest IR and objects; "
                         "rebuilding host DLL only", flush=True
                     )
-                build_linked_library(
-                    source_root, work, metadata_path, object_dir, library,
-                    args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs,
-                    reuse_objects=bool(pending_append and objects_complete),
-                    appended_ir=(
-                        [Path(item["ir_path"]) for item in pending_append]
-                        if pending_append and not objects_complete else None
-                    ),
-                )
+                direct_relink = (not pending_append and objects_complete and
+                    can_relink_verified_objects(
+                        cache_path, inputs, ir_sources, args.emit_opt,
+                        metadata_path, object_dir))
+                if direct_relink:
+                    print("run_game: complete verified object manifest; "
+                          "skipping redundant emission scan", flush=True)
+                try:
+                    build_linked_library(
+                        source_root, work, metadata_path, object_dir, library,
+                        args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs,
+                        reuse_objects=direct_relink or bool(pending_append and objects_complete),
+                        appended_ir=(
+                            [Path(item["ir_path"]) for item in pending_append]
+                            if pending_append and not objects_complete else None
+                        ),
+                    )
+                except subprocess.CalledProcessError:
+                    if not direct_relink:
+                        raise
+                    # A missing/corrupt object is detected by the linker's
+                    # full object hash validation. Repair via the existing
+                    # incremental emitter before trying the link again.
+                    print("run_game: direct relink failed; verifying and repairing objects",
+                          flush=True)
+                    build_linked_library(
+                        source_root, work, metadata_path, object_dir, library,
+                        args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs)
                 write_translation_cache(
                     cache_path, inputs, args.emit_opt,
                     metadata_path, library, ir_sources
