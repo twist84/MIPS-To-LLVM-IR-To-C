@@ -1,4 +1,5 @@
 #include "ee_gs_presentation_probe.h"
+#include "ee_window_pump_gate.h"
 
 #include <cstdio>
 #include <cstring>
@@ -18,6 +19,30 @@
 
 int main()
 {
+    // Default leaves every service call untouched. A sampled host poll
+    // never suppresses a changed field, even across jumps or resets.
+    ee::c_ee_window_pump_gate default_gate{};
+    for (uint32_t i = 0u; i < 128u; ++i)
+    {
+        CHECK(default_gate.should_pump(0u));
+    }
+    ee::c_ee_window_pump_gate sampled(64u);
+    CHECK(sampled.should_pump(0u));
+    for (uint32_t i = 0u; i < 63u; ++i)
+    {
+        CHECK(!sampled.should_pump(0u));
+    }
+    CHECK(sampled.should_pump(0u));
+    CHECK(sampled.should_pump(1u));
+    CHECK(!sampled.should_pump(1u));
+    CHECK(sampled.should_pump(4u));
+    CHECK(!sampled.should_pump(4u));
+    CHECK(sampled.should_pump(0u));
+    for (uint32_t i = 0u; i < 63u; ++i)
+    {
+        CHECK(!sampled.should_pump(0u));
+    }
+    CHECK(sampled.should_pump(0u));
     ee::c_ee_gs_presentation_probe probe{};
     ee::s_ee_gs_display_registers display{};
     display.m_pmode = 1u;

@@ -60,6 +60,14 @@ payloads. Event/QWC counters, parsing, committed payload bytes and DMA
 semantics remain unchanged. Reports mark the digest disabled and emit null
 for unavailable byte-level statistics. The default retains full provenance.
 
+For profiling, `SDBZ_WINDOW_PUMP_STRIDE=64` reduces host window clock
+checks to one every 64 device-service calls while still calling the window
+pump immediately on every observed guest field change. The existing 120 Hz
+host input polling rule inside the pump is retained. The default stride is
+1; valid values are 1 through 64. A larger stride can delay host input or
+close-event detection between guest fields, especially during slow guest
+execution. It does not change guest scanout or device-service timing.
+
 ## Windows (MSVC / LLVM)
 
 From a Windows command prompt in the repository root:

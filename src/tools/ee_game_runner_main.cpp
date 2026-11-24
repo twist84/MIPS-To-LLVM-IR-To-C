@@ -27,6 +27,7 @@
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
 #include "ee_raylib_window.h"
+#include "ee_window_pump_gate.h"
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
@@ -3453,6 +3454,23 @@ int main(int argc, char** argv)
     double slowest_native_ms = 0.0;
     uint32_t slowest_native_pc = 0u;
 #ifdef EE_ENABLE_RAYLIB_WINDOW
+    uint32_t window_pump_stride = 1u;
+    std::string window_pump_environment;
+    const char* window_pump_value = read_host_environment(
+        "SDBZ_WINDOW_PUMP_STRIDE", &window_pump_environment);
+    if (window_pump_value != nullptr &&
+        (!parse_u32(window_pump_value, &window_pump_stride) ||
+         window_pump_stride == 0u || window_pump_stride > 64u))
+    {
+        std::fprintf(stderr, "invalid SDBZ_WINDOW_PUMP_STRIDE (expected 1..64)\n");
+        return 2;
+    }
+    ee::c_ee_window_pump_gate window_pump_gate(window_pump_stride);
+    if (gs_webgpu_window)
+    {
+        std::printf("GS host window pump stride: %u (all observed field advances serviced)\n",
+            window_pump_stride);
+    }
     uint64_t paced_field = 0u;
     uint64_t pace_cycle = 0u;
     uint64_t sample_cycle = 0u;
@@ -3596,6 +3614,10 @@ int main(int argc, char** argv)
                 }
                 paced_field = field;
             }
+            // The window already throttles host input polls to 120 Hz.
+            // Avoid checking its host clock on every EE boundary, while
+            // preserving immediate service on every observed field advance.
+            if (window_pump_gate.should_pump(field))
             {
                 ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::window_pump);
                 raylib_window.pump(
