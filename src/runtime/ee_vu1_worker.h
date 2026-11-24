@@ -3,6 +3,7 @@
 #include "ee_vu1_aot.h"
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <utility>
 #include <memory>
@@ -58,9 +59,18 @@ public:
     // A single acquire observes the same publication as try_take().
     // It neither consumes work nor changes guest-visible state.
     bool ready() const { return m_ready.load(std::memory_order_acquire); }
-    static uint64_t clock_ns();
+    static uint64_t clock_ns()
+    {
+        return static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    uint64_t started_ns() const { return m_started_ns.load(std::memory_order_acquire); }
     uint64_t finished_ns() const { return m_finished_ns.load(std::memory_order_acquire); }
-    std::pair<uint64_t, uint64_t> execution_interval() const;
+    std::pair<uint64_t, uint64_t> execution_interval() const
+    {
+        return {started_ns(), finished_ns()};
+    }
     void write_aot_json(FILE* output) const;
 
     // Full reset can discard a result, but cannot allow old work to

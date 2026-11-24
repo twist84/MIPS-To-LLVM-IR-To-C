@@ -7,6 +7,7 @@
 #include "ee_vu1_worker.h"
 #include "ee_runtime.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -201,7 +202,29 @@ private:
     bool publish(s_transaction& tx);
     e_deferred_result resume_deferred(bool wait);
     static void complete_vu_start(s_machine& machine);
-    void record_native_overlap(uint64_t end);
+    void record_native_overlap(uint64_t end)
+    {
+        if (m_native_interval_start != 0u)
+        {
+            const auto interval = m_worker->execution_interval();
+            const uint64_t finish = interval.second == 0u ? end :
+                std::min(end, interval.second);
+            finish_native_overlap(interval.first, finish);
+        }
+    }
+
+    // Called only with timestamps for the current controller-owned job.
+    // A known finish or a taken result needs no second atomic snapshot.
+    void finish_native_overlap(uint64_t worker_start, uint64_t finish)
+    {
+        const uint64_t start = std::max(m_native_interval_start, worker_start);
+        if (m_native_interval_start != 0u && worker_start != 0u && finish > start)
+        {
+            m_worker_profile.m_native_overlap_ns += finish - start;
+            ++m_worker_profile.m_native_overlap_intervals;
+        }
+        m_native_interval_start = 0u;
+    }
     std::unique_ptr<s_ee_vu1_job> take_worker_job(bool wait);
     void record_worker_job(const s_ee_vu1_job& job, bool discarded);
 
@@ -292,7 +315,7 @@ inline void c_ee_vif1::native_execution_end()
                 // is the exact upper bound, so another host clock read
                 // cannot contribute to the intersection.
                 ++m_worker_profile.m_native_completed_at_exit;
-                record_native_overlap(finished);
+                finish_native_overlap(m_worker->started_ns(), finished);
             }
             else
             {

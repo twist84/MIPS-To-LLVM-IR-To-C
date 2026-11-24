@@ -902,23 +902,6 @@ void c_ee_vif1::cancel_deferred()
     }
 }
 
-void c_ee_vif1::record_native_overlap(uint64_t end)
-{
-    if (m_native_interval_start != 0u)
-    {
-        const auto interval = m_worker->execution_interval();
-        const uint64_t start = std::max(m_native_interval_start, interval.first);
-        const uint64_t finish = interval.second == 0u ? end :
-            std::min(end, interval.second);
-        if (interval.first != 0u && finish > start)
-        {
-            m_worker_profile.m_native_overlap_ns += finish - start;
-            ++m_worker_profile.m_native_overlap_intervals;
-        }
-        m_native_interval_start = 0u;
-    }
-}
-
 std::unique_ptr<s_ee_vu1_job> c_ee_vif1::take_worker_job(bool wait)
 {
     if (wait)
@@ -935,7 +918,7 @@ std::unique_ptr<s_ee_vu1_job> c_ee_vif1::take_worker_job(bool wait)
     auto result = m_worker->try_take();
     if (result != nullptr && m_native_interval_start != 0u)
     {
-        record_native_overlap(result->m_finished_ns);
+        finish_native_overlap(result->m_started_ns, result->m_finished_ns);
     }
     return result;
 }

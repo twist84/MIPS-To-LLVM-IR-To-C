@@ -85,6 +85,9 @@ int main()
             result->m_started_ns >= submitted_ns &&
             result->m_finished_ns >= result->m_started_ns &&
             worker.finished_ns() == result->m_finished_ns &&
+            worker.started_ns() == result->m_started_ns &&
+            worker.execution_interval() ==
+                std::make_pair(result->m_started_ns, result->m_finished_ns) &&
             result->m_resident.m_state.m_vi == resident.m_state.m_vi &&
             result->m_resident.m_state.m_vf == resident.m_state.m_vf &&
             result->m_resident.m_state.m_tpc == resident.m_state.m_tpc &&

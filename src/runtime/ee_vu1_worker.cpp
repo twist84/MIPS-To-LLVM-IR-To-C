@@ -96,19 +96,6 @@ void c_ee_vu1_worker::discard()
     (void)wait_take();
 }
 
-uint64_t c_ee_vu1_worker::clock_ns()
-{
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count());
-}
-
-std::pair<uint64_t, uint64_t> c_ee_vu1_worker::execution_interval() const
-{
-    return {m_started_ns.load(std::memory_order_acquire),
-        m_finished_ns.load(std::memory_order_acquire)};
-}
-
 void c_ee_vu1_worker::write_aot_json(FILE* output) const
 {
     // A report may sample while a program is active. Serialize only
