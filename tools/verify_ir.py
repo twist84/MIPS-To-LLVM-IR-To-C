@@ -176,6 +176,20 @@ def compile_module_job(args):
     return compile_module(*args)
 
 
+def input_path(value, emit_dir, manifest):
+    path = Path(value)
+    if manifest.get("path_format") == "manifest-relative-v1":
+        return str((emit_dir / path).resolve())
+    return str(path.resolve())
+
+
+def relative_input(filename, emit_dir):
+    try:
+        return Path(os.path.relpath(Path(filename).resolve(), emit_dir.resolve())).as_posix()
+    except ValueError:
+        return str(Path(filename).resolve())
+
+
 def cached_objects(emit_dir, emit_opt, target_triple, filenames):
     manifest_path = emit_dir / "objects.json"
     if not manifest_path.is_file():
@@ -196,7 +210,9 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
             item.get("input") for item in entries if isinstance(item, dict)
         }):
             return {}
-        by_input = {item["input"]: item for item in entries}
+        by_input = {input_path(item["input"], emit_dir, manifest): item for item in entries}
+        if len(by_input) != len(entries):
+            return {}
         reused = {}
         for filename in filenames:
             item = by_input.get(filename)
@@ -255,6 +271,8 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
         if not isinstance(item, dict):
             raise ValueError("invalid cached object entry")
         filename = item.get("input")
+        if isinstance(filename, str) and filename:
+            filename = input_path(filename, emit_dir, manifest)
         obj = item.get("object")
         size = item.get("size_bytes")
         symbols = item.get("defined_symbols")
@@ -322,7 +340,7 @@ def main():
     if append_only and (not incremental or emit_dir is None):
         raise SystemExit("--append-only requires --incremental and --emit-dir")
 
-    files = sorted({str(Path(name)) for pattern in patterns for name in glob.glob(pattern)})
+    files = sorted({str(Path(name).resolve()) for pattern in patterns for name in glob.glob(pattern)})
     if not files:
         print("No LLVM IR files matched the supplied pattern(s).")
         return 2
@@ -450,6 +468,7 @@ def main():
     if emit_dir is not None and (not append_only or bad == 0):
         manifest_order = sorted(emitted) if append_only else files
         manifest = {
+            "path_format": "manifest-relative-v1",
             "complete": bad == 0 and len(emitted) == len(manifest_order),
             "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
             "target_triple": target_triple,
@@ -460,7 +479,8 @@ def main():
             "input_module_count": len(manifest_order),
             "object_count": len(emitted),
             "object_bytes": sum(item["size_bytes"] for item in emitted.values()),
-            "objects": [emitted[name] for name in manifest_order if name in emitted],
+            "objects": [dict(emitted[name], input=relative_input(name, emit_dir))
+                        for name in manifest_order if name in emitted],
         }
         write_atomic(
             emit_dir / "objects.json",

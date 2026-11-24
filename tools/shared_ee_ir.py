@@ -8,6 +8,7 @@ from pathlib import Path
 MARKER = "shared-ir.json"
 PROVENANCE = ".shared-ir-provenance.json"
 SCHEMA = "ee-shared-ir-v1"
+MARKER_SCHEMA = "ee-shared-ir-v2"
 _held = set()
 
 
@@ -29,6 +30,47 @@ def write_json(path, value):
         temporary.unlink(missing_ok=True)
 
 
+def relative_path(path, directory):
+    """Manifest-relative path, retaining an absolute path only across volumes."""
+    try:
+        return Path(os.path.relpath(Path(path).resolve(), Path(directory).resolve())).as_posix()
+    except ValueError:
+        return str(Path(path).resolve())
+
+
+def resolve_path(value, directory, *, legacy_cwd=False):
+    path = Path(value)
+    if path.is_absolute():
+        return path.resolve()
+    if legacy_cwd and len(path.parts) > 1 and path.exists():
+        return path.resolve()
+    return (Path(directory) / path).resolve()
+
+
+def module_path(value, directory):
+    path = Path(value)
+    return resolve_path(value, directory, legacy_cwd=len(path.parts) > 1)
+
+
+def elf_path(metadata, directory):
+    return resolve_path(metadata["elf"], directory,
+                        legacy_cwd=metadata.get("path_format") != "manifest-relative-v1")
+
+
+def normalize_metadata(metadata_path, elf):
+    """Convert freshly generated or independently verified metadata only."""
+    metadata = read_json(metadata_path)
+    directory = metadata_path.parent.resolve()
+    for function in metadata["functions"]:
+        module = module_path(function["ir_path"], directory)
+        if module.parent != directory or module.suffix != ".ll" or not module.is_file():
+            raise ValueError("function references an unexpected IR path")
+        function["ir_path"] = module.name
+    metadata["elf"] = relative_path(elf, directory)
+    metadata["path_format"] = "manifest-relative-v1"
+    write_json(metadata_path, metadata)
+
+
 def ir_directory(work):
     work = Path(work).resolve()
     marker = work / MARKER
@@ -39,11 +81,16 @@ def ir_directory(work):
         path = Path(value["ir_dir"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise ValueError("invalid shared EE IR directory marker") from exc
-    if (value.get("schema") != SCHEMA or not path.is_absolute() or
-            path.name != "ir" or path.resolve() == work / "ir" or
+    schema = value.get("schema")
+    if schema == MARKER_SCHEMA and not path.is_absolute():
+        path = work / path
+    elif schema != SCHEMA or not path.is_absolute():
+        raise ValueError("invalid shared EE IR directory marker")
+    path = path.resolve()
+    if (path.name != "ir" or path == work / "ir" or
             not (path / PROVENANCE).is_file()):
         raise ValueError("invalid shared EE IR directory marker")
-    return path.resolve()
+    return path
 
 
 @contextmanager
@@ -180,4 +227,7 @@ def verified_extension(snapshot, metadata_path, ir_sources, hashes):
 
 
 def attach(work, directory):
-    write_json(work / MARKER, {"schema": SCHEMA, "ir_dir": str(directory.resolve())})
+    relative = relative_path(directory, work)
+    if Path(relative).is_absolute():
+        raise ValueError("shared EE IR must reside on the same volume")
+    write_json(work / MARKER, {"schema": MARKER_SCHEMA, "ir_dir": relative})

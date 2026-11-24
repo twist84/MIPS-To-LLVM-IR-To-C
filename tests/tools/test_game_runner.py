@@ -2387,11 +2387,12 @@ def main():
             assert variant_cache["emit_opt"] == 2
             assert variant_cache["ir_hashes"] == json.loads(original_bytes)["ir_hashes"]
             shared_marker = json.loads((variant / "shared-ir.json").read_text(encoding="utf-8"))
-            assert Path(shared_marker["ir_dir"]) == metadata_path.parent
+            assert not Path(shared_marker["ir_dir"]).is_absolute()
+            assert (variant / shared_marker["ir_dir"]).resolve() == metadata_path.parent
             assert not (variant / "ir").exists()
             variant_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert len(variant_metadata["functions"]) == 2
-            assert all(Path(fn["ir_path"]).parent == metadata_path.parent
+            assert all(Path(fn["ir_path"]).parent == Path(".")
                        for fn in variant_metadata["functions"])
             states = []
             for work_dir, opt in ((root / "out", 0), (variant, 2)):
@@ -2412,7 +2413,7 @@ def main():
             assert warm.returncode == 0, warm.stdout + warm.stderr
             assert "full IR verification deferred to runner" in warm.stdout
             assert "Shared EE IR: verified" not in warm.stdout
-            module = Path(variant_metadata["functions"][0]["ir_path"])
+            module = metadata_path.parent / variant_metadata["functions"][0]["ir_path"]
             module.write_bytes(module.read_bytes() + b"\n; modified\n")
             # Preflight does not claim to authenticate the IR. The actual
             # driver must fail before native execution when IR is damaged.

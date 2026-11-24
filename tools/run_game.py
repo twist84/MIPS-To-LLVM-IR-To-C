@@ -128,6 +128,8 @@ def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
     hashes = {}
     for function in functions:
         module = Path(function["ir_path"])
+        if not module.is_absolute() and len(module.parts) == 1:
+            module = ir_dir / module
         entry = entries.get(module.name)
         if (module.is_absolute() and module.parent == ir_dir and
                 entry is not None and entry.is_file(follow_symlinks=False)):
@@ -139,7 +141,7 @@ def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
             else:
                 module = ir_dir / entry.name
         else:
-            module = module.resolve(strict=True)
+            module = shared_ir.module_path(str(module), ir_dir).resolve(strict=True)
         if require_owned_directory and (
                 module.parent != ir_dir or module.suffix != ".ll"):
             raise ValueError("function references an unexpected IR path")
@@ -234,7 +236,7 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
             raise ValueError("interrupted append contains invalid guest entry")
         expected_addresses.append(address)
         expected_symbols.add(function["host_symbol"])
-        module = Path(function["ir_path"]).resolve(strict=True)
+        module = shared_ir.module_path(function["ir_path"], destination_dir).resolve(strict=True)
         if module.parent != destination_dir or module.suffix != ".ll":
             raise ValueError("interrupted append references unexpected IR path")
 
@@ -264,8 +266,8 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
                     f"interrupted append entry 0x{address:08x} not retranslated"
                 )
             fresh = dict(fresh)
-            fresh_path = Path(fresh.pop("ir_path")).resolve(strict=True)
-            expected_path = Path(old["ir_path"]).resolve(strict=True)
+            fresh_path = shared_ir.module_path(fresh.pop("ir_path"), output).resolve(strict=True)
+            expected_path = shared_ir.module_path(old["ir_path"], destination_dir).resolve(strict=True)
             fresh["block_pcs"] = [
                 pc for pc in fresh["block_pcs"]
                 if int(pc, 0) not in owned
@@ -1035,7 +1037,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
                 f"while translating entry 0x{address:08x}",
                 flush=True,
             )
-        source = Path(function["ir_path"])
+        source = shared_ir.module_path(function["ir_path"], output_dir)
         destination = metadata_path.parent / source.name
         if (destination.exists() or
             source.name in published_names):
@@ -1043,7 +1045,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
         if not source.is_file():
             raise ValueError(f"missing batched IR module: {source}")
         function["block_pcs"] = owned_blocks
-        function["ir_path"] = str(destination)
+        function["ir_path"] = destination.name
         pending.append((source, destination, function))
         published_owners.update(int(pc, 0) for pc in owned_blocks)
         published_names.add(source.name)
@@ -1108,7 +1110,8 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
         metadata = shared_ir.read_json(metadata_path)
         # Exact path equality is sufficient for the common case. Only
         # canonicalize individual paths if their spellings differ.
-        module_paths = {Path(fn["ir_path"]) for fn in metadata["functions"]}
+        module_paths = {shared_ir.module_path(fn["ir_path"], metadata_path.parent)
+                        for fn in metadata["functions"]}
         record_paths = {Path(name) for name in records}
         same_paths = module_paths == record_paths or (
             {p.resolve() for p in module_paths} ==
@@ -1534,6 +1537,7 @@ def main(argv=None):
             elif functions != "all":
                 command.append(f"--max-functions={functions}")
             run(command)
+            shared_ir.normalize_metadata(metadata_path, elf)
 
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if entry not in covered_pcs(metadata):
@@ -1564,7 +1568,7 @@ def main(argv=None):
                     "(for --no-recompile) the linked guest library"
                 )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            source_elf = Path(metadata.get("elf", "")).resolve()
+            source_elf = shared_ir.elf_path(metadata, metadata_path.parent)
             if source_elf != elf:
                 raise ValueError(
                     "--no-recompile ELF does not match existing translation: "
@@ -1606,7 +1610,8 @@ def main(argv=None):
                         args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs,
                         reuse_objects=direct_relink or bool(pending_append and objects_complete),
                         appended_ir=(
-                            [Path(item["ir_path"]) for item in pending_append]
+                            [shared_ir.module_path(item["ir_path"], metadata_path.parent)
+                             for item in pending_append]
                             if pending_append and not objects_complete else None
                         ),
                     )

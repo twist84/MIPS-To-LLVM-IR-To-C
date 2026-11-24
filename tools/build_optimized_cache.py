@@ -76,7 +76,7 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
         staged = []
         try:
             for entry in old["functions"][count:]:
-                source = Path(entry["ir_path"])
+                source = shared_ir.module_path(entry["ir_path"], old_path.parent)
                 destination = metadata_path.parent / source.name
                 if destination.exists():
                     raise ValueError(f"shared IR filename collision: {destination}")
@@ -85,7 +85,7 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
                 shutil.copyfile(source, temporary)
                 temporary.replace(destination)
                 committed.append(destination)
-                current["functions"].append(dict(entry, ir_path=str(destination)))
+                current["functions"].append(dict(entry, ir_path=destination.name))
             current["function_count"] = old_count
             shared_ir.write_json(metadata_path, current)
             shared_ir.publish(metadata_path, ir_sources, hashes)
@@ -110,7 +110,8 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
         name = Path(item["input"]).name
         if item["ir_sha256"] != current_hashes.get(name):
             raise ValueError("legacy object does not match shared IR")
-        item["input"] = str(metadata_path.parent / name)
+        item["input"] = shared_ir.relative_path(metadata_path.parent / name, manifest_path.parent)
+    manifest["path_format"] = "manifest-relative-v1"
     shared_ir.write_json(manifest_path, manifest)
     shared_ir.attach(work, metadata_path.parent)
 
@@ -164,7 +165,7 @@ def validate_source_ir(elf, source_work, source_opt, ir_sources):
     """
     metadata_path = shared_ir.ir_directory(source_work) / "ee_functions.json"
     metadata = shared_ir.read_json(metadata_path)
-    if (Path(metadata.get("elf", "")).resolve() != elf or
+    if (shared_ir.elf_path(metadata, metadata_path.parent) != elf or
             run_game.elf_entry(elf) not in run_game.covered_pcs(metadata)):
         raise ValueError("shared IR source ELF/entry mismatch")
     if shared_ir.active(metadata_path):

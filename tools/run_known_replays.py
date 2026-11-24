@@ -153,6 +153,7 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
             "\nUse --allow-ir-mismatches in an ISOLATED work directory only "
             "after inspecting the differences; parity is not established."
         )
+    run_game.shared_ir.normalize_metadata(metadata_path, elf)
     # Emit all guest objects once, then link one library. Never run a guest
     # between function batches or rebuild guest code just for host changes.
     lib_name = "game-translated.dll" if os.name == "nt" else (
