@@ -2142,6 +2142,23 @@ int main(int argc, char** argv)
             "(expected a positive integer)\n");
         return 2;
     }
+    bool trace_buffered = false;
+    std::string trace_buffer_environment;
+    const char* trace_buffer_setting = read_host_environment(
+        "SDBZ_TRACE_BUFFERED", &trace_buffer_environment);
+    if (trace_buffer_setting != nullptr)
+    {
+        if (std::strcmp(trace_buffer_setting, "1") == 0)
+        {
+            trace_buffered = true;
+        }
+        else if (std::strcmp(trace_buffer_setting, "0") != 0)
+        {
+            std::fprintf(stderr,
+                "invalid SDBZ_TRACE_BUFFERED (expected 0 or 1)\n");
+            return 2;
+        }
+    }
     // Reproducible, explicitly requested controller response to a real
     // guest SIO2 pad poll. Never press Cross by default.
     uint32_t pad0_cross_first_poll = 0u;
@@ -2193,9 +2210,25 @@ int main(int argc, char** argv)
     }
     if (trace)
     {
-        // Preserve recent trace lines when the Python host kills a timed-out
-        // process: redirected stdout is normally fully buffered on Windows.
-        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        // Keep the historical immediate trace by default. The optional
+        // buffered mode coalesces CRT writes without dropping any events.
+        // The buffer must outlive stdout, including process-exit flushing.
+        if (trace_buffered)
+        {
+            static char trace_buffer[64u * 1024u];
+            if (std::setvbuf(stdout, trace_buffer, _IOFBF,
+                    sizeof(trace_buffer)) != 0)
+            {
+                std::fprintf(stderr, "failed to configure buffered EE trace\n");
+                return 2;
+            }
+            std::printf("EE trace output: buffered (64 KiB; flushed at progress checkpoints)\n");
+        }
+        else
+        {
+            // Preserve recent lines if the Python host kills a timeout.
+            std::setvbuf(stdout, nullptr, _IONBF, 0);
+        }
         if (dispatch_trace_every > 1u)
         {
             std::printf(
@@ -3880,6 +3913,10 @@ int main(int argc, char** argv)
             // avoid repeated JSON I/O in fast guest paths, without using host
             // time to advance any EE, IOP, DMA, scanout or interrupt state.
             const auto report_start = std::chrono::steady_clock::now();
+            if (trace && trace_buffered)
+            {
+                std::fflush(stdout);
+            }
 #ifdef EE_ENABLE_WEBGPU
             graphics_probe.set_gpu_progress(
                 webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
@@ -4560,6 +4597,12 @@ int main(int argc, char** argv)
             dispatched - last_progress_dispatch >= k_report_progress_interval)
         {
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::progress_log);
+            // Keep stdout traces ahead of the progress line in a merged
+            // stdout/stderr capture; report-less traces remain size-bounded.
+            if (trace && trace_buffered)
+            {
+                std::fflush(stdout);
+            }
             const double elapsed_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wall_start
             ).count();

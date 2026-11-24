@@ -1708,6 +1708,31 @@ def main():
             assert report["history"][-1]["dispatch"] == report["dispatches"], report
             assert len(report["gpr_lo"]) == 32, report
             assert (root / "out" / "ir" / "ee_functions.json").is_file()
+            # Buffered trace must retain dispatch lines and terminal guest
+            # state, including on the incomplete guest-return exit path.
+            buffered_report = root / "buffered_boot.json"
+            trace_env = dict(os.environ, SDBZ_TRACE_BUFFERED="1")
+            buffered = subprocess.run(
+                [
+                    sys.executable, str(source / "tools" / "run_game.py"),
+                    str(elf), "--build-dir", str(build),
+                    "--work-dir", str(root / "out"), "--max-dispatches=8",
+                    "--trace", "--kseg-ram", "--no-recompile",
+                    "--report", str(buffered_report),
+                ],
+                env=trace_env, capture_output=True, text=True, check=False,
+            )
+            assert buffered.returncode == result.returncode, buffered
+            assert "EE trace output: buffered" in buffered.stdout, buffered.stdout
+            assert [line for line in buffered.stdout.splitlines()
+                    if line.startswith("dispatch=")] == [
+                        line for line in result.stdout.splitlines()
+                        if line.startswith("dispatch=")]
+            buffered_state = json.loads(buffered_report.read_text(encoding="utf-8"))
+            for field in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
+                          "guest_instruction_attempts", "gpr_lo", "history"):
+                assert buffered_state[field] == report[field], field
+
             # Cycle-model prerequisite: an ordered trace of native-executed
             # instruction PCs, without pretending attempt numbers are EE cycles.
             # BEQL is NOT taken: its delay slot at 0x00100010 is annulled.
