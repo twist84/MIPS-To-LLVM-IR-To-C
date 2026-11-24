@@ -2284,6 +2284,50 @@ def main():
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert metadata["function_count"] == 2, metadata
 
+            # Verify a separate native O2 variant from live-expanded IR.
+            original_cache = root / "out" / "translation-cache.json"
+            original_bytes = original_cache.read_bytes()
+            original_map = metadata_path.read_bytes()
+            variant = root / "optimized"
+            prepare = [
+                sys.executable, str(source / "tools" / "build_optimized_cache.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--source-work-dir", str(root / "out"),
+                "--work-dir", str(variant),
+            ]
+            for expected_message in ("Built O2 EE variant", "Reusing verified O2 EE cache"):
+                result = subprocess.run(prepare, capture_output=True, text=True, check=False)
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert expected_message in result.stdout, result.stdout
+                assert original_cache.read_bytes() == original_bytes
+                assert metadata_path.read_bytes() == original_map
+            variant_cache = json.loads((variant / "translation-cache.json").read_text(encoding="utf-8"))
+            assert variant_cache["emit_opt"] == 2
+            assert variant_cache["ir_hashes"] == json.loads(original_bytes)["ir_hashes"]
+            variant_metadata = json.loads((variant / "ir" / "ee_functions.json").read_text(encoding="utf-8"))
+            assert len(variant_metadata["functions"]) == 2
+            assert all(Path(fn["ir_path"]).parent == variant / "ir"
+                       for fn in variant_metadata["functions"])
+            states = []
+            for work_dir, opt in ((root / "out", 0), (variant, 2)):
+                report = work_dir / "comparison.json"
+                result = subprocess.run([
+                    sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                    "--build-dir", str(build), "--work-dir", str(work_dir),
+                    f"--emit-opt={opt}", "--max-dispatches=8", "--no-recompile",
+                    f"--report={report}",
+                ], capture_output=True, text=True, check=False)
+                assert report.is_file(), result.stdout + result.stderr
+                states.append(json.loads(report.read_text(encoding="utf-8")))
+            for key in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert states[0][key] == states[1][key], (key, states)
+            module = Path(variant_metadata["functions"][0]["ir_path"])
+            module.write_bytes(module.read_bytes() + b"\n; modified\n")
+            refused = subprocess.run(prepare, capture_output=True, text=True, check=False)
+            assert refused.returncode != 0, refused.stdout + refused.stderr
+            assert original_cache.read_bytes() == original_bytes
+
         # Signed word ALU ops consume the low words. A delay-slot overflow
         # commits preceding writes, preserves rd, and reports the branch EPC.
         with tempfile.TemporaryDirectory(prefix="ee-signed-word-") as tmp:

@@ -77,6 +77,16 @@ echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache]
 exit /b 2
 
 :launcher_options_ready
+rem Optimized native object variants never replace the O0 baseline.
+if not defined SDBZ_EE_OPT set "SDBZ_EE_OPT=0"
+if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" (
+    echo ERROR: SDBZ_EE_OPT must be 0, 1, 2 or 3.
+    exit /b 2
+)
+if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+    echo ERROR: Optimized EE cache experiments require --full.
+    exit /b 2
+)
 if defined ACCEPT_NEW_IR if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
     echo ERROR: --accept-new-ir requires --recover-cache.
     exit /b 2
@@ -370,6 +380,22 @@ if not defined CACHE_FLAG (
     echo Guest translation cache is not reusable; regenerating IR automatically.
 )
 
+rem Fork verified guest IR into an independent optimization cache.
+if not "%SDBZ_EE_OPT%"=="0" (
+    if not defined CACHE_FLAG (
+        echo ERROR: Optimized EE replay requires a verified O0 cache.
+        exit /b 1
+    )
+    python tools\build_optimized_cache.py "%GAME_ELF%" ^
+        --build-dir build --config Release ^
+        --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O%SDBZ_EE_OPT%" ^
+        --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
+    if errorlevel 1 exit /b 1
+    set "WORK_DIR=%WORK_DIR%-O%SDBZ_EE_OPT%"
+)
+if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%WORK_DIR%\gs-webgpu.ppm"
+echo EE native object optimization: O%SDBZ_EE_OPT%
+
 echo === Starting extracted-disc HLE boot session ===
 set "SESSION_ARGS=--quick-probe --no-iop-catalog"
 set "REPORT_NAME=quick-probe.json"
@@ -462,7 +488,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --hle-startup ^
     --kseg-ram ^
     --emit-jobs=%EMIT_JOBS% ^
-    --emit-opt=0 ^
+    --emit-opt=%SDBZ_EE_OPT% ^
     --max-dispatches=%MAX_DISPATCHES% ^
     --max-expansion-dispatches=%MAX_EXPANSION_DISPATCHES% ^
     --max-replay-dispatches=%MAX_REPLAY_DISPATCHES% ^
