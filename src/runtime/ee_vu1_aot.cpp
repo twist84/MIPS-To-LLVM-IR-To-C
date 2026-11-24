@@ -66,6 +66,17 @@ uint32_t native_kick(void* context, uint32_t address)
     auto& kick = *static_cast<s_native_kick_context*>(context);
     return c_ee_vu1::kick(kick.m_data, address, kick.m_path1, kick.m_issue) ? 1u : 0u;
 }
+uint64_t native_efu(uint32_t index, uint32_t component, uint32_t x,
+    uint32_t y, uint32_t z, uint32_t w)
+{
+    uint32_t value = 0u;
+    uint32_t latency = 0u;
+    if (!c_ee_vu1::efu({x, y, z, w}, index, component, value, latency))
+    {
+        return 0u;
+    }
+    return (static_cast<uint64_t>(latency) << 32u) | value;
+}
 } // namespace
 
 c_ee_vu1_aot::~c_ee_vu1_aot()
@@ -329,7 +340,8 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 0u, &steps);
             steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), &next.m_q, &next.m_mac,
-                &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip, native_kick, &kick);
+                &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip, native_kick, &kick,
+                &next.m_p, &next.m_r, native_efu);
             if (steps < 2u || steps > c_ee_vu1::k_max_steps ||
                 cycles < steps || cycles > steps * 64u ||
                 last_pc >= c_ee_vu1::k_memory_size || (last_pc & 7u) != 0u ||

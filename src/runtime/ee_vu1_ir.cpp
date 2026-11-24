@@ -459,6 +459,24 @@ bool is_q_pair(uint32_t lo, uint32_t hi)
     return index >= 0x38u && index <= 0x3bu;
 }
 
+bool is_efu_index(uint32_t index)
+{
+    return (index >= 0x70u && index <= 0x76u) ||
+        (index >= 0x78u && index <= 0x7au) ||
+        (index >= 0x7cu && index <= 0x7eu);
+}
+
+bool is_p_pair(uint32_t lo, uint32_t hi)
+{
+    if ((hi & 0x80000000u) != 0u || lo >> 25u != 0x40u ||
+        (lo & 0x3cu) != 0x3cu)
+    {
+        return false;
+    }
+    const uint32_t index = (((lo >> 6u) & 31u) << 2u) | (lo & 3u);
+    return is_efu_index(index) || index == 0x7bu || index == 0x64u;
+}
+
 bool is_kick_pair(uint32_t lo, uint32_t hi)
 {
     return (hi & 0x80000000u) == 0u && lo >> 25u == 0x40u &&
@@ -496,18 +514,23 @@ public:
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, ptr %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
             "ptr %last_pc_out, ptr %acc, ptr %clip, ptr %kick, "
-            "ptr %kick_context) {\nentry:\n";
+            "ptr %kick_context, ptr %p, ptr %r, ptr %efu) {\nentry:\n";
     }
 
     // The dynamic path uses the same per-pair arithmetic emitter as the
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
     void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
-        bool flags, bool q)
+        bool flags, bool q, bool p)
     {
         m_dynamic = true;
         m_flag_pipeline = flags;
         m_q_pipeline = q;
+        m_p_pipeline = p;
+        if (p)
+        {
+            init_scalar("p");
+        }
         if (q)
         {
             init_scalar("q");
@@ -587,6 +610,10 @@ public:
         {
             sync_scalar("q", cycle);
         }
+        if (m_p_pipeline)
+        {
+            sync_scalar("p", cycle);
+        }
         if (m_flag_pipeline)
         {
             m_issue_cycle = cycle;
@@ -630,6 +657,10 @@ public:
         {
             wait_scalar("q");
         }
+        if (m_p_pipeline)
+        {
+            wait_scalar("p");
+        }
         const auto cycle = operation("load i32, ptr %cycle, align 4");
         const auto elapsed = operation("sub i32 " + cycle + ", 16");
         line("store i32 " + elapsed + ", ptr %cycles_out, align 4");
@@ -671,7 +702,7 @@ public:
         if (!m_pending_clip.empty())
         {
             line("store i32 " + m_pending_clip + ", ptr %clip, align 4");
-            const auto now = m_q_pipeline ?
+            const auto now = (m_q_pipeline || m_p_pipeline) ?
                 operation("load i32, ptr %cycle, align 4") : m_issue_cycle;
             push_ring("clip", now, m_pending_clip);
         }
@@ -817,6 +848,14 @@ public:
                 write_vector(ft, mask, values);
                 return true;
             }
+            if (index >= 0x40u && index <= 0x43u)
+            {
+                return emit_random_lower(lo, index, fs, ft, mask);
+            }
+            if (m_p_pipeline && (is_efu_index(index) || index == 0x64u || index == 0x7bu))
+            {
+                return emit_p_lower(lo, index, fs, ft, mask);
+            }
             if (m_dynamic && index == 0x6cu)
             {
                 const auto address = operation("zext i16 " + reg(is) + " to i32");
@@ -881,6 +920,74 @@ private:
     {
         line("call void @vu_scalar_schedule(" + scalar_args(name) + ", ptr %cycle, i32 " +
             value + ", i32 " + std::to_string(latency) + ")");
+    }
+
+    bool emit_random_lower(uint32_t lo, uint32_t index, uint32_t fs,
+        uint32_t ft, uint32_t mask)
+    {
+        auto current = operation("load i32, ptr %r, align 4");
+        if (index == 0x42u || index == 0x43u)
+        {
+            const auto source = vf(fs, (lo >> 21u) & 3u);
+            const auto value = index == 0x42u ? source :
+                operation("xor i32 " + current + ", " + source);
+            const auto bits = operation("and i32 " + value + ", 8388607");
+            line("store i32 " + bits + ", ptr %r, align 4");
+            return true;
+        }
+        if (index == 0x40u)
+        {
+            const auto a = operation("lshr i32 " + current + ", 4");
+            const auto b = operation("lshr i32 " + current + ", 22");
+            const auto mix = operation("xor i32 " + a + ", " + b);
+            const auto bit = operation("and i32 " + mix + ", 1");
+            const auto shifted = operation("shl i32 " + current + ", 1");
+            const auto combined = operation("or i32 " + shifted + ", " + bit);
+            current = operation("and i32 " + combined + ", 8388607");
+            line("store i32 " + current + ", ptr %r, align 4");
+        }
+        const auto bits = operation("and i32 " + current + ", 8388607");
+        const auto value = operation("or i32 " + bits + ", 1065353216");
+        const std::array<std::string, 4> values{value, value, value, value};
+        write_vector(ft, mask, values);
+        return true;
+    }
+
+    bool emit_p_lower(uint32_t lo, uint32_t index, uint32_t fs,
+        uint32_t ft, uint32_t mask)
+    {
+        if (index == 0x64u)
+        {
+            const auto value = operation("load i32, ptr %p, align 4");
+            const std::array<std::string, 4> values{value, value, value, value};
+            write_vector(ft, mask, values);
+            return true;
+        }
+        if (index == 0x7bu)
+        {
+            wait_scalar("p");
+            return true;
+        }
+        // EFU math is a shared host callback, preserving the interpreter's
+        // float normalization and platform math implementation. The P
+        // dependency pipeline and destination writeback remain native IR.
+        std::string call = "call i64 %efu(i32 " + std::to_string(index) +
+            ", i32 " + std::to_string((lo >> 21u) & 3u);
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            call += ", i32 " + vf(fs, lane);
+        }
+        const auto result = operation(call + ")");
+        const auto value = operation("trunc i64 " + result + " to i32");
+        const auto latency64 = operation("lshr i64 " + result + ", 32");
+        const auto latency = operation("trunc i64 " + latency64 + " to i32");
+        const auto valid = operation("icmp ne i32 " + latency + ", 0");
+        const auto label = "efu_ok_" + std::to_string(m_counter++);
+        line("br i1 " + valid + ", label %" + label + ", label %fail");
+        m_ir += label + ":\n";
+        line("call void @vu_scalar_schedule(" + scalar_args("p") +
+            ", ptr %cycle, i32 " + value + ", i32 " + latency + ")");
+        return true;
     }
 
     bool emit_q_lower(uint32_t lo, uint32_t index, uint32_t fs, uint32_t ft)
@@ -1498,6 +1605,7 @@ private:
     bool m_dynamic = false;
     bool m_flag_pipeline = false;
     bool m_q_pipeline = false;
+    bool m_p_pipeline = false;
     std::string m_flag_time;
     std::string m_issue_cycle;
     std::string m_pending_clip;
@@ -1528,7 +1636,7 @@ s_ee_vu1_ir_program vu1_lift_straight_line_ir(
         const uint32_t lo = read_word(code.data() + pc);
         const uint32_t hi = read_word(code.data() + pc + 4u);
         if (is_flag_pair(lo, hi) || is_q_pair(lo, hi) ||
-            is_kick_pair(lo, hi) || !emitter.emit(lo, hi))
+            is_p_pair(lo, hi) || is_kick_pair(lo, hi) || !emitter.emit(lo, hi))
         {
             return {};
         }
@@ -1577,6 +1685,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     bool has_flags = false;
     bool has_q = false;
     bool has_kick = false;
+    bool has_p = false;
     for (size_t index = 0u; index < queue.size(); ++index)
     {
         // Avoid pathological branch-in-delay graphs at lift time.
@@ -1593,6 +1702,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         has_flags |= is_flag_pair(lo, hi);
         has_q |= is_q_pair(lo, hi);
         has_kick |= is_kick_pair(lo, hi);
+        has_p |= is_p_pair(lo, hi);
         if (ending)
         {
             has_end = true;
@@ -1623,12 +1733,12 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             enqueue(npc, sequential, next_end);
         }
     }
-    if ((!has_branch && !has_flags && !has_q && !has_kick) || !has_end)
+    if ((!has_branch && !has_flags && !has_q && !has_kick && !has_p) || !has_end)
     {
         return {};
     }
     c_straight_line_emitter emitter;
-    emitter.begin_dynamic(start, reached, has_flags, has_q);
+    emitter.begin_dynamic(start, reached, has_flags, has_q, has_p);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))

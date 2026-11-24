@@ -69,6 +69,46 @@ ee::t_vu1_code branch_program()
     return code;
 }
 
+ee::t_vu1_code efu_program()
+{
+    ee::t_vu1_code code{};
+    uint32_t pc = k_start;
+    const auto append = [&](uint32_t lo, uint32_t hi = 0x000002ffu)
+    {
+        pair(code, pc, lo, hi);
+        pc = (pc + 8u) & 0x3fffu;
+    };
+    const auto special = [](uint32_t index, uint32_t fs, uint32_t ft, uint32_t mask)
+    {
+        return 0x80000000u | (mask << 21u) | (ft << 16u) |
+            (fs << 11u) | ((index >> 2u) << 6u) | 0x3cu | (index & 3u);
+    };
+    constexpr uint32_t ops[] = {
+        0x70u, 0x71u, 0x72u, 0x73u, 0x74u, 0x75u, 0x76u,
+        0x78u, 0x79u, 0x7au, 0x7cu, 0x7du, 0x7eu
+    };
+    uint32_t slot = 0x100u;
+    for (uint32_t op : ops)
+    {
+        // Finite, signed zero, exponent-255 and zero vector cases.
+        for (uint32_t source : {2u, 3u, 4u})
+        {
+            append(special(op, source, 0u, 0u));
+            append(special(0x64u, 0u, 16u, 15u)); // previous P
+            append(special(0x7bu, 0u, 0u, 0u)); // WAITP
+            append(special(0x64u, 0u, 17u, 15u));
+            append((1u << 25u) | (15u << 21u) | (16u << 11u) | slot++);
+            append((1u << 25u) | (15u << 21u) | (17u << 11u) | slot++);
+        }
+    }
+    // Producers serialize, Q and P overlap, and E drains both.
+    append(special(0x73u, 2u, 0u, 0u));
+    append(special(0x70u, 3u, 0u, 0u));
+    append(special(0x38u, 2u, 3u, 0u), 0x400002ffu);
+    append(special(0x7eu, 3u, 0u, 0u));
+    return code;
+}
+
 struct s_outcome
 {
     ee::s_ee_vu1_state m_state{};
@@ -161,6 +201,11 @@ int main(int argc, char** argv)
         {
             return 1;
         }
+        const auto efu = efu_program();
+        if (!same(run(efu, &backend), run(efu, nullptr)))
+        {
+            return 1;
+        }
         size_t files = 0u;
         for (const auto& item : std::filesystem::directory_iterator(argv[2]))
         {
@@ -169,10 +214,10 @@ int main(int argc, char** argv)
                 ++files;
             }
         }
-        return files == 3u ? 0 : 1;
+        return files == 4u ? 0 : 1;
     }
     if (std::strcmp(argv[1], "run") != 0 ||
-        backend.open_directory(argv[2], &error) != 2u || !error.empty())
+        backend.open_directory(argv[2], &error) != 3u || !error.empty())
     {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
@@ -253,6 +298,11 @@ int main(int argc, char** argv)
     {
         return 1;
     }
-    std::puts("VU1 AOT native dispatch, dynamic control flow, rollback and fallback: PASS");
+    const auto efu = efu_program();
+    if (!same(run(efu, &backend), run(efu, nullptr)) || backend.native_runs() != 5u)
+    {
+        return 1;
+    }
+    std::puts("VU1 AOT native dispatch, scalar pipelines, PATH1 rollback and fallback: PASS");
     return 0;
 }

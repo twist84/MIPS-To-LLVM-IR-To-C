@@ -512,11 +512,9 @@ bool branch_delay_exempt(uint32_t lower)
 
 // Reference EFU arithmetic from vu_ops.hpp::efu; pipeline latencies from
 // the VU manual. P retains its previous value until the producer retires.
-bool efu_result(const s_ee_vu1_state& state, uint32_t index,
-                uint32_t fs, uint32_t fsf,
-                uint32_t& value, uint32_t& latency)
+bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
+                uint32_t fsf, uint32_t& value, uint32_t& latency)
 {
-    const auto& source = state.m_vf[fs];
     const float x = to_float(source[0]);
     const float y = to_float(source[1]);
     const float z = to_float(source[2]);
@@ -779,7 +777,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         {
             uint32_t value = 0u;
             uint32_t latency = 0u;
-            if (!efu_result(state, index, fs, (lo >> 21u) & 3u,
+            if (!efu_result(state.m_vf[fs], index, (lo >> 21u) & 3u,
                             value, latency))
             {
                 return false;
@@ -939,6 +937,12 @@ bool c_ee_vu1::kick(const std::array<uint8_t, k_memory_size>& data,
     uint32_t address, std::vector<uint8_t>& output, s_ee_vu1_issue& issue)
 {
     return xgkick(data, address, output, issue);
+}
+
+bool c_ee_vu1::efu(const std::array<uint32_t, 4>& source, uint32_t index,
+    uint32_t component, uint32_t& value, uint32_t& latency)
+{
+    return component < 4u && efu_result(source, index, component, value, latency);
 }
 
 bool c_ee_vu1::run(

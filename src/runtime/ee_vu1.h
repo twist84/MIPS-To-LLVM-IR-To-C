@@ -61,6 +61,10 @@ public:
     static bool kick(const std::array<uint8_t, k_memory_size>& data,
         uint32_t address, std::vector<uint8_t>& output, s_ee_vu1_issue& issue);
 
+    // Shared EFU arithmetic, including host-specific transcendental results.
+    static bool efu(const std::array<uint32_t, 4>& source, uint32_t index,
+        uint32_t component, uint32_t& value, uint32_t& latency);
+
     static bool run(
         s_ee_vu1_state& state,
         std::array<uint8_t, k_memory_size>& code,

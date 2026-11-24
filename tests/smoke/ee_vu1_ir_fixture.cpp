@@ -51,7 +51,7 @@ bool rejection_tests()
     {
         return false;
     }
-    pair(code, 8u, 0x8000073du, k_upper); // unsupported EFU
+    pair(code, 8u, 0x800006fdu, k_upper); // unknown lower index 0x6d
     return ee::vu1_lift_straight_line_ir(code, 0u).m_ir.empty();
 }
 } // namespace
@@ -327,6 +327,21 @@ int main(int argc, char** argv)
         append((0x1cu << 25u) | (8u << 16u));
         append(scalar(0x38u, 21u, 22u, 0u, 0u)); // E drain
     }
+    const bool random_case = std::strcmp(argv[2], "random") == 0;
+    if (random_case)
+    {
+        const auto special = [](uint32_t index, uint32_t fs, uint32_t ft, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (fs << 11u) | ((index >> 2u) << 6u) | 0x3cu | (index & 3u);
+        };
+        append(special(0x42u, 21u, 0u, 0u)); // RINIT.x
+        append(special(0x40u, 0u, 26u, 10u)); // RNEXT.xz
+        append(special(0x41u, 0u, 27u, 15u)); // RGET
+        append(special(0x43u, 22u, 0u, 2u)); // RXOR.z
+        append(special(0x40u, 0u, 0u, 15u)); // advance R even with VF0
+        append(special(0x41u, 0u, 28u, 15u));
+    }
     const bool branches = std::strcmp(argv[2], "branches") == 0 ||
         std::strcmp(argv[2], "branch-wrap") == 0 ||
         std::strcmp(argv[2], "acc-branches") == 0;
@@ -398,6 +413,8 @@ int main(int argc, char** argv)
     state.m_mac = 0x1234u;
     state.m_status = 0x30u;
     state.m_clip = 0x345678u;
+    state.m_p = 0x12345678u;
+    state.m_r = 0x54321u;
     state.m_vf[2] = {0x3f800000u, 0x80000001u, 0x7fffffffu, 0xbf800000u};
     state.m_vf[3] = {0x40000000u, 0x80000000u, 0x7f7fffffu, 0x3f800000u};
     state.m_vf[6] = {11u, 22u, 33u, 44u};
@@ -431,7 +448,8 @@ int main(int argc, char** argv)
             std::printf(" %u", value);
         }
     }
-    std::printf(" %u %u %u %u", state.m_mac, state.m_status, state.m_clip, state.m_q);
+    std::printf(" %u %u %u %u %u %u", state.m_mac, state.m_status, state.m_clip,
+        state.m_q, state.m_p, state.m_r);
     for (uint32_t value : state.m_acc)
     {
         std::printf(" %u", value);
