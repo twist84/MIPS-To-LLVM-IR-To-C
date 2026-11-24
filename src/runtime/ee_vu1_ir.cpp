@@ -459,6 +459,13 @@ bool is_q_pair(uint32_t lo, uint32_t hi)
     return index >= 0x38u && index <= 0x3bu;
 }
 
+bool is_kick_pair(uint32_t lo, uint32_t hi)
+{
+    return (hi & 0x80000000u) == 0u && lo >> 25u == 0x40u &&
+        (lo & 0x3cu) == 0x3cu &&
+        ((((lo >> 6u) & 31u) << 2u) | (lo & 3u)) == 0x6cu;
+}
+
 bool branch_delay_exempt(uint32_t lo)
 {
     switch (lo >> 25u)
@@ -488,7 +495,8 @@ public:
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, ptr %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
-            "ptr %last_pc_out, ptr %acc, ptr %clip) {\nentry:\n";
+            "ptr %last_pc_out, ptr %acc, ptr %clip, ptr %kick, "
+            "ptr %kick_context) {\nentry:\n";
     }
 
     // The dynamic path uses the same per-pair arithmetic emitter as the
@@ -807,6 +815,17 @@ public:
                 const auto value = operation("sext i16 " + reg(is) + " to i32");
                 const std::array<std::string, 4> values{value, value, value, value};
                 write_vector(ft, mask, values);
+                return true;
+            }
+            if (m_dynamic && index == 0x6cu)
+            {
+                const auto address = operation("zext i16 " + reg(is) + " to i32");
+                const auto result = operation("call i32 %kick(ptr %kick_context, i32 " +
+                    address + ")");
+                const auto ok = operation("icmp ne i32 " + result + ", 0");
+                const auto label = "kick_ok_" + std::to_string(m_counter++);
+                line("br i1 " + ok + ", label %" + label + ", label %fail");
+                m_ir += label + ":\n";
                 return true;
             }
             if (index == 0x68u || index == 0x69u)
@@ -1508,7 +1527,8 @@ s_ee_vu1_ir_program vu1_lift_straight_line_ir(
     {
         const uint32_t lo = read_word(code.data() + pc);
         const uint32_t hi = read_word(code.data() + pc + 4u);
-        if (is_flag_pair(lo, hi) || is_q_pair(lo, hi) || !emitter.emit(lo, hi))
+        if (is_flag_pair(lo, hi) || is_q_pair(lo, hi) ||
+            is_kick_pair(lo, hi) || !emitter.emit(lo, hi))
         {
             return {};
         }
@@ -1556,6 +1576,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     bool has_branch = false;
     bool has_flags = false;
     bool has_q = false;
+    bool has_kick = false;
     for (size_t index = 0u; index < queue.size(); ++index)
     {
         // Avoid pathological branch-in-delay graphs at lift time.
@@ -1571,6 +1592,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         has_branch |= branch;
         has_flags |= is_flag_pair(lo, hi);
         has_q |= is_q_pair(lo, hi);
+        has_kick |= is_kick_pair(lo, hi);
         if (ending)
         {
             has_end = true;
@@ -1601,7 +1623,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             enqueue(npc, sequential, next_end);
         }
     }
-    if ((!has_branch && !has_flags && !has_q) || !has_end)
+    if ((!has_branch && !has_flags && !has_q && !has_kick) || !has_end)
     {
         return {};
     }

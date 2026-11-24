@@ -57,6 +57,10 @@ public:
     static constexpr uint32_t k_memory_size = 16384u;
     static constexpr uint32_t k_max_steps = 100000u;
 
+    // Shared validated packet transfer for both interpreter and AOT.
+    static bool kick(const std::array<uint8_t, k_memory_size>& data,
+        uint32_t address, std::vector<uint8_t>& output, s_ee_vu1_issue& issue);
+
     static bool run(
         s_ee_vu1_state& state,
         std::array<uint8_t, k_memory_size>& code,

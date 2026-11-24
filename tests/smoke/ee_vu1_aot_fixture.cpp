@@ -56,11 +56,14 @@ ee::t_vu1_code branch_program()
     pair(code, 0u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
         (6u << 11u), upper(0x3eu, 0x2eu >> 2u, 2u, 3u, 15u));
     pair(code, 8u, branch(0x20u, 0u, 0u, 6u), k_upper | 0x40000000u);
-    pair(code, 16u, 0x80000072u | (7u << 16u) | (7u << 11u), k_upper);
-    pair(code, 0x20u, branch(0x25u, 2u, 8u, 0u), k_upper);
-    // Q producer in the JALR delay slot is drained before E completion.
-    pair(code, 0x28u, 0x80000000u | (3u << 16u) | (2u << 11u) |
+    // Q producer in E delay slot is drained before completion.
+    pair(code, 16u, 0x80000000u | (3u << 16u) | (2u << 11u) |
         ((0x38u >> 2u) << 6u) | 0x3cu, k_upper);
+    pair(code, 0x20u, branch(0x25u, 2u, 8u, 0u), k_upper);
+    // A successful XGKICK in the JALR delay slot must be rolled back
+    // if the later indirect target is unknown.
+    pair(code, 0x28u, 0x80000000u | (1u << 11u) |
+        ((0x6cu >> 2u) << 6u) | 0x3cu, k_upper);
     pair(code, 0x30u, k_lower_nop, k_upper | 0x40000000u);
     pair(code, 0x38u, k_lower_nop, k_upper);
     return code;
@@ -97,6 +100,12 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
     s.m_status = 0x30u;
     s.m_clip = 0x123456u;
     result.m_data.fill(0x5au);
+    if (branching)
+    {
+        // The preceding SQ writes VF6 to quadword 1022; supply an EOP
+        // IMAGE tag there and a single payload qword at 1023.
+        s.m_vf[6] = {0x00008001u, 0x08000000u, 0u, 0u};
+    }
     result.m_path1 = {1u, 2u, 3u, 4u};
     result.m_ok = ee::c_ee_vu1::run(s, code, result.m_data, k_start, 123u,
         456u, result.m_path1, &result.m_issue);
@@ -202,7 +211,7 @@ int main(int argc, char** argv)
     ee::s_ee_vu1_state candidate{};
     candidate.m_initialized = true;
     candidate.m_vf[0][3] = 0x3f800000u;
-    candidate.m_vf[6] = {1u, 2u, 3u, 4u};
+    candidate.m_vf[6] = {0x00008001u, 0x08000000u, 0u, 0u};
     candidate.m_vi[1] = 0xfffeu;
     candidate.m_vi[2] = 0x100u;
     const auto original = candidate;
@@ -210,14 +219,28 @@ int main(int argc, char** argv)
     memory.fill(0xa5u);
     const auto original_memory = memory;
     ee::s_ee_vu1_issue issue{};
-    if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, issue) ||
+    std::vector<uint8_t> path1{1u, 2u, 3u, 4u};
+    const auto original_path1 = path1;
+    if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, path1, issue) ||
         candidate.m_vi != original.m_vi || candidate.m_vf != original.m_vf ||
         candidate.m_acc != original.m_acc ||
         candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
         candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
         candidate.m_clip != original.m_clip || candidate.m_q != original.m_q ||
-        memory != original_memory || issue.m_steps != 0u ||
+        memory != original_memory || path1 != original_path1 || issue.m_steps != 0u ||
         backend.native_runs() != 4u || backend.fallbacks() != 2u)
+    {
+        return 1;
+    }
+    // A malformed tag also rejects without publishing any bytes.
+    candidate = original;
+    candidate.m_vi[2] = 1u;
+    candidate.m_vf[6] = {0x0000ffffu, 0x08000000u, 0u, 0u};
+    const auto malformed = candidate;
+    if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, path1, issue) ||
+        candidate.m_vf != malformed.m_vf || candidate.m_vi != malformed.m_vi ||
+        candidate.m_clip != malformed.m_clip || memory != original_memory ||
+        path1 != original_path1 || backend.fallbacks() != 3u)
     {
         return 1;
     }
@@ -226,7 +249,7 @@ int main(int argc, char** argv)
     auto modified = branching;
     modified[0x100u] ^= 1u;
     if (!same(run(modified, &backend, true), run(modified, nullptr, true)) ||
-        backend.fallbacks() != 3u || backend.native_runs() != 4u)
+        backend.fallbacks() != 4u || backend.native_runs() != 4u)
     {
         return 1;
     }

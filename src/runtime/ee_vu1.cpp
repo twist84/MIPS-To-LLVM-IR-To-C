@@ -935,6 +935,12 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
 }
 } // namespace
 
+bool c_ee_vu1::kick(const std::array<uint8_t, k_memory_size>& data,
+    uint32_t address, std::vector<uint8_t>& output, s_ee_vu1_issue& issue)
+{
+    return xgkick(data, address, output, issue);
+}
+
 bool c_ee_vu1::run(
     s_ee_vu1_state& state,
     std::array<uint8_t, k_memory_size>& code,
@@ -958,7 +964,7 @@ bool c_ee_vu1::run(
     if (g_vu1_aot != nullptr)
     {
         g_vu1_aot->capture(code, address);
-        if (g_vu1_aot->try_run(state, code, data, address, top, itop, *issue))
+        if (g_vu1_aot->try_run(state, code, data, address, top, itop, path1_bytes, *issue))
         {
             return true;
         }

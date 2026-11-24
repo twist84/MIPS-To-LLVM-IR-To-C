@@ -54,6 +54,18 @@ bool exact_match(const t_vu1_code& code, uint32_t pc,
     }
     return true;
 }
+struct s_native_kick_context
+{
+    const t_vu1_code& m_data;
+    std::vector<uint8_t>& m_path1;
+    s_ee_vu1_issue m_issue{};
+};
+
+uint32_t native_kick(void* context, uint32_t address)
+{
+    auto& kick = *static_cast<s_native_kick_context*>(context);
+    return c_ee_vu1::kick(kick.m_data, address, kick.m_path1, kick.m_issue) ? 1u : 0u;
+}
 } // namespace
 
 c_ee_vu1_aot::~c_ee_vu1_aot()
@@ -276,7 +288,8 @@ void c_ee_vu1_aot::capture(const t_vu1_code& code, uint32_t pc)
 }
 
 bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
-    t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue)
+    t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop,
+    std::vector<uint8_t>& path1, s_ee_vu1_issue& issue)
 {
     pc &= 0x3ff8u;
     // A compiled entry assumes initialized constant registers. If a
@@ -298,8 +311,14 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             {
                 staged_data = data;
             }
-            uint8_t* data_ptr = program.m_writes_data ?
-                staged_data.data() : data.data();
+            auto& native_data = program.m_writes_data ? staged_data : data;
+            uint8_t* data_ptr = native_data.data();
+            // The shared XGKICK parser only appends. Roll back the
+            // appended suffix on any native failure, including a later
+            // unknown jump or malformed GIFtag. Existing PATH1 bytes
+            // still count toward the same aggregate budget.
+            const size_t path1_before = path1.size();
+            s_native_kick_context kick{native_data, path1, {}};
             std::array<uint32_t, 128> vf{};
             static_assert(sizeof(vf) == sizeof(next.m_vf), "VF ABI");
             std::memcpy(vf.data(), next.m_vf.data(), sizeof(vf));
@@ -310,7 +329,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 0u, &steps);
             steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), &next.m_q, &next.m_mac,
-                &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip);
+                &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip, native_kick, &kick);
             if (steps < 2u || steps > c_ee_vu1::k_max_steps ||
                 cycles < steps || cycles > steps * 64u ||
                 last_pc >= c_ee_vu1::k_memory_size || (last_pc & 7u) != 0u ||
@@ -320,8 +339,10 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                      next.m_tpc != program.m_next_pc ||
                      last_pc != ((program.m_next_pc - 8u) & 0x3fffu))) ||
                 next.m_vi[0] != 0u || vf[0] != 0u || vf[1] != 0u ||
-                vf[2] != 0u || vf[3] != 0x3f800000u)
+                vf[2] != 0u || vf[3] != 0x3f800000u ||
+                kick.m_issue.m_kick_reject != e_ee_vu1_kick_reject::none)
             {
+                path1.resize(path1_before);
                 break;
             }
             std::memcpy(next.m_vf.data(), vf.data(), sizeof(vf));

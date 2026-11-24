@@ -39,7 +39,8 @@ def main():
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
-                    ctypes.POINTER(ctypes.c_uint32))(address)
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.c_void_p, ctypes.c_void_p)(address)
                 vi = (ctypes.c_uint16 * 16)(0, 0xfffe, 5)
                 immediate = ctypes.c_uint32(0x12345678)
                 tpc = ctypes.c_uint32(0)
@@ -81,7 +82,7 @@ def main():
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
                                  0x12345, 0x23456, vf, ctypes.byref(q),
                                  ctypes.byref(mac), ctypes.byref(status), data,
-                                 ctypes.byref(cycles), ctypes.byref(last_pc), acc, ctypes.byref(clip))
+                                 ctypes.byref(cycles), ctypes.byref(last_pc), acc, ctypes.byref(clip), None, None)
                 actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
                           *vi, *vf, mac.value, status.value, clip.value, q.value, *acc, *data]
                 assert actual == expected, (case, opt, actual, expected)

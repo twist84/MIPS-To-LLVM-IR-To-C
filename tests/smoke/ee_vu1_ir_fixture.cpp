@@ -51,7 +51,7 @@ bool rejection_tests()
     {
         return false;
     }
-    pair(code, 8u, 0x800006fcu, k_upper); // unsupported XGKICK
+    pair(code, 8u, 0x8000073du, k_upper); // unsupported EFU
     return ee::vu1_lift_straight_line_ir(code, 0u).m_ir.empty();
 }
 } // namespace
