@@ -13,7 +13,7 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags"):
+        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags", "q"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
@@ -32,7 +32,7 @@ def main():
                     ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint16),
                     ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
                     ctypes.c_uint32, ctypes.c_uint32,
-                    ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
+                    ctypes.POINTER(ctypes.c_uint32), ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint8),
@@ -56,6 +56,7 @@ def main():
                 mac = ctypes.c_uint32(0x1234)
                 status = ctypes.c_uint32(0x30)
                 clip = ctypes.c_uint32(0x345678)
+                q = ctypes.c_uint32(0x3f800000)
                 data = (ctypes.c_uint8 * 16384)(
                     *((i * 13 + (i >> 8)) & 255 for i in range(16384)))
                 if case == "conversions":
@@ -78,11 +79,11 @@ def main():
                 cycles = ctypes.c_uint32(0)
                 last_pc = ctypes.c_uint32(0)
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
-                                 0x12345, 0x23456, vf, 0x3f800000,
+                                 0x12345, 0x23456, vf, ctypes.byref(q),
                                  ctypes.byref(mac), ctypes.byref(status), data,
                                  ctypes.byref(cycles), ctypes.byref(last_pc), acc, ctypes.byref(clip))
                 actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
-                          *vi, *vf, mac.value, status.value, clip.value, *acc, *data]
+                          *vi, *vf, mac.value, status.value, clip.value, q.value, *acc, *data]
                 assert actual == expected, (case, opt, actual, expected)
     print("VU1 integer LLVM interpreter differential: PASS")
 

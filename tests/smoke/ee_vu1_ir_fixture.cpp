@@ -289,6 +289,44 @@ int main(int argc, char** argv)
         append(integer(0x32u, 7u, 15u, 15u));
         append(k_nop);
     }
+    const bool q_case = std::strcmp(argv[2], "q") == 0;
+    if (q_case)
+    {
+        const auto scalar = [](uint32_t index, uint32_t fs, uint32_t ft,
+            uint32_t fsf, uint32_t ftf)
+        {
+            return 0x80000000u | (fsf << 21u) | (ftf << 23u) |
+                (ft << 16u) | (fs << 11u) | ((index >> 2u) << 6u) |
+                0x3cu | (index & 3u);
+        };
+        // Q must be read before a same-pair producer/wait.
+        append(scalar(0x38u, 21u, 22u, 0u, 0u),
+            upper(0x20u, 26u, 0u, 0u, 15u));
+        append(k_nop, upper(0x20u, 27u, 0u, 0u, 15u));
+        append(scalar(0x3bu, 0u, 0u, 0u, 0u), upper(0x20u, 28u, 0u, 0u, 15u));
+        append(k_nop, upper(0x20u, 29u, 0u, 0u, 15u));
+        // Save every observation. A second producer stalls for the
+        // earlier Q; zero divisors and negative sqrt operands use VU rules.
+        for (uint32_t j = 0u; j < 4u; ++j)
+        {
+            append(scalar(0x38u, 21u, 22u, j, j));
+            append(scalar(0x39u, 0u, 21u, 0u, j));
+            append(scalar(0x3au, 21u, 22u, j, j),
+                upper(0x20u, 30u, 0u, 0u, 15u));
+            append(scalar(0x3bu, 0u, 0u, 0u, 0u));
+            append(k_nop, upper(0x20u, 31u, 0u, 0u, 15u));
+            append((1u << 25u) | (15u << 21u) | (30u << 11u) | (0x240u + j * 2u));
+            append((1u << 25u) | (15u << 21u) | (31u << 11u) | (0x241u + j * 2u));
+        }
+        // CLIP commits after the lower's Q stall; flags retain their
+        // different issue-count vs elapsed-cycle visibility.
+        append(scalar(0x38u, 21u, 0u, 1u, 0u),
+            upper(0x3fu, 0x1fu >> 2u, 21u, 3u, 0u));
+        append(scalar(0x3bu, 0u, 0u, 0u, 0u),
+            upper(0x3fu, 0x1fu >> 2u, 21u, 3u, 0u));
+        append((0x1cu << 25u) | (8u << 16u));
+        append(scalar(0x38u, 21u, 22u, 0u, 0u)); // E drain
+    }
     const bool branches = std::strcmp(argv[2], "branches") == 0 ||
         std::strcmp(argv[2], "branch-wrap") == 0 ||
         std::strcmp(argv[2], "acc-branches") == 0;
@@ -340,8 +378,8 @@ int main(int argc, char** argv)
         append(integer(0x30u, 12u, 10u, 11u)); // E delay slot
     }
     const auto program = ee::vu1_lift_program_ir(code, start);
-    if (program.m_ir.empty() || (program.m_steps == 0u) != (branches || flag_case) ||
-        program.m_writes_data != (conversion_case || acc_case || flag_case ||
+    if (program.m_ir.empty() || (program.m_steps == 0u) != (branches || flag_case || q_case) ||
+        program.m_writes_data != (conversion_case || acc_case || flag_case || q_case ||
             std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
@@ -368,7 +406,7 @@ int main(int argc, char** argv)
     std::vector<uint8_t> path1;
     if (!ee::c_ee_vu1::run(state, code, data, start, 0x12345u, 0x23456u,
             path1, &issue) || !path1.empty() ||
-        (!branches && !flag_case && (issue.m_steps != program.m_steps ||
+        (!branches && !flag_case && !q_case && (issue.m_steps != program.m_steps ||
             issue.m_cycles != program.m_cycles || state.m_tpc != program.m_next_pc)))
     {
         return 1;
@@ -393,7 +431,7 @@ int main(int argc, char** argv)
             std::printf(" %u", value);
         }
     }
-    std::printf(" %u %u %u", state.m_mac, state.m_status, state.m_clip);
+    std::printf(" %u %u %u %u", state.m_mac, state.m_status, state.m_clip, state.m_q);
     for (uint32_t value : state.m_acc)
     {
         std::printf(" %u", value);

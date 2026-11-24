@@ -58,7 +58,9 @@ ee::t_vu1_code branch_program()
     pair(code, 8u, branch(0x20u, 0u, 0u, 6u), k_upper | 0x40000000u);
     pair(code, 16u, 0x80000072u | (7u << 16u) | (7u << 11u), k_upper);
     pair(code, 0x20u, branch(0x25u, 2u, 8u, 0u), k_upper);
-    pair(code, 0x28u, k_lower_nop, k_upper);
+    // Q producer in the JALR delay slot is drained before E completion.
+    pair(code, 0x28u, 0x80000000u | (3u << 16u) | (2u << 11u) |
+        ((0x38u >> 2u) << 6u) | 0x3cu, k_upper);
     pair(code, 0x30u, k_lower_nop, k_upper | 0x40000000u);
     pair(code, 0x38u, k_lower_nop, k_upper);
     return code;
@@ -213,7 +215,7 @@ int main(int argc, char** argv)
         candidate.m_acc != original.m_acc ||
         candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
         candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
-        candidate.m_clip != original.m_clip ||
+        candidate.m_clip != original.m_clip || candidate.m_q != original.m_q ||
         memory != original_memory || issue.m_steps != 0u ||
         backend.native_runs() != 4u || backend.fallbacks() != 2u)
     {

@@ -309,10 +309,10 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             c_runtime_profile_scope scope(e_runtime_profile_id::vu1_compiled,
                 0u, &steps);
             steps = program.m_entry(next.m_vi.data(), &next.m_i,
-                &next.m_tpc, top, itop, vf.data(), next.m_q, &next.m_mac,
+                &next.m_tpc, top, itop, vf.data(), &next.m_q, &next.m_mac,
                 &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip);
             if (steps < 2u || steps > c_ee_vu1::k_max_steps ||
-                cycles < steps || cycles > steps * 4u ||
+                cycles < steps || cycles > steps * 64u ||
                 last_pc >= c_ee_vu1::k_memory_size || (last_pc & 7u) != 0u ||
                 next.m_tpc >= c_ee_vu1::k_memory_size || (next.m_tpc & 7u) != 0u ||
                 (program.m_steps != 0u &&

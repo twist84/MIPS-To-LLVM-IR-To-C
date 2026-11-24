@@ -11,7 +11,7 @@ namespace ee
 // Entry ABI: VI[16], I, TPC, TOP, ITOP, VF[32][4], Q, MAC, STATUS,
 // data[16384], cycles_out, last_pc_out, ACC[4], CLIP. Return 0 requests rollback/fallback.
 // Stores require a staged data-memory copy before native execution.
-// All pointer arguments are disjoint; Q is passed by value.
+// All pointer arguments are disjoint; Q is read/written through its pointer.
 // Caller must supply initialized state with canonical VI0/VF0. The
 // caller owns code identity, issue diagnostics and transactional commit.
 // Native execution is opt-in; unsupported programs are interpreted.
