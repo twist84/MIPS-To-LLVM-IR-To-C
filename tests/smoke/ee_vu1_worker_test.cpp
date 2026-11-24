@@ -57,7 +57,7 @@ int main()
             resident.m_state, resident.m_code, resident.m_data, 0u, 0u, 0u,
             reference.m_path1, &reference.m_issue),
             "synchronous fixture failed") ||
-        !check(!worker.busy() && !worker.try_take() && !worker.wait_take(),
+        !check(!worker.busy() && !worker.ready() && !worker.try_take() && !worker.wait_take(),
             "empty worker returned stale result") ||
         !check(worker.submit(job) && !job && worker.busy(),
             "worker did not take exclusive ownership"))
@@ -88,7 +88,7 @@ int main()
             result->m_issue.m_steps == reference.m_issue.m_steps &&
             result->m_issue.m_cycles == reference.m_issue.m_cycles &&
             result->m_path1 == reference.m_path1 &&
-            result->m_path1.size() == 48u && !worker.busy(),
+            result->m_path1.size() == 48u && !worker.busy() && !worker.ready(),
             "worker result differs from synchronous XGKICK"))
     {
         return 1;
@@ -112,7 +112,7 @@ int main()
         return 1;
     }
     worker.discard();
-    if (!check(!worker.busy() && !worker.try_take(),
+    if (!check(!worker.busy() && !worker.ready() && !worker.try_take(),
             "discard exposed an old generation"))
     {
         return 1;

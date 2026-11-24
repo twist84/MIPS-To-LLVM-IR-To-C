@@ -227,6 +227,8 @@ private:
         uint64_t m_xgkick_ns = 0u;
         uint64_t m_wait_ns = 0u;
         uint64_t m_wait_calls = 0u;
+        uint64_t m_poll_calls = 0u;
+        uint64_t m_empty_polls = 0u;
         uint64_t m_native_overlap_ns = 0u;
         uint64_t m_native_overlap_intervals = 0u;
         uint64_t m_native_pending_boundaries = 0u;

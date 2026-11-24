@@ -839,6 +839,18 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
     {
         return e_deferred_result::idle;
     }
+    if (!wait)
+    {
+        ++m_worker_profile.m_poll_calls;
+        // The common pending path does not need two host clock reads
+        // or profile-stack manipulation. Preserve the exact acquire
+        // readiness checkpoint and retain poll counts separately.
+        if (!m_worker->ready())
+        {
+            ++m_worker_profile.m_empty_polls;
+            return e_deferred_result::pending;
+        }
+    }
     ee::c_runtime_profile_scope profile_scope(
         ee::e_runtime_profile_id::vif1_deferred_resume);
     do
@@ -1007,6 +1019,7 @@ void c_ee_vif1::write_worker_json(FILE* output) const
         "\"worker_queue_ns\":%llu,\"compiled_exclusive_ns\":%llu,"
         "\"compiled_attempted_pairs\":%llu,\"xgkick_exclusive_ns\":%llu,"
         "\"controller_wait_ns\":%llu,\"controller_wait_calls\":%llu,"
+        "\"controller_poll_calls\":%llu,\"controller_empty_polls\":%llu,"
         "\"ee_native_overlap_wall_ns\":%llu,\"ee_native_overlap_intervals\":%llu,"
         "\"ee_native_pending_boundaries\":%llu}",
         m_worker != nullptr ? "true" : "false",
@@ -1024,6 +1037,8 @@ void c_ee_vif1::write_worker_json(FILE* output) const
         static_cast<unsigned long long>(p.m_xgkick_ns),
         static_cast<unsigned long long>(p.m_wait_ns),
         static_cast<unsigned long long>(p.m_wait_calls),
+        static_cast<unsigned long long>(p.m_poll_calls),
+        static_cast<unsigned long long>(p.m_empty_polls),
         static_cast<unsigned long long>(p.m_native_overlap_ns),
         static_cast<unsigned long long>(p.m_native_overlap_intervals),
         static_cast<unsigned long long>(p.m_native_pending_boundaries));

@@ -54,6 +54,9 @@ public:
     std::unique_ptr<s_ee_vu1_job> try_take();
     std::unique_ptr<s_ee_vu1_job> wait_take();
     bool busy() const;
+    // A single acquire observes the same publication as try_take().
+    // It neither consumes work nor changes guest-visible state.
+    bool ready() const { return m_ready.load(std::memory_order_acquire); }
     static uint64_t clock_ns();
     std::pair<uint64_t, uint64_t> execution_interval() const;
     void write_aot_json(FILE* output) const;
