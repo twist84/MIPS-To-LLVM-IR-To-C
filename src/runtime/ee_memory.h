@@ -31,6 +31,14 @@ public:
 
     bool contains(uint32_t addr, size_t len) const;
 
+    // Borrow a contiguous, bounds-checked backing span for a synchronous
+    // host DMA copy. No MMIO, TLB lookup or guest side effect is implied.
+    // The pointer is valid only while this memory object remains alive.
+    const uint8_t* read_span(uint32_t addr, size_t len) const
+    {
+        return map_address(addr, len);
+    }
+
     // Opt-in direct-mapped EE aliases. The original KSEG option now also
     // covers the EE's 0x2/0x3 uncached/accelerated aliases, matching
     // ps2-web-recomp's physical() mapping; the actual RAM buffer bounds

@@ -819,17 +819,20 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             return false;
         }
 
-        // Reject missing or out-of-range source words BEFORE invoking
-        // the consumer. In particular, do not commit a TTE tag by itself.
-        std::vector<uint32_t> addresses(qwc);
-        for (uint32_t i = 0u; i < qwc; ++i)
+        // The packet is private until the entire chain passes preflight.
+        // Validate the address domain before borrowing contiguous backing
+        // spans; a nonempty payload cannot cross the 32-bit address limit
+        // or the physical 32 MiB RAM aperture.
+        const uint64_t payload_bytes = static_cast<uint64_t>(qwc) * 16u;
+        const uint64_t payload_end = data_address + payload_bytes;
+        if (qwc != 0u &&
+            ((data_address & 15u) != 0u ||
+             payload_end > 0x100000000ull ||
+             ((data_address & 0x80000000ull) == 0u &&
+              payload_end > 0x02000000ull)))
         {
-            if (!resolve(data_address + static_cast<uint64_t>(i) * 16u,
-                         &addresses[i]))
-            {
-                m_vif1_chain_last_reject = reject::invalid_payload_span;
-                return false;
-            }
+            m_vif1_chain_last_reject = reject::invalid_payload_span;
+            return false;
         }
         if (tte)
         {
@@ -841,16 +844,36 @@ bool c_ee_dmac::transfer_vif1_source_chain()
                     static_cast<uint8_t>(tag.m_hi >> (b * 8u));
             }
         }
-        for (const uint32_t address : addresses)
+        // RAM payloads are contiguous. SPR addresses wrap every 16 KiB,
+        // so split only at scratchpad boundaries. The backing bytes are
+        // already in guest little-endian order; no per-lane decoding is
+        // required. Failed spans discard the entire private packet.
+        for (uint64_t address = data_address; address < payload_end;)
         {
-            s_ee_u128 quad{};
-            m_memory->read128(address, &quad);
-            for (uint32_t lane = 0u; lane < 16u; ++lane)
+            uint32_t mapped = 0u;
+            if (!resolve(address, &mapped))
             {
-                const uint64_t half = lane < 8u ? quad.m_lo : quad.m_hi;
-                packet.push_back(static_cast<uint8_t>(
-                    half >> ((lane & 7u) * 8u)));
+                m_vif1_chain_last_reject = reject::invalid_payload_span;
+                return false;
             }
+            size_t span = static_cast<size_t>(payload_end - address);
+            if ((address & 0x80000000ull) != 0u)
+            {
+                const size_t to_wrap = ee_memory::k_scratchpad_size -
+                    (mapped - ee_memory::k_scratchpad_base);
+                if (span > to_wrap)
+                {
+                    span = to_wrap;
+                }
+            }
+            const uint8_t* bytes = m_memory->read_span(mapped, span);
+            if (bytes == nullptr)
+            {
+                m_vif1_chain_last_reject = reject::invalid_payload_span;
+                return false;
+            }
+            packet.insert(packet.end(), bytes, bytes + span);
+            address += span;
         }
 
         // Tag upper half is reflected into CHCR after processing.

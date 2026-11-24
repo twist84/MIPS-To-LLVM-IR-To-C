@@ -367,6 +367,51 @@ int main()
         return 1;
     }
 
+    // SPR payload wraps from the final quadword to offset zero.
+    // Validate all bytes, rather than only the first and last lanes.
+    dmac.reset();
+    sink = {};
+    constexpr uint32_t k_spr = ee::ee_memory::k_scratchpad_base;
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        memory.write8(k_spr + 0x3ff0u + i, static_cast<uint8_t>(i + 1u));
+        memory.write8(k_spr + i, static_cast<uint8_t>(i + 17u));
+    }
+    write_tag(memory, 0x300u, 2u, 0u, 0u, 0x80003ff0u, 0u);
+    if (!check(begin(dmac, 0x300u, 0x185u), "SPR wrapping start refused") ||
+        !check(sink.m_calls == 1u && sink.m_packet.size() == 32u &&
+               dmac.status() == 2u &&
+               dmac.vif1_channel_state().m_madr == 0x80004010u,
+               "SPR wrap did not commit"))
+    {
+        return 1;
+    }
+    for (uint32_t i = 0u; i < 32u; ++i)
+    {
+        if (!check(sink.m_packet[i] == i + 1u, "SPR wrapped byte mismatch"))
+        {
+            return 1;
+        }
+    }
+
+    // An address overflow or partially mapped RAM payload must reject
+    // the whole transfer, even when its first quadword is valid.
+    for (uint32_t external : {0xfffffff0u, 0x00000ff0u})
+    {
+        dmac.reset();
+        sink = {};
+        write_tag(memory, 0x300u, 2u, 0u, 0u, external, 0u);
+        if (!check(begin(dmac, 0x300u), "partial span start refused") ||
+            !check(dmac.vif1_chain_last_reject() == reject::invalid_payload_span &&
+                   sink.m_calls == 0u && dmac.status() == 0u &&
+                   dmac.vif1_channel_state().m_tadr == 0x300u &&
+                   (dmac.vif1_channel_state().m_chcr & 0x100u) != 0u,
+                   "partial span committed DMA"))
+        {
+            return 1;
+        }
+    }
+
     std::puts("EE VIF1 source chain TTE/TIE/rollback: PASS");
     return 0;
 }
