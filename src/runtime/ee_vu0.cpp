@@ -2059,46 +2059,82 @@ void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
     }
 }
 
-bool vu0_fmac_product_underflows(uint32_t a, uint32_t b)
+// Same asymmetric truncated Booth multiplier model as ee_cop1_mul_ir.h.
+// All low-row operations wrap at 32 bits; the full significand product
+// fits within 48 bits. Preserve Fs/Ft order, including broadcast forms.
+struct s_vu0_product_row
+{
+    uint32_t m_sum;
+    uint32_t m_carry;
+};
+
+s_vu0_product_row vu0_booth_row(uint32_t a, uint32_t code, uint32_t shift)
+{
+    if (code == 0u || code == 7u)
+    {
+        return {0u, 0u};
+    }
+    uint32_t magnitude = a << shift;
+    if (code == 3u || code == 4u)
+    {
+        magnitude <<= 1u;
+    }
+    if (code >= 4u)
+    {
+        const uint32_t position = 1u << shift;
+        return {magnitude ^ (0u - position), position};
+    }
+    return {magnitude, 0u};
+}
+
+s_vu0_product_row vu0_product_csa(uint32_t a, uint32_t b, uint32_t c)
+{
+    return {a ^ b ^ c, ((a & b) | ((a ^ b) & c)) << 1u};
+}
+
+s_vu0_adder_result vu0_fmac_mul(uint32_t a, uint32_t b)
 {
     const int ea = static_cast<int>((a >> 23u) & 255u);
     const int eb = static_cast<int>((b >> 23u) & 255u);
+    const uint32_t sign = (a ^ b) & 0x80000000u;
     if (ea == 0 || eb == 0)
     {
-        return false;
+        return {sign, false, false};
     }
-    const uint64_t product =
-        static_cast<uint64_t>((a & 0x7fffffu) | 0x800000u) *
-        ((b & 0x7fffffu) | 0x800000u);
-    return ea + eb - 127 + static_cast<int>(product >> 47u) <= 0;
-}
-
-uint32_t vu0_fmac_result_bits(float value, uint32_t lane, uint32_t* flags)
-{
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
-    const uint32_t shift = 3u - lane;
-    const uint32_t exponent = bits & 0x7f800000u;
-    *flags &= ~(0x1111u << shift);
-    if (bits & 0x80000000u)
+    const uint32_t ma = (a & 0x7fffffu) | 0x800000u;
+    const uint32_t mb = (b & 0x7fffffu) | 0x800000u;
+    s_vu0_product_row rows[8]{};
+    for (uint32_t i = 0u; i < 8u; ++i)
     {
-        *flags |= 0x10u << shift;
+        const uint32_t code = i == 0u ? (mb << 1u) : (mb >> (2u * i - 1u));
+        rows[i] = vu0_booth_row(ma, code & 7u, i * 2u);
     }
-    if ((bits & 0x7fffffffu) == 0)
+    const auto p0 = vu0_product_csa(rows[1].m_sum, rows[2].m_sum, rows[3].m_sum);
+    auto p1 = vu0_product_csa(rows[4].m_sum & ~2047u,
+        rows[5].m_sum & ~4095u, rows[6].m_sum);
+    p1.m_carry |= rows[6].m_carry | (rows[5].m_sum & 2048u);
+    const uint32_t row7 = rows[7].m_sum |
+        ((rows[5].m_sum & 1024u) + rows[5].m_carry);
+    const auto p2 = vu0_product_csa(rows[0].m_sum, p0.m_sum, p0.m_carry);
+    const auto p3 = vu0_product_csa(row7, p1.m_sum, p1.m_carry);
+    const auto p4 = vu0_product_csa(p2.m_carry, p3.m_sum, p3.m_carry);
+    const auto p5 = vu0_product_csa(p2.m_sum, p4.m_sum, p4.m_carry);
+    const uint32_t low = (p5.m_sum & ~32767u) +
+        ((p5.m_carry + rows[7].m_carry) & ~32767u);
+    const uint64_t full = static_cast<uint64_t>(ma) * mb;
+    const uint64_t product = full - ((low ^ static_cast<uint32_t>(full)) & 32768u);
+    const bool wide = (product >> 47u) != 0u;
+    const int exponent = ea + eb - 127 + static_cast<int>(wide);
+    if (exponent > 255)
     {
-        *flags |= 1u << shift;
+        return {sign | 0x7fffffffu, true, false};
     }
-    else if (exponent == 0)
+    if (exponent <= 0)
     {
-        *flags |= 0x0101u << shift;
-        bits &= 0x80000000u;
+        return {sign, false, true};
     }
-    else if (exponent == 0x7f800000u)
-    {
-        *flags |= 0x1000u << shift;
-        bits = (bits & 0x80000000u) | 0x7f7fffffu;
-    }
-    return bits;
+    const uint32_t fraction = static_cast<uint32_t>(product >> (wide ? 24u : 23u)) & 0x7fffffu;
+    return {sign | (static_cast<uint32_t>(exponent) << 23u) | fraction, false, false};
 }
 } // namespace
 
@@ -2361,7 +2397,8 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         // Stage a separate result: fs==ft==fd must read original lanes.
         s_ee_u128 output = op.m_to_acc ? vu0->m_acc : lanes_of(fd);
         uint32_t mac_flags = vu0->m_mac_flags;
-        bool product_underflow = false;
+        uint32_t product_sticky = 0u;
+        uint32_t acc_overflow_mask = vu0->m_acc_overflow_mask;
         for (uint32_t lane = 0; lane < 4; ++lane)
         {
             if (!(mask & (8u >> lane)))
@@ -2400,62 +2437,72 @@ extern "C" uint32_t ee_vu0_macro_fmac(
                 vu0_fmac_set_lane(&output, lane, take_a ? a_bits : b_bits);
                 continue;
             }
+            s_vu0_adder_result result{};
+            const uint32_t lane_bit = 8u >> lane;
             if (op.m_arith == e_vu0_macro_arith::add ||
                 op.m_arith == e_vu0_macro_arith::sub)
             {
-                const auto result = vu0_fmac_add(a_bits, b_bits,
+                result = vu0_fmac_add(a_bits, b_bits,
                     op.m_arith == e_vu0_macro_arith::sub);
-                vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
-                    result.m_underflow, lane, &mac_flags);
-                vu0_fmac_set_lane(&output, lane, result.m_bits);
-                continue;
             }
-            if (op.m_arith == e_vu0_macro_arith::mul &&
-                vu0_fmac_product_underflows(a_bits, b_bits))
+            else
             {
-                const uint32_t bits = (a_bits ^ b_bits) & 0x80000000u;
-                vu0_fmac_integer_flags(bits, false, true, lane, &mac_flags);
-                vu0_fmac_set_lane(&output, lane, bits);
-                continue;
-            }
-            const float a = vu0_fmac_operand(a_bits);
-            const float b = vu0_fmac_operand(b_bits);
-            volatile float product = a * b; // rounded before accumulation
-            if (op.m_arith == e_vu0_macro_arith::madd ||
-                op.m_arith == e_vu0_macro_arith::msub)
-            {
-                // VU User's Manual 3.3.4: multiplication underflow
-                // contributes to US even if the final sum is normal.
-                // Detect it from the exact product of the normalized
-                // inputs, not a host float that may already be zero.
-                const uint32_t a_exp = (a_bits >> 23u) & 0xffu;
-                const uint32_t b_exp = (b_bits >> 23u) & 0xffu;
-                if (a_exp != 0u && b_exp != 0u && a_exp + b_exp <= 127u &&
-                    std::fabs(static_cast<double>(a) * static_cast<double>(b)) <
-                        0x1p-126)
+                const auto product = vu0_fmac_mul(a_bits, b_bits);
+                result = product;
+                if (op.m_arith == e_vu0_macro_arith::madd ||
+                    op.m_arith == e_vu0_macro_arith::msub)
                 {
-                    product_underflow = true;
-                    product = ((a_bits ^ b_bits) & 0x80000000u) != 0u
-                        ? -0.0f : 0.0f;
+                    const bool subtract = op.m_arith == e_vu0_macro_arith::msub;
+                    const uint32_t acc = vu0_fmac_lane(vu0->m_acc, lane);
+                    const uint32_t signed_product = product.m_bits ^ (subtract ? 0x80000000u : 0u);
+                    const bool acc_overflow = (vu0->m_acc_overflow_mask & lane_bit) != 0u;
+                    // VU manual pp. 42-43: product overflow wins, then
+                    // latched ACC overflow, then ordinary accumulation.
+                    if (product.m_overflow)
+                    {
+                        result = {signed_product, true, false};
+                    }
+                    else if (acc_overflow)
+                    {
+                        result = {(acc & 0x80000000u) | 0x7fffffffu, true, false};
+                    }
+                    else
+                    {
+                        result = vu0_fmac_add(acc, product.m_bits, subtract);
+                    }
+                    if (product.m_underflow)
+                    {
+                        product_sticky |= 0x100u;
+                    }
+                    // For an exceptional accumulation, the manual also
+                    // accumulates the multiplication Z/S events.
+                    if (!product.m_overflow &&
+                        (acc_overflow || result.m_overflow || result.m_underflow))
+                    {
+                        if ((product.m_bits & 0x7f800000u) == 0u)
+                        {
+                            product_sticky |= 0x40u;
+                        }
+                        if ((product.m_bits & 0x80000000u) != 0u)
+                        {
+                            product_sticky |= 0x80u;
+                        }
+                    }
                 }
             }
-            const float acc = vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane));
-            float answer = 0.0f;
-            switch (op.m_arith)
+            if (op.m_to_acc)
             {
-            case e_vu0_macro_arith::add: answer = a + b; break;
-            case e_vu0_macro_arith::sub: answer = a - b; break;
-            case e_vu0_macro_arith::mul: answer = product; break;
-            case e_vu0_macro_arith::madd: answer = acc + product; break;
-            case e_vu0_macro_arith::msub: answer = acc - product; break;
-            default: break;
+                acc_overflow_mask = (acc_overflow_mask & ~lane_bit) |
+                    (result.m_overflow ? lane_bit : 0u);
             }
-            vu0_fmac_set_lane(&output, lane,
-                vu0_fmac_result_bits(answer, lane, &mac_flags));
+            vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
+                result.m_underflow, lane, &mac_flags);
+            vu0_fmac_set_lane(&output, lane, result.m_bits);
         }
         if (op.m_to_acc)
         {
             vu0->m_acc = output;
+            vu0->m_acc_overflow_mask = acc_overflow_mask;
         }
         else
         {
@@ -2463,10 +2510,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         }
         if (flags)
         {
-            if (product_underflow)
-            {
-                vu0->m_status_flags |= 0x0100u;
-            }
+            vu0->m_status_flags |= product_sticky;
             vu0_macro_update_status(vu0, mac_flags);
         }
         return complete;

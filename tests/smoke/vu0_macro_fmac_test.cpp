@@ -289,7 +289,7 @@ int main()
     // subsequent operation even after the current overflow bit clears.
     vu0.m_status_flags = 0u;
     cpu.m_vu0[4] = make_vector(3.0e38f, 0.f, 0.f, 0.f);
-    cpu.m_vu0[8] = make_vector(2.f, 0.f, 0.f, 0.f);
+    cpu.m_vu0[8] = make_vector(4.f, 0.f, 0.f, 0.f);
     check(ee::ee_vu0_macro_fmac(&cpu, &runtime, x_only, 0x108240) == 0 &&
           (vu0.m_status_flags & 0x0208u) == 0x0208u,
           "FMAC overflow sets current O and sticky OS");
@@ -464,8 +464,8 @@ int main()
     const ee::s_ee_u128 old_acc = vu0.m_acc;
     check(ee::ee_vu0_macro_fmac(
               &cpu, &runtime, k_vmulq_xyz, 0x00106990u) == 0 &&
-          lane(cpu.m_vu0[4], 0) == bits(3.f * (1.f / 5.f)) &&
-          lane(cpu.m_vu0[4], 1) == bits(4.f * (1.f / 5.f)) &&
+          lane(cpu.m_vu0[4], 0) == 0x3f199999u &&
+          lane(cpu.m_vu0[4], 1) == 0x3f4cccccu &&
           lane(cpu.m_vu0[4], 2) == bits(0.f) &&
           lane(cpu.m_vu0[4], 3) == bits(7.f) &&
           same_vector(vu0.m_acc, old_acc),
@@ -604,7 +604,9 @@ int main()
                 : ee::ee_vu0_macro_fmac(&cpu, &runtime, word, 0x0010697cu + 4u * i);
             check(result == 0u, "retail spawn normalization instruction completes");
         }
-        check(same_vector(cpu.m_vu0[4], make_vector(sign * 0.6f, 0.f, sign * 0.8f, 1.f)),
+        const uint32_t sign_bit = sign < 0.f ? 0x80000000u : 0u;
+        check(same_vector(cpu.m_vu0[4], {static_cast<uint64_t>(sign_bit | 0x3f199999u),
+                  (static_cast<uint64_t>(0x3f800000u) << 32u) | (sign_bit | 0x3f4cccccu)}),
               "retail spawn normalization preserves direction and W");
     }
 
@@ -733,6 +735,53 @@ int main()
           lane(cpu.m_vu0[3], 0u) == 0x7f800000u &&
           vu0.m_mac_flags == 0u && vu0.m_status_flags == 0u,
           "VU0 finite exponent-255 add is not overflow");
+
+    // Model-derived VU multiplier controls using the COP1 Booth model.
+    constexpr uint32_t mul_words[][3] =
+    {
+        {0x3fffffffu, 0x3f800000u, 0x3fffffffu},
+        {0x3f800000u, 0x3fffffffu, 0x3ffffffeu},
+        {0x7f800000u, 0x3f800000u, 0x7f800000u},
+        {0x3fffffffu, 0x3fffffffu, 0x407ffffeu},
+    };
+    for (const auto& entry : mul_words)
+    {
+        cpu.m_vu0[1] = {entry[0], 0u};
+        cpu.m_vu0[2] = {entry[1], 0u};
+        vu0.m_status_flags = 0u;
+        check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x2au)) == 0u &&
+              lane(cpu.m_vu0[3], 0u) == entry[2] &&
+              vu0.m_mac_flags == 0u && vu0.m_status_flags == 0u,
+              "VU0 multiplier preserves order and extended precision");
+    }
+    // Model-derived MAC exception sequences from VU manual pp. 42-43.
+    cpu.m_vu0[1] = {0x7fffffffu, 0u};
+    cpu.m_vu0[2] = {0x40000000u, 0u};
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special2(8u, 2u, 1u, 0x2au)) == 0u &&
+          lane(vu0.m_acc, 0u) == 0x7fffffffu &&
+          (vu0.m_acc_overflow_mask & 8u) != 0u &&
+          vu0.m_mac_flags == 0x8000u,
+          "VMULA latches X overflow");
+    cpu.m_vu0[2] = {0xbf800000u, 0u};
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x29u)) == 0u &&
+          lane(cpu.m_vu0[3], 0u) == 0x7fffffffu &&
+          lane(vu0.m_acc, 0u) == 0x7fffffffu &&
+          (vu0.m_acc_overflow_mask & 8u) != 0u &&
+          vu0.m_mac_flags == 0x8000u && vu0.m_status_flags == 0x0288u,
+          "VMADD preserves ACC latch and records negative product sticky");
+    cpu.m_vu0[2] = {0x40000000u, 0u};
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x2du)) == 0u &&
+          lane(cpu.m_vu0[3], 0u) == 0xffffffffu &&
+          vu0.m_mac_flags == 0x8080u && vu0.m_status_flags == 0x028au,
+          "VMSUB product overflow takes precedence with inverted sign");
+    cpu.m_vu0[1] = {0x3f800000u, 0u};
+    cpu.m_vu0[2] = {0x3f800000u, 0u};
+    check(run_macro(cpu, runtime, special2(8u, 2u, 1u, 0x2au)) == 0u &&
+          (vu0.m_acc_overflow_mask & 8u) == 0u,
+          "normal VMULA clears only the written ACC overflow latch");
 
     // Unsupported instructions or a busy VU0 must fail closed. Confirm no
     // architectural writes, not merely a non-zero return value.
