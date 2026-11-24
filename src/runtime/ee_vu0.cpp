@@ -2604,31 +2604,20 @@ extern "C" uint32_t ee_vu0_macro_scalar(
     const float denominator = vu0_fmac_operand(ft_bits);
     const float numerator = vu0_fmac_operand(fs_bits);
 
-    uint32_t current_flags = 0u;
+    // SQRT/RSQRT check the raw denominator sign, even if its exponent
+    // flushes to zero. Unlike DIV, RSQRT divides by an absolute root:
+    // a zero divisor saturates with the numerator's sign alone.
+    // VU manual v6.0 sections 3.3.2/RSQRT; PCSX2 VUops.cpp at
+    // 4e56d430595164106eab9606cb46c94c902802cd.
+    uint32_t current_flags = (ft_bits & 0x80000000u) != 0u ? 0x10u : 0u;
     uint32_t result_bits = 0u;
     if (reciprocal && denominator == 0.0f)
     {
-        // PCSX2 _vuRSQRT: division by zero sets D; zero over zero
-        // additionally sets I. The sign uses the ORIGINAL raw VF
-        // operands, preserving negative-zero behavior.
-        const uint32_t sign = (ft_bits ^ fs_bits) & 0x80000000u;
-        current_flags = 0x20u;
-        if (numerator == 0.0f)
-        {
-            current_flags |= 0x10u;
-            result_bits = sign;
-        }
-        else
-        {
-            result_bits = sign | 0x7f7fffffu;
-        }
+        current_flags |= numerator == 0.0f ? 0x10u : 0x20u;
+        result_bits = (fs_bits & 0x80000000u) | 0x7f7fffffu;
     }
     else
     {
-        if (denominator < 0.0f)
-        {
-            current_flags |= 0x10u;
-        }
         const float root = std::sqrt(std::fabs(denominator));
         const float value = reciprocal ? numerator / root : root;
         std::memcpy(&result_bits, &value, sizeof(result_bits));

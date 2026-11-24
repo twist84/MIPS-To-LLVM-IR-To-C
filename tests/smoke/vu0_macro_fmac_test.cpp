@@ -471,9 +471,9 @@ int main()
           same_vector(vu0.m_acc, old_acc),
           "VMULq.xyz normalizes (3,4,0), preserving VF4.w and ACC");
 
-    // Real VU0 RSQRT edge semantics, confirmed against PCSX2 VUops:
-    // a negative denominator raises current/sticky I; zero denominator
-    // raises D/DS, with signed saturation and 0/0 producing signed zero.
+    // Reference VU0 RSQRT edge semantics: negative raw denominator
+    // raises I/IS, nonzero over zero raises D/DS, and zero over zero
+    // raises I/IS without D. All zero-divisor results saturate with Fs sign.
     cpu.m_vu0[5] = make_vector(-25.f, 0.f, 0.f, 0.f);
     vu0.m_status_flags = 0u;
     check(ee::ee_vu0_macro_scalar(
@@ -496,30 +496,91 @@ int main()
               &cpu, &runtime, k_vwaitq, 0x0010698cu) == 0,
           "positive-zero Q retires");
 
-    cpu.m_vu0[5] = make_vector(-0.f, 0.f, 0.f, 0.f);
-    vu0.m_status_flags = 0u;
-    check(ee::ee_vu0_macro_scalar(
-              &cpu, &runtime, k_vrsqrt, 0x00106988u) == 0 &&
-          vu0.m_q_pending_bits == 0xff7fffffu &&
-          (vu0.m_status_flags & 0x820u) == 0x820u,
-          "negative zero denominator saturates -max with D/DS");
-    check(ee::ee_vu0_macro_scalar(
-              &cpu, &runtime, k_vwaitq, 0x0010698cu) == 0,
-          "negative-zero Q retires");
-
-    // Force VF0.x=0 instead of VF0.w=1, with the same negative-zero
-    // denominator, to check sign XOR and both I/D sticky flags.
-    const uint32_t zero_numerator = k_vrsqrt & ~(3u << 21u);
-    cpu.m_vu0[5] = make_vector(-0.f, 0.f, 0.f, 0.f);
-    vu0.m_status_flags = 0u;
-    check(ee::ee_vu0_macro_scalar(
-              &cpu, &runtime, zero_numerator, 0x00106988u) == 0 &&
-          vu0.m_q_pending_bits == 0x80000000u &&
-          (vu0.m_status_flags & 0xc30u) == 0xc30u,
-          "zero over negative zero yields -0 with I/D and sticky IS/DS");
-    check(ee::ee_vu0_macro_scalar(
-              &cpu, &runtime, k_vwaitq, 0x0010698cu) == 0,
-          "zero-over-zero Q retires");
+    // Independent raw numerator and denominator sign/zero cases.
+    struct s_scalar_case
+    {
+        uint32_t m_fs;
+        uint32_t m_ft;
+        uint32_t m_q;
+        uint32_t m_current;
+    };
+    constexpr s_scalar_case rsqrt_cases[] =
+    {
+        {0x3f800000u, 0x80000000u, 0x7f7fffffu, 0x30u},
+        {0xbf800000u, 0x80000000u, 0xff7fffffu, 0x30u},
+        {0x00000000u, 0x00000000u, 0x7f7fffffu, 0x10u},
+        {0x00000000u, 0x80000000u, 0x7f7fffffu, 0x10u},
+        {0x80000000u, 0x00000000u, 0xff7fffffu, 0x10u},
+        {0x80000000u, 0x80000000u, 0xff7fffffu, 0x10u},
+        {0x3f800000u, 0x80000001u, 0x7f7fffffu, 0x30u},
+        {0x80000001u, 0x00000001u, 0xff7fffffu, 0x10u},
+        {0x3f800000u, 0x41800000u, 0x3e800000u, 0u},
+        {0xbf800000u, 0xc1800000u, 0xbe800000u, 0x10u},
+    };
+    constexpr s_scalar_case div_cases[] =
+    {
+        {0x3f800000u, 0x80000000u, 0xff7fffffu, 0x20u},
+        {0xbf800000u, 0x80000000u, 0x7f7fffffu, 0x20u},
+        {0x00000000u, 0x00000000u, 0x7f7fffffu, 0x10u},
+        {0x00000000u, 0x80000000u, 0xff7fffffu, 0x10u},
+        {0x80000000u, 0x00000000u, 0xff7fffffu, 0x10u},
+        {0x3f800000u, 0x80000001u, 0xff7fffffu, 0x20u},
+        {0x40800000u, 0xc0000000u, 0xc0000000u, 0u},
+    };
+    constexpr s_scalar_case sqrt_cases[] =
+    {
+        {0u, 0x00000000u, 0u, 0u},
+        {0u, 0x80000000u, 0u, 0x10u},
+        {0u, 0x00000001u, 0u, 0u},
+        {0u, 0x80000001u, 0u, 0x10u},
+        {0u, 0xc1800000u, 0x40800000u, 0x10u},
+        {0u, 0x41800000u, 0x40800000u, 0u},
+    };
+    const auto check_scalar_case = [&](const s_scalar_case& entry,
+                                      uint32_t opcode, uint32_t latency)
+    {
+        // Use distinct X/Y/Z/W bits to detect incorrect lane selection.
+        cpu.m_vu0[1] = {static_cast<uint64_t>(entry.m_fs) << 32u, 0u};
+        cpu.m_vu0[2] = {0u, entry.m_ft};
+        const uint32_t word = special2(1u, 2u, 1u, opcode) | (2u << 23u);
+        constexpr uint32_t initial_flags = 0x8b3u;
+        vu0.m_status_flags = initial_flags;
+        vu0.m_vi[16] = initial_flags;
+        const uint32_t mac = vu0.m_mac_flags;
+        const uint32_t old_q = static_cast<uint32_t>(vu0.m_q.m_lo);
+        const uint64_t old_cycle = vu0.m_cycle;
+        const uint32_t expected_flags = (initial_flags & ~0x30u) |
+            entry.m_current | (entry.m_current << 6u);
+        const uint32_t result = opcode == 0x38u ?
+            run_macro(cpu, runtime, word) :
+            ee::ee_vu0_macro_scalar(&cpu, &runtime, word, 0x00106988u);
+        check(result == 0u && vu0.m_q_pending == 1u &&
+              vu0.m_q_pending_bits == entry.m_q &&
+              vu0.m_q_ready_cycle == old_cycle + latency &&
+              static_cast<uint32_t>(vu0.m_q.m_lo) == old_q &&
+              vu0.m_status_flags == expected_flags &&
+              vu0.m_vi[16] == expected_flags && vu0.m_mac_flags == mac,
+              "scalar edge result, flags, selector and pending Q");
+        check(ee::ee_vu0_macro_scalar(
+                  &cpu, &runtime, k_vwaitq, 0x0010698cu) == 0 &&
+              vu0.m_cycle == old_cycle + latency &&
+              vu0.m_q_pending == 0u &&
+              static_cast<uint32_t>(vu0.m_q.m_lo) == entry.m_q &&
+              vu0.m_vi[22] == entry.m_q,
+              "scalar edge WAITQ retires exact Q and VI22");
+    };
+    for (const auto& entry : rsqrt_cases)
+    {
+        check_scalar_case(entry, 0x3au, 13u);
+    }
+    for (const auto& entry : div_cases)
+    {
+        check_scalar_case(entry, 0x38u, 7u);
+    }
+    for (const auto& entry : sqrt_cases)
+    {
+        check_scalar_case(entry, 0x39u, 7u);
+    }
 
     check_general_macros(cpu, runtime, vu0);
 
