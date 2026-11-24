@@ -13,7 +13,7 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap"):
+        for case in ("integer", "normal", "wrap", "stores"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
@@ -49,15 +49,13 @@ def main():
                 status = ctypes.c_uint32(0x30)
                 data = (ctypes.c_uint8 * 16384)(
                     *((i * 13 + (i >> 8)) & 255 for i in range(16384)))
-                before = bytes(data)
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
                                  0x12345, 0x23456, vf, 0x3f800000,
                                  ctypes.byref(mac), ctypes.byref(status), data)
-                assert bytes(data) == before
                 # Cycle count is determined statically by the emitter and
                 # checked against the interpreter by the fixture.
                 actual = [steps, expected[1], tpc.value, immediate.value,
-                          *vi, *vf, mac.value, status.value]
+                          *vi, *vf, mac.value, status.value, *data]
                 assert actual == expected, (case, opt, actual, expected)
     print("VU1 integer LLVM interpreter differential: PASS")
 

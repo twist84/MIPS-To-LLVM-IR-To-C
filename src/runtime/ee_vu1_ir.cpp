@@ -221,16 +221,16 @@ public:
         const uint32_t mask = (lo >> 21u) & 15u;
         const int32_t raw = static_cast<int32_t>(lo & 0x7ffu);
         const int32_t offset = raw >= 1024 ? raw - 2048 : raw;
-        if (major == 0x00u || major == 0x04u)
+        if (major == 0x00u || major == 0x01u ||
+            major == 0x04u || major == 0x05u)
         {
-            const auto address = data_address(is, offset);
-            if (major == 0x00u)
+            const auto address = data_address(major == 0x01u ? it : is, offset);
+            switch (major)
             {
-                load_vector(ft, mask, address);
-            }
-            else
-            {
-                load_integer(it, mask, address, false);
+            case 0x00u: load_vector(ft, mask, address); break;
+            case 0x01u: store_vector(fs, mask, address); break;
+            case 0x04u: load_integer(it, mask, address, false); break;
+            case 0x05u: store_integer(it, mask, address); break;
             }
             return true;
         }
@@ -278,9 +278,27 @@ public:
                 }
                 return true;
             }
+            if (index == 0x35u || index == 0x37u)
+            {
+                if (index == 0x37u)
+                {
+                    binary("sub", it, it, "1");
+                }
+                store_vector(fs, mask, data_address(it, 0));
+                if (index == 0x35u)
+                {
+                    binary("add", it, it, "1");
+                }
+                return true;
+            }
             if (index == 0x3eu)
             {
                 load_integer(it, mask, data_address(is, 0), true);
+                return true;
+            }
+            if (index == 0x3fu)
+            {
+                store_integer(it, mask, data_address(is, 0));
                 return true;
             }
             if (index == 0x30u || index == 0x31u)
@@ -319,6 +337,8 @@ public:
         }
         return false;
     }
+
+    bool writes_data() const { return m_writes_data; }
 
     std::string finish(uint32_t steps, uint32_t next_pc)
     {
@@ -360,12 +380,47 @@ private:
         return operation("shl i32 " + wrapped + ", 4");
     }
 
-    std::string data_lane(const std::string& address, uint32_t lane)
+    std::string data_pointer(const std::string& address, uint32_t lane)
     {
         const auto offset = operation("add i32 " + address + ", " +
             std::to_string(lane * 4u));
-        const auto ptr = operation("getelementptr i8, ptr %data, i32 " + offset);
-        return operation("load i32, ptr " + ptr + ", align 1");
+        return operation("getelementptr i8, ptr %data, i32 " + offset);
+    }
+
+    std::string data_lane(const std::string& address, uint32_t lane)
+    {
+        return operation("load i32, ptr " + data_pointer(address, lane) + ", align 1");
+    }
+
+    void store_data_lane(const std::string& address, uint32_t lane,
+        const std::string& value)
+    {
+        line("store i32 " + value + ", ptr " + data_pointer(address, lane) +
+            ", align 1");
+        m_writes_data = true;
+    }
+
+    void store_vector(uint32_t source, uint32_t mask, const std::string& address)
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                store_data_lane(address, lane, vf(source, lane));
+            }
+        }
+    }
+
+    void store_integer(uint32_t source, uint32_t mask, const std::string& address)
+    {
+        const auto value = operation("zext i16 " + reg(source) + " to i32");
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                store_data_lane(address, lane, value);
+            }
+        }
     }
 
     void write_vector(uint32_t target, uint32_t mask,
@@ -602,6 +657,7 @@ private:
     uint32_t m_upper_target = 0u;
     uint32_t m_upper_mask = 0u;
     bool m_upper_flags = false;
+    bool m_writes_data = false;
     uint32_t m_counter = 0u;
 };
 } // namespace
@@ -637,7 +693,8 @@ s_ee_vu1_ir_program vu1_lift_straight_line_ir(
         pc = (pc + 8u) & 0x3fffu;
         if (ending)
         {
-            return {emitter.finish(steps, pc), steps, cycle - 16u, pc};
+            return {emitter.finish(steps, pc), steps, cycle - 16u, pc,
+                emitter.writes_data()};
         }
         ending = (hi & 0x40000000u) != 0u;
     }

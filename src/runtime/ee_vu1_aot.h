@@ -9,9 +9,9 @@
 namespace ee
 {
 // ABI changes invalidate native VU1 libraries, never the EE IR cache.
-inline constexpr uint32_t k_vu1_aot_abi = 2u;
+inline constexpr uint32_t k_vu1_aot_abi = 3u;
 using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,
-    uint32_t, uint32_t, uint32_t*, uint32_t, uint32_t*, uint32_t*, const uint8_t*);
+    uint32_t, uint32_t, uint32_t*, uint32_t, uint32_t*, uint32_t*, uint8_t*);
 using t_vu1_aot_info = const uint32_t* (*)();
 using t_vu1_aot_code = const uint8_t* (*)();
 using t_vu1_code = std::array<uint8_t, c_ee_vu1::k_memory_size>;
@@ -32,7 +32,7 @@ public:
     // This is host-only; it never mutates guest code or execution state.
     void capture(const t_vu1_code& code, uint32_t pc);
     bool try_run(s_ee_vu1_state& state, const t_vu1_code& code,
-        const t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue);
+        t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue);
     void write_json(FILE* output) const;
     uint64_t native_runs() const { return m_native_runs; }
     uint64_t fallbacks() const { return m_fallbacks; }
@@ -44,6 +44,7 @@ private:
         uint32_t m_steps = 0u;
         uint32_t m_cycles = 0u;
         uint32_t m_next_pc = 0u;
+        bool m_writes_data = false;
         std::vector<uint8_t> m_code;
         t_vu1_aot_entry m_entry = nullptr;
     };

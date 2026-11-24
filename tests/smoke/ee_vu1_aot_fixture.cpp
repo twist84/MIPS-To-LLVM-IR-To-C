@@ -32,7 +32,10 @@ ee::t_vu1_code program()
     pair(code, k_start, add_vi, upper(0x28u, 4u, 2u, 3u, 15u));
     // Same-pair LQ reads memory while the upper consumes the old VF4.
     pair(code, 0u, 0x01e40001u, upper(0x2au, 5u, 4u, 3u, 15u) | 0x40000000u);
-    pair(code, 8u, 0x3f800000u, upper(0x22u, 6u, 5u, 0u, 15u) | 0x80000000u);
+    // E delay slot stores the old VF6 before the simultaneous upper
+    // writeback. Native execution must publish these data bytes too.
+    pair(code, 8u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
+        (6u << 11u), upper(0x22u, 6u, 5u, 0u, 15u));
     return code;
 }
 
@@ -58,6 +61,7 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend)
     s.m_vi[2] = 5u;
     s.m_i = 0x40000000u;
     s.m_acc = {11u, 22u, 33u, 44u};
+    s.m_vf[6] = {0x12345678u, 0xabcdef01u, 0xdeadbeefu, 0x01020304u};
     s.m_q = 0x3f800000u;
     s.m_p = 123u;
     s.m_r = 456u;

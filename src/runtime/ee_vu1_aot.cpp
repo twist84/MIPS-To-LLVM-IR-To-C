@@ -140,6 +140,7 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     {
         return reject("VU1 AOT code or timing validation failed");
     }
+    program.m_writes_data = lifted.m_writes_data;
     m_programs[start >> 3u].push_back(std::move(program));
     m_libraries.push_back(library);
     return true;
@@ -272,7 +273,7 @@ void c_ee_vu1_aot::capture(const t_vu1_code& code, uint32_t pc)
 }
 
 bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
-    const t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue)
+    t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue)
 {
     pc &= 0x3ff8u;
     // A compiled entry assumes initialized constant registers. If a
@@ -286,10 +287,16 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             {
                 continue;
             }
-            // All currently lifted programs leave VU data, PATH1, ACC,
-            // P/Q pipelines and CLIP untouched. Keep the whole candidate
-            // private until the entry returns a valid completion.
+            // Keep candidate state and any memory stores private until
+            // successful completion. Read-only programs avoid the copy.
             auto next = state;
+            t_vu1_code staged_data;
+            if (program.m_writes_data)
+            {
+                staged_data = data;
+            }
+            uint8_t* data_ptr = program.m_writes_data ?
+                staged_data.data() : data.data();
             std::array<uint32_t, 128> vf{};
             static_assert(sizeof(vf) == sizeof(next.m_vf), "VF ABI");
             std::memcpy(vf.data(), next.m_vf.data(), sizeof(vf));
@@ -297,7 +304,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 program.m_steps);
             const uint32_t steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), next.m_q, &next.m_mac,
-                &next.m_status, data.data());
+                &next.m_status, data_ptr);
             if (steps != program.m_steps || next.m_tpc != program.m_next_pc ||
                 next.m_vi[0] != 0u || vf[0] != 0u || vf[1] != 0u ||
                 vf[2] != 0u || vf[3] != 0x3f800000u)
@@ -306,6 +313,10 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             }
             std::memcpy(next.m_vf.data(), vf.data(), sizeof(vf));
             state = next;
+            if (program.m_writes_data)
+            {
+                data = staged_data;
+            }
             issue.m_steps = steps;
             issue.m_cycles = program.m_cycles;
             issue.m_pc = (program.m_next_pc - 8u) & 0x3fffu;

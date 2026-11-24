@@ -131,11 +131,27 @@ int main(int argc, char** argv)
         append(special(0x30u, 18u, 17u, 15u), k_upper);
         append(special(0x3cu, 5u, 18u, 1u), k_upper);
         append(special(0x3du, 19u, 5u, 15u), k_upper);
+        if (std::strcmp(argv[2], "stores") == 0)
+        {
+            // SQ uses IT as the address, FS as the vector. Negative
+            // offset wraps; unselected lanes must remain unchanged.
+            append((1u << 25u) | (10u << 21u) | (1u << 16u) |
+                (2u << 11u) | 0x7ffu, upper(0x28u, 2u, 2u, 3u, 15u));
+            append(special(0x35u, 1u, 2u, 15u), k_upper);
+            append(special(0x37u, 1u, 3u, 5u), k_upper);
+            append(special(0x35u, 0u, 0u, 15u), k_upper);
+            append(special(0x37u, 0u, 3u, 8u), k_upper);
+            append((5u << 25u) | (9u << 21u) | (1u << 16u) |
+                0x7ffu, k_upper); // ISW zero-extends 0xfffe
+            append(special(0x3fu, 2u, 1u, 6u), k_upper);
+            append((15u << 21u) | (20u << 16u) | (1u << 11u), k_upper);
+        }
     }
     append(k_nop, k_end);
     append(integer(0x30u, 12u, 10u, 11u)); // E delay slot
     const auto program = ee::vu1_lift_straight_line_ir(code, start);
-    if (program.m_ir.empty())
+    if (program.m_ir.empty() || program.m_writes_data !=
+        (std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
     }
@@ -180,6 +196,11 @@ int main(int argc, char** argv)
             std::printf(" %u", value);
         }
     }
-    std::printf(" %u %u\n", state.m_mac, state.m_status);
+    std::printf(" %u %u", state.m_mac, state.m_status);
+    for (uint8_t value : data)
+    {
+        std::printf(" %u", static_cast<unsigned>(value));
+    }
+    std::puts("");
     return 0;
 }
