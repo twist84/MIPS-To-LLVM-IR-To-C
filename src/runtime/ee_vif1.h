@@ -98,13 +98,6 @@ private:
     // VIF command reset preserves this entire value; a full reset clears it.
     // Keeping the memories and execution context together permits an
     // explicit ownership handoff without lending MMIO pointers to a worker.
-    struct s_vu1_resident
-    {
-        std::array<uint8_t, k_vu1_memory_size> m_data{};
-        std::array<uint8_t, k_vu1_memory_size> m_code{};
-        s_ee_vu1_state m_state{};
-    };
-
     struct s_machine
     {
         uint32_t m_stat = 0u;
@@ -125,7 +118,7 @@ private:
         uint32_t m_col[4]{};
         bool m_dbf = false;
         std::vector<uint32_t> m_pending;
-        s_vu1_resident m_vu1{};
+        s_ee_vu1_resident m_vu1{};
         uint32_t m_commands = 0u;
         uint32_t m_mpg_uploads = 0u;
         uint32_t m_unpack_commands = 0u;

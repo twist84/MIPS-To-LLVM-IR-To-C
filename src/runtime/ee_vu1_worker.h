@@ -1,0 +1,66 @@
+#pragma once
+
+#include "ee_vu1_aot.h"
+
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
+
+namespace ee
+{
+// Host-owned job, not a committed VIF transaction. Only the worker
+// mutates it between submit and take. PATH1 can contain an existing
+// staged prefix so XGKICK retains the aggregate packet bound.
+struct s_ee_vu1_job
+{
+    s_ee_vu1_resident m_resident{};
+    uint32_t m_address = 0u;
+    uint32_t m_top = 0u;
+    uint32_t m_itop = 0u;
+    std::vector<uint8_t> m_path1;
+    s_ee_vu1_issue m_issue{};
+    bool m_accepted = false;
+    bool m_host_failed = false;
+    uint64_t m_execution_ns = 0u;
+};
+
+// Single producer/consumer controller, one outstanding job (including
+// an untaken result). Never publishes GS or DMAC state from the worker.
+// The optional AOT backend transfers exclusive ownership at construction;
+// the worker installs its own thread-local binding. No runner-owned
+// counters, DLL lifetime or guest state are borrowed.
+class c_ee_vu1_worker
+{
+public:
+    explicit c_ee_vu1_worker(std::unique_ptr<c_ee_vu1_aot> backend = {});
+    ~c_ee_vu1_worker();
+
+    c_ee_vu1_worker(const c_ee_vu1_worker&) = delete;
+    c_ee_vu1_worker& operator=(const c_ee_vu1_worker&) = delete;
+
+    // On failure the caller retains the job. On success it must not
+    // keep references into the transferred object.
+    bool submit(std::unique_ptr<s_ee_vu1_job>& job);
+    std::unique_ptr<s_ee_vu1_job> try_take();
+    std::unique_ptr<s_ee_vu1_job> wait_take();
+    bool busy() const;
+
+    // Full reset can discard a result, but cannot allow old work to
+    // race a new generation. No timeout or fabricated completion.
+    void discard();
+
+private:
+    void run();
+    std::unique_ptr<s_ee_vu1_job> take_locked();
+
+    std::unique_ptr<c_ee_vu1_aot> m_backend;
+    mutable std::mutex m_mutex;
+    std::condition_variable m_changed;
+    std::unique_ptr<s_ee_vu1_job> m_pending;
+    std::unique_ptr<s_ee_vu1_job> m_finished;
+    bool m_busy = false;
+    bool m_stopping = false;
+    std::thread m_thread;
+};
+} // namespace ee

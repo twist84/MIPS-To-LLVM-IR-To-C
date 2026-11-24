@@ -25,6 +25,15 @@ struct s_ee_vu1_state
     bool m_initialized = false;
 };
 
+// Single value owner for VU1 code, data and execution context.
+// Worker requests and staged VIF transactions never borrow guest MMIO pointers.
+struct s_ee_vu1_resident
+{
+    std::array<uint8_t, 16384u> m_data{};
+    std::array<uint8_t, 16384u> m_code{};
+    s_ee_vu1_state m_state{};
+};
+
 enum class e_ee_vu1_kick_reject : uint32_t
 {
     none = 0u,

@@ -44,6 +44,7 @@ add_library(ee_core STATIC
     src/runtime/ee_vif1.cpp
     src/runtime/ipu/ee_ipu.cpp
     src/runtime/ee_vu1.cpp
+    src/runtime/ee_vu1_worker.cpp
     src/runtime/ee_vu1_ir.cpp
     src/runtime/ee_vu1_aot.cpp
     src/runtime/ee_gs.cpp
@@ -54,6 +55,8 @@ add_library(ee_core STATIC
     src/runtime/ee_scanout_clock.cpp
     src/runtime/ee_cycle_scheduler.cpp
 )
+find_package(Threads REQUIRED)
+target_link_libraries(ee_core PUBLIC Threads::Threads)
 if(CMAKE_DL_LIBS)
     target_link_libraries(ee_core PUBLIC ${CMAKE_DL_LIBS})
 endif()
@@ -529,6 +532,10 @@ add_test(NAME ee_vif1_device COMMAND ee_vif1_device_test)
 add_executable(ee_vu1_pipeline_test tests/smoke/ee_vu1_pipeline_test.cpp)
 target_link_libraries(ee_vu1_pipeline_test PRIVATE ee_core)
 add_test(NAME ee_vu1_pipeline COMMAND ee_vu1_pipeline_test)
+
+add_executable(ee_vu1_worker_test tests/smoke/ee_vu1_worker_test.cpp)
+target_link_libraries(ee_vu1_worker_test PRIVATE ee_core)
+add_test(NAME ee_vu1_worker COMMAND ee_vu1_worker_test)
 
 add_executable(ee_vu1_ir_fixture tests/smoke/ee_vu1_ir_fixture.cpp)
 target_link_libraries(ee_vu1_ir_fixture PRIVATE ee_core)
