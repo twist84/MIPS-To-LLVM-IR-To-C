@@ -584,6 +584,30 @@ int main()
 
     check_general_macros(cpu, runtime, vu0);
 
+    // The actual USA spawn routine calls 0x00106950. Its six COP2
+    // instructions normalize xyz, preserving w and using VF0.w / sqrt.
+    constexpr uint32_t normalize_words[] =
+    {
+        0x4bc4216au, 0x4b052941u, 0x4b052942u,
+        0x4a6503beu, 0x4a0003bfu, 0x4bc0211cu
+    };
+    const float signs[] = {1.f, -1.f};
+    for (float sign : signs)
+    {
+        cpu.m_vu0[4] = make_vector(sign * 3.f, 0.f, sign * 4.f, 1.f);
+        cpu.m_vu0[5] = make_vector(0.f, 0.f, 0.f, 123.f);
+        for (uint32_t i = 0u; i < 6u; ++i)
+        {
+            const uint32_t word = normalize_words[i];
+            const uint32_t result = i == 3u || i == 4u
+                ? ee::ee_vu0_macro_scalar(&cpu, &runtime, word, 0x0010697cu + 4u * i)
+                : ee::ee_vu0_macro_fmac(&cpu, &runtime, word, 0x0010697cu + 4u * i);
+            check(result == 0u, "retail spawn normalization instruction completes");
+        }
+        check(same_vector(cpu.m_vu0[4], make_vector(sign * 0.6f, 0.f, sign * 0.8f, 1.f)),
+              "retail spawn normalization preserves direction and W");
+    }
+
     // Exercise the authentic four-instruction SDBZ matrix chain with
     // a nonidentity transform: rotate +90 degrees around Z, then translate.
     // A direction (w=0) must not receive translation.
