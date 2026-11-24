@@ -9,7 +9,7 @@ namespace ee
 // LLVM backend for straight-line and bounded branching integer/FMAC
 // instructions. Empty IR means the entire program uses the interpreter.
 // Entry ABI: VI[16], I, TPC, TOP, ITOP, VF[32][4], Q, MAC, STATUS,
-// data[16384], cycles_out, last_pc_out, ACC[4]. Return 0 requests rollback/fallback.
+// data[16384], cycles_out, last_pc_out, ACC[4], CLIP. Return 0 requests rollback/fallback.
 // Stores require a staged data-memory copy before native execution.
 // All pointer arguments are disjoint; Q is passed by value.
 // Caller must supply initialized state with canonical VI0/VF0. The

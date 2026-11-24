@@ -51,7 +51,7 @@ bool rejection_tests()
     {
         return false;
     }
-    pair(code, 8u, k_nop, 0x000001ffu); // unsupported CLIP
+    pair(code, 8u, 0x800006fcu, k_upper); // unsupported XGKICK
     return ee::vu1_lift_straight_line_ir(code, 0u).m_ir.empty();
 }
 } // namespace
@@ -241,6 +241,54 @@ int main(int argc, char** argv)
         append(k_nop, accumulator(0x2eu, 21u, 22u, 1u));
         append(k_nop, upper(0x2eu, 25u, 21u, 22u, 1u));
     }
+    const bool flag_case = std::strcmp(argv[2], "flags") == 0;
+    if (flag_case)
+    {
+        const auto lower_flag = [](uint32_t major, uint32_t it, uint32_t is, uint32_t imm)
+        {
+            return (major << 25u) | (it << 16u) | (is << 11u) |
+                (imm & 0x7ffu) | ((imm & 0x800u) << 10u);
+        };
+        uint32_t slot = 0x200u;
+        const auto save = [&](uint32_t vi)
+        {
+            append((5u << 25u) | (15u << 21u) | (vi << 16u) | slot++, k_upper);
+        };
+        const auto clip = upper(0x3fu, 0x1fu >> 2u, 21u, 3u, 0u);
+        append((0x11u << 25u) | 0x123456u);
+        append((0x10u << 25u) | 0x123456u); save(1u);
+        append((0x12u << 25u) | 0x100000u); save(1u);
+        append((0x13u << 25u) | 0xedcba9u); save(1u);
+        append(lower_flag(0x1cu, 6u, 0u, 0u), clip); save(6u);
+        append(lower_flag(0x1cu, 6u, 0u, 0u)); save(6u);
+        append(lower_flag(0x1cu, 6u, 0u, 0u)); save(6u);
+        // More than eight writes, including same-pair FCSET + CLIP.
+        for (uint32_t j = 0u; j < 12u; ++j)
+        {
+            append(j & 1u ? (0x11u << 25u) | (j * 0x11111u) :
+                lower_flag(0x1cu, 6u, 0u, 0u), clip);
+        }
+        append(lower_flag(0x1cu, 6u, 0u, 0u)); save(6u);
+        // MAC/STATUS use issue count, not scoreboard-stalled cycles.
+        append(k_nop, upper(0x2cu, 23u, 21u, 21u, 15u));
+        append(lower_flag(0x16u, 7u, 0u, 0xfffu),
+            upper(0x2au, 24u, 23u, 21u, 15u)); save(7u);
+        append(lower_flag(0x17u, 7u, 0u, 0x800u)); save(7u);
+        append(lower_flag(0x14u, 7u, 0u, 0x30u)); save(7u);
+        append(lower_flag(0x15u, 0u, 0u, 0xac0u),
+            upper(0x2au, 24u, 21u, 22u, 15u));
+        append(lower_flag(0x16u, 7u, 0u, 0xfffu)); save(7u);
+        append(lower_flag(0x18u, 7u, 2u, 0u)); save(7u);
+        append(lower_flag(0x1au, 7u, 2u, 0u)); save(7u);
+        append(lower_flag(0x1bu, 7u, 2u, 0u)); save(7u);
+        // A flag-produced VI is exempt from previous-VI branch delay.
+        append((0x11u << 25u) | 1u);
+        append((0x12u << 25u) | 1u);
+        append((0x29u << 25u) | (1u << 11u) | 2u);
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u));
+        append(k_nop);
+    }
     const bool branches = std::strcmp(argv[2], "branches") == 0 ||
         std::strcmp(argv[2], "branch-wrap") == 0 ||
         std::strcmp(argv[2], "acc-branches") == 0;
@@ -292,8 +340,8 @@ int main(int argc, char** argv)
         append(integer(0x30u, 12u, 10u, 11u)); // E delay slot
     }
     const auto program = ee::vu1_lift_program_ir(code, start);
-    if (program.m_ir.empty() || (program.m_steps == 0u) != branches ||
-        program.m_writes_data != (conversion_case || acc_case ||
+    if (program.m_ir.empty() || (program.m_steps == 0u) != (branches || flag_case) ||
+        program.m_writes_data != (conversion_case || acc_case || flag_case ||
             std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
@@ -311,6 +359,7 @@ int main(int argc, char** argv)
     state.m_vf[25][3] = 0x12345678u;
     state.m_mac = 0x1234u;
     state.m_status = 0x30u;
+    state.m_clip = 0x345678u;
     state.m_vf[2] = {0x3f800000u, 0x80000001u, 0x7fffffffu, 0xbf800000u};
     state.m_vf[3] = {0x40000000u, 0x80000000u, 0x7f7fffffu, 0x3f800000u};
     state.m_vf[6] = {11u, 22u, 33u, 44u};
@@ -319,7 +368,7 @@ int main(int argc, char** argv)
     std::vector<uint8_t> path1;
     if (!ee::c_ee_vu1::run(state, code, data, start, 0x12345u, 0x23456u,
             path1, &issue) || !path1.empty() ||
-        (!branches && (issue.m_steps != program.m_steps ||
+        (!branches && !flag_case && (issue.m_steps != program.m_steps ||
             issue.m_cycles != program.m_cycles || state.m_tpc != program.m_next_pc)))
     {
         return 1;
@@ -344,7 +393,7 @@ int main(int argc, char** argv)
             std::printf(" %u", value);
         }
     }
-    std::printf(" %u %u", state.m_mac, state.m_status);
+    std::printf(" %u %u %u", state.m_mac, state.m_status, state.m_clip);
     for (uint32_t value : state.m_acc)
     {
         std::printf(" %u", value);

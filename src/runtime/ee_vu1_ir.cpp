@@ -234,6 +234,44 @@ convert:
   %result = call i32 @vu_pack(i32 %sign, i32 %e, i32 %mantissa)
   ret i32 %result
 }
+
+; Each ring stores the last eight writes in issue order, not timestamp
+; order (FCSET and FSSET can publish retroactively visible values).
+define internal void @vu_flag_push(ptr %head, ptr %times, ptr %values,
+    i32 %time, i32 %value) alwaysinline {
+  %h = load i32, ptr %head, align 4
+  %index = and i32 %h, 7
+  %tp = getelementptr i32, ptr %times, i32 %index
+  %vp = getelementptr i32, ptr %values, i32 %index
+  store i32 %time, ptr %tp, align 4
+  store i32 %value, ptr %vp, align 4
+  %next = add i32 %h, 1
+  store i32 %next, ptr %head, align 4
+  ret void
+}
+
+define internal i32 @vu_flag_read(ptr %head, ptr %times, ptr %values,
+    i32 %now) alwaysinline {
+entry:
+  %h = load i32, ptr %head, align 4
+  br label %scan
+scan:
+  %k = phi i32 [1, %entry], [%next, %scan]
+  %offset = sub i32 %h, %k
+  %index = and i32 %offset, 7
+  %tp = getelementptr i32, ptr %times, i32 %index
+  %ts = load i32, ptr %tp, align 4
+  %ready = add i32 %ts, 4
+  %visible = icmp ule i32 %ready, %now
+  %oldest = icmp eq i32 %k, 8
+  %done = or i1 %visible, %oldest
+  %next = add i32 %k, 1
+  br i1 %done, label %result, label %scan
+result:
+  %vp = getelementptr i32, ptr %values, i32 %index
+  %value = load i32, ptr %vp, align 4
+  ret i32 %value
+}
 )IR";
 
 constexpr uint32_t k_unknown_pc = 0xffffffffu;
@@ -255,6 +293,34 @@ bool is_branch(uint32_t lo, uint32_t hi)
     }
 }
 
+bool is_flag_pair(uint32_t lo, uint32_t hi)
+{
+    const uint32_t funct = hi & 63u;
+    const uint32_t index = (((hi >> 6u) & 31u) << 2u) | (funct & 3u);
+    if (funct >= 0x3cu && index == 0x1fu)
+    {
+        return true;
+    }
+    if ((hi & 0x80000000u) != 0u)
+    {
+        return false;
+    }
+    const uint32_t major = lo >> 25u;
+    return major >= 0x10u && major <= 0x1cu && major != 0x19u;
+}
+
+bool branch_delay_exempt(uint32_t lo)
+{
+    switch (lo >> 25u)
+    {
+    case 0x10u: case 0x12u: case 0x13u: case 0x14u:
+    case 0x16u: case 0x17u: case 0x18u: case 0x1au:
+    case 0x1bu: case 0x1cu: case 0x21u: case 0x25u:
+        return true;
+    default: return false;
+    }
+}
+
 uint32_t relative_target(uint32_t pc, uint32_t lo)
 {
     const uint32_t raw = lo & 0x7ffu;
@@ -272,15 +338,23 @@ public:
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, i32 %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
-            "ptr %last_pc_out, ptr %acc) {\nentry:\n";
+            "ptr %last_pc_out, ptr %acc, ptr %clip) {\nentry:\n";
     }
 
     // The dynamic path uses the same per-pair arithmetic emitter as the
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
-    void begin_dynamic(uint32_t start, const std::bitset<2048>& reached)
+    void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
+        bool flags)
     {
         m_dynamic = true;
+        m_flag_pipeline = flags;
+        if (flags)
+        {
+            init_ring("mac");
+            init_ring("status");
+            init_ring("clip");
+        }
         line("%pc = alloca i32, align 4");
         line("%npc = alloca i32, align 4");
         line("%step_count = alloca i32, align 4");
@@ -346,6 +420,11 @@ public:
             cycle = max_ready(cycle, 128u + use.m_vi_indices[index]);
         }
         line("store i32 " + cycle + ", ptr %cycle, align 4");
+        if (m_flag_pipeline)
+        {
+            m_issue_cycle = cycle;
+            m_flag_time = operation("add i32 %steps, 16");
+        }
         if (!emit(lo, hi))
         {
             return false;
@@ -364,11 +443,8 @@ public:
                     ready_pointer(128u + use.m_vi_load) + ", align 4");
             }
         }
-        // Match branch_delay_exempt for all currently lifted lower ops.
-        // LOI and link-producing branches use current VI next pair.
-        const uint32_t major = lo >> 25u;
         const bool previous_lower = (hi & 0x80000000u) == 0u &&
-            major != 0x21u && major != 0x25u;
+            !branch_delay_exempt(lo);
         line("store <16 x i16> %before_vi, ptr %previous_vi, align 2");
         line(std::string("store i1 ") + (previous_lower ? "true" : "false") +
             ", ptr %previous_lower, align 1");
@@ -402,12 +478,30 @@ public:
         m_upper_mask = 0u;
         m_upper_flags = false;
         m_upper_acc = false;
+        m_pending_clip.clear();
+        m_fsset = -1;
         if ((hi & 0x38000000u) != 0u || !emit_upper(hi) ||
             !emit_lower(lo, hi))
         {
             return false;
         }
         commit_upper();
+        if (m_fsset >= 0)
+        {
+            const auto old = operation("load i32, ptr %status, align 4");
+            const auto current = operation("and i32 " + old + ", 63");
+            const auto status = operation("or i32 " + current + ", " +
+                std::to_string(m_fsset));
+            line("store i32 " + status + ", ptr %status, align 4");
+            const auto time = operation("sub i32 " + m_flag_time + ", 4");
+            push_ring("status", time, status);
+            push_ring("mac", time, operation("load i32, ptr %mac, align 4"));
+        }
+        if (!m_pending_clip.empty())
+        {
+            line("store i32 " + m_pending_clip + ", ptr %clip, align 4");
+            push_ring("clip", m_issue_cycle, m_pending_clip);
+        }
         return true;
     }
 
@@ -445,6 +539,10 @@ public:
             case 0x05u: store_integer(it, mask, address); break;
             }
             return true;
+        }
+        if (m_flag_pipeline && major >= 0x10u && major <= 0x1cu)
+        {
+            return emit_flag_lower(lo, major, is, it);
         }
         if (m_dynamic && is_branch(lo, hi))
         {
@@ -568,6 +666,119 @@ public:
     }
 
 private:
+    void init_ring(const std::string& name)
+    {
+        const auto prefix = "%" + name + "_ring_";
+        line(prefix + "head = alloca i32, align 4");
+        line(prefix + "times = alloca [8 x i32], align 4");
+        line(prefix + "values = alloca [8 x i32], align 4");
+        line("store i32 0, ptr " + prefix + "head, align 4");
+        line("store [8 x i32] zeroinitializer, ptr " + prefix + "times, align 4");
+        const auto initial = operation("load i32, ptr %" + name + ", align 4");
+        const auto lane = operation("insertelement <8 x i32> poison, i32 " + initial + ", i32 0");
+        const auto all = operation("shufflevector <8 x i32> " + lane +
+            ", <8 x i32> poison, <8 x i32> zeroinitializer");
+        line("store <8 x i32> " + all + ", ptr " + prefix + "values, align 4");
+    }
+
+    void push_ring(const std::string& name, const std::string& time,
+        const std::string& value)
+    {
+        const auto prefix = "%" + name + "_ring_";
+        line("call void @vu_flag_push(ptr " + prefix + "head, ptr " +
+            prefix + "times, ptr " + prefix + "values, i32 " + time +
+            ", i32 " + value + ")");
+    }
+
+    std::string read_ring(const std::string& name)
+    {
+        const auto prefix = "%" + name + "_ring_";
+        return operation("call i32 @vu_flag_read(ptr " + prefix +
+            "head, ptr " + prefix + "times, ptr " + prefix +
+            "values, i32 " + (name == "clip" ? m_issue_cycle : m_flag_time) + ")");
+    }
+
+    void store_flag_result(uint32_t target, const std::string& value)
+    {
+        store(target, operation("trunc i32 " + value + " to i16"));
+    }
+
+    void store_flag_predicate(uint32_t target, const std::string& predicate)
+    {
+        store(target, operation("zext i1 " + predicate + " to i16"));
+    }
+
+    bool emit_flag_lower(uint32_t lo, uint32_t major, uint32_t is, uint32_t it)
+    {
+        const auto imm24 = std::to_string(lo & 0xffffffu);
+        const uint32_t imm12 = ((lo >> 10u) & 0x800u) | (lo & 0x7ffu);
+        const auto immediate = std::to_string(imm12);
+        if (major == 0x11u)
+        {
+            line("store i32 " + imm24 + ", ptr %clip, align 4");
+            push_ring("clip", operation("sub i32 " + m_flag_time + ", 4"), imm24);
+            return true;
+        }
+        if (major == 0x15u)
+        {
+            m_fsset = static_cast<int32_t>(imm12 & 0xfc0u);
+            return true;
+        }
+        if (major == 0x10u || major == 0x12u || major == 0x13u || major == 0x1cu)
+        {
+            const auto clip = operation("and i32 " + read_ring("clip") + ", 16777215");
+            if (major == 0x10u)
+            {
+                store_flag_predicate(1u, operation("icmp eq i32 " + clip + ", " + imm24));
+            }
+            else if (major == 0x12u)
+            {
+                const auto bits = operation("and i32 " + clip + ", " + imm24);
+                store_flag_predicate(1u, operation("icmp ne i32 " + bits + ", 0"));
+            }
+            else if (major == 0x13u)
+            {
+                const auto bits = operation("or i32 " + clip + ", " + imm24);
+                store_flag_predicate(1u, operation("icmp eq i32 " + bits + ", 16777215"));
+            }
+            else
+            {
+                store_flag_result(it, operation("and i32 " + clip + ", 4095"));
+            }
+            return true;
+        }
+        if (major == 0x14u || major == 0x16u || major == 0x17u)
+        {
+            const auto status = operation("and i32 " + read_ring("status") + ", 4095");
+            if (major == 0x14u)
+            {
+                store_flag_predicate(it, operation("icmp eq i32 " + status + ", " + immediate));
+            }
+            else
+            {
+                store_flag_result(it, operation(std::string(major == 0x16u ? "and" : "or") +
+                    " i32 " + status + ", " + immediate));
+            }
+            return true;
+        }
+        if (major == 0x18u || major == 0x1au || major == 0x1bu)
+        {
+            const auto mac = operation("and i32 " + read_ring("mac") + ", 65535");
+            const auto vi = operation("zext i16 " + reg(is) + " to i32");
+            if (major == 0x18u)
+            {
+                store_flag_predicate(it, operation("icmp eq i32 " + mac + ", " + vi));
+            }
+            else
+            {
+                store_flag_result(it, operation(std::string(major == 0x1au ? "and" : "or") +
+                    " i32 " + mac + ", " + vi));
+            }
+            return true;
+        }
+        return false;
+    }
+
     std::string ready_pointer(uint32_t index)
     {
         return operation("getelementptr i32, ptr %ready, i32 " +
@@ -826,6 +1037,11 @@ private:
             status = operation("or i32 " + status + ", " + flag);
         }
         line("store i32 " + status + ", ptr %status, align 4");
+        if (m_flag_pipeline)
+        {
+            push_ring("mac", m_flag_time, mac);
+            push_ring("status", m_flag_time, status);
+        }
     }
 
     std::string acc_pointer(uint32_t lane)
@@ -864,10 +1080,33 @@ private:
         const bool abs = special && op == 0x1du;
         const bool cross = op == 0x2eu;
         const bool conversion = special && op >= 0x10u && op <= 0x17u;
-        // CLIP has a separate delayed flag pipeline.
         if (special && op == 0x1fu)
         {
-            return false;
+            if (!m_flag_pipeline)
+            {
+                return false;
+            }
+            const auto abs_w = operation("and i32 " + vf(ft, 3u) + ", 2147483647");
+            const auto limit = operation("call i32 @vu_key(i32 " + abs_w + ")");
+            const auto neg = operation("sub i32 0, " + limit);
+            std::string bits = "0";
+            for (uint32_t lane = 0u; lane < 3u; ++lane)
+            {
+                const auto x = operation("call i32 @vu_key(i32 " + vf(fs, lane) + ")");
+                const auto above = operation("icmp sgt i32 " + x + ", " + limit);
+                const auto below = operation("icmp slt i32 " + x + ", " + neg);
+                const auto p = operation("select i1 " + above + ", i32 " +
+                    std::to_string(1u << (lane * 2u)) + ", i32 0");
+                const auto n = operation("select i1 " + below + ", i32 " +
+                    std::to_string(2u << (lane * 2u)) + ", i32 0");
+                bits = operation("or i32 " + bits + ", " + p);
+                bits = operation("or i32 " + bits + ", " + n);
+            }
+            const auto old = operation("load i32, ptr %clip, align 4");
+            const auto shifted = operation("shl i32 " + old + ", 6");
+            const auto combined = operation("or i32 " + shifted + ", " + bits);
+            m_pending_clip = operation("and i32 " + combined + ", 16777215");
+            return true;
         }
         const bool madd = (op >= 0x08u && op <= 0x0bu) ||
             op == 0x21u || op == 0x23u || op == 0x29u;
@@ -1014,6 +1253,11 @@ private:
     bool m_upper_acc = false;
     bool m_writes_data = false;
     bool m_dynamic = false;
+    bool m_flag_pipeline = false;
+    std::string m_flag_time;
+    std::string m_issue_cycle;
+    std::string m_pending_clip;
+    int32_t m_fsset = -1;
     uint32_t m_current_pc = 0u;
     std::string m_next_target;
     uint32_t m_counter = 0u;
@@ -1039,7 +1283,7 @@ s_ee_vu1_ir_program vu1_lift_straight_line_ir(
     {
         const uint32_t lo = read_word(code.data() + pc);
         const uint32_t hi = read_word(code.data() + pc + 4u);
-        if (!emitter.emit(lo, hi))
+        if (is_flag_pair(lo, hi) || !emitter.emit(lo, hi))
         {
             return {};
         }
@@ -1085,6 +1329,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     enqueue(start, (start + 8u) & 0x3fffu, false);
     bool has_end = false;
     bool has_branch = false;
+    bool has_flags = false;
     for (size_t index = 0u; index < queue.size(); ++index)
     {
         // Avoid pathological branch-in-delay graphs at lift time.
@@ -1098,6 +1343,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         const uint32_t hi = read_word(code.data() + pc + 4u);
         const bool branch = is_branch(lo, hi);
         has_branch |= branch;
+        has_flags |= is_flag_pair(lo, hi);
         if (ending)
         {
             has_end = true;
@@ -1128,12 +1374,12 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             enqueue(npc, sequential, next_end);
         }
     }
-    if (!has_branch || !has_end)
+    if ((!has_branch && !has_flags) || !has_end)
     {
         return {};
     }
     c_straight_line_emitter emitter;
-    emitter.begin_dynamic(start, reached);
+    emitter.begin_dynamic(start, reached, has_flags);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))

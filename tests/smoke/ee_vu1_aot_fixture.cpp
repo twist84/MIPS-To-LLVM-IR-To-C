@@ -49,7 +49,8 @@ ee::t_vu1_code branch_program()
     };
     constexpr uint32_t k_upper = 0x000002ffu;
     // BAL across the micro-memory boundary; its link is VI6=2049.
-    pair(code, k_start, branch(0x21u, 0u, 6u, 4u), k_upper);
+    pair(code, k_start, branch(0x21u, 0u, 6u, 4u),
+        upper(0x3fu, 0x1fu >> 2u, 2u, 3u, 0u));
     // A memory write in the delay slot must be transactional even when
     // the later JALR target is not in the statically compiled graph.
     pair(code, 0u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
@@ -212,6 +213,7 @@ int main(int argc, char** argv)
         candidate.m_acc != original.m_acc ||
         candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
         candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
+        candidate.m_clip != original.m_clip ||
         memory != original_memory || issue.m_steps != 0u ||
         backend.native_runs() != 4u || backend.fallbacks() != 2u)
     {
