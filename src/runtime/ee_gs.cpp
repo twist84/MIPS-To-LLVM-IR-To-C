@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <type_traits>
 #include <utility>
 
 namespace ee
@@ -1089,22 +1090,7 @@ bool c_ee_gs_state::stage_host_upload(
         }
     };
 
-    if (four_bit)
-    {
-        // GIF bytes store even-numbered pixels in the low nibble.
-        // Raster order continues across odd-width rows without
-        // adding per-row padding.
-        for (size_t i = 0u; i < byte_count &&
-             state.m_transfer_pixels_written < total_pixels; ++i)
-        {
-            stage_pixel(data[i] & 0x0fu, 0u);
-            if (state.m_transfer_pixels_written < total_pixels)
-            {
-                stage_pixel((data[i] >> 4u) & 0x0fu, 0u);
-            }
-        }
-    }
-    else if (twenty_four_bit)
+    if (twenty_four_bit)
     {
         // A+D HWREG supplies eight bytes, not 16. In 24-bit modes
         // partial pixels can span HWREG, IMAGE and DMA calls.
@@ -1126,19 +1112,76 @@ bool c_ee_gs_state::stage_host_upload(
     }
     else
     {
-        for (size_t i = 0u; i < pixels; ++i)
+        // Fixed-size input formats can stage a run within one GS page
+        // and raster row. Neither the page base nor the row changes in
+        // the inner loop. Four-bit input remains packed across odd rows;
+        // its nibble index is relative to the entire input chunk.
+        const auto stage_runs = [&](auto size_tag)
         {
-            const size_t at = i * pixel_bytes;
-            uint32_t value = data[at];
-            if (pixel_bytes == 2u)
+            constexpr uint8_t size = decltype(size_tag)::value;
+            size_t at = 0u;
+            while (at < pixels)
             {
-                value |= static_cast<uint32_t>(data[at + 1u]) << 8u;
+                const uint32_t px = (x + column) & 0x7ffu;
+                const uint32_t page_x = px & x_mask;
+                const uint32_t page_base = row_base +
+                    ((px >> layout.m_x_shift) * 8192u);
+                const size_t run = std::min<size_t>(pixels - at,
+                    std::min(rrw - column, (x_mask + 1u) - page_x));
+                const uint16_t* offsets = row_offsets + page_x;
+                for (size_t i = 0u; i < run; ++i)
+                {
+                    const size_t input = at + i;
+                    uint32_t value;
+                    if constexpr (size == 0u)
+                    {
+                        value = (data[input >> 1u] >> ((input & 1u) * 4u)) & 15u;
+                    }
+                    else if constexpr (size == 1u)
+                    {
+                        value = data[input];
+                    }
+                    else if constexpr (size == 2u)
+                    {
+                        value = static_cast<uint32_t>(data[input * 2u]) |
+                            (static_cast<uint32_t>(data[input * 2u + 1u]) << 8u);
+                    }
+                    else
+                    {
+                        value = read_le32(data + input * 4u);
+                    }
+                    const uint32_t packed = offsets[i];
+                    const uint32_t offset = (page_base + (packed >> 1u)) &
+                        (k_vram_bytes - 1u);
+                    writes.emplace_back(offset, value, size,
+                        static_cast<uint8_t>((packed & 1u) * 4u));
+                }
+                at += run;
+                column += static_cast<uint32_t>(run);
+                if (column == rrw)
+                {
+                    column = 0u;
+                    ++row;
+                    update_row();
+                }
             }
-            else if (pixel_bytes == 4u)
-            {
-                value = read_le32(data + at);
-            }
-            stage_pixel(value, pixel_bytes);
+            state.m_transfer_pixels_written += static_cast<uint32_t>(pixels);
+        };
+        if (four_bit)
+        {
+            stage_runs(std::integral_constant<uint8_t, 0u>{});
+        }
+        else if (pixel_bytes == 1u)
+        {
+            stage_runs(std::integral_constant<uint8_t, 1u>{});
+        }
+        else if (pixel_bytes == 2u)
+        {
+            stage_runs(std::integral_constant<uint8_t, 2u>{});
+        }
+        else
+        {
+            stage_runs(std::integral_constant<uint8_t, 4u>{});
         }
     }
     return true;

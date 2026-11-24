@@ -269,9 +269,14 @@ bool test_host_upload_page_tables()
             return false;
         }
         const uint32_t qwc = static_cast<uint32_t>(payload.size() / 16u);
+        // Exercise both small continuations and large runs, moving
+        // the next chunk's starting position relative to row/page edges.
+        constexpr uint32_t chunks[] = {1u, 17u, 3u, 129u, 2u, 33u};
+        uint32_t chunk_index = 0u;
         for (uint32_t at = 0u; at < qwc;)
         {
-            const uint32_t chunk = (qwc - at < 17u) ? qwc - at : 17u;
+            const uint32_t limit = chunks[chunk_index++ % 6u];
+            const uint32_t chunk = (qwc - at < limit) ? qwc - at : limit;
             if (!image(actual, payload.data() + at * 16u, chunk))
             {
                 return false;
