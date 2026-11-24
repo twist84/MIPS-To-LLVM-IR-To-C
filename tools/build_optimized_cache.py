@@ -31,7 +31,7 @@ def verify_modules(work, metadata, hashes):
         raise ValueError("unowned IR modules in cache directory")
 
 
-def prepare(elf, build, config, source_work, work, opt, jobs):
+def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0):
     elf = elf.resolve(strict=True)
     source_work = source_work.resolve(strict=True)
     work = work.resolve()
@@ -48,7 +48,7 @@ def prepare(elf, build, config, source_work, work, opt, jobs):
     source_metadata_path = source_work / "ir" / "ee_functions.json"
     source_cache = source_work / "translation-cache.json"
     run_game.validate_translation_cache(
-        source_cache, inputs, 0, source_metadata_path,
+        source_cache, inputs, source_opt, source_metadata_path,
         source_work / library_name)
     source_snapshot = json.loads(source_cache.read_text(encoding="utf-8"))
     if source_snapshot.get("ir_sources") != ir_sources:
@@ -63,7 +63,8 @@ def prepare(elf, build, config, source_work, work, opt, jobs):
     if work.exists():
         # Retain functions discovered by the independent optimized replay.
         snapshot = json.loads(cache.read_text(encoding="utf-8"))
-        if snapshot.get("ir_sources") != ir_sources or snapshot.get("emit_opt") != opt:
+        if (snapshot.get("ir_sources") != ir_sources or snapshot.get("emit_opt") != opt or
+                snapshot.get("ir_pipeline") != run_game.ir_pipeline_id(opt)):
             raise ValueError("optimized cache lowering or optimization changed")
         variant_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         variant_hashes = snapshot.get("ir_hashes")
@@ -124,14 +125,18 @@ def main(argv=None):
     parser.add_argument("--config", default="Release")
     parser.add_argument("--source-work-dir", type=Path, required=True)
     parser.add_argument("--work-dir", type=Path, required=True)
-    parser.add_argument("--emit-opt", type=int, choices=(1, 2, 3), required=True)
+    parser.add_argument("--emit-opt", type=int, choices=(1, 2, 3, 4), required=True)
+    parser.add_argument("--source-opt", type=int, choices=(0, 2), default=0,
+                        help="verified source cache profile; use 2 to seed profile 4 from O2")
     parser.add_argument("--emit-jobs", type=int, default=2)
     args = parser.parse_args(argv)
+    if args.source_opt == 2 and args.emit_opt != 4:
+        parser.error("O2 source is only supported for the independent IR pipeline profile")
     if not 1 <= args.emit_jobs <= 32:
         parser.error("--emit-jobs must be between 1 and 32")
     try:
         prepare(args.elf, args.build_dir, args.config, args.source_work_dir,
-                args.work_dir, args.emit_opt, args.emit_jobs)
+                args.work_dir, args.emit_opt, args.emit_jobs, args.source_opt)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
         print(f"Optimized cache refused: {error}", file=sys.stderr)
         return 1

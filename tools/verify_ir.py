@@ -5,6 +5,7 @@ Examples:
   python3 tools/verify_ir.py 'out/*.ll'
   python3 tools/verify_ir.py 'out/*.ll' --emit
   python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects --emit-opt=0
+  python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects-ir-o2 --emit-opt=4
   python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects --emit-opt=0 --incremental --jobs=4
   python3 tools/verify_ir.py out/NEW1.ll out/NEW2.ll --emit-dir=out/objects --emit-opt=0 --incremental --append-only
 
@@ -33,6 +34,28 @@ import llvmlite.binding as llvm
 
 _worker_machines = {}
 
+# Profile 4 is not a backend O4 level: it is the LLVM default O2
+# middle-end pipeline followed by O2 machine code generation.
+IR_PIPELINE_PROFILE = 4
+IR_PIPELINE_ID = "llvm-default-O2-v1"
+
+
+def ir_pipeline_id(profile):
+    return IR_PIPELINE_ID if profile == IR_PIPELINE_PROFILE else None
+
+
+def backend_opt(profile):
+    return 2 if profile == IR_PIPELINE_PROFILE else profile
+
+
+def optimize_guest_ir(module, target_machine):
+    """Optimize a parsed, host-targeted module, never its source .ll file."""
+    with llvm.create_pipeline_tuning_options(speed_level=2, size_level=0) as tuning:
+        with llvm.create_pass_builder(target_machine, tuning) as builder:
+            with builder.getModulePassManager() as passes:
+                passes.run(module, builder)
+    module.verify()
+
 
 def write_atomic(path, data):
     temporary = path.with_name(path.name + ".tmp")
@@ -51,7 +74,7 @@ def get_target_machine(emit_opt, target_triple):
         llvm.initialize_native_asmprinter()
         target = llvm.Target.from_triple(target_triple)
         _worker_machines[key] = target.create_target_machine(
-            opt=emit_opt, reloc="pic", codemodel="default"
+            opt=backend_opt(emit_opt), reloc="pic", codemodel="default"
         )
     return _worker_machines[key]
 
@@ -71,6 +94,8 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
             module.triple = target_triple
             module.data_layout = str(target_machine.target_data)
             module.verify()
+            if emit_opt == IR_PIPELINE_PROFILE:
+                optimize_guest_ir(module, target_machine)
             object_data = target_machine.emit_object(module)
             object_size = len(object_data)
             if emit_dir is not None:
@@ -106,6 +131,7 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
         if (
             not manifest.get("complete")
             or manifest.get("optimization_level") != emit_opt
+            or manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)
             or manifest.get("target_triple") != target_triple
             or manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))
         ):
@@ -156,6 +182,7 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (manifest.get("complete") is not True or
         manifest.get("optimization_level") != emit_opt or
+        manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
         manifest.get("target_triple") != target_triple or
         manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))):
         raise ValueError("append-only object manifest is stale or incompatible")
@@ -216,8 +243,8 @@ def main():
             emit_opt = 2
         elif arg.startswith("--emit-opt="):
             emit_opt = int(arg.split("=", 1)[1])
-            if not 0 <= emit_opt <= 3:
-                raise SystemExit("--emit-opt must be between 0 and 3")
+            if not 0 <= emit_opt <= IR_PIPELINE_PROFILE:
+                raise SystemExit("--emit-opt must be 0..3 (backend only) or 4 (O2 IR + O2 backend)")
         elif arg.startswith("--emit-dir="):
             emit_dir = Path(arg.split("=", 1)[1])
             if emit_opt is None:
@@ -342,6 +369,8 @@ def main():
             "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
             "target_triple": target_triple,
             "optimization_level": emit_opt,
+            "ir_pipeline": ir_pipeline_id(emit_opt),
+            "backend_optimization_level": backend_opt(emit_opt),
             "input_module_count": len(manifest_order),
             "object_count": len(emitted),
             "object_bytes": sum(item["size_bytes"] for item in emitted.values()),

@@ -35,6 +35,11 @@ STOP_PATTERN = re.compile(
 CACHE_SCHEMA = "ee-translation-cache-v1"
 
 
+def ir_pipeline_id(profile):
+    # Keep this provenance identifier in sync with verify_ir.py.
+    return "llvm-default-O2-v1" if profile == 4 else None
+
+
 def sha256_path(path):
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -250,8 +255,9 @@ def validate_preserved_translation(path, inputs, ir_sources,
     snapshot = json.loads(path.read_text(encoding="utf-8"))
     if snapshot.get("schema") != CACHE_SCHEMA:
         raise ValueError("preserved translation has unknown provenance")
-    if snapshot.get("emit_opt") != emit_opt:
-        raise ValueError("preserved translation uses a different --emit-opt")
+    if (snapshot.get("emit_opt") != emit_opt or
+            snapshot.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
+        raise ValueError("preserved translation uses a different --emit-opt or IR pipeline")
     metadata_changed = (
         snapshot.get("metadata_sha256") != sha256_path(metadata_path)
     )
@@ -354,7 +360,9 @@ def validate_preserved_translation(path, inputs, ir_sources,
     if not manifest_path.is_file():
         raise ValueError("preserved object manifest missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not manifest.get("complete") or manifest.get("optimization_level") != emit_opt:
+    if (not manifest.get("complete") or
+            manifest.get("optimization_level") != emit_opt or
+            manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
         raise ValueError("preserved object manifest incomplete or incompatible")
     objects = manifest.get("objects")
     if not isinstance(objects, list):
@@ -430,6 +438,7 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
         "schema": CACHE_SCHEMA,
         "inputs": inputs,
         "emit_opt": emit_opt,
+        "ir_pipeline": ir_pipeline_id(emit_opt),
         "metadata_sha256": sha256_path(metadata_path),
         "library_sha256": sha256_path(library),
         "ir_sources": ir_sources,
@@ -474,9 +483,10 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
             "cached translation input list changed; "
             "rerun without --no-recompile"
         )
-    if snapshot.get("emit_opt") != emit_opt:
+    if (snapshot.get("emit_opt") != emit_opt or
+            snapshot.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
         raise ValueError(
-            "cached translation uses a different --emit-opt; "
+            "cached translation uses a different --emit-opt or IR pipeline; "
             "rerun without --no-recompile"
         )
     for name, file_path in (("metadata_sha256", metadata_path),
@@ -1183,9 +1193,9 @@ def main(argv=None):
     )
     parser.add_argument("--pdb", action="store_true",
                         help="Generate game-translated.pdb using Windows Clang/LLD")
-    parser.add_argument("--emit-opt", type=int, choices=range(4), default=0,
-                        metavar="{0,1,2,3}",
-                        help="LLVM native object optimization level (default: 0)")
+    parser.add_argument("--emit-opt", type=int, choices=range(5), default=0,
+                        metavar="{0,1,2,3,4}",
+                        help="LLVM backend O0..O3; profile 4 runs O2 IR + O2 backend")
     parser.add_argument("--emit-jobs", type=int, default=2,
                         help="parallel LLVM object-emission processes (default: 2)")
     parser.add_argument("--max-dispatches", type=int, default=10000)

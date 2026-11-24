@@ -140,6 +140,52 @@ def test_append_only_emission():
         print("PASS: append-only LLVM emission, manifest safety and no old rehash")
 
 
+def test_ir_pipeline_profile():
+    with tempfile.TemporaryDirectory(prefix="ee-ir-pipeline-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        first = ir_dir / "guest_fn.ll"
+        first.write_text("""define i32 @guest_fn(i32 %x) {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+""", encoding="utf-8")
+        original = first.read_bytes()
+        objects = root / "objects"
+        _, baseline = run_emitter(ir_dir, objects, opt=2)
+        out, optimized = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 0/1" in out, out
+        assert optimized["optimization_level"] == 4
+        assert optimized["backend_optimization_level"] == 2
+        assert optimized["ir_pipeline"] == "llvm-default-O2-v1"
+        assert optimized["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
+        assert first.read_bytes() == original
+        out, _ = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 1/1" in out, out
+        next_ir = ir_dir / "next_guest.ll"
+        write_ir(next_ir, 2)
+        manifest_path = objects / "objects.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["ir_pipeline"] = "different-pipeline"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        before = manifest_path.read_bytes()
+        command = [sys.executable, str(SCRIPT), str(next_ir),
+                   f"--emit-dir={objects}", "--emit-opt=4",
+                   "--incremental", "--append-only"]
+        refused = subprocess.run(command, capture_output=True, text=True)
+        assert refused.returncode != 0 and "stale or incompatible" in refused.stderr
+        assert manifest_path.read_bytes() == before
+        out, fixed = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 0/2" in out and fixed["object_count"] == 2
+        assert first.read_bytes() == original
+        print("PASS: O2 IR pipeline cache provenance and immutable source IR")
+
+
 if __name__ == "__main__":
     test_incremental_parallel_emission()
     test_append_only_emission()
+    test_ir_pipeline_profile()

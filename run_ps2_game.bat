@@ -79,8 +79,8 @@ exit /b 2
 :launcher_options_ready
 rem Optimized native object variants never replace the O0 baseline.
 if not defined SDBZ_EE_OPT set "SDBZ_EE_OPT=0"
-if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" (
-    echo ERROR: SDBZ_EE_OPT must be 0, 1, 2 or 3.
+if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" if not "%SDBZ_EE_OPT%"=="4" (
+    echo ERROR: SDBZ_EE_OPT must be 0..3 or 4 ^(O2 IR + O2 backend^).
     exit /b 2
 )
 if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
@@ -386,15 +386,35 @@ if not "%SDBZ_EE_OPT%"=="0" (
         echo ERROR: Optimized EE replay requires a verified O0 cache.
         exit /b 1
     )
-    python tools\build_optimized_cache.py "%GAME_ELF%" ^
-        --build-dir build --config Release ^
-        --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O%SDBZ_EE_OPT%" ^
-        --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
-    if errorlevel 1 exit /b 1
-    set "WORK_DIR=%WORK_DIR%-O%SDBZ_EE_OPT%"
+    if "%SDBZ_EE_OPT%"=="4" (
+        rem Refresh the verified O2 cache and seed the pipeline variant from
+        rem its full discovery map. Never replace the O0 or O2 IR/objects.
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O2" ^
+            --emit-opt=2 --emit-jobs=%EMIT_JOBS%
+        if errorlevel 1 exit /b 1
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%-O2" --source-opt=2 ^
+            --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%-IR-O2"
+    ) else (
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O%SDBZ_EE_OPT%" ^
+            --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%-O%SDBZ_EE_OPT%"
+    )
 )
 if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%WORK_DIR%\gs-webgpu.ppm"
-echo EE native object optimization: O%SDBZ_EE_OPT%
+if "%SDBZ_EE_OPT%"=="4" (
+    echo EE native object optimization: O2 IR pipeline + O2 backend
+) else (
+    echo EE native object optimization: O%SDBZ_EE_OPT%
+)
 
 echo === Starting extracted-disc HLE boot session ===
 set "SESSION_ARGS=--quick-probe --no-iop-catalog"
