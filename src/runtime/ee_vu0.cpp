@@ -2262,6 +2262,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         // Stage a separate result: fs==ft==fd must read original lanes.
         s_ee_u128 output = op.m_to_acc ? vu0->m_acc : lanes_of(fd);
         uint32_t mac_flags = vu0->m_mac_flags;
+        bool product_underflow = false;
         for (uint32_t lane = 0; lane < 4; ++lane)
         {
             if (!(mask & (8u >> lane)))
@@ -2303,6 +2304,24 @@ extern "C" uint32_t ee_vu0_macro_fmac(
             const float a = vu0_fmac_operand(a_bits);
             const float b = vu0_fmac_operand(b_bits);
             volatile float product = a * b; // rounded before accumulation
+            if (op.m_arith == e_vu0_macro_arith::madd ||
+                op.m_arith == e_vu0_macro_arith::msub)
+            {
+                // VU User's Manual 3.3.4: multiplication underflow
+                // contributes to US even if the final sum is normal.
+                // Detect it from the exact product of the normalized
+                // inputs, not a host float that may already be zero.
+                const uint32_t a_exp = (a_bits >> 23u) & 0xffu;
+                const uint32_t b_exp = (b_bits >> 23u) & 0xffu;
+                if (a_exp != 0u && b_exp != 0u && a_exp + b_exp <= 127u &&
+                    std::fabs(static_cast<double>(a) * static_cast<double>(b)) <
+                        0x1p-126)
+                {
+                    product_underflow = true;
+                    product = ((a_bits ^ b_bits) & 0x80000000u) != 0u
+                        ? -0.0f : 0.0f;
+                }
+            }
             const float acc = vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane));
             float answer = 0.0f;
             switch (op.m_arith)
@@ -2327,6 +2346,10 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         }
         if (flags)
         {
+            if (product_underflow)
+            {
+                vu0->m_status_flags |= 0x0100u;
+            }
             vu0_macro_update_status(vu0, mac_flags);
         }
         return complete;

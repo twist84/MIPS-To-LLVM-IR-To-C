@@ -584,6 +584,82 @@ int main()
 
     check_general_macros(cpu, runtime, vu0);
 
+    // Exercise the authentic four-instruction SDBZ matrix chain with
+    // a nonidentity transform: rotate +90 degrees around Z, then translate.
+    // A direction (w=0) must not receive translation.
+    cpu.m_vu0[4] = make_vector(0.f, 1.f, 0.f, 0.f);
+    cpu.m_vu0[5] = make_vector(-1.f, 0.f, 0.f, 0.f);
+    cpu.m_vu0[6] = make_vector(0.f, 0.f, 1.f, 0.f);
+    cpu.m_vu0[7] = make_vector(10.f, 20.f, 30.f, 1.f);
+    for (uint32_t point = 0u; point < 2u; ++point)
+    {
+        cpu.m_vu0[8] = make_vector(2.f, 3.f, 4.f, static_cast<float>(point));
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            check(run_macro(cpu, runtime, s_matrix_words[i]) == 0u,
+                  "nonidentity retail matrix instruction completes");
+        }
+        check(same_vector(cpu.m_vu0[8], point == 0u
+                  ? make_vector(-3.f, 2.f, 4.f, 0.f)
+                  : make_vector(7.f, 22.f, 34.f, 1.f)) &&
+              same_vector(vu0.m_acc, make_vector(-3.f, 2.f, 4.f, 0.f)),
+              "matrix chain rotates direction and translates only point; final MADD preserves ACC");
+    }
+
+    // VU manual 3.3.4 MADD/MSUB exception table: with normal ACC,
+    // an underflowing product sets US but not current U or MAC.U.
+    // Include products below host subnormal range and both product signs.
+    struct s_product_case
+    {
+        uint32_t m_a;
+        uint32_t m_b;
+        bool m_underflow;
+    };
+    constexpr s_product_case product_cases[] =
+    {
+        {0x00800000u, 0x3f000000u, true},
+        {0x80800000u, 0x3f000000u, true},
+        {0x00800000u, 0x00800000u, true},
+        {0x01000000u, 0x3f000000u, false}, // minimum normal
+        {0x00000001u, 0x3f000000u, false}, // flushed input, not result UDF
+        {0x80000000u, 0x3f000000u, false},
+    };
+    for (const auto& entry : product_cases)
+    {
+        for (uint32_t operation = 0u; operation < 4u; ++operation)
+        {
+            const bool to_acc = (operation & 2u) != 0u;
+            const uint32_t opcode = (operation & 1u) != 0u ? 0x2du : 0x29u;
+            cpu.m_vu0[1] = {entry.m_a, 0u};
+            cpu.m_vu0[2] = {entry.m_b, 0u};
+            cpu.m_vu0[3] = make_vector(9.f, 8.f, 7.f, 6.f);
+            vu0.m_acc = make_vector(1.f, 2.f, 3.f, 4.f);
+            vu0.m_status_flags = 0x80u; // preserve preexisting SS
+            vu0.m_mac_flags = 0xffffu;
+            const uint32_t word = to_acc
+                ? special2(8u, 2u, 1u, opcode)
+                : special1(8u, 2u, 1u, 3u, opcode);
+            const uint32_t expected_status = entry.m_underflow ? 0x180u : 0x80u;
+            check(run_macro(cpu, runtime, word) == 0u &&
+                  same_vector(vu0.m_acc, make_vector(1.f, 2.f, 3.f, 4.f)) &&
+                  same_vector(cpu.m_vu0[3], to_acc
+                      ? make_vector(9.f, 8.f, 7.f, 6.f)
+                      : make_vector(1.f, 8.f, 7.f, 6.f)) &&
+                  vu0.m_mac_flags == 0u && vu0.m_vi[17] == 0u &&
+                  vu0.m_status_flags == expected_status &&
+                  vu0.m_vi[16] == expected_status,
+                  "MADD/MSUB product underflow contributes only sticky US");
+        }
+    }
+    cpu.m_vu0[1] = {0x008000003f800000ull, 0u};
+    cpu.m_vu0[2] = {0x008000003f800000ull, 0u};
+    vu0.m_acc = make_vector(1.f, 2.f, 3.f, 4.f);
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x29u)) == 0u &&
+          lane(cpu.m_vu0[3], 0u) == bits(2.f) &&
+          vu0.m_status_flags == 0u,
+          "masked product underflow cannot set sticky US");
+
     // Unsupported instructions or a busy VU0 must fail closed. Confirm no
     // architectural writes, not merely a non-zero return value.
     const ee::s_ee_cpu_state cpu_before = cpu;
