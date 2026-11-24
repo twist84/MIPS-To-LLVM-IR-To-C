@@ -1239,7 +1239,7 @@ int main()
         return fail("CancelAlarm did not disarm the scheduled callback");
     }
 
-    // A later alarm may be inserted before an existing earlier hint,
+    // An earlier alarm may be inserted after an existing later alarm,
     // including from a due HLE callback. Preserve the exact deadlines
     // and cancellation semantics while avoiding future alarm scans.
     kernel.cpu().write32(0x2a28u, 0u);
@@ -1256,10 +1256,20 @@ int main()
     {
         return fail("future alarm hint changed event timing");
     }
-    if (kernel.run(20u, 1u).m_stop != iop::e_kernel_stop::idle ||
+    // The later alarm is still pending, so advancing to the end of
+    // this slice exhausts its budget rather than reporting idle.
+    if (kernel.run(20u, 1u).m_stop != iop::e_kernel_stop::budget_exhausted ||
+        kernel.cycles() != alarm_start + 35u ||
         !kernel.cpu().read32(0x2a28u, &low) || low != 1u ||
+        !kernel.has_guest_work() ||
         !kernel.cancel_alarm(0x3000u, 0u) ||
-        kernel.run(100u, 1u).m_executed != 0u ||
+        kernel.has_guest_work())
+    {
+        return fail("earlier alarm insertion or cancellation changed idle timing");
+    }
+    const iop::s_kernel_run_result cancelled_run = kernel.run(100u, 1u);
+    if (cancelled_run.m_stop != iop::e_kernel_stop::idle ||
+        cancelled_run.m_executed != 0u ||
         kernel.cycles() != alarm_start + 135u || kernel.has_guest_work())
     {
         return fail("earlier alarm insertion or cancellation changed idle timing");
