@@ -572,6 +572,126 @@ int main()
         }
     }
 
+    // The DMA controller commits its staged register state and raises
+    // channel 1 only after the worker and VIF/GIF publication succeed.
+    {
+        using result = ee::c_ee_dmac::e_deferred_vif1;
+        ee::c_ee_vif1 deferred{};
+        ee::c_ee_gif_path3 deferred_path{};
+        s_capture deferred_capture{};
+        deferred_path.bind_event_sink(&deferred_capture, capture_gif);
+        deferred.bind_path1(&deferred_path);
+        ee::ee_memory dma_memory(0x2000u);
+        ee::c_ee_hw_bus bus{};
+        bus.bind_memory(&dma_memory);
+        bus.bind_vif1(&deferred);
+        auto& dma = bus.dmac();
+        const ee::s_ee_u128 start_command{0x14000000u, 0u};
+        const ee::s_ee_u128 bad_command{0x0600000014000000ull, 0u};
+        const ee::s_ee_u128 end_tag{1u | (uint64_t{7u} << 28u), 0u};
+        dma_memory.write128(0x100u, &start_command);
+        dma_memory.write128(0x200u, &end_tag);
+        dma_memory.write128(0x210u, &start_command);
+        dma_memory.write128(0x300u, &end_tag);
+        dma_memory.write128(0x310u, &bad_command);
+
+        if (!check(deferred.enable_deferred() &&
+            send(deferred, {0x4a030000u, vi1_two, nop_upper,
+                0x80000efcu, 0x400002ffu, nop_lower, nop_upper, 0u}) &&
+            ee::c_ee_vif1::mmio_write(&deferred,
+                ee::c_ee_vif1::k_vu1_data_base + 32u, 16u, &kick_tag) &&
+            ee::c_ee_vif1::mmio_write(&deferred,
+                ee::c_ee_vif1::k_vu1_data_base + 48u, 16u, &kick_body),
+            "deferred DMA fixture setup"))
+        {
+            return 1;
+        }
+        dma.bind_deferred_vif1(&deferred);
+        if (!check(write_dmac(dma, 0x10u, 0x100u) &&
+                write_dmac(dma, 0x20u, 1u) &&
+                write_dmac(dma, 0x00u, 0x101u) &&
+                dma.deferred_vif1_pending() &&
+                dma.vif1_channel_state().m_chcr == 0x101u &&
+                dma.vif1_channel_state().m_madr == 0x100u &&
+                dma.vif1_channel_state().m_qwc == 1u &&
+                dma.status() == 0u && deferred_capture.m_calls == 0u &&
+                (deferred.read_register(0u) & 4u) != 0u,
+                "normal DMA fabricated early completion") ||
+            !check(dma.service_deferred_vif1(true) == result::completed &&
+                !dma.deferred_vif1_pending() &&
+                dma.vif1_channel_state().m_chcr == 1u &&
+                dma.vif1_channel_state().m_madr == 0x110u &&
+                dma.vif1_channel_state().m_qwc == 0u &&
+                dma.status() == 2u && deferred_capture.m_calls == 1u &&
+                (deferred.read_register(0u) & 4u) == 0u,
+                "normal DMA did not retire on publication"))
+        {
+            return 1;
+        }
+
+        if (!check(dma.acknowledge(1u) &&
+                write_dmac(dma, 0x30u, 0x200u) &&
+                write_dmac(dma, 0x00u, 0x105u) &&
+                dma.deferred_vif1_pending() && dma.status() == 0u &&
+                dma.vif1_channel_state().m_tadr == 0x200u &&
+                deferred_capture.m_calls == 1u,
+                "chain DMA published early") ||
+            !check(dma.service_deferred_vif1(true) == result::completed &&
+                dma.vif1_channel_state().m_tadr == 0x220u &&
+                (dma.vif1_channel_state().m_chcr & 0x100u) == 0u &&
+                dma.status() == 2u && deferred_capture.m_calls == 2u,
+                "chain DMA failed to commit post-transfer registers"))
+        {
+            return 1;
+        }
+
+        if (!check(dma.acknowledge(1u) &&
+                write_dmac(dma, 0x30u, 0x300u) &&
+                write_dmac(dma, 0x00u, 0x105u) &&
+                dma.deferred_vif1_pending() &&
+                dma.service_deferred_vif1(true) == result::rejected &&
+                dma.vif1_chain_last_reject() ==
+                    ee::c_ee_dmac::e_vif1_chain_reject::rejected_by_sink &&
+                dma.vif1_channel_state().m_tadr == 0x300u &&
+                (dma.vif1_channel_state().m_chcr & 0x100u) != 0u &&
+                dma.status() == 0u && deferred_capture.m_calls == 2u,
+                "rejected chain retired or leaked worker output"))
+        {
+            return 1;
+        }
+        if (!check(write_dmac(dma, 0x00u, 1u) &&
+                write_dmac(dma, 0x10u, 0x100u) &&
+                write_dmac(dma, 0x20u, 1u) &&
+                write_dmac(dma, 0x00u, 0x101u) &&
+                dma.deferred_vif1_pending() &&
+                write_dmac(dma, 0x00u, 1u) &&
+                !dma.deferred_vif1_pending() &&
+                dma.service_deferred_vif1() == result::idle &&
+                dma.status() == 0u && deferred_capture.m_calls == 2u,
+                "STR clear fabricated completion"))
+        {
+            return 1;
+        }
+        if (!check(write_dmac(dma, 0x00u, 0x101u) &&
+                dma.deferred_vif1_pending() &&
+                ee::c_ee_hw_bus::mmio_write(&bus,
+                    ee::c_ee_vif1::k_register_base + 0x10u, 4u, &fbrst) &&
+                !dma.deferred_vif1_pending() &&
+                !deferred.deferred_busy() &&
+                dma.status() == 0u && deferred_capture.m_calls == 2u,
+                "FBRST did not discard pending DMA"))
+        {
+            return 1;
+        }
+        bus.reset();
+        if (!check(dma.status() == 0u && dma.vif1_channel_state().m_chcr == 0u &&
+                deferred.vu1_data()[32u] == 0u,
+                "full reset retained deferred state"))
+        {
+            return 1;
+        }
+    }
+
     // Mixed PATH2 -> PATH1 -> PATH2 must reach the same GS sink in
     // command order. A late invalid GS write must roll the entire batch
     // back, including parser counters and VIF microprogram state.

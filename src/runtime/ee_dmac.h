@@ -7,6 +7,7 @@
 
 namespace ee
 {
+class c_ee_vif1;
 // EE DMA registers, normal/interleave SPR DMA, bounded SPR chains,
 // and normal DMA for VIF0/VIF1/GIF through an optional host consumer.
 // SIF0 channel 5 and SIF1 channel 6 registers are readable/writable,
@@ -138,6 +139,22 @@ public:
     );
     void bind_device_transfer(void* user, t_device_transfer_callback callback);
 
+    // Optional deferred channel-1 forward transfers. The bound VIF
+    // must own a worker, and the controller must service it on the EE
+    // thread. STR, MADR/QWC/TADR and D_STAT remain uncommitted until
+    // the whole VIF transaction (including GIF publication) succeeds.
+    enum class e_deferred_vif1
+    {
+        idle,
+        pending,
+        completed,
+        rejected
+    };
+    void bind_deferred_vif1(c_ee_vif1* vif1);
+    bool deferred_vif1_pending() const { return m_vif1_pending; }
+    e_deferred_vif1 service_deferred_vif1(bool wait = false);
+    void cancel_deferred_vif1();
+
     // VIF1 channel 1, CHCR.DIR=0: device-to-EE-RAM DMA.
     // The producer fills all 16*qwc bytes or rejects the entire
     // transfer without changing its internal state. On rejection,
@@ -172,6 +189,8 @@ private:
         uint32_t m_asr[2]{};
     };
 
+    e_deferred_vif1 submit_deferred_vif1(const uint8_t* data, uint32_t qwc,
+        const s_spr_channel& next, bool chain);
     void sync_interrupt_line();
     void trace_gif_write(uint32_t offset, uint32_t value,
                          uint32_t previous);
@@ -197,6 +216,10 @@ private:
     ee_memory* m_memory = nullptr;
     void* m_device_user = nullptr;
     t_device_transfer_callback m_device_transfer = nullptr;
+    c_ee_vif1* m_deferred_vif1 = nullptr;
+    bool m_vif1_pending = false;
+    bool m_vif1_pending_chain = false;
+    s_spr_channel m_vif1_pending_next{};
     void* m_download_user = nullptr;
     t_device_download_callback m_device_download = nullptr;
     uint32_t m_status = 0;

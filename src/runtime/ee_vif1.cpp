@@ -881,7 +881,8 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
     switch (offset)
     {
     case 0x00u: return m_machine.m_stat |
-        (m_machine.m_dbf ? 0x80u : 0u);
+        (m_machine.m_dbf ? 0x80u : 0u) |
+        (deferred_busy() ? 0x4u : 0u); // VEW: outstanding VU execution
     case 0x20u: return m_machine.m_err;
     case 0x30u: return m_machine.m_mark;
     case 0x40u: return m_machine.m_cycle;

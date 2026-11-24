@@ -1,4 +1,5 @@
 #include "ee_dmac.h"
+#include "ee_vif1.h"
 #include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 
@@ -298,6 +299,71 @@ void c_ee_dmac::bind_device_transfer(
     m_device_transfer = callback;
 }
 
+void c_ee_dmac::bind_deferred_vif1(c_ee_vif1* vif1)
+{
+    cancel_deferred_vif1();
+    m_deferred_vif1 = vif1;
+}
+
+c_ee_dmac::e_deferred_vif1 c_ee_dmac::submit_deferred_vif1(
+    const uint8_t* data, uint32_t qwc, const s_spr_channel& next, bool chain)
+{
+    if (m_deferred_vif1 == nullptr || m_vif1_pending)
+    {
+        return e_deferred_vif1::rejected;
+    }
+    using result = c_ee_vif1::e_deferred_result;
+    const auto accepted = m_deferred_vif1->begin_deferred(data, qwc);
+    if (accepted == result::pending)
+    {
+        m_vif1_pending_next = next;
+        m_vif1_pending_chain = chain;
+        m_vif1_pending = true;
+        return e_deferred_vif1::pending;
+    }
+    return accepted == result::completed ? e_deferred_vif1::completed :
+        e_deferred_vif1::rejected;
+}
+
+c_ee_dmac::e_deferred_vif1 c_ee_dmac::service_deferred_vif1(bool wait)
+{
+    if (!m_vif1_pending)
+    {
+        return e_deferred_vif1::idle;
+    }
+    using result = c_ee_vif1::e_deferred_result;
+    const auto accepted = wait ? m_deferred_vif1->wait_deferred() :
+        m_deferred_vif1->poll_deferred();
+    if (accepted == result::pending)
+    {
+        return e_deferred_vif1::pending;
+    }
+
+    m_vif1_pending = false;
+    if (accepted == result::completed)
+    {
+        m_device_channels[1u] = m_vif1_pending_next;
+        (void)raise(1u);
+        return e_deferred_vif1::completed;
+    }
+    if (m_vif1_pending_chain)
+    {
+        m_vif1_chain_last_reject = e_vif1_chain_reject::rejected_by_sink;
+    }
+    return e_deferred_vif1::rejected;
+}
+
+void c_ee_dmac::cancel_deferred_vif1()
+{
+    if (m_vif1_pending)
+    {
+        m_deferred_vif1->cancel_deferred();
+        m_vif1_pending = false;
+    }
+    m_vif1_pending_chain = false;
+    m_vif1_pending_next = {};
+}
+
 void c_ee_dmac::bind_device_download(
     void* user, t_device_download_callback callback)
 {
@@ -307,6 +373,7 @@ void c_ee_dmac::bind_device_download(
 
 void c_ee_dmac::reset()
 {
+    cancel_deferred_vif1();
     m_status = 0u;
     m_sqwc = 0u;
     m_gif_trace_count = 0u;
@@ -615,7 +682,8 @@ bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
         }
         else
         {
-            if (m_device_transfer == nullptr)
+            if (m_device_transfer == nullptr &&
+                !(channel_index == 1u && m_deferred_vif1 != nullptr))
             {
                 return false;
             }
@@ -635,7 +703,24 @@ bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
                         static_cast<uint8_t>(quad.m_hi >> (b * 8u));
                 }
             }
-            if (!m_device_transfer(
+            if (channel_index == 1u && m_deferred_vif1 != nullptr)
+            {
+                s_spr_channel next = channel;
+                next.m_madr += static_cast<uint32_t>(bytes);
+                next.m_qwc = 0u;
+                next.m_chcr &= ~k_chcr_str;
+                const auto submitted = submit_deferred_vif1(
+                    data.data(), channel.m_qwc, next, false);
+                if (submitted == e_deferred_vif1::pending)
+                {
+                    return true; // Started, not completed.
+                }
+                if (submitted != e_deferred_vif1::completed)
+                {
+                    return false;
+                }
+            }
+            else if (!m_device_transfer(
                     m_device_user, channel_index,
                     data.data(), channel.m_qwc))
             {
@@ -668,7 +753,8 @@ bool c_ee_dmac::transfer_vif1_source_chain()
     using reject = e_vif1_chain_reject;
     m_vif1_chain_last_reject = reject::none;
     s_spr_channel& current = m_device_channels[1u];
-    if (m_memory == nullptr || m_device_transfer == nullptr)
+    if (m_memory == nullptr ||
+        (m_device_transfer == nullptr && m_deferred_vif1 == nullptr))
     {
         m_vif1_chain_last_reject = reject::missing_memory_or_sink;
         return false;
@@ -890,16 +976,32 @@ bool c_ee_dmac::transfer_vif1_source_chain()
         m_vif1_chain_last_reject = reject::chain_tag_limit;
         return false;
     }
-    if (!packet.empty() && !m_device_transfer(
-        m_device_user, 1u, packet.data(),
-        static_cast<uint32_t>(packet.size() / 16u)))
-    {
-        m_vif1_chain_last_reject = reject::rejected_by_sink;
-        return false;
-    }
-
     next.m_qwc = 0u;
     next.m_chcr &= ~k_chcr_str;
+    if (!packet.empty())
+    {
+        if (m_deferred_vif1 != nullptr)
+        {
+            const auto submitted = submit_deferred_vif1(packet.data(),
+                static_cast<uint32_t>(packet.size() / 16u), next, true);
+            if (submitted == e_deferred_vif1::pending)
+            {
+                return true; // Started, not completed.
+            }
+            if (submitted != e_deferred_vif1::completed)
+            {
+                m_vif1_chain_last_reject = reject::rejected_by_sink;
+                return false;
+            }
+        }
+        else if (!m_device_transfer(m_device_user, 1u, packet.data(),
+            static_cast<uint32_t>(packet.size() / 16u)))
+        {
+            m_vif1_chain_last_reject = reject::rejected_by_sink;
+            return false;
+        }
+    }
+
     m_device_channels[1u] = next;
     return raise(1u);
 }
@@ -1611,6 +1713,41 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
     else
     {
         return false;
+    }
+
+    if (m_vif1_pending)
+    {
+        if (channel_index == 1u)
+        {
+            if (offset == 0u)
+            {
+                if ((value & k_chcr_str) == 0u)
+                {
+                    // Explicit stop abandons the staged transfer; do
+                    // not raise a completion interrupt for discarded work.
+                    cancel_deferred_vif1();
+                }
+                else
+                {
+                    // STR is already set. Do not start a second DMA or
+                    // overwrite the registers of the outstanding job.
+                    return true;
+                }
+            }
+            else
+            {
+                // Conservative register-write fence: never overwrite
+                // staged post-transfer registers behind the worker.
+                (void)service_deferred_vif1(true);
+            }
+        }
+        else if (channel_index == 2u && offset == 0u &&
+                 (value & k_chcr_str) != 0u)
+        {
+            // PATH3 cannot overtake the earlier staged PATH1/PATH2
+            // transaction. GS parsers remain EE-thread-owned.
+            (void)service_deferred_vif1(true);
+        }
     }
 
     switch (offset)
