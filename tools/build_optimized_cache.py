@@ -210,6 +210,65 @@ def warm_profile_ready(source_work, work, inputs, ir_sources, opt, library):
         return False
 
 
+def seed_backup_objects(source_work, work, metadata_path, hashes, opt):
+    """Copy only candidate matching objects; the normal emitter rehashes them."""
+    if work.parent != source_work:
+        return 0
+    from verify_ir import llvm, native_target_identity, ir_pipeline_id
+
+    candidates = []
+    for backup in sorted(source_work.glob("backup-*"), reverse=True):
+        if not backup.is_dir() or backup.is_symlink():
+            continue
+        candidates.extend((backup / work.name, backup / ("legacy-" + work.name)))
+        candidates.extend(backup.glob("legacy-recovery-*-" + work.name))
+    best = None
+    for source in candidates:
+        directory = source / "objects"
+        try:
+            manifest = shared_ir.read_json(directory / "objects.json")
+            if (manifest.get("complete") is not True or
+                    manifest.get("optimization_level") != opt or
+                    manifest.get("ir_pipeline") != ir_pipeline_id(opt) or
+                    manifest.get("native_target") != native_target_identity(opt) or
+                    manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info)) or
+                    manifest.get("target_triple") != llvm.get_default_triple()):
+                continue
+            matches = {}
+            for item in manifest["objects"]:
+                name = Path(item["input"]).name
+                if (name not in hashes or item.get("ir_sha256") != hashes[name] or
+                        item.get("object") != Path(name).stem + ".o" or
+                        not isinstance(item.get("size_bytes"), int) or
+                        item["size_bytes"] < 1 or
+                        not (directory / item["object"]).is_file()):
+                    continue
+                if name in matches:
+                    raise ValueError("duplicate backup object")
+                matches[name] = item
+            if matches and (best is None or len(matches) > len(best[2])):
+                best = (directory, manifest, matches)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    if best is None:
+        return 0
+    directory, manifest, matches = best
+    destination = work / "objects"
+    destination.mkdir()
+    copied = []
+    for name, item in matches.items():
+        shutil.copy2(directory / item["object"], destination / item["object"])
+        copied.append(dict(item, input=shared_ir.relative_path(
+            metadata_path.parent / name, destination)))
+    shared_ir.write_json(destination / "objects.json", dict(
+        manifest, path_format="manifest-relative-v1",
+        input_module_count=len(copied), object_count=len(copied),
+        object_bytes=sum(item["size_bytes"] for item in copied), objects=copied))
+    print(f"Seeded {len(copied)} candidate O{opt} objects from backup; "
+          "incremental emitter will verify every reused object", flush=True)
+    return len(copied)
+
+
 def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
                    *, defer_warm_validation=False):
     root = Path(__file__).resolve().parents[1]
@@ -248,6 +307,7 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
     work.mkdir(parents=True, exist_ok=False)
     try:
         shared_ir.attach(work, metadata_path.parent)
+        seed_backup_objects(source_work, work, metadata_path, hashes, opt)
         run_game.build_linked_library(
             root, work, metadata_path, work / "objects", library,
             opt, emit_jobs=jobs)

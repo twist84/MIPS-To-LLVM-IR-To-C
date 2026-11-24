@@ -294,6 +294,37 @@ def test_relocated_object_manifest():
         assert first == second
 
 
+def test_nested_profile_reuses_matching_backup_objects():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_optimized_cache as optimized
+    import shared_ee_ir as shared
+
+    with tempfile.TemporaryDirectory(prefix="ee-backup-objects-") as temp:
+        base = Path(temp) / "ps2-game-hle"
+        backup = base / "backup-123"
+        old_ir = backup / "ir"
+        old_objects = backup / "legacy-O2" / "objects"
+        old_ir.mkdir(parents=True)
+        for name, value in (("same", 1), ("changed", 2)):
+            write_ir(old_ir / (name + ".ll"), value)
+        _, before = run_emitter(old_ir, old_objects, opt=2)
+        ir = base / "ir"
+        ir.mkdir()
+        write_ir(ir / "same.ll", 1)
+        write_ir(ir / "changed.ll", 3)
+        hashes = {path.name: shared.digest(path) for path in ir.glob("*.ll")}
+        work = base / "O2"
+        work.mkdir()
+        assert optimized.seed_backup_objects(base, work, ir / "ee_functions.json",
+                                            hashes, 2) == 1
+        out, after = run_emitter(ir, work / "objects", opt=2)
+        assert "reused 1/2" in out, out
+        assert after["object_count"] == 2
+        assert json.loads((old_objects / "objects.json").read_text()) == before
+        assert {item["input"] for item in after["objects"]} == {
+            "../../ir/same.ll", "../../ir/changed.ll"}
+
+
 def test_shared_ir_provenance():
     sys.path.insert(0, str(SCRIPT.parent))
     import shared_ee_ir as shared
@@ -364,6 +395,7 @@ def test_shared_ir_provenance():
 
 if __name__ == "__main__":
     test_relocated_object_manifest()
+    test_nested_profile_reuses_matching_backup_objects()
     test_shared_ir_provenance()
     test_native_target_profile()
     test_pipeline_worker_recycling()

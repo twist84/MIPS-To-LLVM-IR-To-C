@@ -80,6 +80,12 @@ def check_source_header(elf, work, ir_sources):
 PROFILE_SUFFIXES = ("-O1", "-O2", "-O3", "-IR-O2", "-O2-native")
 
 
+def legacy_recovery_directories(base_work):
+    return [path for path in sorted(
+        base_work.parent.glob(base_work.name + "-recovery-*"))
+        if path.is_dir() and not path.is_symlink()]
+
+
 def manifest_candidates(base_work):
     candidates = []
     # Profiles share the unoptimized guest IR inventory. A native profile
@@ -90,9 +96,12 @@ def manifest_candidates(base_work):
                  if root.is_dir())
     # Previous pointer-based recoveries may have a larger native inventory.
     # Only consider actual recovery roots, not their optimized siblings.
-    for root in sorted(base_work.parent.glob(base_work.name + "-recovery-*")):
-        if root.is_dir() and not root.name.endswith(PROFILE_SUFFIXES):
+    for root in legacy_recovery_directories(base_work):
+        if not root.name.endswith(PROFILE_SUFFIXES):
             roots.append(root)
+        else:
+            # An old optimized sibling may outlive its source directory.
+            candidates.append(root / "translation-cache.json")
     for source in dict.fromkeys(roots):
         candidates.append(source / "translation-cache.json")
         for suffix in PROFILE_SUFFIXES:
@@ -175,6 +184,7 @@ def canonical_portable(base_work, work):
     return (work == base_work and not pointer_path(base_work).exists()
             and not any(base_work.with_name(base_work.name + suffix).exists()
                         for suffix in PROFILE_SUFFIXES)
+            and not legacy_recovery_directories(base_work)
             and metadata.get("path_format") == "manifest-relative-v1"
             and all(Path(fn["ir_path"]).name == fn["ir_path"]
                     for fn in metadata["functions"]))
@@ -241,6 +251,8 @@ def promote_canonical(base_work, work, validate, *, elf=None):
         source = base_work.with_name(base_work.name + suffix)
         if source.exists():
             previous.append((source, backup / ("legacy" + suffix)))
+    for source in legacy_recovery_directories(base_work):
+        previous.append((source, backup / ("legacy" + source.name[len(base_work.name):])))
     moved = []
     promoted = []
     original = {}
@@ -365,7 +377,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
     with ExitStack() as locks:
         # Lock the canonical and legacy source stores and all extant native
         # profiles before moving any directory. Shared profiles reuse a lock.
-        roots = list(dict.fromkeys((base_work, previous_cache)))
+        roots = list(dict.fromkeys((base_work, previous_cache,
+                                    *legacy_recovery_directories(base_work))))
         if candidate.parent != history_dir(base_work):
             roots = list(dict.fromkeys((*roots, candidate.parent)))
         for root in roots:
@@ -418,8 +431,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
     print(f"Cache recovery validated and activated: {base_work}", flush=True)
     if backup is not None:
         print(f"Previous canonical cache/profile names retained under: {backup}", flush=True)
-    if previous_cache != base_work:
-        print(f"Previous legacy active cache retained: {previous_cache}", flush=True)
+    if previous_cache != base_work and backup is not None:
+        print(f"Previous legacy active cache retained inside: {backup}", flush=True)
     return base_work
 
 

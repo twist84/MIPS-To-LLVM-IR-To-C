@@ -244,7 +244,10 @@ def test_canonical_promotion_rolls_back_all_names():
         base = root / "ps2-game-hle"
         profile = base / "O2-native"
         stage = base / "recovery-123"
-        for directory, data in ((base, "old"), (profile, "native"), (stage, "new")):
+        legacy = root / "ps2-game-hle-recovery-456"
+        legacy_profile = root / "ps2-game-hle-IR-O2"
+        for directory, data in ((base, "old"), (profile, "native"), (stage, "new"),
+                                (legacy, "legacy"), (legacy_profile, "legacy-profile")):
             directory.mkdir()
             (directory / "sentinel").write_text(data)
         def fail(directory):
@@ -260,12 +263,17 @@ def test_canonical_promotion_rolls_back_all_names():
         assert (base / "sentinel").read_text() == "old"
         assert (profile / "sentinel").read_text() == "native"
         assert (stage / "sentinel").read_text() == "new"
+        assert (legacy / "sentinel").read_text() == "legacy"
+        assert (legacy_profile / "sentinel").read_text() == "legacy-profile"
         assert not list(base.glob("backup-*"))
         backup = recovery.promote_canonical(base, stage, lambda directory: None)
         assert (base / "sentinel").read_text() == "new"
         assert (backup / "sentinel").read_text() == "old"
         assert (backup / "O2-native" / "sentinel").read_text() == "native"
+        assert (backup / "legacy-recovery-456" / "sentinel").read_text() == "legacy"
+        assert (backup / "legacy-IR-O2" / "sentinel").read_text() == "legacy-profile"
         assert not stage.exists() and not profile.exists()
+        assert not legacy.exists() and not legacy_profile.exists()
 
 
 def test_active_source_preflight_rejects_stale_shared_provenance():
