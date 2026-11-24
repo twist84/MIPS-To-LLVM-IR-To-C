@@ -14,6 +14,14 @@ namespace ee
 {
 namespace
 {
+// PS2 words are little-endian. memcpy avoids unaligned typed accesses and
+// is valid for arbitrarily aligned DMA sources and trivially copyable words.
+bool host_little_endian()
+{
+    const uint16_t one = 1u;
+    return *reinterpret_cast<const unsigned char*>(&one) == 1u;
+}
+
 uint32_t element_bits(uint32_t vl)
 {
     switch (vl)
@@ -150,6 +158,27 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
     }
     const uint32_t cl = machine.m_cycle & 0xffu;
     const uint32_t wl = (machine.m_cycle >> 8u) & 0xffu;
+    // V4-32, unmasked, no row arithmetic and CL == WL consumes one
+    // complete source vector per destination qword with no skips or fills.
+    // Split at the physical 16 KiB wrap, including NUM=0 (256 vectors).
+    // Keep all other cycling, masks and formats on the reference path.
+    if (vn == 3u && vl == 0u && !masked &&
+        machine.m_mode != 1u && machine.m_mode != 2u && cl == wl &&
+        host_little_endian())
+    {
+        const uint32_t start = address & 0x3ffu;
+        const uint32_t first = std::min(num, 0x400u - start);
+        std::memcpy(machine.m_vu1_data.data() + start * 16u,
+                    words, first * 16u);
+        if (first < num)
+        {
+            std::memcpy(machine.m_vu1_data.data(), words + first * 4u,
+                        (num - first) * 16u);
+        }
+        machine.m_num = 0u;
+        ++machine.m_unpack_commands;
+        return;
+    }
     const uint32_t bits = element_bits(vl);
     size_t bit_position = 0u;
     uint32_t cycle = 0u;
@@ -307,13 +336,21 @@ bool c_ee_vif1::execute(
             const uint32_t qwc = imm != 0u ? imm : 0x10000u;
             const size_t previous = path2_bytes.size();
             path2_bytes.resize(previous + static_cast<size_t>(qwc) * 16u);
-            for (uint32_t i = 0u; i < qwc * 4u; ++i)
+            if (host_little_endian())
             {
-                const uint32_t word = words[i];
-                for (uint32_t byte = 0u; byte < 4u; ++byte)
+                std::memcpy(path2_bytes.data() + previous, words,
+                            static_cast<size_t>(qwc) * 16u);
+            }
+            else
+            {
+                for (uint32_t i = 0u; i < qwc * 4u; ++i)
                 {
-                    path2_bytes[previous + static_cast<size_t>(i) * 4u + byte] =
-                        static_cast<uint8_t>(word >> (byte * 8u));
+                    const uint32_t word = words[i];
+                    for (uint32_t byte = 0u; byte < 4u; ++byte)
+                    {
+                        path2_bytes[previous + static_cast<size_t>(i) * 4u + byte] =
+                            static_cast<uint8_t>(word >> (byte * 8u));
+                    }
                 }
             }
             machine.m_direct_qwc += qwc;
@@ -410,14 +447,22 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     }
     const size_t previous = next.m_pending.size();
     next.m_pending.resize(previous + static_cast<size_t>(qwc) * 4u);
-    for (size_t i = 0u; i < static_cast<size_t>(qwc) * 4u; ++i)
+    if (qwc != 0u && host_little_endian())
     {
-        const size_t offset = i * 4u;
-        next.m_pending[previous + i] =
-            static_cast<uint32_t>(data[offset]) |
-            (static_cast<uint32_t>(data[offset + 1u]) << 8u) |
-            (static_cast<uint32_t>(data[offset + 2u]) << 16u) |
-            (static_cast<uint32_t>(data[offset + 3u]) << 24u);
+        std::memcpy(next.m_pending.data() + previous, data,
+                    static_cast<size_t>(qwc) * 16u);
+    }
+    else
+    {
+        for (size_t i = 0u; i < static_cast<size_t>(qwc) * 4u; ++i)
+        {
+            const size_t offset = i * 4u;
+            next.m_pending[previous + i] =
+                static_cast<uint32_t>(data[offset]) |
+                (static_cast<uint32_t>(data[offset + 1u]) << 8u) |
+                (static_cast<uint32_t>(data[offset + 2u]) << 16u) |
+                (static_cast<uint32_t>(data[offset + 3u]) << 24u);
+        }
     }
 
     size_t index = 0u;

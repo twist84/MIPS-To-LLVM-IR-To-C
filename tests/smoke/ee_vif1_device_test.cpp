@@ -139,6 +139,43 @@ int main()
         return 1;
     }
 
+    // Bulk V4-32 must be identical to the generic masked path with a
+    // zero mask, including NUM=0, TOPS-relative addressing and wrap.
+    {
+        ee::c_ee_vif1 fast{}, reference{};
+        const std::vector<uint32_t> setup{
+            0x01000404u, 0x030003f0u, 0x02000000u, 0u};
+        if (!check(send(fast, setup) && send(reference, setup),
+                   "bulk UNPACK setup rejected"))
+        {
+            return 1;
+        }
+        std::vector<uint32_t> packet{0x6c00800eu};
+        for (uint32_t i = 0u; i < 256u * 4u; ++i)
+        {
+            packet.push_back(0x89abcdefu ^ (i * 0x1020304u));
+        }
+        packet.resize(packet.size() + 3u, 0u);
+        auto masked = packet;
+        masked[0] |= 0x10000000u;
+        const auto raw = pack_words(packet);
+        std::vector<uint8_t> unaligned(raw.size() + 1u);
+        std::memcpy(unaligned.data() + 1u, raw.data(), raw.size());
+        if (!check(fast.consume(unaligned.data() + 1u,
+                       static_cast<uint32_t>(raw.size() / 16u)) &&
+                   send(reference, masked),
+                   "bulk/reference V4-32 rejected") ||
+            !check(std::memcmp(fast.vu1_data(), reference.vu1_data(),
+                       ee::c_ee_vif1::k_vu1_memory_size) == 0 &&
+                   lane32(fast.vu1_data(), 1022u, 0u) == packet[1] &&
+                   lane32(fast.vu1_data(), 0u, 0u) == packet[9] &&
+                   fast.diagnostic().m_unpack_commands == 1u,
+                   "bulk UNPACK changed wrapped VU1 data"))
+        {
+            return 1;
+        }
+    }
+
     // V2-16 sign extension, vector lane replication and continuation.
     if (!check(send(vif1, {0x65020001u, 0x0003fffeu,
                           0x7fff8001u, 0u}),
@@ -227,6 +264,37 @@ int main()
                "DIRECT did not deliver real GIF PATH2"))
     {
         return 1;
+    }
+
+    // The split DIRECT fixture above checks command continuation. Also
+    // compare a nonzero IMAGE payload byte-for-byte at the actual GIF sink.
+    {
+        ee::c_ee_vif1 image_vif{};
+        ee::c_ee_gif_path3 image_path{};
+        std::vector<uint8_t> received;
+        image_path.bind_event_sink(&received,
+            [](void* user, const ee::s_ee_gif_event*, size_t,
+               const uint8_t* data, uint32_t qwc)
+            {
+                auto& bytes = *static_cast<std::vector<uint8_t>*>(user);
+                bytes.assign(data, data + static_cast<size_t>(qwc) * 16u);
+                return true;
+            });
+        image_vif.bind_path2(&image_path);
+        // NLOOP=2, EOP, FLG=IMAGE; two arbitrary payload qwords.
+        const std::vector<uint32_t> payload{
+            0x00008002u, 0x08000000u, 0u, 0u,
+            0x01234567u, 0x89abcdefu, 0x0badc0deu, 0x10203040u,
+            0xfeedfaceu, 0xdeadbeefu, 0x11223344u, 0xaabbccddu};
+        std::vector<uint32_t> packet{0x50000003u};
+        packet.insert(packet.end(), payload.begin(), payload.end());
+        packet.resize(packet.size() + 3u, 0u);
+        if (!check(send(image_vif, packet) &&
+                   received == pack_words(payload),
+                   "bulk DIRECT changed GIF IMAGE bytes"))
+        {
+            return 1;
+        }
     }
 
     // Unknown commands and IRQ stalls fail closed without altering
