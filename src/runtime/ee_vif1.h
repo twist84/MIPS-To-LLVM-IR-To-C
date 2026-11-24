@@ -241,4 +241,52 @@ private:
     std::unique_ptr<c_ee_vu1_worker> m_worker;
     std::unique_ptr<s_transaction> m_deferred;
 };
+// Keep the common no-pending-job paths visible to the runner optimizer.
+// A job submitted by guest MMIO must still see m_native_executing set.
+inline void c_ee_vif1::native_execution_begin()
+{
+    if (m_worker != nullptr)
+    {
+        m_native_executing = true;
+        if (m_deferred != nullptr)
+        {
+            ++m_worker_profile.m_native_pending_boundaries;
+            if (m_worker->finished_ns() != 0u)
+            {
+                // An outstanding transaction can hold an already finished
+                // job; no new execution-window intersection is possible.
+                ++m_worker_profile.m_native_completed_at_entry;
+            }
+            else
+            {
+                m_native_interval_start = c_ee_vu1_worker::clock_ns();
+            }
+        }
+    }
+}
+
+inline void c_ee_vif1::native_execution_end()
+{
+    if (m_native_executing)
+    {
+        if (m_native_interval_start != 0u)
+        {
+            const uint64_t finished = m_worker->finished_ns();
+            if (finished != 0u)
+            {
+                // We are already past the worker's finish. Its timestamp
+                // is the exact upper bound, so another host clock read
+                // cannot contribute to the intersection.
+                ++m_worker_profile.m_native_completed_at_exit;
+                record_native_overlap(finished);
+            }
+            else
+            {
+                record_native_overlap(c_ee_vu1_worker::clock_ns());
+            }
+        }
+        m_native_executing = false;
+    }
+}
+
 } // namespace ee
