@@ -1,9 +1,12 @@
 #include "ee_dmac.h"
+#include "ee_graphics_batch.h"
 
 #include <cstring>
 #include "ee_exceptions.h"
 
 #include <vector>
+#include <set>
+#include <tuple>
 
 namespace ee
 {
@@ -649,7 +652,7 @@ bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
 // Supported: REFE, CNT, NEXT, REF and END, including TIE/IRQ termination.
 // A DMA address with bit 31 set reads EE scratchpad at its low 14-bit
 // offset, matching ps2-web-recomp/runtime/src/dmac.cpp::source().
-// TTE, REFS stalls, CALL/RET and MFIFO remain fail-closed.
+// REFS stalls and MFIFO remain fail-closed.
 // VIF1 source chain, matching the guest-visible tag/transfer ordering in
 // ps2-web-recomp:SDBZ/runtime/src/dmac.cpp::run_chain(1).
 //
@@ -705,12 +708,16 @@ bool c_ee_dmac::transfer_vif1_source_chain()
     };
 
     constexpr uint32_t k_max_tags = 1024u;
-    constexpr size_t k_max_packet_qwc = 0xffffu;
+    constexpr size_t k_max_packet_qwc = k_max_graphics_batch_qwc;
     s_spr_channel next = current;
     uint64_t tag_address = next.m_tadr;
     const bool tte = (next.m_chcr & 0x40u) != 0u;
     const bool tie = (next.m_chcr & 0x80u) != 0u;
     std::vector<uint8_t> packet;
+    // Tags are immutable throughout preflight. A repeated tag address
+    // with the same active return stack cannot reach a new terminator.
+    // CALL/RET subroutines reused from different return addresses are valid.
+    std::set<std::tuple<uint64_t, uint32_t, uint32_t, uint32_t>> visited;
     bool terminal = false;
 
     for (uint32_t tag_index = 0u;
@@ -720,6 +727,15 @@ bool c_ee_dmac::transfer_vif1_source_chain()
         if (!resolve(tag_address, &tag_host_address))
         {
             m_vif1_chain_last_reject = reject::invalid_tag_address;
+            return false;
+        }
+        const uint32_t depth = (next.m_chcr >> 4u) & 3u;
+        const auto key = std::make_tuple(tag_address, depth,
+            depth >= 1u ? next.m_asr[0] : 0u,
+            depth >= 2u ? next.m_asr[1] : 0u);
+        if (!visited.insert(key).second)
+        {
+            m_vif1_chain_last_reject = reject::cyclic_chain;
             return false;
         }
         s_ee_u128 tag{};

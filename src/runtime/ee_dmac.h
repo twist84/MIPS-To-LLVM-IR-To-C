@@ -90,7 +90,8 @@ public:
         invalid_payload_span,
         chain_qwc_limit,
         chain_tag_limit,
-        rejected_by_sink
+        rejected_by_sink,
+        cyclic_chain
     };
     e_vif1_chain_reject vif1_chain_last_reject() const;
 

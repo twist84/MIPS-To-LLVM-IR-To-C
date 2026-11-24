@@ -1,4 +1,5 @@
 #include "ee_gif.h"
+#include "ee_graphics_batch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -68,13 +69,13 @@ const s_ee_gif_path_counters& c_ee_gif_path3::counters() const
 
 bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
 {
-    // DMA QWC is 16 bits; reject out-of-contract direct callers.
+    // A host GIF transaction may aggregate multiple 16-bit DMA tags.
     // Zero-length DMA has no GIF words to parse or forward.
     if (qwc == 0u)
     {
         return true;
     }
-    if (data == nullptr || m_sink == nullptr || qwc > 0xffffu)
+    if (data == nullptr || m_sink == nullptr || qwc > k_max_graphics_batch_qwc)
     {
         ++m_counters.m_rejected_batches;
         trace_rejection(__func__, __LINE__);

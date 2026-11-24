@@ -1,6 +1,7 @@
 // Adapted from ps2-web-recomp:SDBZ by Samir Nuri (2026), MIT license.
 // Upstream license: src/runtime/ps2_webgpu/gs/LICENSE.upstream
 #include "ee_vif1.h"
+#include "ee_graphics_batch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -371,7 +372,10 @@ bool c_ee_vif1::execute(
 
 bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 {
-    constexpr size_t k_max_pending_words = 0x40000u + 0x400u;
+    // A partial DIRECT can carry up to 65536 qwords plus its command.
+    // Allow that residual in addition to the independently bounded batch.
+    constexpr size_t k_max_pending_words =
+        static_cast<size_t>(k_max_graphics_batch_qwc) * 4u + 0x40000u + 0x400u;
     // Host-only provenance. A failed DMA may be retried with identical
     // bytes, so rejection totals count attempts, not unique guest commands.
     const auto reject_packet = [this](e_reject reason, uint32_t code)
@@ -385,7 +389,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
         m_diagnostic.m_reason = reason;
         m_diagnostic.m_code = code;
     };
-    if (qwc > 0xffffu || (qwc != 0u && data == nullptr))
+    if (qwc > k_max_graphics_batch_qwc || (qwc != 0u && data == nullptr))
     {
         reject_packet(e_reject::invalid_packet, 0u);
         return false;
@@ -451,7 +455,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
             rejection = e_reject::missing_path1;
         }
         else if ((path1_bytes.size() & 15u) != 0u ||
-                 path1_bytes.size() / 16u > 0xffffu ||
+                 path1_bytes.size() / 16u > k_max_graphics_batch_qwc ||
                  !m_path1->consume(path1_bytes.data(),
                      static_cast<uint32_t>(path1_bytes.size() / 16u)))
         {
@@ -464,7 +468,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
         {
             rejection = e_reject::missing_path2;
         }
-        else if (path2_bytes.size() / 16u > 0xffffu ||
+        else if (path2_bytes.size() / 16u > k_max_graphics_batch_qwc ||
                  !m_path2->consume(
                      path2_bytes.data(),
                      static_cast<uint32_t>(path2_bytes.size() / 16u)))

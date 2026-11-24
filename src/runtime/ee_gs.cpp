@@ -1,4 +1,5 @@
 #include "ee_gs.h"
+#include "ee_graphics_batch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -1354,7 +1355,7 @@ bool c_ee_gs_state::consume(
 {
     if ((count != 0u && events == nullptr) ||
         (qwc != 0u && data == nullptr) ||
-        qwc > 0xffffu)
+        qwc > k_max_graphics_batch_qwc)
     {
         trace_rejection(__func__, __LINE__);
         return false;

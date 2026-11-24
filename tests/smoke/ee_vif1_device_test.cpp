@@ -1,5 +1,7 @@
 #include "ee_dmac.h"
 #include "ee_gif.h"
+#include "ee_gs.h"
+#include "ee_graphics_batch.h"
 #include "ee_hw_bus.h"
 #include "ee_memory.h"
 #include "ee_vif1.h"
@@ -83,6 +85,46 @@ int main()
     s_capture capture{};
     path2.bind_event_sink(&capture, capture_gif);
     vif1.bind_path2(&path2);
+
+    // End-to-end aggregate PATH2 transaction: two DIRECT commands,
+    // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
+    // unrelated texture/VRAM side effects while exercising all limits.
+    {
+        ee::c_ee_vif1 large_vif{};
+        ee::c_ee_gif_path3 large_path{};
+        ee::c_ee_gs_state large_gs{};
+        large_path.bind_event_sink(&large_gs,
+            [](void* user, const ee::s_ee_gif_event* events, size_t count,
+               const uint8_t* data, uint32_t qwc)
+            {
+                return static_cast<ee::c_ee_gs_state*>(user)->consume(events, count, data, qwc);
+            });
+        large_vif.bind_path2(&large_path);
+        std::vector<uint32_t> words;
+        for (uint32_t part = 0u; part < 2u; ++part)
+        {
+            words.push_back(0x50008000u);
+            words.resize(words.size() + 0x8000u * 4u, 0u);
+        }
+        words.resize(words.size() + 2u, 0u);
+        if (!check(send(large_vif, words), "large DIRECT batch refused") ||
+            !check(large_vif.diagnostic().m_direct_qwc == 0x10000u &&
+                   large_path.counters().m_input_qwc == 0x10000u &&
+                   large_path.counters().m_accepted_batches == 1u &&
+                   large_vif.diagnostic().m_pending_words == 0u,
+                   "large DIRECT did not reach GS as one transaction"))
+        {
+            return 1;
+        }
+        // A non-null pointer must not be dereferenced for over-budget input.
+        const uint8_t dummy = 0u;
+        if (!check(!large_vif.consume(&dummy, ee::k_max_graphics_batch_qwc + 1u) &&
+                   !large_path.consume(&dummy, ee::k_max_graphics_batch_qwc + 1u),
+                   "oversized host batch accepted"))
+        {
+            return 1;
+        }
+    }
 
     // Basic command sequencing and V4-32 writes.
     if (!check(send(vif1, {0x01000101u, 0x6c010000u,

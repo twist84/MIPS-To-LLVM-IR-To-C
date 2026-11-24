@@ -271,6 +271,49 @@ int main()
         return 1;
     }
 
+    // Two individually legal REF payloads exceed the old 16-bit
+    // aggregate cap. Keep the exact TTE byte order and retire once.
+    ee::ee_memory large_memory(2u * 1024u * 1024u);
+    ee::c_ee_dmac large_dmac{};
+    large_dmac.bind_memory(&large_memory);
+    large_dmac.bind_device_transfer(&sink, &accept);
+    sink = {};
+    write_tag(large_memory, 0x100u, 0x8000u, 3u, 0u, 0x1000u,
+              0x1122334400000000ull);
+    write_tag(large_memory, 0x110u, 0x8000u, 0u, 0u, 0x81000u,
+              0x5566778800000000ull);
+    large_memory.write128(0x1000u, &first_data);
+    large_memory.write128(0x100ff0u, &last_data);
+    if (!check(begin(large_dmac, 0x100u), "large chain start refused") ||
+        !check(sink.m_calls == 1u && sink.m_packet.size() == 0x10002u * 16u &&
+               sink.m_packet[12u] == 0x44u &&
+               sink.m_packet[16u] == 0x17u &&
+               sink.m_packet[0x8001u * 16u + 12u] == 0x88u &&
+               sink.m_packet.back() == 0x28u &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.vif1_channel_state().m_tadr == 0x120u &&
+               large_dmac.vif1_channel_state().m_madr == 0x101000u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x100u) == 0u &&
+               large_dmac.status() == 2u, "large chain did not commit atomically"))
+    {
+        return 1;
+    }
+
+    large_dmac.reset();
+    sink = {};
+    // Repeated NEXT with nonzero payload must be rejected before the
+    // host accumulates a large cyclic transaction.
+    write_tag(large_memory, 0x200u, 1u, 2u, 0u, 0x200u, 0u);
+    if (!check(begin(large_dmac, 0x200u), "cyclic chain start refused") ||
+        !check(large_dmac.vif1_chain_last_reject() == reject::cyclic_chain &&
+               sink.m_calls == 0u && large_dmac.status() == 0u &&
+               large_dmac.vif1_channel_state().m_tadr == 0x200u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x100u) != 0u,
+               "cycle did not fail closed"))
+    {
+        return 1;
+    }
+
     std::puts("EE VIF1 source chain TTE/TIE/rollback: PASS");
     return 0;
 }
