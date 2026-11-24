@@ -235,6 +235,102 @@ int main()
         return 1;
     }
 
+    // Compare the expanded scoreboard lists with the original mask
+    // scan across deterministic instruction words, varying readiness
+    // timestamps and both immediate and ordinary lower instructions.
+    {
+        uint32_t random = 0x6a09e667u;
+        const auto next = [&]()
+        {
+            random = random * 1664525u + 1013904223u;
+            return random;
+        };
+        ee::c_ee_vu1_decode_cache cache;
+        for (uint32_t sample = 0u; sample < 8192u; ++sample)
+        {
+            const uint32_t lo = next();
+            const uint32_t hi = next();
+            const auto& use = cache.lookup((sample & 0x7ffu) * 8u, lo, hi);
+            ee::s_ee_vu1_dependency scoreboard{};
+            for (auto& reg : scoreboard.m_vf_ready)
+            {
+                for (auto& lane : reg)
+                {
+                    lane = next() & 127u;
+                }
+            }
+            for (auto& reg : scoreboard.m_vi_ready)
+            {
+                reg = next() & 127u;
+            }
+            auto reference = scoreboard;
+            const uint32_t start = next() & 127u;
+            uint32_t expected = start;
+            for (uint32_t i = 0u; i < use.m_n; ++i)
+            {
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
+                {
+                    if ((use.m_mask[i] & (8u >> lane)) != 0u)
+                    {
+                        expected = std::max(expected,
+                            reference.m_vf_ready[use.m_reg[i]][lane]);
+                    }
+                }
+            }
+            for (uint32_t reg = 1u; reg < 16u; ++reg)
+            {
+                if ((use.m_vi_reads & (1u << reg)) != 0u)
+                {
+                    expected = std::max(expected, reference.m_vi_ready[reg]);
+                }
+            }
+            const uint32_t actual = scoreboard.issue(use, start);
+            for (uint32_t i = 0u; i < use.m_wn; ++i)
+            {
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
+                {
+                    if ((use.m_wmask[i] & (8u >> lane)) != 0u)
+                    {
+                        reference.m_vf_ready[use.m_wreg[i]][lane] =
+                            expected + 4u;
+                    }
+                }
+            }
+            if (use.m_vi_load != 0u)
+            {
+                reference.m_vi_ready[use.m_vi_load] = expected + 4u;
+            }
+            scoreboard.retire(use, actual);
+            if (!check(actual == expected &&
+                       scoreboard.m_vf_ready == reference.m_vf_ready &&
+                       scoreboard.m_vi_ready == reference.m_vi_ready,
+                       "expanded scoreboard differs from mask scan"))
+            {
+                return 1;
+            }
+        }
+        // Exercise the full representable metadata capacity, including
+        // duplicates and suppressed writes to the constant registers.
+        ee::s_ee_vu1_use full{};
+        for (uint32_t reg = 0u; reg < 16u; ++reg)
+        {
+            full.read_vi(reg);
+            full.read_vi(reg);
+        }
+        for (uint32_t reg = 1u; reg <= 4u; ++reg)
+        {
+            full.read(reg, 15u);
+            full.write(reg, 15u);
+        }
+        if (!check(full.m_vi_index_count == 15u &&
+                   full.m_read_lane_count == 16u &&
+                   full.m_write_lane_count == 8u,
+                   "expanded scoreboard capacity or VI deduplication"))
+        {
+            return 1;
+        }
+    }
+
     // A resident decode cache must not retain stale dependency metadata
     // when MPG replaces either half of the instruction at the same PC.
     // Check the load and vector masks against a fresh decode, then revisit
