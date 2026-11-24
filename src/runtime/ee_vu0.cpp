@@ -2108,6 +2108,15 @@ uint32_t vu0_macro_bits(float value)
     return bits;
 }
 
+// MAX/MINI compare the original VU words, not normalized host floats.
+// The sign-magnitude ordering distinguishes signed zeros, denormals and
+// exponent-255 payloads. Reference: PCSX2 VUops.cpp fp_max/fp_min,
+// 4e56d430595164106eab9606cb46c94c902802cd.
+uint32_t vu0_macro_order_key(uint32_t bits)
+{
+    return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
+}
+
 uint32_t vu0_macro_ftoi(uint32_t bits, double scale)
 {
     const double value = static_cast<double>(vu0_fmac_operand(bits)) * scale;
@@ -2278,18 +2287,21 @@ extern "C" uint32_t ee_vu0_macro_fmac(
             {
                 ft_lane = op.m_broadcast;
             }
-            const float a = vu0_fmac_operand(vu0_fmac_read_vf(cpu, fs, fs_lane));
-            const float b = vu0_fmac_operand(
-                op.m_source == e_vu0_macro_source::q ||
+            const uint32_t a_bits = vu0_fmac_read_vf(cpu, fs, fs_lane);
+            const uint32_t b_bits = op.m_source == e_vu0_macro_source::q ||
                 op.m_source == e_vu0_macro_source::i
-                    ? scalar_bits : vu0_fmac_read_vf(cpu, ft, ft_lane));
+                    ? scalar_bits : vu0_fmac_read_vf(cpu, ft, ft_lane);
             if (!flags)
             {
+                const uint32_t a_key = vu0_macro_order_key(a_bits);
+                const uint32_t b_key = vu0_macro_order_key(b_bits);
                 const bool take_a = op.m_arith == e_vu0_macro_arith::max
-                    ? a >= b : a <= b;
-                vu0_fmac_set_lane(&output, lane, vu0_macro_bits(take_a ? a : b));
+                    ? a_key >= b_key : a_key <= b_key;
+                vu0_fmac_set_lane(&output, lane, take_a ? a_bits : b_bits);
                 continue;
             }
+            const float a = vu0_fmac_operand(a_bits);
+            const float b = vu0_fmac_operand(b_bits);
             volatile float product = a * b; // rounded before accumulation
             const float acc = vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane));
             float answer = 0.0f;
@@ -2382,7 +2394,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
                 source, special2 == 0x31u ? (lane + 1u) & 3u : lane);
             if (special2 == 0x1du)
             {
-                bits = vu0_macro_bits(std::fabs(vu0_fmac_operand(bits)));
+                bits &= 0x7fffffffu; // VABS clears only the raw sign bit.
             }
             vu0_fmac_set_lane(&output, lane, bits);
         }

@@ -159,6 +159,31 @@ void check_general_macros(ee::s_ee_cpu_state& cpu, ee::s_ee_runtime& runtime,
           vu0.m_mac_flags == mac_before_max,
           "VMAXi selects per lane without touching MAC flags");
 
+    // Distinguish raw VU comparison from normalization. Include
+    // exponent-255 payloads, both signed zeros and negative denormals.
+    cpu.m_vu0[1] = {0x800000007fc12345ull, 0xffc0000180000001ull};
+    cpu.m_vu0[2] = {0x000000007f800001ull, 0xff80000180000002ull};
+    const uint32_t status_before_extreme = vu0.m_status_flags;
+    const uint32_t mac_before_extreme = vu0.m_mac_flags;
+    check(run_macro(cpu, runtime, special1(15u, 2u, 1u, 3u, 0x2bu)) == 0 &&
+          cpu.m_vu0[3].m_lo == 0x000000007fc12345ull &&
+          cpu.m_vu0[3].m_hi == 0xff80000180000001ull &&
+          run_macro(cpu, runtime, special1(15u, 2u, 1u, 3u, 0x2fu)) == 0 &&
+          cpu.m_vu0[3].m_lo == 0x800000007f800001ull &&
+          cpu.m_vu0[3].m_hi == 0xffc0000180000002ull,
+          "VMAX/VMINI retain exact selected words, including signed zeros");
+    check(run_macro(cpu, runtime, special1(10u, 2u, 1u, 1u, 0x10u)) == 0 &&
+          cpu.m_vu0[1].m_lo == 0x800000007fc12345ull &&
+          cpu.m_vu0[1].m_hi == 0xffc000017f800001ull,
+          "VMAXx preserves masked lanes and aliased source words");
+    cpu.m_vu0[1] = {0x80000001ffc12345ull, 0x80000000bf800000ull};
+    check(run_macro(cpu, runtime, special2(15u, 1u, 1u, 0x1du)) == 0 &&
+          cpu.m_vu0[1].m_lo == 0x000000017fc12345ull &&
+          cpu.m_vu0[1].m_hi == 0x000000003f800000ull &&
+          vu0.m_status_flags == status_before_extreme &&
+          vu0.m_mac_flags == mac_before_extreme,
+          "VABS preserves magnitude bits and does not update MAC/status");
+
     cpu.m_vu0[1] = make_vector(0.f, 0.f, 0.f, 0.f);
     cpu.m_vu0[1].m_lo = 1u;
     check(run_macro(cpu, runtime, special2(0u, 0u, 1u, 0x42u)) == 0 &&
