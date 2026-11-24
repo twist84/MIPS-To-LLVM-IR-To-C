@@ -94,12 +94,12 @@ const c_ee_vif1::s_diagnostic& c_ee_vif1::diagnostic() const
 
 const uint8_t* c_ee_vif1::vu1_data() const
 {
-    return m_machine.m_vu1.m_data.data();
+    return m_machine.m_vu1->m_data.data();
 }
 
 const uint8_t* c_ee_vif1::vu1_code() const
 {
-    return m_machine.m_vu1.m_code.data();
+    return m_machine.m_vu1->m_code.data();
 }
 
 uint32_t c_ee_vif1::command_data_words(
@@ -172,11 +172,11 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
     {
         const uint32_t start = address & 0x3ffu;
         const uint32_t first = std::min(num, 0x400u - start);
-        std::memcpy(machine.m_vu1.m_data.data() + start * 16u,
+        std::memcpy(machine.m_vu1->m_data.data() + start * 16u,
                     words, first * 16u);
         if (first < num)
         {
-            std::memcpy(machine.m_vu1.m_data.data(), words + first * 4u,
+            std::memcpy(machine.m_vu1->m_data.data(), words + first * 4u,
                         (num - first) * 16u);
         }
         machine.m_num = 0u;
@@ -221,7 +221,7 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
             }
         }
 
-        uint8_t* destination = machine.m_vu1.m_data.data() +
+        uint8_t* destination = machine.m_vu1->m_data.data() +
             (address & 0x3ffu) * 16u;
         const uint32_t mask_row = std::min(cycle, 3u);
         for (uint32_t lane = 0u; lane < 4u; ++lane)
@@ -328,7 +328,7 @@ bool c_ee_vif1::execute(
             for (uint32_t i = 0u; i < count; ++i)
             {
                 const uint32_t offset = ((imm + i) * 8u) & 0x3fffu;
-                std::memcpy(machine.m_vu1.m_code.data() + offset,
+                std::memcpy(machine.m_vu1->m_code.data() + offset,
                             words + i * 2u, 8u);
             }
             ++machine.m_mpg_uploads;
@@ -371,17 +371,17 @@ bool c_ee_vif1::execute(
         case 0x15u: // MSCALF (PATH3 idle checked before execution)
         case 0x17u: // MSCNT
         {
-            if (op == 0x17u && !machine.m_vu1.m_state.m_initialized)
+            if (op == 0x17u && !machine.m_vu1->m_state.m_initialized)
             {
                 *reject = e_reject::unsupported_vu_execution;
                 accepted = false;
                 break;
             }
             const uint32_t start = op == 0x17u
-                ? machine.m_vu1.m_state.m_tpc : (imm & 0x7ffu) * 8u;
+                ? machine.m_vu1->m_state.m_tpc : (imm & 0x7ffu) * 8u;
             accepted = c_ee_vu1::run(
-                machine.m_vu1.m_state, machine.m_vu1.m_code,
-                machine.m_vu1.m_data, start, machine.m_tops,
+                machine.m_vu1->m_state, machine.m_vu1->m_code,
+                machine.m_vu1->m_data, start, machine.m_tops,
                 machine.m_itops, path1_bytes, vu_issue);
             if (!accepted)
             {
@@ -582,7 +582,7 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
         // the preceding worker result has been collected.
         if (worker != nullptr && vu_start &&
             ((code & 0x80000000u) == 0u || (next.m_err & 1u) != 0u) &&
-            (opcode != 0x17u || next.m_vu1.m_state.m_initialized))
+            (opcode != 0x17u || next.m_vu1->m_state.m_initialized))
         {
             auto job = std::move(m_spare_job);
             if (job == nullptr)
@@ -590,10 +590,10 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
                 job = std::make_unique<s_ee_vu1_job>();
             }
             job->m_address = opcode == 0x17u ?
-                next.m_vu1.m_state.m_tpc : (code & 0x7ffu) * 8u;
+                next.m_vu1->m_state.m_tpc : (code & 0x7ffu) * 8u;
             job->m_top = next.m_tops;
             job->m_itop = next.m_itops;
-            job->m_resident = std::move(next.m_vu1);
+            job->m_resident.swap(next.m_vu1);
             job->m_path1.swap(tx.m_path1);
             next.m_code = code;
             uint64_t handoff = 0u;
@@ -606,7 +606,7 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
                 tx.m_waiting_words = words;
                 return false;
             }
-            next.m_vu1 = std::move(job->m_resident);
+            next.m_vu1.swap(job->m_resident);
             job->m_path1.swap(tx.m_path1);
             m_spare_job = std::move(job);
             tx.m_rejection = e_reject::unsupported_vu_execution;
@@ -854,7 +854,7 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
         auto& next = tx.m_next;
         const uint32_t code = next.m_pending[tx.m_index];
         const uint32_t opcode = (code >> 24u) & 0x7fu;
-        next.m_vu1 = std::move(job->m_resident);
+        next.m_vu1.swap(job->m_resident);
         tx.m_path1.swap(job->m_path1);
         tx.m_issue = job->m_issue;
         if (!job->m_accepted || job->m_host_failed)
@@ -1107,13 +1107,13 @@ bool c_ee_vif1::mmio_read(void* user, uint32_t address,
         address < k_vu1_code_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_code_base;
-        source = vif1->m_machine.m_vu1.m_code.data();
+        source = vif1->m_machine.m_vu1->m_code.data();
     }
     else if (address >= k_vu1_data_base &&
              address < k_vu1_data_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_data_base;
-        source = vif1->m_machine.m_vu1.m_data.data();
+        source = vif1->m_machine.m_vu1->m_data.data();
     }
     if (source == nullptr ||
         (width != 1u && width != 2u && width != 4u &&
@@ -1178,13 +1178,13 @@ bool c_ee_vif1::mmio_write(void* user, uint32_t address,
         address < k_vu1_code_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_code_base;
-        destination = vif1->m_machine.m_vu1.m_code.data();
+        destination = vif1->m_machine.m_vu1->m_code.data();
     }
     else if (address >= k_vu1_data_base &&
              address < k_vu1_data_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_data_base;
-        destination = vif1->m_machine.m_vu1.m_data.data();
+        destination = vif1->m_machine.m_vu1->m_data.data();
     }
     if (destination == nullptr ||
         (width != 1u && width != 2u && width != 4u &&

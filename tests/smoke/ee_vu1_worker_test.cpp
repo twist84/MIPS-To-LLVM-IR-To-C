@@ -26,8 +26,8 @@ bool check(bool condition, const char* message)
 std::unique_ptr<ee::s_ee_vu1_job> fixture()
 {
     auto job = std::make_unique<ee::s_ee_vu1_job>();
-    auto& code = job->m_resident.m_code;
-    auto& data = job->m_resident.m_data;
+    auto& code = job->m_resident->m_code;
+    auto& data = job->m_resident->m_data;
     const uint32_t words[] = {
         (0x08u << 25u) | (1u << 16u) | 2u, 0x000002ffu,
         0x80000efcu, 0x400002ffu,
@@ -49,11 +49,35 @@ std::unique_ptr<ee::s_ee_vu1_job> fixture()
 
 int main()
 {
+    // Snapshots must not alias; explicit handoff must swap the exact
+    // allocation, while copy assignment preserves the committed address.
+    ee::c_ee_vu1_resident_slot committed;
+    committed->m_data[0] = 42u;
+    ee::c_ee_vu1_resident_slot staged = committed;
+    ee::c_ee_vu1_resident_slot spare;
+    auto* const committed_address = &*committed;
+    auto* const staged_address = &*staged;
+    auto* const spare_address = &*spare;
+    staged.swap(spare);
+    spare->m_data[0] = 99u;
+    if (!check(&*staged == spare_address && &*spare == staged_address &&
+            committed->m_data[0] == 42u, "resident ownership swap aliases committed state"))
+    {
+        return 1;
+    }
+    staged.swap(spare);
+    committed = staged;
+    if (!check(&*committed == committed_address && committed->m_data[0] == 99u &&
+            &*staged != &*committed, "resident snapshot replaced committed storage"))
+    {
+        return 1;
+    }
+
     ee::c_ee_vu1_worker worker;
     auto job = fixture();
     auto reference = *job;
     uint64_t submitted_ns = 0u;
-    auto& resident = reference.m_resident;
+    auto& resident = *reference.m_resident;
     if (!check(ee::c_ee_vu1::run(
             resident.m_state, resident.m_code, resident.m_data, 0u, 0u, 0u,
             reference.m_path1, &reference.m_issue),
@@ -88,11 +112,11 @@ int main()
             worker.started_ns() == result->m_started_ns &&
             worker.execution_interval() ==
                 std::make_pair(result->m_started_ns, result->m_finished_ns) &&
-            result->m_resident.m_state.m_vi == resident.m_state.m_vi &&
-            result->m_resident.m_state.m_vf == resident.m_state.m_vf &&
-            result->m_resident.m_state.m_tpc == resident.m_state.m_tpc &&
-            result->m_resident.m_data == resident.m_data &&
-            result->m_resident.m_code == resident.m_code &&
+            result->m_resident->m_state.m_vi == resident.m_state.m_vi &&
+            result->m_resident->m_state.m_vf == resident.m_state.m_vf &&
+            result->m_resident->m_state.m_tpc == resident.m_state.m_tpc &&
+            result->m_resident->m_data == resident.m_data &&
+            result->m_resident->m_code == resident.m_code &&
             result->m_issue.m_steps == reference.m_issue.m_steps &&
             result->m_issue.m_cycles == reference.m_issue.m_cycles &&
             result->m_path1 == reference.m_path1 &&

@@ -148,7 +148,7 @@ void c_ee_vu1_worker::run()
             m_started_ns.store(job->m_started_ns, std::memory_order_release);
             try
             {
-                auto& resident = job->m_resident;
+                auto& resident = *job->m_resident;
                 job->m_accepted = c_ee_vu1::run(
                     resident.m_state, resident.m_code, resident.m_data,
                     job->m_address, job->m_top, job->m_itop,

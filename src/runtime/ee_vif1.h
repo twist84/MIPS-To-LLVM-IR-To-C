@@ -156,7 +156,7 @@ private:
         uint32_t m_col[4]{};
         bool m_dbf = false;
         std::vector<uint32_t> m_pending;
-        s_ee_vu1_resident m_vu1{};
+        c_ee_vu1_resident_slot m_vu1{};
         uint32_t m_commands = 0u;
         uint32_t m_mpg_uploads = 0u;
         uint32_t m_unpack_commands = 0u;

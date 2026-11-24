@@ -12,12 +12,45 @@
 
 namespace ee
 {
+// Host-only owning slot. Copying snapshots the complete resident machine;
+// swapping transfers storage without copying either 16 KiB memory bank.
+// Copy assignment preserves the destination address (committed MMIO view).
+class c_ee_vu1_resident_slot
+{
+public:
+    c_ee_vu1_resident_slot() = default;
+    c_ee_vu1_resident_slot(const c_ee_vu1_resident_slot& other)
+        : m_value(std::make_unique<s_ee_vu1_resident>(*other.m_value))
+    {
+    }
+
+    c_ee_vu1_resident_slot& operator=(const c_ee_vu1_resident_slot& other)
+    {
+        *m_value = *other.m_value;
+        return *this;
+    }
+
+    s_ee_vu1_resident& operator*() { return *m_value; }
+    const s_ee_vu1_resident& operator*() const { return *m_value; }
+    s_ee_vu1_resident* operator->() { return m_value.get(); }
+    const s_ee_vu1_resident* operator->() const { return m_value.get(); }
+
+    void swap(c_ee_vu1_resident_slot& other) noexcept
+    {
+        m_value.swap(other.m_value);
+    }
+
+private:
+    std::unique_ptr<s_ee_vu1_resident> m_value =
+        std::make_unique<s_ee_vu1_resident>();
+};
+
 // Host-owned job, not a committed VIF transaction. Only the worker
 // mutates it between submit and take. PATH1 can contain an existing
 // staged prefix so XGKICK retains the aggregate packet bound.
 struct s_ee_vu1_job
 {
-    s_ee_vu1_resident m_resident{};
+    c_ee_vu1_resident_slot m_resident{};
     uint32_t m_address = 0u;
     uint32_t m_top = 0u;
     uint32_t m_itop = 0u;
