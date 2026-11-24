@@ -551,7 +551,7 @@ def expected_sqrt_bits(source_bits):
 
 def expected_rsqrt_bits(numerator_bits, denominator_bits):
     if (denominator_bits & 0x7F800000) == 0:
-        return (denominator_bits & 0x80000000) | 0x7F7FFFFF
+        return (numerator_bits & 0x80000000) | 0x7FFFFFFF
 
     numerator = f32_value(ee_fpu_normalise_bits(numerator_bits))
     denominator = ee_fpu_normalise_bits(denominator_bits) & 0x7FFFFFFF
@@ -628,10 +628,13 @@ def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs):
 
         expected = expected_rsqrt_bits(numerator_bits, denominator_bits)
         expected_fcsr = cleared_fcsr
-        if (denominator_bits & 0x7F800000) == 0:
-            expected_fcsr |= 0x00010020  # D|SD
-        elif denominator_bits & 0x80000000:
+        if denominator_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
+        if (denominator_bits & 0x7F800000) == 0:
+            if (numerator_bits & 0x7F800000) == 0:
+                expected_fcsr |= 0x00020040  # zero/zero: I|SI
+            else:
+                expected_fcsr |= 0x00010020  # nonzero/zero: D|SD
 
         require(state.fpr[6] == expected,
                 prefix + f"FPR[6] got 0x{state.fpr[6]:016x}, "
@@ -834,7 +837,15 @@ def main():
         (0x40C00000, 0x40800000, "six divided by sqrt four"),
         (0x40C00000, 0xC0800000, "negative divisor is made positive and invalid"),
         (0x40C00000, 0x00000000, "positive zero divisor returns FMAX"),
-        (0x40C00000, 0x80000000, "negative zero divisor returns negative FMAX"),
+        (0x40C00000, 0x80000000, "negative zero divisor returns positive R5900 maximum"),
+        # Signed-zero combinations from ps2autotests sqrt.expected.
+        (0x00000000, 0x00000000, "positive zero over positive zero"),
+        (0x00000000, 0x80000000, "positive zero over negative zero"),
+        (0x80000000, 0x00000000, "negative zero over positive zero"),
+        (0x80000000, 0x80000000, "negative zero over negative zero"),
+        (0xC0C00000, 0x00000000, "negative numerator over positive zero"),
+        (0xC0C00000, 0x80000000, "negative numerator over negative zero"),
+        (0x80000001, 0x00000001, "negative denormal numerator over denormal divisor"),
         (0x40C00000, 0x00000001, "positive denormal divisor counts as zero"),
         (0x40C00000, 0x80000001, "negative denormal divisor counts as zero"),
         (0x7F7FFFFF, 0x00800000, "overflow clamps without flags"),

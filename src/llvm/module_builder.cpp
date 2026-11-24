@@ -2499,7 +2499,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             }
             else if (fmt == 0x10 && fp_funct == 0x16) // RSQRT.S  fd = fs / sqrt(ft)
             {
+                const std::string raw_fs = load_fpr_i32(fs);
                 const std::string raw_ft = load_fpr_i32(ft);
+                const std::string fs_exponent = newtemp();
+                const std::string numerator_is_zero = newtemp();
+                const std::string numerator_sign = newtemp();
                 const std::string ft_exponent = newtemp();
                 const std::string divisor_is_zero = newtemp();
                 const std::string sign = newtemp();
@@ -2509,7 +2513,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + divisor_is_zero + " = icmp eq i32 " + ft_exponent + ", 0\n";
                 m_out += "  " + sign + " = and i32 " + raw_ft + ", -2147483648\n";
                 m_out += "  " + negative + " = icmp ne i32 " + sign + ", 0\n";
-                m_out += "  " + zero_result + " = or i32 " + sign + ", 2139095039\n";
+                // Hardware saturation uses Fs's sign and the R5900 maximum.
+                m_out += "  " + fs_exponent + " = and i32 " + raw_fs + ", 2139095040\n";
+                m_out += "  " + numerator_is_zero + " = icmp eq i32 " + fs_exponent + ", 0\n";
+                m_out += "  " + numerator_sign + " = and i32 " + raw_fs + ", -2147483648\n";
+                m_out += "  " + zero_result + " = or i32 " + numerator_sign + ", 2147483647\n";
 
                 const std::string numerator = load_ee_fpr_f32(fs);
                 const std::string normalised_denominator = normalise_ee_f32_bits(raw_ft);
@@ -2530,28 +2538,30 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                          ", i32 " + zero_result + ", i32 " + quotient_bits + "\n";
                 store_fpr_i32(fd, result);
 
-                // RSQRT.S clears I/D causes. A zero/denormal divisor sets
-                // D|SD; otherwise a negative divisor sets I|SI. Result
-                // overflow/underflow is clamped without touching FCSR.
+                // Negative Ft sets I independently of the zero test.
+                // Zero/zero sets I; nonzero/zero sets D (PCSX2 interpreter).
+                // Ordinary quotient overflow/underflow handling is unchanged.
                 const std::string fcsr = newtemp();
                 const std::string old_flags = newtemp();
                 const std::string cleared_flags = newtemp();
-                const std::string divide_flags = newtemp();
+                const std::string negative_flags = newtemp();
                 const std::string invalid_flags = newtemp();
-                const std::string no_error_flags = newtemp();
-                const std::string nonzero_flags = newtemp();
+                const std::string divide_flags = newtemp();
+                const std::string zero_flags = newtemp();
+                const std::string base_flags = newtemp();
                 const std::string final_flags = newtemp();
                 m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
                 m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
                 m_out += "  " + cleared_flags + " = and i32 " + old_flags + ", -196609\n";
-                m_out += "  " + divide_flags + " = or i32 " + cleared_flags + ", 65568\n";
-                m_out += "  " + invalid_flags + " = or i32 " + cleared_flags + ", 131136\n";
-                m_out += "  " + no_error_flags + " = select i1 " + negative +
-                         ", i32 " + invalid_flags + ", i32 " + cleared_flags + "\n";
-                m_out += "  " + nonzero_flags + " = select i1 " + divisor_is_zero +
-                         ", i32 " + divide_flags + ", i32 " + no_error_flags + "\n";
+                m_out += "  " + negative_flags + " = or i32 " + cleared_flags + ", 131136\n";
+                m_out += "  " + base_flags + " = select i1 " + negative +
+                         ", i32 " + negative_flags + ", i32 " + cleared_flags + "\n";
+                m_out += "  " + invalid_flags + " = or i32 " + base_flags + ", 131136\n";
+                m_out += "  " + divide_flags + " = or i32 " + base_flags + ", 65568\n";
+                m_out += "  " + zero_flags + " = select i1 " + numerator_is_zero +
+                         ", i32 " + invalid_flags + ", i32 " + divide_flags + "\n";
                 m_out += "  " + final_flags + " = select i1 " + divisor_is_zero +
-                         ", i32 " + divide_flags + ", i32 " + nonzero_flags + "\n";
+                         ", i32 " + zero_flags + ", i32 " + base_flags + "\n";
                 m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
             }
             else if (fmt == 0x10 && (fp_funct == 0x18 || fp_funct == 0x19 || fp_funct == 0x1a))
