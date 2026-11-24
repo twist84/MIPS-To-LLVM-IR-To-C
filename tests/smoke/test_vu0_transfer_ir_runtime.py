@@ -88,7 +88,14 @@ class VU0State(ctypes.Structure):
         ("vi_backup_cycles", ctypes.c_uint32),
         ("vi_backup_register", ctypes.c_uint32),
         ("vi_backup_old_value", ctypes.c_uint32),
-        ("_padding_after_backup", ctypes.c_uint32 * 2),
+        ("vf_memory_ready_cycle", ctypes.c_uint64),
+        ("vf_memory_issues", ctypes.c_uint64 * 8),
+        ("vf_memory_issue_index", ctypes.c_uint32),
+        ("acc_overflow_mask", ctypes.c_uint32),
+        ("q_ready_cycle", ctypes.c_uint64),
+        ("q_pending_bits", ctypes.c_uint32),
+        ("q_pending", ctypes.c_uint32),
+        ("_tail_padding", ctypes.c_uint64),
     ]
 
 
@@ -105,7 +112,9 @@ assert VU0State.take_delay_branch.offset == 8520
 assert VU0State.vi_backup_cycles.offset == 8524
 assert VU0State.vi_backup_register.offset == 8528
 assert VU0State.vi_backup_old_value.offset == 8532
-assert ctypes.sizeof(VU0State) == 8544
+assert VU0State.acc_overflow_mask.offset == 8612
+assert VU0State.q_ready_cycle.offset == 8616
+assert ctypes.sizeof(VU0State) == 8640
 
 
 class Runtime(ctypes.Structure):
@@ -174,6 +183,11 @@ def compile_jit(fixture, temp_dir, mode, target):
     subprocess.run([str(fixture), str(ir_path), mode], check=True)
 
     ir_text = ir_path.read_text(encoding="utf-8")
+    if mode.startswith("ir_v"):
+        require("call i32 @ee_vu0_ir_" in ir_text, "missing direct VU0 IR lowering")
+        require("call i32 @ee_vu0_macro_fmac(" not in ir_text and
+                "call i32 @ee_vu0_macro_scalar(" not in ir_text,
+                "translated arithmetic escaped to a runtime opcode helper")
     # The fixture previously modeled only the ABI's first six pointer
     # fields. Native instruction counting appends a counter after later
     # host-owned fields; a 48-byte runtime allocation would cause JIT code
@@ -306,6 +320,73 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-vu0-transfer-") as directory:
         temp_dir = pathlib.Path(directory)
+
+        def vf_words(cpu, index):
+            v = cpu.vu0[index]
+            return (v.lo & 0xffffffff, v.lo >> 32,
+                    v.hi & 0xffffffff, v.hi >> 32)
+
+        def set_vf(cpu, index, words):
+            cpu.vu0[index].lo = words[0] | (words[1] << 32)
+            cpu.vu0[index].hi = words[2] | (words[3] << 32)
+
+        def init_mul(cpu, vu0):
+            set_vf(cpu, 1, (0x3f800000, 0x16a08bd5, 0x7fffffff, 0x7fffffff))
+            set_vf(cpu, 2, (0x3fffffff, 0x03f4fe21, 0x3f800000, 0x40000000))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmul", init_mul)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 3) == (0x3ffffffe, 0, 0x7fffffff, 0x7fffffff)
+                and vu0.mac_flags == 0x1404 and vu0.status_flags == 0x34d,
+                "direct VU0 VMUL result and true range flags")
+        check_sync(sync, 1, ENTRY_PC, "direct VMUL")
+
+        def init_add(cpu, vu0):
+            set_vf(cpu, 1, (0x8080002c, 0x80800036, 0x80c1aa65, 0x3f800000))
+            set_vf(cpu, 2, (0x008000ec, 0x00829f6a, 0x01200000, 0x3f800000))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vadd", init_add)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 1) == (0x00400000, 0x0027cd00, 0x007cab36, 0x40000000)
+                and vu0.mac_flags == 0x0e0e and vu0.status_flags == 0x145,
+                "direct VU0 aliasing VADD cancellation flags")
+
+        def init_mac(cpu, vu0):
+            set_vf(cpu, 1, (0x7fffffff, 0, 0, 0))
+            set_vf(cpu, 2, (0x40000000, 0, 0, 0))
+            set_vf(cpu, 4, (0xbf800000, 0, 0, 0))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmula_madd", init_mac)
+        require(result == EE_EXIT_DISPATCH and vf_words(cpu, 3)[0] == 0x7fffffff
+                and vu0.acc_overflow_mask == 8 and vu0.mac_flags == 0x8000
+                and vu0.status_flags == 0x288,
+                "direct VU0 ACC overflow latch and MAC sticky")
+        require(sync["calls"] == [(1, ENTRY_PC), (1, ENTRY_PC + 4)],
+                "each direct FMAC synchronizes")
+
+        for mode, numerator, denominator, expected, flags in (
+            ("ir_vdiv_wait", 0x3f800000, 0x3fffffff, 0x3f000001, 0),
+            ("ir_vdiv_wait", 0, 0, 0x7fffffff, 0x410),
+            ("ir_vsqrt_wait", 0, 0xbf800000, 0x3f800000, 0x410),
+        ):
+            def init_q(cpu, vu0):
+                set_vf(cpu, 1, (numerator, 0, 0, 0))
+                set_vf(cpu, 2, (denominator, 0, 0, 0))
+            result, cpu, vu0, sync, _, keep = run_guest(
+                fixture, temp_dir, target, mode, init_q)
+            require(result == EE_EXIT_DISPATCH and vu0.q.lo == expected
+                    and vu0.vi[22] == expected and vu0.q_pending == 0
+                    and vu0.cycle == 7 and vu0.status_flags == flags,
+                    "direct VU0 Q arithmetic and WAITQ retirement")
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmul", init_mul,
+            sync_result=VU0_SYNC_FAILED)
+        require(result == EE_EXIT_UNSUPPORTED and vf_words(cpu, 3) == (0, 0, 0, 0)
+                and vu0.mac_flags == 0, "failed VU0 sync commits no arithmetic")
 
         def init_qmfc(cpu, vu0):
             cpu.gpr[8] = U128(0, 0)

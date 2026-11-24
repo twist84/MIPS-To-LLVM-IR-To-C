@@ -2,6 +2,8 @@
 #include "ee_cop1_rsqrt_ir.h"
 #include "ee_cop1_add_ir.h"
 #include "ee_cop1_mul_ir.h"
+#include "ee_vu_fmac_ir.h"
+#include "ee_vu0_macro_ir.h"
 #include "ee_runtime.h"
 #include <cstddef>
 #include "ee_opcode.h"
@@ -2758,15 +2760,35 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 special2 >= 0x34u && special2 <= 0x37u;
             const bool scalar_q =
                 (ins.opcode_word & 0x3cu) == 0x3cu &&
-                (special2 >= 0x39u && special2 <= 0x3bu);
-            m_out += "  " + result + " = call i32 @" +
-                     std::string(indexed_memory
-                         ? "ee_vu0_macro_indexed_memory"
-                         : scalar_q ? "ee_vu0_macro_scalar"
-                                    : "ee_vu0_macro_fmac") +
-                     "(ptr %cpu, ptr %rt, i32 " +
-                     std::to_string(ins.opcode_word) + ", i32 " +
-                     std::to_string(ins.pc) + ")\n";
+                (special2 >= 0x38u && special2 <= 0x3bu);
+            s_vu0_ir_op fmac{};
+            if (decode_vu0_ir_fmac(ins.opcode_word, fmac))
+            {
+                const uint32_t word = ins.opcode_word;
+                m_out += "  " + result + " = call i32 @ee_vu0_ir_fmac(ptr %cpu, ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " + std::to_string((word >> 11u) & 31u) +
+                    ", i32 " + std::to_string((word >> 16u) & 31u) +
+                    ", i32 " + std::to_string((word >> 6u) & 31u) +
+                    ", i32 " + std::to_string((word >> 21u) & 15u) +
+                    ", i32 " + std::to_string(fmac.m_kind) +
+                    ", i32 " + std::to_string(fmac.m_source) +
+                    ", i32 " + std::to_string(fmac.m_broadcast) +
+                    ", i1 " + (fmac.m_acc ? "true" : "false") + ")\n";
+            }
+            else if (scalar_q)
+            {
+                m_out += "  " + result + " = call i32 @ee_vu0_ir_q(ptr %cpu, ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " + std::to_string(ins.opcode_word) +
+                    ", i32 " + std::to_string(special2 - 0x38u) + ")\n";
+            }
+            else
+            {
+                m_out += "  " + result + " = call i32 @" +
+                    std::string(indexed_memory ? "ee_vu0_macro_indexed_memory"
+                                               : "ee_vu0_macro_fmac") +
+                    "(ptr %cpu, ptr %rt, i32 " + std::to_string(ins.opcode_word) +
+                    ", i32 " + std::to_string(ins.pc) + ")\n";
+            }
         }
         else
         {
@@ -3472,6 +3494,13 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     m_out += "\n";
     end_function();
 
+    if (m_out.find("call i32 @ee_vu0_ir_fmac(") != std::string::npos ||
+        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos)
+    {
+        m_out += make_vu0_macro_ir();
+        m_out += k_vu_fmac_ir;
+        m_out += k_vu_q_status_ir;
+    }
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_root(") != std::string::npos)
@@ -5413,6 +5442,13 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     m_out += "\n";
     end_function();
 
+    if (m_out.find("call i32 @ee_vu0_ir_fmac(") != std::string::npos ||
+        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos)
+    {
+        m_out += make_vu0_macro_ir();
+        m_out += k_vu_fmac_ir;
+        m_out += k_vu_q_status_ir;
+    }
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_root(") != std::string::npos)

@@ -136,6 +136,31 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
         return true;
     }
 
+    const auto vu_macro = [](uint32_t op, uint32_t mask, uint32_t fs, uint32_t ft, uint32_t fd)
+    {
+        return 0x4a000000u | (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+    };
+    const auto vu_special = [&](uint32_t op, uint32_t mask, uint32_t fs, uint32_t ft)
+    {
+        return vu_macro(0x3cu | (op & 3u), mask, fs, ft, op >> 2u);
+    };
+    if (mode == "ir_vmul" || mode == "ir_vadd" || mode == "ir_vmula_madd" ||
+        mode == "ir_vdiv_wait" || mode == "ir_vsqrt_wait")
+    {
+        if (mode == "ir_vmul") { words = {vu_macro(0x2au, 15u, 1u, 2u, 3u)}; }
+        else if (mode == "ir_vadd") { words = {vu_macro(0x28u, 15u, 1u, 2u, 1u)}; }
+        else if (mode == "ir_vmula_madd")
+        {
+            words = {vu_special(0x2au, 8u, 1u, 2u), vu_macro(0x29u, 8u, 1u, 4u, 3u)};
+        }
+        else
+        {
+            words = {vu_special(mode == "ir_vdiv_wait" ? 0x38u : 0x39u, 0u, 1u, 2u),
+                     vu_special(0x3bu, 0u, 0u, 0u)};
+        }
+        return true;
+    }
+
     uint8_t cop2_rs = 0;
     if (mode.rfind("qmfc2", 0) == 0)
         cop2_rs = 0x01;

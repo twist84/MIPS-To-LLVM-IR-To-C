@@ -70,7 +70,7 @@ inline uint32_t quotient(uint32_t a, uint32_t b)
     s_step state{((a & 0x7fffffu) | 0x800000u) << 2u, 0u, 1};
     const uint32_t divisor = ((b & 0x7fffffu) | 0x800000u) << 2u;
     uint32_t result = 0u;
-    for (int32_t i = 25; i >= 0; --i)
+    for (int32_t i = 0; i < 25; ++i)
     {
         result = (result << 1u) + static_cast<uint32_t>(state.m_digit);
         state = step(state.m_sum, state.m_carry, divisor, state.m_digit);
