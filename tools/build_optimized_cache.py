@@ -122,7 +122,8 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
 
 def remove_verified_duplicates(work, metadata_path, hashes):
     legacy = work / "ir"
-    if legacy.resolve() == metadata_path.parent.resolve() or not legacy.is_dir():
+    if (legacy.is_symlink() or legacy.resolve() == metadata_path.parent.resolve()
+            or not legacy.is_dir()):
         return
     old_path = legacy / "ee_functions.json"
     if not old_path.is_file():
@@ -149,7 +150,8 @@ def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0):
     source_work = source_work.resolve(strict=True)
     work = work.resolve()
     if (work == source_work or source_work in work.parents or
-            work in source_work.parents):
+            work in source_work.parents or
+            work == shared_ir.ir_directory(source_work).parent):
         raise ValueError("optimized cache must be separate from the source")
     with shared_ir.ir_lock(source_work), shared_ir.ir_lock(work):
         prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)

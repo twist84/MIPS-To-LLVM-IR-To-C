@@ -2254,6 +2254,28 @@ def main():
             metadata_path = root / "out" / "ir" / "ee_functions.json"
             assert json.loads(metadata_path.read_text(encoding="utf-8"))["function_count"] == 1
 
+            # Prepare one shared profile and one pre-sharing legacy
+            # profile while the base still owns just the entry function.
+            early = root / "early-optimized"
+            legacy = root / "legacy-optimized"
+            prepare_early = [
+                sys.executable, str(source / "tools" / "build_optimized_cache.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--source-work-dir", str(root / "out"),
+                "--work-dir", str(early),
+            ]
+            result = subprocess.run(prepare_early, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert not (early / "ir").exists()
+            legacy_build = [
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--work-dir", str(legacy), "--link-only",
+            ]
+            result = subprocess.run(legacy_build, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert (legacy / "ir" / "ee_functions.json").is_file()
+
             resumed = subprocess.run(
                 base + ["--no-recompile", "--auto-expand=1",
                         "--trace-entry=0x00100008"],
@@ -2283,6 +2305,29 @@ def main():
             )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert metadata["function_count"] == 2, metadata
+
+            # A new discovery in the base must be visible to an existing
+            # shared profile without re-lifting either guest function.
+            result = subprocess.run(prepare_early, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "synchronizing native profile to shared EE IR" in result.stdout
+            assert "reused 1/2" in result.stdout, result.stdout
+            assert "ee_recomp: loading" not in result.stdout
+            assert not (early / "ir").exists()
+            early_cache = json.loads((early / "translation-cache.json").read_text())
+            assert len(early_cache["ir_hashes"]) == 2
+
+            # Migrate the legacy profile with the shorter verified prefix.
+            # Its existing O2 object must be rekeyed, not recompiled.
+            prepare_legacy = [*prepare_early[:-1], str(legacy)]
+            result = subprocess.run(prepare_legacy, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "reused 1/2" in result.stdout, result.stdout
+            assert "removed 1 verified duplicate modules" in result.stdout
+            assert not list((legacy / "ir").glob("*.ll"))
+            assert not (legacy / "ir" / "ee_functions.json").exists()
+            legacy_cache = json.loads((legacy / "translation-cache.json").read_text())
+            assert legacy_cache["ir_hashes"] == early_cache["ir_hashes"]
 
             # Verify a separate native O2 variant from live-expanded IR.
             original_cache = root / "out" / "translation-cache.json"

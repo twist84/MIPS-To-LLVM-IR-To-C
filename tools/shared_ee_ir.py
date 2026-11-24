@@ -34,8 +34,11 @@ def ir_directory(work):
     marker = work / MARKER
     if not marker.is_file():
         return work / "ir"
-    value = read_json(marker)
-    path = Path(value["ir_dir"])
+    try:
+        value = read_json(marker)
+        path = Path(value["ir_dir"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ValueError("invalid shared EE IR directory marker") from exc
     if (value.get("schema") != SCHEMA or not path.is_absolute() or
             path.name != "ir" or path.resolve() == work / "ir" or
             not (path / PROVENANCE).is_file()):

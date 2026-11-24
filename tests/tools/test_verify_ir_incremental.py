@@ -276,7 +276,76 @@ def test_native_target_profile():
         print("PASS: host-native O2 profile, CPU provenance and immutable IR")
 
 
+def test_shared_ir_provenance():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import shared_ee_ir as shared
+
+    with tempfile.TemporaryDirectory(prefix="ee-shared-provenance-") as temp:
+        root = Path(temp)
+        base = root / "base"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        profile = root / "profile"
+        profile.mkdir()
+        metadata_path = ir / "ee_functions.json"
+        sources = {"ELF": "synthetic"}
+        metadata = {"function_count": 0, "functions": []}
+        hashes = {}
+
+        def append(i):
+            path = ir / f"fn_{i}.ll"
+            write_ir(path, i)
+            metadata["functions"].append({
+                "ir_path": str(path), "vaddr": hex(0x100000 + i * 4),
+                "host_symbol": path.stem, "block_pcs": [hex(0x100000 + i * 4)]
+            })
+            hashes[path.name] = shared.digest(path)
+            metadata["function_count"] = len(metadata["functions"])
+
+        append(0)
+        shared.write_json(metadata_path, metadata)
+        shared.publish(metadata_path, sources, hashes)
+        shared.attach(profile, ir)
+        original = {"ir_sources": sources,
+                    "metadata_sha256": shared.digest(metadata_path),
+                    "ir_hashes": dict(hashes)}
+        assert shared.ir_directory(profile) == ir
+        assert not (profile / "ir").exists()
+        # More than one 128-function recovery batch may have elapsed.
+        for i in range(1, 260):
+            append(i)
+        shared.write_json(metadata_path, metadata)
+        shared.publish(metadata_path, sources, hashes)
+        assert shared.verified_extension(original, metadata_path, sources, hashes)
+        changed = dict(hashes)
+        changed["fn_0.ll"] = "modified"
+        assert not shared.verified_extension(original, metadata_path, sources, changed)
+        metadata["functions"][0]["block_pcs"] = ["0x200000"]
+        shared.write_json(metadata_path, metadata)
+        assert not shared.verified_extension(original, metadata_path, sources, hashes)
+        try:
+            shared.publish(metadata_path, sources, hashes)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("changed original block ownership was accepted")
+
+        # Locks must serialize distinct profiles, but allow reentrant use
+        # by the builder and run_game in one process.
+        with shared.ir_lock(base), shared.ir_lock(profile):
+            script = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                      "from shared_ee_ir import ir_lock; "
+                      "with_lock = ir_lock(sys.argv[2]); with_lock.__enter__()")
+            other = subprocess.run([sys.executable, "-c", script, str(SCRIPT.parent),
+                                    str(profile)], capture_output=True, text=True)
+            assert other.returncode != 0 and "shared EE IR is in use" in other.stderr
+        with shared.ir_lock(profile):
+            pass
+        print("PASS: shared IR append history, tamper rejection and cross-profile locking")
+
+
 if __name__ == "__main__":
+    test_shared_ir_provenance()
     test_native_target_profile()
     test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()

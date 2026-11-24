@@ -521,8 +521,10 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
                 "rerun without --no-recompile"
             )
     if shared_ir.active(metadata_path):
-        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"),
-                                translated_ir_hashes(metadata_path))
+        current = translated_ir_hashes(metadata_path)
+        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"), current)
+        if current != snapshot.get("ir_hashes"):
+            raise ValueError("cached native profile IR does not match shared source")
     # A valid cache created before snapshot support is also preserved.
     archive_known_function_manifest(path, snapshot)
 
