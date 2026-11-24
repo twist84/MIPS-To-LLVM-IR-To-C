@@ -419,5 +419,15 @@ int main()
 
     std::printf("native GS WebGPU compute: PASS "
                 "(upload=%08x point=%08x)\n", rgba[0], rgba[10u]);
+    // The existing GPU-only rollback and overlap fixture also runs
+    // through the deferred observer. VRAM readback fences must drain
+    // the original committed order, not sample stale GPU state.
+    if (!bridge.enable_async() || !test_gpu_only_transactions(bridge) ||
+        !bridge.flush_committed() || !bridge.worker_healthy())
+    {
+        std::fprintf(stderr, "deferred WebGPU transaction parity failed\n");
+        return 1;
+    }
+    bridge.write_worker_statistics(stderr);
     return 0;
 }

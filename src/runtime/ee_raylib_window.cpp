@@ -238,6 +238,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         if (!IsWindow(parent_handle) || !IsWindow(child_handle))
         {
             m_closed = true;
+            (void)bridge.flush_committed();
             CloseWindow();
             m_ready = false;
             return;
@@ -272,6 +273,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
             iop_hardware->set_sio2_pad0_input(0u, 128u, 128u, 128u, 128u);
         }
         m_closed = true;
+        (void)bridge.flush_committed();
         CloseWindow();
         m_ready = false;
         return;
@@ -288,9 +290,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         return;
     }
-    ps2::gs::gpu::resize_surface(
-        static_cast<uint32_t>(width),
-        static_cast<uint32_t>(height));
+    if (!bridge.resize_surface(
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height)))
+    {
+        return;
+    }
 
     if (advanced)
     {

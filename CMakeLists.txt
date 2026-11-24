@@ -436,7 +436,7 @@ if(EE_ENABLE_WEBGPU)
         "${EE_WEBGPU_INCLUDE_DIR}"
         "${EE_WGPU_EXTRAS_INCLUDE_DIR}"
         "${CMAKE_SOURCE_DIR}/src/runtime")
-    target_link_libraries(ee_webgpu_native PUBLIC "${EE_WGPU_NATIVE_LIBRARY}")
+    target_link_libraries(ee_webgpu_native PUBLIC "${EE_WGPU_NATIVE_LIBRARY}" Threads::Threads)
     if(WIN32)
         # The pinned MSVC wgpu-native SDK includes Rust std objects in
         # wgpu_native.lib. clang++/lld-link does not infer their Windows

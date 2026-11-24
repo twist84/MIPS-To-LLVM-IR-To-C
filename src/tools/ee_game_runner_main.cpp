@@ -2566,6 +2566,9 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+#ifdef EE_ENABLE_RAYLIB_WINDOW
+    ee::c_ee_raylib_window raylib_window{};
+#endif
     ee::c_ee_webgpu_bridge webgpu_bridge{};
     if (gs_webgpu_snapshot_path != nullptr || gs_webgpu_window ||
         gs_field_probe.m_file != nullptr)
@@ -2604,7 +2607,6 @@ int main(int argc, char** argv)
     }
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
-    ee::c_ee_raylib_window raylib_window{};
     if (gs_webgpu_window && !raylib_window.initialize())
     {
         std::fprintf(stderr, "native raylib window initialization failed\n");
@@ -3482,6 +3484,32 @@ int main(int argc, char** argv)
         "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
     ee::runtime_profile_begin(runtime_profile_value != nullptr &&
         std::strcmp(runtime_profile_value, "1") == 0);
+    std::string gs_async_environment;
+    const char* gs_async_setting = read_host_environment(
+        "SDBZ_GS_ASYNC", &gs_async_environment);
+    if (gs_async_setting != nullptr && *gs_async_setting != '\0' &&
+        std::strcmp(gs_async_setting, "0") != 0 &&
+        std::strcmp(gs_async_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_GS_ASYNC (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool async_gs = gs_async_setting != nullptr &&
+        std::strcmp(gs_async_setting, "1") == 0;
+    if (async_gs)
+    {
+#ifdef EE_ENABLE_WEBGPU
+        if (!webgpu_bridge.enable_async())
+        {
+            std::fprintf(stderr, "GS async requires an initialized WebGPU bridge\n");
+            return 2;
+        }
+        std::puts("GS async: enabled (bounded ordered worker, fenced presentation/readback)");
+#else
+        std::fprintf(stderr, "GS async requires -DEE_ENABLE_WEBGPU=ON\n");
+        return 2;
+#endif
+    }
     std::unique_ptr<ee::c_ee_vu1_aot> vu1_aot;
     std::string vu1_aot_environment;
     std::string vu1_capture_environment;
@@ -3630,6 +3658,13 @@ int main(int argc, char** argv)
                 detail.m_vu_pc, detail.m_last_rejected_vu_steps);
             graphics_dma.m_rejection_logged = true;
         }
+#ifdef EE_ENABLE_WEBGPU
+        if (async_gs && !webgpu_bridge.worker_healthy())
+        {
+            std::fprintf(stderr, "GS async worker failed after committed GIF batch\n");
+            return e_device_service::failed;
+        }
+#endif
         // Service guest-programmed timer compare/overflow events against
         // the same reached-instruction compatibility clock as scanout.
         // Timer COUNT reads inside a long native loop sample the live
@@ -8270,6 +8305,19 @@ int main(int argc, char** argv)
             "registered syscall handler did not return: pc=0x%08x resume=0x%08x\n",
             cpu.m_pc, callback_resume_pc);
     }
+
+#ifdef EE_ENABLE_WEBGPU
+    if (async_gs)
+    {
+        const bool drained = webgpu_bridge.flush_committed();
+        webgpu_bridge.write_worker_statistics(stderr);
+        if (!drained)
+        {
+            std::fprintf(stderr, "GS async worker failed before final snapshot\n");
+            return 1;
+        }
+    }
+#endif
 
     // Only accepted GIF PATH2/PATH3 batches contribute to these counters.
     // This does not imply scanout or rasterized presentation.

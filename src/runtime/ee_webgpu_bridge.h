@@ -5,10 +5,13 @@
 // success of guest DMA, interrupts, or GIF transaction commits.
 
 #include "ee_gif.h"
+#include "ee_gs_worker.h"
 #include "ee_gs_display.h"
 #include "ps2_webgpu/gs/gs.hpp"
 
+#include <atomic>
 #include <cstddef>
+#include <memory>
 #include <cstdint>
 #include <vector>
 
@@ -20,6 +23,12 @@ public:
     bool init();
     bool active() const;
     uint64_t rendered_primitives() const;
+    // Opt-in only, after adapter and any native window are initialized.
+    bool enable_async();
+    bool worker_healthy() const;
+    bool flush_committed();
+    bool resize_surface(uint32_t width, uint32_t height);
+    void write_worker_statistics(FILE* output) const;
 
     // Called only by the CPU GS transaction sink AFTER an accepted batch.
     // This is a render mirror: it has no return path to the EE/DMAC.
@@ -65,6 +74,8 @@ public:
     );
 
 private:
+    void consume_now(const s_ee_gif_event* events, size_t count,
+        const uint8_t* data, uint32_t qwc);
     void refresh_clut(uint64_t tex0);
     void register_write(uint32_t reg, uint64_t value);
     void packed_write(uint32_t reg, uint64_t low, uint64_t high);
@@ -72,8 +83,15 @@ private:
     void kick(bool draw);
     bool m_ready = false;
     uint64_t m_draw_count = 0u;
+    std::atomic<uint64_t> m_published_draw_count{0u};
+    bool m_host_failed = false;
+    uint32_t m_surface_width = 0u;
+    uint32_t m_surface_height = 0u;
+    uint64_t m_oversized_batches = 0u;
     uint32_t m_clut_cbp0 = 0xffffffffu;
     uint32_t m_clut_cbp1 = 0xffffffffu;
     ps2::gs::State m_state{};
+    // Last member: joins before renderer state is destroyed.
+    std::unique_ptr<c_ee_gs_worker> m_worker;
 };
 }
