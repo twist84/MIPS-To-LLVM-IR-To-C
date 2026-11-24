@@ -2,12 +2,12 @@
 
 #include "ee_runtime.h"
 #include "ee_memory.h"
+#include "ee_vif1.h"
 
 #include <cstdint>
 
 namespace ee
 {
-class c_ee_vif1;
 // EE DMA registers, normal/interleave SPR DMA, bounded SPR chains,
 // and normal DMA for VIF0/VIF1/GIF through an optional host consumer.
 // SIF0 channel 5 and SIF1 channel 6 registers are readable/writable,
@@ -152,7 +152,20 @@ public:
     };
     void bind_deferred_vif1(c_ee_vif1* vif1);
     bool deferred_vif1_pending() const { return m_vif1_pending; }
-    e_deferred_vif1 service_deferred_vif1(bool wait = false);
+    e_deferred_vif1 service_deferred_vif1(bool wait = false)
+    {
+        if (!m_vif1_pending)
+        {
+            return e_deferred_vif1::idle;
+        }
+        const auto accepted = wait ? m_deferred_vif1->wait_deferred() :
+            m_deferred_vif1->poll_deferred();
+        if (accepted == c_ee_vif1::e_deferred_result::pending)
+        {
+            return e_deferred_vif1::pending;
+        }
+        return finish_deferred_vif1(accepted);
+    }
     void cancel_deferred_vif1();
 
     // VIF1 channel 1, CHCR.DIR=0: device-to-EE-RAM DMA.
@@ -179,6 +192,7 @@ public:
                            uint32_t width, const s_ee_u128* value);
 
 private:
+    e_deferred_vif1 finish_deferred_vif1(c_ee_vif1::e_deferred_result accepted);
     struct s_spr_channel
     {
         uint32_t m_chcr = 0;

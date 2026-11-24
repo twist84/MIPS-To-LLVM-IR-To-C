@@ -840,18 +840,6 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
     {
         return e_deferred_result::idle;
     }
-    if (!wait)
-    {
-        ++m_worker_profile.m_poll_calls;
-        // The common pending path does not need two host clock reads
-        // or profile-stack manipulation. Preserve the exact acquire
-        // readiness checkpoint and retain poll counts separately.
-        if (!m_worker->ready())
-        {
-            ++m_worker_profile.m_empty_polls;
-            return e_deferred_result::pending;
-        }
-    }
     ee::c_runtime_profile_scope profile_scope(
         ee::e_runtime_profile_id::vif1_deferred_resume);
     do
@@ -892,11 +880,6 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
     }
     while (wait);
     return e_deferred_result::pending;
-}
-
-c_ee_vif1::e_deferred_result c_ee_vif1::poll_deferred()
-{
-    return resume_deferred(false);
 }
 
 c_ee_vif1::e_deferred_result c_ee_vif1::wait_deferred()

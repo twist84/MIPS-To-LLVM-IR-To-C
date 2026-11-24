@@ -99,7 +99,21 @@ public:
     void write_aot_json(FILE* output) const;
     void write_worker_json(FILE* output) const;
     e_deferred_result begin_deferred(const uint8_t* data, uint32_t qwc);
-    e_deferred_result poll_deferred();
+    e_deferred_result poll_deferred()
+    {
+        if (m_deferred == nullptr)
+        {
+            return e_deferred_result::idle;
+        }
+        ++m_worker_profile.m_poll_calls;
+        // Keep the same acquire checkpoint and exact poll accounting.
+        if (!m_worker->ready())
+        {
+            ++m_worker_profile.m_empty_polls;
+            return e_deferred_result::pending;
+        }
+        return resume_deferred(false);
+    }
     e_deferred_result wait_deferred();
     bool deferred_busy() const;
     void cancel_deferred();

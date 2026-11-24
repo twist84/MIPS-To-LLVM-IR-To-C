@@ -325,20 +325,10 @@ c_ee_dmac::e_deferred_vif1 c_ee_dmac::submit_deferred_vif1(
         e_deferred_vif1::rejected;
 }
 
-c_ee_dmac::e_deferred_vif1 c_ee_dmac::service_deferred_vif1(bool wait)
+c_ee_dmac::e_deferred_vif1 c_ee_dmac::finish_deferred_vif1(
+    c_ee_vif1::e_deferred_result accepted)
 {
-    if (!m_vif1_pending)
-    {
-        return e_deferred_vif1::idle;
-    }
     using result = c_ee_vif1::e_deferred_result;
-    const auto accepted = wait ? m_deferred_vif1->wait_deferred() :
-        m_deferred_vif1->poll_deferred();
-    if (accepted == result::pending)
-    {
-        return e_deferred_vif1::pending;
-    }
-
     m_vif1_pending = false;
     if (accepted == result::completed)
     {
