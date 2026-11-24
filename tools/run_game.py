@@ -274,8 +274,33 @@ def validate_preserved_translation(path, inputs, ir_sources,
                 if name != old_host_key
             } == ir_sources
         )
+        # Dispatch hotspot observations are also host-only. The two exact
+        # historical header revisions (LF and CRLF checkouts) below never
+        # participated in guest lowering. Only remove that single stale
+        # fingerprint; all remaining generator and IR/object hashes stay strict.
+        old_diagnostics_key = "include/ee/ee_hot_loop_diagnostics.h"
+        known_diagnostics_digests = {
+            "6dd93590f16ee27ce21d26bc6545e80186a1f2869b058c0139e2ab99af3bbbee",
+            "d5c9345285e8a93958113d7d24d16c9d8131ced874765bb2a06c8761423017ad",
+            "0cfeffaa89a2b3dc9b282b0ff214e64197bb4ce166a76e2b4bfe6c5c0b87767d",
+            "a6305c7c8567a91048d3e8e841e20e1782c36fab8256942689e0a15aaf92f8bf",
+        }
+        migrated_diagnostics_header = (
+            isinstance(saved_sources, dict)
+            and isinstance(snapshot.get("inputs"), dict)
+            and saved_sources.get(old_diagnostics_key) in known_diagnostics_digests
+            and snapshot["inputs"].get(old_diagnostics_key) ==
+                saved_sources[old_diagnostics_key]
+            and old_diagnostics_key not in ir_sources
+            and "src/runtime/ee_hot_loop_diagnostics.h" in inputs
+            and {
+                name: digest for name, digest in saved_sources.items()
+                if name != old_diagnostics_key
+            } == ir_sources
+        )
         if (not isinstance(saved_sources, dict) or
-                (saved_sources != ir_sources and not migrated_host_header)):
+                (saved_sources != ir_sources and not migrated_host_header
+                 and not migrated_diagnostics_header)):
             changed = next((
                 name for name in sorted(
                     set(saved_sources if isinstance(saved_sources, dict) else {}) |
@@ -288,6 +313,12 @@ def validate_preserved_translation(path, inputs, ir_sources,
         if migrated_host_header:
             print(
                 "run_game: migrated misplaced host-only pad probe "
+                "fingerprint; preserving verified guest IR",
+                flush=True
+            )
+        if migrated_diagnostics_header:
+            print(
+                "run_game: migrated host-only dispatch diagnostics "
                 "fingerprint; preserving verified guest IR",
                 flush=True
             )

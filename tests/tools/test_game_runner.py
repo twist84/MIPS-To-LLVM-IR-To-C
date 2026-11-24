@@ -1958,6 +1958,49 @@ def main():
                 "--relink-existing", "--link-only",
             ]
             repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # The previous dispatch diagnostics header was fingerprinted in
+            # include/ee, despite never participating in guest lowering.
+            old_key = "include/ee/ee_hot_loop_diagnostics.h"
+            new_key = "src/runtime/ee_hot_loop_diagnostics.h"
+            old_digest = "d5c9345285e8a93958113d7d24d16c9d8131ced874765bb2a06c8761423017ad"
+            assert old_key not in repaired_snapshot["ir_sources"]
+            assert new_key not in repaired_snapshot["ir_sources"]
+            assert new_key in repaired_snapshot["inputs"]
+            old_diagnostics = dict(repaired_snapshot)
+            old_diagnostics["ir_sources"] = dict(repaired_snapshot["ir_sources"])
+            old_diagnostics["inputs"] = dict(repaired_snapshot["inputs"])
+            old_diagnostics["inputs"].pop(new_key)
+            old_diagnostics["inputs"][old_key] = old_digest
+            old_diagnostics["ir_sources"][old_key] = old_digest
+            cache_path.write_text(
+                json.dumps(old_diagnostics) + "\n", encoding="utf-8"
+            )
+            migrated = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False,
+            )
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+            assert "migrated host-only dispatch diagnostics" in migrated.stdout
+            assert "reused 1/1 cached object(s)" in migrated.stdout
+            assert (root / "out" / "ir" / "ee_functions.json").read_bytes() == preserved_metadata
+            assert {
+                item.name: item.read_bytes()
+                for item in (root / "out" / "ir").glob("*.ll")
+            } == preserved_ir
+            repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # Unknown historical header content cannot be silently accepted.
+            old_diagnostics["inputs"][old_key] = "0" * 64
+            old_diagnostics["ir_sources"][old_key] = "0" * 64
+            cache_path.write_text(
+                json.dumps(old_diagnostics) + "\n", encoding="utf-8"
+            )
+            rejected_diagnostics = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False,
+            )
+            assert rejected_diagnostics.returncode != 0
+            assert "guest IR generation input changed:" in rejected_diagnostics.stderr
+
             altered_sources = dict(repaired_snapshot)
             altered_sources["ir_sources"] = dict(repaired_snapshot["ir_sources"])
             altered_sources["ir_sources"]["ELF"] = "f" * 64
