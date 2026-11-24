@@ -75,6 +75,11 @@ bool download_checked(uint8_t*, uint32_t, uint32_t)
     return false;
 }
 
+bool read_clut_checked(uint32_t*, size_t)
+{
+    return false;
+}
+
 void texflush()
 {
     ++s_texflushes;

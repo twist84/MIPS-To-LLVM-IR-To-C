@@ -41,6 +41,19 @@ without advancing its cursor. Split reads reuse a snapshot until the next
 committed GIF batch. Headless CPU-only runs remain unchanged. This does not
 yet remove CPU-side swizzling, local copies or palette processing.
 
+### Experimental GPU-authoritative VRAM
+
+`SDBZ_GS_GPU_VRAM=1` selects GPU-only materialization when the renderer
+is active. CPU GS validates the entire transaction, tracks upload cursors,
+CLD/CBP controls and local-copy bounds, but does not produce pixel journals
+or CPU palette words. Checked diagnostic and guest reads retrieve GPU
+snapshots. Raw CLUT values in the control-state struct are not authoritative
+in this mode; use the checked palette accessor. The existing CPU mode
+remains the default. This experimental path rejects aliased/wrapped-coordinate
+destination rectangles, layout mutation during upload and copies exceeding
+the compute scratch capacity. It does not support switching back to stale
+CPU VRAM mid-run.
+
 ## Windows (MSVC / LLVM)
 
 From a Windows command prompt in the repository root:

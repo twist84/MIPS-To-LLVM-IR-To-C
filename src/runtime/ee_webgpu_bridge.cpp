@@ -440,6 +440,13 @@ bool c_ee_webgpu_bridge::read_vram(void* user, uint8_t* memory, size_t bytes)
         ps2::gs::gpu::download_checked(memory);
 }
 
+bool c_ee_webgpu_bridge::read_clut(void* user, uint32_t* entries, size_t count)
+{
+    return user != nullptr &&
+        static_cast<c_ee_webgpu_bridge*>(user)->active() &&
+        ps2::gs::gpu::read_clut_checked(entries, count);
+}
+
 bool c_ee_webgpu_bridge::supports_display(
     const s_ee_gs_display_registers& registers, uint32_t crt_mode) const
 {

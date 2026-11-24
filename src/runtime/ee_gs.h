@@ -32,6 +32,10 @@ struct s_ee_gs_sprite_sample
 
 struct s_ee_gs_state
 {
+    // In GPU-only mode palette values and physical VRAM are fetched on
+    // demand; the remaining fields describe committed guest control state.
+    bool m_gpu_vram_authoritative = false;
+    std::array<uint64_t, 3> m_gpu_upload_layout{};
     std::array<uint64_t, 128> m_registers{};
     std::array<bool, 128> m_written{};
     uint32_t m_q_bits = 0x3f800000u; // GIFtag resets the STQ Q to 1.0
@@ -116,6 +120,11 @@ public:
     // and report failure without publishing partial data to the guest.
     using t_vram_readback = bool (*)(void* user, uint8_t* memory, size_t bytes);
     void bind_vram_readback(void* user, t_vram_readback callback);
+    using t_clut_readback = bool (*)(void* user, uint32_t* entries, size_t count);
+    // Only a fresh GS may select this backend. No mid-run fallback to a
+    // stale CPU mirror is permitted.
+    bool enable_gpu_authority(void* user, t_vram_readback vram_callback,
+                              t_clut_readback clut_callback);
 
     static constexpr size_t k_max_image_bytes = 4u * 1024u * 1024u;
     static constexpr size_t k_vram_bytes = 4u * 1024u * 1024u;
@@ -124,6 +133,7 @@ public:
 
     // GS VRAM is separate from EE RAM. The vector reference remains
     // valid, but its backing storage may change after consume().
+    // GPU authority: an empty vector indicates a failed snapshot read.
     const std::vector<uint8_t>& vram() const;
     bool read_vram8(uint32_t offset, uint8_t& value) const;
     // Returns false for out-of-range raw VRAM accesses.
@@ -255,7 +265,7 @@ private:
     // within this GIF event batch, not later ones.
     static bool stage_local_copy(
         s_ee_gs_state& state, const std::vector<uint8_t>& source_vram,
-        std::vector<s_vram_write>& writes
+        std::vector<s_vram_write>& writes, size_t* gpu_pixels = nullptr
     );
 
     // Both GIF IMAGE/IMAGE2 and A+D HWREG writes use the same
@@ -263,7 +273,7 @@ private:
     // Only completed pixels are staged; final padding is ignored.
     static bool stage_host_upload(
         s_ee_gs_state& state, std::vector<s_vram_write>& writes,
-        const uint8_t* data, size_t byte_count
+        const uint8_t* data, size_t byte_count, size_t* gpu_pixels = nullptr
     );
 
     // Shared transaction-local VRAM view for CLUT and local-copy reads.
@@ -296,8 +306,13 @@ private:
     // Cache a readback only until the next accepted nonempty batch.
     void* m_readback_user = nullptr;
     t_vram_readback m_readback_callback = nullptr;
-    std::vector<uint8_t> m_gpu_readback;
-    bool m_gpu_readback_valid = false;
+    mutable std::vector<uint8_t> m_gpu_readback;
+    mutable bool m_gpu_readback_valid = false;
+    t_clut_readback m_clut_readback_callback = nullptr;
+    mutable std::array<uint32_t, 512> m_gpu_clut{};
+    mutable bool m_gpu_clut_valid = false;
+    bool ensure_gpu_vram() const;
+    bool ensure_gpu_clut() const;
 
     // Host-only scratch. Neither buffer is committed guest state.
     std::vector<s_vram_write> m_write_scratch;

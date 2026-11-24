@@ -35,6 +35,7 @@ public:
     // Guest reverse DMA: submit all preceding GS work and return a checked
     // physical VRAM image. Does not modify the CPU reference mirror.
     static bool read_vram(void* user, uint8_t* memory, size_t bytes);
+    static bool read_clut(void* user, uint32_t* entries, size_t count);
 
     // Read-only validation against the same display-source decoder used
     // by present/readback. This does not submit any GPU work.

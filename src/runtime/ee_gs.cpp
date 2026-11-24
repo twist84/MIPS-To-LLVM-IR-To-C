@@ -265,8 +265,49 @@ void c_ee_gs_state::bind_committed_event_observer(
     m_committed_callback = callback;
 }
 
+bool c_ee_gs_state::enable_gpu_authority(void* user,
+    t_vram_readback vram_callback, t_clut_readback clut_callback)
+{
+    if (m_state.m_committed_gif_batches != 0u || m_committed_callback == nullptr ||
+        user != m_committed_user || vram_callback == nullptr || clut_callback == nullptr)
+    {
+        return false;
+    }
+    bind_vram_readback(user, vram_callback);
+    m_clut_readback_callback = clut_callback;
+    m_gpu_clut_valid = false;
+    m_state.m_gpu_vram_authoritative = true;
+    return true;
+}
+
+bool c_ee_gs_state::ensure_gpu_vram() const
+{
+    if (!m_gpu_readback_valid && m_readback_callback != nullptr)
+    {
+        m_gpu_readback.resize(k_vram_bytes);
+        m_gpu_readback_valid = m_readback_callback(m_readback_user,
+            m_gpu_readback.data(), m_gpu_readback.size());
+    }
+    return m_gpu_readback_valid;
+}
+
+bool c_ee_gs_state::ensure_gpu_clut() const
+{
+    if (!m_gpu_clut_valid && m_clut_readback_callback != nullptr)
+    {
+        m_gpu_clut_valid = m_clut_readback_callback(m_readback_user,
+            m_gpu_clut.data(), m_gpu_clut.size());
+    }
+    return m_gpu_clut_valid;
+}
+
 const std::vector<uint8_t>& c_ee_gs_state::vram() const
 {
+    if (m_state.m_gpu_vram_authoritative)
+    {
+        static const std::vector<uint8_t> empty;
+        return ensure_gpu_vram() ? m_gpu_readback : empty;
+    }
     return m_vram;
 }
 
@@ -277,7 +318,9 @@ bool c_ee_gs_state::read_vram8(uint32_t offset, uint8_t& value) const
         trace_rejection(__func__, __LINE__);
         return false;
     }
-    value = m_vram[offset];
+    const auto& memory = vram();
+    if (memory.empty()) { return false; }
+    value = memory[offset];
     return true;
 }
 
@@ -288,9 +331,11 @@ bool c_ee_gs_state::read_vram16(uint32_t offset, uint16_t& value) const
         trace_rejection(__func__, __LINE__);
         return false;
     }
+    const auto& memory = vram();
+    if (memory.empty()) { return false; }
     value = static_cast<uint16_t>(
-        static_cast<uint16_t>(m_vram[offset]) |
-        static_cast<uint16_t>(m_vram[offset + 1u] << 8u)
+        static_cast<uint16_t>(memory[offset]) |
+        static_cast<uint16_t>(memory[offset + 1u] << 8u)
     );
     return true;
 }
@@ -302,7 +347,9 @@ bool c_ee_gs_state::read_vram32(uint32_t offset, uint32_t& value) const
         trace_rejection(__func__, __LINE__);
         return false;
     }
-    value = read_le32(m_vram.data() + offset);
+    const auto& memory = vram();
+    if (memory.empty()) { return false; }
+    value = read_le32(memory.data() + offset);
     return true;
 }
 
@@ -325,7 +372,9 @@ bool c_ee_gs_state::read_color_pixel(
     // DISPFB1/2 before its first VBlank. Preserve the actual register;
     // normalize only the swizzled VRAM addressing used for readback.
     const uint32_t stride = std::max(1u, fbw);
-    const uint32_t raw = read_pixel(m_vram, psm, base, stride, x, y);
+    const auto& memory = vram();
+    if (memory.empty()) { return false; }
+    const uint32_t raw = read_pixel(memory, psm, base, stride, x, y);
     uint32_t rgb = raw & 0x00ffffffu;
     if (psm == 2u || psm == 0x0au)
     {
@@ -346,7 +395,11 @@ bool c_ee_gs_state::read_clut_entry(
         trace_rejection(__func__, __LINE__);
         return false;
     }
-    value = m_state.m_clut[slot];
+    if (m_state.m_gpu_vram_authoritative && !ensure_gpu_clut())
+    {
+        return false;
+    }
+    value = m_state.m_gpu_vram_authoritative ? m_gpu_clut[slot] : m_state.m_clut[slot];
     return true;
 }
 
@@ -366,28 +419,30 @@ bool c_ee_gs_state::read_indexed_clut_value(
     const uint32_t psm = static_cast<uint32_t>((tex0 >> 20u) & 0x3fu);
     const uint32_t csa = static_cast<uint32_t>((tex0 >> 56u) & 0x1fu);
     uint32_t slot = 0u;
+    const auto& memory = vram();
+    if (memory.empty()) { return false; }
 
     if (psm == 0x13u) // PSMT8
     {
-        slot = m_vram[psmt8_address(bp, bw, x, y)];
+        slot = memory[psmt8_address(bp, bw, x, y)];
     }
     else if (psm == 0x1bu) // PSMT8H: high byte of PSMCT32 word
     {
         const uint32_t address = psmct32_address(bp, bw, x, y);
-        slot = m_vram[address + 3u];
+        slot = memory[address + 3u];
     }
     else if (psm == 0x14u) // PSMT4
     {
         const uint32_t nibble = psmt4_nibble_address(bp, bw, x, y);
         const uint32_t index = (
-            m_vram[nibble / 2u] >> ((nibble & 1u) * 4u)
+            memory[nibble / 2u] >> ((nibble & 1u) * 4u)
         ) & 0x0fu;
         slot = (csa * 16u + index) & 511u;
     }
     else if (psm == 0x24u || psm == 0x2cu) // PSMT4HL / PSMT4HH
     {
         const uint32_t address = psmct32_address(bp, bw, x, y);
-        const uint8_t upper = m_vram[address + 3u];
+        const uint8_t upper = memory[address + 3u];
         const uint32_t index =
             (upper >> (psm == 0x24u ? 0u : 4u)) & 0x0fu;
         slot = (csa * 16u + index) & 511u;
@@ -476,18 +531,13 @@ bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
     // requested. Padding requires no GPU access. A failed transfer does
     // not touch the caller's bytes or advance any guest DMA cursor.
     const std::vector<uint8_t>* source = &m_vram;
-    if (m_readback_callback != nullptr && offset < logical_bytes)
+    if ((m_readback_callback != nullptr || m_state.m_gpu_vram_authoritative) &&
+        offset < logical_bytes)
     {
-        if (!m_gpu_readback_valid)
+        if (!ensure_gpu_vram())
         {
-            m_gpu_readback.resize(k_vram_bytes);
-            if (!m_readback_callback(m_readback_user,
-                    m_gpu_readback.data(), m_gpu_readback.size()))
-            {
-                trace_rejection(__func__, __LINE__);
-                return false;
-            }
-            m_gpu_readback_valid = true;
+            trace_rejection(__func__, __LINE__);
+            return false;
         }
         source = &m_gpu_readback;
     }
@@ -567,6 +617,8 @@ void c_ee_gs_state::reset()
     // its owner to explicitly rebind after resetting GPU state as well.
     bind_vram_readback(nullptr, nullptr);
     m_gpu_readback.clear();
+    m_clut_readback_callback = nullptr;
+    m_gpu_clut_valid = false;
 }
 
 const s_ee_gs_state& c_ee_gs_state::state() const
@@ -648,6 +700,22 @@ bool c_ee_gs_state::load_clut(
     const uint32_t cbw = csm ? (texclut & 0x3fu) : 1u;
     const uint32_t cou = (texclut >> 6u) & 0x3fu;
     const uint32_t cov = (texclut >> 12u) & 0x3ffu;
+
+    if (state.m_gpu_vram_authoritative)
+    {
+        // Control and validity are still transactional; the GPU loads
+        // the actual palette words in committed GIF event order.
+        const uint32_t first = csm ? csa * 16u :
+            (eight ? 0u : (csa & 15u) * 16u);
+        for (uint32_t i = 0u; i < entries; ++i)
+        {
+            state.m_clut_valid[(first + i) & 511u] = true;
+        }
+        if (cld == 2u || cld == 4u) { state.m_clut_cbp0 = cbp; }
+        else if (cld == 3u || cld == 5u) { state.m_clut_cbp1 = cbp; }
+        ++state.m_clut_load_count;
+        return true;
+    }
 
     // Read the exact VRAM contents visible at this TEX0/TEX2 write.
     // Both CLUT loads and local copies share one transaction-local
@@ -875,9 +943,28 @@ void c_ee_gs_state::apply_vram_write(
     }
 }
 
+// GPU parallel writes must not alias another destination pixel. Keep
+// complex wrapping/aliasing rectangles on the CPU reference backend.
+static bool gpu_destination_supported(uint32_t psm, uint32_t bw,
+    uint32_t x, uint32_t y, uint32_t width, uint32_t height)
+{
+    if (width == 0u || height == 0u || x + width > 2048u || y + height > 2048u)
+    {
+        return false;
+    }
+    const bool indexed = psm == 0x13u || psm == 0x14u;
+    const bool half = psm == 2u || psm == 0x0au || psm == 0x32u || psm == 0x3au;
+    const uint32_t pw = indexed ? 128u : 64u;
+    const uint32_t ph = psm == 0x14u ? 128u : (indexed || half ? 64u : 32u);
+    const uint32_t stride = std::max(1u, bw * 64u / pw);
+    const uint32_t columns = (x + width - 1u) / pw - x / pw + 1u;
+    const uint32_t rows = (y + height - 1u) / ph - y / ph + 1u;
+    return columns <= stride && (rows - 1u) * stride + columns <= 512u;
+}
+
 bool c_ee_gs_state::stage_local_copy(
     s_ee_gs_state& state, const std::vector<uint8_t>& source_vram,
-    std::vector<s_vram_write>& writes)
+    std::vector<s_vram_write>& writes, size_t* gpu_pixels)
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_local_copy);
     const uint64_t buf = state.m_registers[0x50u];
@@ -902,11 +989,26 @@ bool c_ee_gs_state::stage_local_copy(
     if (sbw == 0u || dbw == 0u ||
         !supported_psm(spsm) || !supported_psm(dpsm) ||
         count == 0u || count > k_max_local_copy_pixels ||
-        static_cast<uint64_t>(writes.size()) + count >
+        static_cast<uint64_t>(gpu_pixels ? *gpu_pixels : writes.size()) + count >
             k_max_local_copy_pixels)
     {
         trace_rejection(__func__, __LINE__);
         return false;
+    }
+
+    if (gpu_pixels != nullptr)
+    {
+        // The compute copy scratch holds one million logical pixels.
+        if (count > (1u << 20u) ||
+            !gpu_destination_supported(dpsm, dbw, dsax, dsay, rrw, rrh))
+        {
+            trace_rejection(__func__, __LINE__);
+            return false;
+        }
+        *gpu_pixels += static_cast<size_t>(count);
+        ++state.m_local_copy_count;
+        state.m_local_copy_pixels += count;
+        return true;
     }
 
     // The reference first reads all source pixels, then writes
@@ -959,7 +1061,7 @@ bool c_ee_gs_state::stage_local_copy(
 
 bool c_ee_gs_state::stage_host_upload(
     s_ee_gs_state& state, std::vector<s_vram_write>& writes,
-    const uint8_t* data, size_t byte_count)
+    const uint8_t* data, size_t byte_count, size_t* gpu_pixels)
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_host_upload, byte_count);
     if (!state.m_transfer_started ||
@@ -1027,6 +1129,37 @@ bool c_ee_gs_state::stage_host_upload(
             state.m_transfer_pending_size) / pixel_bytes;
     const size_t pixels = static_cast<size_t>(
         std::min<uint64_t>(available_pixels, remaining));
+    if (gpu_pixels != nullptr)
+    {
+        // The compute backend latches the layout at TRXDIR. Reject a
+        // mid-transfer layout mutation before committing any events.
+        if (state.m_gpu_upload_layout != std::array<uint64_t, 3>{buf, pos, reg_size} ||
+            !gpu_destination_supported(psm, width, x, y, rrw, rrh) ||
+            pixels > writes.max_size() - *gpu_pixels)
+        {
+            trace_rejection(__func__, __LINE__);
+            return false;
+        }
+        *gpu_pixels += pixels;
+        if (twenty_four_bit && remaining != 0u)
+        {
+            size_t consumed = 0u;
+            if (pixels != 0u)
+            {
+                consumed = pixels * 3u - state.m_transfer_pending_size;
+                state.m_transfer_pending_size = 0u;
+            }
+            if (pixels < remaining)
+            {
+                for (size_t i = consumed; i < byte_count; ++i)
+                {
+                    state.m_transfer_pending[state.m_transfer_pending_size++] = data[i];
+                }
+            }
+        }
+        state.m_transfer_pixels_written += static_cast<uint32_t>(pixels);
+        return true;
+    }
     if (pixels > writes.max_size() - writes.size())
     {
         trace_rejection(__func__, __LINE__);
@@ -1418,6 +1551,7 @@ bool c_ee_gs_state::write_register(
                 state.m_image_data.clear();
                 state.m_image_qwc = 0u;
                 state.m_transfer_started = true;
+                state.m_gpu_upload_layout = {buf, state.m_registers[0x51u], reg_size};
             }
             else if (download)
             {
@@ -1528,8 +1662,16 @@ bool c_ee_gs_state::consume(
         return false;
     }
 
+    if (m_state.m_gpu_vram_authoritative &&
+        (m_committed_callback == nullptr || m_readback_callback == nullptr ||
+         m_clut_readback_callback == nullptr || m_committed_user != m_readback_user))
+    {
+        return false;
+    }
     // A local snapshot makes every accepted DMA event batch atomic.
     s_ee_gs_state next = m_state;
+    size_t gpu_pixel_count = 0u;
+    size_t* gpu_pixels = next.m_gpu_vram_authoritative ? &gpu_pixel_count : nullptr;
     // Keep scratch storage across transactions, but never retain its
     // logical contents. Release exceptionally large journals to bound
     // the persistent allocation (at most 32 MiB plus the 4 MiB shadow).
@@ -1572,8 +1714,9 @@ bool c_ee_gs_state::consume(
     size_t shadow_applied = 0u;
     const auto copy_local = [&]() -> bool
     {
-        const auto& source = staged_vram_view(writes, shadow_vram, shadow_applied);
-        return stage_local_copy(next, source, writes);
+        const auto& source = gpu_pixels != nullptr ? m_vram :
+            staged_vram_view(writes, shadow_vram, shadow_applied);
+        return stage_local_copy(next, source, writes, gpu_pixels);
     };
 
     // A+D HWREG writes are 8-byte host-to-local image chunks. They
@@ -1586,7 +1729,7 @@ bool c_ee_gs_state::consume(
         {
             packed[b] = static_cast<uint8_t>(value >> (b * 8u));
         }
-        if (!stage_host_upload(next, writes, packed, sizeof(packed)))
+        if (!stage_host_upload(next, writes, packed, sizeof(packed), gpu_pixels))
         {
             trace_rejection(__func__, __LINE__);
             return false;
@@ -1728,7 +1871,7 @@ bool c_ee_gs_state::consume(
 
             if (!stage_host_upload(
                     next, writes, data + static_cast<size_t>(offset),
-                    static_cast<size_t>(length)))
+                    static_cast<size_t>(length), gpu_pixels))
             {
                 trace_rejection(__func__, __LINE__);
                 return false;
@@ -1762,6 +1905,7 @@ bool c_ee_gs_state::consume(
     {
         ++next.m_committed_gif_batches;
         m_gpu_readback_valid = false;
+        m_gpu_clut_valid = false;
     }
     m_state = std::move(next);
     // Return scratch before invoking an external observer. A callback

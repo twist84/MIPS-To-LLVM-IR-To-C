@@ -1074,6 +1074,7 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
     std::fprintf(output,
         "{\n    \"schema\": \"ee-m2-gif-gs-v1\","
         "\n    \"scope\": \"committed_gif_paths_1_2_and_3\","
+        "\n    \"gpu_vram_authoritative\": %s,"
         "\n    \"accepted_batches\": %llu,"
         "\n    \"accepted_tags\": %llu,"
         "\n    \"prim_writes_total\": %llu,"
@@ -1089,6 +1090,7 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
         "\n    \"image_qwc_current_transfer\": %u,"
         "\n    \"pixels_current_transfer\": %u,"
         "\n    \"tag_formats\": [",
+        gs.m_gpu_vram_authoritative ? "true" : "false",
         static_cast<unsigned long long>(gs.m_committed_gif_batches),
         static_cast<unsigned long long>(gs.m_tag_count),
         static_cast<unsigned long long>(gs.m_total_prim_writes),
@@ -2454,7 +2456,20 @@ int main(int argc, char** argv)
         std::string gpu_readback_environment;
         const char* gpu_readback = read_host_environment(
             "SDBZ_GS_GPU_READBACK", &gpu_readback_environment);
-        if (gpu_readback != nullptr && std::strcmp(gpu_readback, "1") == 0)
+        std::string gpu_authority_environment;
+        const char* gpu_authority = read_host_environment(
+            "SDBZ_GS_GPU_VRAM", &gpu_authority_environment);
+        if (gpu_authority != nullptr && std::strcmp(gpu_authority, "1") == 0)
+        {
+            if (!gs_state.enable_gpu_authority(&webgpu_bridge,
+                    &ee::c_ee_webgpu_bridge::read_vram, &ee::c_ee_webgpu_bridge::read_clut))
+            {
+                std::fprintf(stderr, "cannot enable experimental GPU GS VRAM authority\n");
+                return 2;
+            }
+            std::printf("GS native WebGPU: GPU-authoritative VRAM/CLUT (experimental)\n");
+        }
+        else if (gpu_readback != nullptr && std::strcmp(gpu_readback, "1") == 0)
         {
             gs_state.bind_vram_readback(
                 &webgpu_bridge, &ee::c_ee_webgpu_bridge::read_vram);

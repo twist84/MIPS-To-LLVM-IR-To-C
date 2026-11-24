@@ -118,7 +118,7 @@ bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
     return true;
 }
 
-bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge)
+bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge, bool gpu_only = false)
 {
     // A fresh zero-filled GPU VRAM/CLUT and CPU GS receive the exact
     // same accepted GIF events. Compare raw physical bytes, including
@@ -129,6 +129,18 @@ bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge)
     ee::c_ee_gs_state gs{};
     gs.bind_committed_event_observer(&bridge,
         &ee::c_ee_webgpu_bridge::committed_gif_events);
+    ee::c_ee_gs_state gpu_gs{};
+    if (gpu_only)
+    {
+        gs.bind_committed_event_observer(nullptr, nullptr);
+        gpu_gs.bind_committed_event_observer(&bridge,
+            &ee::c_ee_webgpu_bridge::committed_gif_events);
+        if (!gpu_gs.enable_gpu_authority(&bridge,
+                &ee::c_ee_webgpu_bridge::read_vram, &ee::c_ee_webgpu_bridge::read_clut))
+        {
+            return false;
+        }
+    }
     std::vector<uint8_t> actual(kMemorySize, 0u);
     struct s_format
     {
@@ -160,16 +172,27 @@ bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge)
             seed = seed * 1664525u + 1013904223u;
             byte = static_cast<uint8_t>(seed >> 24u);
         }
-        if (!write_register(gs, 0x50u, (uint64_t{base} << 32u) |
-                (uint64_t{bw} << 48u) | (uint64_t{format.m_psm} << 56u)) ||
-            !write_register(gs, 0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) ||
-            !write_register(gs, 0x52u, width | (uint64_t{height} << 32u)) ||
-            !write_register(gs, 0x53u, 0u) ||
-            !write_image(gs, payload.data(), 1u) ||
-            !write_image(gs, payload.data() + 16u, qwc - 1u) ||
+        const auto transfer = [&](ee::c_ee_gs_state& target)
+        {
+            return write_register(target, 0x50u, (uint64_t{base} << 32u) |
+                    (uint64_t{bw} << 48u) | (uint64_t{format.m_psm} << 56u)) &&
+                write_register(target, 0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) &&
+                write_register(target, 0x52u, width | (uint64_t{height} << 32u)) &&
+                write_register(target, 0x53u, 0u) &&
+                write_image(target, payload.data(), 1u) &&
+                write_image(target, payload.data() + 16u, qwc - 1u);
+        };
+        if (!transfer(gs) || (gpu_only && !transfer(gpu_gs)) ||
             !gpu::download_checked(actual.data()))
         {
             std::fprintf(stderr, "GS transfer/readback failed PSM=%02x\n", format.m_psm);
+            return false;
+        }
+        if (gpu_only && (gpu_gs.vram() != actual ||
+            gpu_gs.state().m_transfer_pixels_written != gs.state().m_transfer_pixels_written ||
+            gpu_gs.state().m_transfer_pending_size != gs.state().m_transfer_pending_size))
+        {
+            std::fprintf(stderr, "GPU-only transfer cursor/readback mismatch PSM=%02x\n", format.m_psm);
             return false;
         }
         const auto& expected = gs.vram();
@@ -295,7 +318,8 @@ int main()
         std::puts("GPU raster -> guest reverse DMA: PASS");
     }
 
-    if (!compare_transfer_formats(bridge) || !compare_clut(bridge))
+    if (!compare_transfer_formats(bridge) ||
+        !compare_transfer_formats(bridge, true) || !compare_clut(bridge))
     {
         return 1;
     }
