@@ -769,6 +769,32 @@ int main()
         return 1;
     }
 
+    // VIF reset preserves the whole resident VU1 context, including
+    // the continuation PC. A full device reset must discard it.
+    vif1.reset();
+    if (!check(send(vif1, {0x4a040000u,
+                   nop_lower, e_nop, nop_lower, nop_upper,
+                   nop_lower, e_nop, nop_lower, nop_upper,
+                   0u, 0u, 0u}),
+               "VU1 resident continuation MPG failed") ||
+        !check(send(vif1, {0x14000000u, 0u, 0u, 0u}),
+               "VU1 resident continuation MSCAL failed") ||
+        !check(vif1.write_register(0x10u, 1u) &&
+               send(vif1, {0x17000000u, 0u, 0u, 0u}) &&
+               vif1.diagnostic().m_committed_opcodes[0x17u] == 1u,
+               "FBRST erased resident VU1 continuation state"))
+    {
+        return 1;
+    }
+    vif1.reset();
+    if (!check(!send(vif1, {0x17000000u, 0u, 0u, 0u}) &&
+               vif1.diagnostic().m_reason ==
+                   ee::c_ee_vif1::e_reject::unsupported_vu_execution,
+               "full reset retained stale VU1 continuation state"))
+    {
+        return 1;
+    }
+
     // MSCALF uses the explicit start address, not the MSCNT resume PC.
     vif1.reset();
     ee::c_ee_gif_path3 path3{};

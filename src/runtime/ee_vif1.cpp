@@ -93,12 +93,12 @@ const c_ee_vif1::s_diagnostic& c_ee_vif1::diagnostic() const
 
 const uint8_t* c_ee_vif1::vu1_data() const
 {
-    return m_machine.m_vu1_data.data();
+    return m_machine.m_vu1.m_data.data();
 }
 
 const uint8_t* c_ee_vif1::vu1_code() const
 {
-    return m_machine.m_vu1_code.data();
+    return m_machine.m_vu1.m_code.data();
 }
 
 uint32_t c_ee_vif1::command_data_words(
@@ -171,11 +171,11 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
     {
         const uint32_t start = address & 0x3ffu;
         const uint32_t first = std::min(num, 0x400u - start);
-        std::memcpy(machine.m_vu1_data.data() + start * 16u,
+        std::memcpy(machine.m_vu1.m_data.data() + start * 16u,
                     words, first * 16u);
         if (first < num)
         {
-            std::memcpy(machine.m_vu1_data.data(), words + first * 4u,
+            std::memcpy(machine.m_vu1.m_data.data(), words + first * 4u,
                         (num - first) * 16u);
         }
         machine.m_num = 0u;
@@ -220,7 +220,7 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
             }
         }
 
-        uint8_t* destination = machine.m_vu1_data.data() +
+        uint8_t* destination = machine.m_vu1.m_data.data() +
             (address & 0x3ffu) * 16u;
         const uint32_t mask_row = std::min(cycle, 3u);
         for (uint32_t lane = 0u; lane < 4u; ++lane)
@@ -327,7 +327,7 @@ bool c_ee_vif1::execute(
             for (uint32_t i = 0u; i < count; ++i)
             {
                 const uint32_t offset = ((imm + i) * 8u) & 0x3fffu;
-                std::memcpy(machine.m_vu1_code.data() + offset,
+                std::memcpy(machine.m_vu1.m_code.data() + offset,
                             words + i * 2u, 8u);
             }
             ++machine.m_mpg_uploads;
@@ -370,17 +370,17 @@ bool c_ee_vif1::execute(
         case 0x15u: // MSCALF (PATH3 idle checked before execution)
         case 0x17u: // MSCNT
         {
-            if (op == 0x17u && !machine.m_vu1_state.m_initialized)
+            if (op == 0x17u && !machine.m_vu1.m_state.m_initialized)
             {
                 *reject = e_reject::unsupported_vu_execution;
                 accepted = false;
                 break;
             }
             const uint32_t start = op == 0x17u
-                ? machine.m_vu1_state.m_tpc : (imm & 0x7ffu) * 8u;
+                ? machine.m_vu1.m_state.m_tpc : (imm & 0x7ffu) * 8u;
             accepted = c_ee_vu1::run(
-                machine.m_vu1_state, machine.m_vu1_code,
-                machine.m_vu1_data, start, machine.m_tops,
+                machine.m_vu1.m_state, machine.m_vu1.m_code,
+                machine.m_vu1.m_data, start, machine.m_tops,
                 machine.m_itops, path1_bytes, vu_issue);
             if (!accepted)
             {
@@ -764,9 +764,7 @@ bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
             s_machine next{};
             std::memcpy(next.m_row, m_machine.m_row, sizeof(next.m_row));
             std::memcpy(next.m_col, m_machine.m_col, sizeof(next.m_col));
-            next.m_vu1_data = m_machine.m_vu1_data;
-            next.m_vu1_code = m_machine.m_vu1_code;
-            next.m_vu1_state = m_machine.m_vu1_state;
+            next.m_vu1 = m_machine.m_vu1;
             m_machine = std::move(next);
             m_diagnostic = {};
         }
@@ -823,13 +821,13 @@ bool c_ee_vif1::mmio_read(void* user, uint32_t address,
         address < k_vu1_code_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_code_base;
-        source = vif1->m_machine.m_vu1_code.data();
+        source = vif1->m_machine.m_vu1.m_code.data();
     }
     else if (address >= k_vu1_data_base &&
              address < k_vu1_data_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_data_base;
-        source = vif1->m_machine.m_vu1_data.data();
+        source = vif1->m_machine.m_vu1.m_data.data();
     }
     if (source == nullptr ||
         (width != 1u && width != 2u && width != 4u &&
@@ -890,13 +888,13 @@ bool c_ee_vif1::mmio_write(void* user, uint32_t address,
         address < k_vu1_code_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_code_base;
-        destination = vif1->m_machine.m_vu1_code.data();
+        destination = vif1->m_machine.m_vu1.m_code.data();
     }
     else if (address >= k_vu1_data_base &&
              address < k_vu1_data_base + k_vu1_memory_size)
     {
         offset = address - k_vu1_data_base;
-        destination = vif1->m_machine.m_vu1_data.data();
+        destination = vif1->m_machine.m_vu1.m_data.data();
     }
     if (destination == nullptr ||
         (width != 1u && width != 2u && width != 4u &&
