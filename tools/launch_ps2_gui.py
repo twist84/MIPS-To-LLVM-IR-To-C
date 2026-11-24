@@ -674,6 +674,50 @@ def fullscreen_key_reader(window):
     return pressed
 
 
+def game_context_input_reader(window, host):
+    """Observe right-clicks over the native child HWND, not the whole desktop."""
+    if os.name != "nt":
+        return lambda: (False, None)
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    foreground = user32.GetForegroundWindow
+    foreground.argtypes = ()
+    foreground.restype = wintypes.HWND
+    ancestor = user32.GetAncestor
+    ancestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    ancestor.restype = wintypes.HWND
+    key_state = user32.GetAsyncKeyState
+    key_state.argtypes = (ctypes.c_int,)
+    key_state.restype = ctypes.c_short
+    get_cursor = user32.GetCursorPos
+    get_cursor.argtypes = (ctypes.POINTER(wintypes.POINT),)
+    get_cursor.restype = wintypes.BOOL
+    window_from_point = user32.WindowFromPoint
+    window_from_point.argtypes = (wintypes.POINT,)
+    window_from_point.restype = wintypes.HWND
+    is_child = user32.IsChild
+    is_child.argtypes = (wintypes.HWND, wintypes.HWND)
+    is_child.restype = wintypes.BOOL
+
+    def read():
+        active = foreground()
+        if not active or ancestor(active, 2) != ancestor(window.winfo_id(), 2):
+            return False, None
+        down = bool(key_state(0x02) & 0x8000)  # VK_RBUTTON
+        point = wintypes.POINT()
+        if not host.winfo_ismapped() or not get_cursor(ctypes.byref(point)):
+            return down, None
+        target = window_from_point(point)
+        parent_handle = host.winfo_id()
+        if target and (target == parent_handle or is_child(parent_handle, target)):
+            return down, (point.x, point.y)
+        return down, None
+
+    return read
+
+
 def request_embedded_close(parent_handle):
     """Request a normal close of the native child so the runner can finalize."""
     if os.name != "nt" or not parent_handle:
@@ -782,10 +826,15 @@ class Launcher(ttk.Frame):
             highlightthickness=0, borderwidth=0,
         )
         self.game_host.grid(row=0, column=0, sticky="nsew")
+        self.context_pressed = False
+        self.context_armed = False
+        self.context_open = False
+        self.read_context_input = game_context_input_reader(window, self.game_host)
+        self.create_game_context_menu()
         self.game_hint = ttk.Label(
             self.game_view,
             text="The native game will appear here after Launch. "
-                 "The log remains visible below. F11 toggles fullscreen.",
+                 "Right-click for display settings. F11 toggles fullscreen.",
         )
         self.game_hint.grid(row=1, column=0, sticky="w", pady=(6, 0))
         self.game_speed = ttk.Label(self.game_view, textvariable=self.speed_status)
@@ -995,11 +1044,69 @@ class Launcher(ttk.Frame):
         self.update_fullscreen_button()
         if os.name == "nt":
             self.after(25, self.poll_fullscreen_hotkey)
+            self.after(15, self.poll_game_context_input)
         if os.name != "nt":
             self.play.state(["disabled"])
             self.help_button.state(["disabled"])
             if not warning:
                 self.status.set("The native raylib window is available on Windows.")
+
+    def create_game_context_menu(self):
+        # Bind the radio entries to the exact variables used by the Game tab.
+        # Their existing traces publish changes to the running renderer.
+        self.game_context_menu = tk.Menu(self, tearoff=False)
+        for label, key, options in (
+            ("Display aspect", "display_aspect", DISPLAY_ASPECTS),
+            ("Deinterlacing", "deinterlace", DEINTERLACE_MODES),
+        ):
+            submenu = tk.Menu(self.game_context_menu, tearoff=False)
+            for option in options:
+                submenu.add_radiobutton(
+                    label=option, value=option, variable=self.fields[key]
+                )
+            self.game_context_menu.add_cascade(label=label, menu=submenu)
+        self.game_context_menu.add_separator()
+        self.game_context_menu.add_command(
+            label="Fullscreen", accelerator="F11", command=self.toggle_fullscreen
+        )
+        self.game_context_menu.add_separator()
+        self.game_context_menu.add_command(label="Close game", command=self.close_session)
+
+    def poll_game_context_input(self):
+        # Tk cannot receive mouse events sent to the separate native process.
+        # Open on release only if both ends of the click are in the viewport.
+        down, position = self.read_context_input()
+        available = self.embedded_running and self.tabs.select() == str(self.game_view)
+        show = False
+        if not available or self.context_open:
+            self.context_armed = False
+        elif down and not self.context_pressed:
+            self.context_armed = position is not None
+        elif not down and self.context_pressed:
+            show = self.context_armed and position is not None
+            self.context_armed = False
+        self.context_pressed = down
+        if show:
+            self.show_game_context_menu(*position)
+        self.after(15, self.poll_game_context_input)
+
+    def show_game_context_menu(self, x, y):
+        if self.context_open or not self.embedded_running or self.tabs.select() != str(self.game_view):
+            return
+        self.game_context_menu.entryconfigure(
+            3, label="Exit fullscreen" if self.fullscreen_active else "Fullscreen"
+        )
+        self.game_context_menu.entryconfigure(
+            5, label="Force close game" if self.close_requested else "Close game",
+            state="disabled" if self.stop_process is not None else "normal",
+        )
+        self.context_open = True
+        try:
+            self.game_host.focus_force()
+            self.game_context_menu.tk_popup(x, y)
+        finally:
+            self.game_context_menu.grab_release()
+            self.context_open = False
 
     def update_fullscreen_button(self, *_):
         visible = self.tabs.select() == str(self.game_view)

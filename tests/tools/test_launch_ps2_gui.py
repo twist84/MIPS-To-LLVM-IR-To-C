@@ -405,6 +405,59 @@ def test_live_display_aspect():
         assert not path.exists() and other.exists()
 
 
+def test_game_context_menu():
+    from unittest.mock import Mock, patch
+
+    fields = {key: Mock() for key in ("display_aspect", "deinterlace")}
+    instance = SimpleNamespace(fields=fields, toggle_fullscreen=Mock(), close_session=Mock())
+    main, aspect, interlace = Mock(), Mock(), Mock()
+    with patch.object(GUI.tk, "Menu", side_effect=[main, aspect, interlace]):
+        GUI.Launcher.create_game_context_menu(instance)
+    assert instance.game_context_menu is main
+    for submenu, key, options in (
+        (aspect, "display_aspect", GUI.DISPLAY_ASPECTS),
+        (interlace, "deinterlace", GUI.DEINTERLACE_MODES),
+    ):
+        assert submenu.add_radiobutton.call_count == len(options)
+        for call, name in zip(submenu.add_radiobutton.call_args_list, options):
+            assert call.kwargs == {"label": name, "value": name, "variable": fields[key]}
+
+    # Only a complete click over the embedded viewport opens the menu.
+    position = (400, 300)
+    game_view = Mock()
+    tabs = Mock()
+    tabs.select.return_value = str(game_view)
+    session = SimpleNamespace(
+        tabs=tabs, game_view=game_view, embedded_running=True,
+        context_pressed=False, context_armed=False, context_open=False,
+        read_context_input=Mock(side_effect=[
+            (False, None), (True, None), (False, position),
+            (True, position), (True, position), (False, position),
+            (True, position), (False, None),
+        ]),
+        show_game_context_menu=Mock(), after=Mock(),
+    )
+    session.poll_game_context_input = lambda: GUI.Launcher.poll_game_context_input(session)
+    for _ in range(8):
+        session.poll_game_context_input()
+    session.show_game_context_menu.assert_called_once_with(*position)
+    assert session.after.call_count == 8
+
+    session.game_context_menu = main
+    session.game_host = Mock()
+    session.fullscreen_active = True
+    session.close_requested = False
+    session.stop_process = None
+    GUI.Launcher.show_game_context_menu(session, *position)
+    main.entryconfigure.assert_any_call(3, label="Exit fullscreen")
+    main.tk_popup.assert_called_once_with(*position)
+    main.grab_release.assert_called_once_with()
+    assert not session.context_open
+    session.embedded_running = False
+    GUI.Launcher.show_game_context_menu(session, *position)
+    main.tk_popup.assert_called_once_with(*position)
+
+
 def test_fullscreen_controls():
     from unittest.mock import Mock
 
@@ -618,6 +671,7 @@ def main():
     test_runtime_options()
     test_live_deinterlacing()
     test_live_display_aspect()
+    test_game_context_menu()
     test_fullscreen_controls()
     test_launch_close_button()
     test_game_window_environment()
