@@ -36,6 +36,24 @@ const s_recompiled_fn* ee_find_dispatch_owner(
     const s_ee_dispatch_index& index,
     uint32_t guest_pc);
 
+// Resolve a callable native target for an exact guest PC. A null result
+// is not a dispatch outcome: callers must use the normal dispatcher to
+// distinguish unowned PCs from invalid native table entries.
+t_ee_translated_entry ee_resolve_dispatch_entry(
+    const s_ee_dispatch_table& table,
+    const s_ee_dispatch_index& index,
+    uint32_t guest_pc);
+
+// Execute exactly one already-resolved entry at its original PC, with
+// the same interrupt, exit-reason and budget semantics as a one-entry
+// indexed run. The caller must retain the owning library and invalidate
+// cached targets before replacing it. No guest timing boundary is skipped.
+s_ee_dispatch_result ee_dispatch_run_resolved(
+    s_ee_cpu_state* cpu,
+    s_ee_runtime* runtime,
+    uint32_t guest_pc,
+    t_ee_translated_entry entry);
+
 // Same contract as ee_dispatch_run(), using the index for owner lookup.
 // The index must have been built from table.compiled.
 s_ee_dispatch_result ee_dispatch_run_indexed(

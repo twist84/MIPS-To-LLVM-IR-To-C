@@ -1,5 +1,6 @@
 #include "ee_dispatcher.h"
 #include "ee_dispatch_index.h"
+#include "ee_exceptions.h"
 
 #include <cstdio>
 #include <initializer_list>
@@ -518,6 +519,48 @@ int main()
               result.status == e_ee_dispatch_status::DISPATCH_LIMIT &&
               result.guest_pc == 0x00102000u,
               "single-slice dispatch preserves budget, terminal exits and exact ownership");
+
+        bool direct_same = true;
+        for (uint32_t pc : {0u, 0x00100000u, 0x00100008u, 0x00100010u,
+                            0x00100020u, 0x00100030u, 0x00100040u})
+        {
+            for (bool interrupt : {false, true})
+            {
+                ee::s_ee_cpu_state normal{};
+                normal.m_pc = pc;
+                normal.m_gpr[31].m_lo = 0x00100008u;
+                if (interrupt)
+                {
+                    normal.m_cop0[12] = 0x00010401u;
+                    normal.m_cop0[13] = 0x00000400u;
+                }
+                ee::s_ee_cpu_state direct = normal;
+                const auto target = ee::ee_resolve_dispatch_entry(table, index, pc);
+                const auto a = ee::ee_dispatch_run_indexed(&normal, nullptr,
+                    table, index, 1u);
+                const auto b = ee::ee_dispatch_run_resolved(&direct, nullptr,
+                    pc, target);
+                direct_same = direct_same && target != nullptr &&
+                    a.status == b.status && a.exit_reason == b.exit_reason &&
+                    a.dispatch_count == b.dispatch_count && a.guest_pc == b.guest_pc &&
+                    normal.m_pc == direct.m_pc &&
+                    normal.m_exit_reason == direct.m_exit_reason &&
+                    normal.m_cop0[12] == direct.m_cop0[12] &&
+                    normal.m_cop0[13] == direct.m_cop0[13] &&
+                    normal.m_cop0[14] == direct.m_cop0[14] &&
+                    normal.m_gpr[2].m_lo == direct.m_gpr[2].m_lo &&
+                    normal.m_gpr[8].m_lo == direct.m_gpr[8].m_lo &&
+                    normal.m_gpr[31].m_lo == direct.m_gpr[31].m_lo;
+            }
+        }
+        const auto missing = ee::ee_resolve_dispatch_entry(table, index, 0x00100050u);
+        const auto hole = ee::ee_resolve_dispatch_entry(table, index, 0x00100004u);
+        const auto wrong = ee::ee_dispatch_run_resolved(&cpu, nullptr,
+            0x00100000u, caller_entry);
+        check(direct_same && missing == nullptr && hole == nullptr &&
+              wrong.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              wrong.dispatch_count == 0u && cpu.m_pc == 0x00102000u,
+              "resolved single-entry execution matches indexed dispatch including interrupts");
     }
 
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);

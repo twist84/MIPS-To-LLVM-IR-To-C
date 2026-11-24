@@ -68,6 +68,14 @@ const s_data_dispatch& data_dispatch()
 #define EE_GAME_EXPORT __attribute__((visibility("default")))
 #endif
 
+// Optional host-only ABI. Existing runners can continue using ee_game_run.
+extern "C" EE_GAME_EXPORT ee::t_ee_translated_entry ee_game_resolve_entry(
+    std::uint32_t guest_pc)
+{
+    const s_data_dispatch& dispatch = data_dispatch();
+    return ee::ee_resolve_dispatch_entry(dispatch.table, dispatch.index, guest_pc);
+}
+
 extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(
     ee::s_ee_cpu_state* cpu,
     ee::s_ee_runtime* runtime,

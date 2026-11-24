@@ -46,6 +46,8 @@ class ChunkDispatcherTests(unittest.TestCase):
         self.assertNotIn("ee_dispatch_chunk_0001(", before)
         self.assertIn("ee_dispatch_chunk_0001(", after)
         self.assertIn("entries.data()", after)
+        self.assertIn("ee_game_resolve_entry(", after)
+        self.assertIn("ee::ee_resolve_dispatch_entry(g_dispatch_table, g_dispatch.index, guest_pc)", after)
         self.assertIn("ee_dispatch_run_indexed(", after)
         self.assertIn("cpu, runtime, g_dispatch_table, g_dispatch.index,", after)
         # The O(log n) index is built once, after every chunk has registered.
