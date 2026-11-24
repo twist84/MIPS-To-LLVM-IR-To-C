@@ -944,17 +944,6 @@ bool c_ee_gs_state::stage_host_upload(
         return false;
     }
 
-    const auto stage_pixel = [&](uint32_t value, uint8_t size)
-    {
-        const uint32_t pixel = state.m_transfer_pixels_written;
-        const uint32_t dx = (x + pixel % rrw) & 0x7ffu;
-        const uint32_t dy = (y + pixel / rrw) & 0x7ffu;
-        writes.push_back(pixel_write(
-            psm, base, width, dx, dy, value, size
-        ));
-        ++state.m_transfer_pixels_written;
-    };
-
     const bool four_bit =
         psm == 0x14u || psm == 0x24u || psm == 0x2cu;
     const bool twenty_four_bit = psm == 0x01u || psm == 0x31u;
@@ -963,6 +952,53 @@ bool c_ee_gs_state::stage_host_upload(
         trace_rejection(__func__, __LINE__);
         return false;
     }
+
+    const uint8_t pixel_bytes = twenty_four_bit ? 3u :
+        (psm == 0x13u || psm == 0x1bu) ? 1u :
+        (psm == 0x02u || psm == 0x0au ||
+         psm == 0x32u || psm == 0x3au) ? 2u : 4u;
+    const uint32_t remaining =
+        total_pixels - state.m_transfer_pixels_written;
+    // IMAGE/HWREG payloads are bounded by consume(). Reserve only
+    // completed pixels, excluding padding and an incomplete RGB24
+    // carry. Geometric growth also handles multiple small chunks.
+    const uint64_t available_pixels = four_bit ?
+        static_cast<uint64_t>(byte_count) * 2u :
+        (static_cast<uint64_t>(byte_count) +
+            state.m_transfer_pending_size) / pixel_bytes;
+    const size_t pixels = static_cast<size_t>(
+        std::min<uint64_t>(available_pixels, remaining));
+    if (pixels > writes.max_size() - writes.size())
+    {
+        trace_rejection(__func__, __LINE__);
+        return false;
+    }
+    const size_t required = writes.size() + pixels;
+    if (required > writes.capacity())
+    {
+        const size_t growth = std::min(
+            writes.capacity() / 2u, writes.max_size() - writes.capacity());
+        writes.reserve(std::max(required, writes.capacity() + growth));
+    }
+
+    // Reconstruct the raster cursor once per chunk. Incrementing
+    // it avoids a division and remainder for every uploaded pixel,
+    // including split rows and transfers wrapping at 11 bits.
+    uint32_t column = state.m_transfer_pixels_written % rrw;
+    uint32_t row = state.m_transfer_pixels_written / rrw;
+    const auto stage_pixel = [&](uint32_t value, uint8_t size)
+    {
+        writes.push_back(pixel_write(
+            psm, base, width, (x + column) & 0x7ffu,
+            (y + row) & 0x7ffu, value, size
+        ));
+        ++state.m_transfer_pixels_written;
+        if (++column == rrw)
+        {
+            column = 0u;
+            ++row;
+        }
+    };
 
     if (four_bit)
     {
@@ -1001,15 +1037,6 @@ bool c_ee_gs_state::stage_host_upload(
     }
     else
     {
-        const uint8_t pixel_bytes =
-            (psm == 0x13u || psm == 0x1bu) ? 1u :
-            (psm == 0x02u || psm == 0x0au ||
-             psm == 0x32u || psm == 0x3au) ? 2u : 4u;
-        const uint32_t remaining =
-            total_pixels - state.m_transfer_pixels_written;
-        const size_t pixels = std::min<size_t>(
-            byte_count / pixel_bytes, remaining
-        );
         for (size_t i = 0u; i < pixels; ++i)
         {
             const size_t at = i * pixel_bytes;
