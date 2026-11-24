@@ -1490,6 +1490,12 @@ uint32_t c_kernel::next_ready(uint64_t& next_wake) const
     {
         return 0u;
     }
+    // With one highest-priority thread, the round-robin search
+    // necessarily selects that thread, including after wraparound.
+    if (m_ready_cache.size() == 1u)
+    {
+        return m_ready_cache.front();
+    }
     const auto candidate = std::upper_bound(
         m_ready_cache.begin(), m_ready_cache.end(), m_last_scheduled_id);
     return candidate != m_ready_cache.end() ? *candidate : m_ready_cache.front();
@@ -1667,7 +1673,16 @@ s_kernel_run_result c_kernel::run(
     uint64_t remaining = cycle_budget;
     while (remaining != 0u)
     {
-        wake_due();
+        // No software event can wake a thread while all three
+        // conservative deadlines remain in the future. Keep the actual
+        // wake ordering and interrupt-suspension checks in wake_due().
+        if (m_cycles >= m_next_alarm_wake ||
+            m_cycles >= m_next_thread_wake ||
+            (!m_hle_events.empty() &&
+             m_hle_events.begin()->first <= m_cycles))
+        {
+            wake_due();
+        }
         // ps2-web-recomp/SDBZ saves interrupt state with each thread.
         // A suspended thread owns the CPU only while runnable. Once it
         // blocks or exits, a real DMA interrupt may wake it.
