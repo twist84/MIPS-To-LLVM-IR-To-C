@@ -1,4 +1,5 @@
 #include "module_builder.h"
+#include "ee_cop1_rsqrt_ir.h"
 #include "ee_runtime.h"
 #include <cstddef>
 #include "ee_opcode.h"
@@ -2526,44 +2527,29 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const std::string raw_ft = load_fpr_i32(ft);
                 const std::string fs_exponent = newtemp();
                 const std::string numerator_is_zero = newtemp();
-                const std::string numerator_sign = newtemp();
                 const std::string ft_exponent = newtemp();
                 const std::string divisor_is_zero = newtemp();
                 const std::string sign = newtemp();
                 const std::string negative = newtemp();
-                const std::string zero_result = newtemp();
-                m_out += "  " + ft_exponent + " = and i32 " + raw_ft + ", 2139095040\n";
+                 m_out += "  " + ft_exponent + " = and i32 " + raw_ft + ", 2139095040\n";
                 m_out += "  " + divisor_is_zero + " = icmp eq i32 " + ft_exponent + ", 0\n";
                 m_out += "  " + sign + " = and i32 " + raw_ft + ", -2147483648\n";
                 m_out += "  " + negative + " = icmp ne i32 " + sign + ", 0\n";
-                // Hardware saturation uses Fs's sign and the R5900 maximum.
+                // An exponent-zero numerator distinguishes invalid from divide-by-zero.
                 m_out += "  " + fs_exponent + " = and i32 " + raw_fs + ", 2139095040\n";
                 m_out += "  " + numerator_is_zero + " = icmp eq i32 " + fs_exponent + ", 0\n";
-                m_out += "  " + numerator_sign + " = and i32 " + raw_fs + ", -2147483648\n";
-                m_out += "  " + zero_result + " = or i32 " + numerator_sign + ", 2147483647\n";
-
-                const std::string numerator = load_ee_fpr_f32(fs);
-                const std::string normalised_denominator = normalise_ee_f32_bits(raw_ft);
-                const std::string absolute_denominator = newtemp();
-                const std::string denominator = newtemp();
-                const std::string root = newtemp();
-                const std::string safe_root = newtemp();
-                const std::string quotient = newtemp();
-                m_out += "  " + absolute_denominator + " = and i32 " + normalised_denominator + ", 2147483647\n";
-                m_out += "  " + denominator + " = bitcast i32 " + absolute_denominator + " to float\n";
-                m_out += "  " + root + " = call float @llvm.sqrt.f32(float " + denominator + ")\n";
-                m_out += "  " + safe_root + " = select i1 " + divisor_is_zero +
-                         ", float 1.000000e+00, float " + root + "\n";
-                m_out += "  " + quotient + " = fdiv float " + numerator + ", " + safe_root + "\n";
-                const std::string quotient_bits = clamp_ee_f32_result(quotient, false);
+                // A host sqrt/div pair loses exponent-255 values and can
+                // round the last significand bit differently. The R5900
+                // recurrence works directly on the original guest words.
                 const std::string result = newtemp();
-                m_out += "  " + result + " = select i1 " + divisor_is_zero +
-                         ", i32 " + zero_result + ", i32 " + quotient_bits + "\n";
+                m_out += "  " + result + " = call i32 @ee_cop1_rsqrt_bits(i32 " +
+                         raw_fs + ", i32 " + raw_ft + ")\n";
                 store_fpr_i32(fd, result);
 
                 // Negative Ft sets I independently of the zero test.
                 // Zero/zero sets I; nonzero/zero sets D (PCSX2 interpreter).
-                // Ordinary quotient overflow/underflow handling is unchanged.
+                // Preserve existing cause/sticky policy; result saturation is
+                // handled by the integer recurrence.
                 const std::string fcsr = newtemp();
                 const std::string old_flags = newtemp();
                 const std::string cleared_flags = newtemp();
@@ -3591,6 +3577,10 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     m_out += "\n";
     end_function();
 
+    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos)
+    {
+        m_out += k_ee_cop1_rsqrt_ir;
+    }
     m_ctx.ir(optimize_ir(m_out, m_opt_level));
   }
 
@@ -5514,6 +5504,10 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     m_out += "\n";
     end_function();
 
+    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos)
+    {
+        m_out += k_ee_cop1_rsqrt_ir;
+    }
     m_ctx.ir(optimize_ir(m_out, m_opt_level));
 }
 

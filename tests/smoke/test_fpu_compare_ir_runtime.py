@@ -550,18 +550,6 @@ def expected_sqrt_bits(source_bits):
     return ieee_f32_bits(math.sqrt(math.ldexp(significand, exponent)))
 
 
-def expected_rsqrt_bits(numerator_bits, denominator_bits):
-    if (denominator_bits & 0x7F800000) == 0:
-        return (numerator_bits & 0x80000000) | 0x7FFFFFFF
-
-    numerator = f32_value(ee_fpu_normalise_bits(numerator_bits))
-    denominator = ee_fpu_normalise_bits(denominator_bits) & 0x7FFFFFFF
-    root_bits = ieee_f32_bits(math.sqrt(f32_value(denominator)))
-    root_bits = ee_fpu_normalise_bits(root_bits)
-    quotient_bits = ieee_f32_bits(numerator / f32_value(root_bits))
-    return ee_fpu_clamp_result_bits(quotient_bits)
-
-
 def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
     guest_fn, engine, module, target_machine = compile_jit(
         fixture, temp_dir, "sqrt_s", target, opt
@@ -610,15 +598,15 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs):
+def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "rsqrt_s", target
+        fixture, temp_dir, "rsqrt_s", target, opt
     )
     retained = (engine, module, target_machine)
     initial_fcsr = 0xA593F47E
     cleared_fcsr = initial_fcsr & ~0x00030000
 
-    for numerator_bits, denominator_bits, label in operand_pairs:
+    for numerator_bits, denominator_bits, expected, label in operand_pairs:
         backing, state = aligned_state()
         _ = (backing, retained)
         state.fpr[1] = numerator_bits
@@ -637,7 +625,6 @@ def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs):
         require(state.pc == ENTRY_PC + 4,
                 prefix + f"wrong sequential PC 0x{state.pc:08x}")
 
-        expected = expected_rsqrt_bits(numerator_bits, denominator_bits)
         expected_fcsr = cleared_fcsr
         if denominator_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
@@ -844,25 +831,57 @@ def main():
         (0x7FC12345, "positive NaN normalises to FMAX"),
         (0xFFC12345, "negative NaN is invalid"),
     ]
+    # Literal result words from the physical-console ps2autotests
+    # tests/cpu/ee_fpu/sqrt.expected, including expanded CF_* constants.
     rsqrt_pairs = [
-        (0x40C00000, 0x40800000, "six divided by sqrt four"),
-        (0x40C00000, 0xC0800000, "negative divisor is made positive and invalid"),
-        (0x40C00000, 0x00000000, "positive zero divisor returns FMAX"),
-        (0x40C00000, 0x80000000, "negative zero divisor returns positive R5900 maximum"),
-        # Signed-zero combinations from ps2autotests sqrt.expected.
-        (0x00000000, 0x00000000, "positive zero over positive zero"),
-        (0x00000000, 0x80000000, "positive zero over negative zero"),
-        (0x80000000, 0x00000000, "negative zero over positive zero"),
-        (0x80000000, 0x80000000, "negative zero over negative zero"),
-        (0xC0C00000, 0x00000000, "negative numerator over positive zero"),
-        (0xC0C00000, 0x80000000, "negative numerator over negative zero"),
-        (0x80000001, 0x00000001, "negative denormal numerator over denormal divisor"),
-        (0x40C00000, 0x00000001, "positive denormal divisor counts as zero"),
-        (0x40C00000, 0x80000001, "negative denormal divisor counts as zero"),
-        (0x7F7FFFFF, 0x00800000, "overflow clamps without flags"),
-        (0x00800000, 0x7F7FFFFF, "underflow flushes without flags"),
-        (0xC0C00000, 0x40800000, "negative numerator"),
-        (0x40C00000, 0xFF800000, "negative infinity divisor normalises to negative FMAX"),
+        (0x00000000, 0x00000000, 0x7FFFFFFF, "positive zero / zero"),
+        (0x00000000, 0x80000000, 0x7FFFFFFF, "positive zero / negative zero"),
+        (0x80000000, 0x00000000, 0xFFFFFFFF, "negative zero / zero"),
+        (0x80000000, 0x80000000, 0xFFFFFFFF, "negative zero / negative zero"),
+        (0x00000000, 0x3F800000, 0x00000000, "zero / one"),
+        (0x3F800000, 0x3F800000, 0x3F800000, "one / one"),
+        (0x3F800000, 0x00000000, 0x7FFFFFFF, "one / zero"),
+        (0x40000000, 0x40000000, 0x3FB504F3, "two / sqrt two"),
+        (0x40400000, 0x3F800000, 0x40400000, "three / one"),
+        (0x40400000, 0x40400000, 0x3FDDB3D7, "three / sqrt three"),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x5FB504F2, "maximum / sqrt maximum"),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x5FB504F2, "maximum / negative maximum"),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xDFB504F2, "negative maximum / maximum"),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0xDFB504F2, "negative maximum / negative maximum"),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF, "maximum / zero"),
+        (0x00000000, 0x7FFFFFFF, 0x00000000, "zero / maximum"),
+        (0x00000000, 0x7F800000, 0x00000000, "zero / extended"),
+        (0x7F800000, 0x7F800000, 0x5F800000, "extended / extended"),
+        (0xFF800000, 0x7F800000, 0xDF800000, "negative extended / extended"),
+        (0x3F800000, 0x41C80000, 0x3E4CCCCD, "one / sqrt twenty-five"),
+        (0x40A00000, 0x41C80000, 0x3F800000, "five / sqrt twenty-five"),
+        (0x41C80000, 0x41C80000, 0x40A00000, "twenty-five / sqrt twenty-five"),
+        (0x3F800000, 0xBF800000, 0x3F800000, "one / negative one"),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF, "max mantissa / one"),
+        (0x7F800001, 0x3F800000, 0x7F800001, "extended mantissa / one"),
+        (0x00000001, 0x3F800000, 0x00000000, "denormal / one"),
+        (0x3F800000, 0x3FFFFFFF, 0x3F3504F3, "one / max mantissa"),
+        (0x3F800000, 0x7F800001, 0x1F800000, "one / extended mantissa"),
+        (0x3F800000, 0x00000001, 0x7FFFFFFF, "one / denormal"),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF, "maximum / one"),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF, "negative maximum / one"),
+        (0x3F800000, 0x7FFFFFFF, 0x1F3504F3, "one / maximum"),
+        (0x3F800000, 0xFFFFFFFF, 0x1F3504F3, "one / negative maximum"),
+        (0x00001337, 0xDEADBEEF, 0x00000000, "garbage words"),
+        # Additional architectural controls; no new hardware trace claimed.
+        (0x40C00000, 0x40800000, 0x40400000, "six / sqrt four"),
+        (0x40C00000, 0xC0800000, 0x40400000, "negative radicand"),
+        (0x40C00000, 0x00000000, 0x7FFFFFFF, "positive zero divisor"),
+        (0x40C00000, 0x80000000, 0x7FFFFFFF, "negative zero divisor"),
+        (0xC0C00000, 0x00000000, 0xFFFFFFFF, "negative numerator / zero"),
+        (0xC0C00000, 0x80000000, 0xFFFFFFFF, "negative numerator / negative zero"),
+        (0x80000001, 0x00000001, 0xFFFFFFFF, "denormal / denormal"),
+        (0x40C00000, 0x00000001, 0x7FFFFFFF, "positive denormal divisor"),
+        (0x40C00000, 0x80000001, 0x7FFFFFFF, "negative denormal divisor"),
+        (0x7F7FFFFF, 0x00800000, 0x7FFFFFFF, "overflow saturates to R5900 max"),
+        (0x00800000, 0x7F7FFFFF, 0x00000000, "underflow flushes"),
+        (0xC0C00000, 0x40800000, 0xC0400000, "negative numerator"),
+        (0x40C00000, 0xFF800000, 0x20C00000, "negative extended radicand"),
     ]
 
     sign_operation_words = [
@@ -942,7 +961,8 @@ def main():
         for opt in (0, 3):
             run_sqrt_cases(fixture, temp_dir, target,
                            sqrt_words + sqrt_hardware_words, opt)
-        run_rsqrt_cases(fixture, temp_dir, target, rsqrt_pairs)
+        for opt in (0, 3):
+            run_rsqrt_cases(fixture, temp_dir, target, rsqrt_pairs, opt)
         run_max_min_cases(fixture, temp_dir, target, "max_s", extreme_pairs)
         run_max_min_cases(fixture, temp_dir, target, "min_s", extreme_pairs)
         run_sign_operation_cases(
