@@ -668,21 +668,6 @@ bool c_hw::spu2_ram_word(uint32_t address, uint16_t* value) const
     return m_spu2.ram_word(address, value);
 }
 
-uint32_t c_hw::spu2_dma_cycles_remaining() const
-{
-    const uint32_t first = m_spu2_dma_remaining[0u];
-    const uint32_t second = m_spu2_dma_remaining[1u];
-    if (first == 0u)
-    {
-        return second;
-    }
-    if (second == 0u)
-    {
-        return first;
-    }
-    return std::min(first, second);
-}
-
 void c_hw::start_spu2_dma(uint32_t core)
 {
     if (core >= 2u || m_dma_cpu == nullptr ||
@@ -1623,18 +1608,8 @@ bool c_hw::set_interrupt_mask(uint32_t line, bool enabled)
     return true;
 }
 
-uint32_t c_hw::pending_interrupts() const
+int32_t c_hw::resolve_pending_interrupt(uint32_t pending) const
 {
-    return m_i_ctrl != 0u ? (m_i_stat & m_i_mask) : 0u;
-}
-
-int32_t c_hw::next_pending_interrupt() const
-{
-    const uint32_t pending = pending_interrupts();
-    if (pending == 0u)
-    {
-        return -1;
-    }
     if ((pending & (1u << k_dma_irq)) != 0u)
     {
         const uint32_t primary =

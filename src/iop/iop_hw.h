@@ -174,7 +174,20 @@ public:
     bool spu2_ram_word(uint32_t address, uint16_t* value) const;
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
-    uint32_t spu2_dma_cycles_remaining() const;
+    uint32_t spu2_dma_cycles_remaining() const
+    {
+        const uint32_t first = m_spu2_dma_remaining[0u];
+        const uint32_t second = m_spu2_dma_remaining[1u];
+        if (first == 0u)
+        {
+            return second;
+        }
+        if (second == 0u)
+        {
+            return first;
+        }
+        return first < second ? first : second;
+    }
 
     // For the ordinary MMIO/scratchpad range, address is physical.
     // The cache-control register retains its privileged full address.
@@ -190,9 +203,16 @@ public:
     // These operations only program masks, not DMA completion flags.
     static bool supports_interrupt_line(uint32_t line);
     bool set_interrupt_mask(uint32_t line, bool enabled);
-    uint32_t pending_interrupts() const;
+    uint32_t pending_interrupts() const
+    {
+        return m_i_ctrl != 0u ? (m_i_stat & m_i_mask) : 0u;
+    }
     // Resolve masked DMA channels before ordinary IRQ lines, as INTRMAN does.
-    int32_t next_pending_interrupt() const;
+    int32_t next_pending_interrupt() const
+    {
+        const uint32_t pending = pending_interrupts();
+        return pending != 0u ? resolve_pending_interrupt(pending) : -1;
+    }
     bool acknowledge_interrupt(uint32_t line);
     uint32_t cache_control() const;
     // Advance IOP timer clock by completed guest execution cycles.
@@ -287,6 +307,7 @@ public:
     const char* sio2_rejection_name() const;
 
 private:
+    int32_t resolve_pending_interrupt(uint32_t pending) const;
     bool scratchpad_range(uint32_t address, uint32_t width) const;
     bool sif_dma_register(uint32_t address, uint32_t* channel,
                           uint32_t* reg) const;
