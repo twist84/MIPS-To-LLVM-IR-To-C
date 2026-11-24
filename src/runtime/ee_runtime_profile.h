@@ -207,12 +207,15 @@ public:
         bool measure_without_profile = false)
         : m_id(id), m_work(work), m_work_at_end(work_at_end)
     {
-        if (g_runtime_profile.m_enabled)
+        auto& state = g_runtime_profile;
+        if (state.m_enabled)
         {
-            m_parent = g_runtime_profile.m_active;
-            g_runtime_profile.m_active = this;
+            // Scopes are thread-confined. Cache the owning state so the
+            // stop path does not need to resolve thread-local storage again.
+            m_state = &state;
+            m_parent = state.m_active;
+            state.m_active = this;
             m_start = t_runtime_profile_clock::now();
-            m_active = true;
         }
         else if (measure_without_profile)
         {
@@ -238,7 +241,7 @@ public:
     uint64_t stop()
     {
         uint64_t inclusive = 0u;
-        if (m_active || m_measure_only)
+        if (m_state != nullptr || m_measure_only)
         {
             const auto end = t_runtime_profile_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -246,10 +249,11 @@ public:
             inclusive = static_cast<uint64_t>(elapsed);
             m_measure_only = false;
         }
-        if (m_active)
+        if (m_state != nullptr)
         {
+            auto& state = *m_state;
             const uint64_t exclusive = inclusive - m_children_ns;
-            auto& counter = g_runtime_profile.m_counters[static_cast<std::size_t>(m_id)];
+            auto& counter = state.m_counters[static_cast<std::size_t>(m_id)];
             ++counter.m_calls;
             counter.m_inclusive_ns += inclusive;
             counter.m_exclusive_ns += exclusive;
@@ -268,10 +272,10 @@ public:
             }
             else
             {
-                g_runtime_profile.m_covered_ns += inclusive;
+                state.m_covered_ns += inclusive;
             }
-            g_runtime_profile.m_active = m_parent;
-            m_active = false;
+            state.m_active = m_parent;
+            m_state = nullptr;
         }
         return inclusive;
     }
@@ -283,7 +287,7 @@ private:
     c_runtime_profile_scope* m_parent = nullptr;
     t_runtime_profile_clock::time_point m_start{};
     uint64_t m_children_ns = 0u;
-    bool m_active = false;
+    s_runtime_profile_state* m_state = nullptr;
     bool m_measure_only = false;
 };
 
