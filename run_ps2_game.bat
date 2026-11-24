@@ -289,6 +289,14 @@ rem Optimized full replay validates the shared source IR in the profile
 rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
 if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating shared EE IR for selected optimization profile ===
+    python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source
+    if errorlevel 1 (
+        echo ERROR: Shared source is not current. Existing caches retained.
+        echo Run with SDBZ_EE_OPT=0 and --recover-cache --accept-new-ir
+        echo only when changed lowering is intentional.
+        exit /b 1
+    )
     set "CACHE_FLAG=--no-recompile"
 )
 if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
@@ -316,6 +324,12 @@ if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
 )
 
 rem Cache recovery is reconstruction-only: no guest replay or discovery.
+rem A linked O0 library is not sufficient if the shared lowering is stale.
+if /I "%REQUESTED_SESSION_MODE%"=="recover" if defined CACHE_FLAG (
+    python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source
+    if errorlevel 1 set "CACHE_FLAG="
+)
 rem Do not enter the interactive destructive rebuild path on failure.
 if /I "%REQUESTED_SESSION_MODE%"=="recover" (
     if defined CACHE_FLAG (

@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 
 import run_game
 import run_known_replays
+import shared_ee_ir as shared_ir
 
 
 def history_dir(base_work):
@@ -47,6 +48,29 @@ def active_work(base_work):
     except (OSError, ValueError):
         pass
     return base_work
+
+
+def check_source_header(elf, work, ir_sources):
+    """Read-only preflight. Full module hashes are checked before native use."""
+    metadata = shared_ir.ir_directory(work) / "ee_functions.json"
+    if shared_ir.active(metadata):
+        state = shared_ir.current_state(metadata, ir_sources)
+        count = len(state["ir_hashes"])
+    else:
+        snapshot, entries = run_known_replays.read_manifest(
+            work / "translation-cache.json")
+        if snapshot["inputs"]["ELF"] != run_game.sha256_path(elf):
+            raise ValueError("source cache ELF differs")
+        if snapshot.get("emit_opt") != 0:
+            raise ValueError("source cache is not the base EE profile")
+        if snapshot.get("ir_sources") != ir_sources:
+            raise ValueError("source cache lowering inputs differ")
+        if snapshot.get("metadata_sha256") != run_game.sha256_path(metadata):
+            raise ValueError("source cache function metadata differs")
+        count = len(entries)
+    if count == 0:
+        raise ValueError("source cache has no known functions")
+    return count
 
 
 def manifest_candidates(base_work):
@@ -192,7 +216,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--elf", type=Path)
     parser.add_argument("--print-active", action="store_true",
-                        help="print only the validated active work directory")
+                        help="print only the selected active work directory")
+    parser.add_argument("--check-active-source", action="store_true",
+                        help="read-only current lowering and metadata preflight")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument("--config", choices=("Debug", "Release", "RelWithDebInfo",
                                             "MinSizeRel"), default="Release")
@@ -213,11 +239,21 @@ def main(argv=None):
         elf = args.elf.resolve(strict=True)
         build = args.build_dir.resolve()
         base_work = args.base_work_dir.resolve()
-        recover(elf, build, args.config, base_work, args.emit_jobs,
-                args.allow_ir_changes)
+        if args.check_active_source:
+            work = active_work(base_work)
+            print(f"Active EE source: {work}", flush=True)
+            source_root = Path(__file__).resolve().parents[1]
+            sources = run_game.ir_generation_inputs(elf, source_root)
+            count = check_source_header(elf, work, sources)
+            print(f"EE source preflight: {count} known functions; "
+                  "current lowering and metadata match", flush=True)
+        else:
+            recover(elf, build, args.config, base_work, args.emit_jobs,
+                    args.allow_ir_changes)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        print(f"Cache recovery stopped without changing the active cache: {error}",
-              file=sys.stderr)
+        prefix = ("EE source preflight refused" if args.check_active_source else
+                  "Cache recovery stopped without changing the active cache")
+        print(f"{prefix}: {error}", file=sys.stderr)
         return 1
     return 0
 

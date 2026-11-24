@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import recover_translation_cache as recovery
 import run_game
+import shared_ee_ir as shared_ir
 
 
 def digest(data):
@@ -192,11 +193,59 @@ def test_link_or_validation_failure_does_not_activate():
         assert len(builds) == 2
 
 
+def test_active_source_preflight_rejects_stale_shared_provenance():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        work = root / "ps2-game-hle"
+        ir = work / "ir"
+        ir.mkdir(parents=True)
+        metadata = ir / "ee_functions.json"
+        metadata.write_text("{}", encoding="utf-8")
+        sources = {"ELF": digest(b"fixture-elf"), "src/llvm/module_builder.cpp": "new"}
+        state = {
+            "schema": shared_ir.SCHEMA,
+            "ir_sources": sources,
+            "metadata_sha256": run_game.sha256_path(metadata),
+            "ir_hashes": {"sub_0x100008_0x100008.ll": "a" * 64},
+        }
+        provenance = ir / shared_ir.PROVENANCE
+        shared_ir.write_json(provenance, state)
+        original = provenance.read_bytes()
+        assert recovery.check_source_header(elf, work, sources) == 1
+        for changed, expected in (
+            ({**sources, "src/llvm/module_builder.cpp": "old"}, "module_builder.cpp"),
+            ({**sources, "ELF": "different"}, "ELF"),
+        ):
+            try:
+                recovery.check_source_header(elf, work, changed)
+            except ValueError as exc:
+                assert expected in str(exc)
+            else:
+                raise AssertionError("accepted stale source")
+        metadata.write_text('{"modified": true}', encoding="utf-8")
+        try:
+            recovery.check_source_header(elf, work, sources)
+        except ValueError as exc:
+            assert "metadata hash changed" in str(exc)
+        else:
+            raise AssertionError("accepted changed function metadata")
+        assert provenance.read_bytes() == original
+
+
 def test_launcher_recovers_before_automatic_rebuild():
     batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--recover-cache" (' in batch
     assert 'if /I "%~1"=="--accept-new-ir" (' in batch
     assert "--print-active" in batch
+    preflight = batch.index("=== Validating shared EE IR")
+    flag = batch.index('set "CACHE_FLAG=--no-recompile"', preflight)
+    assert "--check-active-source" in batch[preflight:flag]
+    assert "exit /b 1" in batch[preflight:flag]
+    recovery_guard = batch.index('rem A linked O0 library is not sufficient')
+    assert "--check-active-source" in batch[recovery_guard:batch.index("rem Strict unattended recovery")]
+    assert 'if errorlevel 1 set "CACHE_FLAG="' in batch[recovery_guard:batch.index("rem Strict unattended recovery")]
     assert 'set "BASE_WORK_DIR=build\\ps2-game-hle"' in batch
     strict = batch.index("rem Strict unattended recovery")
     automatic = batch.index(
@@ -223,6 +272,7 @@ def main():
     test_changed_lowering_requires_explicit_opt_in()
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
+    test_active_source_preflight_rejects_stale_shared_provenance()
     test_launcher_recovers_before_automatic_rebuild()
     print("safe known-function cache recovery: PASS")
 

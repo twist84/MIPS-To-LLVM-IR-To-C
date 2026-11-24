@@ -111,10 +111,21 @@ def current_state(metadata_path, ir_sources, hashes=None):
     if not path.is_file():
         return None
     state = read_json(path)
-    if (state.get("schema") != SCHEMA or state.get("ir_sources") != ir_sources or
-            state.get("metadata_sha256") != digest(metadata_path) or
-            (hashes is not None and state.get("ir_hashes") != hashes)):
-        raise ValueError("shared EE IR provenance is stale or incompatible")
+    prefix = "shared EE IR provenance is stale or incompatible"
+    if state.get("schema") != SCHEMA:
+        raise ValueError(f"{prefix}: unsupported schema")
+    saved_sources = state.get("ir_sources")
+    if saved_sources != ir_sources:
+        if not isinstance(saved_sources, dict) or not isinstance(ir_sources, dict):
+            raise ValueError(f"{prefix}: missing lowering fingerprints")
+        changed = sorted(name for name in set(saved_sources) | set(ir_sources)
+                         if saved_sources.get(name) != ir_sources.get(name))
+        raise ValueError(f"{prefix}: lowering inputs changed: " +
+                         ", ".join(changed[:8]))
+    if state.get("metadata_sha256") != digest(metadata_path):
+        raise ValueError(f"{prefix}: function metadata hash changed")
+    if hashes is not None and state.get("ir_hashes") != hashes:
+        raise ValueError(f"{prefix}: guest module hashes changed")
     return state
 
 
