@@ -347,6 +347,19 @@ int main()
         return 1;
     }
 
+    // A new preflight must not see previous-generation visit keys or
+    // stale payload bytes even when it walks exactly the same addresses.
+    const auto first_packet = sink.m_packet;
+    large_dmac.reset();
+    sink = {};
+    if (!check(begin(large_dmac, k_start) && sink.m_calls == 1u &&
+               sink.m_packet == first_packet &&
+               large_dmac.vif1_chain_last_reject() == reject::none,
+               "reused preflight leaked visit keys or payload"))
+    {
+        return 1;
+    }
+
     // Even a tag-only chain is bounded. Reject the full batch if its
     // terminal tag is beyond the host budget.
     large_dmac.reset();
@@ -363,6 +376,20 @@ int main()
                large_dmac.vif1_channel_state().m_tadr == k_start &&
                large_dmac.vif1_channel_state().m_chcr == 0x185u,
                "over-budget chain did not fail closed"))
+    {
+        return 1;
+    }
+
+    // The same table can admit exactly the full tag budget after a
+    // failed over-budget walk. No stale visited entry can reject it.
+    large_dmac.reset();
+    sink = {};
+    write_tag(large_memory, k_start + (k_budget - 1u) * 16u,
+              0u, 7u, 0u, 0u, 0u);
+    if (!check(begin(large_dmac, k_start, 0x185u) &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.status() == 2u && sink.m_calls == 0u,
+               "exact-budget tag-only retry failed"))
     {
         return 1;
     }

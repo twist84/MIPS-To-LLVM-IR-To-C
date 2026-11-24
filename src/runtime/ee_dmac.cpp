@@ -7,11 +7,103 @@
 #include "ee_exceptions.h"
 
 #include <vector>
-#include <set>
-#include <tuple>
+#include <algorithm>
+#include <utility>
 
 namespace ee
 {
+namespace
+{
+constexpr uint32_t k_vif1_chain_max_tags = 65536u;
+constexpr size_t k_vif1_visit_slots = 2u * k_vif1_chain_max_tags;
+
+struct s_vif1_visit
+{
+    uint32_t m_tag = 0u;
+    uint32_t m_depth = 0u;
+    uint32_t m_asr0 = 0u;
+    uint32_t m_asr1 = 0u;
+    uint32_t m_generation = 0u;
+};
+
+struct s_vif1_chain_workspace
+{
+    std::vector<uint8_t> m_packet;
+    std::vector<s_vif1_visit> m_visits;
+    uint32_t m_generation = 0u;
+};
+
+// Each preflight owns its packet and visit table, including throughout
+// synchronous sink callbacks. Nested calls acquire independent storage.
+class c_vif1_chain_workspace
+{
+public:
+    explicit c_vif1_chain_workspace(s_vif1_chain_workspace& scratch)
+        : m_scratch(scratch)
+    {
+        std::swap(m_workspace, m_scratch);
+        m_workspace.m_packet.clear();
+        m_workspace.m_visits.resize(k_vif1_visit_slots);
+        if (++m_workspace.m_generation == 0u)
+        {
+            std::fill(m_workspace.m_visits.begin(),
+                m_workspace.m_visits.end(), s_vif1_visit{});
+            m_workspace.m_generation = 1u;
+        }
+    }
+
+    ~c_vif1_chain_workspace()
+    {
+        m_workspace.m_packet.clear();
+        if (m_workspace.m_packet.capacity() >
+            static_cast<size_t>(k_max_graphics_batch_qwc) * 16u)
+        {
+            std::vector<uint8_t>().swap(m_workspace.m_packet);
+        }
+        std::swap(m_workspace, m_scratch);
+    }
+
+    c_vif1_chain_workspace(const c_vif1_chain_workspace&) = delete;
+    c_vif1_chain_workspace& operator=(const c_vif1_chain_workspace&) = delete;
+
+    std::vector<uint8_t>& packet() { return m_workspace.m_packet; }
+
+    bool visit(uint32_t tag, uint32_t depth, uint32_t asr0, uint32_t asr1)
+    {
+        // At most half the table can be occupied by a legal tag walk.
+        // Hashing is only a slot hint: all four key fields are compared.
+        uint64_t hash = (static_cast<uint64_t>(tag) << 32u) | asr0;
+        hash ^= static_cast<uint64_t>(asr1) * 0x9e3779b97f4a7c15ull;
+        hash ^= static_cast<uint64_t>(depth) * 0xbf58476d1ce4e5b9ull;
+        hash ^= hash >> 30u;
+        hash *= 0xbf58476d1ce4e5b9ull;
+        hash ^= hash >> 27u;
+        hash *= 0x94d049bb133111ebull;
+        hash ^= hash >> 31u;
+        size_t index = static_cast<size_t>(hash) & (k_vif1_visit_slots - 1u);
+        for (size_t probe = 0u; probe < k_vif1_visit_slots; ++probe)
+        {
+            auto& entry = m_workspace.m_visits[index];
+            if (entry.m_generation != m_workspace.m_generation)
+            {
+                entry = {tag, depth, asr0, asr1, m_workspace.m_generation};
+                return true;
+            }
+            if (entry.m_tag == tag && entry.m_depth == depth &&
+                entry.m_asr0 == asr0 && entry.m_asr1 == asr1)
+            {
+                return false;
+            }
+            index = (index + 1u) & (k_vif1_visit_slots - 1u);
+        }
+        return false;
+    }
+
+private:
+    s_vif1_chain_workspace& m_scratch;
+    s_vif1_chain_workspace m_workspace;
+};
+} // namespace
 c_ee_dmac::s_gif_channel_state c_ee_dmac::vif1_channel_state() const
 {
     const s_spr_channel& channel = m_device_channels[1u];
@@ -761,21 +853,21 @@ bool c_ee_dmac::transfer_vif1_source_chain()
     // Tag count is a host work budget, not an architectural DMA limit.
     // SDBZ's pre-battle chain exceeds 1024 tags. Bound preflight
     // independently of payload size (zero-QWC tags still cost work).
-    constexpr uint32_t k_max_tags = 65536u;
     constexpr size_t k_max_packet_qwc = k_max_graphics_batch_qwc;
     s_spr_channel next = current;
     uint64_t tag_address = next.m_tadr;
     const bool tte = (next.m_chcr & 0x40u) != 0u;
     const bool tie = (next.m_chcr & 0x80u) != 0u;
-    std::vector<uint8_t> packet;
+    static thread_local s_vif1_chain_workspace scratch;
+    c_vif1_chain_workspace workspace(scratch);
+    auto& packet = workspace.packet();
     // Tags are immutable throughout preflight. A repeated tag address
     // with the same active return stack cannot reach a new terminator.
     // CALL/RET subroutines reused from different return addresses are valid.
-    std::set<std::tuple<uint64_t, uint32_t, uint32_t, uint32_t>> visited;
     bool terminal = false;
 
     for (uint32_t tag_index = 0u;
-         tag_index < k_max_tags && !terminal; ++tag_index)
+         tag_index < k_vif1_chain_max_tags && !terminal; ++tag_index)
     {
         uint32_t tag_host_address = 0u;
         if (!resolve(tag_address, &tag_host_address))
@@ -784,10 +876,9 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             return false;
         }
         const uint32_t depth = (next.m_chcr >> 4u) & 3u;
-        const auto key = std::make_tuple(tag_address, depth,
-            depth >= 1u ? next.m_asr[0] : 0u,
-            depth >= 2u ? next.m_asr[1] : 0u);
-        if (!visited.insert(key).second)
+        if (!workspace.visit(static_cast<uint32_t>(tag_address), depth,
+                depth >= 1u ? next.m_asr[0] : 0u,
+                depth >= 2u ? next.m_asr[1] : 0u))
         {
             m_vif1_chain_last_reject = reject::cyclic_chain;
             return false;
