@@ -87,6 +87,31 @@ int main()
     assert(json.find("\"gif_chcr\": 256") != std::string::npos);
     assert(json.find("\"gif_write_sequence\": 4") != std::string::npos);
 
+    // These PC and transition keys intentionally collide in the
+    // direct-mapped counter caches. Cache hits, collisions, untracked
+    // keys after capacity fills, zero and unaligned PCs must preserve
+    // the exact bounded map counts and ordering.
+    ee::c_ee_dispatch_hotspots collision(3u, 3u);
+    for (uint32_t i = 0u; i < 100u; ++i)
+    {
+        collision.record(i * 5u + 1u, 0u, 0u, {});
+        collision.record(i * 5u + 2u, 0x1000u, 0x1000u, {});
+        collision.record(i * 5u + 3u, 0x2001u, 0x2001u, {});
+        collision.record(i * 5u + 4u, 0x3000u, 0x3000u, {});
+        collision.record(i * 5u + 5u, 0x3000u, 0x3000u, {});
+    }
+    const std::string collided = serialize(collision);
+    assert(collision.observations() == 500u);
+    assert(collision.untracked_pc_samples() == 200u);
+    assert(collision.untracked_edge_samples() == 200u);
+    assert(collided.find("\"pc\": 0, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"pc\": 4096, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"pc\": 8193, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"from_pc\": 0, \"to_pc\": 0, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"from_pc\": 4096, \"to_pc\": 4096, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"from_pc\": 8193, \"to_pc\": 8193, \"visits\": 100") != std::string::npos);
+    assert(collided.find("\"total_state_changes\": 0") != std::string::npos);
+
     ee::c_ee_dispatch_hotspots changes;
     ee::s_ee_hot_loop_state state{};
     for (uint32_t i = 0u; i < 100u; ++i)
