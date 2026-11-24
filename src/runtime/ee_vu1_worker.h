@@ -2,7 +2,9 @@
 
 #include "ee_vu1_aot.h"
 
+#include <atomic>
 #include <condition_variable>
+#include <utility>
 #include <memory>
 #include <mutex>
 #include <thread>
@@ -23,6 +25,12 @@ struct s_ee_vu1_job
     bool m_accepted = false;
     bool m_host_failed = false;
     uint64_t m_execution_ns = 0u;
+    uint64_t m_submitted_ns = 0u;
+    uint64_t m_started_ns = 0u;
+    uint64_t m_finished_ns = 0u;
+    uint64_t m_compiled_ns = 0u;
+    uint64_t m_compiled_pairs = 0u;
+    uint64_t m_xgkick_ns = 0u;
 };
 
 // Single producer/consumer controller, one outstanding job (including
@@ -33,7 +41,8 @@ struct s_ee_vu1_job
 class c_ee_vu1_worker
 {
 public:
-    explicit c_ee_vu1_worker(std::unique_ptr<c_ee_vu1_aot> backend = {});
+    explicit c_ee_vu1_worker(std::unique_ptr<c_ee_vu1_aot> backend = {},
+        bool detailed_profile = false);
     ~c_ee_vu1_worker();
 
     c_ee_vu1_worker(const c_ee_vu1_worker&) = delete;
@@ -45,6 +54,9 @@ public:
     std::unique_ptr<s_ee_vu1_job> try_take();
     std::unique_ptr<s_ee_vu1_job> wait_take();
     bool busy() const;
+    static uint64_t clock_ns();
+    std::pair<uint64_t, uint64_t> execution_interval() const;
+    void write_aot_json(FILE* output) const;
 
     // Full reset can discard a result, but cannot allow old work to
     // race a new generation. No timeout or fabricated completion.
@@ -55,6 +67,11 @@ private:
     std::unique_ptr<s_ee_vu1_job> take_locked();
 
     std::unique_ptr<c_ee_vu1_aot> m_backend;
+    mutable std::mutex m_backend_mutex;
+    bool m_detailed_profile = false;
+    std::atomic<bool> m_ready{false};
+    std::atomic<uint64_t> m_started_ns{0u};
+    std::atomic<uint64_t> m_finished_ns{0u};
     mutable std::mutex m_mutex;
     std::condition_variable m_changed;
     std::unique_ptr<s_ee_vu1_job> m_pending;

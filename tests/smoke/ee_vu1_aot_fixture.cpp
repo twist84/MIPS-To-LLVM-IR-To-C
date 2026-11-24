@@ -1,4 +1,5 @@
 #include "ee_vu1_aot.h"
+#include "ee_vu1_worker.h"
 
 #include <cstdio>
 #include <cstring>
@@ -119,7 +120,8 @@ struct s_outcome
 };
 
 s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
-    bool branching = false)
+    bool branching = false, ee::c_ee_vu1_worker* worker = nullptr,
+    bool aligned = false)
 {
     ee::c_vu1_aot_binding binding(backend);
     s_outcome result{};
@@ -147,8 +149,41 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
         s.m_vf[6] = {0x00008001u, 0x08000000u, 0u, 0u};
     }
     result.m_path1 = {1u, 2u, 3u, 4u};
-    result.m_ok = ee::c_ee_vu1::run(s, code, result.m_data, k_start, 123u,
-        456u, result.m_path1, &result.m_issue);
+    if (worker != nullptr || aligned)
+    {
+        result.m_path1.resize(16u, 0x5au);
+    }
+    if (worker != nullptr)
+    {
+        auto job = std::make_unique<ee::s_ee_vu1_job>();
+        job->m_resident.m_state = s;
+        job->m_resident.m_code = code;
+        job->m_resident.m_data = result.m_data;
+        job->m_path1.swap(result.m_path1);
+        job->m_address = k_start;
+        job->m_top = 123u;
+        job->m_itop = 456u;
+        if (!worker->submit(job))
+        {
+            return result;
+        }
+        job = worker->wait_take();
+        if (job == nullptr)
+        {
+            return result;
+        }
+        result.m_state = job->m_resident.m_state;
+        result.m_data = job->m_resident.m_data;
+        result.m_path1.swap(job->m_path1);
+        result.m_issue = job->m_issue;
+        result.m_ok = job->m_accepted && !job->m_host_failed &&
+            job->m_compiled_pairs == job->m_issue.m_steps;
+    }
+    else
+    {
+        result.m_ok = ee::c_ee_vu1::run(s, code, result.m_data, k_start, 123u,
+            456u, result.m_path1, &result.m_issue);
+    }
     return result;
 }
 
@@ -331,6 +366,24 @@ int main(int argc, char** argv)
     {
         return 1;
     }
-    std::puts("VU1 AOT native dispatch, scalar pipelines, PATH1 rollback and fallback: PASS");
+    // Native libraries and mutable capture/counter state are exclusively
+    // owned by the persistent worker, not the main thread's TLS binding.
+    auto owned = std::make_unique<ee::c_ee_vu1_aot>();
+    error.clear();
+    if (owned->open_directory(argv[2], &error) != 3u || !error.empty())
+    {
+        return 1;
+    }
+    ee::c_ee_vu1_worker worker(std::move(owned), true);
+    if (!same(run(code, nullptr, false, &worker),
+              run(code, nullptr, false, nullptr, true)) ||
+        !same(run(branching, nullptr, true, &worker),
+              run(branching, nullptr, true, nullptr, true)) ||
+        !same(run(efu, nullptr, false, &worker),
+              run(efu, nullptr, false, nullptr, true)))
+    {
+        return 1;
+    }
+    std::puts("VU1 AOT native dispatch, scalar pipelines, PATH1 rollback and worker parity: PASS");
     return 0;
 }

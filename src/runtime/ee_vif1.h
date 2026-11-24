@@ -92,7 +92,12 @@ public:
         rejected,
         busy
     };
-    bool enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend = {});
+    bool enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend = {},
+        bool detailed_profile = false);
+    void native_execution_begin();
+    void native_execution_end();
+    void write_aot_json(FILE* output) const;
+    void write_worker_json(FILE* output) const;
     e_deferred_result begin_deferred(const uint8_t* data, uint32_t qwc);
     e_deferred_result poll_deferred();
     e_deferred_result wait_deferred();
@@ -182,6 +187,9 @@ private:
     bool publish(s_transaction& tx);
     e_deferred_result resume_deferred(bool wait);
     static void complete_vu_start(s_machine& machine);
+    void record_native_overlap(uint64_t end);
+    std::unique_ptr<s_ee_vu1_job> take_worker_job(bool wait);
+    void record_worker_job(const s_ee_vu1_job& job, bool discarded);
 
     static uint32_t command_data_words(const s_machine& machine,
                                        uint32_t code);
@@ -203,6 +211,29 @@ private:
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
     const c_ee_gif_path3* m_path3 = nullptr;
+    // Host timing only. Neither timestamps nor overlap advance guest cycles.
+    struct s_worker_profile
+    {
+        uint64_t m_submitted = 0u;
+        uint64_t m_collected = 0u;
+        uint64_t m_rejected = 0u;
+        uint64_t m_discarded = 0u;
+        uint64_t m_host_failures = 0u;
+        uint64_t m_pairs = 0u;
+        uint64_t m_execution_ns = 0u;
+        uint64_t m_queue_ns = 0u;
+        uint64_t m_compiled_ns = 0u;
+        uint64_t m_compiled_pairs = 0u;
+        uint64_t m_xgkick_ns = 0u;
+        uint64_t m_wait_ns = 0u;
+        uint64_t m_wait_calls = 0u;
+        uint64_t m_native_overlap_ns = 0u;
+        uint64_t m_native_overlap_intervals = 0u;
+        uint64_t m_native_pending_boundaries = 0u;
+    } m_worker_profile{};
+    bool m_native_executing = false;
+    uint64_t m_native_interval_start = 0u;
+    std::unique_ptr<s_ee_vu1_job> m_spare_job;
     std::unique_ptr<c_ee_vu1_worker> m_worker;
     std::unique_ptr<s_transaction> m_deferred;
 };

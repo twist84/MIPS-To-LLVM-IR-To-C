@@ -156,6 +156,10 @@ public:
         {
             return false;
         }
+        if (m_dmac.deferred_vif1_pending())
+        {
+            (void)m_dmac.service_deferred_vif1(true);
+        }
         // Establish the field epoch at the supplied EE cycle. An
         // unvalidated runner supplies zero and cannot advance the clock.
         // Do not partially commit CRT mode fields on timing overflow.

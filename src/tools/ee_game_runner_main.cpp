@@ -1552,7 +1552,9 @@ bool write_report(
     // Profile serialization and final stream close remain uninstrumented.
     report_profile_scope.stop();
     std::fputs(",\n  \"vu1_aot\": ", output);
-    ee::write_vu1_aot_json(output);
+    vif1.write_aot_json(output);
+    std::fputs(",\n  \"vu1_worker\": ", output);
+    vif1.write_worker_json(output);
     std::fputs(",\n  \"runtime_profile\": ", output);
     ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
         graphics_probe.present_succeeded());
@@ -3431,6 +3433,29 @@ int main(int argc, char** argv)
             }
         }
     }
+    std::string vu1_async_environment;
+    const char* vu1_async_value = read_host_environment(
+        "SDBZ_VU1_ASYNC", &vu1_async_environment);
+    if (vu1_async_value != nullptr && *vu1_async_value != '\0' &&
+        std::strcmp(vu1_async_value, "0") != 0 &&
+        std::strcmp(vu1_async_value, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_VU1_ASYNC (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool async_vu1 = vu1_async_value != nullptr &&
+        std::strcmp(vu1_async_value, "1") == 0;
+    if (async_vu1)
+    {
+        if (!vif1.enable_deferred(std::move(vu1_aot),
+                ee::g_runtime_profile.m_enabled))
+        {
+            std::fprintf(stderr, "failed to enable deferred VU1 worker\n");
+            return 1;
+        }
+        hardware.dmac().bind_deferred_vif1(&vif1);
+        std::puts("VU1 async: enabled (bounded worker; ordered EE-thread publication)");
+    }
     ee::c_vu1_aot_binding vu1_binding(vu1_aot.get());
     double report_time_ms = 0.0;
     double native_time_ms = 0.0;
@@ -3498,6 +3523,25 @@ int main(int argc, char** argv)
     const auto service_devices = [&]() -> e_device_service
     {
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
+        if (hardware.dmac().deferred_vif1_pending())
+        {
+            // Present only committed GS state at the next field boundary.
+            // Otherwise poll without blocking the independent EE/IOP path.
+            const bool field_due = hardware.scanout().enabled() &&
+                hardware.scanout().next_field_cycle() <=
+                    runtime.m_ee_cycle_scheduler.current_cycle();
+            (void)hardware.dmac().service_deferred_vif1(field_due);
+        }
+        if (async_vu1 && !graphics_dma.m_rejection_logged &&
+            vif1.diagnostic().m_rejected_batches != 0u)
+        {
+            const auto& detail = vif1.diagnostic();
+            std::fprintf(stderr,
+                "VIF1 deferred reject: reason=%u code=0x%08x vu_pc=%04x steps=%u\n",
+                static_cast<uint32_t>(detail.m_reason), detail.m_code,
+                detail.m_vu_pc, detail.m_last_rejected_vu_steps);
+            graphics_dma.m_rejection_logged = true;
+        }
         // Service guest-programmed timer compare/overflow events against
         // the same reached-instruction compatibility clock as scanout.
         // Timer COUNT reads inside a long native loop sample the live
@@ -3806,6 +3850,10 @@ int main(int argc, char** argv)
 
     while (remaining != 0)
     {
+        if (hardware.dmac().deferred_vif1_pending())
+        {
+            (void)hardware.dmac().service_deferred_vif1();
+        }
         if (pad0_cross_poll_count != 0u && iop_kernel != nullptr)
         {
             iop_kernel->hardware().set_pad_trace_dispatch(dispatched);
@@ -4357,7 +4405,8 @@ int main(int argc, char** argv)
             // Arm the translated loop-header idle probe with known pure,
             // idempotent poll loops (see ee_idle_loop_skip.h).
             bool idle_armed = false;
-            if (idle_skip && !idle_probe_headers.empty() && slice == 1u &&
+            if (idle_skip && !hardware.dmac().deferred_vif1_pending() &&
+                !idle_probe_headers.empty() && slice == 1u &&
                 runtime.m_loop_safepoint_limit > 1u &&
                 runtime.m_loop_safepoint_yield_enabled != 0u &&
                 runtime.m_instruction_trace == nullptr &&
@@ -4383,6 +4432,10 @@ int main(int argc, char** argv)
                 ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
                 report_path != nullptr);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
+            if (async_vu1)
+            {
+                vif1.native_execution_begin();
+            }
             reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
             // A module that does not own the PC returns EXITED with zero
             // dispatches and leaves the CPU, PC and exit reason untouched.
@@ -4421,6 +4474,10 @@ int main(int argc, char** argv)
                         }
                     }
                 }
+            }
+            if (async_vu1)
+            {
+                vif1.native_execution_end();
             }
             if (idle_armed)
             {

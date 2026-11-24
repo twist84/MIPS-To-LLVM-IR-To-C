@@ -584,7 +584,11 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
             ((code & 0x80000000u) == 0u || (next.m_err & 1u) != 0u) &&
             (opcode != 0x17u || next.m_vu1.m_state.m_initialized))
         {
-            auto job = std::make_unique<s_ee_vu1_job>();
+            auto job = std::move(m_spare_job);
+            if (job == nullptr)
+            {
+                job = std::make_unique<s_ee_vu1_job>();
+            }
             job->m_address = opcode == 0x17u ?
                 next.m_vu1.m_state.m_tpc : (code & 0x7ffu) * 8u;
             job->m_top = next.m_tops;
@@ -592,13 +596,18 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
             job->m_resident = std::move(next.m_vu1);
             job->m_path1.swap(tx.m_path1);
             next.m_code = code;
+            const uint64_t handoff = m_native_executing ?
+                c_ee_vu1_worker::clock_ns() : 0u;
             if (worker->submit(job))
             {
+                ++m_worker_profile.m_submitted;
+                m_native_interval_start = handoff;
                 tx.m_waiting_words = words;
                 return false;
             }
             next.m_vu1 = std::move(job->m_resident);
             job->m_path1.swap(tx.m_path1);
+            m_spare_job = std::move(job);
             tx.m_rejection = e_reject::unsupported_vu_execution;
             tx.m_rejected_code = code;
             tx.m_issue = {};
@@ -764,6 +773,15 @@ bool c_ee_vif1::publish(s_transaction& tx)
 
 bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 {
+    // A direct FIFO/MMIO transfer is a synchronous observation point,
+    // but in worker mode it must retain the same owned AOT backend.
+    if (m_worker != nullptr)
+    {
+        const auto accepted = begin_deferred(data, qwc);
+        return accepted == e_deferred_result::completed ||
+            (accepted == e_deferred_result::pending &&
+             wait_deferred() == e_deferred_result::completed);
+    }
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_consume, qwc);
     if (m_deferred != nullptr)
     {
@@ -773,13 +791,14 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     return prepare(tx, data, qwc) && advance(tx, nullptr) && publish(tx);
 }
 
-bool c_ee_vif1::enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend)
+bool c_ee_vif1::enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend,
+    bool detailed_profile)
 {
     if (m_worker != nullptr)
     {
         return false;
     }
-    m_worker = std::make_unique<c_ee_vu1_worker>(std::move(backend));
+    m_worker = std::make_unique<c_ee_vu1_worker>(std::move(backend), detailed_profile);
     return true;
 }
 
@@ -791,6 +810,7 @@ bool c_ee_vif1::deferred_busy() const
 c_ee_vif1::e_deferred_result c_ee_vif1::begin_deferred(
     const uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_consume, qwc);
     if (m_deferred != nullptr)
     {
         return e_deferred_result::busy;
@@ -819,13 +839,16 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
     {
         return e_deferred_result::idle;
     }
+    ee::c_runtime_profile_scope profile_scope(
+        ee::e_runtime_profile_id::vif1_deferred_resume);
     do
     {
-        auto job = wait ? m_worker->wait_take() : m_worker->try_take();
+        auto job = take_worker_job(wait);
         if (job == nullptr)
         {
             return e_deferred_result::pending;
         }
+        record_worker_job(*job, false);
         auto& tx = *m_deferred;
         auto& next = tx.m_next;
         const uint32_t code = next.m_pending[tx.m_index];
@@ -845,6 +868,7 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
             ++next.m_committed_opcodes[opcode];
             (void)record_command(tx, code, tx.m_waiting_words);
         }
+        m_spare_job = std::move(job);
         if (advance(tx, m_worker.get()))
         {
             const bool accepted = publish(tx);
@@ -871,9 +895,138 @@ void c_ee_vif1::cancel_deferred()
 {
     if (m_deferred != nullptr)
     {
-        m_worker->discard();
+        auto job = take_worker_job(true);
+        if (job != nullptr)
+        {
+            record_worker_job(*job, true);
+            job->m_path1.swap(m_deferred->m_path1);
+            m_spare_job = std::move(job);
+        }
         m_deferred.reset();
     }
+}
+
+void c_ee_vif1::native_execution_begin()
+{
+    if (m_worker != nullptr)
+    {
+        m_native_executing = true;
+        if (m_deferred != nullptr)
+        {
+            ++m_worker_profile.m_native_pending_boundaries;
+            m_native_interval_start = c_ee_vu1_worker::clock_ns();
+        }
+    }
+}
+
+void c_ee_vif1::record_native_overlap(uint64_t end)
+{
+    if (m_native_interval_start != 0u)
+    {
+        const auto interval = m_worker->execution_interval();
+        const uint64_t start = std::max(m_native_interval_start, interval.first);
+        const uint64_t finish = interval.second == 0u ? end :
+            std::min(end, interval.second);
+        if (interval.first != 0u && finish > start)
+        {
+            m_worker_profile.m_native_overlap_ns += finish - start;
+            ++m_worker_profile.m_native_overlap_intervals;
+        }
+        m_native_interval_start = 0u;
+    }
+}
+
+void c_ee_vif1::native_execution_end()
+{
+    if (m_native_executing)
+    {
+        if (m_native_interval_start != 0u)
+        {
+            record_native_overlap(c_ee_vu1_worker::clock_ns());
+        }
+        m_native_executing = false;
+    }
+}
+
+std::unique_ptr<s_ee_vu1_job> c_ee_vif1::take_worker_job(bool wait)
+{
+    if (wait)
+    {
+        const uint64_t start = c_ee_vu1_worker::clock_ns();
+        // Explicit joins are not EE/VU overlap, including joins in MMIO.
+        record_native_overlap(start);
+        ee::c_runtime_profile_scope scope(ee::e_runtime_profile_id::vu1_worker_wait);
+        auto result = m_worker->wait_take();
+        ++m_worker_profile.m_wait_calls;
+        m_worker_profile.m_wait_ns += c_ee_vu1_worker::clock_ns() - start;
+        return result;
+    }
+    auto result = m_worker->try_take();
+    if (result != nullptr && m_native_interval_start != 0u)
+    {
+        record_native_overlap(c_ee_vu1_worker::clock_ns());
+    }
+    return result;
+}
+
+void c_ee_vif1::record_worker_job(const s_ee_vu1_job& job, bool discarded)
+{
+    auto& p = m_worker_profile;
+    ++p.m_collected;
+    p.m_rejected += job.m_accepted ? 0u : 1u;
+    p.m_discarded += discarded ? 1u : 0u;
+    p.m_host_failures += job.m_host_failed ? 1u : 0u;
+    p.m_pairs += job.m_issue.m_steps;
+    p.m_execution_ns += job.m_execution_ns;
+    p.m_queue_ns += job.m_started_ns - job.m_submitted_ns;
+    p.m_compiled_ns += job.m_compiled_ns;
+    p.m_compiled_pairs += job.m_compiled_pairs;
+    p.m_xgkick_ns += job.m_xgkick_ns;
+}
+
+void c_ee_vif1::write_aot_json(FILE* output) const
+{
+    if (m_worker != nullptr)
+    {
+        m_worker->write_aot_json(output);
+    }
+    else
+    {
+        write_vu1_aot_json(output);
+    }
+}
+
+void c_ee_vif1::write_worker_json(FILE* output) const
+{
+    const auto& p = m_worker_profile;
+    std::fprintf(output,
+        "{\"enabled\":%s,\"pending\":%s,"
+        "\"submitted_jobs\":%llu,\"collected_jobs\":%llu,"
+        "\"rejected_jobs\":%llu,\"discarded_jobs\":%llu,\"host_failures\":%llu,"
+        "\"attempted_pairs\":%llu,\"worker_execution_ns\":%llu,"
+        "\"worker_queue_ns\":%llu,\"compiled_exclusive_ns\":%llu,"
+        "\"compiled_attempted_pairs\":%llu,\"xgkick_exclusive_ns\":%llu,"
+        "\"controller_wait_ns\":%llu,\"controller_wait_calls\":%llu,"
+        "\"ee_native_overlap_wall_ns\":%llu,\"ee_native_overlap_intervals\":%llu,"
+        "\"ee_native_pending_boundaries\":%llu}",
+        m_worker != nullptr ? "true" : "false",
+        m_deferred != nullptr ? "true" : "false",
+        static_cast<unsigned long long>(p.m_submitted),
+        static_cast<unsigned long long>(p.m_collected),
+        static_cast<unsigned long long>(p.m_rejected),
+        static_cast<unsigned long long>(p.m_discarded),
+        static_cast<unsigned long long>(p.m_host_failures),
+        static_cast<unsigned long long>(p.m_pairs),
+        static_cast<unsigned long long>(p.m_execution_ns),
+        static_cast<unsigned long long>(p.m_queue_ns),
+        static_cast<unsigned long long>(p.m_compiled_ns),
+        static_cast<unsigned long long>(p.m_compiled_pairs),
+        static_cast<unsigned long long>(p.m_xgkick_ns),
+        static_cast<unsigned long long>(p.m_wait_ns),
+        static_cast<unsigned long long>(p.m_wait_calls),
+        static_cast<unsigned long long>(p.m_native_overlap_ns),
+        static_cast<unsigned long long>(p.m_native_overlap_intervals),
+        static_cast<unsigned long long>(p.m_native_pending_boundaries));
 }
 
 uint32_t c_ee_vif1::read_register(uint32_t offset) const
