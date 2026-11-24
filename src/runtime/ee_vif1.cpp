@@ -418,6 +418,27 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     size_t index = 0u;
     std::vector<uint8_t> path2_bytes;
     std::vector<uint8_t> path1_bytes;
+    struct s_path_range
+    {
+        uint32_t m_path;
+        size_t m_offset;
+        size_t m_size;
+    };
+    std::vector<s_path_range> ranges;
+    const auto record_range = [&ranges](uint32_t path, size_t before, size_t after)
+    {
+        if (before != after)
+        {
+            if (!ranges.empty() && ranges.back().m_path == path)
+            {
+                ranges.back().m_size += after - before;
+            }
+            else
+            {
+                ranges.push_back({path, before, after - before});
+            }
+        }
+    };
     s_ee_vu1_issue vu_issue{};
     e_reject rejection = e_reject::none;
     uint32_t rejected_code = 0u;
@@ -446,9 +467,20 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
             vu_issue = {};
             break;
         }
+        const size_t before1 = path1_bytes.size();
+        const size_t before2 = path2_bytes.size();
         if (!execute(next, code, next.m_pending.data() + index + 1u,
                      path2_bytes, path1_bytes, &vu_issue, &rejection))
         {
+            rejected_code = code;
+            break;
+        }
+        record_range(1u, before1, path1_bytes.size());
+        record_range(2u, before2, path2_bytes.size());
+        if (path1_bytes.size() + path2_bytes.size() >
+            static_cast<size_t>(k_max_graphics_batch_qwc) * 16u)
+        {
+            rejection = e_reject::pending_limit;
             rejected_code = code;
             break;
         }
@@ -458,7 +490,36 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     if (rejection == e_reject::none &&
         !path1_bytes.empty() && !path2_bytes.empty())
     {
-        rejection = e_reject::mixed_gif_paths;
+        if (m_path1 == nullptr)
+        {
+            rejection = e_reject::missing_path1;
+        }
+        else if (m_path2 == nullptr)
+        {
+            rejection = e_reject::missing_path2;
+        }
+        else
+        {
+            std::vector<s_ee_gif_segment> segments;
+            segments.reserve(ranges.size());
+            for (const auto& range : ranges)
+            {
+                const auto& bytes = range.m_path == 1u ? path1_bytes : path2_bytes;
+                segments.push_back({range.m_path, bytes.data() + range.m_offset,
+                                    static_cast<uint32_t>(range.m_size / 16u)});
+            }
+            if (!c_ee_gif_path3::consume_ordered(*m_path1, *m_path2,
+                    segments.data(), segments.size()))
+            {
+                rejection = e_reject::mixed_gif_paths;
+            }
+            else
+            {
+                // Already committed both parsers and GS atomically.
+                path1_bytes.clear();
+                path2_bytes.clear();
+            }
+        }
     }
     if (rejection == e_reject::none && !path1_bytes.empty())
     {

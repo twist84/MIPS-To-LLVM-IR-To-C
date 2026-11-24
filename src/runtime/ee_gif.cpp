@@ -252,6 +252,85 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     return true;
 }
 
+bool c_ee_gif_path3::consume_ordered(
+    c_ee_gif_path3& path1, c_ee_gif_path3& path2,
+    const s_ee_gif_segment* segments, size_t count)
+{
+    if (&path1 == &path2 || path1.m_sink == nullptr ||
+        path1.m_sink != path2.m_sink || path1.m_sink_user != path2.m_sink_user ||
+        (count != 0u && segments == nullptr))
+    {
+        return false;
+    }
+    uint32_t total_qwc = 0u;
+    for (size_t i = 0u; i < count; ++i)
+    {
+        const auto& segment = segments[i];
+        if ((segment.m_path != 1u && segment.m_path != 2u) ||
+            segment.m_data == nullptr || segment.m_qwc == 0u ||
+            segment.m_qwc > k_max_graphics_batch_qwc - total_qwc)
+        {
+            return false;
+        }
+        total_qwc += segment.m_qwc;
+    }
+    if (total_qwc == 0u)
+    {
+        return true;
+    }
+
+    struct s_staged_events
+    {
+        std::vector<uint8_t> m_data;
+        std::vector<s_ee_gif_event> m_events;
+    } staged;
+    staged.m_data.reserve(static_cast<size_t>(total_qwc) * 16u);
+    const auto collect = [](void* user, const s_ee_gif_event* events,
+                            size_t event_count, const uint8_t* data, uint32_t qwc)
+    {
+        auto& batch = *static_cast<s_staged_events*>(user);
+        const uint32_t offset = static_cast<uint32_t>(batch.m_data.size());
+        batch.m_data.insert(batch.m_data.end(), data,
+            data + static_cast<size_t>(qwc) * 16u);
+        for (size_t i = 0u; i < event_count; ++i)
+        {
+            auto event = events[i];
+            event.m_byte_offset += offset;
+            batch.m_events.push_back(event);
+        }
+        return true;
+    };
+
+    auto next1 = path1;
+    auto next2 = path2;
+    next1.bind_event_sink(&staged, collect);
+    next2.bind_event_sink(&staged, collect);
+    for (size_t i = 0u; i < count; ++i)
+    {
+        const auto& segment = segments[i];
+        auto& next = segment.m_path == 1u ? next1 : next2;
+        const auto& other = segment.m_path == 1u ? next2 : next1;
+        // A partially received tag cannot be interleaved with a different
+        // path in this synchronous model. Real arbitration is a later step.
+        if (other.m_state.m_active || !next.consume(segment.m_data, segment.m_qwc))
+        {
+            return false;
+        }
+    }
+    if (!path1.m_sink(path1.m_sink_user, staged.m_events.data(),
+            staged.m_events.size(), staged.m_data.data(), total_qwc))
+    {
+        ++path1.m_counters.m_rejected_batches;
+        ++path2.m_counters.m_rejected_batches;
+        return false;
+    }
+    path1.m_state = next1.m_state;
+    path1.m_counters = next1.m_counters;
+    path2.m_state = next2.m_state;
+    path2.m_counters = next2.m_counters;
+    return true;
+}
+
 bool c_ee_gif_path3::dma_transfer(
     void* user, uint32_t channel, const uint8_t* data, uint32_t qwc)
 {

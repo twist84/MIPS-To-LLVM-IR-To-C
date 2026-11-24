@@ -382,6 +382,73 @@ int main()
         return 1;
     }
 
+    // Mixed PATH2 -> PATH1 -> PATH2 must reach the same GS sink in
+    // command order. A late invalid GS write must roll the entire batch
+    // back, including parser counters and VIF microprogram state.
+    {
+        ee::c_ee_vif1 mixed{};
+        ee::c_ee_gif_path3 first{}, second{};
+        ee::c_ee_gs_state gs{};
+        s_capture observer{};
+        first.bind_event_sink(&gs, &ee::c_ee_gs_state::gif_events);
+        second.bind_event_sink(&gs, &ee::c_ee_gs_state::gif_events);
+        gs.bind_committed_event_observer(&observer,
+            [](void* user, const ee::s_ee_gif_event* events, size_t count,
+               const uint8_t* data, uint32_t qwc)
+            {
+                capture_gif(user, events, count, data, qwc);
+            });
+        mixed.bind_path1(&first);
+        mixed.bind_path2(&second);
+        const ee::s_ee_u128 body{2u, 0x00u};
+        if (!check(send(mixed, {
+                       0x4a030000u, vi1_two, nop_upper,
+                       0x80000efcu, 0x400002ffu,
+                       nop_lower, nop_upper, 0u}) &&
+                   ee::c_ee_vif1::mmio_write(&mixed,
+                       ee::c_ee_vif1::k_vu1_data_base + 32u, 16u, &kick_tag) &&
+                   ee::c_ee_vif1::mmio_write(&mixed,
+                       ee::c_ee_vif1::k_vu1_data_base + 48u, 16u, &body),
+                   "mixed GIF fixture failed"))
+        {
+            return 1;
+        }
+        const auto batch = [](uint32_t last_register)
+        {
+            return std::vector<uint32_t>{
+                0x50000002u, 0x8001u, 0x10000000u, 0xeu, 0u,
+                1u, 0u, 0u, 0u,
+                0x14000000u,
+                0x50000002u, 0x8001u, 0x10000000u, 0xeu, 0u,
+                3u, 0u, last_register, 0u, 0u};
+        };
+        if (!check(!send(mixed, batch(0x7fu)) &&
+                   observer.m_calls == 0u && !gs.was_written(0u) &&
+                   first.counters().m_input_qwc == 0u &&
+                   second.counters().m_input_qwc == 0u &&
+                   mixed.diagnostic().m_committed_opcodes[0x14u] == 0u,
+                   "mixed GIF failure leaked staged writes"))
+        {
+            return 1;
+        }
+        if (!check(send(mixed, batch(0u)) &&
+                   observer.m_calls == 1u && observer.m_events.size() == 6u &&
+                   observer.m_events[1].m_word0 == 1u &&
+                   observer.m_events[3].m_word0 == 2u &&
+                   observer.m_events[5].m_word0 == 3u &&
+                   observer.m_events[1].m_byte_offset == 16u &&
+                   observer.m_events[3].m_byte_offset == 48u &&
+                   observer.m_events[5].m_byte_offset == 80u &&
+                   gs.register_value(0u) == 3u &&
+                   first.counters().m_input_qwc == 2u &&
+                   second.counters().m_input_qwc == 4u &&
+                   mixed.diagnostic().m_committed_opcodes[0x14u] == 1u,
+                   "mixed GIF command order or atomic completion failed"))
+        {
+            return 1;
+        }
+    }
+
     // Unknown upper operation must fail before emitting or retiring DMA.
     // An invalid MPG pair is visible in the actual VU code aperture.
     // One VU pair is two 32-bit words in the LOW 64-bit lane.
