@@ -112,9 +112,11 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     const uint32_t cycles = metadata[3];
     const uint32_t next_pc = metadata[4];
     const uint8_t* code_bytes = bytes();
+    const bool dynamic = steps == 0u;
     if (start >= c_ee_vu1::k_memory_size || (start & 7u) != 0u ||
-        steps < 2u || steps > 2049u || cycles < steps ||
-        cycles > steps * 4u || next_pc != ((start + steps * 8u) & 0x3fffu) ||
+        (dynamic ? (cycles != 0u || next_pc != 0u) :
+            (steps < 2u || steps > 2049u || cycles < steps ||
+             cycles > steps * 4u || next_pc != ((start + steps * 8u) & 0x3fffu))) ||
         code_bytes == nullptr)
     {
         return reject("invalid VU1 AOT metadata");
@@ -123,7 +125,8 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     // Validate the exact encoded program with the current lifter. Reject
     // stale coverage or timing metadata even if the ABI version matches.
     t_vu1_code image{};
-    for (uint32_t i = 0u; i < steps * 8u; ++i)
+    const uint32_t size = dynamic ? c_ee_vu1::k_memory_size : steps * 8u;
+    for (uint32_t i = 0u; i < size; ++i)
     {
         image[(start + i) & 0x3fffu] = code_bytes[i];
     }
@@ -131,9 +134,9 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     program.m_steps = steps;
     program.m_cycles = cycles;
     program.m_next_pc = next_pc;
-    program.m_code.assign(code_bytes, code_bytes + steps * 8u);
+    program.m_code.assign(code_bytes, code_bytes + size);
     program.m_entry = entry;
-    const auto lifted = vu1_lift_straight_line_ir(image, start);
+    const auto lifted = vu1_lift_program_ir(image, start);
     if (lifted.m_ir.empty() || lifted.m_steps != steps ||
         lifted.m_cycles != cycles || lifted.m_next_pc != next_pc ||
         !exact_match(image, start, program.m_code))
@@ -300,12 +303,22 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             std::array<uint32_t, 128> vf{};
             static_assert(sizeof(vf) == sizeof(next.m_vf), "VF ABI");
             std::memcpy(vf.data(), next.m_vf.data(), sizeof(vf));
+            uint32_t steps = 0u;
+            uint32_t cycles = 0u;
+            uint32_t last_pc = 0u;
             c_runtime_profile_scope scope(e_runtime_profile_id::vu1_compiled,
-                program.m_steps);
-            const uint32_t steps = program.m_entry(next.m_vi.data(), &next.m_i,
+                0u, &steps);
+            steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), next.m_q, &next.m_mac,
-                &next.m_status, data_ptr);
-            if (steps != program.m_steps || next.m_tpc != program.m_next_pc ||
+                &next.m_status, data_ptr, &cycles, &last_pc);
+            if (steps < 2u || steps > c_ee_vu1::k_max_steps ||
+                cycles < steps || cycles > steps * 4u ||
+                last_pc >= c_ee_vu1::k_memory_size || (last_pc & 7u) != 0u ||
+                next.m_tpc >= c_ee_vu1::k_memory_size || (next.m_tpc & 7u) != 0u ||
+                (program.m_steps != 0u &&
+                    (steps != program.m_steps || cycles != program.m_cycles ||
+                     next.m_tpc != program.m_next_pc ||
+                     last_pc != ((program.m_next_pc - 8u) & 0x3fffu))) ||
                 next.m_vi[0] != 0u || vf[0] != 0u || vf[1] != 0u ||
                 vf[2] != 0u || vf[3] != 0x3f800000u)
             {
@@ -318,8 +331,8 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 data = staged_data;
             }
             issue.m_steps = steps;
-            issue.m_cycles = program.m_cycles;
-            issue.m_pc = (program.m_next_pc - 8u) & 0x3fffu;
+            issue.m_cycles = cycles;
+            issue.m_pc = last_pc;
             issue.m_lower = word(code.data() + issue.m_pc);
             issue.m_upper = word(code.data() + issue.m_pc + 4u);
             ++m_native_runs;

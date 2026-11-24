@@ -114,9 +114,9 @@ int main(int argc, char** argv)
         {
             return 1;
         }
-        // Unsupported branch code must be captured but never compiled.
+        // Unsupported debug control must be captured but never compiled.
         auto unsupported = code;
-        pair(unsupported, k_start, 0x40000000u, 0x000002ffu);
+        pair(unsupported, k_start, k_lower_nop, 0x100002ffu);
         backend.capture(unsupported, k_start);
         backend.capture(code, k_start);
         size_t files = 0u;

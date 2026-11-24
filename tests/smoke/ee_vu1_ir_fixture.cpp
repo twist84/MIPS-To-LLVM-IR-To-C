@@ -70,7 +70,8 @@ int main(int argc, char** argv)
     {
         return 2;
     }
-    const uint32_t start = std::strcmp(argv[2], "wrap") == 0 ? 0x3ff0u : 0x80u;
+    const uint32_t start = std::strcmp(argv[2], "wrap") == 0 ||
+        std::strcmp(argv[2], "branch-wrap") == 0 ? 0x3ff0u : 0x80u;
     t_code code{}, data{};
     for (size_t i = 0u; i < data.size(); ++i)
     {
@@ -147,11 +148,58 @@ int main(int argc, char** argv)
             append((15u << 21u) | (20u << 16u) | (1u << 11u), k_upper);
         }
     }
-    append(k_nop, k_end);
-    append(integer(0x30u, 12u, 10u, 11u)); // E delay slot
-    const auto program = ee::vu1_lift_straight_line_ir(code, start);
-    if (program.m_ir.empty() || program.m_writes_data !=
-        (std::strcmp(argv[2], "stores") == 0))
+    const bool branches = std::strcmp(argv[2], "branches") == 0 ||
+        std::strcmp(argv[2], "branch-wrap") == 0;
+    if (branches)
+    {
+        const auto branch = [](uint32_t major, uint32_t is, uint32_t it, int32_t imm)
+        {
+            return (major << 25u) | (it << 16u) | (is << 11u) |
+                (static_cast<uint32_t>(imm) & 0x7ffu);
+        };
+        // VI13=3; IBNE observes the value before the immediately
+        // preceding decrement. The loop therefore executes four times.
+        append((0x08u << 25u) | (13u << 16u) | 3u);
+        append(integer(0x32u, 31u, 13u, 13u)); // -1
+        append(branch(0x29u, 13u, 0u, -2));
+        append(integer(0x32u, 1u, 15u, 15u)); // branch delay slot
+        // Exercise all conditional predicates, both branch outcomes,
+        // and the independent NPC on an E-bit branch.
+        append(branch(0x28u, 0u, 0u, 2));
+        append(integer(0x32u, 1u, 15u, 15u));
+        append(integer(0x32u, 7u, 15u, 15u)); // skipped
+        append(branch(0x2cu, 1u, 0u, 2));
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u)); // skipped
+        append(branch(0x2du, 0u, 0u, 2));
+        append(k_nop);
+        append(integer(0x32u, 1u, 15u, 15u)); // not taken
+        append(branch(0x2eu, 0u, 0u, 2));
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u));
+        append(branch(0x2fu, 1u, 0u, 2));
+        append(k_nop);
+        append(integer(0x32u, 1u, 15u, 15u));
+        // BAL calls forward; JR returns to the discovered continuation.
+        append(branch(0x21u, 0u, 6u, 4));
+        append(k_nop);
+        append(branch(0x20u, 0u, 0u, 5));
+        append(k_nop);
+        append(k_nop);
+        append(integer(0x32u, 1u, 15u, 15u));
+        append(branch(0x24u, 6u, 0u, 0));
+        append(k_nop);
+        append(branch(0x20u, 0u, 0u, 3), k_end);
+        append(integer(0x32u, 1u, 15u, 15u));
+    }
+    else
+    {
+        append(k_nop, k_end);
+        append(integer(0x30u, 12u, 10u, 11u)); // E delay slot
+    }
+    const auto program = ee::vu1_lift_program_ir(code, start);
+    if (program.m_ir.empty() || (program.m_steps == 0u) != branches ||
+        program.m_writes_data != (std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
     }
@@ -172,8 +220,8 @@ int main(int argc, char** argv)
     std::vector<uint8_t> path1;
     if (!ee::c_ee_vu1::run(state, code, data, start, 0x12345u, 0x23456u,
             path1, &issue) || !path1.empty() ||
-        issue.m_steps != program.m_steps || issue.m_cycles != program.m_cycles ||
-        state.m_tpc != program.m_next_pc)
+        (!branches && (issue.m_steps != program.m_steps ||
+            issue.m_cycles != program.m_cycles || state.m_tpc != program.m_next_pc)))
     {
         return 1;
     }
@@ -184,7 +232,8 @@ int main(int argc, char** argv)
     {
         return 1;
     }
-    std::printf("%u %u %u %u", issue.m_steps, issue.m_cycles, state.m_tpc, state.m_i);
+    std::printf("%u %u %u %u %u", issue.m_steps, issue.m_cycles, state.m_tpc,
+        state.m_i, issue.m_pc);
     for (uint16_t value : state.m_vi)
     {
         std::printf(" %u", static_cast<unsigned>(value));

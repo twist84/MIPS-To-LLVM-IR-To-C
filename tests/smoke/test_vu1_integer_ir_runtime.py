@@ -13,7 +13,7 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap", "stores"):
+        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
@@ -35,7 +35,9 @@ def main():
                     ctypes.POINTER(ctypes.c_uint32), ctypes.c_uint32,
                     ctypes.POINTER(ctypes.c_uint32),
                     ctypes.POINTER(ctypes.c_uint32),
-                    ctypes.POINTER(ctypes.c_uint8))(address)
+                    ctypes.POINTER(ctypes.c_uint8),
+                    ctypes.POINTER(ctypes.c_uint32),
+                    ctypes.POINTER(ctypes.c_uint32))(address)
                 vi = (ctypes.c_uint16 * 16)(0, 0xfffe, 5)
                 immediate = ctypes.c_uint32(0x12345678)
                 tpc = ctypes.c_uint32(0)
@@ -49,12 +51,13 @@ def main():
                 status = ctypes.c_uint32(0x30)
                 data = (ctypes.c_uint8 * 16384)(
                     *((i * 13 + (i >> 8)) & 255 for i in range(16384)))
+                cycles = ctypes.c_uint32(0)
+                last_pc = ctypes.c_uint32(0)
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
                                  0x12345, 0x23456, vf, 0x3f800000,
-                                 ctypes.byref(mac), ctypes.byref(status), data)
-                # Cycle count is determined statically by the emitter and
-                # checked against the interpreter by the fixture.
-                actual = [steps, expected[1], tpc.value, immediate.value,
+                                 ctypes.byref(mac), ctypes.byref(status), data,
+                                 ctypes.byref(cycles), ctypes.byref(last_pc))
+                actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
                           *vi, *vf, mac.value, status.value, *data]
                 assert actual == expected, (case, opt, actual, expected)
     print("VU1 integer LLVM interpreter differential: PASS")
