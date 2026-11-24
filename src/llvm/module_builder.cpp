@@ -1754,8 +1754,9 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             // DIV/DIVU operate on low 32-bit words and sign-extend both HI
             // (remainder) and LO (quotient). LLVM division by zero and signed
             // INT_MIN / -1 are undefined, so neither case may reach sdiv/srem.
-            // The EE's divide-by-zero result is architecturally undefined:
-            // preserve HI/LO deterministically, matching DIV1/DIVU1.
+            // Although the manual leaves zero division undefined, hardware
+            // observations (ps2autotests cpu/ee/muldiv.expected) give LO
+            // -1 (signed negative dividend: +1), and HI = dividend.
             const bool is_unsigned = funct == ee::e_ee_opcode::FUNCT_DIVU;
             const std::string lhs32 = newtemp();
             const std::string rhs32 = newtemp();
@@ -1808,20 +1809,25 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
 
             const std::string quotient64 = newtemp();
             const std::string remainder64 = newtemp();
-            const std::string old_hi = newtemp();
-            const std::string old_lo = newtemp();
+            std::string fallback = "-1";
+            if (!is_unsigned)
+            {
+                const std::string negative = newtemp();
+                fallback = newtemp();
+                m_out += "  " + negative + " = icmp slt i32 " + lhs32 + ", 0\n";
+                m_out += "  " + fallback + " = select i1 " + negative +
+                         ", i32 1, i32 -1\n";
+            }
             const std::string final_hi = newtemp();
             const std::string final_lo = newtemp();
-            m_out += "  " + quotient64 + " = sext i32 " + quotient + " to i64\n";
-            m_out += "  " + remainder64 + " = sext i32 " + remainder + " to i64\n";
-            m_out += "  " + old_hi + " = load i64, ptr " + hi_ptr + "\n";
-            m_out += "  " + old_lo + " = load i64, ptr " + lo_ptr + "\n";
             m_out += "  " + final_hi + " = select i1 " + div_zero +
-                     ", i64 " + old_hi + ", i64 " + remainder64 + "\n";
+                     ", i32 " + lhs32 + ", i32 " + remainder + "\n";
             m_out += "  " + final_lo + " = select i1 " + div_zero +
-                     ", i64 " + old_lo + ", i64 " + quotient64 + "\n";
-            m_out += "  store i64 " + final_hi + ", ptr " + hi_ptr + "\n";
-            m_out += "  store i64 " + final_lo + ", ptr " + lo_ptr + "\n";
+                     ", i32 " + fallback + ", i32 " + quotient + "\n";
+            m_out += "  " + quotient64 + " = sext i32 " + final_lo + " to i64\n";
+            m_out += "  " + remainder64 + " = sext i32 " + final_hi + " to i64\n";
+            m_out += "  store i64 " + remainder64 + ", ptr " + hi_ptr + "\n";
+            m_out += "  store i64 " + quotient64 + ", ptr " + lo_ptr + "\n";
         }
         else if (funct == ee::e_ee_opcode::FUNCT_SLT ||
                  funct == ee::e_ee_opcode::FUNCT_SLTU)
@@ -4391,16 +4397,14 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
     if (fn == 0x1a || fn == 0x1b)
     {
         // DIV1/DIVU1 write HI1=rem and LO1=quotient from low 32-bit operands.
-        // The EE manual leaves divide-by-zero results undefined; choose a
-        // deterministic no-op for HI1/LO1 and avoid LLVM poison from div by 0.
+        // Match the hardware-observed zero-divisor results of DIV/DIVU,
+        // preserving the independent HI/LO bank and avoiding LLVM poison.
         // Signed INT_MIN/-1 is defined by the EE as INT_MIN with remainder 0.
         const bool is_unsigned = fn == 0x1b;
         std::string lhs32 = newtemp(), rhs32 = newtemp(), div_zero = newtemp();
         std::string safe_rhs = newtemp(), quotient_raw = newtemp(), remainder_raw = newtemp();
         std::string quotient = newtemp(), remainder = newtemp();
         std::string hi_ptr = state_field(3), lo_ptr = state_field(4);
-        std::string old_hi = newtemp(), old_lo = newtemp();
-        std::string final_hi = newtemp(), final_lo = newtemp();
         m_out += "  " + lhs32 + " = trunc i64 " + a.first + " to i32\n";
         m_out += "  " + rhs32 + " = trunc i64 " + b.first + " to i32\n";
         m_out += "  " + div_zero + " = icmp eq i32 " + rhs32 + ", 0\n";
@@ -4409,8 +4413,8 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         {
             m_out += "  " + quotient_raw + " = udiv i32 " + lhs32 + ", " + safe_rhs + "\n";
             m_out += "  " + remainder_raw + " = urem i32 " + lhs32 + ", " + safe_rhs + "\n";
-            m_out += "  " + quotient + " = select i1 " + div_zero + ", i32 0, i32 " + quotient_raw + "\n";
-            m_out += "  " + remainder + " = select i1 " + div_zero + ", i32 0, i32 " + remainder_raw + "\n";
+            m_out += "  " + quotient + " = select i1 " + div_zero + ", i32 -1, i32 " + quotient_raw + "\n";
+            m_out += "  " + remainder + " = select i1 " + div_zero + ", i32 " + lhs32 + ", i32 " + remainder_raw + "\n";
         }
         else
         {
@@ -4426,18 +4430,17 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             m_out += "  " + remainder_raw + " = srem i32 " + safe_lhs + ", " + safe_signed_rhs + "\n";
             m_out += "  " + quotient_select + " = select i1 " + overflow + ", i32 -2147483648, i32 " + quotient_raw + "\n";
             m_out += "  " + remainder_select + " = select i1 " + overflow + ", i32 0, i32 " + remainder_raw + "\n";
-            m_out += "  " + quotient + " = select i1 " + div_zero + ", i32 0, i32 " + quotient_select + "\n";
-            m_out += "  " + remainder + " = select i1 " + div_zero + ", i32 0, i32 " + remainder_select + "\n";
+            const std::string negative = newtemp(), fallback = newtemp();
+            m_out += "  " + negative + " = icmp slt i32 " + lhs32 + ", 0\n";
+            m_out += "  " + fallback + " = select i1 " + negative + ", i32 1, i32 -1\n";
+            m_out += "  " + quotient + " = select i1 " + div_zero + ", i32 " + fallback + ", i32 " + quotient_select + "\n";
+            m_out += "  " + remainder + " = select i1 " + div_zero + ", i32 " + lhs32 + ", i32 " + remainder_select + "\n";
         }
         std::string quotient64 = newtemp(), remainder64 = newtemp();
-        m_out += "  " + old_hi + " = load i64, ptr " + hi_ptr + "\n";
-        m_out += "  " + old_lo + " = load i64, ptr " + lo_ptr + "\n";
         m_out += "  " + quotient64 + " = sext i32 " + quotient + " to i64\n";
         m_out += "  " + remainder64 + " = sext i32 " + remainder + " to i64\n";
-        m_out += "  " + final_hi + " = select i1 " + div_zero + ", i64 " + old_hi + ", i64 " + remainder64 + "\n";
-        m_out += "  " + final_lo + " = select i1 " + div_zero + ", i64 " + old_lo + ", i64 " + quotient64 + "\n";
-        m_out += "  store i64 " + final_hi + ", ptr " + hi_ptr + "\n";
-        m_out += "  store i64 " + final_lo + ", ptr " + lo_ptr + "\n";
+        m_out += "  store i64 " + remainder64 + ", ptr " + hi_ptr + "\n";
+        m_out += "  store i64 " + quotient64 + ", ptr " + lo_ptr + "\n";
         return;
     }
     if (fn == 0x00 || fn == 0x01 || fn == 0x20 || fn == 0x21)

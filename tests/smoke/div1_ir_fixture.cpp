@@ -37,17 +37,17 @@ int main(int argc, char** argv)
 
     const int opt_level = std::atoi(argv[2]);
     const int test_case = std::atoi(argv[3]);
-    if (opt_level < 0 || opt_level > 3 || test_case < 0 || test_case > 11)
+    if (opt_level < 0 || opt_level > 3 || test_case < 0 || test_case > 17)
     {
-        std::fprintf(stderr, "opt_level must be 0..3 and case must be 0..11\n");
+        std::fprintf(stderr, "opt_level must be 0..3 and case must be 0..17\n");
         return 2;
     }
 
-    // Cases 0..4 exercise MMI DIV1/DIVU1. Cases 5..11 exercise SPECIAL
-    // DIV/DIVU with the same signed/unsigned edge cases plus 0/0.
-    const bool primary = test_case >= 5;
-    const int variant = primary ? test_case - 5 : test_case;
-    const uint8_t funct = variant >= 3 && variant != 5 ? 0x1b : 0x1a;
+    // Nine cases per independent HI/LO bank, with identical operands.
+    const bool primary = test_case >= 9;
+    const int variant = test_case % 9;
+    const uint8_t funct = variant == 3 || variant == 4 || variant == 6
+        ? 0x1b : 0x1a;
     const std::vector<uint32_t> words =
     {
         primary ? make_special(4, 5, 0, 0, funct)

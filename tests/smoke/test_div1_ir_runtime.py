@@ -67,8 +67,8 @@ def run_case(fixture, temp_dir, opt_level, case, target_machine):
 
     backing, state = make_aligned_state()
     _ = backing
-    primary = case >= 5
-    variant = case - 5 if primary else case
+    primary = case >= 9
+    variant = case % 9
     initial_hi = 0x9999AAAABBBBCCCC
     initial_lo = 0xDDDDEEEEFFFF0000
     initial_hi1 = 0x1111222233334444
@@ -91,8 +91,7 @@ def run_case(fixture, temp_dir, opt_level, case, target_machine):
     elif variant == 2:  # signed nonzero dividend / zero
         state.gpr[4].lo = (-17) & 0xFFFFFFFFFFFFFFFF
         state.gpr[5].lo = 0
-        expected_hi = initial_hi if primary else initial_hi1
-        expected_lo = initial_lo if primary else initial_lo1
+        expected_hi, expected_lo = 0xFFFFFFFFFFFFFFEF, 1
     elif variant == 3:  # unsigned 0xfffffffe / 3
         state.gpr[4].lo = 0xFFFFFFFE
         state.gpr[5].lo = 3
@@ -100,16 +99,23 @@ def run_case(fixture, temp_dir, opt_level, case, target_machine):
     elif variant == 4:  # unsigned nonzero dividend / zero
         state.gpr[4].lo = 0xFFFFFFFE
         state.gpr[5].lo = 0
-        expected_hi = initial_hi if primary else initial_hi1
-        expected_lo = initial_lo if primary else initial_lo1
+        expected_hi, expected_lo = 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF
     elif variant == 5:  # signed zero / zero
         state.gpr[4].lo = 0
         state.gpr[5].lo = 0
-        expected_hi, expected_lo = initial_hi, initial_lo
-    else:  # unsigned zero / zero
+        expected_hi, expected_lo = 0, 0xFFFFFFFFFFFFFFFF
+    elif variant == 6:  # unsigned zero / zero
         state.gpr[4].lo = 0
         state.gpr[5].lo = 0
-        expected_hi, expected_lo = initial_hi, initial_lo
+        expected_hi, expected_lo = 0, 0xFFFFFFFFFFFFFFFF
+    elif variant == 7:  # positive signed dividend / zero
+        state.gpr[4].lo = 53
+        state.gpr[5].lo = 0
+        expected_hi, expected_lo = 53, 0xFFFFFFFFFFFFFFFF
+    else:  # signed INT_MIN / zero; high source word is irrelevant
+        state.gpr[4].lo = 0x1234567880000000
+        state.gpr[5].lo = 0xDEADBEEF00000000
+        expected_hi, expected_lo = 0xFFFFFFFF80000000, 1
 
     original_rs = state.gpr[4].lo
     original_rt = state.gpr[5].lo
@@ -157,7 +163,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="ee_div1_ir_") as directory:
         temp_dir = pathlib.Path(directory)
         for opt_level in range(4):
-            for case in range(12):
+            for case in range(18):
                 # MCJIT takes ownership of backend resources; give each engine
                 # its own target machine rather than sharing one across engines.
                 target_machine = target.create_target_machine(opt=0)
