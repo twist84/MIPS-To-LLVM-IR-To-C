@@ -1248,6 +1248,9 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         " \"last_rejected_vu_pc\": %u,"
         " \"last_rejected_vu_lower\": %u,"
         " \"last_rejected_vu_upper\": %u,"
+        " \"last_rejected_vu_steps\": %u,"
+        " \"last_rejected_staged_mpg\": %u,"
+        " \"last_rejected_staged_unpack\": %u,"
         "\n    \"rejected_dma_attempts\": %llu,"
         " \"first_rejection\": %u,"
         " \"first_rejected_command\": %u,"
@@ -1271,7 +1274,8 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         static_cast<unsigned long long>(detail.m_vu_start_rejections),
         detail.m_last_vu_start_code, detail.m_last_rejected_vu_start_code,
         detail.m_last_rejected_vu_pc, detail.m_last_rejected_vu_lower,
-        detail.m_last_rejected_vu_upper,
+        detail.m_last_rejected_vu_upper, detail.m_last_rejected_vu_steps,
+        detail.m_last_rejected_staged_mpg, detail.m_last_rejected_staged_unpack,
         static_cast<unsigned long long>(detail.m_rejected_batches),
         static_cast<uint32_t>(detail.m_first_rejection),
         detail.m_first_rejected_code,
@@ -2258,6 +2262,7 @@ int main(int argc, char** argv)
     gif_path1.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     vif1.bind_path2(&gif_path2);
     vif1.bind_path1(&gif_path1);
+    vif1.bind_path3(&gif_path3);
     hardware.bind_vif1(&vif1);
 
     struct s_graphics_dma_routes
@@ -2283,11 +2288,14 @@ int main(int argc, char** argv)
                     const auto& diagnostic = routes->m_vif1->diagnostic();
                     std::fprintf(stderr,
                         "VIF1 native reject: reason=%u code=0x%08x "
-                        "pending_words=%u vu_pc=%04x vu_lo=%08x vu_hi=%08x\n",
+                        "pending_words=%u vu_pc=%04x vu_lo=%08x vu_hi=%08x "
+                        "vu_steps=%u staged_mpg=%u staged_unpack=%u\n",
                         static_cast<uint32_t>(diagnostic.m_reason),
                         diagnostic.m_code, diagnostic.m_pending_words,
                         diagnostic.m_vu_pc, diagnostic.m_vu_lower,
-                        diagnostic.m_vu_upper);
+                        diagnostic.m_vu_upper, diagnostic.m_last_rejected_vu_steps,
+                        diagnostic.m_last_rejected_staged_mpg,
+                        diagnostic.m_last_rejected_staged_unpack);
                     routes->m_rejection_logged = true;
                 }
             }

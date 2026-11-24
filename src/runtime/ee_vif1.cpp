@@ -63,6 +63,11 @@ void c_ee_vif1::bind_path1(c_ee_gif_path3* path1)
     m_path1 = path1;
 }
 
+void c_ee_vif1::bind_path3(const c_ee_gif_path3* path3)
+{
+    m_path3 = path3;
+}
+
 void c_ee_vif1::reset()
 {
     m_machine = {};
@@ -271,7 +276,7 @@ bool c_ee_vif1::execute(
         case 0x10u: // FLUSHE
         case 0x11u: // FLUSH
         case 0x13u: // FLUSHA
-            // No VU can be running until MSCAL/MSCNT has a real engine.
+            // The bounded VU engine runs synchronously to completion.
             break;
         case 0x20u: machine.m_mask = words[0]; break; // STMASK
         case 0x30u: // STROW
@@ -315,6 +320,7 @@ bool c_ee_vif1::execute(
             accepted = false;
             break;
         case 0x14u: // MSCAL
+        case 0x15u: // MSCALF (PATH3 idle checked before execution)
         case 0x17u: // MSCNT
         {
             if (op == 0x17u && !machine.m_vu1_state.m_initialized)
@@ -323,8 +329,8 @@ bool c_ee_vif1::execute(
                 accepted = false;
                 break;
             }
-            const uint32_t start = op == 0x14u
-                ? (imm & 0x7ffu) * 8u : machine.m_vu1_state.m_tpc;
+            const uint32_t start = op == 0x17u
+                ? machine.m_vu1_state.m_tpc : (imm & 0x7ffu) * 8u;
             accepted = c_ee_vu1::run(
                 machine.m_vu1_state, machine.m_vu1_code,
                 machine.m_vu1_data, start, machine.m_tops,
@@ -345,10 +351,6 @@ bool c_ee_vif1::execute(
             }
             break;
         }
-        case 0x15u: // MSCALF requires real GIF PATH3 synchronization
-            *reject = e_reject::unsupported_vu_execution;
-            accepted = false;
-            break;
         default:
             if ((op & 0x60u) == 0x60u)
             {
@@ -434,6 +436,16 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
             ++m_diagnostic.m_vu_start_attempts;
             m_diagnostic.m_last_vu_start_code = code;
         }
+        // MSCALF waits for PATH3 as well as VU1. Completed PATH3
+        // transfers already reached GS in this synchronous runtime.
+        // Fail closed for incomplete packets until stall/resume exists.
+        if (opcode == 0x15u && m_path3 != nullptr && m_path3->state().m_active)
+        {
+            rejection = e_reject::mscalf_path3_busy;
+            rejected_code = code;
+            vu_issue = {};
+            break;
+        }
         if (!execute(next, code, next.m_pending.data() + index + 1u,
                      path2_bytes, path1_bytes, &vu_issue, &rejection))
         {
@@ -498,7 +510,10 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     if (rejection != e_reject::none)
     {
         reject_packet(rejection, rejected_code);
+        m_diagnostic.m_last_rejected_staged_mpg = next.m_mpg_uploads - m_machine.m_mpg_uploads;
+        m_diagnostic.m_last_rejected_staged_unpack = next.m_unpack_commands - m_machine.m_unpack_commands;
         if (rejection == e_reject::unsupported_vu_execution ||
+            rejection == e_reject::mscalf_path3_busy ||
             rejection == e_reject::path1_rejected ||
             rejection == e_reject::missing_path1)
         {
@@ -509,6 +524,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
             m_diagnostic.m_last_rejected_vu_pc = vu_issue.m_pc;
             m_diagnostic.m_last_rejected_vu_lower = vu_issue.m_lower;
             m_diagnostic.m_last_rejected_vu_upper = vu_issue.m_upper;
+            m_diagnostic.m_last_rejected_vu_steps = vu_issue.m_steps;
         }
         m_diagnostic.m_pending_words =
             static_cast<uint32_t>(next.m_pending.size());

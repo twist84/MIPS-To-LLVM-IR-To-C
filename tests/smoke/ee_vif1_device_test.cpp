@@ -576,6 +576,59 @@ int main()
         return 1;
     }
 
+    // MSCALF uses the explicit start address, not the MSCNT resume PC.
+    vif1.reset();
+    ee::c_ee_gif_path3 path3{};
+    path3.bind_event_sink(&capture, capture_gif);
+    vif1.bind_path3(&path3);
+    if (!check(send(vif1, {
+                   0x03000020u, 0x02000010u,
+                   0x4a020004u, nop_lower, e_nop,
+                   nop_lower, nop_upper, 0u}),
+               "MSCALF test MPG failed") ||
+        !check(send(vif1, {0x15000004u, 0u, 0u, 0u}) &&
+               vif1.diagnostic().m_committed_opcodes[0x15u] == 1u &&
+               vif1.diagnostic().m_vu_start_attempts == 1u &&
+               vif1.diagnostic().m_vu_start_rejections == 0u &&
+               vif1.read_register(0xe0u) == 0x20u &&
+               vif1.read_register(0xc0u) == 0x30u,
+               "idle MSCALF failed to execute and advance TOPS"))
+    {
+        return 1;
+    }
+    const auto partial = pack_words({0x00008001u, 0x10000000u, 0xeu, 0u});
+    if (!check(path3.consume(partial.data(), 1u) && path3.state().m_active,
+               "PATH3 partial packet fixture failed") ||
+        !check(!send(vif1, {0x15000004u, 0u, 0u, 0u}) &&
+               vif1.diagnostic().m_reason == ee::c_ee_vif1::e_reject::mscalf_path3_busy &&
+               vif1.diagnostic().m_committed_opcodes[0x15u] == 1u &&
+               vif1.diagnostic().m_last_rejected_vu_steps == 0u &&
+               vif1.read_register(0xc0u) == 0x30u,
+               "MSCALF retired while PATH3 was incomplete"))
+    {
+        return 1;
+    }
+    const auto payload = pack_words({6u, 0u, 0u, 0u});
+    if (!check(path3.consume(payload.data(), 1u) && !path3.state().m_active &&
+               send(vif1, {0x15000004u, 0u, 0u, 0u}) &&
+               vif1.diagnostic().m_committed_opcodes[0x15u] == 2u &&
+               vif1.read_register(0xc0u) == 0x20u,
+               "MSCALF did not execute after PATH3 completed"))
+    {
+        return 1;
+    }
+    vif1.reset();
+    if (!check(!send(vif1, {0x4a010000u, nop_lower, 0x00000030u,
+                            0x15000000u}) &&
+               vif1.diagnostic().m_last_rejected_vu_steps == 1u &&
+               vif1.diagnostic().m_last_rejected_staged_mpg == 1u &&
+               vif1.diagnostic().m_mpg_uploads == 0u &&
+               vif1.diagnostic().m_last_rejected_vu_upper == 0x00000030u,
+               "MSCALF failed to preserve rejected microprogram evidence"))
+    {
+        return 1;
+    }
+
     std::puts("EE native VIF1/MPG, VU1/XGKICK PATH1, PATH2 and TTE: PASS");
     return 0;
 }

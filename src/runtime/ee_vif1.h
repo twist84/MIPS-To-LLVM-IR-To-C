@@ -38,7 +38,8 @@ public:
         missing_path1,
         path1_rejected,
         mixed_gif_paths,
-        pending_limit
+        pending_limit,
+        mscalf_path3_busy
     };
 
     struct s_diagnostic
@@ -66,11 +67,15 @@ public:
         uint32_t m_last_rejected_vu_pc = 0u;
         uint32_t m_last_rejected_vu_lower = 0u;
         uint32_t m_last_rejected_vu_upper = 0u;
+        uint32_t m_last_rejected_vu_steps = 0u;
+        uint32_t m_last_rejected_staged_mpg = 0u;
+        uint32_t m_last_rejected_staged_unpack = 0u;
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
 
     void bind_path2(c_ee_gif_path3* path2);
     void bind_path1(c_ee_gif_path3* path1);
+    void bind_path3(const c_ee_gif_path3* path3);
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
     const s_diagnostic& diagnostic() const;
@@ -133,5 +138,6 @@ private:
     s_diagnostic m_diagnostic{};
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
+    const c_ee_gif_path3* m_path3 = nullptr;
 };
 } // namespace ee
