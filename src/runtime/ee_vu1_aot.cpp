@@ -3,6 +3,8 @@
 #include "ee_runtime_profile.h"
 
 #include <algorithm>
+#include <array>
+#include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -21,6 +23,25 @@ namespace ee
 {
 namespace
 {
+// Diagnostic identity of the on-disk binary, not an authenticity check.
+bool native_file_fingerprint(const std::filesystem::path& path, uint64_t& hash)
+{
+    std::ifstream input(path, std::ios::binary);
+    std::array<char, 16384> bytes{};
+    hash = UINT64_C(14695981039346656037);
+    for (; input; )
+    {
+        input.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+        const auto count = input.gcount();
+        for (std::streamsize i = 0; i < count; ++i)
+        {
+            hash ^= static_cast<uint8_t>(bytes[static_cast<size_t>(i)]);
+            hash *= UINT64_C(1099511628211);
+        }
+    }
+    return input.eof() && !input.bad();
+}
+
 void close_library(void* library)
 {
 #if defined(_WIN32)
@@ -231,6 +252,7 @@ size_t c_ee_vu1_aot::open_directory(const std::string& path, std::string* error)
         return 0u;
     }
     std::sort(paths.begin(), paths.end());
+    std::fprintf(stderr, "VU1 AOT directory: %s\n", path.c_str());
     size_t loaded = 0u;
     for (const auto& item : paths)
     {
@@ -238,6 +260,17 @@ size_t c_ee_vu1_aot::open_directory(const std::string& path, std::string* error)
         if (open(item.string(), &message))
         {
             ++loaded;
+            uint64_t hash = 0u;
+            if (native_file_fingerprint(item, hash))
+            {
+                std::fprintf(stderr, "VU1 AOT library: %s fnv1a64=%016llx\n",
+                    item.filename().string().c_str(), static_cast<unsigned long long>(hash));
+            }
+            else
+            {
+                std::fprintf(stderr, "VU1 AOT library: %s fingerprint unavailable\n",
+                    item.filename().string().c_str());
+            }
         }
         else if (error != nullptr)
         {

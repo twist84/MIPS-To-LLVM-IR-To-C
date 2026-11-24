@@ -19,6 +19,8 @@ def main():
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--opt", choices=("0", "1", "2", "3"), default="3")
+    parser.add_argument("--march", choices=("generic", "native"), default="generic",
+                        help="native tunes for this host only; use a separate output directory")
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     args = parser.parse_args()
     suffix = ".dll" if os.name == "nt" else ".so"
@@ -41,6 +43,17 @@ def main():
     if args.jobs < 1:
         parser.error("--jobs must be positive")
 
+    # A target-specific library can execute unsupported instructions on a
+    # different host. Never mix portable and tuned libraries in one set.
+    target_marker = out / "vu1-build-target.txt"
+    if target_marker.exists():
+        if target_marker.read_text(encoding="utf-8").strip() != args.march:
+            parser.error("VU1 target changed; use a separate output directory")
+    elif args.march == "native" and any(out.glob("*" + suffix)):
+        parser.error("unidentified existing libraries; use a fresh native output directory")
+    target_marker.write_text(args.march + "\n", encoding="utf-8")
+    print(f"VU1 AOT target: {args.march}", flush=True)
+
     def build_one(capture):
         start = int(capture.stem.split("-", 1)[0], 16)
         with tempfile.TemporaryDirectory(prefix="vu1-", dir=out) as directory:
@@ -54,6 +67,8 @@ def main():
             library = Path(directory) / ("program" + suffix)
             command = [clang, f"-O{args.opt}", "-shared", "-fuse-ld=lld",
                        "-Wno-override-module", str(ir), "-o", str(library)]
+            if args.march == "native":
+                command.append("-march=native")
             if os.name == "nt":
                 command += ["-nostdlib", "-Wl,/noentry"]
             else:
