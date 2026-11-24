@@ -65,6 +65,48 @@ define void @test_mul4(ptr %a, ptr %b, ptr %out) {
             assert list(out) == [scalar(x, y) for x, y in group], (opt, group)
 
 
+def verify_minmax(ir):
+    wrapper = """
+define i32 @test_max(i32 %a, i32 %b) {
+  %r = call i32 @vu_max(i32 %a, i32 %b)
+  ret i32 %r
+}
+define i32 @test_min(i32 %a, i32 %b) {
+  %r = call i32 @vu_min(i32 %a, i32 %b)
+  ret i32 %r
+}
+"""
+    # Explicit reference pairs: (a, b, max, min). Check both operand orders.
+    vectors = [
+        (0x80000000, 0, 0, 0x80000000),
+        (0, 1, 1, 0),
+        (1, 2, 2, 1),
+        (0x80000001, 0x80000002, 0x80000001, 0x80000002),
+        (0x80000000, 0x80000001, 0x80000000, 0x80000001),
+        (0x7f800000, 0x7f800001, 0x7f800001, 0x7f800000),
+        (0xff800000, 0xff800001, 0xff800000, 0xff800001),
+        (0x7f7fffff, 0x7f800000, 0x7f800000, 0x7f7fffff),
+        (0xffffffff, 0x7fffffff, 0x7fffffff, 0xffffffff),
+    ]
+    signature = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32)
+    for opt in (0, 3):
+        module = llvm.parse_assembly(ir + wrapper)
+        module.verify()
+        target = llvm.Target.from_default_triple().create_target_machine(opt=opt)
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(target.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), target)
+        engine.add_module(module)
+        engine.finalize_object()
+        addresses = [engine.get_function_address(name) for name in ("test_max", "test_min")]
+        assert all(addresses)
+        vmax, vmin = map(signature, addresses)
+        for a, b, maximum, minimum in vectors:
+            for x, y in ((a, b), (b, a)):
+                assert vmax(x, y) == maximum, (opt, x, y, "MAX")
+                assert vmin(x, y) == minimum, (opt, x, y, "MINI")
+
+
 def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
@@ -76,6 +118,7 @@ def main():
             ir = path.read_text(encoding="utf-8")
             if case == "acc":
                 verify_mul4(ir)
+                verify_minmax(ir)
             for opt in (0, 3):
                 module = llvm.parse_assembly(ir)
                 module.verify()

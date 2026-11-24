@@ -67,6 +67,27 @@ int main()
     std::array<uint8_t, ee::c_ee_vu1::k_memory_size> data{};
     ee::s_ee_vu1_issue issue{};
 
+    // MAX/MINI use raw sign-magnitude ordering, including signed zero,
+    // denormals and exponent-255 words. CLIP retains its separate key.
+    {
+        ee::s_ee_vu1_state extrema{};
+        extrema.m_initialized = true;
+        extrema.m_vf[2] = {0x80000000u, 1u, 0x80000001u, 0x7f800000u};
+        extrema.m_vf[3] = {0u, 2u, 0x80000002u, 0x7f800001u};
+        if (!check(run(extrema, {
+                       {k_lower_nop, upper(0x2bu, 4u, 2u, 3u, 15u)},
+                       {k_lower_nop, upper(0x2fu, 5u, 3u, 2u, 15u)},
+                       {k_lower_nop, k_upper_end},
+                       {k_lower_nop, k_upper_nop}
+                   }, data, issue) &&
+                   extrema.m_vf[4] == std::array<uint32_t, 4>{0u, 2u, 0x80000001u, 0x7f800001u} &&
+                   extrema.m_vf[5] == std::array<uint32_t, 4>{0x80000000u, 1u, 0x80000002u, 0x7f800000u},
+                   "MAX/MINI raw word selection"))
+        {
+            return 1;
+        }
+    }
+
     // Q retains its previous value until the FDIV completes; WAITQ
     // advances the cycle clock before the next upper reads the new Q.
     ee::s_ee_vu1_state q{};

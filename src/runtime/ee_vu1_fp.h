@@ -140,8 +140,15 @@ inline std::int32_t key(std::uint32_t x) {
     return (x & kSign) ? -magnitude : magnitude;
 }
 
-inline std::uint32_t max(std::uint32_t a, std::uint32_t b) { return key(a) >= key(b) ? a : b; }
-inline std::uint32_t min(std::uint32_t a, std::uint32_t b) { return key(a) <= key(b) ? a : b; }
+// MAX/MINI select raw words. Unlike CLIP's numerical key, do not
+// flush denormals or collapse signed zero (PCSX2 VUops.cpp fp_max/min).
+inline std::uint32_t raw_order_key(std::uint32_t x)
+{
+    return (x & kSign) ? ~x : (x ^ kSign);
+}
+
+inline std::uint32_t max(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) >= raw_order_key(b) ? a : b; }
+inline std::uint32_t min(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) <= raw_order_key(b) ? a : b; }
 
 inline std::uint32_t to_fixed(std::uint32_t x, int fraction) {
     const int e = static_cast<int>(exponent(x)) + fraction;

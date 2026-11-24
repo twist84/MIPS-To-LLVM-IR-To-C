@@ -200,18 +200,26 @@ define internal i32 @vu_key(i32 %raw) alwaysinline {
   ret i32 %r
 }
 
+define internal i32 @vu_raw_order_key(i32 %x) alwaysinline {
+  %negative = icmp slt i32 %x, 0
+  %neg = xor i32 %x, -1
+  %pos = xor i32 %x, -2147483648
+  %r = select i1 %negative, i32 %neg, i32 %pos
+  ret i32 %r
+}
+
 define internal i32 @vu_max(i32 %a, i32 %b) alwaysinline {
-  %ak = call i32 @vu_key(i32 %a)
-  %bk = call i32 @vu_key(i32 %b)
-  %pick_a = icmp sge i32 %ak, %bk
+  %ak = call i32 @vu_raw_order_key(i32 %a)
+  %bk = call i32 @vu_raw_order_key(i32 %b)
+  %pick_a = icmp uge i32 %ak, %bk
   %r = select i1 %pick_a, i32 %a, i32 %b
   ret i32 %r
 }
 
 define internal i32 @vu_min(i32 %a, i32 %b) alwaysinline {
-  %ak = call i32 @vu_key(i32 %a)
-  %bk = call i32 @vu_key(i32 %b)
-  %pick_a = icmp sle i32 %ak, %bk
+  %ak = call i32 @vu_raw_order_key(i32 %a)
+  %bk = call i32 @vu_raw_order_key(i32 %b)
+  %pick_a = icmp ule i32 %ak, %bk
   %r = select i1 %pick_a, i32 %a, i32 %b
   ret i32 %r
 }
