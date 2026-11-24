@@ -192,11 +192,12 @@ def test_pipeline_binding_preflight():
     llvm = verify_ir.llvm
     factory = llvm.create_pipeline_tuning_options
 
-    # Model the LLVM 22 binding that rejects the old size_level keyword.
-    def renamed_size_argument(speed_level=2, size_opt=0):
-        return factory(speed_level, size_opt)
+    # Model LLVM 22's one-argument factory, also delegating to older
+    # bindings using only the speed level and their default size tuning.
+    def speed_only_factory(speed_level=2):
+        return factory(speed_level)
 
-    with patch.object(llvm, "create_pipeline_tuning_options", renamed_size_argument):
+    with patch.object(llvm, "create_pipeline_tuning_options", speed_only_factory):
         verify_ir.preflight_ir_pipeline(llvm.get_default_triple())
 
     with tempfile.TemporaryDirectory(prefix="ee-pipeline-preflight-") as temp:
