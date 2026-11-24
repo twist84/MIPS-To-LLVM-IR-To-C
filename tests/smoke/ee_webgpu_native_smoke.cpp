@@ -71,10 +71,10 @@ bool compare_clut(ee::c_ee_webgpu_bridge& bridge, bool gpu_only = false)
             reg(0x53u, 0u) && write_image(gs, bytes.data(), qwc) &&
             (!gpu_only || write_image(gpu_gs, bytes.data(), qwc));
     };
-    const auto load = [&](uint32_t reg, uint32_t psm, uint32_t cbp,
+    const auto load = [&](uint32_t address, uint32_t psm, uint32_t cbp,
                           uint32_t cpsm, uint32_t csm, uint32_t csa, uint32_t cld)
     {
-        return reg(reg, (uint64_t{psm} << 20u) |
+        return reg(address, (uint64_t{psm} << 20u) |
             (uint64_t{cbp} << 37u) | (uint64_t{cpsm} << 51u) |
             (uint64_t{csm} << 55u) | (uint64_t{csa} << 56u) |
             (uint64_t{cld} << 61u));
