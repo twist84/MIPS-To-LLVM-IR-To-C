@@ -204,8 +204,9 @@ def test_game_tab_command_and_environment():
             "numeric": {label: c_fake_variable(value)
                         for label, value in gui_values(GUI.default_settings()).items()},
         }
+        vars["fields"] = {key: c_fake_variable(default) for key, (_, default, _) in GUI.RUNTIME_SETTINGS.items()}
         instance = SimpleNamespace(**vars)
-        env = {"EXPANSION_PER_PASS": "99", "SDBZ_DISC_ROOT": "stale"}
+        env = {"EXPANSION_PER_PASS": "99", "SDBZ_DISC_ROOT": "stale", "SDBZ_PAD0_SCRIPT": "1:1:cross", "SDBZ_TRACE_IPU": "1", "SDBZ_IOP_AOT_VERIFY": "1"}
         command = GUI.Launcher.game_command(instance, env)
         assert command[:4] == [
             "cmd.exe", "/d", "/c", "run_ps2_game.bat"
@@ -214,6 +215,8 @@ def test_game_tab_command_and_environment():
         assert env["EXPANSION_PER_PASS"] == "128"
         assert env["SDBZ_DISC_ROOT"] == str(disc.resolve())
         assert env["SDBZ_SPEED_PERCENT"] == "150"
+        assert env["SDBZ_IDLE_SKIP"] == "1"
+        assert not any(key in env for key in ("SDBZ_PAD0_SCRIPT", "SDBZ_TRACE_IPU", "SDBZ_IOP_AOT_VERIFY"))
         assert env["PRECOMPILE_ALL"] == "1"
         assert "--live-full-relink" not in command
         assert GUI.default_settings()["speed"] == "100%"
@@ -235,6 +238,66 @@ def test_game_tab_command_and_environment():
         instance.diagnostics["Trace guest stores"] = c_fake_variable("")
         GUI.Launcher.game_command(instance, env)
         assert "SDBZ_TRACE_STORE" not in env
+
+
+def test_runtime_options():
+    defaults = GUI.default_settings()
+    assert defaults["idle_skip"] is True
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary)
+        settings_path = path / "settings.json"
+        settings_path.write_text(json.dumps({"pad": "Neutral"}), encoding="utf-8")
+        restored, warning = GUI.load_settings(settings_path)
+        assert not warning and restored["idle_skip"] is True
+        restored["pad"] = "Scripted"
+        restored["pad_script"] = "740:8:cross;3500:4:start+circle"
+        restored["idle_skip"] = False
+        restored["iop_aot"] = str(path)
+        restored["iop_capture"] = str(path / "capture")
+        restored["iop_verify"] = True
+        restored["trace_ipu"] = True
+        restored["trace_cdvd"] = True
+        restored["trace_rpc_args"] = "0x80000592"
+        restored["trace_iop_sema"] = "0"
+        restored["frame_dir"] = str(path)
+        restored["frame_interval"] = "30"
+        restored["dump_ram"] = str(path / "ram.bin")
+        GUI.save_settings(settings_path, restored)
+        again, warning = GUI.load_settings(settings_path)
+        assert not warning and again["pad_script"] == restored["pad_script"]
+        assert again["idle_skip"] is False and again["iop_verify"] is True
+        values = {key: again[key] for key in GUI.RUNTIME_SETTINGS}
+        args, env = GUI.launcher_options(
+            "Full replay", "Scripted", False, True, True, gui_values(again), runtime=values)
+        assert "--neutral" not in args and "--cross" not in args
+        assert env["SDBZ_PAD0_SCRIPT"] == "740:8:cross,3500:4:start+circle"
+        assert env["SDBZ_IDLE_SKIP"] == "0"
+        assert env["SDBZ_IOP_AOT"] == str(path.resolve())
+        assert env["SDBZ_IOP_AOT_CAPTURE"] == str(path.resolve() / "capture")
+        assert env["SDBZ_IOP_AOT_VERIFY"] == "1"
+        assert env["SDBZ_TRACE_IPU"] == env["SDBZ_TRACE_CDVD"] == "1"
+        assert env["SDBZ_TRACE_RPC_ARGS"] == str(0x80000592)
+        assert env["SDBZ_TRACE_IOP_SEMA"] == "0"
+        assert env["SDBZ_FRAME_DUMP"] == f"{path.resolve()}:30"
+        assert env["SDBZ_DUMP_RAM"] == str(path.resolve() / "ram.bin")
+        matched = GUI.runtime_overrides("Matched neutral/Cross", "Scripted", True, True, values)
+        assert not any(key in matched for key in ("SDBZ_PAD0_SCRIPT", "SDBZ_IOP_AOT_CAPTURE", "SDBZ_FRAME_DUMP", "SDBZ_DUMP_RAM"))
+        assert GUI.runtime_overrides("Recover translation cache", "Scripted", True, True, values) == {}
+        neutral = GUI.runtime_overrides("Full replay", "Neutral", False, False, values)
+        assert "SDBZ_PAD0_SCRIPT" not in neutral and "SDBZ_FRAME_DUMP" not in neutral
+    for raw in ("", "0:1:cross", "1:601:cross", "1:1:bad", "1:1:cross+", "1234567890:1:cross"):
+        try:
+            GUI.validate_pad_script(raw)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid pad script: {raw}")
+    try:
+        GUI.runtime_overrides("Full replay", "Neutral", True, True, {"iop_verify": True})
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("accepted AOT verification without a library")
 
 
 def test_game_window_environment():
@@ -296,6 +359,8 @@ def test_batch_route():
     assert '--trace-store=%SDBZ_TRACE_STORE%' in batch
     assert '--trace-v0=%SDBZ_TRACE_V0%' in batch
     assert '%GUEST_TRACE_ARGS%' in batch
+    assert 'if defined SDBZ_PAD0_SCRIPT set "CAPTURE_PROFILE=pad-script"' in batch
+    assert '--target iop_recomp' in batch
     assert 'if /I "%~1"=="--replay-after-expand" (' in batch
     assert 'set "CACHE_MISS_ARGS=--replay-after-expand"' in batch
     assert '%SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG%' in batch
@@ -326,6 +391,7 @@ def main():
     test_defaults_and_compatibility()
     test_launcher_flags_and_bounds()
     test_game_tab_command_and_environment()
+    test_runtime_options()
     test_game_window_environment()
     test_direct_commands()
     test_batch_route()

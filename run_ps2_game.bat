@@ -110,17 +110,21 @@ if defined LIVE_RELINK_ARG if defined CACHE_MISS_ARGS (
     exit /b 2
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="cross" (
+    set "SDBZ_PAD0_SCRIPT="
     set "SDBZ_PAD0_CROSS_FIRST_POLL=200"
     set "SDBZ_PAD0_CROSS_POLL_COUNT=8"
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="neutral" (
+    set "SDBZ_PAD0_SCRIPT="
     set "SDBZ_PAD0_CROSS_FIRST_POLL="
     set "SDBZ_PAD0_CROSS_POLL_COUNT="
 )
+if /I "%REQUESTED_SESSION_MODE%"=="matched" set "SDBZ_PAD0_SCRIPT="
 set "CAPTURE_PROFILE=neutral"
 if defined SDBZ_PAD0_CROSS_FIRST_POLL set "CAPTURE_PROFILE=pad-custom"
 if defined SDBZ_PAD0_CROSS_POLL_COUNT set "CAPTURE_PROFILE=pad-custom"
 if "%SDBZ_PAD0_CROSS_FIRST_POLL%"=="200" if "%SDBZ_PAD0_CROSS_POLL_COUNT%"=="8" set "CAPTURE_PROFILE=cross"
+if defined SDBZ_PAD0_SCRIPT set "CAPTURE_PROFILE=pad-script"
 
 set "DISC_ROOT=%CD%\PS2_GAME"
 if defined SDBZ_DISC_ROOT set "DISC_ROOT=%SDBZ_DISC_ROOT%"
@@ -257,6 +261,10 @@ if errorlevel 1 exit /b 1
 echo === Building native EE runner and recompiler ===
 cmake --build build --config Release --parallel 8 --target ee_recomp ee_game_runner
 if errorlevel 1 exit /b 1
+if defined SDBZ_IOP_AOT_CAPTURE (
+    cmake --build build --config Release --parallel 8 --target iop_recomp
+    if errorlevel 1 exit /b 1
+)
 
 if not exist "%WORK_DIR%" mkdir "%WORK_DIR%"
 if errorlevel 1 exit /b 1

@@ -26,10 +26,10 @@ SESSION_MODES = {
     "Matched neutral/Cross": "--matched",
     "Recover translation cache": "--recover-cache",
 }
-PAD_PROFILES = {"Neutral": "--neutral", "Cross replay": "--cross", "Custom": None}
+PAD_PROFILES = {"Neutral": "--neutral", "Cross replay": "--cross", "Custom": None, "Scripted": None}
 NUMERIC_SETTINGS = {
     "Cross first poll": ("SDBZ_PAD0_CROSS_FIRST_POLL", 1, 0xFFFFFFFF),
-    "Cross poll count": ("SDBZ_PAD0_CROSS_POLL_COUNT", 1, 0xFFFFFFFF),
+    "Cross poll count": ("SDBZ_PAD0_CROSS_POLL_COUNT", 1, 120),
     "Max dispatches": ("MAX_DISPATCHES", 1, None),
     "Timeout (seconds)": ("BOOT_TIMEOUT_SECONDS", 1, None),
     "Expansion passes": ("EXPANSION_PASSES", 1, 64),
@@ -47,6 +47,102 @@ DIAGNOSTIC_SETTINGS = {
     "Trace guest stores": ("SDBZ_TRACE_STORE", "word"),
     "Trace V0 writes": ("SDBZ_TRACE_V0", "range"),
 }
+
+ 
+RUNTIME_SETTINGS = {
+    "idle_skip": ("SDBZ_IDLE_SKIP", True, "Accelerate idle polling loops"),
+    "pad_script": ("SDBZ_PAD0_SCRIPT", "", "Pad script"),
+    "iop_aot": ("SDBZ_IOP_AOT", "", "IOP AOT library or directory"),
+    "iop_capture": ("SDBZ_IOP_AOT_CAPTURE", "", "Capture linked IRX modules"),
+    "iop_verify": ("SDBZ_IOP_AOT_VERIFY", False, "Verify IOP AOT (diagnostic only)"),
+    "trace_ipu": ("SDBZ_TRACE_IPU", False, "Trace IPU"),
+    "trace_cdvd": ("SDBZ_TRACE_CDVD", False, "Trace CDVD"),
+    "trace_rpc_reject": ("SDBZ_TRACE_RPC_REJECT", False, "Trace rejected RPC commands"),
+    "trace_iop_threads": ("SDBZ_TRACE_IOP_THREADS", False, "Dump IOP threads at exit"),
+    "trace_iop_sema": ("SDBZ_TRACE_IOP_SEMA", "", "IOP semaphore trace limit"),
+    "trace_rpc_args": ("SDBZ_TRACE_RPC_ARGS", "", "Trace RPC server ID"),
+    "frame_dir": ("SDBZ_FRAME_DUMP", "", "Frame dump directory"),
+    "frame_interval": (None, "60", "Frame dump interval (fields)"),
+    "dump_ram": ("SDBZ_DUMP_RAM", "", "EE RAM dump file"),
+}
+
+PAD_BUTTONS = frozenset(
+    "select l3 r3 start up right down left l2 r2 l1 r1 triangle circle cross square".split()
+)
+
+
+def validate_pad_script(raw):
+    steps = [step for step in raw.replace(";", ",").split(",") if step]
+    if not 1 <= len(steps) <= 256:
+        raise ValueError("Pad script requires 1–256 steps.")
+    for step in steps:
+        parts = step.split(":")
+        if len(parts) != 3:
+            raise ValueError("Pad script: expected FIRST:HOLD:BUTTON[+BUTTON].")
+        first, hold, buttons = parts
+        if (not first.isascii() or not first.isdecimal() or len(first) > 9 or
+                not hold.isascii() or not hold.isdecimal() or len(hold) > 9 or
+                int(first) < 1 or not 1 <= int(hold) <= 600 or
+                any(button.lower() not in PAD_BUTTONS for button in buttons.split("+"))):
+            raise ValueError(f"Invalid pad script step: {step}")
+    return ",".join(steps)
+
+
+def runtime_overrides(mode, pad, window, snapshot, values):
+    """Translate persisted runtime controls into explicit, per-launch environment."""
+    if mode == "Recover translation cache":
+        return {}
+    values = {**{key: default for key, (_, default, _) in RUNTIME_SETTINGS.items()}, **values}
+    env = {"SDBZ_IDLE_SKIP": str(int(values["idle_skip"]))}
+    if mode != "Matched neutral/Cross" and pad == "Scripted":
+        env["SDBZ_PAD0_SCRIPT"] = validate_pad_script(values["pad_script"].strip())
+    for key in ("trace_ipu", "trace_cdvd", "trace_rpc_reject", "trace_iop_threads"):
+        if values[key]:
+            env[RUNTIME_SETTINGS[key][0]] = "1"
+    for key, minimum, maximum in (("trace_iop_sema", 0, 0xffffffff),
+                                   ("trace_rpc_args", 0, 0xffffffff)):
+        raw = values[key].strip()
+        if raw:
+            try:
+                number = int(raw, 16 if raw.lower().startswith("0x") else 10)
+                if not minimum <= number <= maximum:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"{RUNTIME_SETTINGS[key][2]} must be a 32-bit unsigned integer.") from None
+            env[RUNTIME_SETTINGS[key][0]] = str(number)
+    aot = values["iop_aot"].strip()
+    if aot:
+        path = Path(aot).expanduser().resolve()
+        if not (path.is_file() or path.is_dir()):
+            raise ValueError("Choose an existing IOP AOT library or directory.")
+        env["SDBZ_IOP_AOT"] = str(path)
+    if values["iop_verify"]:
+        if not aot:
+            raise ValueError("IOP AOT verification requires an AOT library or directory.")
+        env["SDBZ_IOP_AOT_VERIFY"] = "1"
+    # Output-producing probes are excluded from matched runs to avoid one
+    # replay overwriting the other. Capture is supported in ordinary sessions.
+    if mode != "Matched neutral/Cross":
+        for key in ("iop_capture", "dump_ram"):
+            raw = values[key].strip()
+            if raw:
+                path = Path(raw).expanduser().resolve()
+                if key == "iop_capture":
+                    if path.exists() and not path.is_dir():
+                        raise ValueError("IRX capture destination must be a directory.")
+                elif path.is_dir() or not path.parent.is_dir():
+                    raise ValueError("RAM dump requires a file in an existing directory.")
+                env[RUNTIME_SETTINGS[key][0]] = str(path)
+        raw = values["frame_dir"].strip()
+        if raw and mode in ("Full replay", "Automatic") and (window or snapshot):
+            path = Path(raw).expanduser().resolve()
+            if not path.is_dir():
+                raise ValueError("Choose an existing frame dump directory.")
+            interval = values["frame_interval"].strip()
+            if not interval.isascii() or not interval.isdecimal() or not 1 <= int(interval) <= 0xffffffff:
+                raise ValueError("Frame dump interval must be 1–4294967295 fields.")
+            env["SDBZ_FRAME_DUMP"] = f"{path}:{int(interval)}"
+    return env
 
 
 def diagnostic_overrides(values):
@@ -90,7 +186,7 @@ OPTION_HELP = {
     ),
     "Controller profile": (
         "Neutral leaves the controller free of scripted presses. Cross replay injects "
-        "eight polls starting at poll 200. Custom uses the values under Limits and diagnostics."
+        "eight polls starting at poll 200. Custom uses Limits and diagnostics; Scripted uses the Runtime tab."
     ),
     "WebGPU window": "Open the raylib game window with live controller input. Available for Full replay and Automatic.",
     "Speed": "Target emulation speed for the game window. Headless expansion remains unpaced.",
@@ -136,6 +232,20 @@ OPTION_HELP = {
     "Watch guest word": "Track changes between native dispatches. Example: 0x0044081c (sound-object handle).",
     "Trace guest stores": "Capture the exact guest STORE PCs and operands modifying this word (first 64 events). Example: 0x0044081c.",
     "Trace V0 writes": "Trace low-64-bit V0 assignments within an aligned guest PC range START:END (first 64 events). Example: 0x00137970:0x00137d18.",
+    "Accelerate idle polling loops": "Enable the runtime idle-loop accelerator. Uncheck for baseline comparisons.",
+    "Pad script": "Select Scripted on the Game tab. Example: 740:8:cross,2900:8:cross,3500:4:start. Combine buttons with +.",
+    "IOP AOT library or directory": "Load a single compiled IRX library or the modules directory produced by tools/build_iop_aot.py.",
+    "Capture linked IRX modules": "Capture relocated and linked IRX bytes for tools/build_iop_aot.py.",
+    "Verify IOP AOT (diagnostic only)": "Replay translated calls on the interpreter; expensive and may repeat MMIO side effects. Do not use for normal play.",
+    "Trace IPU": "Log IPU commands and MMIO activity.",
+    "Trace CDVD": "Log disc searches and reads.",
+    "Trace rejected RPC commands": "Dump refused SIF RPC command words.",
+    "Dump IOP threads at exit": "Print IOP thread state when the runner exits.",
+    "IOP semaphore trace limit": "Override the bounded semaphore event count; blank retains the runtime default.",
+    "Trace RPC server ID": "Dump requests for this server ID (decimal or 0x hexadecimal).",
+    "Frame dump directory": "Existing directory for periodic WebGPU PPM output; only used in graphical replay modes.",
+    "Frame dump interval (fields)": "Number of GS fields between frame dumps.",
+    "EE RAM dump file": "Write the 32 MiB EE RAM image at exit. Existing files may be overwritten.",
     "Tool": "Choose the boot session orchestrator, Python game runner, or native executable for a direct command.",
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
@@ -210,6 +320,7 @@ def default_settings():
         "cache_miss_resume": True,
         "precompile_all": True,
         "fast_overlays": True,
+        **{key: default for key, (_, default, _) in RUNTIME_SETTINGS.items()},
         "diagnostics": {label: "" for label in DIAGNOSTIC_SETTINGS},
         "tool": COMMAND_TOOLS[0],
         "executable": str(runner),
@@ -366,7 +477,7 @@ def save_settings(path, settings):
 
 def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
                      resume_on_cache_miss=True, precompile_all=True,
-                     fast_overlays=True, diagnostics=None):
+                     fast_overlays=True, diagnostics=None, runtime=None):
     args = []
     mode_flag = SESSION_MODES[mode]
     if mode_flag:
@@ -407,6 +518,7 @@ def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
     if uses_pad_profile and pad == "Custom":
         if not all(key in env for key in ("SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT")):
             raise ValueError("Set both values for the custom Cross pulse.")
+    env.update(runtime_overrides(mode, pad, window, snapshot, runtime or {}))
     return args, env
 
 
@@ -485,12 +597,13 @@ class Launcher(ttk.Frame):
         self.game_view = ttk.Frame(self.tabs, padding=6)
         self.performance = ttk.Frame(self.tabs, padding=10)
         self.limits = ttk.Frame(self.tabs, padding=10)
+        self.runtime = ttk.Frame(self.tabs, padding=10)
         self.direct = ttk.Frame(self.tabs, padding=10)
         for tab, title in (
             (self.setup, "Game"), (self.game_view, "Game window"),
             (self.performance, "Performance"),
             (self.limits, "Limits and diagnostics"),
-            (self.direct, "Direct command"),
+            (self.runtime, "Runtime"), (self.direct, "Direct command"),
         ):
             tab.columnconfigure(1, weight=1)
             self.tabs.add(tab, text=title)
@@ -610,6 +723,36 @@ class Launcher(ttk.Frame):
         ttk.Label(self.limits, text="Blank fields use the batch launcher defaults.").grid(
             row=len(self.numeric), column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
+        ttk.Label(
+            self.runtime, text="Runtime options for Game launches (blank = default/off).",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        for row, (key, (_, default, label)) in enumerate(RUNTIME_SETTINGS.items(), 1):
+            variable = self.fields[key]
+            if isinstance(default, bool):
+                widget = ttk.Checkbutton(self.runtime, text=label, variable=variable)
+                widget.grid(row=row, column=0, columnspan=3, sticky="w", pady=2)
+                Tooltip(widget, OPTION_HELP[label])
+            elif key in ("iop_aot", "iop_capture", "frame_dir", "dump_ram"):
+                picker = filedialog.asksaveasfilename if key == "dump_ram" else filedialog.askdirectory
+                self.path_row(self.runtime, row, label, variable, picker)
+                if key == "iop_aot":
+                    button = ttk.Button(
+                        self.runtime, text="File…",
+                        command=lambda: self.browse_aot_file(),
+                    )
+                    button.grid(row=row, column=3, padx=(4, 0))
+            else:
+                caption = ttk.Label(self.runtime, text=label)
+                caption.grid(row=row, column=0, sticky="w", padx=(0, 12))
+                entry = ttk.Entry(self.runtime, textvariable=variable)
+                entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
+                Tooltip(caption, OPTION_HELP[label])
+                Tooltip(entry, OPTION_HELP[label])
+        ttk.Label(
+            self.runtime, text="AOT: capture IRX modules, build with tools/build_iop_aot.py, then select OUT/modules. "
+            "Matched runs suppress scripted input and output dumps. Cache recovery ignores runtime options.",
+            wraplength=670,
+        ).grid(row=len(RUNTIME_SETTINGS) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
         self.choice_row(self.direct, 0, "Tool", self.tool, COMMAND_TOOLS)
         self.path_row(self.direct, 1, "Native executable", self.executable, filedialog.askopenfilename)
         self.tool_forms = {}
@@ -849,6 +992,11 @@ class Launcher(ttk.Frame):
         Tooltip(entry, OPTION_HELP[label])
         Tooltip(button, OPTION_HELP[label])
 
+    def browse_aot_file(self):
+        selected = filedialog.askopenfilename(parent=self, filetypes=[("Native library", "*.dll *.so"), ("All files", "*")])
+        if selected:
+            self.fields["iop_aot"].set(selected)
+
     def game_command(self, env):
         disc = Path(self.disc.get()).expanduser().resolve()
         if not (disc / "SYSTEM.CNF").is_file():
@@ -860,11 +1008,15 @@ class Launcher(ttk.Frame):
             precompile_all=self.precompile_all.get(),
             fast_overlays=self.fast_overlays.get(),
             diagnostics={label: var.get() for label, var in self.diagnostics.items()},
+            runtime={key: self.fields[key].get() for key in RUNTIME_SETTINGS},
         )
         for key, _, _ in NUMERIC_SETTINGS.values():
             env.pop(key, None)
         for key, _ in DIAGNOSTIC_SETTINGS.values():
             env.pop(key, None)
+        for key, _, _ in RUNTIME_SETTINGS.values():
+            if key is not None:
+                env.pop(key, None)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
                    SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))
         return ["cmd.exe", "/d", "/c", "run_ps2_game.bat", *args]
