@@ -64,8 +64,10 @@ entry:
   %exp_bits = shl i32 %exponent, 23
   %normal = or i32 %exp_bits, %fraction
   %bounded = select i1 %overflow, i32 2147483647, i32 %normal
-  %flush = or i1 %zero, %underflow
-  %absolute = select i1 %flush, i32 0, i32 %bounded
+  ; A cancellation underflow retains the normalized fraction with an
+  ; exponent of zero. Only an exactly zero sum loses the fraction.
+  %range_result = select i1 %underflow, i32 %fraction, i32 %bounded
+  %absolute = select i1 %zero, i32 0, i32 %range_result
   %bits = or i32 %absolute, %sign
   %out0 = insertvalue { i32, i1, i1 } poison, i32 %bits, 0
   %out1 = insertvalue { i32, i1, i1 } %out0, i1 %overflow, 1

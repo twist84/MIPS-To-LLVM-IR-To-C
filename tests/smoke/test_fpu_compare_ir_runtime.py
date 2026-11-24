@@ -990,7 +990,8 @@ def main():
     # PCSX2 EE reference semantics:
     # - ADD/SUB/MUL normalise zero/denormal and Inf/NaN operands first.
     # - Arithmetic overflow clamps to signed FMAX and sets O|SO.
-    # - Arithmetic underflow flushes to signed zero and sets U|SU.
+    # - Multiplier underflow flushes to signed zero; adder cancellation
+    #   retains the normalized fraction. Both set U|SU.
     # - DIV zero checks the raw divisor exponent and ORs D|SD or I|SI.
     fpu_normal_flags = 0xA592F45E
     add_cases = [
@@ -1106,6 +1107,35 @@ def main():
                 accumulator_cases.append((lhs, rhs, 0xAABBCCDD, expected,
                                           initial, flags, "hardware " + operation + "A"))
 
+    # Physical SCPH-900xx cancellation traces from PCSX2 PR #12001.
+    # The adder retains its normalized fraction on exponent underflow,
+    # unlike the multiplier. The flag trace reports U|SU.
+    for scalar_cases, accumulator_cases, words in (
+        (add_cases, adda_cases, [
+            (0x8080002C, 0x008000EC, 0x00400000),
+            (0x80800036, 0x00829F6A, 0x0027CD00),
+            (0x80C1AA65, 0x01200000, 0x007CAB36),
+        ]),
+        (sub_cases, suba_cases, [
+            (0x0080008B, 0x008000EA, 0x803E0000),
+        ]),
+    ):
+        for lhs, rhs, expected in words:
+            scalar_cases.append((lhs, rhs, expected, 0x01000001,
+                                 0x01004009, "hardware cancellation fraction"))
+            accumulator_cases.append((lhs, rhs, 0, expected, 0x01000001,
+                                      0x01004009, "adder fraction model for ACC"))
+
+    # The same adder is used for the final MAC stage.
+    mac_cases["madd_s"].extend([
+        (0x00800000, 0x3F000000, 0x01000000, 0x01000000,
+         0x01000001, 0x01000009, "hardware product underflow sticky only", 0, 0),
+        (0x7FFFFFFF, 0xBF800000, 0x7FFFFFFF, 0x7FFFFFFF,
+         0x01000001, 0x01008011, "hardware latched overflow result", 1, 1),
+        (0x008000EC, 0x3F800000, 0x8080002C, 0x00400000,
+         0x01000001, 0x01004009, "MAC cancellation fraction model", 0, 0),
+    ])
+
     mul_cases = [
         (0x3FC00000, 0x40000000, 0x40400000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal multiplication"),
@@ -1187,6 +1217,15 @@ def main():
         (0x7F800000, 0x40000000, 0x7F000000,
          0xA592F45E, 0xA592F45E, "extended operand divided by two"),
     ]
+
+    # SCPH-900xx console flags: range errors from the divide unit
+    # saturate/flush the result without setting the FMAC O/U flags.
+    div_cases.extend([
+        (0x00800000, 0x40000000, 0x00000000,
+         0x01000001, 0x01000001, "hardware division underflow flag"),
+        (0x5AE20690, 0x00800044, 0x7FFFFFFF,
+         0x01000001, 0x01000001, "hardware division overflow flag"),
+    ])
 
     # Unique physical-console results from ps2autotests
     # tests/cpu/ee_fpu/muldiv.expected (expanded CF_* operands).
