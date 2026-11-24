@@ -50,7 +50,9 @@ def backend_opt(profile):
 
 def optimize_guest_ir(module, target_machine):
     """Optimize a parsed, host-targeted module, never its source .ll file."""
-    with llvm.create_pipeline_tuning_options(speed_level=2, size_level=0) as tuning:
+    # LLVM bindings have used different names for the size tuning
+    # argument. O2 with the default size level (zero) needs only speed.
+    with llvm.create_pipeline_tuning_options(2) as tuning:
         with llvm.create_pass_builder(target_machine, tuning) as builder:
             with builder.getModulePassManager() as passes:
                 passes.run(module, builder)
@@ -77,6 +79,28 @@ def get_target_machine(emit_opt, target_triple):
             opt=backend_opt(emit_opt), reloc="pic", codemodel="default"
         )
     return _worker_machines[key]
+
+
+def preflight_ir_pipeline(target_triple):
+    """Check the installed LLVM pipeline before creating objects or workers."""
+    machine = get_target_machine(IR_PIPELINE_PROFILE, target_triple)
+    with llvm.parse_assembly("""
+define i32 @ee_pipeline_probe(i32 %x) {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+""") as module:
+        module.triple = target_triple
+        module.data_layout = str(machine.target_data)
+        module.verify()
+        optimize_guest_ir(module, machine)
+        if "alloca" in str(module):
+            raise RuntimeError("LLVM O2 pipeline did not promote the probe stack slot")
+        if not machine.emit_object(module):
+            raise RuntimeError("LLVM O2 pipeline probe emitted no object")
 
 
 def compile_module(filename, emit_opt, emit_dir, target_triple):
@@ -272,6 +296,13 @@ def main():
         return 2
 
     target_triple = llvm.get_default_triple() if emit_opt is not None else None
+    if emit_opt == IR_PIPELINE_PROFILE:
+        try:
+            preflight_ir_pipeline(target_triple)
+        except Exception as exc:
+            print(f"verify_ir: O2 IR pipeline preflight failed (LLVM "
+                  f"{llvm.llvm_version_info}): {exc}", file=sys.stderr)
+            return 1
     if emit_dir is not None:
         emit_dir.mkdir(parents=True, exist_ok=True)
         object_names = [Path(filename).stem + ".o" for filename in files]

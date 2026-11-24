@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "verify_ir.py"
@@ -185,7 +186,35 @@ entry:
         print("PASS: O2 IR pipeline cache provenance and immutable source IR")
 
 
+def test_pipeline_binding_preflight():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import verify_ir
+    llvm = verify_ir.llvm
+    factory = llvm.create_pipeline_tuning_options
+
+    # Model the LLVM 22 binding that rejects the old size_level keyword.
+    def renamed_size_argument(speed_level=2, size_opt=0):
+        return factory(speed_level, size_opt)
+
+    with patch.object(llvm, "create_pipeline_tuning_options", renamed_size_argument):
+        verify_ir.preflight_ir_pipeline(llvm.get_default_triple())
+
+    with tempfile.TemporaryDirectory(prefix="ee-pipeline-preflight-") as temp:
+        root = Path(temp)
+        source = root / "guest_fn.ll"
+        write_ir(source, 1)
+        objects = root / "objects"
+        args = [str(SCRIPT), str(source), f"--emit-dir={objects}", "--emit-opt=4"]
+        with patch.object(sys, "argv", args), patch.object(
+                llvm, "create_pipeline_tuning_options",
+                side_effect=TypeError("incompatible pipeline binding")):
+            assert verify_ir.main() == 1
+        assert not objects.exists(), "failed preflight must not start object emission"
+    print("PASS: renamed LLVM tuning argument and fail-fast pipeline setup")
+
+
 if __name__ == "__main__":
+    test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
     test_append_only_emission()
     test_ir_pipeline_profile()

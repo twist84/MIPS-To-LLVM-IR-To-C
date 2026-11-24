@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 
 import run_game
@@ -137,7 +138,8 @@ def main(argv=None):
     try:
         prepare(args.elf, args.build_dir, args.config, args.source_work_dir,
                 args.work_dir, args.emit_opt, args.emit_jobs, args.source_opt)
-    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError,
+            subprocess.CalledProcessError) as error:
         print(f"Optimized cache refused: {error}", file=sys.stderr)
         return 1
     return 0
