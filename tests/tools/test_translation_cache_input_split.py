@@ -48,6 +48,7 @@ def verify_preservation_when_host_only_inputs_change():
         paths = {
             "tools/run_game.py": b"runner",
             "tools/verify_ir.py": b"verify",
+            "tools/shared_ee_ir.py": b"shared source store",
             "tools/link_native_objects.py": b"link",
             "src/ee/ee_dispatcher.cpp": b"dispatch",
             "src/ee/recompiled_functions.cpp": b"dispatch map",
