@@ -29,9 +29,10 @@ ee::t_vu1_code program()
     ee::t_vu1_code code{};
     const uint32_t add_vi =
         0x80000030u | (2u << 16u) | (1u << 11u) | (3u << 6u);
-    pair(code, k_start, add_vi, upper(0x28u, 4u, 2u, 3u, 15u));
+    // MULAx writes ACC; following MADD consumes it.
+    pair(code, k_start, add_vi, upper(0x3cu, 0x18u >> 2u, 2u, 3u, 15u));
     // Same-pair LQ reads memory while the upper consumes the old VF4.
-    pair(code, 0u, 0x01e40001u, upper(0x2au, 5u, 4u, 3u, 15u) | 0x40000000u);
+    pair(code, 0u, 0x01e40001u, upper(0x29u, 5u, 4u, 3u, 15u) | 0x40000000u);
     // E delay slot stores the old VF6 before the simultaneous upper
     // writeback. Native execution must publish these data bytes too.
     pair(code, 8u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
@@ -52,7 +53,7 @@ ee::t_vu1_code branch_program()
     // A memory write in the delay slot must be transactional even when
     // the later JALR target is not in the statically compiled graph.
     pair(code, 0u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
-        (6u << 11u), k_upper);
+        (6u << 11u), upper(0x3eu, 0x2eu >> 2u, 2u, 3u, 15u));
     pair(code, 8u, branch(0x20u, 0u, 0u, 6u), k_upper | 0x40000000u);
     pair(code, 16u, 0x80000072u | (7u << 16u) | (7u << 11u), k_upper);
     pair(code, 0x20u, branch(0x25u, 2u, 8u, 0u), k_upper);
@@ -208,6 +209,7 @@ int main(int argc, char** argv)
     ee::s_ee_vu1_issue issue{};
     if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, issue) ||
         candidate.m_vi != original.m_vi || candidate.m_vf != original.m_vf ||
+        candidate.m_acc != original.m_acc ||
         candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
         candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
         memory != original_memory || issue.m_steps != 0u ||

@@ -51,7 +51,7 @@ bool rejection_tests()
     {
         return false;
     }
-    pair(code, 8u, k_nop, 0x29u); // unsupported MADD
+    pair(code, 8u, k_nop, 0x000001ffu); // unsupported CLIP
     return ee::vu1_lift_straight_line_ir(code, 0u).m_ir.empty();
 }
 } // namespace
@@ -148,8 +148,54 @@ int main(int argc, char** argv)
             append((15u << 21u) | (20u << 16u) | (1u << 11u), k_upper);
         }
     }
+    const bool acc_case = std::strcmp(argv[2], "acc") == 0 ||
+        std::strcmp(argv[2], "acc-branches") == 0;
+    if (acc_case)
+    {
+        const auto accumulator = [&](uint32_t index, uint32_t fs,
+            uint32_t ft, uint32_t mask)
+        {
+            return upper(0x3cu | (index & 3u), index >> 2u, fs, ft, mask);
+        };
+        // Every supported ACC arithmetic opcode, interleaved with a
+        // non-ACC MADD reading it into a distinct VF destination.
+        // VU FP special values and partial masks are carried forward.
+        constexpr uint32_t ops[] = {
+            0x00u, 0x01u, 0x02u, 0x03u, 0x04u, 0x05u, 0x06u, 0x07u,
+            0x08u, 0x09u, 0x0au, 0x0bu, 0x0cu, 0x0du, 0x0eu, 0x0fu,
+            0x18u, 0x19u, 0x1au, 0x1bu, 0x1cu, 0x1eu, 0x20u, 0x21u,
+            0x22u, 0x23u, 0x24u, 0x25u, 0x26u, 0x27u, 0x28u, 0x29u,
+            0x2au, 0x2cu, 0x2du, 0x2eu
+        };
+        // Store every result to an independent memory slot so later
+        // arithmetic cannot hide an incorrect earlier result.
+        for (uint32_t j = 0u; j < sizeof(ops) / sizeof(ops[0]); ++j)
+        {
+            append(k_nop, accumulator(ops[j], 21u, 22u, (j & 1u) ? 5u : 15u));
+            append(k_nop, upper(0x29u, 23u, 0u, 0u, 15u));
+            append((1u << 25u) | (15u << 21u) | (23u << 11u) |
+                (0x100u + j), k_upper);
+        }
+        // All VF-target MADD/MSUB variants, including broadcast, I/Q,
+        // zero destination, source aliases and cross-product XYZ mask.
+        constexpr uint32_t mac_ops[] = {
+            0x08u, 0x09u, 0x0au, 0x0bu, 0x0cu, 0x0du, 0x0eu, 0x0fu,
+            0x21u, 0x23u, 0x25u, 0x27u, 0x29u, 0x2du, 0x2eu
+        };
+        for (uint32_t j = 0u; j < sizeof(mac_ops) / sizeof(mac_ops[0]); ++j)
+        {
+            append(k_nop, upper(mac_ops[j], 24u, 21u, 22u, 15u));
+            append((1u << 25u) | (15u << 21u) | (24u << 11u) |
+                (0x140u + j), k_upper);
+        }
+        append(k_nop, upper(0x29u, 22u, 21u, 22u, 10u));
+        append(k_nop, upper(0x2du, 0u, 21u, 22u, 15u));
+        append(k_nop, accumulator(0x2eu, 21u, 22u, 1u));
+        append(k_nop, upper(0x2eu, 25u, 21u, 22u, 1u));
+    }
     const bool branches = std::strcmp(argv[2], "branches") == 0 ||
-        std::strcmp(argv[2], "branch-wrap") == 0;
+        std::strcmp(argv[2], "branch-wrap") == 0 ||
+        std::strcmp(argv[2], "acc-branches") == 0;
     if (branches)
     {
         const auto branch = [](uint32_t major, uint32_t is, uint32_t it, int32_t imm)
@@ -199,7 +245,7 @@ int main(int argc, char** argv)
     }
     const auto program = ee::vu1_lift_program_ir(code, start);
     if (program.m_ir.empty() || (program.m_steps == 0u) != branches ||
-        program.m_writes_data != (std::strcmp(argv[2], "stores") == 0))
+        program.m_writes_data != (acc_case || std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
     }
@@ -210,6 +256,10 @@ int main(int argc, char** argv)
     state.m_vi[2] = 5u;
     state.m_i = 0x12345678u;
     state.m_q = 0x3f800000u;
+    state.m_acc = {0x3f000000u, 0xbf800000u, 0x80000000u, 0x7fffffffu};
+    state.m_vf[21] = {0x3f800001u, 0xbf800001u, 0x7fffffffu, 0x00800000u};
+    state.m_vf[22] = {0x40000000u, 0x3f800000u, 0x80000000u, 0x00800001u};
+    state.m_vf[25][3] = 0x12345678u;
     state.m_mac = 0x1234u;
     state.m_status = 0x30u;
     state.m_vf[2] = {0x3f800000u, 0x80000001u, 0x7fffffffu, 0xbf800000u};
@@ -246,6 +296,10 @@ int main(int argc, char** argv)
         }
     }
     std::printf(" %u %u", state.m_mac, state.m_status);
+    for (uint32_t value : state.m_acc)
+    {
+        std::printf(" %u", value);
+    }
     for (uint8_t value : data)
     {
         std::printf(" %u", static_cast<unsigned>(value));

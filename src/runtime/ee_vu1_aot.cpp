@@ -310,7 +310,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 0u, &steps);
             steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), next.m_q, &next.m_mac,
-                &next.m_status, data_ptr, &cycles, &last_pc);
+                &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data());
             if (steps < 2u || steps > c_ee_vu1::k_max_steps ||
                 cycles < steps || cycles > steps * 4u ||
                 last_pc >= c_ee_vu1::k_memory_size || (last_pc & 7u) != 0u ||

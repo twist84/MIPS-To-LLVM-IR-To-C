@@ -212,7 +212,7 @@ public:
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, i32 %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
-            "ptr %last_pc_out) {\nentry:\n";
+            "ptr %last_pc_out, ptr %acc) {\nentry:\n";
     }
 
     // The dynamic path uses the same per-pair arithmetic emitter as the
@@ -341,6 +341,7 @@ public:
         // retire upper writes after lower writeback, as in the interpreter.
         m_upper_mask = 0u;
         m_upper_flags = false;
+        m_upper_acc = false;
         if ((hi & 0x38000000u) != 0u || !emit_upper(hi) ||
             !emit_lower(lo, hi))
         {
@@ -707,7 +708,21 @@ private:
 
     void commit_upper()
     {
-        write_vector(m_upper_target, m_upper_mask, m_upper_values);
+        if (m_upper_acc)
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((m_upper_mask & (8u >> lane)) != 0u)
+                {
+                    line("store i32 " + m_upper_values[lane] + ", ptr " +
+                        acc_pointer(lane) + ", align 4");
+                }
+            }
+        }
+        else
+        {
+            write_vector(m_upper_target, m_upper_mask, m_upper_values);
+        }
         if (m_upper_flags)
         {
             emit_flags(m_upper_values, m_upper_mask);
@@ -753,6 +768,24 @@ private:
         line("store i32 " + status + ", ptr %status, align 4");
     }
 
+    std::string acc_pointer(uint32_t lane)
+    {
+        return operation("getelementptr i32, ptr %acc, i32 " +
+            std::to_string(lane));
+    }
+
+    std::string acc(uint32_t lane)
+    {
+        return operation("load i32, ptr " + acc_pointer(lane) + ", align 4");
+    }
+
+    std::string fp_binary(const char* helper, const std::string& lhs,
+        const std::string& rhs)
+    {
+        return operation(std::string("call i32 @") + helper +
+            "(i32 " + lhs + ", i32 " + rhs + ")");
+    }
+
     bool emit_upper(uint32_t hi)
     {
         const uint32_t funct = hi & 63u;
@@ -769,67 +802,89 @@ private:
         }
 
         const bool abs = special && op == 0x1du;
-        const char* helper = nullptr;
-        if (!special)
+        const bool cross = op == 0x2eu;
+        // Conversions and CLIP have distinct side effects; do not
+        // accidentally decode those special indices as arithmetic.
+        if (special && ((op >= 0x10u && op <= 0x17u) || op == 0x1fu))
         {
-            if (op <= 0x03u || op == 0x20u || op == 0x22u || op == 0x28u)
-            {
-                helper = "vu_add";
-            }
-            else if ((op >= 0x04u && op <= 0x07u) ||
-                op == 0x24u || op == 0x26u || op == 0x2cu)
-            {
-                helper = "vu_sub";
-            }
-            else if ((op >= 0x18u && op <= 0x1cu) || op == 0x1eu || op == 0x2au)
-            {
-                helper = "vu_mul";
-            }
-            else if ((op >= 0x10u && op <= 0x13u) || op == 0x1du || op == 0x2bu)
-            {
-                helper = "vu_max";
-            }
-            else if ((op >= 0x14u && op <= 0x17u) || op == 0x1fu || op == 0x2fu)
-            {
-                helper = "vu_min";
-            }
+            return false;
         }
-        if (!abs && helper == nullptr)
+        const bool madd = (op >= 0x08u && op <= 0x0bu) ||
+            op == 0x21u || op == 0x23u || op == 0x29u;
+        const bool msub = (op >= 0x0cu && op <= 0x0fu) ||
+            op == 0x25u || op == 0x27u || op == 0x2du;
+        const char* helper = nullptr;
+        if (op <= 0x03u || op == 0x20u || op == 0x22u || op == 0x28u)
+        {
+            helper = "vu_add";
+        }
+        else if ((op >= 0x04u && op <= 0x07u) ||
+            op == 0x24u || op == 0x26u || op == 0x2cu)
+        {
+            helper = "vu_sub";
+        }
+        else if ((op >= 0x18u && op <= 0x1cu) || op == 0x1eu || op == 0x2au)
+        {
+            helper = "vu_mul";
+        }
+        else if (!special && ((op >= 0x10u && op <= 0x13u) ||
+            op == 0x1du || op == 0x2bu))
+        {
+            helper = "vu_max";
+        }
+        else if (!special && ((op >= 0x14u && op <= 0x17u) ||
+            op == 0x1fu || op == 0x2fu))
+        {
+            helper = "vu_min";
+        }
+        if (!abs && !cross && !madd && !msub && helper == nullptr)
         {
             return false;
         }
         const bool flags = !abs && !(op >= 0x10u && op <= 0x17u) &&
             op != 0x1du && op != 0x1fu && op != 0x2bu && op != 0x2fu;
-        const bool uses_q = op == 0x1cu || op == 0x20u || op == 0x24u;
+        const bool uses_q = op == 0x1cu || op == 0x20u || op == 0x21u ||
+            op == 0x24u || op == 0x25u;
         const bool uses_i = op == 0x1du || op == 0x1eu || op == 0x1fu ||
-            op == 0x22u || op == 0x26u;
+            op == 0x22u || op == 0x23u || op == 0x26u || op == 0x27u;
+        const uint32_t write_mask = cross ? 0xeu : mask;
         std::array<std::string, 4> values{};
-        // Read all lanes before any destination store (broadcast aliases
-        // and source/destination overlap must see the original values).
+        // Read every source before lower execution and upper writeback.
+        // MADD/MSUB use separate PS2-rounded MUL and ADD/SUB, never FMA.
         for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
-            if ((mask & (8u >> lane)) == 0u)
+            if ((write_mask & (8u >> lane)) == 0u)
             {
                 continue;
             }
-            const auto lhs = vf(fs, lane);
+            const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);
             if (abs)
             {
                 values[lane] = operation("and i32 " + lhs + ", 2147483647");
             }
             else
             {
-                const auto rhs = op <= 0x1bu ? vf(ft, funct & 3u) :
+                const auto rhs = cross ? vf(ft, (lane + 2u) % 3u) :
+                    op <= 0x1bu ? vf(ft, funct & 3u) :
                     uses_q ? "%q" : uses_i ?
                     operation("load i32, ptr %i, align 4") : vf(ft, lane);
-                values[lane] = operation(std::string("call i32 @") + helper +
-                    "(i32 " + lhs + ", i32 " + rhs + ")");
+                if (cross || madd || msub)
+                {
+                    const auto product = fp_binary("vu_mul", lhs, rhs);
+                    values[lane] = cross && special ? product :
+                        fp_binary(madd ? "vu_add" : "vu_sub", acc(lane), product);
+                }
+                else
+                {
+                    values[lane] = fp_binary(helper, lhs, rhs);
+                }
             }
         }
         m_upper_target = abs ? ft : fd;
-        m_upper_mask = mask;
+        m_upper_mask = write_mask;
         m_upper_values = std::move(values);
         m_upper_flags = flags;
+        m_upper_acc = special && !abs;
         return true;
     }
 
@@ -890,6 +945,7 @@ private:
     uint32_t m_upper_target = 0u;
     uint32_t m_upper_mask = 0u;
     bool m_upper_flags = false;
+    bool m_upper_acc = false;
     bool m_writes_data = false;
     bool m_dynamic = false;
     uint32_t m_current_pc = 0u;
