@@ -1239,6 +1239,32 @@ int main()
         return fail("CancelAlarm did not disarm the scheduled callback");
     }
 
+    // A later alarm may be inserted before an existing earlier hint,
+    // including from a due HLE callback. Preserve the exact deadlines
+    // and cancellation semantics while avoiding future alarm scans.
+    kernel.cpu().write32(0x2a28u, 0u);
+    const uint64_t alarm_start = kernel.cycles();
+    bool inserted = false;
+    if (!kernel.set_alarm(100u, 0x3000u, 0u, 0u) ||
+        !kernel.schedule_hle_event(10u, [&]()
+        {
+            inserted = kernel.set_alarm(5u, 0x3000u, 1u, 0u);
+        }) ||
+        kernel.run(15u, 1u).m_executed != 0u ||
+        !inserted || kernel.cycles() != alarm_start + 15u ||
+        !kernel.cpu().read32(0x2a28u, &low) || low != 0u)
+    {
+        return fail("future alarm hint changed event timing");
+    }
+    if (kernel.run(20u, 1u).m_stop != iop::e_kernel_stop::idle ||
+        !kernel.cpu().read32(0x2a28u, &low) || low != 1u ||
+        !kernel.cancel_alarm(0x3000u, 0u) ||
+        kernel.run(100u, 1u).m_executed != 0u ||
+        kernel.cycles() != alarm_start + 135u || kernel.has_guest_work())
+    {
+        return fail("earlier alarm insertion or cancellation changed idle timing");
+    }
+
     // Bounded guest-memory strncmp, lookup_ctype and strtol operate
     // through actual R3000 import stubs, not direct host-only calls.
     const std::string lhs = "ABC";

@@ -2166,6 +2166,23 @@ int main(int argc, char** argv)
             "(expected a positive integer)\n");
         return 2;
     }
+    uint32_t report_progress_interval = static_cast<uint32_t>(k_report_progress_interval);
+    std::string progress_environment;
+    const char* progress_setting = read_host_environment(
+        "SDBZ_REPORT_PROGRESS_EVERY", &progress_environment);
+    if (progress_setting != nullptr &&
+        (!parse_u32(progress_setting, &report_progress_interval) ||
+         report_progress_interval == 0u))
+    {
+        std::fprintf(stderr,
+            "invalid SDBZ_REPORT_PROGRESS_EVERY (expected a positive integer)\n");
+        return 2;
+    }
+    if (report_path != nullptr && report_progress_interval != k_report_progress_interval)
+    {
+        std::printf("EE progress reporting stride: %u (snapshots and history unchanged)\n",
+            report_progress_interval);
+    }
     bool trace_buffered = false;
     std::string trace_buffer_environment;
     const char* trace_buffer_setting = read_host_environment(
@@ -4699,7 +4716,7 @@ int main(int argc, char** argv)
         }
 
         if (report_path != nullptr &&
-            dispatched - last_progress_dispatch >= k_report_progress_interval)
+            dispatched - last_progress_dispatch >= report_progress_interval)
         {
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::progress_log);
             // Keep stdout traces ahead of the progress line in a merged

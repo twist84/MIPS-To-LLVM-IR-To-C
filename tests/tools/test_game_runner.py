@@ -4138,6 +4138,24 @@ def main():
             assert "report_ms=" in result.stderr, result.stderr
             assert "slowest_native_pc=" in result.stderr, result.stderr
 
+            # Throttle host progress text only. The runner's final state,
+            # instruction counts and terminal timing must be identical.
+            env = dict(os.environ, SDBZ_REPORT_PROGRESS_EVERY="1024")
+            sampled_report = root / "sampled.json"
+            sampled = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(sampled_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=env)
+            assert sampled.returncode == 4, sampled.stdout + sampled.stderr
+            assert "EE progress: dispatched=" not in sampled.stderr, sampled.stderr
+            assert "EE timing: dispatched=300" in sampled.stderr, sampled.stderr
+            sampled_state = json.loads(sampled_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert sampled_state[key] == snapshot[key], key
+
         with tempfile.TemporaryDirectory(prefix="ee-native-loop-budget-") as tmp:
             root = Path(tmp)
             elf = root / "counting-loop.elf"

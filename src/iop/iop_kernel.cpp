@@ -87,6 +87,7 @@ void c_kernel::reset()
     m_interrupts_suspended = false;
     m_cycles = 0u;
     m_next_thread_wake = std::numeric_limits<uint64_t>::max();
+    m_next_alarm_wake = std::numeric_limits<uint64_t>::max();
     m_next_module_id = 1u;
     m_next_thread_id = 1u;
     m_next_alarm_id = 1u;
@@ -986,6 +987,7 @@ bool c_kernel::set_alarm(
     m_alarms.emplace(alarm_id, s_kernel_alarm{
         alarm_id, id, callback, argument, gp, m_cycles + ticks, false
     });
+    m_next_alarm_wake = std::min(m_next_alarm_wake, m_cycles + ticks);
     return true;
 }
 
@@ -1523,33 +1525,47 @@ void c_kernel::wake_due()
         m_hle_events.erase(m_hle_events.begin());
         callback();
     }
-    for (auto& item : m_alarms)
+    // HLE callbacks above may add earlier alarms. Only skip a scan
+    // when every live deadline is still in the future. Preserve the
+    // original alarm-ID order, critical sections and exact idle scan.
+    if (m_cycles >= m_next_alarm_wake)
     {
-        s_kernel_alarm& alarm = item.second;
-        if (alarm.m_cancelled || alarm.m_deadline > m_cycles)
+        m_next_alarm_wake = std::numeric_limits<uint64_t>::max();
+        for (auto& item : m_alarms)
         {
-            continue;
+            s_kernel_alarm& alarm = item.second;
+            if (alarm.m_cancelled)
+            {
+                continue;
+            }
+            // Keep due but active alarms in the conservative hint: their
+            // thread may become dormant without changing the deadline.
+            m_next_alarm_wake = std::min(m_next_alarm_wake, alarm.m_deadline);
+            if (alarm.m_deadline > m_cycles)
+            {
+                continue;
+            }
+            auto found = m_threads.find(alarm.m_thread_id);
+            if (found == m_threads.end() ||
+                found->second.m_status != e_thread_status::dormant)
+            {
+                continue;
+            }
+            s_kernel_thread& thread = found->second;
+            s_cpu_state state{};
+            state.m_pc = alarm.m_callback;
+            state.m_next_pc = alarm.m_callback + 4u;
+            state.m_gpr[4] = alarm.m_argument;
+            state.m_gpr[28] = alarm.m_gp;
+            state.m_gpr[29] =
+                thread.m_stack_base + thread.m_stack_size - 16u;
+            state.m_gpr[31] = k_alarm_return_pc;
+            thread.m_cpu = state;
+            start_thread(alarm.m_thread_id);
         }
-        auto found = m_threads.find(alarm.m_thread_id);
-        if (found == m_threads.end() ||
-            found->second.m_status != e_thread_status::dormant)
-        {
-            continue;
-        }
-        s_kernel_thread& thread = found->second;
-        s_cpu_state state{};
-        state.m_pc = alarm.m_callback;
-        state.m_next_pc = alarm.m_callback + 4u;
-        state.m_gpr[4] = alarm.m_argument;
-        state.m_gpr[28] = alarm.m_gp;
-        state.m_gpr[29] =
-            thread.m_stack_base + thread.m_stack_size - 16u;
-        state.m_gpr[31] = k_alarm_return_pc;
-        thread.m_cpu = state;
-        start_thread(alarm.m_thread_id);
     }
-    // HLE callbacks and alarms retain their original ordering. Only
-    // the timed-thread scan can be skipped when no sleep is due.
+    // HLE callbacks, alarms and timed threads retain their original
+    // ordering. Skip the timed-thread scan when no sleep is due.
     if (m_cycles >= m_next_thread_wake)
     {
         m_next_thread_wake = std::numeric_limits<uint64_t>::max();
@@ -1890,6 +1906,7 @@ s_kernel_run_result c_kernel::run(
             else
             {
                 alarm->second.m_deadline = m_cycles + repeat_ticks;
+                m_next_alarm_wake = std::min(m_next_alarm_wake, alarm->second.m_deadline);
                 thread.m_status = e_thread_status::dormant;
                 thread.m_cpu = m_cpu.state();
             }

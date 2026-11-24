@@ -344,6 +344,9 @@ private:
     // Conservative lower bound on timed thread wakes. Cancellation may
     // leave it early, but scheduling a sleep must never leave it late.
     uint64_t m_next_thread_wake = std::numeric_limits<uint64_t>::max();
+    // Conservative earliest alarm deadline. Cancellation can leave an
+    // earlier hint, but never a hint later than a live alarm.
+    uint64_t m_next_alarm_wake = std::numeric_limits<uint64_t>::max();
     bool m_rom0_boot_active = false;
     uint32_t m_next_module_id = 1u;
     uint32_t m_next_thread_id = 1u;
