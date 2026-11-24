@@ -129,6 +129,7 @@ struct s_gpu_timestamp_profile
     uint64_t m_failed_queries = 0u;
     uint64_t m_sampled_compute_ns = 0u;
     uint64_t m_detail_passes = 0u;
+    uint32_t m_slot_capacity = 0u;
 };
 
 inline void write_gpu_timestamp_profile_json(FILE* output,
@@ -139,7 +140,7 @@ inline void write_gpu_timestamp_profile_json(FILE* output,
         "\"compute_passes\":%llu,\"submitted_queries\":%llu,"
         "\"completed_queries\":%llu,\"failed_queries\":%llu,"
         "\"pending_queries\":%llu,\"unsampled_passes\":%llu,"
-        "\"detail_passes_excluded\":%llu,\"sampled_compute_ns\":",
+        "\"detail_passes_excluded\":%llu,\"slot_capacity\":%u,\"sampled_compute_ns\":",
         p.m_supported ? "true" : "false",
         static_cast<unsigned long long>(p.m_compute_passes),
         static_cast<unsigned long long>(p.m_submitted_queries),
@@ -148,7 +149,8 @@ inline void write_gpu_timestamp_profile_json(FILE* output,
         static_cast<unsigned long long>(p.m_submitted_queries -
             p.m_completed_queries - p.m_failed_queries),
         static_cast<unsigned long long>(p.m_compute_passes - p.m_submitted_queries),
-        static_cast<unsigned long long>(p.m_detail_passes));
+        static_cast<unsigned long long>(p.m_detail_passes),
+        p.m_slot_capacity);
     if (p.m_completed_queries != 0u)
     {
         std::fprintf(output, "%llu", static_cast<unsigned long long>(p.m_sampled_compute_ns));

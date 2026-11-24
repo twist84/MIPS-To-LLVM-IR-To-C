@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <chrono>
 #include <cstdio>
@@ -109,8 +110,18 @@ std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1
 
 bool g_timestamps = false;
 WGPUQuerySet g_queries = nullptr;
-WGPUBuffer g_query_resolve = nullptr, g_query_read = nullptr;
-bool g_query_pending = false, g_query_ready = false;
+// The query set is shared, but each in-flight pair has independent
+// resolve/readback storage. No mapped buffer can be reused until retired.
+constexpr uint32_t k_timestamp_slots = 8u;
+enum class e_timestamp_state : uint8_t { free, pending, ready, failed };
+struct s_timestamp_slot
+{
+    WGPUBuffer m_resolve = nullptr;
+    WGPUBuffer m_read = nullptr;
+    std::atomic<e_timestamp_state> m_state{e_timestamp_state::free};
+};
+std::array<s_timestamp_slot, k_timestamp_slots> g_timestamp_slots{};
+uint32_t g_timestamp_cursor = 0u;
 std::uint64_t g_measured_ns = 0, g_measured = 0, g_total_passes = 0;
 std::uint64_t g_query_submissions = 0, g_query_failures = 0, g_detail_passes = 0;
 std::mutex g_timestamp_mutex;
@@ -120,34 +131,64 @@ void publish_timestamps()
 {
     const ee::s_gpu_timestamp_profile snapshot{
         g_timestamps, g_total_passes, g_query_submissions, g_measured,
-        g_query_failures, g_measured_ns, g_detail_passes};
+        g_query_failures, g_measured_ns, g_detail_passes,
+        g_timestamps ? k_timestamp_slots : 0u};
     std::lock_guard<std::mutex> lock(g_timestamp_mutex);
     g_published_timestamps = snapshot;
 }
 
 void collect_ready_timestamp()
 {
-    if (!g_query_ready)
+    for (auto& slot : g_timestamp_slots)
     {
-        return;
+        const auto state = slot.m_state.load(std::memory_order_acquire);
+        if (state == e_timestamp_state::failed)
+        {
+            ++g_query_failures;
+            slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
+            continue;
+        }
+        if (state != e_timestamp_state::ready)
+        {
+            continue;
+        }
+        const void* mapped = wgpuBufferGetConstMappedRange(slot.m_read, 0, 16);
+        std::uint64_t values[2]{};
+        if (mapped != nullptr)
+        {
+            std::memcpy(values, mapped, sizeof values);
+        }
+        if (mapped != nullptr && values[1] >= values[0])
+        {
+            g_measured_ns += values[1] - values[0];
+            ++g_measured;
+        }
+        else
+        {
+            ++g_query_failures;
+        }
+        wgpuBufferUnmap(slot.m_read);
+        slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
     }
-    const void* mapped = wgpuBufferGetConstMappedRange(g_query_read, 0, 16);
-    std::uint64_t values[2]{};
-    if (mapped != nullptr)
+}
+
+uint32_t acquire_timestamp_slot()
+{
+    if (g_timestamps)
     {
-        std::memcpy(values, mapped, sizeof values);
+        for (uint32_t offset = 0u; offset < k_timestamp_slots; ++offset)
+        {
+            const uint32_t index = (g_timestamp_cursor + offset) % k_timestamp_slots;
+            if (g_timestamp_slots[index].m_state.load(std::memory_order_acquire) ==
+                e_timestamp_state::free)
+            {
+                g_timestamp_cursor = (index + 1u) % k_timestamp_slots;
+                return index;
+            }
+        }
     }
-    if (mapped != nullptr && values[1] >= values[0])
-    {
-        g_measured_ns += values[1] - values[0];
-        ++g_measured;
-    }
-    else
-    {
-        ++g_query_failures;
-    }
-    wgpuBufferUnmap(g_query_read);
-    g_query_ready = g_query_pending = false;
+    // Profiling must never stall renderer submission to free a slot.
+    return k_timestamp_slots;
 }
 WGPUDevice g_device = nullptr;
 WGPUQueue g_queue = nullptr;
@@ -1063,12 +1104,13 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
     collect_ready_timestamp();
-    const bool measure = g_timestamps && !g_query_pending;
+    const uint32_t query_index = acquire_timestamp_slot();
+    const bool measure = query_index != k_timestamp_slots;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
     writes.querySet = g_queries;
-    writes.beginningOfPassWriteIndex = 0;
-    writes.endOfPassWriteIndex = 1;
+    writes.beginningOfPassWriteIndex = measure ? query_index * 2u : 0u;
+    writes.endOfPassWriteIndex = measure ? query_index * 2u + 1u : 1u;
     WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
     if (measure) cd.timestampWrites = &writes;
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
@@ -1088,8 +1130,10 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
     if (measure) {
-        wgpuCommandEncoderResolveQuerySet(enc, g_queries, 0, 2, g_query_resolve, 0);
-        wgpuCommandEncoderCopyBufferToBuffer(enc, g_query_resolve, 0, g_query_read, 0, 16);
+        auto& slot = g_timestamp_slots[query_index];
+        wgpuCommandEncoderResolveQuerySet(enc, g_queries, query_index * 2u, 2u,
+            slot.m_resolve, 0);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, slot.m_resolve, 0, slot.m_read, 0, 16);
     }
     if (present_view) {
         WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
@@ -1114,15 +1158,19 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
     if (measure) {
-        g_query_pending = true;
+        auto& slot = g_timestamp_slots[query_index];
+        slot.m_state.store(e_timestamp_state::pending, std::memory_order_release);
         ++g_query_submissions;
         WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
         cb.mode = WGPUCallbackMode_AllowProcessEvents;
-        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *, void *) {
-            if (status == WGPUMapAsyncStatus_Success) g_query_ready = true;
-            else { ++g_query_failures; g_query_pending = false; }
+        cb.userdata1 = &slot;
+        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* user, void*) {
+            auto& completed = *static_cast<s_timestamp_slot*>(user);
+            completed.m_state.store(status == WGPUMapAsyncStatus_Success ?
+                e_timestamp_state::ready : e_timestamp_state::failed,
+                std::memory_order_release);
         };
-        wgpuBufferMapAsync(g_query_read, WGPUMapMode_Read, 0, 16, cb);
+        wgpuBufferMapAsync(slot.m_read, WGPUMapMode_Read, 0, 16, cb);
     }
 #ifdef __EMSCRIPTEN__
     wgpuInstanceProcessEvents(g_instance);
@@ -1463,12 +1511,28 @@ bool init(Mode m) {
     if (g_timestamps) {
         WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
         qd.type = WGPUQueryType_Timestamp;
-        qd.count = 2;
+        qd.count = k_timestamp_slots * 2u;
         g_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
-        g_query_resolve = make_buffer(16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
-        g_query_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
-        g_timestamps = g_queries != nullptr && g_query_resolve != nullptr &&
-            g_query_read != nullptr;
+        g_timestamps = g_queries != nullptr;
+        for (auto& slot : g_timestamp_slots)
+        {
+            slot.m_resolve = make_buffer(16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+            slot.m_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+            g_timestamps = g_timestamps && slot.m_resolve != nullptr &&
+                slot.m_read != nullptr;
+        }
+        if (!g_timestamps)
+        {
+            for (auto& slot : g_timestamp_slots)
+            {
+                if (slot.m_resolve != nullptr) wgpuBufferRelease(slot.m_resolve);
+                if (slot.m_read != nullptr) wgpuBufferRelease(slot.m_read);
+                slot.m_resolve = nullptr;
+                slot.m_read = nullptr;
+            }
+            if (g_queries != nullptr) wgpuQuerySetRelease(g_queries);
+            g_queries = nullptr;
+        }
     }
     publish_timestamps();
 

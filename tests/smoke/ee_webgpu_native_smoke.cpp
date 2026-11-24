@@ -437,7 +437,11 @@ int main()
         timestamps.m_submitted_queries > timestamps.m_compute_passes ||
         timestamps.m_completed_queries + timestamps.m_failed_queries >
             timestamps.m_submitted_queries ||
-        (!timestamps.m_supported && timestamps.m_submitted_queries != 0u))
+        timestamps.m_submitted_queries - timestamps.m_completed_queries -
+            timestamps.m_failed_queries > timestamps.m_slot_capacity ||
+        (timestamps.m_supported && timestamps.m_slot_capacity != 8u) ||
+        (!timestamps.m_supported && (timestamps.m_submitted_queries != 0u ||
+            timestamps.m_slot_capacity != 0u)))
     {
         std::fprintf(stderr, "GPU timestamp accounting is inconsistent\n");
         return 1;

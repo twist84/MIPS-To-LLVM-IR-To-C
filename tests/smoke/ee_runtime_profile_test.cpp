@@ -127,13 +127,13 @@ int main()
     }
     const bool emitted = ee::write_runtime_profile_interval(intervals,
         100u, 200u, 3u, 2u, false, first,
-        {true, 10u, 8u, 6u, 1u, 1200u, 0u});
+        {true, 10u, 8u, 6u, 1u, 1200u, 0u, 8u});
     {
         ee::c_runtime_profile_scope scope(e_runtime_profile_id::gif_consume, 11u);
     }
     const bool final_emitted = ee::write_runtime_profile_interval(intervals,
         150u, 300u, 1u, 3u, true, second,
-        {true, 20u, 16u, 14u, 1u, 2700u, 2u});
+        {true, 20u, 16u, 14u, 1u, 2700u, 2u, 8u});
     std::rewind(intervals);
     std::string records;
     char buffer[1024];
@@ -153,7 +153,7 @@ int main()
         records.find("\"gif_consume\":{\"calls\":1,", second_record) == std::string::npos ||
         records.find("\"work\":11}", second_record) == std::string::npos ||
         records.find("\"pending_queries\":1,\"unsampled_passes\":2") == std::string::npos ||
-        records.find("\"sampled_compute_ns\":2700", second_record) == std::string::npos ||
+        records.find("\"slot_capacity\":8,\"sampled_compute_ns\":2700", second_record) == std::string::npos ||
         records.find("\"sampled_compute_ns\":1200", second_record) == std::string::npos ||
         records.find("\"gpu_execution_ns\":null", second_record) == std::string::npos)
     {
