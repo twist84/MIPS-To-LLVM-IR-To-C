@@ -320,6 +320,7 @@ private:
         const std::vector<uint8_t>& bytes, uint32_t* size
     ) const;
     uint32_t next_ready(uint64_t& next_wake) const;
+    void rebuild_ready_cache() const;
     void wake_due();
     bool start_guest_interrupt(uint32_t line,
                                const s_kernel_interrupt_target& target);
@@ -332,6 +333,12 @@ private:
     std::map<uint32_t, s_kernel_module> m_modules;
     std::function<void(const s_irx_module&)> m_module_loaded;
     std::map<uint32_t, s_kernel_thread> m_threads;
+    // Exact highest-priority ready IDs in original map order, and the
+    // earliest future timed wake. Invalidate on durable thread state
+    // changes; a normal READY -> RUNNING -> READY slice is unchanged.
+    mutable bool m_ready_cache_dirty = true;
+    mutable std::vector<uint32_t> m_ready_cache;
+    mutable uint64_t m_ready_cache_wake = std::numeric_limits<uint64_t>::max();
     std::map<uint32_t, s_kernel_alarm> m_alarms;
     std::multimap<uint64_t, std::function<void()>> m_hle_events;
     t_kernel_syscall m_syscall;

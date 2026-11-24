@@ -1631,6 +1631,10 @@ uint32_t c_hw::pending_interrupts() const
 int32_t c_hw::next_pending_interrupt() const
 {
     const uint32_t pending = pending_interrupts();
+    if (pending == 0u)
+    {
+        return -1;
+    }
     if ((pending & (1u << k_dma_irq)) != 0u)
     {
         const uint32_t primary =
@@ -1653,6 +1657,10 @@ int32_t c_hw::next_pending_interrupt() const
         }
     }
     const uint32_t ordinary = pending & ~(1u << k_dma_irq);
+    if (ordinary == 0u)
+    {
+        return -1;
+    }
     for (uint32_t line = 0u; line < 32u; ++line)
     {
         if ((ordinary & (1u << line)) != 0u)
@@ -1697,15 +1705,19 @@ void c_hw::advance_cycles(uint32_t cycles)
     {
         return;
     }
-    advance_spu2_dma(cycles);
-    // Timer 5 clock division, per IOP counter MODE[14:13].
-    // The initial kernel tick uses /1, mode 0x58.
-    const uint32_t shifts[4] = {1u, 8u, 16u, 256u};
-    const uint32_t divider = shifts[(m_timer5_mode >> 13u) & 3u];
+    if ((m_spu2_dma_remaining[0u] | m_spu2_dma_remaining[1u]) != 0u)
+    {
+        advance_spu2_dma(cycles);
+    }
+    // All Timer 5 divisors are powers of two. Keep the exact quotient
+    // and fractional remainder without a variable 64-bit division.
+    constexpr uint32_t shifts[4] = {0u, 3u, 4u, 8u};
+    const uint32_t shift = shifts[(m_timer5_mode >> 13u) & 3u];
     const uint64_t accumulated =
         static_cast<uint64_t>(m_timer5_remainder) + cycles;
-    const uint64_t elapsed = accumulated / divider;
-    m_timer5_remainder = static_cast<uint32_t>(accumulated % divider);
+    const uint64_t elapsed = accumulated >> shift;
+    m_timer5_remainder = static_cast<uint32_t>(
+        accumulated & ((uint64_t{1u} << shift) - 1u));
     if (elapsed == 0u)
     {
         return;
