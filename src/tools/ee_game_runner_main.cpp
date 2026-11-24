@@ -25,6 +25,7 @@
 #include "ee_gs_presentation_probe.h"
 #ifdef EE_ENABLE_WEBGPU
 #include "ee_webgpu_bridge.h"
+#include "ps2_webgpu/gs/gpu/gpu.hpp"
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
 #include "ee_raylib_window.h"
@@ -1622,8 +1623,14 @@ bool write_report(
     std::fputs(",\n  \"vu1_worker\": ", output);
     vif1.write_worker_json(output);
     std::fputs(",\n  \"runtime_profile\": ", output);
+    ee::s_gpu_timestamp_profile gpu_timestamps{};
+#ifdef EE_ENABLE_WEBGPU
+    // Snapshot the last published counters without touching the device
+    // or joining an active GS worker at periodic report boundaries.
+    gpu_timestamps = ps2::gs::gpu::timestamp_profile();
+#endif
     ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
-        graphics_probe.present_succeeded());
+        graphics_probe.present_succeeded(), gpu_timestamps);
     if (ee::g_runtime_profile.m_enabled)
     {
         // Retain phase deltas in the archived replay log, even though
@@ -1631,7 +1638,7 @@ bool write_report(
         ee::write_runtime_profile_interval(stderr, dispatched,
             runtime.m_ee_cycle_scheduler.current_cycle(),
             hardware.scanout().fields_started(), graphics_probe.present_succeeded(),
-            !in_progress);
+            !in_progress, ee::t_runtime_profile_clock::now(), gpu_timestamps);
     }
     std::fputs("\n}\n", output);
     const bool no_write_error = std::ferror(output) == 0;
@@ -8695,6 +8702,12 @@ int main(int argc, char** argv)
         }
     }
 #ifdef EE_ENABLE_WEBGPU
+    if (webgpu_bridge.active())
+    {
+        // All committed GS batches are already drained. Retire any
+        // ready timestamp without waiting for a new GPU submission.
+        ps2::gs::gpu::collect_timestamp_profile();
+    }
     graphics_probe.set_gpu_progress(
         webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
 #endif

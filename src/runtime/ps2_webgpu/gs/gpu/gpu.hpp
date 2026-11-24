@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <vector>
 
+namespace ee { struct s_gpu_timestamp_profile; }
+
 namespace ps2::gs::gpu {
 
 enum class Mode { off, mirror, primary };
@@ -56,6 +58,10 @@ bool attach_surface(const SurfaceTarget &target);
 void resize_surface(std::uint32_t width, std::uint32_t height);
 bool has_surface();
 bool present(const DisplaySource &src);
+// Snapshot can be called by the EE while the GS worker owns the GPU.
+// Collection touches the device and is owner-only, after draining work.
+ee::s_gpu_timestamp_profile timestamp_profile();
+void collect_timestamp_profile();
 double busy_ms();
 double vram_mb();
 void stats();

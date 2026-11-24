@@ -117,6 +117,49 @@ class c_runtime_profile_scope;
 
 // Completed-scope baseline for a wall-clock interval. Field endpoints
 // are retained rather than assuming scanout counters never reset.
+// GPU clock measurements are not host steady-clock scopes. A normal
+// compute pass can be unmeasured when the single query slot is busy;
+// never extrapolate those samples into an exact GPU execution total.
+struct s_gpu_timestamp_profile
+{
+    bool m_supported = false;
+    uint64_t m_compute_passes = 0u;
+    uint64_t m_submitted_queries = 0u;
+    uint64_t m_completed_queries = 0u;
+    uint64_t m_failed_queries = 0u;
+    uint64_t m_sampled_compute_ns = 0u;
+    uint64_t m_detail_passes = 0u;
+};
+
+inline void write_gpu_timestamp_profile_json(FILE* output,
+    const s_gpu_timestamp_profile& p)
+{
+    std::fprintf(output,
+        "{\"supported\":%s,\"scope\":\"sampled_regular_compute_passes\","
+        "\"compute_passes\":%llu,\"submitted_queries\":%llu,"
+        "\"completed_queries\":%llu,\"failed_queries\":%llu,"
+        "\"pending_queries\":%llu,\"unsampled_passes\":%llu,"
+        "\"detail_passes_excluded\":%llu,\"sampled_compute_ns\":",
+        p.m_supported ? "true" : "false",
+        static_cast<unsigned long long>(p.m_compute_passes),
+        static_cast<unsigned long long>(p.m_submitted_queries),
+        static_cast<unsigned long long>(p.m_completed_queries),
+        static_cast<unsigned long long>(p.m_failed_queries),
+        static_cast<unsigned long long>(p.m_submitted_queries -
+            p.m_completed_queries - p.m_failed_queries),
+        static_cast<unsigned long long>(p.m_compute_passes - p.m_submitted_queries),
+        static_cast<unsigned long long>(p.m_detail_passes));
+    if (p.m_completed_queries != 0u)
+    {
+        std::fprintf(output, "%llu", static_cast<unsigned long long>(p.m_sampled_compute_ns));
+    }
+    else
+    {
+        std::fputs("null", output);
+    }
+    std::fputc('}', output);
+}
+
 struct s_runtime_profile_interval
 {
     t_runtime_profile_clock::time_point m_start{};
@@ -125,6 +168,7 @@ struct s_runtime_profile_interval
     uint64_t m_fields = 0u;
     uint64_t m_presentations = 0u;
     uint64_t m_covered_ns = 0u;
+    s_gpu_timestamp_profile m_gpu{};
     std::array<s_runtime_profile_counter, k_runtime_profile_descriptors.size()> m_counters{};
 };
 
@@ -247,7 +291,8 @@ private:
 // Endpoints (not inferred frame deltas) expose scanout reconfiguration.
 inline bool write_runtime_profile_interval(FILE* output, uint64_t dispatches,
     uint64_t cycles, uint64_t fields, uint64_t presentations, bool final,
-    t_runtime_profile_clock::time_point now = t_runtime_profile_clock::now())
+    t_runtime_profile_clock::time_point now = t_runtime_profile_clock::now(),
+    const s_gpu_timestamp_profile& gpu = {})
 {
     auto& state = g_runtime_profile;
     if (!state.m_enabled || state.m_active != nullptr || output == nullptr)
@@ -270,7 +315,7 @@ inline bool write_runtime_profile_interval(FILE* output, uint64_t dispatches,
         "\"start_fields\":%llu,\"end_fields\":%llu,"
         "\"start_presentations\":%llu,\"end_presentations\":%llu,"
         "\"wall_ns\":%llu,\"covered_ns\":%llu,\"uninstrumented_ns\":%llu,"
-        "\"gpu_execution_ns\":null,\"subsystems\":{",
+        "\"gpu_execution_ns\":null,\"gpu_compute_timestamps\":",
         static_cast<unsigned long long>(previous.m_dispatches),
         static_cast<unsigned long long>(dispatches),
         static_cast<unsigned long long>(previous.m_cycles),
@@ -282,6 +327,12 @@ inline bool write_runtime_profile_interval(FILE* output, uint64_t dispatches,
         static_cast<unsigned long long>(wall_ns),
         static_cast<unsigned long long>(covered_ns),
         static_cast<unsigned long long>(wall_ns >= covered_ns ? wall_ns - covered_ns : 0u));
+    // Publish cumulative endpoints rather than pretending a query
+    // collected in this interval necessarily executed in it.
+    write_gpu_timestamp_profile_json(output, gpu);
+    std::fputs(",\"gpu_compute_previous\":", output);
+    write_gpu_timestamp_profile_json(output, previous.m_gpu);
+    std::fputs(",\"subsystems\":{", output);
     for (std::size_t i = 0u; i < k_runtime_profile_descriptors.size(); ++i)
     {
         const auto& current = state.m_counters[i];
@@ -302,12 +353,14 @@ inline bool write_runtime_profile_interval(FILE* output, uint64_t dispatches,
     previous.m_fields = fields;
     previous.m_presentations = presentations;
     previous.m_covered_ns = state.m_covered_ns;
+    previous.m_gpu = gpu;
     previous.m_counters = state.m_counters;
     return true;
 }
 
 inline void write_runtime_profile_json(FILE* output, uint64_t dispatches,
-    uint64_t fields, uint64_t presentations)
+    uint64_t fields, uint64_t presentations,
+    const s_gpu_timestamp_profile& gpu = {})
 {
     if (!g_runtime_profile.m_enabled)
     {
@@ -328,7 +381,7 @@ inline void write_runtime_profile_json(FILE* output, uint64_t dispatches,
         "\"dispatches\":%llu,\"guest_fields\":%llu,\"presentations\":%llu,"
         "\"dispatches_per_second\":%.6f,\"guest_fields_per_second\":%.6f,"
         "\"presentations_per_second\":%.6f,\"gpu_execution_ns\":null,"
-        "\"subsystems\":{",
+        "\"gpu_compute_timestamps\":",
         static_cast<unsigned long long>(wall_ns),
         static_cast<unsigned long long>(covered_ns),
         static_cast<unsigned long long>(uninstrumented_ns),
@@ -338,6 +391,8 @@ inline void write_runtime_profile_json(FILE* output, uint64_t dispatches,
         seconds > 0.0 ? static_cast<double>(dispatches) / seconds : 0.0,
         seconds > 0.0 ? static_cast<double>(fields) / seconds : 0.0,
         seconds > 0.0 ? static_cast<double>(presentations) / seconds : 0.0);
+    write_gpu_timestamp_profile_json(output, gpu);
+    std::fputs(",\"subsystems\":{", output);
 
     for (std::size_t i = 0u; i < k_runtime_profile_descriptors.size(); ++i)
     {

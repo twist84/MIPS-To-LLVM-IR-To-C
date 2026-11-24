@@ -3,6 +3,7 @@
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 #include "ee_gs.h"
 #include "ee_webgpu_bridge.h"
+#include "ee_runtime_profile.h"
 
 #include <algorithm>
 #include <array>
@@ -429,5 +430,19 @@ int main()
         return 1;
     }
     bridge.write_worker_statistics(stderr);
+    ps2::gs::gpu::wait_idle();
+    ps2::gs::gpu::collect_timestamp_profile();
+    const auto timestamps = ps2::gs::gpu::timestamp_profile();
+    if (timestamps.m_compute_passes == 0u ||
+        timestamps.m_submitted_queries > timestamps.m_compute_passes ||
+        timestamps.m_completed_queries + timestamps.m_failed_queries >
+            timestamps.m_submitted_queries ||
+        (!timestamps.m_supported && timestamps.m_submitted_queries != 0u))
+    {
+        std::fprintf(stderr, "GPU timestamp accounting is inconsistent\n");
+        return 1;
+    }
+    ee::write_gpu_timestamp_profile_json(stderr, timestamps);
+    std::fputc('\n', stderr);
     return 0;
 }

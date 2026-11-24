@@ -18,6 +18,7 @@
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -111,6 +112,43 @@ WGPUQuerySet g_queries = nullptr;
 WGPUBuffer g_query_resolve = nullptr, g_query_read = nullptr;
 bool g_query_pending = false, g_query_ready = false;
 std::uint64_t g_measured_ns = 0, g_measured = 0, g_total_passes = 0;
+std::uint64_t g_query_submissions = 0, g_query_failures = 0, g_detail_passes = 0;
+std::mutex g_timestamp_mutex;
+ee::s_gpu_timestamp_profile g_published_timestamps{};
+
+void publish_timestamps()
+{
+    const ee::s_gpu_timestamp_profile snapshot{
+        g_timestamps, g_total_passes, g_query_submissions, g_measured,
+        g_query_failures, g_measured_ns, g_detail_passes};
+    std::lock_guard<std::mutex> lock(g_timestamp_mutex);
+    g_published_timestamps = snapshot;
+}
+
+void collect_ready_timestamp()
+{
+    if (!g_query_ready)
+    {
+        return;
+    }
+    const void* mapped = wgpuBufferGetConstMappedRange(g_query_read, 0, 16);
+    std::uint64_t values[2]{};
+    if (mapped != nullptr)
+    {
+        std::memcpy(values, mapped, sizeof values);
+    }
+    if (mapped != nullptr && values[1] >= values[0])
+    {
+        g_measured_ns += values[1] - values[0];
+        ++g_measured;
+    }
+    else
+    {
+        ++g_query_failures;
+    }
+    wgpuBufferUnmap(g_query_read);
+    g_query_ready = g_query_pending = false;
+}
 WGPUDevice g_device = nullptr;
 WGPUQueue g_queue = nullptr;
 WGPUBuffer g_vram = nullptr, g_tables = nullptr, g_params = nullptr, g_data = nullptr, g_clut = nullptr, g_scratch = nullptr, g_readback = nullptr, g_decoded = nullptr, g_native_atlases = nullptr;
@@ -1015,25 +1053,16 @@ void submit(WGPUTextureView present_view = nullptr) {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_submit_cpu);
     if (g_commands.empty() && !present_view) return;
     if (g_profile_out && !present_view && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
+        g_detail_passes += g_commands.size();
         profile_submit();
+        collect_ready_timestamp();
+        publish_timestamps();
         return;
     }
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
-    if (g_query_ready) {
-        const void *mapped = wgpuBufferGetConstMappedRange(g_query_read, 0, 16);
-        if (mapped) {
-            std::uint64_t t[2];
-            std::memcpy(t, mapped, sizeof t);
-            if (t[1] > t[0]) {
-                g_measured_ns += t[1] - t[0];
-                ++g_measured;
-            }
-        }
-        wgpuBufferUnmap(g_query_read);
-        g_query_ready = g_query_pending = false;
-    }
+    collect_ready_timestamp();
     const bool measure = g_timestamps && !g_query_pending;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
@@ -1086,11 +1115,12 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuCommandEncoderRelease(enc);
     if (measure) {
         g_query_pending = true;
+        ++g_query_submissions;
         WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
         cb.mode = WGPUCallbackMode_AllowProcessEvents;
         cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *, void *) {
             if (status == WGPUMapAsyncStatus_Success) g_query_ready = true;
-            else g_query_pending = false;
+            else { ++g_query_failures; g_query_pending = false; }
         };
         wgpuBufferMapAsync(g_query_read, WGPUMapMode_Read, 0, 16, cb);
     }
@@ -1099,6 +1129,8 @@ void submit(WGPUTextureView present_view = nullptr) {
 #else
     wgpuDevicePoll(g_device, false, nullptr);
 #endif
+    collect_ready_timestamp();
+    publish_timestamps();
     g_commands.clear();
     g_command_info.clear();
     ++g_serial;
@@ -1435,7 +1467,10 @@ bool init(Mode m) {
         g_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
         g_query_resolve = make_buffer(16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
         g_query_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        g_timestamps = g_queries != nullptr && g_query_resolve != nullptr &&
+            g_query_read != nullptr;
     }
+    publish_timestamps();
 
     WGPUBindGroupLayoutEntry le[9] = {};
     const WGPUBufferBindingType types[9] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
@@ -2144,9 +2179,32 @@ bool present(const DisplaySource &src) {
     return true;
 }
 
+ee::s_gpu_timestamp_profile timestamp_profile()
+{
+    std::lock_guard<std::mutex> lock(g_timestamp_mutex);
+    return g_published_timestamps;
+}
+
+void collect_timestamp_profile()
+{
+    if (g_device != nullptr && g_timestamps)
+    {
+#ifdef __EMSCRIPTEN__
+        wgpuInstanceProcessEvents(g_instance);
+#else
+        wgpuDevicePoll(g_device, false, nullptr);
+#endif
+        collect_ready_timestamp();
+        publish_timestamps();
+    }
+}
+
 double busy_ms() {
-    if (!g_measured) return 0.0;
-    return static_cast<double>(g_measured_ns) / static_cast<double>(g_measured) * static_cast<double>(g_total_passes) / 1e6;
+    const auto p = timestamp_profile();
+    if (!p.m_completed_queries) return 0.0;
+    return static_cast<double>(p.m_sampled_compute_ns) /
+        static_cast<double>(p.m_completed_queries) *
+        static_cast<double>(p.m_compute_passes) / 1e6;
 }
 
 double vram_mb() {
