@@ -12,21 +12,10 @@
 
 namespace ee
 {
-c_ee_dmac::s_gif_channel_state c_ee_dmac::gif_channel_state() const
-{
-    const s_spr_channel& channel = m_device_channels[2u];
-    return {channel.m_chcr, channel.m_madr, channel.m_qwc, channel.m_tadr};
-}
-
 c_ee_dmac::s_gif_channel_state c_ee_dmac::vif1_channel_state() const
 {
     const s_spr_channel& channel = m_device_channels[1u];
     return {channel.m_chcr, channel.m_madr, channel.m_qwc, channel.m_tadr};
-}
-
-uint64_t c_ee_dmac::gif_trace_count() const
-{
-    return m_gif_trace_count;
 }
 
 bool c_ee_dmac::gif_trace_newest(
@@ -41,11 +30,6 @@ bool c_ee_dmac::gif_trace_newest(
     *result = m_gif_trace[
         (m_gif_trace_count - 1u - offset) % k_gif_trace_capacity];
     return true;
-}
-
-c_ee_dmac::e_gif_dma_reject c_ee_dmac::gif_last_reject() const
-{
-    return m_gif_last_reject;
 }
 
 c_ee_dmac::e_vif1_chain_reject
@@ -507,18 +491,6 @@ bool c_ee_dmac::acknowledge(uint32_t channel)
     m_status &= ~(uint32_t{1} << channel);
     sync_interrupt_line();
     return true;
-}
-
-uint32_t c_ee_dmac::status() const
-{
-    return m_status;
-}
-
-uint32_t c_ee_dmac::pending() const
-{
-    // Physical DMA channels 0..9: low status bits and high mask bits.
-    // This is the same CIS & CIM expression used in ps2-web-recomp.
-    return (m_status & 0x03ffu) & ((m_status >> 16u) & 0x03ffu);
 }
 
 bool c_ee_dmac::read_spr_channel(uint32_t address, uint32_t* value) const

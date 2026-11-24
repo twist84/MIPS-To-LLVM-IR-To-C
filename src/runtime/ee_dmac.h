@@ -73,13 +73,23 @@ public:
     };
 
     // Physical GIF-channel state for host diagnostics (read only).
-    s_gif_channel_state gif_channel_state() const;
+    s_gif_channel_state gif_channel_state() const
+    {
+        const s_spr_channel& channel = m_device_channels[2u];
+        return {channel.m_chcr, channel.m_madr, channel.m_qwc, channel.m_tadr};
+    }
     // The same read-only CHCR/MADR/QWC/TADR view for physical VIF1.
     // This does not advance the DMA engine or read guest MMIO.
     s_gif_channel_state vif1_channel_state() const;
-    uint64_t gif_trace_count() const;
+    uint64_t gif_trace_count() const
+    {
+        return m_gif_trace_count;
+    }
     bool gif_trace_newest(uint32_t offset, s_gif_dma_write* result) const;
-    e_gif_dma_reject gif_last_reject() const;
+    e_gif_dma_reject gif_last_reject() const
+    {
+        return m_gif_last_reject;
+    }
 
     enum class e_vif1_chain_reject : uint32_t
     {
@@ -183,8 +193,16 @@ public:
     bool raise(uint32_t channel);
     bool acknowledge(uint32_t channel);
 
-    uint32_t status() const;
-    uint32_t pending() const;
+    uint32_t status() const
+    {
+        return m_status;
+    }
+    uint32_t pending() const
+    {
+        // Physical DMA channels 0..9: low status bits and high mask bits.
+        // This is the same CIS & CIM expression used in ps2-web-recomp.
+        return (m_status & 0x03ffu) & ((m_status >> 16u) & 0x03ffu);
+    }
 
     static bool mmio_read(void* user, uint32_t address,
                           uint32_t width, s_ee_u128* value);

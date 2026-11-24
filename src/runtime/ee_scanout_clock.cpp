@@ -139,16 +139,6 @@ void c_ee_scanout_clock::acknowledge_csr(uint64_t write_one_to_clear)
     m_csr &= ~(write_one_to_clear & 0x1full);
 }
 
-bool c_ee_scanout_clock::enabled() const
-{
-    return m_enabled;
-}
-
-uint64_t c_ee_scanout_clock::next_field_cycle() const
-{
-    return m_next_field_cycle;
-}
-
 uint64_t c_ee_scanout_clock::next_event_cycle() const
 {
     if (!m_enabled)
@@ -162,21 +152,6 @@ uint64_t c_ee_scanout_clock::next_event_cycle() const
 uint64_t c_ee_scanout_clock::last_ee_cycle() const
 {
     return m_last_ee_cycle;
-}
-
-uint64_t c_ee_scanout_clock::csr() const
-{
-    return m_csr;
-}
-
-uint64_t c_ee_scanout_clock::fields_started() const
-{
-    return m_fields_started;
-}
-
-uint64_t c_ee_scanout_clock::fields_ended() const
-{
-    return m_fields_ended;
 }
 
 const std::vector<uint8_t>&

@@ -36,15 +36,30 @@ public:
 
     // CSR.VSINT is sticky, cleared only by the guest write-one-to-clear.
     void acknowledge_csr(uint64_t write_one_to_clear);
-    bool enabled() const;
-    uint64_t next_field_cycle() const;
+    bool enabled() const
+    {
+        return m_enabled;
+    }
+    uint64_t next_field_cycle() const
+    {
+        return m_next_field_cycle;
+    }
     // Both start and end are guest-visible edges. Disabled scanout has
     // no deadline. This query never publishes an event.
     uint64_t next_event_cycle() const;
     uint64_t last_ee_cycle() const;
-    uint64_t csr() const;
-    uint64_t fields_started() const;
-    uint64_t fields_ended() const;
+    uint64_t csr() const
+    {
+        return m_csr;
+    }
+    uint64_t fields_started() const
+    {
+        return m_fields_started;
+    }
+    uint64_t fields_ended() const
+    {
+        return m_fields_ended;
+    }
     // Ordered edges since the most recent guest-cycle advance.
     // 1 = start, 0 = end; the caller emits only these real events.
     const std::vector<uint8_t>& delivered_vblank_edges() const;
