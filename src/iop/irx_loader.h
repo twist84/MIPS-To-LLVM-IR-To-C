@@ -35,6 +35,8 @@ struct s_irx_module
     std::string m_name;
     uint32_t m_base = 0u;
     uint32_t m_size = 0u;
+    // .text bytes from the IRX iopmod header (code starts at m_base).
+    uint32_t m_text_size = 0u;
     uint32_t m_entry = 0u;
     uint32_t m_gp = 0u;
     std::vector<s_irx_export> m_exports;

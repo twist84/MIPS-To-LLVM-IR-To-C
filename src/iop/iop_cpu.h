@@ -7,6 +7,7 @@
 namespace iop
 {
 class c_hw;
+class c_iop_aot;
 // The PS2 IOP is an R3000A (MIPS I), separate from the EE R5900.
 // This standalone, fail-closed interpreter is the execution foundation
 // for the IOP kernel/IRX loader. It does not start an IOP or set SIF flags.
@@ -107,6 +108,10 @@ public:
     // After a syscall is explicitly serviced by a future IOP kernel, the
     // kernel may advance past its instruction. Never do so automatically.
     void resume_syscall();
+    // Ahead-of-time translated IRX code (nullptr = interpret everything).
+    // Only used while guest exceptions are disabled (HLE kernel mode).
+    void set_aot(c_iop_aot* aot) { m_aot = aot; }
+    c_iop_aot* aot() const { return m_aot; }
 
 private:
     bool read(uint32_t address, uint32_t width, uint32_t* value) const;
@@ -121,5 +126,10 @@ private:
     mutable s_memory_fault m_last_memory_fault{};
     uint64_t m_cycles = 0u;
     bool m_guest_exceptions = false;
+    c_iop_aot* m_aot = nullptr;
+    static int aot_read(void* cpu, uint32_t address, uint32_t width,
+                        uint32_t* value);
+    static int aot_write(void* cpu, uint32_t address, uint32_t width,
+                         uint32_t value);
 };
 } // namespace iop

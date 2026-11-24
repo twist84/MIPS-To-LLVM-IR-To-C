@@ -2144,6 +2144,46 @@ int main()
         return fail("CDVDFSV IOP sector read did not write actual IOP RAM");
     }
 
+    // ps2sdk ee/rpc/cdvd/src/ncmd.c sceCdRead: N fno 1, SIF_RPC_M_NOWAIT,
+    // 24-byte send {lbn, sectors, buf, mode, eeremaindest, eedest} and a
+    // NULL/0 receive buffer (retail SDBZ Sofdec stream reads).
+    {
+        constexpr uint32_t remainder = 0x001a3000u;
+        constexpr uint32_t readpos = 0x001a3100u;
+        for (uint32_t offset = 0u; offset < 16u; offset += 4u)
+        {
+            memory.write32(remainder + offset, 0xccccccccu);
+        }
+        memory.write32(readpos, 0xccccccccu);
+        memory.write32(0u, 0x13572468u);
+        packet(memory, args_source, {
+            padman.m_lba, 1u, 0x201a1000u, 0x00000105u,
+            0x20000000u | remainder, 0x20000000u | readpos});
+        packet(memory, call_source, {
+            64u, 0u, iop::c_sif_rpc_bridge::k_call_cid, 0u,
+            5u, 0x20561900u, 0x140u, 0x00464410u,
+            1u, 24u, 0u, 0u, 1u,
+            iop::c_sif_rpc_bridge::k_cdvd_n_server ^
+                iop::c_sif_rpc_bridge::k_server_xor, 0u, 0u
+        });
+        descriptor(memory, list, args_source,
+                   iop::c_sif_rpc_bridge::k_rpc_data_destination, 24u);
+        descriptor(memory, list + 16u, call_source,
+                   iop::c_sifcmd_bridge::k_command_buffer, 64u);
+        memory.write32(list + 28u, 0x44u);
+        dmac.acknowledge(5u);
+        dmac.acknowledge(6u);
+        if (!sif1.set_dma(list, 2u, &dma_id) ||
+            memory.read32(0x001a1000u) != 0x464c457fu ||
+            memory.read32(remainder) != 0u ||
+            memory.read32(remainder + 4u) != 0u ||
+            memory.read32(readpos) != 2048u ||
+            memory.read32(0u) != 0x13572468u)
+        {
+            return fail("libcdvd NOWAIT sceCdRead with NULL receive failed");
+        }
+    }
+
     const std::string cdvd_path = "cdrom0:\\PADMAN.IRX;1";
     packet(memory, args_source, {0xaabbccddu, 0x11223344u});
     for (size_t index = 0u; index <= cdvd_path.size(); ++index)

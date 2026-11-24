@@ -576,8 +576,9 @@ int main()
     expect("qmtc2 bad funct",R(0x12,5,4,6,0,2), "qmtc2", X);
     expect("ctc2 bad sa",    R(0x12,6,4,6,1,0), "ctc2", X);
     expect("ctc2 bad funct", R(0x12,6,4,6,0,2), "ctc2", X);
-    expect("vadd",    R(0x12,0x10,4,5,0,0x28), "vu0_macro", U);
-    expect("vadda",   R(0x12,0x10,4,5,0,0x3c), "vu0_macro", U); // SPECIAL2 index 0
+    expect("vadd",    R(0x12,0x10,4,5,0,0x28), "vu0_macro", V);
+    expect("vadda",   R(0x12,0x10,4,5,0,0x3c), "vu0_macro", V); // SPECIAL2 index 0
+    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vu0_macro", U);
 
     // Directly from SDBZ (US) 0x00108240..0x0010827C: a 4x4 matrix
     // multiply using the VU0 accumulator. Decode the actual 16 words
@@ -729,17 +730,14 @@ int main()
     expect("bc2 rt=31", R(0x12,8,31,0,0,0x02), "cop2_reserved", X);
 
     // Exhaustively check the published SPECIAL1/SPECIAL2 dispatch tables.
-    // Reserved encodings remain INVALID. Only actually implemented
-    // vector-length, matrix-FMAC and indexed-memory macros are VALID;
-    // other recognized COP2 encodings must remain UNSUPPORTED.
+    // Reserved encodings remain INVALID. Every defined macro executes via
+    // the VU0 macro runtime except VCALLMS/VCALLMSR (UNSUPPORTED).
     for (uint32_t funct = 0; funct < 64; ++funct)
     {
         const bool defined = funct <= 50 || funct == 52 || funct == 53 ||
                              funct == 56 || funct == 57 || funct >= 60;
         const auto ins = decode(0x100000, R(0x12,0x10,0,0,0,funct));
-        const bool native = funct == 0x0bu || funct == 0x01u ||
-            funct == 0x02u || funct == 0x20u || funct == 0x1cu ||
-            funct == 0x2au;
+        const bool native = funct != 0x38u && funct != 0x39u;
         const auto want = !defined ? X : (native ? V : U);
         const bool ok = ins.valid == want;
         ok ? ++g_pass : ++g_fail;
@@ -753,11 +751,7 @@ int main()
         const uint32_t funct = 0x3c + (index & 3);
         const uint32_t sa = index >> 2;
         const auto ins = decode(0x100000, R(0x12,0x10,0,0,sa,funct));
-        const auto want = !defined ? X :
-            (index == 0x09u || index == 0x0au || index == 0x18u ||
-             index == 0x39u || index == 0x3au ||
-              index == 0x3bu ||
-             (index >= 0x34u && index <= 0x37u) ? V : U);
+        const auto want = !defined ? X : V;
         const bool ok = ins.valid == want;
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL COP2 SPECIAL2 index=%02x valid=%u want=%u\n",

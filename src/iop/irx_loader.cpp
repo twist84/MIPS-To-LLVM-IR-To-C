@@ -555,6 +555,8 @@ e_irx_load_result load_irx(
     module->m_name = name;
     module->m_base = base;
     module->m_size = static_cast<uint32_t>(aligned);
+    module->m_text_size = std::min<uint32_t>(
+        read32(bytes, iopmod_offset + 12u), static_cast<uint32_t>(aligned));
     module->m_entry = base + entry_offset;
     module->m_gp = base + gp_offset;
     module->m_exports = std::move(exports);

@@ -10,6 +10,8 @@
 #include "ee_irq_syscall_services.h"
 #include "ee_hot_loop_diagnostics.h"
 #include "ee_host_loop_yield_budget.h"
+#include "ee_idle_loop_skip.h"
+#include "ee_pad_script.h"
 #include "ee_reached_isa_inventory.h"
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
@@ -26,6 +28,7 @@
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
+#include "iop_aot.h"
 #include "iop_memory_card.h"
 #include "iop_guest_fault_probe.h"
 #include "iop_cdvd.h"
@@ -58,6 +61,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -2137,6 +2141,31 @@ int main(int argc, char** argv)
             "expected positive first poll and 1..120 held polls\n");
         return 2;
     }
+    std::vector<iop::c_hw::s_pad0_script_step> pad0_script;
+    {
+        std::string script_environment;
+        const char* script = read_host_environment(
+            "SDBZ_PAD0_SCRIPT", &script_environment);
+        if (script != nullptr && script[0] != '\0')
+        {
+            std::vector<ee::s_pad_script_step> parsed;
+            std::string script_error;
+            if (!ee::parse_pad_script(script, &parsed, &script_error))
+            {
+                std::fprintf(stderr, "invalid SDBZ_PAD0_SCRIPT: %s\n",
+                             script_error.c_str());
+                return 2;
+            }
+            for (const ee::s_pad_script_step& step : parsed)
+            {
+                iop::c_hw::s_pad0_script_step hw_step{};
+                hw_step.m_first_poll = step.first_poll;
+                hw_step.m_poll_count = step.poll_count;
+                hw_step.m_buttons = step.buttons;
+                pad0_script.push_back(hw_step);
+            }
+        }
+    }
     if (trace)
     {
         // Preserve recent trace lines when the Python host kills a timed-out
@@ -2371,6 +2400,8 @@ int main(int argc, char** argv)
         }
         std::printf("[mc] card mounted in slot 1: %s\n", memory_card_path);
     }
+    // Declared before the kernel so translated code outlives the IOP CPU.
+    std::unique_ptr<iop::c_iop_aot> iop_aot;
     std::unique_ptr<iop::c_kernel> iop_kernel;
     iop::c_iop_guest_fault_probe iop_fault_probe{};
     std::unique_ptr<iop::c_sif1_dma_transport> iop_sif1_transport;
@@ -2396,6 +2427,97 @@ int main(int argc, char** argv)
         disc_folder_path != nullptr)
     {
         iop_kernel = std::make_unique<iop::c_kernel>();
+        // SDBZ_IOP_AOT=LIB loads ahead-of-time translated IRX code;
+        // SDBZ_IOP_AOT_CAPTURE=DIR saves each loaded module's relocated,
+        // import-linked .text for tools/iop_recomp.py.
+        if (const char* aot_path = std::getenv("SDBZ_IOP_AOT"))
+        {
+            // SDBZ_IOP_AOT is a directory of per-module libraries
+            // (tools/build_iop_aot.py OUT/modules) or one library.
+            iop_aot = std::make_unique<iop::c_iop_aot>();
+            std::string aot_error;
+            const bool aot_loaded = std::filesystem::is_directory(aot_path)
+                ? iop_aot->open_directory(aot_path, &aot_error) != 0u
+                : iop_aot->open(aot_path, &aot_error);
+            if (!aot_error.empty())
+            {
+                std::fprintf(stderr, "IOP AOT: %s\n", aot_error.c_str());
+            }
+            if (aot_loaded)
+            {
+                iop_kernel->cpu().set_aot(iop_aot.get());
+                std::fprintf(stderr, "IOP AOT: loaded %zu translated module(s) from %s\n",
+                             iop_aot->module_count(), aot_path);
+            }
+            else
+            {
+                std::fprintf(stderr, "IOP AOT: no translated modules loaded "
+                             "from %s; interpreting IRX code\n", aot_path);
+                iop_aot.reset();
+            }
+        }
+        {
+            const char* capture_dir = std::getenv("SDBZ_IOP_AOT_CAPTURE");
+            iop::c_kernel* kernel_for_aot = iop_kernel.get();
+            iop::c_iop_aot* aot_for_kernel = iop_aot.get();
+            iop_kernel->set_module_loaded_callback(
+                [capture_dir, kernel_for_aot, aot_for_kernel](
+                    const iop::s_irx_module& module)
+            {
+                if (capture_dir != nullptr && module.m_text_size != 0u)
+                {
+                    std::vector<uint8_t> text(module.m_text_size);
+                    if (kernel_for_aot->cpu().dma_read(
+                            module.m_base, text.data(), module.m_text_size))
+                    {
+                        std::string name;
+                        for (char ch : module.m_name)
+                        {
+                            name.push_back(std::isalnum(
+                                static_cast<unsigned char>(ch)) ? ch : '_');
+                        }
+                        char stem[128];
+                        std::snprintf(stem, sizeof(stem), "%s/%s@%08x",
+                                      capture_dir, name.c_str(), module.m_base);
+                        if (FILE* bin = std::fopen(
+                                (std::string(stem) + ".bin").c_str(), "wb"))
+                        {
+                            std::fwrite(text.data(), 1u, text.size(), bin);
+                            std::fclose(bin);
+                        }
+                        if (FILE* meta = std::fopen(
+                                (std::string(stem) + ".json").c_str(), "w"))
+                        {
+                            std::fprintf(meta,
+                                "{\"name\": \"%s\", \"base\": %u, "
+                                "\"text_size\": %u, \"entry\": %u, "
+                                "\"gp\": %u, \"hash\": \"%016llx\", "
+                                "\"exports\": [",
+                                name.c_str(), module.m_base, module.m_text_size,
+                                module.m_entry, module.m_gp,
+                                static_cast<unsigned long long>(
+                                    iop::iop_aot_hash(text.data(), text.size())));
+                            for (size_t index = 0; index < module.m_exports.size();
+                                 ++index)
+                            {
+                                std::fprintf(meta, "%s%u", index ? ", " : "",
+                                             module.m_exports[index].m_entry);
+                            }
+                            std::fprintf(meta, "]}\n");
+                            std::fclose(meta);
+                        }
+                    }
+                }
+                if (aot_for_kernel != nullptr)
+                {
+                    aot_for_kernel->refresh(kernel_for_aot->cpu());
+                    std::fprintf(stderr,
+                        "IOP AOT: module %s loaded at 0x%08x, %zu translated "
+                        "module(s) active\n", module.m_name.c_str(),
+                        module.m_base, aot_for_kernel->active_count());
+                }
+            });
+        }
         if (memory_card.mounted())
         {
             iop_kernel->hardware().bind_memory_card(&memory_card);
@@ -2504,6 +2626,13 @@ int main(int argc, char** argv)
                     "IOP SIO2 opt-in pad0 Cross pulse: first_poll=%u "
                     "hold_polls=%u (only real port0 0x42 replies)\n",
                     pad0_cross_first_poll, pad0_cross_poll_count);
+            }
+            if (!pad0_script.empty())
+            {
+                iop_kernel->hardware().configure_sio2_pad0_script(pad0_script);
+                std::printf(
+                    "IOP SIO2 pad0 input script: %zu step(s) "
+                    "(only real port0 0x42 replies)\n", pad0_script.size());
             }
             iop_hle = std::make_unique<iop::c_kernel_hle_bridge>(
                 *iop_kernel);
@@ -2712,7 +2841,12 @@ int main(int argc, char** argv)
     std::vector<ee::s_ee_instruction_trace_entry> instruction_trace;
     if (instruction_trace_path != nullptr)
     {
-        instruction_trace.resize(k_instruction_trace_limit);
+        // SDBZ_TRACE_LIMIT=N raises the bounded entry count (diagnostic).
+        const char* limit_text = std::getenv("SDBZ_TRACE_LIMIT");
+        const unsigned long long limit = limit_text != nullptr
+            ? std::strtoull(limit_text, nullptr, 0) : 0ull;
+        instruction_trace.resize(limit != 0ull && limit <= 0x10000000ull
+            ? static_cast<size_t>(limit) : k_instruction_trace_limit);
     }
     // Preserve the most recent guest stores, not just the first 64
     // printed matches. This ring is host-owned and disabled by default.
@@ -3119,6 +3253,36 @@ int main(int argc, char** argv)
     // and time paused waiting for live cache-miss compilation.
     double iop_time_ms = 0.0;
     double compile_wait_ms = 0.0;
+    // SDBZ_PROFILE_PCS=1: host-only per-entry-PC profile of guest
+    // instructions and native wall time, printed when the runner stops.
+    struct s_pc_profile
+    {
+        uint64_t m_calls = 0u;
+        uint64_t m_dispatches = 0u;
+        uint64_t m_instructions = 0u;
+        double m_wall_ms = 0.0;
+    };
+    std::string profile_pcs_environment;
+    const char* profile_pcs_value = read_host_environment(
+        "SDBZ_PROFILE_PCS", &profile_pcs_environment);
+    const bool profile_pcs = profile_pcs_value != nullptr &&
+        std::strcmp(profile_pcs_value, "0") != 0;
+    std::unordered_map<uint32_t, s_pc_profile> pc_profile;
+    // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
+    // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
+    std::string idle_skip_environment;
+    const char* idle_skip_value = read_host_environment(
+        "SDBZ_IDLE_SKIP", &idle_skip_environment);
+    const bool idle_skip = idle_skip_value != nullptr &&
+        std::strcmp(idle_skip_value, "0") != 0;
+    std::unordered_map<uint32_t, ee::s_idle_loop_shape> idle_loop_shapes;
+    // Guarded loop headers observed at HOST_YIELD. Any later native entry
+    // at one of them may probe; the one-iteration probe validates itself.
+    std::unordered_set<uint32_t> idle_yield_headers;
+    std::vector<uint32_t> idle_probe_headers;  // at most four armed headers
+    uint64_t idle_skip_slices = 0u;
+    uint64_t idle_skip_instructions = 0u;
+    uint64_t idle_skip_mispredictions = 0u;
     double slowest_native_ms = 0.0;
     uint32_t slowest_native_pc = 0u;
 #ifdef EE_ENABLE_RAYLIB_WINDOW
@@ -3154,6 +3318,62 @@ int main(int argc, char** argv)
                 iop_hle->signal_vblank_edge(start_edge != 0u);
             }
         }
+#ifdef EE_ENABLE_WEBGPU
+        // SDBZ_FRAME_DUMP=DIR:EVERY_FIELDS writes DIR/field-NNNNNNNN.ppm
+        // from the WebGPU raster every EVERY_FIELDS fields (diagnostic).
+        {
+            static const std::pair<std::string, uint64_t> s_frame_dump = []
+            {
+                const char* text = std::getenv("SDBZ_FRAME_DUMP");
+                if (text == nullptr)
+                {
+                    return std::pair<std::string, uint64_t>{};
+                }
+                const std::string spec(text);
+                const size_t colon = spec.rfind(':');
+                if (colon == std::string::npos || colon == 0u)
+                {
+                    return std::pair<std::string, uint64_t>{};
+                }
+                return std::pair<std::string, uint64_t>{
+                    spec.substr(0u, colon),
+                    std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
+            }();
+            static uint64_t s_frame_dump_next = 0u;
+            if (s_frame_dump.second != 0u)
+            {
+                const uint64_t field = hardware.scanout().fields_started();
+                if (field >= s_frame_dump_next)
+                {
+                    s_frame_dump_next = field + s_frame_dump.second;
+                    std::vector<uint32_t> pixels;
+                    uint32_t width = 0u;
+                    uint32_t height = 0u;
+                    if (webgpu_bridge.readback(
+                            hardware.gs_display_registers(),
+                            hardware.gs_crt_mode(), pixels, width, height))
+                    {
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "/field-%08llu.ppm",
+                                      static_cast<unsigned long long>(field));
+                        (void)write_gs_ppm(
+                            (s_frame_dump.first + name).c_str(),
+                            pixels, width, height);
+                    }
+                    const ee::c_ee_ipu& ipu = hardware.ipu();
+                    std::fprintf(stderr,
+                        "EE frame dump: field=%llu ipu bdec=%llu idec=%llu "
+                        "csc=%llu out_qwords=%llu dispatched=%llu\n",
+                        static_cast<unsigned long long>(field),
+                        static_cast<unsigned long long>(ipu.command_count(2u)),
+                        static_cast<unsigned long long>(ipu.command_count(1u)),
+                        static_cast<unsigned long long>(ipu.command_count(7u)),
+                        static_cast<unsigned long long>(ipu.output_qwords()),
+                        static_cast<unsigned long long>(dispatched));
+                }
+            }
+        }
+#endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
         if (gs_webgpu_window)
         {
@@ -3324,6 +3544,52 @@ int main(int argc, char** argv)
         }
         return e_intc_service::not_pending;
     };
+    // Verify, without changing guest state, that the next iteration of an
+    // eligible poll loop returns to its header and reads only values that
+    // cannot change inside a native slice: RAM/scratchpad and status
+    // registers the host updates between slices (never timers).
+    const auto idle_iteration_loops = [&](const ee::s_idle_loop_shape& shape)
+    {
+        uint64_t gpr[32];
+        for (uint32_t i = 0u; i < 32u; ++i)
+        {
+            gpr[i] = cpu.m_gpr[i].m_lo;
+        }
+        return ee::predict_idle_iteration(
+            shape, gpr,
+            [&](uint32_t address, uint32_t width, uint64_t* raw)
+            {
+                const uint32_t physical = memory->translate_direct_address(address);
+                // IPU registers only change on EE writes or DMA starts,
+                // never while a pure loop spins, and reads are side-effect
+                // free in this model.
+                const bool status_register =
+                    width == 4u &&
+                    (physical == 0x1000f000u ||   // INTC_STAT
+                     physical == 0x1000f010u ||   // INTC_MASK
+                     physical == 0x1000e010u ||   // D_STAT
+                     physical == 0x12001000u ||   // GS CSR
+                     physical == 0x10002000u ||   // IPU_CMD
+                     physical == 0x10002004u ||   // IPU_CMD busy
+                     physical == 0x10002010u ||   // IPU_CTRL
+                     physical == 0x10002020u ||   // IPU_BP
+                     physical == 0x10002030u ||   // IPU_TOP
+                     physical == 0x10002034u);    // IPU_TOP busy
+                if (!memory->contains(address, width) && !status_register)
+                {
+                    return false;
+                }
+                switch (width)
+                {
+                case 1u: *raw = ee::ee_mem_read8(&runtime, address); break;
+                case 2u: *raw = ee::ee_mem_read16(&runtime, address); break;
+                case 4u: *raw = ee::ee_mem_read32(&runtime, address); break;
+                default: *raw = ee::ee_mem_read64(&runtime, address); break;
+                }
+                return true;
+            }) == ee::e_idle_iteration::loops;
+    };
+
     while (remaining != 0)
     {
         if (pad0_cross_poll_count != 0u && iop_kernel != nullptr)
@@ -3865,12 +4131,37 @@ int main(int argc, char** argv)
         const ee::s_ee_cpu_state cpu_before_dispatch = cpu;
         const uint64_t instructions_before_dispatch =
             runtime.m_guest_instruction_attempts;
+        const auto profile_start = profile_pcs
+            ? std::chrono::steady_clock::now()
+            : std::chrono::steady_clock::time_point{};
         bool hot_expand_budget_reached = false;
         for (;;)
         {
+            // Arm the translated loop-header idle probe with known pure,
+            // idempotent poll loops (see ee_idle_loop_skip.h).
+            bool idle_armed = false;
+            if (idle_skip && !idle_probe_headers.empty() && slice == 1u &&
+                runtime.m_loop_safepoint_limit > 1u &&
+                runtime.m_loop_safepoint_yield_enabled != 0u &&
+                runtime.m_instruction_trace == nullptr &&
+                runtime.m_guest_v0_trace_remaining == 0u &&
+                runtime.m_timing_observer == nullptr)
+            {
+                for (uint32_t slot = 0u; slot < 4u; ++slot)
+                {
+                    runtime.m_idle_probe_pcs[slot] =
+                        slot < idle_probe_headers.size()
+                            ? idle_probe_headers[slot] : 0u;
+                }
+                runtime.m_idle_probe_state = 0u;
+                runtime.m_idle_probe_hit_pc = 0u;
+                runtime.m_idle_probe_remaining = 0u;
+                idle_armed = true;
+            }
+            const uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
+
             // One translated function invocation per native guest boundary.
-            runtime.m_loop_safepoint_remaining =
-                runtime.m_loop_safepoint_limit;
+            runtime.m_loop_safepoint_remaining = safepoint_budget;
             const auto native_start = std::chrono::steady_clock::now();
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
@@ -3892,8 +4183,7 @@ int main(int argc, char** argv)
                 const auto cached = overlay_owner_by_pc.find(from_pc);
                 if (cached != overlay_owner_by_pc.end())
                 {
-                    runtime.m_loop_safepoint_remaining =
-                        runtime.m_loop_safepoint_limit;
+                    runtime.m_loop_safepoint_remaining = safepoint_budget;
                     reason = overlay_runs[cached->second](
                         &cpu, &runtime, slice, &count, &out_pc, &status);
                 }
@@ -3903,8 +4193,7 @@ int main(int argc, char** argv)
                          overlay < overlay_runs.size() && unowned();
                          ++overlay)
                     {
-                        runtime.m_loop_safepoint_remaining =
-                            runtime.m_loop_safepoint_limit;
+                        runtime.m_loop_safepoint_remaining = safepoint_budget;
                         reason = overlay_runs[overlay](
                             &cpu, &runtime, slice, &count, &out_pc, &status);
                         if (!unowned())
@@ -3913,6 +4202,51 @@ int main(int argc, char** argv)
                         }
                     }
                 }
+            }
+            if (idle_armed)
+            {
+                // The armed header yielded after exactly one real iteration.
+                // A verified pure poll loop would have repeated that iteration
+                // for every remaining budgeted header visit (nothing it reads
+                // can change before the runner regains control) and yielded
+                // with no budget left. Charge exactly those iterations.
+                const uint32_t hit = runtime.m_idle_probe_hit_pc;
+                if (runtime.m_idle_probe_state == 2u &&
+                    reason == static_cast<uint32_t>(
+                        ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD) &&
+                    count == 1u && status == 0u &&
+                    out_pc == hit && cpu.m_pc == hit)
+                {
+                    const auto shape = idle_loop_shapes.find(hit);
+                    if (shape != idle_loop_shapes.end() &&
+                        idle_iteration_loops(shape->second) &&
+                        runtime.m_idle_probe_remaining >= 1u)
+                    {
+                        const uint64_t repeats =
+                            runtime.m_idle_probe_remaining - 1u;
+                        const uint64_t per_iteration = shape->second.words.size();
+                        runtime.m_guest_instruction_attempts += repeats * per_iteration;
+                        runtime.m_reference_instruction_slots += repeats * per_iteration;
+                        runtime.m_loop_safepoint_remaining = 0u;
+                        ++idle_skip_slices;
+                        idle_skip_instructions += repeats * per_iteration;
+                    }
+                    else
+                    {
+                        // Should not happen for a verified loop; never arm it
+                        // again. This one HOST_YIELD stays a host-only resume.
+                        ++idle_skip_mispredictions;
+                        idle_probe_headers.erase(
+                            std::remove(idle_probe_headers.begin(),
+                                        idle_probe_headers.end(), hit),
+                            idle_probe_headers.end());
+                    }
+                }
+                for (uint32_t slot = 0u; slot < 4u; ++slot)
+                {
+                    runtime.m_idle_probe_pcs[slot] = 0u;
+                }
+                runtime.m_idle_probe_state = 0u;
             }
             if (runtime.m_timing_observer_failed != 0u)
             {
@@ -4022,6 +4356,20 @@ int main(int argc, char** argv)
         if (hot_expand_budget_reached)
         {
             break;
+        }
+
+        if (profile_pcs)
+        {
+            // Host-only attribution of guest instructions and native wall
+            // time to the guest PC each native call was entered at.
+            s_pc_profile& entry = pc_profile[from_pc];
+            entry.m_calls += 1u;
+            entry.m_dispatches += count;
+            entry.m_instructions +=
+                runtime.m_guest_instruction_attempts -
+                instructions_before_dispatch;
+            entry.m_wall_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - profile_start).count();
         }
 
         dispatched += count;
@@ -4230,6 +4578,27 @@ int main(int argc, char** argv)
             }
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+            // A guarded loop header: analyze it once; arm pure poll loops.
+            if (idle_skip && idle_yield_headers.insert(cpu.m_pc).second)
+            {
+                const uint32_t header = cpu.m_pc;
+                const auto shape = idle_loop_shapes.emplace(header, ee::analyze_idle_loop(
+                    header,
+                    [&](uint32_t pc, uint32_t* word)
+                    {
+                        if (!image.is_executable_address(pc) ||
+                            !memory->contains(pc, 4u))
+                        {
+                            return false;
+                        }
+                        *word = memory->read32(pc);
+                        return true;
+                    })).first;
+                if (shape->second.eligible && idle_probe_headers.size() < 4u)
+                {
+                    idle_probe_headers.push_back(header);
+                }
+            }
             continue;
         }
 
@@ -6319,6 +6688,11 @@ int main(int argc, char** argv)
                                         pad0_cross_first_poll,
                                         pad0_cross_poll_count);
                             }
+                            if (!pad0_script.empty())
+                            {
+                                iop_kernel->hardware()
+                                    .configure_sio2_pad0_script(pad0_script);
+                            }
                             if (cdvd != nullptr && cdvd->m_source != nullptr)
                             {
                                 cdvd->m_transport =
@@ -7282,6 +7656,175 @@ int main(int argc, char** argv)
             slowest_native_pc, slowest_native_ms,
             iop_time_ms, compile_wait_ms
         );
+    }
+    if (std::getenv("SDBZ_TRACE_IOP_THREADS") != nullptr && iop_kernel != nullptr)
+    {
+        for (const auto& item : iop_kernel->threads())
+        {
+            const iop::s_kernel_thread& thread = item.second;
+            std::fprintf(stderr,
+                "IOP thread at exit: id=%u status=%u wait=%u prio=%u module=%u "
+                "entry=0x%08x pc=0x%08x ra=0x%08x a0=0x%08x "
+                "last_syscall=%u at=0x%08x ra=0x%08x a0=0x%08x insns=%llu\n",
+                thread.m_id, static_cast<uint32_t>(thread.m_status),
+                thread.m_wait_type, thread.m_priority, thread.m_module_id,
+                thread.m_entry, thread.m_cpu.m_pc, thread.m_cpu.m_gpr[31],
+                thread.m_cpu.m_gpr[4], thread.m_last_syscall_number,
+                thread.m_last_syscall_pc, thread.m_last_syscall_ra,
+                thread.m_last_syscall_a0,
+                static_cast<unsigned long long>(thread.m_guest_instructions));
+        }
+    }
+    if (std::getenv("SDBZ_TRACE_IPU") != nullptr)
+    {
+        const auto& observed = hardware.ipu_observation();
+        std::fprintf(stderr, "EE IPU MMIO: reads=%llu writes=%llu\n",
+                     static_cast<unsigned long long>(observed.reads),
+                     static_cast<unsigned long long>(observed.writes));
+        for (size_t i = 0; i < observed.first.size() && i < 200u; ++i)
+        {
+            const auto& access = observed.first[i];
+            std::fprintf(stderr, "EE IPU MMIO %s addr=0x%08x width=%u value=0x%016llx\n",
+                         access.write ? "W" : "R", access.address, access.width,
+                         static_cast<unsigned long long>(access.value));
+        }
+    }
+    if (iop_aot != nullptr)
+    {
+        std::fprintf(stderr,
+            "IOP AOT: modules=%zu active=%zu entries=%llu instructions=%llu "
+            "translated_ms=%.1f refresh_ms=%.1f\n",
+            iop_aot->module_count(), iop_aot->active_count(),
+            static_cast<unsigned long long>(iop_aot->entries()),
+            static_cast<unsigned long long>(iop_aot->instructions()),
+            iop_aot->milliseconds(), iop_aot->refresh_milliseconds());
+    }
+    // SDBZ_DUMP_RAM=FILE writes the 32 MiB EE RAM image at exit (diagnostic).
+    if (const char* dump_path = std::getenv("SDBZ_DUMP_RAM"))
+    {
+        if (FILE* dump = std::fopen(dump_path, "wb"))
+        {
+            std::vector<uint8_t> image(32u * 1024u * 1024u);
+            for (uint32_t address = 0u; address < image.size(); address += 4u)
+            {
+                const uint32_t word = memory->read32(address);
+                std::memcpy(image.data() + address, &word, 4u);
+            }
+            std::fwrite(image.data(), 1u, image.size(), dump);
+            std::fclose(dump);
+            std::fprintf(stderr, "EE RAM dumped: %s\n", dump_path);
+        }
+    }
+    {
+        const ee::c_ee_ipu& ipu = hardware.ipu();
+        uint64_t ipu_commands = 0u;
+        for (uint32_t command = 0u; command < 16u; ++command)
+        {
+            ipu_commands += ipu.command_count(command);
+        }
+        if (ipu_commands != 0u)
+        {
+            const auto reg = [&](uint32_t address) -> uint32_t
+            {
+                ee::s_ee_u128 value{};
+                return ee::c_ee_hw_bus::mmio_read(&hardware, address, 4u, &value)
+                    ? static_cast<uint32_t>(value.m_lo) : 0xdeadbeefu;
+            };
+            std::fprintf(stderr,
+                "EE IPU DMA at exit: ch3 chcr=0x%08x madr=0x%08x qwc=0x%x "
+                "ch4 chcr=0x%08x madr=0x%08x qwc=0x%x tadr=0x%08x "
+                "d_stat=0x%08x d_pcr=0x%08x d_ctrl=0x%08x i_stat=0x%08x "
+                "i_mask=0x%08x ipu_ctrl=0x%08x ipu_bp=0x%08x ipu_cmd=0x%08x\n",
+                reg(0x1000b000u), reg(0x1000b010u), reg(0x1000b020u),
+                reg(0x1000b400u), reg(0x1000b410u), reg(0x1000b420u),
+                reg(0x1000b430u), reg(0x1000e010u), reg(0x1000e020u),
+                reg(0x1000e000u), reg(0x1000f000u), reg(0x1000f010u),
+                reg(0x10002010u), reg(0x10002020u), reg(0x10002000u));
+            std::fprintf(stderr,
+                "EE IPU: commands bclr=%llu idec=%llu bdec=%llu vdec=%llu "
+                "fdec=%llu setiq=%llu setvq=%llu csc=%llu setth=%llu "
+                "stalls=%llu out_qwords=%llu bad_codes=%llu busy=%d\n",
+                static_cast<unsigned long long>(ipu.command_count(0u)),
+                static_cast<unsigned long long>(ipu.command_count(1u)),
+                static_cast<unsigned long long>(ipu.command_count(2u)),
+                static_cast<unsigned long long>(ipu.command_count(3u)),
+                static_cast<unsigned long long>(ipu.command_count(4u)),
+                static_cast<unsigned long long>(ipu.command_count(5u)),
+                static_cast<unsigned long long>(ipu.command_count(6u)),
+                static_cast<unsigned long long>(ipu.command_count(7u)),
+                static_cast<unsigned long long>(ipu.command_count(9u)),
+                static_cast<unsigned long long>(ipu.stalls()),
+                static_cast<unsigned long long>(ipu.output_qwords()),
+                static_cast<unsigned long long>(ipu.bad_codes()),
+                ipu.busy() ? 1 : 0);
+        }
+    }
+    if (!pad0_script.empty() && iop_kernel != nullptr)
+    {
+        std::fprintf(stderr,
+            "IOP SIO2 pad0 script: polls=%u scripted_polls=%u steps=%zu\n",
+            iop_kernel->hardware().sio2_pad0_poll_count(),
+            iop_kernel->hardware().sio2_pad0_script_pressed_polls(),
+            pad0_script.size());
+    }
+    if (idle_skip)
+    {
+        size_t eligible_loops = 0u;
+        for (const auto& item : idle_loop_shapes)
+        {
+            eligible_loops += item.second.eligible ? 1u : 0u;
+        }
+        std::fprintf(stderr,
+            "EE idle skip: slices=%llu charged_instructions=%llu "
+            "mispredictions=%llu analyzed_loops=%zu eligible_loops=%zu\n",
+            static_cast<unsigned long long>(idle_skip_slices),
+            static_cast<unsigned long long>(idle_skip_instructions),
+            static_cast<unsigned long long>(idle_skip_mispredictions),
+            idle_loop_shapes.size(), eligible_loops);
+        for (const auto& item : idle_loop_shapes)
+        {
+            std::fprintf(stderr, "EE idle loop: pc=0x%08x %s\n",
+                         item.first, item.second.reason);
+        }
+    }
+    if (profile_pcs && !pc_profile.empty())
+    {
+        std::vector<std::pair<uint32_t, s_pc_profile>> ranked(
+            pc_profile.begin(), pc_profile.end());
+        std::sort(ranked.begin(), ranked.end(),
+                  [](const auto& a, const auto& b)
+                  {
+                      return a.second.m_instructions > b.second.m_instructions;
+                  });
+        uint64_t total_instructions = 0u;
+        for (const auto& item : ranked)
+        {
+            total_instructions += item.second.m_instructions;
+        }
+        std::fprintf(stderr,
+            "EE profile: %zu entry PCs, %llu guest instructions "
+            "(host-only attribution to the native entry PC)\n",
+            ranked.size(), static_cast<unsigned long long>(total_instructions));
+        for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
+        {
+            const s_pc_profile& item = ranked[i].second;
+            std::fprintf(stderr,
+                "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
+                "instructions=%llu (%.1f%%) wall_ms=%.1f ns_per_instruction=%.2f\n",
+                ranked[i].first,
+                static_cast<unsigned long long>(item.m_calls),
+                static_cast<unsigned long long>(item.m_dispatches),
+                static_cast<unsigned long long>(item.m_instructions),
+                total_instructions != 0u
+                    ? 100.0 * static_cast<double>(item.m_instructions) /
+                          static_cast<double>(total_instructions)
+                    : 0.0,
+                item.m_wall_ms,
+                item.m_instructions != 0u
+                    ? 1.0e6 * item.m_wall_ms /
+                          static_cast<double>(item.m_instructions)
+                    : 0.0);
+        }
     }
 
     if (callback_active)

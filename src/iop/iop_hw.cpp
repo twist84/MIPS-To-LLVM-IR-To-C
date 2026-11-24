@@ -330,6 +330,21 @@ bool c_hw::process_sio2_packet()
                     cross_reply = true;
                     ++m_sio2_pad0_cross_pressed_polls;
                 }
+                bool scripted = false;
+                for (const s_pad0_script_step& step : m_sio2_pad0_script)
+                {
+                    if (m_sio2_pad0_poll_count >= step.m_first_poll &&
+                        m_sio2_pad0_poll_count - step.m_first_poll <
+                            step.m_poll_count)
+                    {
+                        buttons |= step.m_buttons;
+                        scripted = true;
+                    }
+                }
+                if (scripted)
+                {
+                    ++m_sio2_pad0_script_pressed_polls;
+                }
                 const uint16_t wire_buttons = static_cast<uint16_t>(~buttons);
                 put(3u, static_cast<uint8_t>(wire_buttons));
                 put(4u, static_cast<uint8_t>(wire_buttons >> 8u));

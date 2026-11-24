@@ -732,8 +732,13 @@ s_module_load_result c_kernel::load_module(
         );
     }
     const uint32_t id = m_next_module_id++;
-    m_modules.emplace(id, s_kernel_module{id, std::move(image)});
+    const auto inserted =
+        m_modules.emplace(id, s_kernel_module{id, std::move(image)});
     result.m_id = id;
+    if (m_module_loaded)
+    {
+        m_module_loaded(inserted.first->second.m_irx);
+    }
     return result;
 }
 
@@ -1575,7 +1580,9 @@ s_kernel_run_result c_kernel::run(
             const s_run_result stepped = m_cpu.run(slice);
             m_cycles += stepped.m_instructions;
             result.m_executed += stepped.m_instructions;
-            left -= stepped.m_instructions;
+            // Translated IRX code may retire a few instructions past the slice;
+            // never let the unsigned budget wrap.
+            left -= std::min<uint64_t>(left, stepped.m_instructions);
             if (stepped.m_result == e_step_result::budget_exhausted)
             {
                 continue;
@@ -1765,7 +1772,9 @@ s_kernel_run_result c_kernel::run(
         m_cycles += step_result.m_instructions;
         m_hardware.advance_cycles(step_result.m_instructions);
         result.m_executed += step_result.m_instructions;
-        remaining -= step_result.m_instructions;
+        // Translated IRX code may retire a few instructions past the slice;
+        // never let the unsigned budget wrap.
+        remaining -= std::min<uint64_t>(remaining, step_result.m_instructions);
 
         // A registered INTRMAN handler has executed its real JR $ra.
         // Its return value controls whether an ordinary (<32) IRQ

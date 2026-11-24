@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <iterator>
 #include <sstream>
@@ -209,11 +210,25 @@ bool c_sif_rpc_bridge::prepare_command(
 {
     // Local diagnostic only. No staged guest DMA or reply can be committed
     // by this validator, even when it classifies an unsupported request.
-    const auto refuse = [rejected_reason](e_rpc_rejection reason) -> bool
+    const auto refuse = [rejected_reason, &packet, size, payload_source,
+                         payload_length](e_rpc_rejection reason) -> bool
     {
         if (rejected_reason != nullptr)
         {
             *rejected_reason = reason;
+        }
+        // SDBZ_TRACE_RPC_REJECT: dump the refused SIF command words.
+        static const bool trace = std::getenv("SDBZ_TRACE_RPC_REJECT") != nullptr;
+        if (trace)
+        {
+            std::fprintf(stderr,
+                "IOP RPC refused: reason=%s size=%u payload=0x%08x len=%u words:",
+                rejection_name(reason), size, payload_source, payload_length);
+            for (size_t i = 0; i < packet.size() && i < 16u; ++i)
+            {
+                std::fprintf(stderr, " %08x", packet[i]);
+            }
+            std::fprintf(stderr, "\n");
         }
         return false;
     };
@@ -531,7 +546,31 @@ bool c_sif_rpc_bridge::prepare_command(
                 candidate.m_cdvd_destination =
                     m_ee_ram.read32(payload_source + 8u);
                 candidate.m_cdvd_to_iop = method == 0x0du;
-                needed = 4u;
+                // libcdvd sceCdRead is SIF_RPC_M_NOWAIT with a NULL/0
+                // receive buffer (ps2sdk ee/rpc/cdvd/src/ncmd.c); only a
+                // caller that supplies a reply buffer gets the result word.
+                needed = reply_size == 0u ? 0u : 4u;
+                if (method == 0x01u && packet[9] >= 24u)
+                {
+                    uint32_t remainder = 0u;
+                    uint32_t readpos = 0u;
+                    const uint32_t remainder_guest =
+                        m_ee_ram.read32(payload_source + 16u);
+                    const uint32_t readpos_guest =
+                        m_ee_ram.read32(payload_source + 20u);
+                    if (remainder_guest != 0u &&
+                        normalize_ee_ram(remainder_guest, &remainder) &&
+                        m_ee_ram.contains(remainder, 16u))
+                    {
+                        candidate.m_cdvd_remainder_destination = remainder;
+                    }
+                    if (readpos_guest != 0u &&
+                        normalize_ee_ram(readpos_guest, &readpos) &&
+                        m_ee_ram.contains(readpos, 4u))
+                    {
+                        candidate.m_cdvd_readpos_destination = readpos;
+                    }
+                }
                 read_media = true;
                 break;
             case 0x09u:
@@ -926,7 +965,38 @@ void c_sif_rpc_bridge::commit_command(const s_request& request)
         {
         case 0x01u:
         case 0x0du:
-            m_ee_ram.write32(request.m_result_destination, 0u);
+        {
+            static const bool trace_cdvd =
+                std::getenv("SDBZ_TRACE_CDVD") != nullptr;
+            if (trace_cdvd)
+            {
+                std::fprintf(stderr,
+                    "IOP CDVDFSV read: fno=%u lba=%u sectors=%u dst=0x%08x "
+                    "recv=%u\n", method, request.m_cdvd_lba,
+                    request.m_cdvd_count, request.m_cdvd_destination,
+                    request.m_words[11]);
+            }
+        }
+            if (request.m_words[11] != 0u)
+            {
+                m_ee_ram.write32(request.m_result_destination, 0u);
+            }
+            if (request.m_cdvd_remainder_destination != 0u)
+            {
+                // The whole transfer already landed in the EE buffer, so
+                // the head/tail fix-up lengths and pointers are zero.
+                for (uint32_t offset = 0u; offset < 16u; offset += 4u)
+                {
+                    m_ee_ram.write32(
+                        request.m_cdvd_remainder_destination + offset, 0u);
+                }
+            }
+            if (request.m_cdvd_readpos_destination != 0u)
+            {
+                m_ee_ram.write32(request.m_cdvd_readpos_destination,
+                    request.m_cdvd_count *
+                        c_iso_sector_source::k_sector_size);
+            }
             break;
         case 0x04u:
             m_ee_ram.write32(request.m_result_destination, 1u);

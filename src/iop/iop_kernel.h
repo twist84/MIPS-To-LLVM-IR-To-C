@@ -214,6 +214,13 @@ public:
     // successfully loaded guest IRX. Never remove HLE-owned imports.
     // All ordinals are validated before the library registry changes.
     bool set_module_library_registration(uint32_t table, bool registered);
+    // Called after a module is relocated, linked and registered (before
+    // its start thread runs). Used for IRX AOT capture and activation.
+    void set_module_loaded_callback(
+        std::function<void(const s_irx_module&)> callback)
+    {
+        m_module_loaded = std::move(callback);
+    }
     s_module_load_result load_module(
         const std::vector<uint8_t>& bytes
     );
@@ -322,6 +329,7 @@ private:
     std::map<uint32_t, uint32_t> m_heap_allocations;
     std::map<std::string, std::map<uint16_t, uint32_t>> m_libraries;
     std::map<uint32_t, s_kernel_module> m_modules;
+    std::function<void(const s_irx_module&)> m_module_loaded;
     std::map<uint32_t, s_kernel_thread> m_threads;
     std::map<uint32_t, s_kernel_alarm> m_alarms;
     std::multimap<uint64_t, std::function<void()>> m_hle_events;

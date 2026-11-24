@@ -2896,8 +2896,92 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                  "\n";
         m_out += "  " + remaining + " = load i32, ptr " + remaining_ptr + "\n";
         m_out += "  " + empty + " = icmp eq i32 " + remaining + ", 0\n";
+        const std::string probe_check_label = "loop_probe_check_" + suffix;
         m_out += "  br i1 " + empty + ", label %" + exhausted_label +
+                 ", label %" + probe_check_label + "\n";
+
+        // Host idle-loop probe: an armed header records the budget at its
+        // first visit and yields at its next visit, after exactly one real
+        // iteration. Unarmed (all-zero) probes fall through unchanged.
+        const std::string probe_label = "loop_probe_" + suffix;
+        const std::string probe_first_label = "loop_probe_first_" + suffix;
+        const std::string probe_again_label = "loop_probe_again_" + suffix;
+        const std::string probe_yield_label = "loop_probe_yield_" + suffix;
+        m_out += probe_check_label + ":\n";
+        std::string armed;
+        for (uint32_t slot = 0u; slot < 4u; ++slot)
+        {
+            const std::string slot_ptr = newtemp();
+            const std::string slot_pc = newtemp();
+            const std::string slot_hit = newtemp();
+            m_out += "  " + slot_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                     std::to_string(offsetof(ee::s_ee_runtime, m_idle_probe_pcs) +
+                                    4u * slot) + "\n";
+            m_out += "  " + slot_pc + " = load i32, ptr " + slot_ptr + "\n";
+            m_out += "  " + slot_hit + " = icmp eq i32 " + slot_pc + ", " +
+                     std::to_string(pc) + "\n";
+            if (armed.empty())
+            {
+                armed = slot_hit;
+            }
+            else
+            {
+                const std::string combined = newtemp();
+                m_out += "  " + combined + " = or i1 " + armed + ", " +
+                         slot_hit + "\n";
+                armed = combined;
+            }
+        }
+        m_out += "  br i1 " + armed + ", label %" + probe_label +
                  ", label %" + decrement_label + "\n";
+        m_out += probe_label + ":\n";
+        const std::string state_ptr = newtemp();
+        const std::string state = newtemp();
+        const std::string first_visit = newtemp();
+        m_out += "  " + state_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_idle_probe_state)) +
+                 "\n";
+        m_out += "  " + state + " = load i32, ptr " + state_ptr + "\n";
+        m_out += "  " + first_visit + " = icmp eq i32 " + state + ", 0\n";
+        m_out += "  br i1 " + first_visit + ", label %" + probe_first_label +
+                 ", label %" + probe_again_label + "\n";
+        m_out += probe_first_label + ":\n";
+        const std::string hit_ptr = newtemp();
+        const std::string budget_ptr = newtemp();
+        m_out += "  store i32 1, ptr " + state_ptr + "\n";
+        m_out += "  " + hit_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_idle_probe_hit_pc)) +
+                 "\n";
+        m_out += "  store i32 " + std::to_string(pc) + ", ptr " + hit_ptr + "\n";
+        m_out += "  " + budget_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_idle_probe_remaining)) +
+                 "\n";
+        m_out += "  store i32 " + remaining + ", ptr " + budget_ptr + "\n";
+        m_out += "  br label %" + decrement_label + "\n";
+        m_out += probe_again_label + ":\n";
+        const std::string hit_again_ptr = newtemp();
+        const std::string hit_pc = newtemp();
+        const std::string one_state = newtemp();
+        const std::string same_pc = newtemp();
+        const std::string yield_now = newtemp();
+        m_out += "  " + hit_again_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_idle_probe_hit_pc)) +
+                 "\n";
+        m_out += "  " + hit_pc + " = load i32, ptr " + hit_again_ptr + "\n";
+        m_out += "  " + one_state + " = icmp eq i32 " + state + ", 1\n";
+        m_out += "  " + same_pc + " = icmp eq i32 " + hit_pc + ", " +
+                 std::to_string(pc) + "\n";
+        m_out += "  " + yield_now + " = and i1 " + one_state + ", " + same_pc + "\n";
+        m_out += "  br i1 " + yield_now + ", label %" + probe_yield_label +
+                 ", label %" + decrement_label + "\n";
+        m_out += probe_yield_label + ":\n";
+        const std::string probe_pc_ptr = state_field(6);
+        const std::string probe_reason_ptr = state_field(7);
+        m_out += "  store i32 2, ptr " + state_ptr + "\n";
+        m_out += "  store i32 " + std::to_string(pc) + ", ptr " + probe_pc_ptr + "\n";
+        m_out += "  store i32 6, ptr " + probe_reason_ptr + "\n";
+        m_out += "  ret i32 6\n";
+
         m_out += decrement_label + ":\n";
         const std::string decremented = newtemp();
         m_out += "  " + decremented + " = sub i32 " + remaining + ", 1\n";
@@ -5033,8 +5117,13 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     header();
     declare_memory_helpers();
 
-    // Compute written/rbw per block.
+    // Compute written/rbw per block. block_killed_map is the must-write set
+    // used by liveness: a branch-likely delay slot executes only when the
+    // branch is taken, so its writes cannot kill a register that the
+    // not-taken successor still reads (SDBZ 0x166410 BEQL with delay slot
+    // "ld s0,0(sp)" otherwise dropped the preceding "lw s0" result).
     std::map<uint32_t, std::set<uint8_t>> block_written_map, block_rbw_map;
+    std::map<uint32_t, std::set<uint8_t>> block_killed_map;
     std::vector<std::vector<ee::s_ee_instruction>> block_insns_vec;
     for (const auto& bb : fn.blocks)
     {
@@ -5046,6 +5135,17 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
         }
         block_insns_vec.push_back(insns);
         block_written_map[bb.start_pc] = block_written(insns);
+        if (insns.size() >= 2u && insns[insns.size() - 2u].branch_likely &&
+            insns[insns.size() - 2u].has_delay_slot)
+        {
+            const std::vector<ee::s_ee_instruction> unconditional(
+                insns.begin(), insns.end() - 1);
+            block_killed_map[bb.start_pc] = block_written(unconditional);
+        }
+        else
+        {
+            block_killed_map[bb.start_pc] = block_written_map[bb.start_pc];
+        }
         std::set<uint8_t> rbw = block_read_before_write(insns);
         // The V0 write trace observes the pre-write SSA value even for an
         // instruction which otherwise kills V0 on entry to the block.
@@ -5234,8 +5334,8 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
                 changed = true;
             }
 
-            // live_in[B] = (live_out[B] - written[B]) U read_before_write[B]
-            const auto& written = block_written_map[bb.start_pc];
+            // live_in[B] = (live_out[B] - killed[B]) U read_before_write[B]
+            const auto& written = block_killed_map[bb.start_pc];
             const auto& rbw = block_rbw_map[bb.start_pc];
             std::set<uint8_t> new_in;
             for (uint8_t r : live_out[bb.start_pc])

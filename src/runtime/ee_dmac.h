@@ -24,6 +24,8 @@ public:
     static constexpr uint32_t k_vif0_base = 0x10008000u; // channel 0
     static constexpr uint32_t k_vif1_base = 0x10009000u; // channel 1
     static constexpr uint32_t k_gif_base = 0x1000a000u; // channel 2
+    static constexpr uint32_t k_from_ipu_base = 0x1000b000u; // channel 3, IPU -> EE
+    static constexpr uint32_t k_to_ipu_base = 0x1000b400u; // channel 4, EE -> IPU
     static constexpr uint32_t k_sif0_base = 0x1000c000u; // channel 5, IOP -> EE
     static constexpr uint32_t k_sif1_base = 0x1000c400u; // channel 6, EE -> IOP
     static constexpr uint32_t k_stat_address = 0x1000e010u;
@@ -99,6 +101,18 @@ public:
     // IOP DMA9 hardware FIFO, never from EE TADR.
     using t_sif0_start_callback = void (*)(void* user);
     void bind_sif0_start(void* user, t_sif0_start_callback callback);
+
+    // IPU channels follow the ps2-web-recomp pull/push model: starting either
+    // channel notifies the IPU, which pulls toIPU (4) source-chain qwords as
+    // its bitstream needs them and pushes decoded qwords to fromIPU (3).
+    using t_ipu_start_callback = void (*)(void* user, uint32_t channel);
+    void bind_ipu(void* user, t_ipu_start_callback start)
+    {
+        m_ipu_user = user;
+        m_ipu_start = start;
+    }
+    bool ipu_pull(uint8_t* qword);
+    bool ipu_push(const uint8_t* qword);
     bool begin_sif0_packet(uint32_t tag, uint32_t destination);
     bool commit_sif0_qwords(uint32_t qwc);
 
@@ -198,5 +212,11 @@ private:
     bool m_sif1_chain_end = false;
     uint32_t m_sif1_chain_tags = 0u;
     s_spr_channel m_spr_channels[2]{}; // fromSPR channel 8, toSPR channel 9
+    s_spr_channel m_ipu_channels[2]{}; // fromIPU channel 3, toIPU channel 4
+    bool m_to_ipu_tag_end = false;
+    void* m_ipu_user = nullptr;
+    t_ipu_start_callback m_ipu_start = nullptr;
+    void finish_ipu(uint32_t channel);
+    uint32_t ipu_dma_address(uint32_t address) const;
 };
 } // namespace ee

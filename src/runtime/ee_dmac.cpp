@@ -1,4 +1,6 @@
 #include "ee_dmac.h"
+
+#include <cstring>
 #include "ee_exceptions.h"
 
 #include <vector>
@@ -318,12 +320,108 @@ void c_ee_dmac::reset()
     {
         channel = {};
     }
+    for (s_spr_channel& channel : m_ipu_channels)
+    {
+        channel = {};
+    }
+    m_to_ipu_tag_end = false;
     m_sif0_channel = {};
     m_sif0_chain_end = false;
     m_sif1_channel = {};
     m_sif1_chain_end = false;
     m_sif1_chain_tags = 0u;
     sync_interrupt_line();
+}
+
+uint32_t c_ee_dmac::ipu_dma_address(uint32_t address) const
+{
+    // MADR/TADR bit 31 selects scratchpad (SPR) instead of main RAM.
+    return (address & 0x80000000u) != 0u
+        ? ee_memory::k_scratchpad_base + (address & 0x3ff0u)
+        : (address & 0x7ffffff0u);
+}
+
+void c_ee_dmac::finish_ipu(uint32_t channel)
+{
+    m_ipu_channels[channel - 3u].m_chcr &= ~k_chcr_str;
+    (void)raise(channel);
+}
+
+bool c_ee_dmac::ipu_pull(uint8_t* qword)
+{
+    s_spr_channel& c = m_ipu_channels[1];
+    if (m_memory == nullptr || (c.m_chcr & k_chcr_str) == 0u)
+    {
+        return false;
+    }
+    const bool chain = ((c.m_chcr >> 2u) & 3u) == 1u;
+    while (c.m_qwc == 0u)
+    {
+        if (!chain || m_to_ipu_tag_end)
+        {
+            finish_ipu(4u);
+            return false;
+        }
+        const uint64_t tag = m_memory->read64(ipu_dma_address(c.m_tadr));
+        c.m_chcr = (c.m_chcr & 0xffffu) |
+            (static_cast<uint32_t>(tag >> 16u) << 16u);
+        const uint32_t qwc = static_cast<uint32_t>(tag) & 0xffffu;
+        const uint32_t id = static_cast<uint32_t>(tag >> 28u) & 7u;
+        const uint32_t addr =
+            (static_cast<uint32_t>(tag >> 32u) & 0x7ffffff0u) |
+            (static_cast<uint32_t>(tag >> 63u) << 31u);
+        const bool irq = ((tag >> 31u) & 1u) != 0u;
+        const bool tie = (c.m_chcr & 0x80u) != 0u;
+        uint32_t data = c.m_tadr + 16u;
+        switch (id)
+        {
+        case 0u: data = addr; c.m_tadr += 16u; m_to_ipu_tag_end = true; break; // refe
+        case 1u: c.m_tadr = data + qwc * 16u; break;                            // cnt
+        case 2u: c.m_tadr = addr; break;                                        // next
+        case 3u: case 4u: data = addr; c.m_tadr += 16u; break;                  // ref, refs
+        default: m_to_ipu_tag_end = true; break;                                // call/ret/end
+        }
+        if (tie && irq)
+        {
+            m_to_ipu_tag_end = true;
+        }
+        c.m_madr = data;
+        c.m_qwc = qwc;
+        if (qwc == 0u && m_to_ipu_tag_end)
+        {
+            finish_ipu(4u);
+            return false;
+        }
+    }
+    s_ee_u128 quad{};
+    m_memory->read128(ipu_dma_address(c.m_madr), &quad);
+    std::memcpy(qword, &quad, 16u);
+    c.m_madr += 16u;
+    --c.m_qwc;
+    if (c.m_qwc == 0u && (!chain || m_to_ipu_tag_end))
+    {
+        finish_ipu(4u);
+    }
+    return true;
+}
+
+bool c_ee_dmac::ipu_push(const uint8_t* qword)
+{
+    s_spr_channel& c = m_ipu_channels[0];
+    if (m_memory == nullptr || (c.m_chcr & k_chcr_str) == 0u || c.m_qwc == 0u)
+    {
+        return false;
+    }
+    s_ee_u128 quad{};
+    std::memcpy(&quad, qword, 16u);
+    m_memory->write128(ipu_dma_address(c.m_madr), &quad);
+    c.m_madr += 16u;
+    --c.m_qwc;
+    if (c.m_qwc == 0u)
+    {
+        finish_ipu(3u);
+    }
+    return true;
 }
 
 bool c_ee_dmac::raise(uint32_t channel)
@@ -411,6 +509,18 @@ bool c_ee_dmac::read_spr_channel(uint32_t address, uint32_t* value) const
     {
         channel = &m_spr_channels[1];
         offset = address - k_to_spr_base;
+    }
+    else if (address >= k_from_ipu_base && address < k_from_ipu_base + 0x100u)
+    {
+        channel = &m_ipu_channels[0];
+        offset = address - k_from_ipu_base;
+        device_channel = true;
+    }
+    else if (address >= k_to_ipu_base && address < k_to_ipu_base + 0x100u)
+    {
+        channel = &m_ipu_channels[1];
+        offset = address - k_to_ipu_base;
+        device_channel = true;
     }
     else
     {
@@ -1438,6 +1548,20 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
         channel_index = 9u;
         offset = address - k_to_spr_base;
     }
+    else if (address >= k_from_ipu_base && address < k_from_ipu_base + 0x100u)
+    {
+        channel = &m_ipu_channels[0];
+        channel_index = 3u;
+        offset = address - k_from_ipu_base;
+        device_channel = true;
+    }
+    else if (address >= k_to_ipu_base && address < k_to_ipu_base + 0x100u)
+    {
+        channel = &m_ipu_channels[1];
+        channel_index = 4u;
+        offset = address - k_to_ipu_base;
+        device_channel = true;
+    }
     else
     {
         return false;
@@ -1467,7 +1591,28 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
                 m_sif1_chain_end = false;
                 m_sif1_chain_tags = 0u;
             }
-            if (channel_index == 5u || channel_index == 6u)
+            if (channel_index == 3u || channel_index == 4u)
+            {
+                if (channel_index == 4u)
+                {
+                    // A nonzero QWC continues the tag already latched in
+                    // CHCR[31:16] (ps2-web-recomp chain_ends_after_current).
+                    const uint32_t id = (channel->m_chcr >> 28u) & 7u;
+                    m_to_ipu_tag_end = channel->m_qwc != 0u &&
+                        (id == 0u || id == 7u ||
+                         ((channel->m_chcr & 0x80u) != 0u &&
+                          (channel->m_chcr & 0x80000000u) != 0u));
+                }
+                if (channel_index == 3u && channel->m_qwc == 0u)
+                {
+                    finish_ipu(3u);
+                }
+                else if (m_ipu_start != nullptr)
+                {
+                    m_ipu_start(m_ipu_user, channel_index);
+                }
+            }
+            else if (channel_index == 5u || channel_index == 6u)
             {
                 // Both channels notify their genuine FIFO engines.
                 // Neither MMIO register write itself retires STR.

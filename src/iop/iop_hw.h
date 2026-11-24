@@ -137,6 +137,26 @@ public:
         uint8_t right_y, uint8_t left_x, uint8_t left_y);
     void configure_sio2_pad0_cross_pulse(
         uint32_t first_poll, uint32_t poll_count);
+    // Optional scripted holds (SDBZ_PAD0_SCRIPT). Each step ORs its PS2
+    // button bits into authentic port-0 0x42 poll replies numbered
+    // [first_poll, first_poll + poll_count). Poll numbering is shared with
+    // the Cross pulse; configuring a script never queues a packet.
+    struct s_pad0_script_step
+    {
+        uint32_t m_first_poll = 0u;
+        uint32_t m_poll_count = 0u;
+        uint16_t m_buttons = 0u;
+    };
+    void configure_sio2_pad0_script(const std::vector<s_pad0_script_step>& steps)
+    {
+        m_sio2_pad0_script = steps;
+        m_sio2_pad0_script_pressed_polls = 0u;
+    }
+    uint32_t sio2_pad0_poll_count() const { return m_sio2_pad0_poll_count; }
+    uint32_t sio2_pad0_script_pressed_polls() const
+    {
+        return m_sio2_pad0_script_pressed_polls;
+    }
     // Completed EE dispatches at the start of this runner iteration.
     void set_pad_trace_dispatch(uint64_t dispatch)
     {
@@ -334,6 +354,8 @@ private:
     uint32_t m_sio2_pad0_cross_bytes_fifo_discarded = 0u;
     uint32_t m_sio2_pad0_cross_first_poll = 0u;
     uint32_t m_sio2_pad0_cross_poll_count = 0u;
+    std::vector<s_pad0_script_step> m_sio2_pad0_script;
+    uint32_t m_sio2_pad0_script_pressed_polls = 0u;
     bool m_sio2_transfer_requested = false;
     uint32_t m_sio2_ctrl_start_count = 0u;
     uint32_t m_sio2_packet_count = 0u;

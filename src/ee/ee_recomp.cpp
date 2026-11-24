@@ -146,7 +146,7 @@ bool write_discovery_cache(
         return false;
     }
 
-    const char magic[8] = { 'E', 'E', 'I', 'D', 'X', 'C', '0', '1' };
+    const char magic[8] = { 'E', 'E', 'I', 'D', 'X', 'C', '0', '2' };
     const uint32_t insn_count = static_cast<uint32_t>(instructions.size());
     const uint32_t entry_count = static_cast<uint32_t>(entries.size());
     const uint32_t jalr_count = static_cast<uint32_t>(jalr_targets.size());
@@ -235,7 +235,7 @@ bool read_discovery_cache(
     uint32_t jalr_only_count = 0;
     uint32_t site_count = 0;
     bool ok = std::fread(magic, 1, sizeof(magic), input) == sizeof(magic)
-        && std::memcmp(magic, "EEIDXC01", 8) == 0
+        && std::memcmp(magic, "EEIDXC02", 8) == 0
         && cache_read(input, &fingerprint)
         && fingerprint == expected_fingerprint
         && cache_read(input, &insn_count)
@@ -316,6 +316,131 @@ bool read_discovery_cache(
     }
     std::fclose(input);
     return ok;
+}
+
+// Address-taken function seeding for ahead-of-time coverage. Function
+// pointer tables (CRI SFD/ADX module tables, callbacks, vtables) and
+// lui/addiu-materialized code addresses are otherwise found only when the
+// game first calls them, through live cache-miss expansion. Retail SDBZ:
+// 1559 of 1713 runtime-only entries were pointer words, 201 lui/addiu.
+//
+// A candidate must look like a function start (preceded by "jr ra; delay"
+// or a J tail call, allowing zero padding, or beginning with a stack
+// prologue) and must decode as a defined instruction stream up to its
+// first "jr ra" delay slot. False positives only cost compile time: a
+// translated entry is dispatched only when the guest actually jumps there.
+bool looks_like_function_start(const elf_loader& loader, uint32_t pc)
+{
+    uint32_t first = 0;
+    if ((pc & 3u) != 0u || !loader.is_executable_address(pc) ||
+        !loader.read32_at(pc, &first) || first == 0u)
+    {
+        return false;
+    }
+    const bool prologue =
+        ((first >> 16) == 0x27bdu || (first >> 16) == 0x67bdu) &&
+        (first & 0x8000u) != 0u;
+    bool after_return = false;
+    uint32_t previous = pc;
+    for (uint32_t skipped = 0; skipped <= 4u && previous >= 8u; ++skipped)
+    {
+        previous -= 4u;
+        uint32_t word = 0;
+        if (!loader.read32_at(previous, &word))
+        {
+            break;
+        }
+        if (word == 0u)
+        {
+            continue;
+        }
+        // "previous" is the last non-padding word: the delay slot of the
+        // preceding function's return or tail jump.
+        uint32_t control = 0;
+        after_return = loader.read32_at(previous - 4u, &control) &&
+            (control == 0x03e00008u || (control >> 26) == 0x02u);
+        break;
+    }
+    if (!prologue && !after_return)
+    {
+        return false;
+    }
+    for (uint32_t offset = 0; offset < 4096u * 4u; offset += 4u)
+    {
+        uint32_t word = 0;
+        if (!loader.read32_at(pc + offset, &word))
+        {
+            return false;
+        }
+        const s_ee_instruction ins = decode(pc + offset, word);
+        if (ins.valid == e_ee_valid::INVALID)
+        {
+            return false;
+        }
+        if (word == 0x03e00008u)
+        {
+            uint32_t delay = 0;
+            return loader.read32_at(pc + offset + 4u, &delay) &&
+                decode(pc + offset + 4u, delay).valid != e_ee_valid::INVALID;
+        }
+    }
+    return false;
+}
+
+std::set<uint32_t> collect_address_taken_entries(const elf_loader& loader)
+{
+    std::set<uint32_t> candidates;
+    for (const auto& segment : loader.segments())
+    {
+        const uint32_t words = segment.filesz / 4u;
+        uint32_t high_value[32] = {};
+        uint32_t high_at[32] = {};
+        bool high_valid[32] = {};
+        for (uint32_t index = 0; index < words; ++index)
+        {
+            const uint32_t at = segment.vaddr + index * 4u;
+            uint32_t word = 0;
+            std::memcpy(&word, segment.data.data() + index * 4u, 4u);
+            // Aligned pointer words anywhere in the loaded image.
+            if ((word & 3u) == 0u && loader.is_executable_address(word))
+            {
+                candidates.insert(word);
+            }
+            // lui/addiu (or ori) pairs within 16 instructions.
+            const uint32_t op = word >> 26;
+            const uint32_t rs = (word >> 21) & 31u;
+            const uint32_t rt = (word >> 16) & 31u;
+            if (op == 0x0fu)
+            {
+                high_value[rt] = (word & 0xffffu) << 16;
+                high_at[rt] = at;
+                high_valid[rt] = true;
+            }
+            else if ((op == 0x09u || op == 0x0du) && high_valid[rs] &&
+                     at - high_at[rs] <= 64u)
+            {
+                uint32_t low = word & 0xffffu;
+                if (op == 0x09u && (low & 0x8000u) != 0u)
+                {
+                    low |= 0xffff0000u;
+                }
+                const uint32_t value = high_value[rs] + low;
+                if ((value & 3u) == 0u && loader.is_executable_address(value))
+                {
+                    candidates.insert(value);
+                }
+            }
+        }
+    }
+    std::set<uint32_t> entries;
+    for (uint32_t candidate : candidates)
+    {
+        if (looks_like_function_start(loader, candidate))
+        {
+            entries.insert(candidate);
+        }
+    }
+    return entries;
 }
 
 } // namespace
@@ -446,6 +571,27 @@ bool ee_recomp(const char* elf_path,
     std::sort(entries.begin(), entries.end());
     entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
     std::set<uint32_t> entry_set(entries.begin(), entries.end());
+
+    // Seed address-taken functions so they are compiled ahead of time
+    // instead of being discovered by live cache-miss expansion.
+    {
+        const std::set<uint32_t> address_taken =
+            collect_address_taken_entries(loader);
+        size_t added = 0;
+        for (uint32_t target : address_taken)
+        {
+            if (entry_set.insert(target).second)
+            {
+                entries.push_back(target);
+                worklist.insert(target);
+                ++added;
+            }
+        }
+        std::sort(entries.begin(), entries.end());
+        decode_worklist();
+        std::printf("  address-taken entries: %zu candidates, %zu new\n",
+                    address_taken.size(), added);
+    }
 
     // Iterate to a fixed point. Direct JAL/branch-and-link targets are
     // harvested as before. JALR targets are added only when CFG constant
