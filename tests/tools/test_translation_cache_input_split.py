@@ -152,7 +152,63 @@ def verify_preservation_when_host_only_inputs_change():
             raise AssertionError("changed guest IR source unexpectedly reused")
 
 
+def verify_ir_directory_scan():
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="ee-ir-scan-") as directory:
+        root = Path(directory).resolve()
+        ir = root / "ir"
+        ir.mkdir()
+        functions = []
+        for i in range(128):
+            path = ir / f"fn_{i:04d}.ll"
+            path.write_bytes(f"; module {i}\n".encode())
+            functions.append({"ir_path": str(path)})
+        expected = {Path(fn["ir_path"]).name:
+                    run_game.sha256_path(Path(fn["ir_path"])) for fn in functions}
+        original_resolve = Path.resolve
+        calls = []
+
+        def counted_resolve(self, *args, **kwargs):
+            calls.append(self)
+            return original_resolve(self, *args, **kwargs)
+
+        with patch.object(Path, "resolve", counted_resolve):
+            assert run_game.hash_ir_modules(
+                ir, functions, require_owned_directory=True) == expected
+        assert calls == [ir], calls
+        first = Path(functions[0]["ir_path"])
+        first.write_bytes(b"changed IR")
+        assert run_game.hash_ir_modules(
+            ir, functions, require_owned_directory=True) != expected
+
+        def rejected(entries):
+            try:
+                run_game.hash_ir_modules(ir, entries, require_owned_directory=True)
+            except (ValueError, OSError):
+                return
+            raise AssertionError("invalid IR ownership accepted")
+
+        rejected(functions + [functions[0]])
+        extra = ir / "extra.ll"
+        extra.write_bytes(b"unowned")
+        rejected(functions)
+        extra.unlink()
+        outside = root / first.name
+        outside.write_bytes(first.read_bytes())
+        rejected([{"ir_path": str(outside)}, *functions[1:]])
+        first.unlink()
+        rejected(functions)
+        try:
+            first.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            rejected(functions)
+
+
 if __name__ == "__main__":
+    verify_ir_directory_scan()
     verify_real_probe_location()
     verify_preservation_when_host_only_inputs_change()
     print("PASS: host-only probes relink without invalidating guest translation")

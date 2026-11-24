@@ -19,19 +19,11 @@ def function_map(metadata):
 
 
 def verify_modules(work, metadata, hashes):
-    ir_dir = shared_ir.ir_directory(work).resolve()
-    expected = {}
-    for function in metadata["functions"]:
-        module = Path(function["ir_path"]).resolve(strict=True)
-        if module.parent != ir_dir or module.suffix != ".ll":
-            raise ValueError("function references an unexpected IR path")
-        if module.name in expected:
-            raise ValueError("duplicate IR module")
-        expected[module.name] = run_game.sha256_path(module)
-    if not expected or expected != hashes:
+    expected = run_game.hash_ir_modules(
+        shared_ir.ir_directory(work), metadata["functions"],
+        require_owned_directory=True)
+    if expected != hashes:
         raise ValueError("verified IR hashes do not match the function map")
-    if set(expected) != {path.name for path in ir_dir.glob("*.ll")}:
-        raise ValueError("unowned IR modules in cache directory")
 
 
 def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,

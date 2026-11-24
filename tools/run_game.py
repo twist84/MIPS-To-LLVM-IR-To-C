@@ -111,19 +111,52 @@ def ir_generation_inputs(elf, source_root):
     return {name: sha256_path(item) for name, item in paths}
 
 
+def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
+    """Hash every module, resolving the ordinary directory only once.
+
+    Windows Path.resolve(strict=True) opens each individual file to
+    obtain its final path. For regular files directly inside the already
+    canonical directory, one scandir supplies the same ownership check.
+    Unusual paths and symlinks retain strict resolution.
+    """
+    if not isinstance(functions, list) or not functions:
+        raise ValueError("cached translation has no functions")
+    ir_dir = Path(ir_dir).resolve(strict=True)
+    with os.scandir(ir_dir) as scan:
+        entries = {entry.name: entry for entry in scan
+                   if entry.name.endswith(".ll")}
+    hashes = {}
+    for function in functions:
+        module = Path(function["ir_path"])
+        entry = entries.get(module.name)
+        if (module.is_absolute() and module.parent == ir_dir and
+                entry is not None and entry.is_file(follow_symlinks=False)):
+            # Windows DirEntry.stat does not require another syscall for
+            # ordinary files. Resolve any reparse point conservatively.
+            if os.name == "nt" and (
+                    entry.stat(follow_symlinks=False).st_file_attributes & 0x400):
+                module = module.resolve(strict=True)
+            else:
+                module = ir_dir / entry.name
+        else:
+            module = module.resolve(strict=True)
+        if require_owned_directory and (
+                module.parent != ir_dir or module.suffix != ".ll"):
+            raise ValueError("function references an unexpected IR path")
+        if module.name in hashes:
+            raise ValueError(f"duplicate cached IR filename: {module.name}")
+        # Full content authentication, never trust timestamps or size.
+        hashes[module.name] = sha256_path(module)
+    if require_owned_directory and set(hashes) != set(entries):
+        raise ValueError("unowned IR modules in cache directory")
+    return hashes
+
+
 def translated_ir_hashes(metadata_path):
     """Record the exact translated modules owned by the function map."""
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    functions = metadata.get("functions")
-    if not isinstance(functions, list) or not functions:
-        raise ValueError("cached translation has no functions")
-    hashes = {}
-    for function in functions:
-        module = Path(function["ir_path"]).resolve(strict=True)
-        if module.name in hashes:
-            raise ValueError(f"duplicate cached IR filename: {module.name}")
-        hashes[module.name] = sha256_path(module)
-    return hashes
+    return hash_ir_modules(metadata_path.parent, metadata.get("functions"),
+                           require_owned_directory=shared_ir.active(metadata_path))
 
 
 def recover_append_only_metadata(snapshot, metadata_path):
@@ -1071,12 +1104,16 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
         records = append_cached_objects(object_dir, emit_opt,
                                         llvm.get_default_triple(), [])
         metadata = shared_ir.read_json(metadata_path)
-        return (
-            {str(Path(fn["ir_path"]).resolve()) for fn in metadata["functions"]} ==
-            {str(Path(name).resolve()) for name in records} and
-            {Path(name).name: item["ir_sha256"] for name, item in records.items()} ==
-                snapshot.get("ir_hashes")
-        )
+        # Exact path equality is sufficient for the common case. Only
+        # canonicalize individual paths if their spellings differ.
+        module_paths = {Path(fn["ir_path"]) for fn in metadata["functions"]}
+        record_paths = {Path(name) for name in records}
+        same_paths = module_paths == record_paths or (
+            {p.resolve() for p in module_paths} ==
+            {p.resolve() for p in record_paths})
+        return (same_paths and
+                {Path(name).name: item["ir_sha256"] for name, item in records.items()} ==
+                snapshot.get("ir_hashes"))
     except (OSError, ValueError, KeyError, TypeError, ImportError):
         return False
 
