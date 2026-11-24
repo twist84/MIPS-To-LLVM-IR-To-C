@@ -166,8 +166,7 @@ if errorlevel 1 (
     echo ERROR: Python was not found in PATH.
     exit /b 1
 )
-rem A recovered cache is selected by an atomically written pointer, checked
-rem against the safe sibling namespace. Never trust the raw pointer file.
+rem Read a legacy active pointer only until the next canonical recovery.
 for /f "usebackq delims=" %%I in (`python "tools\recover_translation_cache.py" --base-work-dir "%CD%\%BASE_WORK_DIR%" --print-active`) do set "WORK_DIR=%%I"
 set "GAME_ELF="
 for /f "usebackq delims=" %%I in (`python "tools\resolve_ps2_boot.py" "%DISC_ROOT%"`) do set "GAME_ELF=%%I"
@@ -324,10 +323,10 @@ if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
 )
 
 rem Cache recovery is reconstruction-only: no guest replay or discovery.
-rem A linked O0 library is not sufficient if the shared lowering is stale.
+rem Recovery also migrates valid legacy caches to the canonical directory.
 if /I "%REQUESTED_SESSION_MODE%"=="recover" if defined CACHE_FLAG (
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
-        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
     if errorlevel 1 set "CACHE_FLAG="
 )
 rem Do not enter the interactive destructive rebuild path on failure.

@@ -276,6 +276,24 @@ def test_native_target_profile():
         print("PASS: host-native O2 profile, CPU provenance and immutable IR")
 
 
+def test_relocated_object_manifest():
+    with tempfile.TemporaryDirectory(prefix="ee-relocation-") as temp:
+        root = Path(temp)
+        stage = root / "stage"
+        ir_dir = stage / "ir"
+        objects = stage / "objects"
+        ir_dir.mkdir(parents=True)
+        write_ir(ir_dir / "guest.ll", 1)
+        _, first = run_emitter(ir_dir, objects)
+        assert first["path_format"] == "manifest-relative-v1"
+        assert first["objects"][0]["input"] == "../ir/guest.ll"
+        canonical = root / "canonical"
+        stage.rename(canonical)
+        out, second = run_emitter(canonical / "ir", canonical / "objects")
+        assert "reused 1/1" in out, out
+        assert first == second
+
+
 def test_shared_ir_provenance():
     sys.path.insert(0, str(SCRIPT.parent))
     import shared_ee_ir as shared
@@ -345,6 +363,7 @@ def test_shared_ir_provenance():
 
 
 if __name__ == "__main__":
+    test_relocated_object_manifest()
     test_shared_ir_provenance()
     test_native_target_profile()
     test_pipeline_worker_recycling()

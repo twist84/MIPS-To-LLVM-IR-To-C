@@ -187,10 +187,44 @@ def test_link_or_validation_failure_does_not_activate():
              patch.object(recovery.run_game, "translation_inputs", return_value={}), \
              patch.object(recovery.run_game, "validate_translation_cache"):
             promoted = recovery.recover(elf, build, "Release", base, 8)
-        assert recovery.active_work(base) == promoted
-        assert saved.read_bytes() == b"original guest code"
+        assert promoted == base and recovery.active_work(base) == base
+        assert not recovery.pointer_path(base).exists()
+        assert not saved.exists()
+        backups = list(build.glob("ps2-game-hle-backup-*"))
+        assert len(backups) == 1
+        assert (backups[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
         assert len(builds) == 2
+
+
+def test_canonical_promotion_rolls_back_all_names():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        base = root / "ps2-game-hle"
+        profile = root / "ps2-game-hle-O2-native"
+        stage = root / "ps2-game-hle-recovery-123"
+        for directory, data in ((base, "old"), (profile, "native"), (stage, "new")):
+            directory.mkdir()
+            (directory / "sentinel").write_text(data)
+        def fail(directory):
+            assert directory == base
+            assert (directory / "sentinel").read_text() == "new"
+            raise ValueError("post-promotion validation failed")
+        try:
+            recovery.promote_canonical(base, stage, fail)
+        except ValueError as exc:
+            assert "post-promotion" in str(exc)
+        else:
+            raise AssertionError("accepted failed promotion")
+        assert (base / "sentinel").read_text() == "old"
+        assert (profile / "sentinel").read_text() == "native"
+        assert (stage / "sentinel").read_text() == "new"
+        assert not list(root.glob("*-backup-*"))
+        backup = recovery.promote_canonical(base, stage, lambda directory: None)
+        assert (base / "sentinel").read_text() == "new"
+        assert (backup / "sentinel").read_text() == "old"
+        assert (root / (backup.name + "-O2-native") / "sentinel").read_text() == "native"
+        assert not stage.exists() and not profile.exists()
 
 
 def test_active_source_preflight_rejects_stale_shared_provenance():
@@ -243,7 +277,7 @@ def test_launcher_recovers_before_automatic_rebuild():
     flag = batch.index('set "CACHE_FLAG=--no-recompile"', preflight)
     assert "--check-active-source" in batch[preflight:flag]
     assert "exit /b 1" in batch[preflight:flag]
-    recovery_guard = batch.index('rem A linked O0 library is not sufficient')
+    recovery_guard = batch.index('rem Recovery also migrates valid legacy caches')
     assert "--check-active-source" in batch[recovery_guard:batch.index("rem Strict unattended recovery")]
     assert 'if errorlevel 1 set "CACHE_FLAG="' in batch[recovery_guard:batch.index("rem Strict unattended recovery")]
     assert 'set "BASE_WORK_DIR=build\\ps2-game-hle"' in batch
@@ -272,6 +306,7 @@ def main():
     test_changed_lowering_requires_explicit_opt_in()
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
+    test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()
     test_launcher_recovers_before_automatic_rebuild()
     print("safe known-function cache recovery: PASS")

@@ -2,9 +2,10 @@
 """Recover known EE functions without running the game or replacing saved IR.
 
 A verified historical translation manifest supplies the known guest entries.
-Reconstruction takes place in a new sibling directory. Only after a complete
-native library passes cache validation is a tiny active-cache pointer replaced.
-The previous cache and every previous recovery remain available for rollback.
+Reconstruction or verified migration takes place in a sibling directory.
+After validation it is promoted to the canonical cache directory, retaining
+the old base and native profiles under a backup name. Legacy active pointers
+are read for migration but no new pointer is written.
 
 IR byte mismatches are NEVER silently accepted. --allow-ir-changes explicitly
 opts into rebuilding changed lowering inputs or non-identical output; the full
@@ -14,6 +15,8 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
+from contextlib import ExitStack
 from pathlib import Path
 import sys
 import subprocess
@@ -150,8 +153,87 @@ def new_recovery_work(base_work):
     return target
 
 
+PROFILE_SUFFIXES = ("-O1", "-O2", "-O3", "-IR-O2", "-O2-native")
+
+
+def canonical_portable(base_work, work):
+    metadata_path = shared_ir.ir_directory(work) / "ee_functions.json"
+    metadata = shared_ir.read_json(metadata_path)
+    return (work == base_work and not pointer_path(base_work).exists()
+            and metadata.get("path_format") == "manifest-relative-v1"
+            and all(Path(fn["ir_path"]).name == fn["ir_path"]
+                    for fn in metadata["functions"]))
+
+
+def stage_verified_ir(elf, source, work, manifest, ir_sources):
+    """Copy a verified map and byte-identical modules, never re-lift them."""
+    metadata_path = shared_ir.ir_directory(source) / "ee_functions.json"
+    metadata = shared_ir.read_json(metadata_path)
+    if shared_ir.elf_path(metadata, metadata_path.parent) != elf:
+        raise ValueError("legacy source ELF location differs")
+    hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
+                                      require_owned_directory=True)
+    if hashes != manifest["ir_hashes"]:
+        raise ValueError("legacy IR does not match selected inventory")
+    if shared_ir.active(metadata_path):
+        shared_ir.current_state(metadata_path, ir_sources, hashes)
+    elif manifest.get("metadata_sha256") != run_game.sha256_path(metadata_path):
+        raise ValueError("legacy function map is not authenticated")
+    if manifest.get("ir_sources") != ir_sources:
+        raise ValueError("legacy lowering inputs changed")
+    destination = work / "ir"
+    destination.mkdir(parents=True, exist_ok=False)
+    for function in metadata["functions"]:
+        name = Path(function["ir_path"]).name
+        shutil.copyfile(metadata_path.parent / name, destination / name)
+        function["ir_path"] = name
+    metadata["elf"] = shared_ir.relative_path(elf, destination)
+    metadata["path_format"] = "manifest-relative-v1"
+    shared_ir.write_json(destination / "ee_functions.json", metadata)
+    copied = run_game.hash_ir_modules(destination, metadata["functions"],
+                                       require_owned_directory=True)
+    if copied != hashes:
+        raise ValueError("copied guest IR changed")
+    return {"missing": [], "extra": [], "mismatched_sha256": [],
+            "expected": len(hashes), "observed": len(hashes), "matching": len(hashes)}
+
+
+def promote_canonical(base_work, work, validate):
+    """Rename only validated staging data; restore all original names on error."""
+    if (work.parent != base_work.parent or
+            not work.name.startswith(base_work.name + "-recovery-")):
+        raise ValueError("invalid recovery staging directory")
+    backup = base_work.with_name(
+        base_work.name + "-backup-" + work.name.split("-recovery-", 1)[1])
+    previous = [(base_work, backup)]
+    previous += [(base_work.with_name(base_work.name + suffix),
+                  backup.with_name(backup.name + suffix)) for suffix in PROFILE_SUFFIXES]
+    moved = []
+    promoted = False
+    pointer = pointer_path(base_work)
+    # A legacy pointer remains valid until canonical validation succeeds.
+    try:
+        for source, target in previous:
+            if target.exists():
+                raise ValueError(f"backup already exists: {target}")
+            if source.exists():
+                source.rename(target)
+                moved.append((source, target))
+        work.rename(base_work)
+        promoted = True
+        validate(base_work)
+        pointer.unlink(missing_ok=True)
+    except BaseException:
+        if promoted:
+            base_work.rename(work)
+        for source, target in reversed(moved):
+            target.rename(source)
+        raise
+    return backup if moved else None
+
+
 def promote_pointer(base_work, work):
-    """Commit only a pointer after verification; retain the old cache."""
+    """Legacy pointer writer retained for compatibility tests only."""
     parent = base_work.parent.resolve()
     work = work.resolve(strict=True)
     if (work.parent != parent or
@@ -181,35 +263,73 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
         f"Cache recovery: {len(entries)} known entries from {candidate}; "
         f"lowering_sources_match={same_sources}", flush=True,
     )
-    # This function refuses any pre-existing target and verifies the complete
-    # module inventory. The explicit opt-in only relaxes OLD IR-byte hashes.
-    comparison = run_known_replays.reconstruct(
-        manifest, entries, elf, build, config, work, jobs, allow_ir_changes
-    )
-    (work / "ir-comparison.json").write_text(
-        json.dumps(comparison, indent=2) + "\n", encoding="utf-8"
-    )
     library_name = ("game-translated.dll" if os.name == "nt" else
                     "libgame-translated.dylib" if sys.platform == "darwin" else
                     "libgame-translated.so")
-    run_game.validate_translation_cache(
-        work / "translation-cache.json",
-        run_game.translation_inputs(elf, recomp, source_root), 0,
-        work / "ir" / "ee_functions.json", work / library_name,
-    )
-    if comparison["missing"] or comparison["extra"] or (
-        comparison["mismatched_sha256"] and not allow_ir_changes
-    ):
-        raise ValueError("reconstructed IR did not meet the recovery policy")
+    inputs = run_game.translation_inputs(elf, recomp, source_root)
 
-    promote_pointer(base_work, work)
-    print(
-        f"Cache recovery validated and activated: {work}\n"
-        f"Previous cache retained: {previous_cache}\n"
-        f"To undo, delete {pointer_path(base_work)}",
-        flush=True,
-    )
-    return work
+    def validate(directory):
+        run_game.validate_translation_cache(
+            directory / "translation-cache.json", inputs, 0,
+            directory / "ir" / "ee_functions.json", directory / library_name)
+
+    with ExitStack() as locks:
+        # Lock the canonical and legacy source stores and all extant native
+        # profiles before moving any directory. Shared profiles reuse a lock.
+        roots = list(dict.fromkeys((base_work, previous_cache)))
+        for root in roots:
+            locks.enter_context(shared_ir.ir_lock(root))
+            for suffix in PROFILE_SUFFIXES:
+                profile = root.with_name(root.name + suffix)
+                if profile.exists():
+                    locks.enter_context(shared_ir.ir_lock(profile))
+        comparison = None
+        if same_sources and candidate.parent != history_dir(base_work):
+            try:
+                comparison = stage_verified_ir(
+                    elf, candidate.parent, work, manifest, ir_sources)
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                # A failed copy is never published; rebuild in a fresh sibling.
+                print(f"Verified migration unavailable: {error}", flush=True)
+                work = new_recovery_work(base_work)
+            else:
+                metadata_path = work / "ir" / "ee_functions.json"
+                print("Migrating verified guest IR without retranslation", flush=True)
+                # Existing O0 objects are reusable only if the incremental
+                # emitter verifies both IR and object hashes after relocation.
+                source_objects = candidate.parent / "objects"
+                if manifest.get("emit_opt") == 0 and source_objects.is_dir():
+                    shutil.copytree(source_objects, work / "objects")
+                    obj_manifest = work / "objects" / "objects.json"
+                    if obj_manifest.is_file():
+                        objects = shared_ir.read_json(obj_manifest)
+                        for item in objects["objects"]:
+                            item["input"] = "../ir/" + Path(item["input"]).name
+                        objects["path_format"] = "manifest-relative-v1"
+                        shared_ir.write_json(obj_manifest, objects)
+                run_game.build_linked_library(
+                    source_root, work, metadata_path, work / "objects",
+                    work / library_name, 0, emit_jobs=jobs)
+                run_game.write_translation_cache(
+                    work / "translation-cache.json", inputs, 0, metadata_path,
+                    work / library_name, ir_sources)
+        if comparison is None:
+            comparison = run_known_replays.reconstruct(
+                manifest, entries, elf, build, config, work, jobs, allow_ir_changes)
+        (work / "ir-comparison.json").write_text(
+            json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
+        validate(work)
+        if comparison["missing"] or comparison["extra"] or (
+                comparison["mismatched_sha256"] and not allow_ir_changes):
+            raise ValueError("reconstructed IR did not meet the recovery policy")
+        backup = promote_canonical(base_work, work, validate)
+
+    print(f"Cache recovery validated and activated: {base_work}", flush=True)
+    if backup is not None:
+        print(f"Previous canonical cache/profile names retained under: {backup}", flush=True)
+    if previous_cache != base_work:
+        print(f"Previous legacy active cache retained: {previous_cache}", flush=True)
+    return base_work
 
 
 def main(argv=None):
@@ -219,6 +339,8 @@ def main(argv=None):
                         help="print only the selected active work directory")
     parser.add_argument("--check-active-source", action="store_true",
                         help="read-only current lowering and metadata preflight")
+    parser.add_argument("--require-portable", action="store_true",
+                        help="also require canonical relative-path metadata")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
     parser.add_argument("--config", choices=("Debug", "Release", "RelWithDebInfo",
                                             "MinSizeRel"), default="Release")
@@ -245,6 +367,8 @@ def main(argv=None):
             source_root = Path(__file__).resolve().parents[1]
             sources = run_game.ir_generation_inputs(elf, source_root)
             count = check_source_header(elf, work, sources)
+            if args.require_portable and not canonical_portable(base_work, work):
+                raise ValueError("cache needs canonical relative-path migration")
             print(f"EE source preflight: {count} known functions; "
                   "current lowering and metadata match", flush=True)
         else:
