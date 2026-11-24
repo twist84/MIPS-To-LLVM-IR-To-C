@@ -1752,9 +1752,9 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             return {};
         }
     }
-    // Dynamic entries use full image identity and return timing/PC at
-    // runtime. Zero steps in metadata identifies this module kind.
-    return {emitter.finish_dynamic(), 0u, 0u, 0u, emitter.writes_data()};
+    // The full image remains in library metadata, but the loader only
+    // needs to compare instruction bytes for emitted switch cases.
+    return {emitter.finish_dynamic(), 0u, 0u, 0u, emitter.writes_data(), reached};
 }
 
 std::string vu1_aot_module_ir(

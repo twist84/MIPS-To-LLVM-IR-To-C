@@ -967,7 +967,7 @@ bool c_ee_vu1::run(
 
     if (g_vu1_aot != nullptr)
     {
-        g_vu1_aot->capture(code, address);
+        g_vu1_aot->capture_on_entry(code, address);
         if (g_vu1_aot->try_run(state, code, data, address, top, itop, path1_bytes, *issue))
         {
             return true;

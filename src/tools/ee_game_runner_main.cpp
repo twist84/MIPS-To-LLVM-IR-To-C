@@ -3329,10 +3329,19 @@ int main(int argc, char** argv)
     std::unique_ptr<ee::c_ee_vu1_aot> vu1_aot;
     std::string vu1_aot_environment;
     std::string vu1_capture_environment;
+    std::string vu1_capture_misses_environment;
     const char* vu1_path = read_host_environment(
         "SDBZ_VU1_AOT", &vu1_aot_environment);
     const char* vu1_capture = read_host_environment(
         "SDBZ_VU1_AOT_CAPTURE", &vu1_capture_environment);
+    const char* vu1_capture_misses = read_host_environment(
+        "SDBZ_VU1_AOT_CAPTURE_MISSES", &vu1_capture_misses_environment);
+    const bool misses_only = (vu1_capture == nullptr || *vu1_capture == '\0') &&
+        vu1_capture_misses != nullptr && *vu1_capture_misses != '\0';
+    if (misses_only)
+    {
+        vu1_capture = vu1_capture_misses;
+    }
     if ((vu1_path != nullptr && *vu1_path != '\0') ||
         (vu1_capture != nullptr && *vu1_capture != '\0'))
     {
@@ -3350,7 +3359,7 @@ int main(int argc, char** argv)
         if (vu1_capture != nullptr && *vu1_capture != '\0')
         {
             error.clear();
-            if (!vu1_aot->enable_capture(vu1_capture, &error))
+            if (!vu1_aot->enable_capture(vu1_capture, &error, misses_only))
             {
                 std::fprintf(stderr, "VU1 capture disabled: %s\n", error.c_str());
             }

@@ -289,17 +289,45 @@ int main(int argc, char** argv)
     {
         return 1;
     }
-    // Full-image guard: changing an otherwise unreached instruction of
-    // a dynamic module cannot reuse the previous library.
+    // An unrelated change is safe for the dynamic switch too. A
+    // changed emitted delay slot still forces the exact-byte fallback.
+    const auto misses = std::filesystem::path(argv[2]) / "misses";
+    if (!backend.enable_capture(misses.string(), &error, true))
+    {
+        return 1;
+    }
     auto modified = branching;
     modified[0x100u] ^= 1u;
     if (!same(run(modified, &backend, true), run(modified, nullptr, true)) ||
-        backend.fallbacks() != 4u || backend.native_runs() != 4u)
+        backend.fallbacks() != 3u || backend.native_runs() != 5u ||
+        !std::filesystem::is_empty(misses))
+    {
+        return 1;
+    }
+    pair(modified, 0x28u, k_lower_nop, 0x000002ffu);
+    if (!same(run(modified, &backend, true), run(modified, nullptr, true)) ||
+        backend.fallbacks() != 4u || backend.native_runs() != 5u ||
+        std::filesystem::is_empty(misses))
+    {
+        return 1;
+    }
+    candidate = original;
+    if (backend.try_run(candidate, branching, memory, 0x100u, 0u, 0u, path1, issue))
+    {
+        return 1;
+    }
+    candidate.m_initialized = false;
+    if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, path1, issue) ||
+        backend.fallback_count(ee::e_vu1_aot_fallback::no_entry) != 1u ||
+        backend.fallback_count(ee::e_vu1_aot_fallback::code_mismatch) != 2u ||
+        backend.fallback_count(ee::e_vu1_aot_fallback::invalid_state) != 1u ||
+        backend.fallback_count(ee::e_vu1_aot_fallback::native_rejected) != 2u ||
+        backend.fallbacks() != 6u)
     {
         return 1;
     }
     const auto efu = efu_program();
-    if (!same(run(efu, &backend), run(efu, nullptr)) || backend.native_runs() != 5u)
+    if (!same(run(efu, &backend), run(efu, nullptr)) || backend.native_runs() != 6u)
     {
         return 1;
     }

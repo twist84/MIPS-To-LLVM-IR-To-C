@@ -167,6 +167,36 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
         return reject("VU1 AOT code or timing validation failed");
     }
     program.m_writes_data = lifted.m_writes_data;
+    if (dynamic)
+    {
+        // The embedded bytes are rotated by start. Derive ranges from
+        // the exact graph used to generate the switch, not a hash or
+        // a guessed microprogram extent. Coalesce adjacent pairs.
+        for (uint32_t index = 0u; index < lifted.m_reached.size(); ++index)
+        {
+            if (!lifted.m_reached.test(index))
+            {
+                continue;
+            }
+            const uint32_t pc = index * 8u;
+            const uint32_t offset = (pc - start) & 0x3fffu;
+            if (!program.m_ranges.empty())
+            {
+                auto& last = program.m_ranges.back();
+                if (last.m_pc + last.m_size == pc &&
+                    last.m_offset + last.m_size == offset)
+                {
+                    last.m_size += 8u;
+                    continue;
+                }
+            }
+            program.m_ranges.push_back({pc, offset, 8u});
+        }
+        if (program.m_ranges.empty())
+        {
+            return reject("empty VU1 AOT dynamic code guard");
+        }
+    }
     m_programs[start >> 3u].push_back(std::move(program));
     m_libraries.push_back(library);
     return true;
@@ -217,7 +247,8 @@ size_t c_ee_vu1_aot::open_directory(const std::string& path, std::string* error)
     return loaded;
 }
 
-bool c_ee_vu1_aot::enable_capture(const std::string& path, std::string* error)
+bool c_ee_vu1_aot::enable_capture(const std::string& path, std::string* error,
+    bool misses_only)
 {
     std::error_code ec;
     std::filesystem::create_directories(path, ec);
@@ -230,6 +261,9 @@ bool c_ee_vu1_aot::enable_capture(const std::string& path, std::string* error)
         return false;
     }
     m_capture_path = path;
+    m_capture_misses_only = misses_only;
+    m_has_code = false;
+    m_captured_entries.reset();
     return true;
 }
 
@@ -303,14 +337,27 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
     std::vector<uint8_t>& path1, s_ee_vu1_issue& issue)
 {
     pc &= 0x3ff8u;
+    const auto& candidates = m_programs[pc >> 3u];
+    auto reason = e_vu1_aot_fallback::invalid_state;
     // A compiled entry assumes initialized constant registers. If a
     // caller supplies a noncanonical state, the interpreter owns it.
     if (state.m_initialized && state.m_vi[0] == 0u &&
         state.m_vf[0] == std::array<uint32_t, 4>{0u, 0u, 0u, 0x3f800000u})
     {
-        for (const auto& program : m_programs[pc >> 3u])
+        reason = candidates.empty() ? e_vu1_aot_fallback::no_entry :
+            e_vu1_aot_fallback::code_mismatch;
+        for (const auto& program : candidates)
         {
-            if (!exact_match(code, pc, program.m_code))
+            const bool matches = program.m_steps != 0u ?
+                exact_match(code, pc, program.m_code) :
+                std::all_of(program.m_ranges.begin(), program.m_ranges.end(),
+                    [&](const s_code_range& range)
+                    {
+                        return std::memcmp(code.data() + range.m_pc,
+                            program.m_code.data() + range.m_offset,
+                            range.m_size) == 0;
+                    });
+            if (!matches)
             {
                 continue;
             }
@@ -355,6 +402,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 kick.m_issue.m_kick_reject != e_ee_vu1_kick_reject::none)
             {
                 path1.resize(path1_before);
+                reason = e_vu1_aot_fallback::native_rejected;
                 break;
             }
             std::memcpy(next.m_vf.data(), vf.data(), sizeof(vf));
@@ -374,6 +422,14 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
         }
     }
     ++m_fallbacks;
+    ++m_fallback_reasons[static_cast<size_t>(reason)];
+    ++m_fallback_pcs[pc >> 3u];
+    if (m_capture_misses_only &&
+        (reason == e_vu1_aot_fallback::no_entry ||
+         reason == e_vu1_aot_fallback::code_mismatch))
+    {
+        capture(code, pc);
+    }
     return false;
 }
 
@@ -382,11 +438,30 @@ void c_ee_vu1_aot::write_json(FILE* output) const
     std::fprintf(output,
         "{\"enabled\":true,\"programs\":%zu,\"native_runs\":%llu,"
         "\"native_pairs\":%llu,\"interpreter_fallbacks\":%llu,"
-        "\"captures\":%llu,\"capture_errors\":%llu}",
+        "\"captures\":%llu,\"capture_errors\":%llu,"
+        "\"fallback_reasons\":{\"no_entry\":%llu,\"code_mismatch\":%llu,"
+        "\"invalid_state\":%llu,\"native_rejected\":%llu},"
+        "\"fallback_pcs\":[",
         program_count(), static_cast<unsigned long long>(m_native_runs),
         static_cast<unsigned long long>(m_native_pairs),
         static_cast<unsigned long long>(m_fallbacks),
         static_cast<unsigned long long>(m_captures),
-        static_cast<unsigned long long>(m_capture_errors));
+        static_cast<unsigned long long>(m_capture_errors),
+        static_cast<unsigned long long>(fallback_count(e_vu1_aot_fallback::no_entry)),
+        static_cast<unsigned long long>(fallback_count(e_vu1_aot_fallback::code_mismatch)),
+        static_cast<unsigned long long>(fallback_count(e_vu1_aot_fallback::invalid_state)),
+        static_cast<unsigned long long>(fallback_count(e_vu1_aot_fallback::native_rejected)));
+    bool first = true;
+    for (uint32_t index = 0u; index < m_fallback_pcs.size(); ++index)
+    {
+        if (m_fallback_pcs[index] != 0u)
+        {
+            std::fprintf(output, "%s{\"pc\":%u,\"count\":%llu}",
+                first ? "" : ",", index * 8u,
+                static_cast<unsigned long long>(m_fallback_pcs[index]));
+            first = false;
+        }
+    }
+    std::fputs("]}", output);
 }
 } // namespace ee

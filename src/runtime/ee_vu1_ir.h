@@ -3,6 +3,7 @@
 #include "ee_vu1.h"
 
 #include <string>
+#include <bitset>
 
 namespace ee
 {
@@ -23,6 +24,9 @@ struct s_ee_vu1_ir_program
     uint32_t m_cycles = 0u;
     uint32_t m_next_pc = 0u;
     bool m_writes_data = false;
+    // Exact switch cases emitted by the dynamic lifter. All other PCs
+    // fail before executing a guest pair. Straight-line guards use size.
+    std::bitset<2048> m_reached{};
 };
 
 s_ee_vu1_ir_program vu1_lift_straight_line_ir(
