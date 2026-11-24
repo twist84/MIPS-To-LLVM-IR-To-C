@@ -2302,7 +2302,9 @@ def main():
                 env=dict(os.environ, SDBZ_EE_DIRECT_DISPATCH="1"),
             )
             assert "EE direct dispatch: enabled" in resumed.stdout, resumed.stdout
-            assert "EE direct dispatch: executed=3" in resumed.stderr, resumed.stderr
+            # run_hot_expand merges child stderr into stdout. Keep the
+            # three-dispatch assertion, but inspect the merged stream.
+            assert "EE direct dispatch: executed=3 " in resumed.stdout, resumed.stdout
             assert "auto-expand: compiling reachable PC 0x00100030" in resumed.stdout, (
                 resumed.stdout + resumed.stderr
             )
