@@ -2299,7 +2299,10 @@ def main():
                 capture_output=True,
                 text=True,
                 check=False,
+                env=dict(os.environ, SDBZ_EE_DIRECT_DISPATCH="1"),
             )
+            assert "EE direct dispatch: enabled" in resumed.stdout, resumed.stdout
+            assert "EE direct dispatch: executed=3" in resumed.stderr, resumed.stderr
             assert "auto-expand: compiling reachable PC 0x00100030" in resumed.stdout, (
                 resumed.stdout + resumed.stderr
             )
@@ -3823,13 +3826,17 @@ def main():
                     "--work-dir", str(root / "out"),
                     "--max-dispatches=64",
                     "--auto-expand=2",
+                    "--live-full-relink",
                     "--hle-startup",
                     "--trace",
                     "--report", str(report_path),
                 ],
                 capture_output=True, text=True, check=False,
+                env=dict(os.environ, SDBZ_EE_DIRECT_DISPATCH="1"),
             )
             assert result.returncode != 0, result.stdout + result.stderr
+            assert "EE direct dispatch: enabled" in result.stdout, result.stdout
+            assert "with replacement=" in result.stdout, result.stdout
             assert "auto-expand: compiling reachable PC 0x00100050" in result.stdout, (
                 result.stdout + result.stderr
             )
