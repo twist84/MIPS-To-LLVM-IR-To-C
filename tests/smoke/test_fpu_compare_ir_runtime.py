@@ -992,7 +992,7 @@ def main():
     # - Arithmetic overflow clamps to signed FMAX and sets O|SO.
     # - Multiplier underflow flushes to signed zero; adder cancellation
     #   retains the normalized fraction. Both set U|SU.
-    # - DIV zero checks the raw divisor exponent and ORs D|SD or I|SI.
+    # - DIV checks the raw divisor exponent and replaces the I/D causes.
     fpu_normal_flags = 0xA592F45E
     add_cases = [
         (0x3FC00000, 0x40100000, 0x40700000,
@@ -1000,7 +1000,7 @@ def main():
         (0x7F7FFFFF, 0x7F7FFFFF, 0x7FFFFFFF,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
         (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF,
-         0xA592744E, 0xA592F45E, "positive overflow and early return"),
+         0xA592744E, 0xA592B45E, "overflow replaces prior underflow cause"),
         (0x3F800000, 0x33800000, 0x3F800000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "half-ULP truncation"),
         (0x3F800001, 0x33800000, 0x3F800001,
@@ -1101,7 +1101,7 @@ def main():
                         and (effective_rhs & 0x7F800000) == 0x7F800000
                         and ((lhs ^ effective_rhs) & 0x80000000) == 0)
             for initial in (0xA5903456, fpu_normal_flags):
-                flags = (initial | 0x8010) if overflow else (initial & ~0xC000)
+                flags = (initial & ~0xC000) | (0x8010 if overflow else 0)
                 scalar_cases.append((lhs, rhs, expected, initial, flags,
                                      "hardware " + operation))
                 accumulator_cases.append((lhs, rhs, 0xAABBCCDD, expected,
@@ -1146,7 +1146,7 @@ def main():
         (0x7F7FFFFF, 0x40000000, 0x7FFFFFFF,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
         (0x7FFFFFFF, 0x40000000, 0x7FFFFFFF,
-         0xA592744E, 0xA592F45E, "multiplication overflow saturates"),
+         0xA592744E, 0xA592B45E, "multiplication overflow replaces prior underflow cause"),
         (0x3FFFFFFF, 0x3FFFFFFF, 0x407FFFFE,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "truncated full significand product"),
     ]
@@ -1188,7 +1188,7 @@ def main():
         overflow = ((lhs & 0x7F800000) == 0x7F800000
                     and (rhs & 0x7F800000) == 0x7F800000)
         for initial in (0xA5903456, fpu_normal_flags):
-            flags = (initial | 0x8010) if overflow else (initial & ~0xC000)
+            flags = (initial & ~0xC000) | (0x8010 if overflow else 0)
             mul_cases.append((lhs, rhs, expected, initial, flags, "hardware MUL"))
             mula_cases.append((lhs, rhs, 0xAABBCCDD, expected, initial, flags,
                                "hardware MULA"))
@@ -1197,7 +1197,7 @@ def main():
                            "accumulator " + label))
     div_cases = [
         (0x40400000, 0x40000000, 0x3FC00000,
-         0xA592F45E, 0xA592F45E, "normal division leaves FCSR untouched"),
+         0xA592F45E, 0xA590F45E, "normal division clears I/D causes"),
         (0x3F800000, 0x00000000, 0x7FFFFFFF,
          0xA5903456, 0xA5913476, "positive divide by zero sets D|SD"),
         (0x00000000, 0x00000000, 0x7FFFFFFF,
@@ -1211,16 +1211,22 @@ def main():
         (0x00000000, 0x80000000, 0xFFFFFFFF,
          0xA5903456, 0xA5923456, "positive zero over negative zero retains sign"),
         (0x00800000, 0x40000000, 0x00000000,
-         0xA592F45E, 0xA592F45E, "division subnormal result flushes without flags"),
+         0xA592F45E, 0xA590F45E, "division underflow clears I/D, preserves O/U"),
         (0x7F7FFFFF, 0x00800000, 0x7FFFFFFF,
-         0xA592F45E, 0xA592F45E, "division overflow saturates without changing existing flags"),
+         0xA592F45E, 0xA590F45E, "division overflow clears I/D, preserves O/U"),
         (0x7F800000, 0x40000000, 0x7F000000,
-         0xA592F45E, 0xA592F45E, "extended operand divided by two"),
+         0xA592F45E, 0xA590F45E, "extended operand divided by two"),
     ]
 
     # SCPH-900xx console flags: range errors from the divide unit
     # saturate/flush the result without setting the FMAC O/U flags.
     div_cases.extend([
+        (0x3F800000, 0, 0x7FFFFFFF,
+         0x01020041, 0x01010061, "D replaces I while SI survives"),
+        (0, 0, 0x7FFFFFFF,
+         0x01010021, 0x01020061, "I replaces D while SD survives"),
+        (0x3F800000, 0x3F800000, 0x3F800000,
+         0x01030061, 0x01000061, "successful divide clears both causes"),
         (0x00800000, 0x40000000, 0x00000000,
          0x01000001, 0x01000001, "hardware division underflow flag"),
         (0x5AE20690, 0x00800044, 0x7FFFFFFF,
@@ -1262,12 +1268,11 @@ def main():
         (0x3F800000, 0xFFFFFFFF, 0x80000000),
         (0x00001337, 0xDEADBEEF, 0x80000000),
     ]
-    # Check both clear and previously populated cause/sticky flags. This
-    # intentionally preserves the pre-existing flag policy; the captured
-    # hardware file provides result words, not an FCSR trace.
+    # Check both clear and previously populated causes/stickies. The
+    # result words are from hardware; I/D clearing follows the EE manual.
     for lhs, rhs, expected in div_hardware_words:
         for initial in (0xA5903456, 0xA593F47E):
-            flags = initial
+            flags = initial & ~0x30000
             if (rhs & 0x7F800000) == 0:
                 flags |= (0x00020040 if (lhs & 0x7F800000) == 0
                           else 0x00010020)

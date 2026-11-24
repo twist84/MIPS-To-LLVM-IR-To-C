@@ -2276,7 +2276,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const std::string set_u = newtemp();
                 const std::string clear_u = newtemp();
                 const std::string after_u = newtemp();
-                const std::string final_flags = newtemp();
                 m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
                 m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
                 m_out += "  " + set_o + " = or i32 " + old_flags + ", 32784\n";
@@ -2287,9 +2286,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + clear_u + " = and i32 " + after_o + ", -16385\n";
                 m_out += "  " + after_u + " = select i1 " + underflow +
                          ", i32 " + set_u + ", i32 " + clear_u + "\n";
-                m_out += "  " + final_flags + " = select i1 " + overflow +
-                         ", i32 " + after_o + ", i32 " + after_u + "\n";
-                m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
+                // Both causes reflect the current result; retain sticky bits.
+                m_out += "  store i32 " + after_u + ", ptr " + fcsr + "\n";
                 if (fp_funct >= 0x18)
                 {
                     store_acc_i32(bits);
@@ -2304,7 +2302,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             {
                 // Divide-by-zero is detected from the raw divisor exponent;
                 // denormals count as zero. The result is signed FMAX, and the
-                // selected cause/sticky flags are ORed without clearing others.
+                // I/D causes are replaced; their sticky bits accumulate.
                 const std::string raw_fs = load_fpr_i32(fs);
                 const std::string raw_ft = load_fpr_i32(ft);
                 const std::string fs_exponent = newtemp();
@@ -2326,6 +2324,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
 
                 const std::string divide_zero_flags = newtemp();
                 const std::string old_flags = newtemp();
+                const std::string cleared_flags = newtemp();
                 const std::string flags_to_set = newtemp();
                 const std::string flags_if_divide_zero = newtemp();
                 const std::string fcsr = newtemp();
@@ -2333,9 +2332,10 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                          ", i32 131136, i32 65568\n";
                 m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
                 m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
-                m_out += "  " + flags_to_set + " = or i32 " + old_flags + ", " + divide_zero_flags + "\n";
+                m_out += "  " + cleared_flags + " = and i32 " + old_flags + ", -196609\n";
+                m_out += "  " + flags_to_set + " = or i32 " + cleared_flags + ", " + divide_zero_flags + "\n";
                 m_out += "  " + flags_if_divide_zero + " = select i1 " + divisor_is_zero +
-                         ", i32 " + flags_to_set + ", i32 " + old_flags + "\n";
+                         ", i32 " + flags_to_set + ", i32 " + cleared_flags + "\n";
                 m_out += "  store i32 " + flags_if_divide_zero + ", ptr " + fcsr + "\n";
             }
             else if (fmt == 0x10 && fp_funct == 0x04) // SQRT.S fd, ft
