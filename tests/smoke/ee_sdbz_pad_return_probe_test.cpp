@@ -1,4 +1,5 @@
 #include "ee_sdbz_pad_return_probe.h"
+#include "ee_sdbz_spawn_probe.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -87,6 +88,52 @@ int main()
         probe.last_sample().m_analog[2] != 91u ||
         !probe.observe(probe.k_return_pc, 10u, stack, 4u, &memory) ||
         probe.last_sample().m_analog_valid)
+    {
+        return 1;
+    }
+
+    // Synthetic signature and virtual target: no game assets needed.
+    ee::c_ee_sdbz_spawn_probe spawn{};
+    spawn.initialize(&memory);
+    if (spawn.enabled())
+    {
+        return 1;
+    }
+    memory.write32(0x0023af30u, 0x27bdfe90u);
+    memory.write32(0x0023b15cu, 0x0c041a54u);
+    memory.write32(0x0023b264u, 0x0320f809u);
+    memory.write32(0x0023b280u, 0x0320f809u);
+    memory.write32(0x0010697cu, 0x4bc4216au);
+    memory.write32(0x0030e300u, 0x27bdff50u);
+    spawn.initialize(&memory);
+    ee::s_ee_cpu_state cpu{};
+    cpu.m_gpr[4].m_lo = 0x1000u;
+    cpu.m_gpr[5].m_lo = 0x2000u;
+    cpu.m_gpr[31].m_lo = 0x0023b26cu;
+    memory.write32(0x1000u, 0x3000u);
+    memory.write32(0x3040u, 0x4000u);
+    memory.write32(0x2000u, 0x3f800000u);
+    spawn.observe(0x4004u, 1u, cpu, &memory); // RA persists in callee
+    spawn.observe(0x4000u, 2u, cpu, &memory);
+    if (!spawn.enabled() || spawn.size() != 1u ||
+        !spawn.sample(0).m_valid ||
+        std::strcmp(spawn.sample(0).m_kind, "spawn_setter") != 0 ||
+        spawn.sample(0).m_words[0] != 0x3f800000u ||
+        memory.read32(0x2000u) != 0x3f800000u)
+    {
+        return 1;
+    }
+    cpu.m_gpr[5].m_lo = 0x01000000u;
+    spawn.observe(0x4000u, 3u, cpu, &memory);
+    if (spawn.size() != 2u || spawn.sample(1).m_valid)
+    {
+        return 1;
+    }
+    for (uint32_t i = 0u; i < 128u; ++i)
+    {
+        spawn.observe(0x4000u, 4u + i, cpu, &memory);
+    }
+    if (spawn.size() != 128u || spawn.dropped() != 2u)
     {
         return 1;
     }

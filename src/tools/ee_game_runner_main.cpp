@@ -20,6 +20,7 @@
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
 #include "ee_sdbz_pad_return_probe.h"
+#include "ee_sdbz_spawn_probe.h"
 #include "ee_gif.h"
 #include "ee_gs.h"
 #include "ee_gs_display.h"
@@ -1350,6 +1351,7 @@ bool write_report(
     const iop::c_kernel* guest_iop_kernel,
     const ee::c_ee_sdbz_dma_wait_probe& dma_wait_probe,
     const ee::c_ee_sdbz_pad_return_probe& pad_return_probe,
+    const ee::c_ee_sdbz_spawn_probe& spawn_probe,
     const ee::c_ee_dispatch_hotspots& hotspots,
     bool in_progress
 )
@@ -1564,6 +1566,8 @@ bool write_report(
     dma_wait_probe.write_json(output);
     std::fputs(",\n  \"m2_sdbz_ee_pad_return\": ", output);
     pad_return_probe.write_json(output);
+    std::fputs(",\n  \"sdbz_spawn_boundaries\": ", output);
+    spawn_probe.write_json(output);
     // Finish the report-body scope before serializing the profile so
     // completed child counters and covered time remain consistent.
     // Profile serialization and final stream close remain uninstrumented.
@@ -3176,6 +3180,8 @@ int main(int argc, char** argv)
     // Original USA game pad-read return continuation at 0x00109ba0.
     // Observe guest EE stack bytes only; do not alter device responses.
     ee::c_ee_sdbz_pad_return_probe pad_return_probe{};
+    ee::c_ee_sdbz_spawn_probe spawn_probe{};
+    spawn_probe.initialize(memory.get());
 
     struct s_kernel_thread
     {
@@ -4201,7 +4207,7 @@ int main(int argc, char** argv)
                 reason, status, history, syscall_history, gs_state.state(),
                 gif_path1, gif_path2, gif_path3, vif1,
                 graphics_probe, iop_fault_probe, iop_kernel.get(),
-                dma_wait_probe, pad_return_probe, hotspots, true
+                dma_wait_probe, pad_return_probe, spawn_probe, hotspots, true
             );
             report_time_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - report_start
@@ -4352,6 +4358,7 @@ int main(int argc, char** argv)
         const uint32_t from_pc = cpu.m_pc;
         if (report_path != nullptr)
         {
+            spawn_probe.observe(from_pc, dispatched + 1u, cpu, memory.get());
             const bool sampled = pad_return_probe.observe(
                 from_pc, dispatched + 1u,
                 cpu.m_gpr[29u].m_lo, cpu.m_gpr[2u].m_lo,
@@ -8687,7 +8694,7 @@ int main(int argc, char** argv)
                       reason, status, history, syscall_history, gs_state.state(),
                       gif_path1, gif_path2, gif_path3, vif1,
                       graphics_probe, iop_fault_probe, iop_kernel.get(),
-                      dma_wait_probe, pad_return_probe, hotspots, false))
+                      dma_wait_probe, pad_return_probe, spawn_probe, hotspots, false))
     {
         return 1;
     }
