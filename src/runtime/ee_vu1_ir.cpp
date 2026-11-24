@@ -150,6 +150,47 @@ calc:
   ret i32 %r
 }
 
+; Four independent full-width products. Constant shifts enable SIMD on
+; hosts without per-lane variable shifts; zero lanes retain the XOR sign.
+define internal <4 x i32> @vu_mul4(<4 x i32> %a, <4 x i32> %b) alwaysinline {
+  %xor = xor <4 x i32> %a, %b
+  %sign = and <4 x i32> %xor, <i32 -2147483648, i32 -2147483648, i32 -2147483648, i32 -2147483648>
+  %ae = lshr <4 x i32> %a, <i32 23, i32 23, i32 23, i32 23>
+  %be = lshr <4 x i32> %b, <i32 23, i32 23, i32 23, i32 23>
+  %ea = and <4 x i32> %ae, <i32 255, i32 255, i32 255, i32 255>
+  %eb = and <4 x i32> %be, <i32 255, i32 255, i32 255, i32 255>
+  %az = icmp eq <4 x i32> %ea, zeroinitializer
+  %bz = icmp eq <4 x i32> %eb, zeroinitializer
+  %zero = or <4 x i1> %az, %bz
+  %a0 = and <4 x i32> %a, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
+  %b0 = and <4 x i32> %b, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
+  %a1 = or <4 x i32> %a0, <i32 8388608, i32 8388608, i32 8388608, i32 8388608>
+  %b1 = or <4 x i32> %b0, <i32 8388608, i32 8388608, i32 8388608, i32 8388608>
+  %a2 = zext <4 x i32> %a1 to <4 x i64>
+  %b2 = zext <4 x i32> %b1 to <4 x i64>
+  %product = mul <4 x i64> %a2, %b2
+  %high = lshr <4 x i64> %product, <i64 47, i64 47, i64 47, i64 47>
+  %inc = trunc <4 x i64> %high to <4 x i32>
+  %carry = icmp ne <4 x i32> %inc, zeroinitializer
+  %m0 = lshr <4 x i64> %product, <i64 23, i64 23, i64 23, i64 23>
+  %m1 = trunc <4 x i64> %m0 to <4 x i32>
+  %m2 = lshr <4 x i32> %m1, <i32 1, i32 1, i32 1, i32 1>
+  %m3 = select <4 x i1> %carry, <4 x i32> %m2, <4 x i32> %m1
+  %mantissa = and <4 x i32> %m3, <i32 8388607, i32 8388607, i32 8388607, i32 8388607>
+  %e0 = add <4 x i32> %ea, %eb
+  %e1 = sub <4 x i32> %e0, <i32 127, i32 127, i32 127, i32 127>
+  %e = add <4 x i32> %e1, %inc
+  %overflow = icmp sgt <4 x i32> %e, <i32 255, i32 255, i32 255, i32 255>
+  %underflow = icmp sle <4 x i32> %e, zeroinitializer
+  %exp = shl <4 x i32> %e, <i32 23, i32 23, i32 23, i32 23>
+  %bits = or <4 x i32> %exp, %mantissa
+  %normal = select <4 x i1> %underflow, <4 x i32> zeroinitializer, <4 x i32> %bits
+  %mag = select <4 x i1> %overflow, <4 x i32> <i32 2147483647, i32 2147483647, i32 2147483647, i32 2147483647>, <4 x i32> %normal
+  %nonzero = select <4 x i1> %zero, <4 x i32> zeroinitializer, <4 x i32> %mag
+  %result = or <4 x i32> %sign, %nonzero
+  ret <4 x i32> %result
+}
+
 define internal i32 @vu_key(i32 %raw) alwaysinline {
   %x = call i32 @vu_flush(i32 %raw)
   %mag = and i32 %x, 2147483647
@@ -1227,6 +1268,24 @@ private:
             ", align 4");
     }
 
+    std::string vf_vector(uint32_t reg_index)
+    {
+        if (reg_index == 0u)
+        {
+            return "<i32 0, i32 0, i32 0, i32 1065353216>";
+        }
+        return operation("load <4 x i32>, ptr " + vf_pointer(reg_index, 0u) +
+            ", align 4");
+    }
+
+    std::string splat(const std::string& value)
+    {
+        const auto first = operation("insertelement <4 x i32> poison, i32 " +
+            value + ", i32 0");
+        return operation("shufflevector <4 x i32> " + first +
+            ", <4 x i32> poison, <4 x i32> zeroinitializer");
+    }
+
     std::string data_address(uint32_t reg_index, int32_t offset)
     {
         const auto base = operation("zext i16 " + reg(reg_index) + " to i32");
@@ -1462,6 +1521,8 @@ private:
             op == 0x21u || op == 0x23u || op == 0x29u;
         const bool msub = (op >= 0x0cu && op <= 0x0fu) ||
             op == 0x25u || op == 0x27u || op == 0x2du;
+        const bool mul = (op >= 0x18u && op <= 0x1cu) ||
+            op == 0x1eu || op == 0x2au;
         const char* helper = nullptr;
         if (op <= 0x03u || op == 0x20u || op == 0x22u || op == 0x28u)
         {
@@ -1472,7 +1533,7 @@ private:
         {
             helper = "vu_sub";
         }
-        else if ((op >= 0x18u && op <= 0x1cu) || op == 0x1eu || op == 0x2au)
+        else if (mul)
         {
             helper = "vu_mul";
         }
@@ -1500,10 +1561,33 @@ private:
         std::array<std::string, 4> values{};
         // Read every source before lower execution and upper writeback.
         // MADD/MSUB use separate PS2-rounded MUL and ADD/SUB, never FMA.
+        // Only full-width products use the SIMD helper; masked and cross
+        // products keep the scalar path and its original lane selection.
+        std::string vector_product;
+        if (write_mask == 15u && !conversion && !abs && !cross &&
+            (mul || madd || msub))
+        {
+            const auto lhs = vf_vector(fs);
+            const auto rhs = op <= 0x1bu ? splat(vf(ft, funct & 3u)) :
+                uses_q ? splat(operation("load i32, ptr %q, align 4")) :
+                uses_i ? splat(operation("load i32, ptr %i, align 4")) :
+                vf_vector(ft);
+            vector_product = operation("call <4 x i32> @vu_mul4(<4 x i32> " +
+                lhs + ", <4 x i32> " + rhs + ")");
+        }
         for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
             if ((write_mask & (8u >> lane)) == 0u)
             {
+                continue;
+            }
+            if (!vector_product.empty())
+            {
+                const auto product = operation("extractelement <4 x i32> " +
+                    vector_product + ", i32 " + std::to_string(lane));
+                values[lane] = madd || msub ?
+                    fp_binary(madd ? "vu_add" : "vu_sub", acc(lane), product) :
+                    product;
                 continue;
             }
             const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);

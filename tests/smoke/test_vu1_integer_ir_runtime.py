@@ -2,11 +2,67 @@
 """Verify and execute the initial VU1 integer IR against the real interpreter."""
 import ctypes
 import pathlib
+import random
 import subprocess
 import sys
 import tempfile
 
 import llvmlite.binding as llvm
+
+
+def verify_mul4(ir):
+    # Test the emitted helper itself, independently of the instruction
+    # fixture's interpreter comparison. All four lanes vary independently.
+    assert "call <4 x i32> @vu_mul4(" in ir
+    wrapper = """
+define void @test_mul4(ptr %a, ptr %b, ptr %out) {
+  %va = load <4 x i32>, ptr %a, align 4
+  %vb = load <4 x i32>, ptr %b, align 4
+  %r = call <4 x i32> @vu_mul4(<4 x i32> %va, <4 x i32> %vb)
+  store <4 x i32> %r, ptr %out, align 4
+  ret void
+}
+"""
+    def scalar(a, b):
+        sign = (a ^ b) & 0x80000000
+        ea, eb = (a >> 23) & 255, (b >> 23) & 255
+        if not ea or not eb:
+            return sign
+        product = ((a & 0x7fffff) | 0x800000) * ((b & 0x7fffff) | 0x800000)
+        carry = product >> 47
+        exponent = ea + eb - 127 + carry
+        if exponent > 255:
+            return sign | 0x7fffffff
+        if exponent <= 0:
+            return sign
+        return sign | (exponent << 23) | ((product >> (23 + carry)) & 0x7fffff)
+
+    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x80800000,
+             0x3f7fffff, 0xbf7fffff, 0x3f800000, 0xbf800000,
+             0x7f7fffff, 0xff7fffff, 0x7f800000, 0xff800000,
+             0x7fffffff, 0xffffffff]
+    rng = random.Random(0x12345678)
+    pairs = [(a, b) for a in edges for b in edges]
+    pairs += [(rng.getrandbits(32), rng.getrandbits(32)) for _ in range(16384)]
+    lanes = ctypes.c_uint32 * 4
+    for opt in (0, 3):
+        module = llvm.parse_assembly(ir + wrapper)
+        module.verify()
+        target = llvm.Target.from_default_triple().create_target_machine(opt=opt)
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(target.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), target)
+        engine.add_module(module)
+        engine.finalize_object()
+        address = engine.get_function_address("test_mul4")
+        assert address
+        function = ctypes.CFUNCTYPE(None, *([ctypes.POINTER(ctypes.c_uint32)] * 3))(address)
+        out = lanes()
+        for i in range(0, len(pairs), 4):
+            group = pairs[i:i + 4]
+            a, b = zip(*group)
+            function(lanes(*a), lanes(*b), out)
+            assert list(out) == [scalar(x, y) for x, y in group], (opt, group)
 
 
 def main():
@@ -17,8 +73,11 @@ def main():
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
+            ir = path.read_text(encoding="utf-8")
+            if case == "acc":
+                verify_mul4(ir)
             for opt in (0, 3):
-                module = llvm.parse_assembly(path.read_text(encoding="utf-8"))
+                module = llvm.parse_assembly(ir)
                 module.verify()
                 target = llvm.Target.from_default_triple().create_target_machine(opt=opt)
                 module.triple = llvm.get_default_triple()
