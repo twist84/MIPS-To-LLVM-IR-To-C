@@ -179,6 +179,8 @@ private:
         ~s_transaction();
         s_transaction(const s_transaction&) = delete;
         s_transaction& operator=(const s_transaction&) = delete;
+        void acquire();
+        void release();
 
         c_ee_vif1& m_owner;
         s_machine m_next{};
@@ -193,8 +195,10 @@ private:
         e_reject m_rejection = e_reject::none;
         uint32_t m_rejected_code = 0u;
         bool m_committed = false;
+        bool m_active = false;
     };
 
+    void recycle_transaction(std::unique_ptr<s_transaction>& tx);
     void reject_packet(e_reject reason, uint32_t code);
     bool prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc);
     bool advance(s_transaction& tx, c_ee_vu1_worker* worker);
@@ -276,6 +280,7 @@ private:
     uint64_t m_native_interval_start = 0u;
     std::unique_ptr<s_ee_vu1_job> m_spare_job;
     std::unique_ptr<c_ee_vu1_worker> m_worker;
+    std::unique_ptr<s_transaction> m_spare_transaction;
     std::unique_ptr<s_transaction> m_deferred;
 };
 // Keep the common no-pending-job paths visible to the runner optimizer.

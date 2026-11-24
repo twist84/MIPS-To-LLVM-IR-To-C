@@ -427,15 +427,43 @@ void c_ee_vif1::complete_vu_start(s_machine& machine)
 c_ee_vif1::s_transaction::s_transaction(c_ee_vif1& owner)
     : m_owner(owner)
 {
-    m_next.m_pending.swap(owner.m_pending_scratch);
-    m_path1.swap(owner.m_path1_scratch);
-    m_path2.swap(owner.m_path2_scratch);
-    m_path1.clear();
-    m_path2.clear();
+    acquire();
 }
 
 c_ee_vif1::s_transaction::~s_transaction()
 {
+    release();
+}
+
+void c_ee_vif1::s_transaction::acquire()
+{
+    // prepare() overwrites the machine snapshot before processing any
+    // command. Keep its resident allocation instead of zeroing 32 KiB.
+    m_next.m_pending.clear();
+    m_next.m_pending.swap(m_owner.m_pending_scratch);
+    m_path1.swap(m_owner.m_path1_scratch);
+    m_path2.swap(m_owner.m_path2_scratch);
+    m_path1.clear();
+    m_path2.clear();
+    m_ranges.clear();
+    m_index = 0u;
+    m_before1 = 0u;
+    m_before2 = 0u;
+    m_waiting_words = 0u;
+    m_issue = {};
+    m_rejection = e_reject::none;
+    m_rejected_code = 0u;
+    m_committed = false;
+    m_active = true;
+}
+
+void c_ee_vif1::s_transaction::release()
+{
+    if (!m_active)
+    {
+        return;
+    }
+    m_active = false;
     if (!m_committed)
     {
         m_next.m_pending.clear();
@@ -460,6 +488,17 @@ c_ee_vif1::s_transaction::~s_transaction()
     {
         std::vector<uint32_t>().swap(m_owner.m_pending_scratch);
     }
+    m_ranges.clear();
+    if (m_ranges.capacity() > limit / sizeof(s_path_range))
+    {
+        std::vector<s_path_range>().swap(m_ranges);
+    }
+}
+
+void c_ee_vif1::recycle_transaction(std::unique_ptr<s_transaction>& tx)
+{
+    tx->release();
+    m_spare_transaction = std::move(tx);
 }
 
 void c_ee_vif1::reject_packet(e_reject reason, uint32_t code)
@@ -820,14 +859,25 @@ c_ee_vif1::e_deferred_result c_ee_vif1::begin_deferred(
     {
         return e_deferred_result::rejected;
     }
-    auto tx = std::make_unique<s_transaction>(*this);
+    auto tx = std::move(m_spare_transaction);
+    if (tx == nullptr)
+    {
+        tx = std::make_unique<s_transaction>(*this);
+    }
+    else
+    {
+        tx->acquire();
+    }
     if (!prepare(*tx, data, qwc))
     {
+        recycle_transaction(tx);
         return e_deferred_result::rejected;
     }
     if (advance(*tx, m_worker.get()))
     {
-        return publish(*tx) ? e_deferred_result::completed :
+        const bool accepted = publish(*tx);
+        recycle_transaction(tx);
+        return accepted ? e_deferred_result::completed :
             e_deferred_result::rejected;
     }
     m_deferred = std::move(tx);
@@ -873,7 +923,7 @@ c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
         if (advance(tx, m_worker.get()))
         {
             const bool accepted = publish(tx);
-            m_deferred.reset();
+            recycle_transaction(m_deferred);
             return accepted ? e_deferred_result::completed :
                 e_deferred_result::rejected;
         }
@@ -898,7 +948,7 @@ void c_ee_vif1::cancel_deferred()
             job->m_path1.swap(m_deferred->m_path1);
             m_spare_job = std::move(job);
         }
-        m_deferred.reset();
+        recycle_transaction(m_deferred);
     }
 }
 

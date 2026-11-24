@@ -570,6 +570,34 @@ int main()
         {
             return 1;
         }
+
+        // Reuse the staging slot after invalid input and cancellation.
+        // It must not retain an old cursor, rejection, PATH1 or snapshot.
+        const auto* const committed_data = deferred.vu1_data();
+        const auto* const committed_code = deferred.vu1_code();
+        if (!check(deferred.begin_deferred(nullptr, 1u) == result::rejected &&
+                !deferred.deferred_busy() &&
+                deferred.begin_deferred(start.data(), 1u) == result::pending &&
+                deferred.wait_deferred() == result::completed &&
+                deferred_capture.m_calls == 2u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 1u &&
+                deferred.vu1_data() == committed_data &&
+                deferred.vu1_code() == committed_code,
+                "reused transaction retained rejected or cancelled state"))
+        {
+            return 1;
+        }
+        deferred.reset();
+        const auto nop = pack_words({0u, 0u, 0u, 0u});
+        if (!check(deferred.begin_deferred(nop.data(), 1u) == result::completed &&
+                !deferred.deferred_busy() &&
+                deferred.diagnostic().m_commands == 4u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 0u &&
+                deferred.vu1_data()[32u] == 0u,
+                "reused transaction retained pre-reset guest state"))
+        {
+            return 1;
+        }
     }
 
     // The DMA controller commits its staged register state and raises
