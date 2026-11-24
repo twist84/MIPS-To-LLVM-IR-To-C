@@ -157,6 +157,36 @@ def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0):
         prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)
 
 
+def validate_source_ir(elf, source_work, source_opt, ir_sources):
+    """Authenticate source modules independently of any native DLL/objects.
+
+    A shared provenance record is newer than a possibly stale O0/O2
+    snapshot after another profile discovers functions. For a legacy
+    source, require its exact saved metadata, lowering inputs and IR.
+    Never repair, relink or execute a source native library here.
+    """
+    metadata_path = shared_ir.ir_directory(source_work) / "ee_functions.json"
+    metadata = shared_ir.read_json(metadata_path)
+    if (Path(metadata.get("elf", "")).resolve() != elf or
+            run_game.elf_entry(elf) not in run_game.covered_pcs(metadata)):
+        raise ValueError("shared IR source ELF/entry mismatch")
+    if shared_ir.active(metadata_path):
+        state = shared_ir.current_state(metadata_path, ir_sources)
+        hashes = state["ir_hashes"]
+    else:
+        snapshot = shared_ir.read_json(source_work / "translation-cache.json")
+        if (snapshot.get("schema") != run_game.CACHE_SCHEMA or
+                snapshot.get("emit_opt") != source_opt or
+                snapshot.get("ir_sources") != ir_sources or
+                snapshot.get("metadata_sha256") != run_game.sha256_path(metadata_path)):
+            raise ValueError("source IR provenance is stale; recover the source cache explicitly")
+        hashes = snapshot["ir_hashes"]
+    verify_modules(source_work, metadata, hashes)
+    shared_ir.publish(metadata_path, ir_sources, hashes)
+    print(f"Shared EE IR: verified {len(hashes)} modules (no source DLL relink)", flush=True)
+    return metadata_path, hashes
+
+
 def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt):
     root = Path(__file__).resolve().parents[1]
     recomp = run_game.native_executable(build.resolve(), "ee_recomp", config)
@@ -165,17 +195,8 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)
     library_name = ("game-translated.dll" if os.name == "nt" else
                     "libgame-translated.dylib" if sys.platform == "darwin" else
                     "libgame-translated.so")
-    metadata_path = shared_ir.ir_directory(source_work) / "ee_functions.json"
-    source_cache = source_work / "translation-cache.json"
-    refresh_profile(elf, build, config, source_work, source_opt, jobs,
-                    inputs, source_work / library_name)
-    source_snapshot = shared_ir.read_json(source_cache)
-    if source_snapshot.get("ir_sources") != ir_sources:
-        raise ValueError("source lowering fingerprint is not current")
-    hashes = source_snapshot["ir_hashes"]
-    metadata = shared_ir.read_json(metadata_path)
-    verify_modules(source_work, metadata, hashes)
-    shared_ir.publish(metadata_path, ir_sources, hashes)
+    metadata_path, hashes = validate_source_ir(
+        elf, source_work, source_opt, ir_sources)
 
     cache = work / "translation-cache.json"
     library = work / library_name
@@ -219,7 +240,7 @@ def main(argv=None):
     parser.add_argument("--work-dir", type=Path, required=True)
     parser.add_argument("--emit-opt", type=int, choices=(1, 2, 3, 4, 5), required=True)
     parser.add_argument("--source-opt", type=int, choices=(0, 2), default=0,
-                        help="verified source cache profile; use 2 to seed profile 4 or 5 from O2")
+                        help="legacy source provenance profile (shared IR is independent of native profile)")
     parser.add_argument("--emit-jobs", type=int, default=2)
     args = parser.parse_args(argv)
     if args.source_opt == 2 and args.emit_opt not in (4, 5):

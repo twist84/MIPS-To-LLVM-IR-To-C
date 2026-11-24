@@ -2340,12 +2340,25 @@ def main():
                 "--source-work-dir", str(root / "out"),
                 "--work-dir", str(variant),
             ]
-            for expected_message in ("Built O2 EE variant", "Reusing verified O2 EE cache"):
-                result = subprocess.run(prepare, capture_output=True, text=True, check=False)
-                assert result.returncode == 0, result.stdout + result.stderr
-                assert expected_message in result.stdout, result.stdout
-                assert original_cache.read_bytes() == original_bytes
-                assert metadata_path.read_bytes() == original_map
+            # A source DLL may be stale or completely absent; native
+            # profiles depend on verified IR, not another profile's DLL.
+            # Select the actual native library, not a cache directory.
+            base_library = next(p for p in (root / "out").iterdir()
+                if p.is_file() and p.name in ("game-translated.dll",
+                    "libgame-translated.so", "libgame-translated.dylib"))
+            saved_library = base_library.with_name(base_library.name + ".saved")
+            base_library.rename(saved_library)
+            try:
+                for expected_message in ("Built O2 EE variant", "Reusing verified O2 EE cache"):
+                    result = subprocess.run(prepare, capture_output=True, text=True, check=False)
+                    assert result.returncode == 0, result.stdout + result.stderr
+                    assert expected_message in result.stdout, result.stdout
+                    assert "no source DLL relink" in result.stdout
+                    assert not base_library.exists()
+                    assert original_cache.read_bytes() == original_bytes
+                    assert metadata_path.read_bytes() == original_map
+            finally:
+                saved_library.rename(base_library)
             variant_cache = json.loads((variant / "translation-cache.json").read_text(encoding="utf-8"))
             assert variant_cache["emit_opt"] == 2
             assert variant_cache["ir_hashes"] == json.loads(original_bytes)["ir_hashes"]

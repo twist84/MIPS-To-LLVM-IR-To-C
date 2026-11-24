@@ -285,7 +285,13 @@ rem --quick forces the non-traced probe even if no guest cache survives.
 rem Without --quick, WebGPU requests still require full replay snapshots.
 rem Only rebuild guest IR when preserved provenance cannot be verified.
 set "CACHE_FLAG="
-if exist "%WORK_DIR%\translation-cache.json" (
+rem Optimized full replay validates the shared source IR in the profile
+rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
+if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
+    echo === Validating shared EE IR for selected optimization profile ===
+    set "CACHE_FLAG=--no-recompile"
+)
+if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating saved EE translation ===
     python tools\run_game.py "%GAME_ELF%" ^
         --build-dir build --config Release ^
@@ -380,36 +386,23 @@ if not defined CACHE_FLAG (
     echo Guest translation cache is not reusable; regenerating IR automatically.
 )
 
-rem Fork verified guest IR into an independent optimization cache.
+rem Build only the selected profile from the canonical shared IR.
 if not "%SDBZ_EE_OPT%"=="0" (
     if not defined CACHE_FLAG (
-        echo ERROR: Optimized EE replay requires a verified O0 cache.
+        echo ERROR: Optimized EE replay requires a verified shared IR cache.
         exit /b 1
     )
     if "%SDBZ_EE_OPT%"=="4" (
-        rem Refresh the verified O2 cache and seed the pipeline variant from
-        rem its full discovery map. Never replace the O0 or O2 IR/objects.
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
-            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O2" ^
-            --emit-opt=2 --emit-jobs=%EMIT_JOBS%
-        if errorlevel 1 exit /b 1
-        python tools\build_optimized_cache.py "%GAME_ELF%" ^
-            --build-dir build --config Release ^
-            --source-work-dir "%WORK_DIR%-O2" --source-opt=2 ^
+            --source-work-dir "%WORK_DIR%" ^
             --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-IR-O2"
     ) else if "%SDBZ_EE_OPT%"=="5" (
-        rem Isolate host CPU targeting from the IR optimization experiment.
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
-            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O2" ^
-            --emit-opt=2 --emit-jobs=%EMIT_JOBS%
-        if errorlevel 1 exit /b 1
-        python tools\build_optimized_cache.py "%GAME_ELF%" ^
-            --build-dir build --config Release ^
-            --source-work-dir "%WORK_DIR%-O2" --source-opt=2 ^
+            --source-work-dir "%WORK_DIR%" ^
             --work-dir "%WORK_DIR%-O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-O2-native"
