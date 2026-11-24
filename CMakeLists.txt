@@ -44,6 +44,7 @@ add_library(ee_core STATIC
     src/runtime/ee_vif1.cpp
     src/runtime/ipu/ee_ipu.cpp
     src/runtime/ee_vu1.cpp
+    src/llvm/ee_vu1_ir.cpp
     src/runtime/ee_gs.cpp
     src/runtime/ee_gs_display.cpp
     src/runtime/ee_exceptions.cpp
@@ -521,6 +522,10 @@ add_executable(ee_vu1_pipeline_test tests/smoke/ee_vu1_pipeline_test.cpp)
 target_link_libraries(ee_vu1_pipeline_test PRIVATE ee_core)
 add_test(NAME ee_vu1_pipeline COMMAND ee_vu1_pipeline_test)
 
+add_executable(ee_vu1_ir_fixture tests/smoke/ee_vu1_ir_fixture.cpp)
+target_link_libraries(ee_vu1_ir_fixture PRIVATE ee_core)
+add_test(NAME ee_vu1_ir_rejection COMMAND ee_vu1_ir_fixture)
+
 add_executable(ee_sdbz_dma_wait_probe_test tests/smoke/ee_sdbz_dma_wait_probe_test.cpp)
 target_link_libraries(ee_sdbz_dma_wait_probe_test PRIVATE ee_core)
 add_test(NAME ee_sdbz_dma_wait_probe COMMAND ee_sdbz_dma_wait_probe_test)
@@ -863,6 +868,10 @@ add_test(NAME function_discovery COMMAND ee_function_discovery_test)
 add_test(NAME smoke COMMAND ee_smoke_test)
 add_test(NAME mmi_ops COMMAND ee_mmi_ops_test)
 if(EE_HAVE_LLVM_JIT_TEST)
+    add_test(NAME ee_vu1_integer_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_vu1_integer_ir_runtime.py
+                $<TARGET_FILE:ee_vu1_ir_fixture>)
     add_test(NAME fpu_compare_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_fpu_compare_ir_runtime.py
