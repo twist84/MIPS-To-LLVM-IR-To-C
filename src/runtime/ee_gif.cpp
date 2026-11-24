@@ -97,6 +97,8 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     }
 
     s_ee_gif_path3_state next = m_state;
+    uint64_t tags = 0u, primitives = 0u, packed = 0u, reglist = 0u;
+    uint64_t images = 0u, image_qwc = 0u;
     std::vector<s_ee_gif_event> events;
     // One reglist quad can generate two events; the tag may additionally
     // synthesize a PRE/PRIM event. Do not permanently queue events.
@@ -126,6 +128,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
             events.push_back(event(
                 e_ee_gif_event_type::tag, 0u, offset, 1u, low, high
             ));
+            ++tags;
             // PRE allows the GIF tag's PRIM field to select the GS
             // primitive before its PACKED registers are processed.
             if (next.m_flg == 0u && ((low >> 46u) & 1u) != 0u)
@@ -134,6 +137,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                     e_ee_gif_event_type::primitive, 0u, offset, 0u,
                     (low >> 47u) & 0x7ffu, 0u
                 ));
+                ++primitives;
             }
             next.m_active = next.m_nloop != 0u;
             ++i;
@@ -149,6 +153,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                 e_ee_gif_event_type::packed, reg, offset, 1u,
                 read_le64(at), read_le64(at + 8u)
             ));
+            ++packed;
             if (++next.m_reg == next.m_nreg)
             {
                 next.m_reg = 0u;
@@ -173,6 +178,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                     offset + half * 8u, 0u,
                     read_le64(at + half * 8u), 0u
                 ));
+                ++reglist;
                 if (++next.m_reg == next.m_nreg)
                 {
                     next.m_reg = 0u;
@@ -201,6 +207,8 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
         events.push_back(event(
             e_ee_gif_event_type::image, 0u, offset, run, 0u, 0u
         ));
+        ++images;
+        image_qwc += run;
         next.m_loop += run;
         i += run;
         if (next.m_loop == next.m_nloop)
@@ -220,39 +228,28 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     m_state = next;
     ++m_counters.m_accepted_batches;
     m_counters.m_input_qwc += qwc;
-    for (const s_ee_gif_event& item : events)
+    // Commit structural provenance only after sink acceptance. Counting
+    // during parsing avoids a second traversal of millions of packed events.
+    m_counters.m_tags += tags;
+    m_counters.m_primitive_events += primitives;
+    m_counters.m_packed_events += packed;
+    m_counters.m_reglist_events += reglist;
+    const bool first_image = m_counters.m_image_events == 0u;
+    m_counters.m_image_events += images;
+    m_counters.m_image_qwc += image_qwc;
+
+    // Retain the exact accepted-payload digest order when requested.
+    if (images != 0u && m_counters.m_image_payload_digest_enabled)
     {
-        switch (item.m_type)
+        if (first_image)
         {
-        case e_ee_gif_event_type::tag:
-            ++m_counters.m_tags;
-            break;
-        case e_ee_gif_event_type::primitive:
-            ++m_counters.m_primitive_events;
-            break;
-        case e_ee_gif_event_type::packed:
-            ++m_counters.m_packed_events;
-            break;
-        case e_ee_gif_event_type::reglist:
-            ++m_counters.m_reglist_events;
-            break;
-        case e_ee_gif_event_type::image:
+            m_counters.m_image_payload_fnv1a64 = 0xcbf29ce484222325ull;
+        }
+        for (const s_ee_gif_event& item : events)
         {
-            // Count the actual, GS-accepted IMAGE/IMAGE2 source bytes.
-            // Do not count rejected or partially staged guest DMA input.
-            // This does not imply the bytes were sampled as textures,
-            // transformed into pixels, or selected by scanout.
-            const bool first = m_counters.m_image_events == 0u;
-            ++m_counters.m_image_events;
-            m_counters.m_image_qwc += item.m_qwc;
-            if (!m_counters.m_image_payload_digest_enabled)
+            if (item.m_type != e_ee_gif_event_type::image)
             {
-                break;
-            }
-            if (first)
-            {
-                m_counters.m_image_payload_fnv1a64 =
-                    0xcbf29ce484222325ull;
+                continue;
             }
             const size_t begin = static_cast<size_t>(item.m_byte_offset);
             const size_t end = begin + static_cast<size_t>(item.m_qwc) * 16u;
@@ -261,11 +258,8 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                 const uint8_t value = data[byte];
                 m_counters.m_image_nonzero_bytes += value != 0u ? 1u : 0u;
                 m_counters.m_image_payload_fnv1a64 ^= value;
-                m_counters.m_image_payload_fnv1a64 *=
-                    0x100000001b3ull;
+                m_counters.m_image_payload_fnv1a64 *= 0x100000001b3ull;
             }
-            break;
-        }
         }
     }
     return true;

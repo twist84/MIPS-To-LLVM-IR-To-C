@@ -220,7 +220,10 @@ int main()
         capture.m_events[3].m_byte_offset != 0u ||
         capture.m_events[4].m_type != t_type::tag ||
         parser.state().m_active ||
-        parser.state().m_nloop != 0u)
+        parser.state().m_nloop != 0u ||
+        parser.counters().m_tags != 2u ||
+        parser.counters().m_reglist_events != 3u ||
+        parser.counters().m_packed_events != 0u)
     {
         return fail("odd REGLIST padding or zero-loop next tag");
     }
@@ -391,7 +394,9 @@ int main()
     if (parser.counters().m_accepted_batches != 0u ||
         parser.counters().m_rejected_batches != 1u ||
         parser.counters().m_input_qwc != 0u ||
-        parser.counters().m_tags != 0u)
+        parser.counters().m_tags != 0u ||
+        parser.counters().m_packed_events != 0u ||
+        parser.counters().m_primitive_events != 0u)
     {
         return fail("rejected PATH3 packet counted as committed");
     }
