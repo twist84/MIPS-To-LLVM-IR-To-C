@@ -152,6 +152,46 @@ int main()
         return 1;
     }
 
+    // SDBZ MSCNT rejected this exact ISW.x VI8, -1(VI4) encoding.
+    // Exercise negative offsets, RAM wrap, zero extension, mask
+    // preservation, ILW load latency and VI0 write suppression.
+    {
+        ee::s_ee_vu1_state integer{};
+        integer.m_initialized = true;
+        integer.m_vi[4] = 0u;
+        integer.m_vi[8] = 0xabcd;
+        std::array<uint32_t, 4> initial{0xfeed1234u, 0x12345678u,
+                                       0x87654321u, 0xaabbccddu};
+        std::memcpy(data.data() + 0x3ff0u, initial.data(), 16u);
+        const uint32_t ilw_x = (0x04u << 25u) | (8u << 21u) |
+            (9u << 16u) | (4u << 11u) | 0x7ffu;
+        const uint32_t isw_y = (0x05u << 25u) | (4u << 21u) |
+            (9u << 16u) | (4u << 11u) | 1u;
+        if (!check(run(integer, {
+                       {0x0b0827ffu, k_upper_nop},
+                       {ilw_x, k_upper_nop},
+                       {isw_y, k_upper_nop},
+                       {ilw_x & ~(15u << 16u), k_upper_end},
+                       {k_lower_nop, k_upper_nop}
+                    }, data, issue), "SDBZ ISW/ILW microprogram rejected"))
+        {
+            return 1;
+        }
+        std::array<uint32_t, 4> actual{};
+        uint32_t stored_y = 0u;
+        std::memcpy(actual.data(), data.data() + 0x3ff0u, 16u);
+        std::memcpy(&stored_y, data.data() + 20u, 4u);
+        if (!check(actual[0] == 0xabcdu &&
+                   actual[1] == initial[1] && actual[2] == initial[2] &&
+                   actual[3] == initial[3] && integer.m_vi[9] == 0xabcdu &&
+                   integer.m_vi[0] == 0u && stored_y == 0xabcdu &&
+                   issue.m_cycles >= 8u,
+                   "ISW/ILW addressing, lane mask, zero extension or load stall"))
+        {
+            return 1;
+        }
+    }
+
     // RINIT/RNEXT/RGET use the reference 23-bit LFSR, and MFIR
     // sign-extends the VI source into the selected VF lanes.
     ee::s_ee_vu1_state rand{};

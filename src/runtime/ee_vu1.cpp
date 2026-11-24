@@ -792,6 +792,32 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         return true;
     }
 
+    // ILW/ISW use signed 11-bit quadword offsets, unlike the unsigned
+    // immediate arithmetic below. VU1 memory wraps at 1024 quadwords.
+    // VI values are 16-bit; ISW zero-extends each selected 32-bit lane.
+    if (major == 0x04u || major == 0x05u)
+    {
+        uint8_t* bytes = data.data() + qword_offset(
+            state.m_vi[is] + static_cast<uint32_t>(imm11));
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((dest & (8u >> lane)) != 0u)
+            {
+                if (major == 0x04u)
+                {
+                    // Selected lanes are processed in XYZW order.
+                    store_vi(state, it, read32(bytes + lane * 4u) & 0xffffu);
+                }
+                else
+                {
+                    const uint32_t value = state.m_vi[it];
+                    std::memcpy(bytes + lane * 4u, &value, sizeof(value));
+                }
+            }
+        }
+        return true;
+    }
+
     switch (major)
     {
     case 0x08u:
