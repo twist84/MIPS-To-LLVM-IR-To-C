@@ -1,5 +1,6 @@
 #include "ee_vu1_ir.h"
 #include "ee_vu1_dependency.h"
+#include "ee_vu1_aot.h"
 
 #include <utility>
 
@@ -504,5 +505,45 @@ s_ee_vu1_ir_program vu1_lift_straight_line_ir(
         ending = (hi & 0x40000000u) != 0u;
     }
     return {};
+}
+std::string vu1_aot_module_ir(
+    const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
+    uint32_t address, bool windows_exports)
+{
+    auto program = vu1_lift_straight_line_ir(code, address);
+    if (program.m_ir.empty())
+    {
+        return {};
+    }
+    const uint32_t start = address & 0x3ff8u;
+    const std::string linkage = windows_exports ? "dso_local dllexport " : "dso_local ";
+    if (windows_exports)
+    {
+        const auto at = program.m_ir.find("define dso_local i32 @ee_vu1_program");
+        program.m_ir.replace(at, sizeof("define dso_local ") - 1u,
+            "define " + linkage);
+    }
+    program.m_ir += "\n@vu1_metadata = private constant [5 x i32] [i32 " +
+        std::to_string(k_vu1_aot_abi) + ", i32 " + std::to_string(start) +
+        ", i32 " + std::to_string(program.m_steps) + ", i32 " +
+        std::to_string(program.m_cycles) + ", i32 " +
+        std::to_string(program.m_next_pc) + "]\n";
+    const uint32_t size = program.m_steps * 8u;
+    program.m_ir += "@vu1_code = private constant [" +
+        std::to_string(size) + " x i8] c\"";
+    constexpr char hex[] = "0123456789abcdef";
+    for (uint32_t i = 0u; i < size; ++i)
+    {
+        const uint8_t byte = code[(start + i) & 0x3fffu];
+        program.m_ir += '\\';
+        program.m_ir += hex[byte >> 4u];
+        program.m_ir += hex[byte & 15u];
+    }
+    program.m_ir += "\"\n";
+    program.m_ir += "define " + linkage +
+        "ptr @ee_vu1_aot_info() { ret ptr @vu1_metadata }\n";
+    program.m_ir += "define " + linkage +
+        "ptr @ee_vu1_aot_code() { ret ptr @vu1_code }\n";
+    return program.m_ir;
 }
 } // namespace ee

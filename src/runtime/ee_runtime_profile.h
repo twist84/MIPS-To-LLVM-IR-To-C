@@ -46,6 +46,7 @@ enum class e_runtime_profile_id : std::size_t
     dispatch_trace_log,
     compile_wait,
     report_snapshot_body,
+    vu1_compiled,
     count
 };
 
@@ -92,7 +93,8 @@ inline constexpr std::array<s_runtime_profile_descriptor,
     {"progress_log", "none"},
     {"dispatch_trace_log", "none"},
     {"compile_wait", "none"},
-    {"report_snapshot_body", "none"}
+    {"report_snapshot_body", "none"},
+    {"vu1_compiled", "attempted_microinstruction_pairs"}
 }};
 
 using t_runtime_profile_clock = std::chrono::steady_clock;

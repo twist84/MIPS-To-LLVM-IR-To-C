@@ -24,4 +24,9 @@ struct s_ee_vu1_ir_program
 s_ee_vu1_ir_program vu1_lift_straight_line_ir(
     const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
     uint32_t address);
+// Produce a self-describing library module, including exact reached code.
+// Empty means unsupported; no partial executable program is emitted.
+std::string vu1_aot_module_ir(
+    const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
+    uint32_t address, bool windows_exports);
 } // namespace ee

@@ -3,6 +3,7 @@
 // This first batch intentionally rejects unported instructions and timing
 // dependencies instead of silently treating them as NOPs.
 #include "ee_vu1.h"
+#include "ee_vu1_aot.h"
 #include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
@@ -954,6 +955,14 @@ bool c_ee_vu1::run(
         state.m_initialized = true;
     }
 
+    if (g_vu1_aot != nullptr)
+    {
+        g_vu1_aot->capture(code, address);
+        if (g_vu1_aot->try_run(state, code, address, top, itop, *issue))
+        {
+            return true;
+        }
+    }
     uint32_t pc = address & 0x3ff8u;
     uint32_t npc = (pc + 8u) & 0x3fffu;
     std::array<uint16_t, 16> previous_vi = state.m_vi;

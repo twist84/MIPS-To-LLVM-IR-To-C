@@ -1,6 +1,7 @@
 #include "ee_scanout_clock.h"
 #include "ee_runtime.h"
 #include "ee_runtime_profile.h"
+#include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
 #include "ee_memory.h"
 #include "ee_ram_interpreter.h"
@@ -1538,6 +1539,8 @@ bool write_report(
     // completed child counters and covered time remain consistent.
     // Profile serialization and final stream close remain uninstrumented.
     report_profile_scope.stop();
+    std::fputs(",\n  \"vu1_aot\": ", output);
+    ee::write_vu1_aot_json(output);
     std::fputs(",\n  \"runtime_profile\": ", output);
     ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
         graphics_probe.present_succeeded());
@@ -3323,6 +3326,37 @@ int main(int argc, char** argv)
         "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
     ee::runtime_profile_begin(runtime_profile_value != nullptr &&
         std::strcmp(runtime_profile_value, "1") == 0);
+    std::unique_ptr<ee::c_ee_vu1_aot> vu1_aot;
+    std::string vu1_aot_environment;
+    std::string vu1_capture_environment;
+    const char* vu1_path = read_host_environment(
+        "SDBZ_VU1_AOT", &vu1_aot_environment);
+    const char* vu1_capture = read_host_environment(
+        "SDBZ_VU1_AOT_CAPTURE", &vu1_capture_environment);
+    if ((vu1_path != nullptr && *vu1_path != '\0') ||
+        (vu1_capture != nullptr && *vu1_capture != '\0'))
+    {
+        vu1_aot = std::make_unique<ee::c_ee_vu1_aot>();
+        std::string error;
+        if (vu1_path != nullptr && *vu1_path != '\0')
+        {
+            const auto count = vu1_aot->open_directory(vu1_path, &error);
+            std::fprintf(stderr, "VU1 AOT: %zu native programs loaded\n", count);
+            if (!error.empty())
+            {
+                std::fprintf(stderr, "VU1 AOT: %s\n", error.c_str());
+            }
+        }
+        if (vu1_capture != nullptr && *vu1_capture != '\0')
+        {
+            error.clear();
+            if (!vu1_aot->enable_capture(vu1_capture, &error))
+            {
+                std::fprintf(stderr, "VU1 capture disabled: %s\n", error.c_str());
+            }
+        }
+    }
+    ee::c_vu1_aot_binding vu1_binding(vu1_aot.get());
     double report_time_ms = 0.0;
     double native_time_ms = 0.0;
     // Host-cost breakdown for reports: IOP emulation between EE dispatches,

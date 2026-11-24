@@ -45,6 +45,7 @@ add_library(ee_core STATIC
     src/runtime/ipu/ee_ipu.cpp
     src/runtime/ee_vu1.cpp
     src/runtime/ee_vu1_ir.cpp
+    src/runtime/ee_vu1_aot.cpp
     src/runtime/ee_gs.cpp
     src/runtime/ee_gs_display.cpp
     src/runtime/ee_exceptions.cpp
@@ -53,6 +54,7 @@ add_library(ee_core STATIC
     src/runtime/ee_scanout_clock.cpp
     src/runtime/ee_cycle_scheduler.cpp
 )
+target_link_libraries(ee_core PUBLIC ${CMAKE_DL_LIBS})
 
 # Standalone IOP R3000A interpreter, initially isolated from the EE
 # runner until module loading, timing and SIF transport are integrated.
@@ -266,6 +268,10 @@ add_executable(ee_recomp
     src/ee/ee_recomp.cpp
 )
 target_link_libraries(ee_recomp PRIVATE ee_core)
+
+# Standalone captured VU1 microprogram LLVM translator.
+add_executable(vu1_recomp src/tools/vu1_recomp_main.cpp)
+target_link_libraries(vu1_recomp PRIVATE ee_core)
 
 # Ahead-of-time IRX (IOP R3000A) to LLVM IR translator.
 add_executable(iop_recomp
