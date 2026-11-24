@@ -15,6 +15,33 @@ int main()
         return 1;
     }
 
+    {
+        ee::c_runtime_profile_scope measure(e_runtime_profile_id::iop_service,
+            0u, nullptr, true);
+        // A second stop must not record another measurement.
+        (void)measure.stop();
+        if (measure.stop() != 0u || ee::g_runtime_profile.m_active != nullptr ||
+            ee::g_runtime_profile.m_covered_ns != 0u ||
+            ee::g_runtime_profile.m_counters[static_cast<std::size_t>(
+                e_runtime_profile_id::iop_service)].m_calls != 0u)
+        {
+            return 6;
+        }
+    }
+
+    ee::runtime_profile_begin(true);
+    {
+        ee::c_runtime_profile_scope measure(e_runtime_profile_id::iop_service,
+            0u, nullptr, true);
+        const uint64_t elapsed = measure.stop();
+        const auto& iop = ee::g_runtime_profile.m_counters[static_cast<std::size_t>(
+            e_runtime_profile_id::iop_service)];
+        if (iop.m_calls != 1u || iop.m_inclusive_ns != elapsed ||
+            measure.stop() != 0u || ee::g_runtime_profile.m_active != nullptr)
+        {
+            return 7;
+        }
+    }
     ee::runtime_profile_begin(true);
     uint32_t steps = 0u;
     {

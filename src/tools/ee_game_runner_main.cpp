@@ -3733,10 +3733,8 @@ int main(int argc, char** argv)
         // elapsed EE cycle, including polling, timer, and idle periods.
         // Dividing by eight is reference compatibility timing, not an
         // assertion of verified R5900 cycle accuracy.
-        ee::c_runtime_profile_scope iop_profile_scope(ee::e_runtime_profile_id::iop_service);
-        const auto iop_start = report_path != nullptr
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        ee::c_runtime_profile_scope iop_profile_scope(
+            ee::e_runtime_profile_id::iop_service, 0u, nullptr, report_path != nullptr);
         if (hle_startup && iop_rom0_path == nullptr &&
             iop_kernel != nullptr)
         {
@@ -3819,10 +3817,11 @@ int main(int argc, char** argv)
             {
                 break;
             }
-            if (iop_rpc != nullptr &&
-                iop_rpc->pending_guest_calls() != 0u &&
-                !iop_kernel->has_guest_work() &&
-                !guest_rpc_idle_diagnostic_reported)
+            const bool rpc_pending =
+                iop_rpc != nullptr && iop_rpc->pending_guest_calls() != 0u;
+            if (rpc_pending &&
+                !guest_rpc_idle_diagnostic_reported &&
+                !iop_kernel->has_guest_work())
             {
                 guest_rpc_idle_diagnostic_reported = true;
                 uint32_t dma4_chcr = 0u;
@@ -3860,17 +3859,15 @@ int main(int argc, char** argv)
                             thread.m_wake_cycle));
                 }
             }
-            if (iop_rpc == nullptr ||
-                iop_rpc->pending_guest_calls() == 0u)
+            if (!rpc_pending)
             {
                 guest_rpc_idle_diagnostic_reported = false;
             }
         }
-        iop_profile_scope.stop();
+        const uint64_t iop_duration_ns = iop_profile_scope.stop();
         if (report_path != nullptr)
         {
-            iop_time_ms += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - iop_start).count();
+            iop_time_ms += static_cast<double>(iop_duration_ns) / 1e6;
         }
 
         // Kernel HLE services completed device interrupts before handing
@@ -4291,8 +4288,9 @@ int main(int argc, char** argv)
 
             // One translated function invocation per native guest boundary.
             runtime.m_loop_safepoint_remaining = safepoint_budget;
-            const auto native_start = std::chrono::steady_clock::now();
-            ee::c_runtime_profile_scope native_profile_scope(ee::e_runtime_profile_id::ee_native_boundary);
+            ee::c_runtime_profile_scope native_profile_scope(
+                ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
+                report_path != nullptr);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
             // A module that does not own the PC returns EXITED with zero
@@ -4385,13 +4383,11 @@ int main(int argc, char** argv)
                     "(no hardware event published)\n");
                 return 1;
             }
-            native_profile_scope.stop();
+            const uint64_t native_duration_ns = native_profile_scope.stop();
             if (report_path != nullptr)
             {
                 const double duration_ms =
-                    std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - native_start
-                    ).count();
+                    static_cast<double>(native_duration_ns) / 1e6;
                 native_time_ms += duration_ms;
                 if (duration_ms > slowest_native_ms)
                 {

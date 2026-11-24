@@ -138,7 +138,8 @@ class c_runtime_profile_scope
 {
 public:
     explicit c_runtime_profile_scope(e_runtime_profile_id id,
-        uint64_t work = 0u, const uint32_t* work_at_end = nullptr)
+        uint64_t work = 0u, const uint32_t* work_at_end = nullptr,
+        bool measure_without_profile = false)
         : m_id(id), m_work(work), m_work_at_end(work_at_end)
     {
         if (g_runtime_profile.m_enabled)
@@ -147,6 +148,13 @@ public:
             g_runtime_profile.m_active = this;
             m_start = t_runtime_profile_clock::now();
             m_active = true;
+        }
+        else if (measure_without_profile)
+        {
+            // Legacy runner progress timing remains available even
+            // when the detailed profiler is disabled.
+            m_start = t_runtime_profile_clock::now();
+            m_measure_only = true;
         }
     }
 
@@ -158,14 +166,23 @@ public:
         stop();
     }
 
-    void stop()
+    // Return the measured inclusive duration on the first stop only.
+    // The caller can reuse it for legacy progress reporting without a
+    // second pair of host clock reads. Measure-only scopes never
+    // contribute to the profiler's nesting or counters.
+    uint64_t stop()
     {
-        if (m_active)
+        uint64_t inclusive = 0u;
+        if (m_active || m_measure_only)
         {
             const auto end = t_runtime_profile_clock::now();
             const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 end - m_start).count();
-            const uint64_t inclusive = static_cast<uint64_t>(elapsed);
+            inclusive = static_cast<uint64_t>(elapsed);
+            m_measure_only = false;
+        }
+        if (m_active)
+        {
             const uint64_t exclusive = inclusive - m_children_ns;
             auto& counter = g_runtime_profile.m_counters[static_cast<std::size_t>(m_id)];
             ++counter.m_calls;
@@ -191,6 +208,7 @@ public:
             g_runtime_profile.m_active = m_parent;
             m_active = false;
         }
+        return inclusive;
     }
 
 private:
@@ -201,6 +219,7 @@ private:
     t_runtime_profile_clock::time_point m_start{};
     uint64_t m_children_ns = 0u;
     bool m_active = false;
+    bool m_measure_only = false;
 };
 
 inline void write_runtime_profile_json(FILE* output, uint64_t dispatches,
