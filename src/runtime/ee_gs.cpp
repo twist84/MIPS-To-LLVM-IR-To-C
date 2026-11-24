@@ -609,7 +609,6 @@ bool c_ee_gs_state::load_clut(
 
     const bool eight = psm == 0x13u || psm == 0x1bu;
     const uint32_t entries = eight ? 256u : 16u;
-    const uint32_t entry_bytes = cpsm == 0u ? 4u : 2u;
     const uint32_t texclut = static_cast<uint32_t>(
         state.m_registers[0x1cu]
     );
@@ -621,43 +620,69 @@ bool c_ee_gs_state::load_clut(
     // Both CLUT loads and local copies share one transaction-local
     // shadow, applying each staged write at most once to that view.
     const auto& vram = staged_vram_view(writes, shadow, applied);
-    for (uint32_t i = 0u; i < entries; ++i)
+    // CSM1's raster coordinates and bit permutation depend only on
+    // palette format and entry count. Cache offsets, never VRAM values:
+    // each CLD load still observes the exact staged VRAM at this event.
+    static const auto csm1_offsets = []
     {
-        uint32_t x = 0u;
-        uint32_t y = 0u;
-        if (csm != 0u) // CSM2: TEXCLUT.CBW/COU/COV
+        std::array<std::array<std::array<uint16_t, 256>, 2>, 3> result{};
+        constexpr uint32_t formats[] = {0u, 2u, 0x0au};
+        for (uint32_t format = 0u; format < 3u; ++format)
         {
-            x = cou * 16u + i;
-            y = cov;
+            for (uint32_t mode = 0u; mode < 2u; ++mode)
+            {
+                const uint32_t count = mode != 0u ? 256u : 16u;
+                for (uint32_t i = 0u; i < count; ++i)
+                {
+                    const uint32_t j = mode != 0u ? (i & ~0x18u) |
+                        ((i & 0x08u) << 1u) | ((i & 0x10u) >> 1u) : i;
+                    const uint32_t x = j & (mode != 0u ? 15u : 7u);
+                    const uint32_t y = j >> (mode != 0u ? 4u : 3u);
+                    result[format][mode][i] = static_cast<uint16_t>(
+                        formats[format] == 0u ?
+                            psmct32_address(0u, 1u, x, y) :
+                            psmct16_address(0u, 1u, x, y, formats[format]));
+                }
+            }
         }
-        else if (eight) // CSM1: swap index bits 3 and 4
+        return result;
+    }();
+    const auto read_entry = [&](uint32_t address)
+    {
+        // Both address helpers and the cached offsets produce aligned,
+        // wrapped addresses. A 2/4-byte entry cannot straddle VRAM end.
+        const uint8_t* bytes = vram.data() + address;
+        return cpsm == 0u ? read_le32(bytes) :
+            static_cast<uint32_t>(bytes[0]) |
+                (static_cast<uint32_t>(bytes[1]) << 8u);
+    };
+    if (csm == 0u)
+    {
+        const auto& offsets = csm1_offsets[cpsm == 0u ? 0u :
+            cpsm == 2u ? 1u : 2u][eight ? 1u : 0u];
+        const uint32_t base = cbp * 256u;
+        const uint32_t first_slot = eight ? 0u : (csa & 15u) * 16u;
+        for (uint32_t i = 0u; i < entries; ++i)
         {
-            const uint32_t j = (i & ~0x18u) |
-                ((i & 0x08u) << 1u) | ((i & 0x10u) >> 1u);
-            x = j & 15u;
-            y = j >> 4u;
+            const uint32_t address = (base + offsets[i]) & (k_vram_bytes - 1u);
+            state.m_clut[first_slot + i] = read_entry(address);
+            state.m_clut_valid[first_slot + i] = true;
         }
-        else // CSM1: 4-bit entries occupy an 8x2 rectangle
+    }
+    else
+    {
+        // CSM2 uses TEXCLUT's dynamic coordinates and buffer stride.
+        const uint32_t width = std::max(1u, cbw);
+        for (uint32_t i = 0u; i < entries; ++i)
         {
-            x = i & 7u;
-            y = i >> 3u;
+            const uint32_t x = cou * 16u + i;
+            const uint32_t address = cpsm == 0u ?
+                psmct32_address(cbp, width, x, cov) :
+                psmct16_address(cbp, width, x, cov, cpsm);
+            const uint32_t slot = (csa * 16u + i) & 511u;
+            state.m_clut[slot] = read_entry(address);
+            state.m_clut_valid[slot] = true;
         }
-
-        const uint32_t address = cpsm == 0u ?
-            psmct32_address(cbp, std::max(1u, cbw), x, y) :
-            psmct16_address(cbp, std::max(1u, cbw), x, y, cpsm);
-        uint32_t value = 0u;
-        for (uint32_t b = 0u; b < entry_bytes; ++b)
-        {
-            const uint32_t at = (address + b) & (k_vram_bytes - 1u);
-            value |= static_cast<uint32_t>(vram[at]) << (8u * b);
-        }
-
-        const uint32_t slot = csm != 0u ?
-            (csa * 16u + i) & 511u :
-            eight ? i : ((csa & 15u) * 16u + i) & 255u;
-        state.m_clut[slot] = value;
-        state.m_clut_valid[slot] = true;
     }
 
     if (cld == 2u || cld == 4u)

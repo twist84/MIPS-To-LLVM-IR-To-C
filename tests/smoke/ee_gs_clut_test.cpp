@@ -437,6 +437,52 @@ int main()
         return fail("incremental CLUT/local-copy view, nibble ordering or rollback");
     }
 
+    // Exercise every CSM1 table entry for both palette sizes and all
+    // three storage formats, including wrap at the final VRAM block.
+    // Upload independent raster values and verify the expected index
+    // permutation and CSA slot selection for every entry.
+    for (uint32_t cpsm : {0u, 2u, 0x0au})
+    {
+        for (uint32_t count : {16u, 256u})
+        {
+            ee::c_ee_gs_state palette;
+            constexpr uint32_t cbp = 0x3fffu;
+            const uint32_t bytes = cpsm == 0u ? 4u : 2u;
+            std::vector<uint8_t> data(count * bytes);
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                if (bytes == 4u)
+                {
+                    set32(data.data(), i, 0x98760000u | i);
+                }
+                else
+                {
+                    set16(data.data(), i, static_cast<uint16_t>(0x7600u | i));
+                }
+            }
+            const bool eight = count == 256u;
+            if (!upload(palette, cbp, 1u, cpsm, 0u, 0u,
+                        eight ? 16u : 8u, eight ? 16u : 2u,
+                        data.data(), static_cast<uint32_t>(data.size() / 16u)) ||
+                !reg(palette, 0x06u, tex0(0u, 1u, eight ? 0x13u : 0x14u,
+                    cbp, cpsm, 0u, 31u, 1u)))
+            {
+                return fail("wrapped CSM1 palette fixture failed");
+            }
+            for (uint32_t i = 0u; i < count; ++i)
+            {
+                const uint32_t j = eight ? (i & ~0x18u) |
+                    ((i & 8u) << 1u) | ((i & 16u) >> 1u) : i;
+                const uint32_t slot = eight ? i : 240u + i;
+                if (!entry(palette, slot,
+                        (bytes == 4u ? 0x98760000u : 0x7600u) | j))
+                {
+                    return fail("wrapped CSM1 palette entry mismatch");
+                }
+            }
+        }
+    }
+
     gs.reset();
     if (gs.read_clut_entry(8u, missing) ||
         gs.state().m_clut_load_count != 0u ||
