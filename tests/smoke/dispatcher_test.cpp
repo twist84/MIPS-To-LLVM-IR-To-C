@@ -1,5 +1,6 @@
 #include "ee_dispatcher.h"
 #include "ee_dispatch_index.h"
+#include "ee_native_target_cache.h"
 #include "ee_exceptions.h"
 
 #include <cstdio>
@@ -561,6 +562,44 @@ int main()
               wrong.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
               wrong.dispatch_count == 0u && cpu.m_pc == 0x00102000u,
               "resolved single-entry execution matches indexed dispatch including interrupts");
+    }
+
+    // The host target cache must never return a colliding PC, cache a
+    // null target, or retain a pointer across module replacement.
+    {
+        ee::c_native_target_cache cache(true);
+        ee::c_native_target_cache disabled(false);
+        constexpr uint32_t a = 0x00100000u;
+        constexpr uint32_t b = a + 65536u * 4u;
+        uint32_t lookups = 0u;
+        const auto resolve = [&](uint32_t pc) -> ee::t_ee_translated_entry
+        {
+            ++lookups;
+            if (pc == a)
+            {
+                return caller_entry;
+            }
+            if (pc == b)
+            {
+                return callee_entry;
+            }
+            return nullptr;
+        };
+        const bool ok =
+            cache.resolve(0u, resolve) == nullptr &&
+            disabled.resolve(a, resolve) == nullptr &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(b, resolve) == callee_entry &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(a + 1u, resolve) == nullptr &&
+            cache.resolve(a + 1u, resolve) == nullptr &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.hits() == 2u && cache.misses() == 5u && lookups == 5u;
+        cache.clear();
+        check(ok && cache.resolve(a, resolve) == caller_entry &&
+              cache.hits() == 2u && cache.misses() == 6u && lookups == 6u,
+              "native target cache preserves exact keys, misses and invalidation");
     }
 
     // Exhaust all control-bit combinations and individual interrupt lines,

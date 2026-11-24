@@ -1,6 +1,7 @@
 #include "ee_scanout_clock.h"
 #include "ee_runtime.h"
 #include "ee_dispatch_index.h"
+#include "ee_native_target_cache.h"
 #include "ee_runtime_profile.h"
 #include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
@@ -426,57 +427,6 @@ using t_game_run = uint32_t (*)(
 );
 
 using t_game_resolve_entry = ee::t_ee_translated_entry (*)(uint32_t);
-
-// Exact-PC cache. The owning module remains loaded until clear().
-// Collisions can only cause another lookup; never use an aliased PC.
-class c_native_target_cache
-{
-public:
-    explicit c_native_target_cache(bool enabled)
-        : m_slots(enabled ? 65536u : 0u)
-    {
-    }
-
-    template<typename t_resolve>
-    ee::t_ee_translated_entry resolve(uint32_t pc, const t_resolve& lookup)
-    {
-        if (m_slots.empty() || pc == 0u)
-        {
-            return nullptr;
-        }
-        auto& slot = m_slots[(pc >> 2u) & (m_slots.size() - 1u)];
-        if (slot.m_pc == pc && slot.m_entry != nullptr)
-        {
-            ++m_hits;
-            return slot.m_entry;
-        }
-        ++m_misses;
-        const auto entry = lookup(pc);
-        if (entry != nullptr)
-        {
-            slot = {pc, entry};
-        }
-        return entry;
-    }
-
-    void clear()
-    {
-        std::fill(m_slots.begin(), m_slots.end(), s_slot{});
-    }
-
-    uint64_t hits() const { return m_hits; }
-    uint64_t misses() const { return m_misses; }
-
-private:
-    struct s_slot
-    {
-        uint32_t m_pc = 0u;
-        ee::t_ee_translated_entry m_entry = nullptr;
-    };
-    std::vector<s_slot> m_slots;
-    uint64_t m_hits = 0u;
-    uint64_t m_misses = 0u;
-};
 
 struct c_native_module
 {
@@ -2424,7 +2374,7 @@ int main(int argc, char** argv)
     const bool direct_dispatch = direct_dispatch_setting != nullptr &&
         std::strcmp(direct_dispatch_setting, "1") == 0;
     t_game_resolve_entry native_resolve = direct_dispatch ? module.resolver() : nullptr;
-    c_native_target_cache native_targets(direct_dispatch);
+    ee::c_native_target_cache native_targets(direct_dispatch);
     uint64_t direct_dispatches = 0u;
     if (direct_dispatch)
     {
