@@ -40,6 +40,9 @@ void load_clut(std::uint64_t tex0, std::uint64_t texclut);
 void flush();
 void texflush();
 void wait_idle();
+// Destination is a full GS VRAM buffer; offset and bytes are word-aligned.
+// A failed map never reports successful guest-visible data.
+bool download_checked(std::uint8_t *memory, std::uint32_t offset = 0, std::uint32_t bytes = kMemorySize);
 void download(std::uint8_t *memory, std::uint32_t offset = 0, std::uint32_t bytes = kMemorySize);
 bool download_async(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes, std::uint32_t serial);
 bool finish_download(std::uint32_t serial);

@@ -1108,7 +1108,7 @@ void submit(WGPUTextureView present_view = nullptr) {
     g_clut_loads = 0;
 }
 
-void read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t offset = 0) {
+bool read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t offset = 0) {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_readback_cpu, bytes);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     wgpuCommandEncoderCopyBufferToBuffer(enc, source, offset, g_readback, 0, bytes);
@@ -1116,19 +1116,36 @@ void read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t 
     wgpuQueueSubmit(g_queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
-    bool done = false;
+    struct s_map_result
+    {
+        bool m_done = false;
+        bool m_success = false;
+    } result;
     WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
     cb.mode = WGPUCallbackMode_AllowProcessEvents;
-    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *flag, void *) {
-        if (status != WGPUMapAsyncStatus_Success) std::fprintf(stderr, "[gpu] map failed %d\n", static_cast<int>(status));
-        *static_cast<bool *>(flag) = true;
+    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *user, void *) {
+        auto& result = *static_cast<s_map_result*>(user);
+        result.m_success = status == WGPUMapAsyncStatus_Success;
+        if (!result.m_success)
+        {
+            std::fprintf(stderr, "[gpu] map failed %d\n", static_cast<int>(status));
+        }
+        result.m_done = true;
     };
-    cb.userdata1 = &done;
+    cb.userdata1 = &result;
     wgpuBufferMapAsync(g_readback, WGPUMapMode_Read, 0, bytes, cb);
-    wait_until(done);
+    wait_until(result.m_done);
+    if (!result.m_success)
+    {
+        return false;
+    }
     const void *mapped = wgpuBufferGetConstMappedRange(g_readback, 0, bytes);
-    if (mapped) std::memcpy(out, mapped, bytes);
+    if (mapped)
+    {
+        std::memcpy(out, mapped, bytes);
+    }
     wgpuBufferUnmap(g_readback);
+    return mapped != nullptr;
 }
 
 std::uint32_t make_setup(const State &st, std::uint64_t attr, std::uint32_t *w) {
@@ -1833,16 +1850,28 @@ bool finish_download(std::uint32_t serial) {
     return done;
 }
 
-void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes) {
+bool download_checked(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes)
+{
+    if (g_mode == Mode::off || memory == nullptr || bytes == 0u ||
+        (offset & 3u) != 0u || (bytes & 3u) != 0u ||
+        offset > kMemorySize || bytes > kMemorySize - offset)
+    {
+        return false;
+    }
     flush_all();
-    if (g_scale == 1) {
+    if (g_scale == 1)
+    {
         submit();
-        read_back(g_vram, bytes, memory + offset, offset);
-        return;
+        return read_back(g_vram, bytes, memory + offset, offset);
     }
     dispatch_linear(kResolve, bytes / 4, push_params({offset / 4}));
     submit();
-    read_back(g_scratch, bytes, memory + offset, offset);
+    return read_back(g_scratch, bytes, memory + offset, offset);
+}
+
+void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes)
+{
+    (void)download_checked(memory, offset, bytes);
 }
 
 void read_state(std::vector<std::uint32_t> &vram, std::uint32_t &scale, std::vector<std::uint32_t> &clut) {

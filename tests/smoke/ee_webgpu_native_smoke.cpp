@@ -1,11 +1,115 @@
 // Native GPU execution test; no browser, SDL, display server, or game ELF.
 // Uses the original wgpu-native GS compute transfer/display passes.
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
+#include "ee_gs.h"
+#include "ee_webgpu_bridge.h"
+
+#include <algorithm>
+#include <array>
 
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <vector>
+
+namespace
+{
+bool write_register(ee::c_ee_gs_state& gs, uint32_t reg, uint64_t value)
+{
+    ee::s_ee_gif_event event{};
+    event.m_type = ee::e_ee_gif_event_type::packed;
+    event.m_register = 0xeu;
+    event.m_word0 = value;
+    event.m_word1 = reg;
+    const std::array<uint8_t, 16> bytes{};
+    return gs.consume(&event, 1u, bytes.data(), 1u);
+}
+
+bool write_image(ee::c_ee_gs_state& gs, const uint8_t* bytes, uint32_t qwc)
+{
+    ee::s_ee_gif_event event{};
+    event.m_type = ee::e_ee_gif_event_type::image;
+    event.m_qwc = qwc;
+    return gs.consume(&event, 1u, bytes, qwc);
+}
+
+bool compare_transfer_formats()
+{
+    // A fresh zero-filled GPU VRAM/CLUT and CPU GS receive the exact
+    // same accepted GIF events. Compare raw physical bytes, including
+    // untouched lanes, rather than the rendered image or a checksum.
+    using namespace ps2::gs;
+    std::vector<uint32_t> zeros(kMemorySize / 4u, 0u);
+    gpu::write_state(zeros, 1u, std::vector<uint32_t>(512u, 0u));
+    ee::c_ee_gs_state gs{};
+    ee::c_ee_webgpu_bridge bridge{};
+    if (!bridge.init())
+    {
+        return false;
+    }
+    gs.bind_committed_event_observer(&bridge,
+        &ee::c_ee_webgpu_bridge::committed_gif_events);
+    std::vector<uint8_t> actual(kMemorySize, 0u);
+    struct s_format
+    {
+        uint32_t m_psm;
+        uint32_t m_bits;
+    };
+    constexpr s_format formats[] =
+    {
+        {0x00u, 32u}, {0x01u, 24u}, {0x02u, 16u}, {0x0au, 16u},
+        {0x13u, 8u}, {0x14u, 4u}, {0x1bu, 8u}, {0x24u, 4u},
+        {0x2cu, 4u}, {0x30u, 32u}, {0x31u, 24u},
+        {0x32u, 16u}, {0x3au, 16u}
+    };
+    for (const auto& format : formats)
+    {
+        // Reuse a nonzero base to exercise preservation of previously
+        // written lanes, cross GS pages, and wrap the 4 MiB address.
+        constexpr uint32_t width = 137u;
+        constexpr uint32_t height = 3u;
+        constexpr uint32_t base = 0x3fffu;
+        constexpr uint32_t bw = 4u;
+        constexpr uint32_t x = 5u;
+        constexpr uint32_t y = 31u;
+        const uint32_t qwc = (width * height * format.m_bits + 127u) / 128u;
+        std::vector<uint8_t> payload(qwc * 16u);
+        uint32_t seed = 0x12345678u ^ format.m_psm;
+        for (auto& byte : payload)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            byte = static_cast<uint8_t>(seed >> 24u);
+        }
+        if (!write_register(gs, 0x50u, (uint64_t{base} << 32u) |
+                (uint64_t{bw} << 48u) | (uint64_t{format.m_psm} << 56u)) ||
+            !write_register(gs, 0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) ||
+            !write_register(gs, 0x52u, width | (uint64_t{height} << 32u)) ||
+            !write_register(gs, 0x53u, 0u) ||
+            !write_image(gs, payload.data(), 1u) ||
+            !write_image(gs, payload.data() + 16u, qwc - 1u) ||
+            !gpu::download_checked(actual.data()))
+        {
+            std::fprintf(stderr, "GS transfer/readback failed PSM=%02x\n", format.m_psm);
+            return false;
+        }
+        const auto& expected = gs.vram();
+        const auto mismatch = std::mismatch(expected.begin(), expected.end(), actual.begin());
+        if (mismatch.first != expected.end())
+        {
+            std::fprintf(stderr, "GS CPU/GPU transfer mismatch PSM=%02x offset=%zx CPU=%02x GPU=%02x\n",
+                format.m_psm, static_cast<size_t>(mismatch.first - expected.begin()),
+                static_cast<unsigned>(*mismatch.first), static_cast<unsigned>(*mismatch.second));
+            return false;
+        }
+        std::printf("GS CPU/GPU transfer PSM=%02x: PASS\n", format.m_psm);
+    }
+    // Invalid requests must not touch the destination.
+    const auto original = actual;
+    return !gpu::download_checked(actual.data(), 1u, 4u) &&
+           !gpu::download_checked(actual.data(), kMemorySize, 4u) &&
+           !gpu::download_checked(nullptr) && actual == original;
+}
+}
 
 int main()
 {
@@ -83,6 +187,11 @@ int main()
             "at(2,2)=%08x\n",
             width, height, rgba.size(),
             rgba.size() >= 11u ? rgba[10u] : 0u);
+        return 1;
+    }
+
+    if (!compare_transfer_formats())
+    {
         return 1;
     }
 

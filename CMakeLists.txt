@@ -701,7 +701,7 @@ endif()
 if(EE_ENABLE_WEBGPU)
     add_executable(ee_webgpu_native_smoke
         tests/smoke/ee_webgpu_native_smoke.cpp)
-    target_link_libraries(ee_webgpu_native_smoke PRIVATE ee_webgpu_native)
+    target_link_libraries(ee_webgpu_native_smoke PRIVATE ee_webgpu_native ee_core)
     add_test(NAME ee_webgpu_native_smoke COMMAND ee_webgpu_native_smoke)
     set_tests_properties(ee_webgpu_native_smoke
         PROPERTIES SKIP_RETURN_CODE 77)
