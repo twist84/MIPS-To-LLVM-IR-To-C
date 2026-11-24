@@ -1460,6 +1460,10 @@ bool c_ee_gs_state::consume(
     };
     auto& writes = m_write_scratch;
     auto& shadow_vram = m_shadow_scratch;
+    // Establish an empty logical transaction independently of cleanup
+    // on any earlier exit. Capacity, not previous contents, is reused.
+    writes.clear();
+    shadow_vram.clear();
     s_scratch_scope scratch{writes, shadow_vram};
     const uint64_t bytes = static_cast<uint64_t>(qwc) * 16u;
 
