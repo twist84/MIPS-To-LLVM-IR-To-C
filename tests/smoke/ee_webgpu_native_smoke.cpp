@@ -33,7 +33,7 @@ bool write_image(ee::c_ee_gs_state& gs, const uint8_t* bytes, uint32_t qwc)
     return gs.consume(&event, 1u, bytes, qwc);
 }
 
-bool compare_transfer_formats()
+bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge)
 {
     // A fresh zero-filled GPU VRAM/CLUT and CPU GS receive the exact
     // same accepted GIF events. Compare raw physical bytes, including
@@ -42,11 +42,6 @@ bool compare_transfer_formats()
     std::vector<uint32_t> zeros(kMemorySize / 4u, 0u);
     gpu::write_state(zeros, 1u, std::vector<uint32_t>(512u, 0u));
     ee::c_ee_gs_state gs{};
-    ee::c_ee_webgpu_bridge bridge{};
-    if (!bridge.init())
-    {
-        return false;
-    }
     gs.bind_committed_event_observer(&bridge,
         &ee::c_ee_webgpu_bridge::committed_gif_events);
     std::vector<uint8_t> actual(kMemorySize, 0u);
@@ -114,8 +109,8 @@ bool compare_transfer_formats()
 int main()
 {
     using ps2::gs::gpu::DisplaySource;
-    using ps2::gs::gpu::Mode;
-    if (!ps2::gs::gpu::init(Mode::primary))
+    ee::c_ee_webgpu_bridge bridge{};
+    if (!bridge.init())
     {
         // No WebGPU adapter available on this runner.
         // CTest may report this as skipped; strict CI can require one.
@@ -190,7 +185,7 @@ int main()
         return 1;
     }
 
-    if (!compare_transfer_formats())
+    if (!compare_transfer_formats(bridge))
     {
         return 1;
     }
