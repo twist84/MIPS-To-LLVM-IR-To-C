@@ -289,7 +289,7 @@ rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
 if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating shared EE IR for selected optimization profile ===
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
-        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
     if errorlevel 1 (
         echo ERROR: Shared source is not current. Existing caches retained.
         echo Run with SDBZ_EE_OPT=0 and --recover-cache --accept-new-ir
@@ -431,23 +431,23 @@ if not "%SDBZ_EE_OPT%"=="0" (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --source-work-dir "%WORK_DIR%" ^
-            --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
+            --work-dir "%WORK_DIR%\IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
-        set "WORK_DIR=%WORK_DIR%-IR-O2"
+        set "WORK_DIR=%WORK_DIR%\IR-O2"
     ) else if "%SDBZ_EE_OPT%"=="5" (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --source-work-dir "%WORK_DIR%" ^
-            --work-dir "%WORK_DIR%-O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
+            --work-dir "%WORK_DIR%\O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
-        set "WORK_DIR=%WORK_DIR%-O2-native"
+        set "WORK_DIR=%WORK_DIR%\O2-native"
     ) else (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
-            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O%SDBZ_EE_OPT%" ^
+            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%\O%SDBZ_EE_OPT%" ^
             --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
-        set "WORK_DIR=%WORK_DIR%-O%SDBZ_EE_OPT%"
+        set "WORK_DIR=%WORK_DIR%\O%SDBZ_EE_OPT%"
     )
 )
 if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%WORK_DIR%\gs-webgpu.ppm"

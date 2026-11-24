@@ -347,6 +347,9 @@ def test_recovery_includes_native_profile_inventory():
         retired_path = save(retired, [4, 8, 12, 16], 5, old_sources)
         retired.with_name(base.name + "-recovery-20261124").mkdir()
         assert recovery.select_manifest(base, elf, current_sources, True)[0] == retired_path
+        nested = base / "O2-native"
+        nested_path = save(nested, [4, 8, 12, 16, 20], 5, old_sources)
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == nested_path
 
 
 def main():

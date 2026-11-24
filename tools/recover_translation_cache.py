@@ -2,9 +2,10 @@
 """Recover known EE functions without running the game or replacing saved IR.
 
 A verified historical translation manifest supplies the known guest entries.
-Reconstruction or verified migration takes place in a sibling directory.
-After validation it is promoted to the canonical cache directory, retaining
-the old base and native profiles under a backup name. Legacy active pointers
+Reconstruction or verified migration takes place in a recovery-* child
+of the canonical cache. After validation the cache contents are promoted
+to the root and previous data retained in backup-* children. Optimized
+profiles are children of the same root. Legacy siblings and active pointers
 are read for migration but no new pointer is written.
 
 IR byte mismatches are NEVER silently accepted. --allow-ir-changes explicitly
@@ -85,6 +86,8 @@ def manifest_candidates(base_work):
     # may have discovered more entries than the last base-library snapshot.
     # Only read the known launcher sibling names, not arbitrary directories.
     roots = [active_work(base_work), base_work]
+    roots.extend(root for root in sorted(base_work.glob("recovery-*"))
+                 if root.is_dir())
     # Previous pointer-based recoveries may have a larger native inventory.
     # Only consider actual recovery roots, not their optimized siblings.
     for root in sorted(base_work.parent.glob(base_work.name + "-recovery-*")):
@@ -93,6 +96,7 @@ def manifest_candidates(base_work):
     for source in dict.fromkeys(roots):
         candidates.append(source / "translation-cache.json")
         for suffix in PROFILE_SUFFIXES:
+            candidates.append(source / suffix[1:] / "translation-cache.json")
             candidates.append(source.with_name(source.name + suffix) /
                               "translation-cache.json")
     directory = history_dir(base_work)
@@ -159,7 +163,7 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
 
 def new_recovery_work(base_work):
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-    target = base_work.parent / (base_work.name + "-recovery-" + stamp)
+    target = base_work / ("recovery-" + stamp)
     if target.exists():
         raise ValueError("recovery staging directory already exists")
     return target
@@ -169,6 +173,8 @@ def canonical_portable(base_work, work):
     metadata_path = shared_ir.ir_directory(work) / "ee_functions.json"
     metadata = shared_ir.read_json(metadata_path)
     return (work == base_work and not pointer_path(base_work).exists()
+            and not any(base_work.with_name(base_work.name + suffix).exists()
+                        for suffix in PROFILE_SUFFIXES)
             and metadata.get("path_format") == "manifest-relative-v1"
             and all(Path(fn["ir_path"]).name == fn["ir_path"]
                     for fn in metadata["functions"]))
@@ -208,38 +214,79 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
             "expected": len(hashes), "observed": len(hashes), "matching": len(hashes)}
 
 
-def promote_canonical(base_work, work, validate):
-    """Rename only validated staging data; restore all original names on error."""
-    if (work.parent != base_work.parent or
-            not work.name.startswith(base_work.name + "-recovery-")):
+def promote_canonical(base_work, work, validate, *, elf=None):
+    """Promote a child staging cache, retaining old contents and legacy profiles.
+
+    Locks remain in place. The only path that changes with nesting depth is
+    the external ELF reference; rebase that field and its authenticated
+    metadata digest after validation, without changing any guest IR.
+    """
+    if (work.parent != base_work or not work.name.startswith("recovery-") or
+            work.is_symlink() or not work.is_dir()):
         raise ValueError("invalid recovery staging directory")
-    backup = base_work.with_name(
-        base_work.name + "-backup-" + work.name.split("-recovery-", 1)[1])
-    previous = [(base_work, backup)]
-    previous += [(base_work.with_name(base_work.name + suffix),
-                  backup.with_name(backup.name + suffix)) for suffix in PROFILE_SUFFIXES]
+    backup = base_work / ("backup-" + work.name.removeprefix("recovery-"))
+    if backup.exists():
+        raise ValueError(f"backup already exists: {backup}")
+    backup.mkdir()
+    previous = []
+    for source in sorted(base_work.iterdir()):
+        if (source == work or source == backup or
+                source.name.startswith(("recovery-", "backup-")) or
+                source.name.endswith(".ee-ir.lock")):
+            continue
+        previous.append((source, backup / source.name))
+    # Preserve old sibling profiles separately, even if a nested profile
+    # with the same name also exists. No old native cache is overwritten.
+    for suffix in PROFILE_SUFFIXES:
+        source = base_work.with_name(base_work.name + suffix)
+        if source.exists():
+            previous.append((source, backup / ("legacy" + suffix)))
     moved = []
-    promoted = False
+    promoted = []
+    original = {}
     pointer = pointer_path(base_work)
-    # A legacy pointer remains valid until canonical validation succeeds.
     try:
+        if elf is not None:
+            meta = work / "ir" / "ee_functions.json"
+            cache = work / "translation-cache.json"
+            original = {meta: meta.read_bytes(), cache: cache.read_bytes()}
+            metadata = shared_ir.read_json(meta)
+            snapshot = shared_ir.read_json(cache)
+            if (shared_ir.active(meta) or
+                    snapshot["metadata_sha256"] != run_game.sha256_path(meta) or
+                    shared_ir.elf_path(metadata, meta.parent) != elf):
+                raise ValueError("staging metadata changed before promotion")
+            metadata["elf"] = shared_ir.relative_path(elf, base_work / "ir")
+            shared_ir.write_json(meta, metadata)
+            snapshot["metadata_sha256"] = run_game.sha256_path(meta)
+            shared_ir.write_json(cache, snapshot)
         for source, target in previous:
             if target.exists():
-                raise ValueError(f"backup already exists: {target}")
-            if source.exists():
-                source.rename(target)
-                moved.append((source, target))
-        work.rename(base_work)
-        promoted = True
+                raise ValueError(f"backup collision: {target}")
+            source.rename(target)
+            moved.append((source, target))
+        for source in sorted(work.iterdir()):
+            target = base_work / source.name
+            if target.exists():
+                raise ValueError(f"promotion collision: {target}")
+            source.rename(target)
+            promoted.append((source, target))
         validate(base_work)
         pointer.unlink(missing_ok=True)
     except BaseException:
-        if promoted:
-            base_work.rename(work)
+        for source, target in reversed(promoted):
+            target.rename(source)
         for source, target in reversed(moved):
             target.rename(source)
+        for path, data in original.items():
+            path.write_bytes(data)
+        backup.rmdir()
         raise
-    return backup if moved else None
+    work.rmdir()
+    if not moved:
+        backup.rmdir()
+        return None
+    return backup
 
 
 def promote_pointer(base_work, work):
@@ -324,9 +371,9 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
         for root in roots:
             locks.enter_context(shared_ir.ir_lock(root))
             for suffix in PROFILE_SUFFIXES:
-                profile = root.with_name(root.name + suffix)
-                if profile.exists():
-                    locks.enter_context(shared_ir.ir_lock(profile))
+                for profile in (root / suffix[1:], root.with_name(root.name + suffix)):
+                    if profile.exists():
+                        locks.enter_context(shared_ir.ir_lock(profile))
         comparison = None
         if same_sources and candidate.parent != history_dir(base_work):
             try:
@@ -366,7 +413,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
         if comparison["missing"] or comparison["extra"] or (
                 comparison["mismatched_sha256"] and not allow_ir_changes):
             raise ValueError("reconstructed IR did not meet the recovery policy")
-        backup = promote_canonical(base_work, work, validate)
+        backup = promote_canonical(base_work, work, validate, elf=elf)
 
     print(f"Cache recovery validated and activated: {base_work}", flush=True)
     if backup is not None:

@@ -161,7 +161,12 @@ def test_link_or_validation_failure_does_not_activate():
             assert not allow_mismatches
             assert saved.read_bytes() == b"original guest code"
             assert not recovery.pointer_path(base).exists()
-            work.mkdir(parents=True)
+            (work / "ir").mkdir(parents=True)
+            metadata = work / "ir" / "ee_functions.json"
+            shared_ir.write_json(metadata, {"elf": shared_ir.relative_path(elf, metadata.parent),
+                                            "path_format": "manifest-relative-v1"})
+            shared_ir.write_json(work / "translation-cache.json",
+                                 {"metadata_sha256": run_game.sha256_path(metadata)})
             builds.append(work)
             return comparison
 
@@ -179,7 +184,7 @@ def test_link_or_validation_failure_does_not_activate():
         assert saved.read_bytes() == b"original guest code"
         assert not recovery.pointer_path(base).exists()
         assert len(builds) == 1 and builds[0].is_dir()
-        assert not (builds[0] / "translation-cache.json").exists()
+        assert (builds[0] / "translation-cache.json").exists()
 
         with patch.object(recovery.run_game, "native_executable", return_value=build / "ee_recomp"), \
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
@@ -190,7 +195,7 @@ def test_link_or_validation_failure_does_not_activate():
         assert promoted == base and recovery.active_work(base) == base
         assert not recovery.pointer_path(base).exists()
         assert not saved.exists()
-        backups = list(build.glob("ps2-game-hle-backup-*"))
+        backups = list(base.glob("backup-*"))
         assert len(backups) == 1
         assert (backups[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
@@ -216,17 +221,19 @@ def test_verified_legacy_migration_preserves_ir_and_relocates():
         shared_ir.write_json(metadata, {"elf": str(elf), "functions": functions,
                                         "function_count": 2})
         manifest["metadata_sha256"] = run_game.sha256_path(metadata)
-        stage = root / "ps2-game-hle-recovery-123"
+        stage = base / "recovery-123"
         report = recovery.stage_verified_ir(elf, base, stage, manifest, sources)
         assert report["matching"] == 2
         stage_metadata = stage / "ir" / "ee_functions.json"
-        raw = stage_metadata.read_bytes()
         converted = shared_ir.read_json(stage_metadata)
+        shared_ir.write_json(stage / "translation-cache.json",
+                             {"metadata_sha256": run_game.sha256_path(stage_metadata)})
         assert all(Path(fn["ir_path"]).parent == Path(".")
                    for fn in converted["functions"])
-        backup = recovery.promote_canonical(base, stage, lambda directory: None)
-        assert (base / "ir" / "ee_functions.json").read_bytes() == raw
-        assert shared_ir.elf_path(converted, base / "ir") == elf
+        backup = recovery.promote_canonical(base, stage, lambda directory: None, elf=elf)
+        promoted = shared_ir.read_json(base / "ir" / "ee_functions.json")
+        assert promoted["functions"] == converted["functions"]
+        assert shared_ir.elf_path(promoted, base / "ir") == elf
         assert run_game.translated_ir_hashes(base / "ir" / "ee_functions.json") == manifest["ir_hashes"]
         assert (backup / "ir" / "ee_functions.json").is_file()
 
@@ -235,8 +242,8 @@ def test_canonical_promotion_rolls_back_all_names():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         base = root / "ps2-game-hle"
-        profile = root / "ps2-game-hle-O2-native"
-        stage = root / "ps2-game-hle-recovery-123"
+        profile = base / "O2-native"
+        stage = base / "recovery-123"
         for directory, data in ((base, "old"), (profile, "native"), (stage, "new")):
             directory.mkdir()
             (directory / "sentinel").write_text(data)
@@ -253,11 +260,11 @@ def test_canonical_promotion_rolls_back_all_names():
         assert (base / "sentinel").read_text() == "old"
         assert (profile / "sentinel").read_text() == "native"
         assert (stage / "sentinel").read_text() == "new"
-        assert not list(root.glob("*-backup-*"))
+        assert not list(base.glob("backup-*"))
         backup = recovery.promote_canonical(base, stage, lambda directory: None)
         assert (base / "sentinel").read_text() == "new"
         assert (backup / "sentinel").read_text() == "old"
-        assert (root / (backup.name + "-O2-native") / "sentinel").read_text() == "native"
+        assert (backup / "O2-native" / "sentinel").read_text() == "native"
         assert not stage.exists() and not profile.exists()
 
 

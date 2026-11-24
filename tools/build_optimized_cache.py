@@ -146,7 +146,10 @@ def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0,
     elf = elf.resolve(strict=True)
     source_work = source_work.resolve(strict=True)
     work = work.resolve()
-    if (work == source_work or source_work in work.parents or
+    nested_profile = (work.parent == source_work and
+                      work.name in ("O1", "O2", "O3", "IR-O2", "O2-native"))
+    if (work == source_work or
+            (source_work in work.parents and not nested_profile) or
             work in source_work.parents or
             work == shared_ir.ir_directory(source_work).parent):
         raise ValueError("optimized cache must be separate from the source")

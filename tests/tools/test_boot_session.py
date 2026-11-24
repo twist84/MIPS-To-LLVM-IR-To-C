@@ -307,8 +307,8 @@ def test_windows_launcher_preserves_guest_cache():
     assert variants.count('python tools\\build_optimized_cache.py') == 3
     assert variants.count('--source-work-dir "%WORK_DIR%"') == 3
     assert '--source-opt=2' not in variants
-    assert '--work-dir "%WORK_DIR%-IR-O2" --emit-opt=4' in variants
-    assert '--work-dir "%WORK_DIR%-O2-native" --emit-opt=5' in variants
+    assert '--work-dir "%WORK_DIR%\\IR-O2" --emit-opt=4' in variants
+    assert '--work-dir "%WORK_DIR%\\O2-native" --emit-opt=5' in variants
     assert '--work-dir "%WORK_DIR%-O2" --emit-opt=2' not in variants
     assert 'set "DIRECT_REPLAY_ARG=--skip-headless-expansion"' in variants
     assert 'set "WARM_VALIDATION_ARG=--defer-warm-validation"' in variants

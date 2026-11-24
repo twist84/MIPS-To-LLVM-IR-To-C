@@ -467,7 +467,14 @@ def archive_known_function_manifest(path, snapshot):
     archived["known_entries"] = list(hashes)
     serialized = json.dumps(archived, sort_keys=True, indent=2) + "\n"
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    folder = path.parent.parent / "ee-known-manifests"
+    owner = path.parent
+    # Nested native profiles share the root IR inventory; stage recoveries
+    # inside the root also archive outside the movable cache contents.
+    if ((owner / shared_ir.MARKER).is_file()):
+        owner = shared_ir.ir_directory(owner).parent
+    if owner.name.startswith("recovery-"):
+        owner = owner.parent
+    folder = owner.parent / "ee-known-manifests"
     folder.mkdir(parents=True, exist_ok=True)
     destination = folder / (
         f"ee-{inputs['ELF'][:12]}-{len(hashes):06d}-{digest[:16]}.json"
