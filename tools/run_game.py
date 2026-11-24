@@ -24,6 +24,11 @@ import sys
 import tempfile
 import time
 
+# This driver is also loaded by path using importlib in tests/tools.
+# Resolve its sibling helpers for both script and module entry points.
+_tools_path = str(Path(__file__).resolve().parent)
+if _tools_path not in sys.path:
+    sys.path.insert(0, _tools_path)
 import shared_ee_ir as shared_ir
 
 
