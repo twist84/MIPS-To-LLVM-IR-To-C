@@ -39,7 +39,8 @@ PAD_PROFILES = {"Neutral": "--neutral", "Cross replay": "--cross", "Custom": Non
 NUMERIC_SETTINGS = {
     "Cross first poll": ("SDBZ_PAD0_CROSS_FIRST_POLL", 1, 0xFFFFFFFF),
     "Cross poll count": ("SDBZ_PAD0_CROSS_POLL_COUNT", 1, 120),
-    "Max dispatches": ("MAX_DISPATCHES", 1, None),
+    "Expansion dispatch limit": ("MAX_EXPANSION_DISPATCHES", 1, 0xFFFFFFFF),
+    "Replay dispatch limit": ("MAX_REPLAY_DISPATCHES", 1, 0xFFFFFFFF),
     "Timeout (seconds)": ("BOOT_TIMEOUT_SECONDS", 1, None),
     "Expansion passes": ("EXPANSION_PASSES", 1, 64),
     "Functions per expansion": ("EXPANSION_PER_PASS", 1, 1024),
@@ -277,7 +278,8 @@ OPTION_HELP = {
     "Accept changed IR hashes": "Allow cache recovery to accept IR hashes that differ from the saved manifest.",
     "Cross first poll": "The first port 1 controller poll that receives scripted Cross. Select the Custom profile to use it.",
     "Cross poll count": "How many consecutive polls hold Cross. Select the Custom profile to use it.",
-    "Max dispatches": "Maximum translated EE dispatches per pass.",
+    "Expansion dispatch limit": "Maximum translated EE dispatches in each headless expansion pass or quick probe.",
+    "Replay dispatch limit": "Maximum translated EE dispatches in the final traced replay (including the game window), or each matched replay.",
     "Timeout (seconds)": "Wall-clock timeout for a replay or probe, in seconds.",
     "Expansion passes": "Maximum auto-expansion passes. Range 1–64.",
     "Functions per expansion": (
@@ -392,7 +394,8 @@ def default_settings():
         "numeric": {
             "SDBZ_PAD0_CROSS_FIRST_POLL": "200",
             "SDBZ_PAD0_CROSS_POLL_COUNT": "8",
-            "MAX_DISPATCHES": dispatches,
+            "MAX_EXPANSION_DISPATCHES": dispatches,
+            "MAX_REPLAY_DISPATCHES": dispatches,
             "BOOT_TIMEOUT_SECONDS": timeout,
             "EXPANSION_PASSES": "8",
             "EXPANSION_PER_PASS": "128",
@@ -417,7 +420,7 @@ def batch_tool_defaults(disc):
         "--gs-upload-snapshot": str(work / "gs-upload.ppm"),
         "--gs-webgpu-snapshot": str(work / "gs-webgpu.ppm"),
         "--gs-webgpu-window": True,
-        "--max-dispatches": numeric["MAX_DISPATCHES"],
+        "--max-dispatches": numeric["MAX_REPLAY_DISPATCHES"],
         "--loop-budget": "1000000",
         "--loop-yield-resumes": numeric["LOOP_YIELD_RESUMES"],
         "--sif-poll-limit": numeric["SIF_POLL_LIMIT"],
@@ -504,8 +507,15 @@ def load_settings(path):
                 settings["diagnostics"][label] = saved_diagnostics[label]
     saved_numeric = saved.get("numeric")
     numeric = settings["numeric"]
-    numeric["MAX_DISPATCHES"], numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
+    dispatches, numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
+    numeric["MAX_EXPANSION_DISPATCHES"] = dispatches
+    numeric["MAX_REPLAY_DISPATCHES"] = dispatches
     if isinstance(saved_numeric, dict):
+        # Preserve the previous shared setting when migrating old settings.
+        legacy_limit = saved_numeric.get("MAX_DISPATCHES")
+        if isinstance(legacy_limit, str):
+            numeric["MAX_EXPANSION_DISPATCHES"] = legacy_limit
+            numeric["MAX_REPLAY_DISPATCHES"] = legacy_limit
         for key in numeric:
             if isinstance(saved_numeric.get(key), str):
                 numeric[key] = saved_numeric[key]
@@ -1234,9 +1244,12 @@ class Launcher(ttk.Frame):
 
     def change_mode(self, *_):
         mode = self.mode.get()
-        for label, previous, current in zip(
-            ("Max dispatches", "Timeout (seconds)"),
-            replay_limits(self.previous_mode), replay_limits(mode),
+        previous_dispatches, previous_timeout = replay_limits(self.previous_mode)
+        current_dispatches, current_timeout = replay_limits(mode)
+        for label, previous, current in (
+            ("Expansion dispatch limit", previous_dispatches, current_dispatches),
+            ("Replay dispatch limit", previous_dispatches, current_dispatches),
+            ("Timeout (seconds)", previous_timeout, current_timeout),
         ):
             if self.numeric[label].get() == previous:
                 self.numeric[label].set(current)
@@ -1398,6 +1411,7 @@ class Launcher(ttk.Frame):
             diagnostics={label: var.get() for label, var in self.diagnostics.items()},
             runtime={key: self.fields[key].get() for key in RUNTIME_SETTINGS},
         )
+        env.pop("MAX_DISPATCHES", None)
         for key, _, _ in NUMERIC_SETTINGS.values():
             env.pop(key, None)
         for key, _ in DIAGNOSTIC_SETTINGS.values():

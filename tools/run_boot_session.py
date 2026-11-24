@@ -212,6 +212,12 @@ def main(argv=None):
     )
     parser.add_argument("--expansion-passes", type=int, default=2)
     parser.add_argument("--expansion-per-pass", type=int, default=128)
+    parser.add_argument("--max-dispatches", type=int,
+                        help="Fallback dispatch limit for both phases")
+    parser.add_argument("--max-expansion-dispatches", type=int,
+                        help="Dispatch limit per headless expansion pass")
+    parser.add_argument("--max-replay-dispatches", type=int,
+                        help="Dispatch limit for the final traced replay")
     parser.add_argument(
         "--replay-after-expand", action="store_true",
         help="Legacy mode: restart the guest after each cache miss instead of resuming live",
@@ -246,6 +252,17 @@ def main(argv=None):
         help=argparse.SUPPRESS,
     )
     args, forwarded = parser.parse_known_args(argv)
+    for option, value in (
+        ("--max-dispatches", args.max_dispatches),
+        ("--max-expansion-dispatches", args.max_expansion_dispatches),
+        ("--max-replay-dispatches", args.max_replay_dispatches),
+    ):
+        if value is not None and not 1 <= value <= 0xFFFFFFFF:
+            parser.error(f"{option} must fit a positive uint32")
+    expansion_limit = args.max_expansion_dispatches or args.max_dispatches
+    replay_limit = args.max_replay_dispatches or args.max_dispatches
+    expansion_args = [f"--max-dispatches={expansion_limit}"] if expansion_limit is not None else []
+    replay_args = [f"--max-dispatches={replay_limit}"] if replay_limit is not None else []
     if not 1 <= args.expansion_passes <= 64:
         parser.error("--expansion-passes must be between 1 and 64")
     if not 1 <= args.expansion_per_pass <= 1024:
@@ -362,7 +379,7 @@ def main(argv=None):
 
     reuse = args.no_recompile
     for index in range(args.expansion_passes):
-        command = [*base, f"--auto-expand={args.expansion_per_pass}"]
+        command = [*base, *expansion_args, f"--auto-expand={args.expansion_per_pass}"]
         if reuse:
             command.append("--no-recompile")
         print(
@@ -479,7 +496,7 @@ def main(argv=None):
             flush=True,
         )
     final_command = [
-        *base, "--no-recompile", f"--auto-expand={final_expansion}", "--trace",
+        *base, *replay_args, "--no-recompile", f"--auto-expand={final_expansion}", "--trace",
     ]
     for option, path in snapshots:
         if path is not None:

@@ -339,6 +339,10 @@ if not defined CACHE_FLAG (
 
 rem A paired experiment MUST use the existing guest IR, never prompt for
 rem a destructive rebuild or replay to discover additional functions.
+rem Resolve defaults before the parenthesized command expands variables.
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined MAX_DISPATCHES set "MAX_DISPATCHES=6000000"
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined BOOT_TIMEOUT_SECONDS set "BOOT_TIMEOUT_SECONDS=600"
 if /I "%REQUESTED_SESSION_MODE%"=="matched" (
     if not defined CACHE_FLAG (
         echo ERROR: Known-function replay requires a valid guest translation cache.
@@ -346,15 +350,13 @@ if /I "%REQUESTED_SESSION_MODE%"=="matched" (
         echo in a separate work directory if you need to rebuild from a manifest.
         exit /b 1
     )
-    if not defined MAX_DISPATCHES set "MAX_DISPATCHES=6000000"
-    if not defined BOOT_TIMEOUT_SECONDS set "BOOT_TIMEOUT_SECONDS=600"
     echo === Running matched CPU-only known-IR neutral/Cross replays ===
     python tools\run_known_replays.py ^
         --disc-root "%DISC_ROOT%" ^
         --build-dir build --config Release ^
         --work-dir "%WORK_DIR%" ^
         --emit-jobs=%EMIT_JOBS% ^
-        --max-dispatches=%MAX_DISPATCHES% ^
+        --max-dispatches=%MAX_REPLAY_DISPATCHES% ^
         --timeout-seconds=%BOOT_TIMEOUT_SECONDS%
     rem EXIT /B without a number preserves Python's actual ERRORLEVEL.
     rem Percent-expanded %%ERRORLEVEL%% inside this block would be stale.
@@ -399,6 +401,8 @@ if /I "%REPORT_NAME%"=="first-boot.json" echo Verbose dispatch trace: first 64, 
 rem Quick probes retain their short limits. Full retail diagnostics use
 rem the observed 6M dispatch / 600s budget unless explicitly overridden.
 if not defined MAX_DISPATCHES set "MAX_DISPATCHES=%DEFAULT_MAX_DISPATCHES%"
+if not defined MAX_EXPANSION_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%MAX_DISPATCHES%"
+if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"
 if not defined BOOT_TIMEOUT_SECONDS (
     if /I "%REPORT_NAME%"=="first-boot.json" (
         set "BOOT_TIMEOUT_SECONDS=600"
@@ -413,7 +417,7 @@ rem Use LOOP_YIELD_RESUMES=0 to stop on the first native loop watchdog.
 if not defined LOOP_YIELD_RESUMES set "LOOP_YIELD_RESUMES=16"
 echo Native loop watchdog: 1000000 instructions per native slice, %LOOP_YIELD_RESUMES% resumes between real GS/GIF/IOP progress
 echo Expansion budget: %EXPANSION_PASSES% passes, %EXPANSION_PER_PASS% new functions per pass
-echo Dispatch budget: %MAX_DISPATCHES% per pass; timeout: %BOOT_TIMEOUT_SECONDS% seconds
+echo Dispatch budgets: %MAX_EXPANSION_DISPATCHES% per expansion pass, %MAX_REPLAY_DISPATCHES% final replay; timeout: %BOOT_TIMEOUT_SECONDS% seconds
 echo Report: "%WORK_DIR%\%REPORT_NAME%"
 echo Controller profile: %CAPTURE_PROFILE%
 if defined SDBZ_PAD0_CROSS_FIRST_POLL echo Injected Cross: first poll %SDBZ_PAD0_CROSS_FIRST_POLL%, count %SDBZ_PAD0_CROSS_POLL_COUNT%
@@ -460,6 +464,8 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --emit-jobs=%EMIT_JOBS% ^
     --emit-opt=0 ^
     --max-dispatches=%MAX_DISPATCHES% ^
+    --max-expansion-dispatches=%MAX_EXPANSION_DISPATCHES% ^
+    --max-replay-dispatches=%MAX_REPLAY_DISPATCHES% ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^

@@ -72,11 +72,18 @@ def test_defaults_and_compatibility():
         # default to live state-preserving resume rather than legacy replay.
         old = {key: value for key, value in defaults.items()
                if key not in ("cache_miss_resume", "precompile_all", "fast_overlays")}
+        old["numeric"] = dict(old["numeric"])
+        old["numeric"].pop("MAX_EXPANSION_DISPATCHES")
+        old["numeric"].pop("MAX_REPLAY_DISPATCHES")
+        old["numeric"]["MAX_DISPATCHES"] = "40000000"
         settings_path.write_text(json.dumps(old), encoding="utf-8")
         restored, warning = GUI.load_settings(settings_path)
         assert not warning and restored["cache_miss_resume"] is True
         assert restored["precompile_all"] is True
         assert restored["fast_overlays"] is True
+        assert restored["numeric"]["MAX_EXPANSION_DISPATCHES"] == "40000000"
+        assert restored["numeric"]["MAX_REPLAY_DISPATCHES"] == "40000000"
+        restored["numeric"]["MAX_REPLAY_DISPATCHES"] = "80000000"
         assert all(not value for value in restored["diagnostics"].values())
         restored["diagnostics"]["Trace guest stores"] = "0x0044081c"
         restored["cache_miss_resume"] = False
@@ -90,6 +97,8 @@ def test_defaults_and_compatibility():
         assert again["fast_overlays"] is False
         assert again["diagnostics"]["Trace guest stores"] == "0x0044081c"
         assert again["numeric"]["EXPANSION_PER_PASS"] == "1024"
+        assert again["numeric"]["MAX_EXPANSION_DISPATCHES"] == "40000000"
+        assert again["numeric"]["MAX_REPLAY_DISPATCHES"] == "80000000"
 
 
 def test_launcher_flags_and_bounds():
@@ -132,6 +141,12 @@ def test_launcher_flags_and_bounds():
         assert "--live-full-relink" not in args
         assert "--replay-after-expand" in args
 
+    values["Expansion dispatch limit"] = "20000000"
+    values["Replay dispatch limit"] = "80000000"
+    _, env = GUI.launcher_options("Full replay", "Neutral", False, True, True, values)
+    assert env["MAX_EXPANSION_DISPATCHES"] == "20000000"
+    assert env["MAX_REPLAY_DISPATCHES"] == "80000000"
+    assert "MAX_DISPATCHES" not in env
     values["Functions per expansion"] = "1024"
     args, env = GUI.launcher_options(
         "Full replay", "Neutral", False, True, True, values,
@@ -664,6 +679,8 @@ def test_direct_commands():
 
 def test_batch_route():
     batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    assert '--max-expansion-dispatches=%MAX_EXPANSION_DISPATCHES%' in batch
+    assert '--max-replay-dispatches=%MAX_REPLAY_DISPATCHES%' in batch
     assert '--watch-word=%SDBZ_WATCH_WORD%' in batch
     assert '--trace-store=%SDBZ_TRACE_STORE%' in batch
     assert '--trace-v0=%SDBZ_TRACE_V0%' in batch

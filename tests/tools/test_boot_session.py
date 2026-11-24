@@ -21,7 +21,8 @@ SPEC.loader.exec_module(SESSION)
 
 def run_case(passes, initial_reuse=False, diagnostics=False,
              initial_function_count=None, expansion_per_pass=2,
-             snapshots=False, quick_probe=False, graphics=None, legacy=False):
+             snapshots=False, quick_probe=False, graphics=None, legacy=False,
+             dispatch_limits=()):
     with tempfile.TemporaryDirectory(prefix="ee-boot-session-") as temp:
         work = Path(temp) / "work"
         report = work / "first-boot.json"
@@ -89,6 +90,7 @@ def run_case(passes, initial_reuse=False, diagnostics=False,
             "--driver", str(ROOT / "tools" / "run_game.py"),
             "--hle-startup", "--kseg-ram", "--max-dispatches=1000",
         ]
+        argv.extend(dispatch_limits)
         if initial_reuse:
             argv.append("--no-recompile")
         if legacy:
@@ -119,6 +121,17 @@ def run_case(passes, initial_reuse=False, diagnostics=False,
         with patch.object(SESSION.subprocess, "run", side_effect=fake_run):
             code = SESSION.main(argv)
         assert len(calls) == len(passes), calls
+        expansion = next((arg.split("=")[1] for arg in dispatch_limits
+                          if arg.startswith("--max-expansion-dispatches=")), "1000")
+        replay = next((arg.split("=")[1] for arg in dispatch_limits
+                       if arg.startswith("--max-replay-dispatches=")), "1000")
+        for call in calls:
+            expected = replay if "--trace" in call else expansion
+            assert [arg for arg in call if arg.startswith("--max-dispatches=")] == [
+                f"--max-dispatches={expected}"
+            ], calls
+            assert not any(arg.startswith(("--max-expansion-dispatches=", "--max-replay-dispatches="))
+                           for arg in call), calls
         assert all(("--replay-after-expand" in call) == legacy for call in calls), calls
         assert all("--trace" not in call for call in calls[:-1]), calls
         if quick_probe:
@@ -526,6 +539,18 @@ def test_guest_rpc_snapshots_in_cached_probe():
 
 
 def main():
+    # Independent phase limits, legacy fallback, and quick probe routing.
+    for limits in (
+        ("--max-expansion-dispatches=2000", "--max-replay-dispatches=4000"),
+        ("--max-replay-dispatches=4000",),
+        ("--max-expansion-dispatches=2000",),
+    ):
+        run_case([{"trace": False, "exit_reason": 5},
+                  {"trace": True, "exit_reason": 5}],
+                 initial_reuse=True, graphics="window", dispatch_limits=limits)
+        run_case([{"trace": False, "exit_reason": 5}],
+                 initial_reuse=True, quick_probe=True, dispatch_limits=limits)
+
     test_clean_ctrl_c_cancellation()
     test_guest_rpc_snapshots_in_cached_probe()
     test_windows_launcher_preserves_guest_cache()
