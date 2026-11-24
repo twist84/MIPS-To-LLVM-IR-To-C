@@ -37,7 +37,7 @@ int main(int argc, char** argv)
         windows_exports);
     if (ir.empty())
     {
-        std::puts("VU1 program outside current straight-line subset");
+        std::puts("VU1 program outside current supported control-flow/instruction subset");
         return 3;
     }
     std::ofstream output(argv[3], std::ios::binary);

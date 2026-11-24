@@ -30,7 +30,7 @@ def main():
                  "--opt", opt, "--jobs", "2"], capture_output=True, text=True)
             if result.returncode != 0:
                 raise AssertionError(result.stdout + result.stderr)
-            assert "1/2 captures compiled" in result.stdout, result.stdout
+            assert "2/3 captures compiled" in result.stdout, result.stdout
             subprocess.run([str(fixture), "run", str(out)], check=True)
     return 0
 

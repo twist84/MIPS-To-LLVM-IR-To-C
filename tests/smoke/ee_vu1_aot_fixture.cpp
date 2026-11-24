@@ -39,6 +39,29 @@ ee::t_vu1_code program()
     return code;
 }
 
+ee::t_vu1_code branch_program()
+{
+    ee::t_vu1_code code{};
+    const auto branch = [](uint32_t major, uint32_t is, uint32_t it, uint32_t imm)
+    {
+        return (major << 25u) | (it << 16u) | (is << 11u) | (imm & 0x7ffu);
+    };
+    constexpr uint32_t k_upper = 0x000002ffu;
+    // BAL across the micro-memory boundary; its link is VI6=2049.
+    pair(code, k_start, branch(0x21u, 0u, 6u, 4u), k_upper);
+    // A memory write in the delay slot must be transactional even when
+    // the later JALR target is not in the statically compiled graph.
+    pair(code, 0u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
+        (6u << 11u), k_upper);
+    pair(code, 8u, branch(0x20u, 0u, 0u, 6u), k_upper | 0x40000000u);
+    pair(code, 16u, 0x80000072u | (7u << 16u) | (7u << 11u), k_upper);
+    pair(code, 0x20u, branch(0x25u, 2u, 8u, 0u), k_upper);
+    pair(code, 0x28u, k_lower_nop, k_upper);
+    pair(code, 0x30u, k_lower_nop, k_upper | 0x40000000u);
+    pair(code, 0x38u, k_lower_nop, k_upper);
+    return code;
+}
+
 struct s_outcome
 {
     ee::s_ee_vu1_state m_state{};
@@ -48,7 +71,8 @@ struct s_outcome
     bool m_ok = false;
 };
 
-s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend)
+s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
+    bool branching = false)
 {
     ee::c_vu1_aot_binding binding(backend);
     s_outcome result{};
@@ -58,7 +82,7 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend)
     s.m_vf[2] = {0x3f800000u, 0x80000001u, 0x7fffffffu, 0xbf800000u};
     s.m_vf[3] = {0x40000000u, 0x80000000u, 0x7f7fffffu, 0x3f800000u};
     s.m_vi[1] = 0xfffeu;
-    s.m_vi[2] = 5u;
+    s.m_vi[2] = branching ? 1u : 5u;
     s.m_i = 0x40000000u;
     s.m_acc = {11u, 22u, 33u, 44u};
     s.m_vf[6] = {0x12345678u, 0xabcdef01u, 0xdeadbeefu, 0x01020304u};
@@ -119,6 +143,11 @@ int main(int argc, char** argv)
         pair(unsupported, k_start, k_lower_nop, 0x100002ffu);
         backend.capture(unsupported, k_start);
         backend.capture(code, k_start);
+        const auto branching = branch_program();
+        if (!same(run(branching, &backend, true), run(branching, nullptr, true)))
+        {
+            return 1;
+        }
         size_t files = 0u;
         for (const auto& item : std::filesystem::directory_iterator(argv[2]))
         {
@@ -127,10 +156,10 @@ int main(int argc, char** argv)
                 ++files;
             }
         }
-        return files == 2u ? 0 : 1;
+        return files == 3u ? 0 : 1;
     }
     if (std::strcmp(argv[1], "run") != 0 ||
-        backend.open_directory(argv[2], &error) != 1u || !error.empty())
+        backend.open_directory(argv[2], &error) != 2u || !error.empty())
     {
         std::fprintf(stderr, "%s\n", error.c_str());
         return 1;
@@ -158,6 +187,43 @@ int main(int argc, char** argv)
     {
         return 1;
     }
-    std::puts("VU1 AOT native dispatch, exact-byte invalidation and fallback: PASS");
+    const auto branching = branch_program();
+    if (!same(run(branching, &backend, true), run(branching, nullptr, true)) ||
+        backend.native_runs() != 4u)
+    {
+        return 1;
+    }
+    // A dynamic entry that writes memory and later jumps to an unknown
+    // target must leave caller state and data entirely unchanged.
+    ee::s_ee_vu1_state candidate{};
+    candidate.m_initialized = true;
+    candidate.m_vf[0][3] = 0x3f800000u;
+    candidate.m_vf[6] = {1u, 2u, 3u, 4u};
+    candidate.m_vi[1] = 0xfffeu;
+    candidate.m_vi[2] = 0x100u;
+    const auto original = candidate;
+    ee::t_vu1_code memory{};
+    memory.fill(0xa5u);
+    const auto original_memory = memory;
+    ee::s_ee_vu1_issue issue{};
+    if (backend.try_run(candidate, branching, memory, k_start, 0u, 0u, issue) ||
+        candidate.m_vi != original.m_vi || candidate.m_vf != original.m_vf ||
+        candidate.m_i != original.m_i || candidate.m_tpc != original.m_tpc ||
+        candidate.m_mac != original.m_mac || candidate.m_status != original.m_status ||
+        memory != original_memory || issue.m_steps != 0u ||
+        backend.native_runs() != 4u || backend.fallbacks() != 2u)
+    {
+        return 1;
+    }
+    // Full-image guard: changing an otherwise unreached instruction of
+    // a dynamic module cannot reuse the previous library.
+    auto modified = branching;
+    modified[0x100u] ^= 1u;
+    if (!same(run(modified, &backend, true), run(modified, nullptr, true)) ||
+        backend.fallbacks() != 3u || backend.native_runs() != 4u)
+    {
+        return 1;
+    }
+    std::puts("VU1 AOT native dispatch, dynamic control flow, rollback and fallback: PASS");
     return 0;
 }
