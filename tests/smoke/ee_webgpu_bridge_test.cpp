@@ -137,6 +137,18 @@ int main()
             return 1;
         }
     }
+    // Off must remain off even with valid history, interlaced half frames,
+    // skipped fields or the legacy force-blend override.
+    for (uint64_t field = 1u; field <= 4u; ++field)
+    {
+        const auto disabled = select_field_presentation(e_deinterlace_mode::off,
+            true, true, field, field - 1u, true, true, false);
+        if (disabled.m_method != e_field_method::off)
+        {
+            fail("off mode unexpectedly selected a field filter");
+            return 1;
+        }
+    }
     const auto automatic = select_field_presentation(e_deinterlace_mode::automatic, true, true, 2u, 1u, true);
     const auto off = select_field_presentation(e_deinterlace_mode::off, true, true, 2u, 1u, true);
     if (automatic.m_method != e_field_method::blend || off.m_method != e_field_method::off ||

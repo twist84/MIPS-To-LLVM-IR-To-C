@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -2009,7 +2010,15 @@ bool present(const DisplaySource &src) {
     flush_all();
     const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
     static const char* mode_text = std::getenv("EE_WEBGPU_DEINTERLACE");
-    static const auto mode = parse_deinterlace_mode(mode_text);
+    static auto mode = parse_deinterlace_mode(mode_text);
+    static const char* mode_path = std::getenv("EE_WEBGPU_DEINTERLACE_FILE");
+    static auto next_mode_poll = std::chrono::steady_clock::time_point::min();
+    const auto now = std::chrono::steady_clock::now();
+    if (mode_path != nullptr && now >= next_mode_poll)
+    {
+        mode = read_deinterlace_mode(mode_path, mode);
+        next_mode_poll = now + std::chrono::milliseconds(100);
+    }
     static const bool legacy_off = mode_text == nullptr && std::getenv("PS2_NO_DEINTERLACE") != nullptr;
     static const char* force_text = std::getenv("PS2_FORCE_DEINTERLACE");
     static const bool legacy_force = mode_text == nullptr && force_text != nullptr && std::strcmp(force_text, "1") == 0;
@@ -2018,6 +2027,17 @@ bool present(const DisplaySource &src) {
         g_last_interlaced == src.interlaced && g_last_halved == src.halved;
     const auto field = select_field_presentation(mode, src.interlaced, src.halved,
         src.guest_field, g_last_guest_field, compatible_history, legacy_force, legacy_off);
+    // Off intentionally bypasses every temporal/spatial field filter.
+    // FFMD line repetition in kDisplay is GS scanout geometry, not a
+    // deinterlacer; changing it would sample outside the guest field.
+    static int reported_mode = -1;
+    if (reported_mode != static_cast<int>(mode))
+    {
+        reported_mode = static_cast<int>(mode);
+        std::fprintf(stderr, "[gpu] deinterlace mode=%d method=%u interlaced=%u halved=%u\n",
+            reported_mode, static_cast<unsigned>(field.m_method),
+            static_cast<unsigned>(src.interlaced), static_cast<unsigned>(src.halved));
+    }
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
     // Correct the host display aspect without changing guest scanout/readback.

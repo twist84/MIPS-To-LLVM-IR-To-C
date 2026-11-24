@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace ps2::gs::gpu
@@ -32,6 +33,26 @@ inline e_deinterlace_mode parse_deinterlace_mode(const char* value)
         return static_cast<e_deinterlace_mode>(value[0] - '0');
     }
     return e_deinterlace_mode::automatic;
+}
+
+// The GUI writes a single ASCII digit atomically. Ignore missing/invalid
+// data and retain the last valid selection rather than changing modes.
+inline e_deinterlace_mode read_deinterlace_mode(const char* path, e_deinterlace_mode fallback)
+{
+    if (path != nullptr && path[0] != '\0')
+    {
+        if (FILE* input = std::fopen(path, "rb"))
+        {
+            const int value = std::fgetc(input);
+            const int end = std::fgetc(input);
+            std::fclose(input);
+            if (value >= '0' && value <= '9' && end == EOF)
+            {
+                fallback = static_cast<e_deinterlace_mode>(value - '0');
+            }
+        }
+    }
+    return fallback;
 }
 
 inline s_field_presentation select_field_presentation(

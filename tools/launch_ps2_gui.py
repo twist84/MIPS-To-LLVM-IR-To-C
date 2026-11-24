@@ -246,7 +246,7 @@ OPTION_HELP = {
         "eight polls starting at poll 200. Custom uses Limits and diagnostics; Scripted uses the Runtime tab."
     ),
     "WebGPU window": "Open the raylib game window with live controller input. Available for Full replay and Automatic.",
-    "Deinterlacing": "Reconstruct interlaced fields at presentation: weave, bob, blend or motion-adaptive. TFF/BFF selects top/bottom field first. Changes apply on launch; raw captures are unchanged.",
+    "Deinterlacing": "Reconstruct interlaced fields at presentation: weave, bob, blend or motion-adaptive. TFF/BFF selects top/bottom field first. Changes apply during gameplay; raw captures are unchanged.",
     "Display aspect": "Host presentation aspect ratio. 4:3 corrects PS2 non-square pixels; Native pixels preserves raw GS dimensions. Captures are unaffected.",
     "Speed": "Target emulation speed for the game window. Headless expansion remains unpaced.",
     "WebGPU snapshot": "Save a WebGPU-rendered display snapshot. Available for Full replay and Automatic.",
@@ -623,6 +623,21 @@ def direct_command(tool, executable, arguments, help_only=False):
     return command + arguments
 
 
+def write_deinterlace_mode(path, selection):
+    """Publish one complete mode value to the current native session."""
+    mode = DEINTERLACE_MODES[selection]
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="ascii", dir=path.parent,
+                                delete=False) as output:
+            temporary = Path(output.name)
+            output.write(mode)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def request_embedded_close(parent_handle):
     """Request a normal close of the native child so the runner can finalize."""
     if os.name != "nt" or not parent_handle:
@@ -688,6 +703,7 @@ class Launcher(ttk.Frame):
         self.process = None
         self.stop_process = None
         self.close_requested = False
+        self.deinterlace_file = None
         self.log = None
         self.embedded_running = False
         self.previous_mode = self.mode.get()
@@ -913,6 +929,7 @@ class Launcher(ttk.Frame):
         self.fast_overlays.trace_add("write", self.update_fields)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.pad.trace_add("write", self.update_fields)
+        self.fields["deinterlace"].trace_add("write", self.change_deinterlace)
         self.update_fields()
         self.play = ttk.Button(self, text="Launch", command=self.toggle_launch)
         self.play.grid(row=3, column=0, sticky="w", pady=(0, 10))
@@ -1003,6 +1020,21 @@ class Launcher(ttk.Frame):
         self.previous_mode = mode
         self.update_fields()
 
+    def change_deinterlace(self, *_):
+        if self.deinterlace_file is not None:
+            try:
+                write_deinterlace_mode(self.deinterlace_file, self.fields["deinterlace"].get())
+            except OSError as error:
+                self.status.set(f"Could not update deinterlacing: {error}")
+
+    def clear_deinterlace_file(self):
+        if self.deinterlace_file is not None:
+            try:
+                self.deinterlace_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.deinterlace_file = None
+
     def persist_settings(self):
         settings = {key: variable.get() for key, variable in self.fields.items()}
         settings["numeric"] = {
@@ -1030,6 +1062,7 @@ class Launcher(ttk.Frame):
             self.persist_settings()
         except OSError as error:
             messagebox.showerror("Could not save settings", str(error), parent=self)
+        self.clear_deinterlace_file()
         self.winfo_toplevel().destroy()
 
     def update_fields(self, *_):
@@ -1217,6 +1250,20 @@ class Launcher(ttk.Frame):
                     env["SDBZ_MEMCARD"] = str(card)
                 self.persist_settings()
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            env.pop("EE_WEBGPU_DEINTERLACE_FILE", None)
+            graphical = not help_only and (
+                (not is_direct and self.window.get() and
+                 self.mode.get() in ("Automatic", "Full replay"))
+                or (is_direct and "--gs-webgpu-window" in command)
+            )
+            if graphical:
+                selection = self.fields["deinterlace"].get()
+                with NamedTemporaryFile(mode="w", encoding="ascii", dir=LOG_PATH.parent,
+                                        prefix="deinterlace-", suffix=".mode", delete=False) as output:
+                    self.deinterlace_file = Path(output.name)
+                    output.write(DEINTERLACE_MODES[selection])
+                env["EE_WEBGPU_DEINTERLACE"] = DEINTERLACE_MODES[selection]
+                env["EE_WEBGPU_DEINTERLACE_FILE"] = str(self.deinterlace_file)
             with LOG_PATH.open("wb") as output:
                 self.process = subprocess.Popen(
                     command,
@@ -1230,6 +1277,7 @@ class Launcher(ttk.Frame):
             self.log = LOG_PATH.open(encoding="utf-8", errors="replace")
             self.embedded_running = embed_game
         except (OSError, ValueError) as error:
+            self.clear_deinterlace_file()
             self.status.set(str(error))
             return
 
@@ -1277,6 +1325,7 @@ class Launcher(ttk.Frame):
             self.log.close()
             self.log = None
             self.process = None
+            self.clear_deinterlace_file()
             self.embedded_running = False
             self.close_requested = False
             self.play.configure(text="Launch")

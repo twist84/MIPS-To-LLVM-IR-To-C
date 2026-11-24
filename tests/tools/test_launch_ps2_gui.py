@@ -362,6 +362,29 @@ def test_runtime_options():
         raise AssertionError("accepted AOT verification without a library")
 
 
+def test_live_deinterlacing():
+    from unittest.mock import Mock
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "session.mode"
+        other = Path(temporary) / "other.mode"
+        other.write_bytes(b"7")
+        variable = c_fake_variable("Automatic")
+        session = SimpleNamespace(deinterlace_file=path, fields={"deinterlace": variable},
+                                  status=Mock())
+        for name, value in GUI.DEINTERLACE_MODES.items():
+            variable.m_value = name
+            GUI.Launcher.change_deinterlace(session)
+            assert path.read_bytes() == value.encode("ascii")
+            assert other.read_bytes() == b"7"
+        variable.m_value = "Off"
+        GUI.Launcher.change_deinterlace(session)
+        assert path.read_bytes() == b"1"
+        GUI.Launcher.clear_deinterlace_file(session)
+        assert session.deinterlace_file is None and not path.exists()
+        GUI.Launcher.change_deinterlace(session)
+        assert not path.exists() and other.exists()
+
+
 def test_launch_close_button():
     from unittest.mock import Mock, patch
 
@@ -507,6 +530,7 @@ def main():
     test_launcher_flags_and_bounds()
     test_game_tab_command_and_environment()
     test_runtime_options()
+    test_live_deinterlacing()
     test_launch_close_button()
     test_game_window_environment()
     test_direct_commands()
