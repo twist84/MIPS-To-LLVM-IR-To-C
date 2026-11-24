@@ -586,6 +586,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
             m_diagnostic.m_last_rejected_vu_lower = vu_issue.m_lower;
             m_diagnostic.m_last_rejected_vu_upper = vu_issue.m_upper;
             m_diagnostic.m_last_rejected_vu_steps = vu_issue.m_steps;
+            m_diagnostic.m_last_rejected_vu_issue = vu_issue;
         }
         m_diagnostic.m_pending_words =
             static_cast<uint32_t>(next.m_pending.size());

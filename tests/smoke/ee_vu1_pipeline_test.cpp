@@ -1,4 +1,5 @@
 #include "ee_vu1.h"
+#include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
 
 #include <array>
@@ -245,6 +246,67 @@ int main()
                "unimplemented VU debug interrupt silently completed"))
     {
         return 1;
+    }
+
+    // The exact SDBZ XGKICK VI3 encoding, with previously staged
+    // output at the obsolete 1 MiB limit. The packet wraps at VU RAM
+    // end. The independent single-kick safety bound is retained.
+    {
+        using reject = ee::e_ee_vu1_kick_reject;
+        std::array<uint8_t, ee::c_ee_vu1::k_memory_size> code{}, memory{};
+        const uint32_t instructions[] = {
+            0x80001efcu, k_upper_end, k_lower_nop, k_upper_nop
+        };
+        std::memcpy(code.data(), instructions, sizeof(instructions));
+        const uint64_t tag = 0x1000000000008001ull;
+        std::memcpy(memory.data() + 0x3ff0u, &tag, sizeof(tag));
+        memory[0] = 0x5au;
+        ee::s_ee_vu1_state kick{};
+        kick.m_initialized = true;
+        kick.m_vi[3] = 0x3ffu;
+        std::vector<uint8_t> output(0x100000u, 0u);
+        const auto execute = [&]()
+        {
+            return ee::c_ee_vu1::run(kick, code, memory, 0u, 0u, 0u,
+                                     output, &issue);
+        };
+        if (!check(execute() && output.size() == 0x100020u &&
+                   output[0x100010u] == 0x5au &&
+                   issue.m_kick_reject == reject::none,
+                   "valid XGKICK rejected at obsolete aggregate cap"))
+        {
+            return 1;
+        }
+        output.resize(static_cast<size_t>(ee::k_max_graphics_batch_qwc) * 16u - 16u);
+        const size_t before = output.size();
+        if (!check(!execute() && output.size() == before &&
+                   issue.m_kick_reject == reject::batch_qwc_limit &&
+                   issue.m_kick_address == 0x3ffu &&
+                   issue.m_kick_packet_qwc == 2u &&
+                   issue.m_kick_staged_qwc == ee::k_max_graphics_batch_qwc - 1u,
+                   "XGKICK aggregate rejection missing diagnostic or leaked bytes"))
+        {
+            return 1;
+        }
+        output.clear();
+        const uint64_t oversize = 0x1000000000008400ull;
+        std::memcpy(memory.data() + 0x3ff0u, &oversize, sizeof(oversize));
+        if (!check(!execute() && output.empty() &&
+                   issue.m_kick_reject == reject::packet_qwc_limit &&
+                   issue.m_kick_tag_address == 0x3ffu &&
+                   issue.m_kick_tag == oversize && issue.m_kick_packet_qwc == 1025u,
+                   "XGKICK oversized packet not diagnosed"))
+        {
+            return 1;
+        }
+        memory.fill(0u);
+        if (!check(!execute() && output.empty() &&
+                   issue.m_kick_reject == reject::missing_eop &&
+                   issue.m_kick_packet_qwc == 1024u,
+                   "unterminated XGKICK packet not diagnosed"))
+        {
+            return 1;
+        }
     }
 
     std::puts("VU1 Q/P, lower specials and dependencies: PASS");

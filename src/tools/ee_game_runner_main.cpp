@@ -1249,6 +1249,12 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         " \"last_rejected_vu_lower\": %u,"
         " \"last_rejected_vu_upper\": %u,"
         " \"last_rejected_vu_steps\": %u,"
+        " \"last_kick_reject\": %u,"
+        " \"last_kick_address\": %u,"
+        " \"last_kick_tag_address\": %u,"
+        " \"last_kick_packet_qwc\": %u,"
+        " \"last_kick_staged_qwc\": %u,"
+        " \"last_kick_tag\": \"0x%016llx\","
         " \"last_rejected_staged_mpg\": %u,"
         " \"last_rejected_staged_unpack\": %u,"
         "\n    \"rejected_dma_attempts\": %llu,"
@@ -1275,6 +1281,12 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         detail.m_last_vu_start_code, detail.m_last_rejected_vu_start_code,
         detail.m_last_rejected_vu_pc, detail.m_last_rejected_vu_lower,
         detail.m_last_rejected_vu_upper, detail.m_last_rejected_vu_steps,
+        static_cast<uint32_t>(detail.m_last_rejected_vu_issue.m_kick_reject),
+        detail.m_last_rejected_vu_issue.m_kick_address,
+        detail.m_last_rejected_vu_issue.m_kick_tag_address,
+        detail.m_last_rejected_vu_issue.m_kick_packet_qwc,
+        detail.m_last_rejected_vu_issue.m_kick_staged_qwc,
+        static_cast<unsigned long long>(detail.m_last_rejected_vu_issue.m_kick_tag),
         detail.m_last_rejected_staged_mpg, detail.m_last_rejected_staged_unpack,
         static_cast<unsigned long long>(detail.m_rejected_batches),
         static_cast<uint32_t>(detail.m_first_rejection),
@@ -2289,13 +2301,21 @@ int main(int argc, char** argv)
                     std::fprintf(stderr,
                         "VIF1 native reject: reason=%u code=0x%08x "
                         "pending_words=%u vu_pc=%04x vu_lo=%08x vu_hi=%08x "
-                        "vu_steps=%u staged_mpg=%u staged_unpack=%u\n",
+                        "vu_steps=%u staged_mpg=%u staged_unpack=%u "
+                        "kick_reject=%u kick_addr=%03x kick_tag_addr=%03x "
+                        "kick_packet_qwc=%u kick_staged_qwc=%u kick_tag=%016llx\n",
                         static_cast<uint32_t>(diagnostic.m_reason),
                         diagnostic.m_code, diagnostic.m_pending_words,
                         diagnostic.m_vu_pc, diagnostic.m_vu_lower,
                         diagnostic.m_vu_upper, diagnostic.m_last_rejected_vu_steps,
                         diagnostic.m_last_rejected_staged_mpg,
-                        diagnostic.m_last_rejected_staged_unpack);
+                        diagnostic.m_last_rejected_staged_unpack,
+                        static_cast<uint32_t>(diagnostic.m_last_rejected_vu_issue.m_kick_reject),
+                        diagnostic.m_last_rejected_vu_issue.m_kick_address,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_tag_address,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_packet_qwc,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_staged_qwc,
+                        static_cast<unsigned long long>(diagnostic.m_last_rejected_vu_issue.m_kick_tag));
                     routes->m_rejection_logged = true;
                 }
             }

@@ -68,6 +68,7 @@ public:
         uint32_t m_last_rejected_vu_lower = 0u;
         uint32_t m_last_rejected_vu_upper = 0u;
         uint32_t m_last_rejected_vu_steps = 0u;
+        s_ee_vu1_issue m_last_rejected_vu_issue{};
         uint32_t m_last_rejected_staged_mpg = 0u;
         uint32_t m_last_rejected_staged_unpack = 0u;
         std::array<uint64_t, 128u> m_committed_opcodes{};

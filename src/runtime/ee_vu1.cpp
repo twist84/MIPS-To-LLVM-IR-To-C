@@ -3,6 +3,7 @@
 // This first batch intentionally rejects unported instructions and timing
 // dependencies instead of silently treating them as NOPs.
 #include "ee_vu1.h"
+#include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
 #include "ee_vu1_dependency.h"
 
@@ -77,15 +78,31 @@ uint32_t qword_offset(uint32_t address)
 // XGKICK walks actual GIFtags from VU1 RAM until an EOP tag. A missing EOP
 // or oversized chain is an error, never a fabricated empty PATH1 transfer.
 bool xgkick(const std::array<uint8_t, 16384>& data,
-            uint32_t address, std::vector<uint8_t>& output)
+            uint32_t address, std::vector<uint8_t>& output,
+            s_ee_vu1_issue& issue)
 {
     std::vector<uint8_t> packet;
     uint32_t qword = address & 0x3ffu;
     bool finished = false;
+    const auto reject = [&](e_ee_vu1_kick_reject reason, uint32_t at,
+                            uint64_t tag, uint32_t packet_qwc)
+    {
+        issue.m_kick_reject = reason;
+        issue.m_kick_address = address & 0x3ffu;
+        issue.m_kick_tag_address = at / 16u;
+        issue.m_kick_tag = tag;
+        issue.m_kick_packet_qwc = packet_qwc;
+        issue.m_kick_staged_qwc = static_cast<uint32_t>(output.size() / 16u);
+        return false;
+    };
+    uint32_t last_at = 0u;
+    uint64_t last_tag = 0u;
     for (uint32_t count = 0u; count < 1024u && !finished;)
     {
         const uint32_t at = qword_offset(qword++);
         const uint64_t tag = read64(data.data() + at);
+        last_at = at;
+        last_tag = tag;
         const uint32_t nloop = static_cast<uint32_t>(tag & 0x7fffu);
         const uint32_t flg = static_cast<uint32_t>((tag >> 58u) & 3u);
         uint32_t nreg = static_cast<uint32_t>((tag >> 60u) & 15u);
@@ -97,7 +114,8 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
             flg == 1u ? (nloop * nreg + 1u) / 2u : nloop;
         if (body + 1u > 1024u - count)
         {
-            return false;
+            return reject(e_ee_vu1_kick_reject::packet_qwc_limit,
+                          at, tag, count + body + 1u);
         }
         packet.insert(packet.end(), data.data() + at, data.data() + at + 16u);
         ++count;
@@ -110,9 +128,21 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
         }
         finished = (tag & 0x8000u) != 0u;
     }
-    if (!finished || output.size() + packet.size() > 0x100000u)
+    if (!finished)
     {
-        return false;
+        return reject(e_ee_vu1_kick_reject::missing_eop, last_at, last_tag,
+                      static_cast<uint32_t>(packet.size() / 16u));
+    }
+    // PATH1 accumulates output from many independent kicks and MSCNT
+    // continuations in the same staged VIF transaction. Its aggregate
+    // budget must agree with the GIF/GS consumer, not VU1 memory size.
+    constexpr size_t k_max_batch_bytes =
+        static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
+    if (output.size() > k_max_batch_bytes ||
+        packet.size() > k_max_batch_bytes - output.size())
+    {
+        return reject(e_ee_vu1_kick_reject::batch_qwc_limit, last_at, last_tag,
+                      static_cast<uint32_t>(packet.size() / 16u));
     }
     output.insert(output.end(), packet.begin(), packet.end());
     return true;
@@ -535,7 +565,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
            const std::array<uint16_t, 16>& branch_vi,
            std::vector<uint8_t>& path1_bytes,
            uint32_t& branch_target, bool& branched,
-           s_flag_pipe& pipe, int32_t& fsset)
+           s_flag_pipe& pipe, int32_t& fsset, s_ee_vu1_issue& issue)
 {
     const uint32_t major = lo >> 25u;
     const uint32_t dest = (lo >> 21u) & 15u;
@@ -756,7 +786,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         }
         case 0x68u: store_vi(state, it, top); return true;
         case 0x69u: store_vi(state, it, itop); return true;
-        case 0x6cu: return xgkick(data, state.m_vi[is], path1_bytes);
+        case 0x6cu: return xgkick(data, state.m_vi[is], path1_bytes, issue);
         }
     }
 
@@ -976,7 +1006,7 @@ bool c_ee_vu1::run(
             bool branched = false;
             if (!lower(state, lo, current, data, top, itop,
                        previous_lower ? previous_vi : state.m_vi,
-                       path1_bytes, target, branched, pipe, fsset))
+                       path1_bytes, target, branched, pipe, fsset, *issue))
             {
                 return false;
             }

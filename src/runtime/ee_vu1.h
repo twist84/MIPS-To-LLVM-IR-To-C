@@ -25,6 +25,14 @@ struct s_ee_vu1_state
     bool m_initialized = false;
 };
 
+enum class e_ee_vu1_kick_reject : uint32_t
+{
+    none = 0u,
+    packet_qwc_limit,
+    missing_eop,
+    batch_qwc_limit
+};
+
 struct s_ee_vu1_issue
 {
     uint32_t m_pc = 0u;
@@ -32,6 +40,12 @@ struct s_ee_vu1_issue
     uint32_t m_upper = 0u;
     uint32_t m_steps = 0u;
     uint32_t m_cycles = 0u;
+    e_ee_vu1_kick_reject m_kick_reject = e_ee_vu1_kick_reject::none;
+    uint32_t m_kick_address = 0u;
+    uint32_t m_kick_tag_address = 0u;
+    uint32_t m_kick_packet_qwc = 0u;
+    uint32_t m_kick_staged_qwc = 0u;
+    uint64_t m_kick_tag = 0u;
 };
 
 // Deliberately a strict subset, NOT a general-purpose VU1 interpreter.
