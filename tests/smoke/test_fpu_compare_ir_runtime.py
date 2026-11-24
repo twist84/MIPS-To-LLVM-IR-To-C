@@ -544,9 +544,10 @@ def ee_fpu_clamp_result_bits(bits):
 def expected_sqrt_bits(source_bits):
     if (source_bits & 0x7F800000) == 0:
         return 0
-    normalised = ee_fpu_normalise_bits(source_bits)
-    absolute = normalised & 0x7FFFFFFF
-    return ieee_f32_bits(math.sqrt(f32_value(absolute)))
+    absolute = source_bits & 0x7FFFFFFF
+    exponent = (absolute >> 23) - 127
+    significand = 1.0 + (absolute & 0x007FFFFF) / (1 << 23)
+    return ieee_f32_bits(math.sqrt(math.ldexp(significand, exponent)))
 
 
 def expected_rsqrt_bits(numerator_bits, denominator_bits):
@@ -561,9 +562,9 @@ def expected_rsqrt_bits(numerator_bits, denominator_bits):
     return ee_fpu_clamp_result_bits(quotient_bits)
 
 
-def run_sqrt_cases(fixture, temp_dir, target, source_words):
+def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "sqrt_s", target
+        fixture, temp_dir, "sqrt_s", target, opt
     )
     retained = (engine, module, target_machine)
     initial_fcsr = 0xA593F43E
@@ -585,7 +586,17 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words):
         require(state.pc == ENTRY_PC + 4,
                 prefix + f"wrong sequential PC 0x{state.pc:08x}")
 
-        expected = expected_sqrt_bits(source_bits)
+        # Literal real-console output words, independent of the float oracle.
+        hardware = {
+            0x00000000: 0x00000000, 0x80000000: 0x00000000,
+            0x3F800000: 0x3F800000, 0x40000000: 0x3FB504F3,
+            0x40400000: 0x3FDDB3D7, 0x41C80000: 0x40A00000,
+            0x7FFFFFFF: 0x5FB504F3, 0xFFFFFFFF: 0x5FB504F3,
+            0x7F800000: 0x5F800000, 0xFF800000: 0x5F800000,
+            0x3FFFFFFF: 0x3FB504F3, 0xDEADBEEF: 0x4F152108,
+            0x3FC00000: 0x3F9CC471, 0x7FC00000: 0x5F9CC471,
+        }
+        expected = hardware.get(source_bits, expected_sqrt_bits(source_bits))
         expected_fcsr = cleared_fcsr
         if source_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
@@ -921,7 +932,16 @@ def main():
         run_accumulator_cases(fixture, temp_dir, target, "msub_s", msub_cases)
         run_accumulator_cases(fixture, temp_dir, target, "madda_s", madda_cases)
         run_accumulator_cases(fixture, temp_dir, target, "msuba_s", msuba_cases)
-        run_sqrt_cases(fixture, temp_dir, target, sqrt_words)
+        sqrt_hardware_words = [
+            (word, "hardware SQRT.S vector")
+            for word in (0x00000000, 0x80000000, 0x3F800000, 0x40000000,
+                         0x40400000, 0x41C80000, 0x7FFFFFFF, 0xFFFFFFFF,
+                         0x7F800000, 0xFF800000, 0x3FFFFFFF, 0xDEADBEEF,
+                         0x3FC00000, 0x7FC00000)
+        ]
+        for opt in (0, 3):
+            run_sqrt_cases(fixture, temp_dir, target,
+                           sqrt_words + sqrt_hardware_words, opt)
         run_rsqrt_cases(fixture, temp_dir, target, rsqrt_pairs)
         run_max_min_cases(fixture, temp_dir, target, "max_s", extreme_pairs)
         run_max_min_cases(fixture, temp_dir, target, "min_s", extreme_pairs)

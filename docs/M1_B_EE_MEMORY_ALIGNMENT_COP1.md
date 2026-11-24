@@ -22,3 +22,7 @@ Primary manuals: [EE Core Instruction Set Manual v6.0, LQ p.141 and LW p.79](htt
 - Native SDBZ retail ARKD DMA4 IRQ and semaphore wakeup are separate from this EE architectural batch.
 
 Required acceptance: all seven CTest shards, OpenPS2BIOS ROM0 execution, SIF DMA acceptance, and Native WebGPU Linux/Windows workflows at one exact final commit SHA. PR #145 remains draft/open/unmerged; eventual merge requires explicit authorization and must be squash.
+
+## Follow-up: SQRT.S extended range
+
+The hardware words in [ps2autotests sqrt.expected](https://github.com/unknownbrackets/ps2autotests/blob/master/tests/cpu/ee_fpu/sqrt.expected) and [PCSX2 #14794](https://github.com/PCSX2/pcsx2/issues/14794) establish that exponent 255 is finite and SQRT.S uses nearest rounding. For this binade the lowering scales the absolute input by 1/4 before the single-precision square root, then restores the result exponent. This avoids interpreting extended-range operands as host NaNs or losing mantissa bits through clamping. Exponent-zero results and existing FCSR handling are unchanged. Tests execute literal console result vectors at backend O0 and O3. RSQRT.S is deliberately left separate because its rounding and two-operand extended-range treatment must be validated together. No claim of bit-exact general COP1 arithmetic follows from this change.
