@@ -1,4 +1,5 @@
 #include "gpu.hpp"
+#include "native_viewport.hpp"
 // Native-only WebGPU backend adapted from ps2-web-recomp:SDBZ (MIT).
 // No PS2 runtime, browser, frontend, resource-pack, or font dependency.
 #include <webgpu/webgpu.h>
@@ -28,33 +29,6 @@ namespace ps2::gs::gpu {
 
 namespace
 {
-struct s_native_viewport
-{
-    int x = 0;
-    int y = 0;
-    int width = 1;
-    int height = 1;
-};
-
-s_native_viewport window_viewport(int window_width, int window_height,
-                                  int source_width, int source_height)
-{
-    window_width = std::max(window_width, 1);
-    window_height = std::max(window_height, 1);
-    source_width = std::max(source_width, 1);
-    source_height = std::max(source_height, 1);
-    int height = window_height;
-    int width = (source_width * window_height + source_height / 2) / source_height;
-    if (width > window_width)
-    {
-        width = window_width;
-        height = std::max(1, (source_height * window_width + source_width / 2) /
-                                source_width);
-    }
-    return {(window_width - width) / 2, (window_height - height) / 2,
-            std::max(width, 1), std::max(height, 1)};
-}
-
 std::vector<std::uint32_t> rescale_vram_samples(
     const std::vector<std::uint32_t>& source, unsigned from, unsigned to)
 {
@@ -2046,14 +2020,14 @@ bool present(const DisplaySource &src) {
     const bool blend = (src.halved || force_blend) && g_have_previous && g_last_width == src.width && g_last_height == src.height && !weave_off;
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
-    // PS2_FORCE_SQUARE: clamp source width to height before viewport calc so
-    // window_viewport receives square dimensions and fills the full window.
-    std::uint32_t view_width = src.width, view_height = src.height;
-    if (std::getenv("EE_WEBGPU_FORCE_SQUARE") && view_width > view_height) {
-        view_width = view_height;
+    // Correct the host display aspect without changing guest scanout/readback.
+    const char* aspect = std::getenv("EE_WEBGPU_ASPECT");
+    if (aspect == nullptr && std::getenv("EE_WEBGPU_FORCE_SQUARE") != nullptr)
+    {
+        aspect = "1:1";
     }
     g_present_viewport = window_viewport(static_cast<int>(g_surface_width), static_cast<int>(g_surface_height),
-        static_cast<int>(view_width), static_cast<int>(view_height));
+        static_cast<int>(src.width), static_cast<int>(src.height), aspect);
     const std::uint32_t blit[9] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u,
         static_cast<std::uint32_t>(g_present_viewport.width), static_cast<std::uint32_t>(g_present_viewport.height),
         std::getenv("EE_WEBGPU_NEAREST") ? 1u : 0u,

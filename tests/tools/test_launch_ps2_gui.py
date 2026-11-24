@@ -62,6 +62,7 @@ def test_defaults_and_compatibility():
     assert defaults["numeric"]["EMIT_JOBS"] == ""
     assert defaults["diagnostics"] == {label: "" for label in GUI.DIAGNOSTIC_SETTINGS}
     assert defaults["embed_game_window"] is True
+    assert defaults["display_aspect"] == "4:3 (PS2)"
     assert GUI.NUMERIC_SETTINGS["Functions per expansion"][2] == 1024
     with tempfile.TemporaryDirectory() as temporary:
         settings_path = Path(temporary) / "launcher-settings.json"
@@ -205,6 +206,7 @@ def test_game_tab_command_and_environment():
                         for label, value in gui_values(GUI.default_settings()).items()},
         }
         vars["fields"] = {key: c_fake_variable(default) for key, (_, default, _) in GUI.RUNTIME_SETTINGS.items()}
+        vars["fields"]["display_aspect"] = c_fake_variable("4:3 (PS2)")
         instance = SimpleNamespace(**vars)
         env = {"EXPANSION_PER_PASS": "99", "SDBZ_DISC_ROOT": "stale", "SDBZ_PAD0_SCRIPT": "1:1:cross", "SDBZ_TRACE_IPU": "1", "SDBZ_IOP_AOT_VERIFY": "1"}
         command = GUI.Launcher.game_command(instance, env)
@@ -215,6 +217,10 @@ def test_game_tab_command_and_environment():
         assert env["EXPANSION_PER_PASS"] == "128"
         assert env["SDBZ_DISC_ROOT"] == str(disc.resolve())
         assert env["SDBZ_SPEED_PERCENT"] == "150"
+        assert env["EE_WEBGPU_ASPECT"] == "4:3"
+        instance.fields["display_aspect"] = c_fake_variable("Native pixels")
+        GUI.Launcher.game_command(instance, env)
+        assert env["EE_WEBGPU_ASPECT"] == "native"
         assert env["SDBZ_IDLE_SKIP"] == "1"
         assert not any(key in env for key in ("SDBZ_PAD0_SCRIPT", "SDBZ_TRACE_IPU", "SDBZ_IOP_AOT_VERIFY"))
         assert env["PRECOMPILE_ALL"] == "1"

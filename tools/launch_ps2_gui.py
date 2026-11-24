@@ -18,6 +18,7 @@ SETTINGS_PATH = ROOT / "build" / "ps2-launcher-settings.json"
 
 
 SPEEDS = {"50%": 50, "100%": 100, "150%": 150, "200%": 200, "Unlimited": 0}
+DISPLAY_ASPECTS = {"4:3 (PS2)": "4:3", "16:9": "16:9", "Native pixels": "native", "1:1": "1:1"}
 
 SESSION_MODES = {
     "Full replay": "--full",
@@ -238,6 +239,7 @@ OPTION_HELP = {
         "eight polls starting at poll 200. Custom uses Limits and diagnostics; Scripted uses the Runtime tab."
     ),
     "WebGPU window": "Open the raylib game window with live controller input. Available for Full replay and Automatic.",
+    "Display aspect": "Host presentation aspect ratio. 4:3 corrects PS2 non-square pixels; Native pixels preserves raw GS dimensions. Captures are unaffected.",
     "Speed": "Target emulation speed for the game window. Headless expansion remains unpaced.",
     "WebGPU snapshot": "Save a WebGPU-rendered display snapshot. Available for Full replay and Automatic.",
     "Show game in launcher tab": (
@@ -366,6 +368,7 @@ def default_settings():
         "embed_game_window": True,
         "snapshot": True,
         "speed": "100%",
+        "display_aspect": "4:3 (PS2)",
         "cache_miss_resume": True,
         "precompile_all": True,
         "fast_overlays": True,
@@ -480,7 +483,7 @@ def load_settings(path):
         settings["pad_script"] = RUNTIME_SETTINGS["pad_script"][1]
     if not settings["frame_interval"].strip():
         settings["frame_interval"] = RUNTIME_SETTINGS["frame_interval"][1]
-    for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS)):
+    for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS), ("display_aspect", DISPLAY_ASPECTS)):
         if settings[key] not in choices:
             settings[key] = default_settings()[key]
     saved_diagnostics = saved.get("diagnostics")
@@ -717,7 +720,8 @@ class Launcher(ttk.Frame):
         self.ir_picker.grid(row=9, column=1, sticky="w")
         Tooltip(self.ir_picker, OPTION_HELP["Accept changed IR hashes"])
         self.speed_picker = self.choice_row(self.setup, 10, "Speed", self.speed, SPEEDS)
-        ttk.Label(self.setup, textvariable=self.speed_status).grid(row=11, column=1, sticky="w")
+        self.aspect_picker = self.choice_row(self.setup, 11, "Display aspect", self.fields["display_aspect"], DISPLAY_ASPECTS)
+        ttk.Label(self.setup, textvariable=self.speed_status).grid(row=12, column=1, sticky="w")
         ttk.Label(
             self.performance,
             text="Native dispatch uses the indexed guest-PC lookup from PR #152.",
@@ -1000,6 +1004,8 @@ class Launcher(ttk.Frame):
         self.snapshot_picker.state(graphics_state)
         self.speed_picker.configure(state="readonly" if self.window.get() and
                                     mode in ("Automatic", "Full replay") else "disabled")
+        self.aspect_picker.configure(state="readonly" if self.window.get() and
+                                     mode in ("Automatic", "Full replay") else "disabled")
         self.ir_picker.state(["!disabled"] if mode == "Recover translation cache" else ["disabled"])
         self.cache_miss_picker.state(
             ["disabled"] if special else ["!disabled"]
@@ -1086,7 +1092,8 @@ class Launcher(ttk.Frame):
         env.pop("SDBZ_IOP_AOT_BUILD_OUT", None)
         prepare_runtime_outputs(overrides)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
-                   SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))
+                   SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]),
+                   EE_WEBGPU_ASPECT=DISPLAY_ASPECTS[self.fields["display_aspect"].get()])
         return ["cmd.exe", "/d", "/c", "run_ps2_game.bat", *args]
 
     def launch(self, help_only=False):

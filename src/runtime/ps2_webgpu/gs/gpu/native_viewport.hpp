@@ -1,0 +1,56 @@
+#pragma once
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+
+namespace ps2::gs::gpu
+{
+struct s_native_viewport
+{
+    int x = 0;
+    int y = 0;
+    int width = 1;
+    int height = 1;
+};
+
+// GS scanout samples do not necessarily have square pixels. Fit the
+// selected display aspect, not the framebuffer dimensions.
+inline s_native_viewport window_viewport(int window_width, int window_height,
+    int source_width, int source_height, const char* aspect = nullptr)
+{
+    window_width = std::max(window_width, 1);
+    window_height = std::max(window_height, 1);
+    int ratio_width = 4;
+    int ratio_height = 3;
+    if (aspect != nullptr && std::strcmp(aspect, "native") == 0)
+    {
+        ratio_width = std::max(source_width, 1);
+        ratio_height = std::max(source_height, 1);
+    }
+    else if (aspect != nullptr && std::strcmp(aspect, "16:9") == 0)
+    {
+        ratio_width = 16;
+        ratio_height = 9;
+    }
+    else if (aspect != nullptr && std::strcmp(aspect, "1:1") == 0)
+    {
+        ratio_width = 1;
+        ratio_height = 1;
+    }
+
+    int width = window_width;
+    int height = window_height;
+    if (int64_t{window_width} * ratio_height > int64_t{window_height} * ratio_width)
+    {
+        width = std::max(1, static_cast<int>(
+            (int64_t{window_height} * ratio_width + ratio_height / 2) / ratio_height));
+    }
+    else
+    {
+        height = std::max(1, static_cast<int>(
+            (int64_t{window_width} * ratio_height + ratio_width / 2) / ratio_width));
+    }
+    return {(window_width - width) / 2, (window_height - height) / 2, width, height};
+}
+}

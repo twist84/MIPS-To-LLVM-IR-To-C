@@ -1,5 +1,6 @@
 #include "ee_webgpu_bridge.h"
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
+#include "ps2_webgpu/gs/gpu/native_viewport.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -94,6 +95,25 @@ bool display(
 
 int main()
 {
+    using ps2::gs::gpu::window_viewport;
+    const auto title = window_viewport(906, 540, 512, 448);
+    const auto movie = window_viewport(906, 540, 640, 384);
+    const auto narrow = window_viewport(600, 900, 512, 448);
+    const auto native = window_viewport(906, 540, 512, 448, "native");
+    const auto wide = window_viewport(1280, 720, 512, 448, "16:9");
+    const auto square = window_viewport(906, 540, 512, 448, "1:1");
+    const auto tiny = window_viewport(1, 1, 0, 0);
+    if (title.x != 93 || title.y != 0 || title.width != 720 || title.height != 540 ||
+        movie.x != title.x || movie.width != title.width || movie.height != title.height ||
+        narrow.x != 0 || narrow.y != 225 || narrow.width != 600 || narrow.height != 450 ||
+        native.width != 617 || native.height != 540 ||
+        wide.width != 1280 || wide.height != 720 ||
+        square.width != 540 || square.height != 540 ||
+        tiny.x != 0 || tiny.y != 0 || tiny.width != 1 || tiny.height != 1)
+    {
+        fail("host display aspect or viewport fitting is incorrect");
+        return 1;
+    }
     ee::c_ee_webgpu_bridge bridge{};
     if (!bridge.init() || !bridge.active())
     {
