@@ -4155,6 +4155,22 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert sampled_state[key] == snapshot[key], key
+            direct_report = root / "direct.json"
+            direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1")
+            direct_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(direct_report),
+            ], capture_output=True, text=True, check=False, timeout=60,
+                env=direct_env)
+            assert direct_run.returncode == 4, direct_run.stdout + direct_run.stderr
+            assert "EE direct dispatch: enabled" in direct_run.stdout, direct_run.stdout
+            assert "EE direct dispatch: executed=300" in direct_run.stderr, direct_run.stderr
+            direct_state = json.loads(direct_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert direct_state[key] == snapshot[key], key
             assert sampled_state["vu1_worker"]["enabled"] is False
             worker_report = root / "worker.json"
             worker_env = dict(env, SDBZ_VU1_ASYNC="1")

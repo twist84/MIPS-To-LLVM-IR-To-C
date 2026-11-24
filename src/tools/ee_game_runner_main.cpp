@@ -1,5 +1,6 @@
 #include "ee_scanout_clock.h"
 #include "ee_runtime.h"
+#include "ee_dispatch_index.h"
 #include "ee_runtime_profile.h"
 #include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
@@ -60,6 +61,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -422,6 +424,59 @@ using t_game_run = uint32_t (*)(
     uint32_t*
 );
 
+using t_game_resolve_entry = ee::t_ee_translated_entry (*)(uint32_t);
+
+// Exact-PC cache. The owning module remains loaded until clear().
+// Collisions can only cause another lookup; never use an aliased PC.
+class c_native_target_cache
+{
+public:
+    explicit c_native_target_cache(bool enabled)
+        : m_slots(enabled ? 65536u : 0u)
+    {
+    }
+
+    template<typename t_resolve>
+    ee::t_ee_translated_entry resolve(uint32_t pc, const t_resolve& lookup)
+    {
+        if (m_slots.empty() || pc == 0u)
+        {
+            return nullptr;
+        }
+        auto& slot = m_slots[(pc >> 2u) & (m_slots.size() - 1u)];
+        if (slot.m_pc == pc && slot.m_entry != nullptr)
+        {
+            ++m_hits;
+            return slot.m_entry;
+        }
+        ++m_misses;
+        const auto entry = lookup(pc);
+        if (entry != nullptr)
+        {
+            slot = {pc, entry};
+        }
+        return entry;
+    }
+
+    void clear()
+    {
+        std::fill(m_slots.begin(), m_slots.end(), s_slot{});
+    }
+
+    uint64_t hits() const { return m_hits; }
+    uint64_t misses() const { return m_misses; }
+
+private:
+    struct s_slot
+    {
+        uint32_t m_pc = 0u;
+        ee::t_ee_translated_entry m_entry = nullptr;
+    };
+    std::vector<s_slot> m_slots;
+    uint64_t m_hits = 0u;
+    uint64_t m_misses = 0u;
+};
+
 struct c_native_module
 {
 #if defined(_WIN32)
@@ -468,6 +523,17 @@ struct c_native_module
         );
 #else
         return reinterpret_cast<t_game_run>(dlsym(m_handle, "ee_game_run"));
+#endif
+    }
+
+    t_game_resolve_entry resolver() const
+    {
+#if defined(_WIN32)
+        return reinterpret_cast<t_game_resolve_entry>(
+            GetProcAddress(m_handle, "ee_game_resolve_entry"));
+#else
+        return reinterpret_cast<t_game_resolve_entry>(
+            dlsym(m_handle, "ee_game_resolve_entry"));
 #endif
     }
 
@@ -2338,6 +2404,27 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    std::string direct_dispatch_environment;
+    const char* direct_dispatch_setting = read_host_environment(
+        "SDBZ_EE_DIRECT_DISPATCH", &direct_dispatch_environment);
+    if (direct_dispatch_setting != nullptr && *direct_dispatch_setting != '\0' &&
+        std::strcmp(direct_dispatch_setting, "0") != 0 &&
+        std::strcmp(direct_dispatch_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_EE_DIRECT_DISPATCH (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool direct_dispatch = direct_dispatch_setting != nullptr &&
+        std::strcmp(direct_dispatch_setting, "1") == 0;
+    t_game_resolve_entry native_resolve = direct_dispatch ? module.resolver() : nullptr;
+    c_native_target_cache native_targets(direct_dispatch);
+    uint64_t direct_dispatches = 0u;
+    if (direct_dispatch)
+    {
+        std::printf("EE direct dispatch: %s (one architectural boundary per entry)\n",
+            native_resolve != nullptr ? "enabled" : "legacy library fallback");
+    }
+
     // Host models INTC/D_STAT and synchronous normal-mode SPR DMA only.
     // There is no general hardware scheduler, BIOS, chain DMA, MFIFO,
     // or complete exception lifecycle.
@@ -3325,6 +3412,7 @@ int main(int argc, char** argv)
     // a few objects instead of relinking the whole translated image.
     std::vector<std::unique_ptr<c_native_module>> overlay_modules;
     std::vector<t_game_run> overlay_runs;
+    std::vector<t_game_resolve_entry> overlay_resolvers;
     std::unordered_map<uint32_t, size_t> overlay_owner_by_pc;
     // Diagnose an unready IOP SIF handshake. Real ROM0 execution advances
     // on each read; the guard never manufactures a readiness value.
@@ -4393,7 +4481,12 @@ int main(int argc, char** argv)
         // Retrying here (rather than restarting the outer guest loop)
         // preserves the exact scheduler boundary: no second IOP quantum,
         // controller poll, VBlank, DMA, or GS presentation is delivered.
-        const ee::s_ee_cpu_state cpu_before_dispatch = cpu;
+        // The history needs only three pre-entry registers. A full
+        // snapshot is required solely for a possible live cache miss.
+        const uint32_t before_s0 = static_cast<uint32_t>(cpu.m_gpr[16].m_lo);
+        const uint32_t before_s1 = static_cast<uint32_t>(cpu.m_gpr[17].m_lo);
+        const uint32_t before_s2 = static_cast<uint32_t>(cpu.m_gpr[18].m_lo);
+        std::optional<ee::s_ee_cpu_state> cpu_before_dispatch;
         const uint64_t instructions_before_dispatch =
             runtime.m_guest_instruction_attempts;
         const auto profile_start = profile_pcs
@@ -4432,11 +4525,50 @@ int main(int argc, char** argv)
                 ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
                 report_path != nullptr);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
+            const auto resolved = slice == 1u && native_resolve != nullptr ?
+                native_targets.resolve(from_pc, [&](uint32_t pc)
+                {
+                    auto target = native_resolve(pc);
+                    for (const auto resolve : overlay_resolvers)
+                    {
+                        if (target != nullptr)
+                        {
+                            break;
+                        }
+                        // An older overlay without the optional export
+                        // may own this PC. Preserve first-owner ordering
+                        // by falling back to the ordinary dispatcher.
+                        if (resolve == nullptr)
+                        {
+                            break;
+                        }
+                        target = resolve(pc);
+                    }
+                    return target;
+                }) : nullptr;
+            if (resolved == nullptr && hot_expand_dir != nullptr &&
+                !cpu_before_dispatch.has_value())
+            {
+                cpu_before_dispatch.emplace(cpu);
+            }
             if (async_vu1)
             {
                 vif1.native_execution_begin();
             }
-            reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
+            if (resolved != nullptr)
+            {
+                const auto result = ee::ee_dispatch_run_resolved(
+                    &cpu, &runtime, from_pc, resolved);
+                reason = result.exit_reason;
+                count = result.dispatch_count;
+                out_pc = result.guest_pc;
+                status = static_cast<uint32_t>(result.status);
+                direct_dispatches += count;
+            }
+            else
+            {
+                reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
+            }
             // A module that does not own the PC returns EXITED with zero
             // dispatches and leaves the CPU, PC and exit reason untouched.
             // Only then consult the live cache-miss overlays (each owns
@@ -4450,7 +4582,7 @@ int main(int argc, char** argv)
                        runtime.m_guest_instruction_attempts ==
                            instructions_before_dispatch;
             };
-            if (!overlay_runs.empty() && unowned())
+            if (resolved == nullptr && !overlay_runs.empty() && unowned())
             {
                 const auto cached = overlay_owner_by_pc.find(from_pc);
                 if (cached != overlay_owner_by_pc.end())
@@ -4606,21 +4738,34 @@ int main(int argc, char** argv)
                     "EE hot-expand replacement lacks ee_game_run\n");
                 return 1;
             }
+            const auto replacement_resolver =
+                direct_dispatch ? candidate->resolver() : nullptr;
             if (replacement_is_overlay)
             {
                 overlay_modules.push_back(std::move(candidate));
                 overlay_runs.push_back(replacement_entry);
+                overlay_resolvers.push_back(replacement_resolver);
             }
             else
             {
                 // A full replacement already contains every overlay.
+                // Native pointers must be invalidated before unloading
+                // any owning library, not after a stale cache hit.
+                native_targets.clear();
                 overlay_owner_by_pc.clear();
                 overlay_runs.clear();
+                overlay_resolvers.clear();
                 overlay_modules.clear();
                 module.swap(*candidate);
                 native_run = replacement_entry;
+                native_resolve = replacement_resolver;
             }
-            cpu = cpu_before_dispatch;
+            if (!cpu_before_dispatch.has_value())
+            {
+                std::fprintf(stderr, "EE hot-expand missing rollback state\n");
+                return 1;
+            }
+            cpu = *cpu_before_dispatch;
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             std::printf(
@@ -4748,11 +4893,11 @@ int main(int argc, char** argv)
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_diagnostics);
             history.push_back({
                 dispatched, from_pc, out_pc, reason, status,
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[16].m_lo),
+                before_s0,
                 static_cast<uint32_t>(cpu.m_gpr[16].m_lo),
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[17].m_lo),
+                before_s1,
                 static_cast<uint32_t>(cpu.m_gpr[17].m_lo),
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[18].m_lo),
+                before_s2,
                 static_cast<uint32_t>(cpu.m_gpr[18].m_lo)
             });
             // Host read-only observations, not synthetic guest events.
@@ -8108,6 +8253,15 @@ int main(int argc, char** argv)
                           static_cast<double>(item.m_instructions)
                     : 0.0);
         }
+    }
+
+    if (direct_dispatch)
+    {
+        std::fprintf(stderr,
+            "EE direct dispatch: executed=%llu cache_hits=%llu cache_misses=%llu\n",
+            static_cast<unsigned long long>(direct_dispatches),
+            static_cast<unsigned long long>(native_targets.hits()),
+            static_cast<unsigned long long>(native_targets.misses()));
     }
 
     if (callback_active)
