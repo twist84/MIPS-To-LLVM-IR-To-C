@@ -2620,11 +2620,35 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             }
             else if (fp_funct == 0x20 || (fmt == 0x14 && fp_funct == 0x20))
             {
-                // CVT.S.W (fmt=W) or enum CVT_S_W
-                std::string wi = load_fpr_i32(fs);
-                std::string fr = newtemp();
+                // CVT.S.W truncates toward zero, rather than rounding to
+                // nearest (ps2autotests ee_fpu/convert.expected).
+                // Convert back to i64, not i32: +INT_MAX can round to +2^31.
+                // If the rounded magnitude overshot, decrement its raw
+                // float word by one ULP. This is defined for every i32.
+                const std::string wi = load_fpr_i32(fs);
+                const std::string fr = newtemp();
+                const std::string wide = newtemp();
+                const std::string back = newtemp();
+                const std::string negative = newtemp();
+                const std::string below = newtemp();
+                const std::string above = newtemp();
+                const std::string overshot = newtemp();
+                const std::string raw = newtemp();
+                const std::string corrected = newtemp();
+                const std::string result = newtemp();
                 m_out += "  " + fr + " = sitofp i32 " + wi + " to float\n";
-                store_fpr_f32(fd, fr);
+                m_out += "  " + wide + " = sext i32 " + wi + " to i64\n";
+                m_out += "  " + back + " = fptosi float " + fr + " to i64\n";
+                m_out += "  " + negative + " = icmp slt i32 " + wi + ", 0\n";
+                m_out += "  " + below + " = icmp slt i64 " + back + ", " + wide + "\n";
+                m_out += "  " + above + " = icmp sgt i64 " + back + ", " + wide + "\n";
+                m_out += "  " + overshot + " = select i1 " + negative + ", i1 " +
+                         below + ", i1 " + above + "\n";
+                m_out += "  " + raw + " = bitcast float " + fr + " to i32\n";
+                m_out += "  " + corrected + " = sub i32 " + raw + ", 1\n";
+                m_out += "  " + result + " = select i1 " + overshot + ", i32 " +
+                         corrected + ", i32 " + raw + "\n";
+                store_fpr_i32(fd, result);
             }
             else if (fmt == 0x10 && fp_funct == 0x24) // CVT.W.S
             {
@@ -2665,33 +2689,32 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             else if (fmt == 0x10 && (fp_funct == 0x30 || fp_funct == 0x32 ||
                                      fp_funct == 0x34 || fp_funct == 0x36))
             {
-                // R5900 comparisons run through the EE FPU's operand
-                // normalisation before testing FCC0:
-                //   exponent == 0       -> signed zero (denormals flushed)
-                //   exponent == 0x7f800000 -> signed FMAX (Inf/NaN saturated)
-                // This matches the reference interpreter's fpuDouble().
-                auto load_compare_f32 = [&](uint8_t freg) -> std::string {
+                // ps2autotests ee_fpu/compare.expected: exponent-255
+                // operands retain their mantissas; denormals and both
+                // signed zeros compare equal. Build a monotonic unsigned
+                // key from the raw sign/magnitude representation, avoiding
+                // host IEEE NaN handling entirely.
+                auto load_compare_key = [&](uint8_t freg) -> std::string
+                {
                     const std::string raw = load_fpr_i32(freg);
                     const std::string exponent = newtemp();
-                    const std::string is_zero_exp = newtemp();
-                    const std::string is_special_exp = newtemp();
-                    const std::string sign = newtemp();
-                    const std::string fmax = newtemp();
-                    const std::string finite_or_special = newtemp();
-                    const std::string normalised = newtemp();
-                    const std::string value = newtemp();
+                    const std::string zero = newtemp();
+                    const std::string bits = newtemp();
+                    const std::string negative = newtemp();
+                    const std::string negative_key = newtemp();
+                    const std::string positive_key = newtemp();
+                    const std::string key = newtemp();
 
                     m_out += "  " + exponent + " = and i32 " + raw + ", 2139095040\n";
-                    m_out += "  " + is_zero_exp + " = icmp eq i32 " + exponent + ", 0\n";
-                    m_out += "  " + is_special_exp + " = icmp eq i32 " + exponent + ", 2139095040\n";
-                    m_out += "  " + sign + " = and i32 " + raw + ", -2147483648\n";
-                    m_out += "  " + fmax + " = or i32 " + sign + ", 2139095039\n";
-                    m_out += "  " + finite_or_special + " = select i1 " + is_special_exp +
-                             ", i32 " + fmax + ", i32 " + raw + "\n";
-                    m_out += "  " + normalised + " = select i1 " + is_zero_exp +
-                             ", i32 " + sign + ", i32 " + finite_or_special + "\n";
-                    m_out += "  " + value + " = bitcast i32 " + normalised + " to float\n";
-                    return value;
+                    m_out += "  " + zero + " = icmp eq i32 " + exponent + ", 0\n";
+                    m_out += "  " + bits + " = select i1 " + zero +
+                             ", i32 0, i32 " + raw + "\n";
+                    m_out += "  " + negative + " = icmp slt i32 " + bits + ", 0\n";
+                    m_out += "  " + negative_key + " = xor i32 " + bits + ", -1\n";
+                    m_out += "  " + positive_key + " = xor i32 " + bits + ", -2147483648\n";
+                    m_out += "  " + key + " = select i1 " + negative +
+                             ", i32 " + negative_key + ", i32 " + positive_key + "\n";
+                    return key;
                 };
 
                 // C.F always clears FCC0 and does not inspect either FPR.
@@ -2703,13 +2726,13 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 }
                 else
                 {
-                    const std::string fa = load_compare_f32(fs);
-                    const std::string fb = load_compare_f32(ft);
+                    const std::string fa = load_compare_key(fs);
+                    const std::string fb = load_compare_key(ft);
                     const std::string cmp = newtemp();
-                    const char* pred = "oeq";
-                    if (fp_funct == 0x34) pred = "olt";
-                    else if (fp_funct == 0x36) pred = "ole";
-                    m_out += "  " + cmp + " = fcmp " + std::string(pred) + " float " + fa +
+                    const char* pred = "eq";
+                    if (fp_funct == 0x34) pred = "ult";
+                    else if (fp_funct == 0x36) pred = "ule";
+                    m_out += "  " + cmp + " = icmp " + std::string(pred) + " i32 " + fa +
                              ", " + fb + "\n";
                     set_fcc(cmp);
                 }

@@ -51,13 +51,13 @@ def f32_bits(value):
     return struct.unpack("<I", struct.pack("<f", value))[0]
 
 
-def compile_jit(fixture, temp_dir, mode, target):
+def compile_jit(fixture, temp_dir, mode, target, opt=0):
     ir_path = temp_dir / f"{mode}.ll"
     subprocess.run([str(fixture), str(ir_path), mode], check=True)
 
     module = llvm.parse_assembly(ir_path.read_text(encoding="utf-8"))
     module.verify()
-    target_machine = target.create_target_machine(opt=0)
+    target_machine = target.create_target_machine(opt=opt)
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
     module.verify()
@@ -74,9 +74,9 @@ def compile_jit(fixture, temp_dir, mode, target):
     return function_type(address), engine, module, target_machine
 
 
-def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc):
+def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     backing, state = aligned_state()
     _ = (backing, engine, module, target_machine)
@@ -85,11 +85,11 @@ def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc):
     # FCSR bits must be preserved by the compare's read/modify/write sequence.
     initial_fcsr = 0xA5923456
     state.fcsr = initial_fcsr
-    state.fpr[1] = f32_bits(lhs)
-    state.fpr[2] = f32_bits(rhs)
+    state.fpr[1] = lhs
+    state.fpr[2] = rhs
 
     result = guest_fn(ctypes.pointer(state), None)
-    prefix = f"{mode}({lhs!r}, {rhs!r}): "
+    prefix = f"{mode}(0x{lhs:08x}, 0x{rhs:08x}, O{opt}): "
     require(result == 3, prefix + f"expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.exit_reason == 3,
             prefix + f"state exit reason was {state.exit_reason}")
@@ -131,9 +131,9 @@ def run_cvt_w_case(fixture, temp_dir, target, source_bits, expected_bits, label)
             prefix + f"CVT.W.S unexpectedly modified FCSR: 0x{state.fcsr:08x}")
 
 
-def run_cvt_s_w_case(fixture, temp_dir, target, source_value, label):
+def run_cvt_s_w_case(fixture, temp_dir, target, source_value, expected_bits, label, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "cvt_s_w", target
+        fixture, temp_dir, "cvt_s_w", target, opt
     )
     backing, state = aligned_state()
     _ = (backing, engine, module, target_machine)
@@ -145,8 +145,7 @@ def run_cvt_s_w_case(fixture, temp_dir, target, source_value, label):
     state.fcsr = initial_fcsr
 
     result = guest_fn(ctypes.pointer(state), None)
-    expected_bits = f32_bits(float(source_value))
-    prefix = f"cvt_s_w({label}, {source_value}): "
+    prefix = f"cvt_s_w({label}, {source_value}, O{opt}): "
     require(result == 3, prefix + f"expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.exit_reason == 3,
             prefix + f"state exit reason was {state.exit_reason}")
@@ -615,29 +614,43 @@ def main():
     llvm.initialize_native_asmprinter()
     target = llvm.Target.from_default_triple()
 
-    qnan = struct.unpack("<f", struct.pack("<I", 0x7FC00000))[0]
+    # Raw-word expectations from ps2autotests ee_fpu/compare.expected
+    # (97469ffbed8631277b94e28d01dabd702aa97ef3), plus negative ordering
+    # and boundary cases. Never route exponent-255 payloads through Python
+    # floats, which can quiet signaling NaNs or lose their raw mantissas.
     cases = [
-        ("c_f", 1.0, 1.0, False),
-        ("c_f", qnan, qnan, False),
-        ("c_eq", 1.5, 1.5, True),
-        ("c_eq", 1.5, 2.5, False),
-        ("c_eq", 0.0, -0.0, True),
-        # The EE comparison path first normalises exponents: denormals become
-        # signed zero, while Inf/NaN become signed FMAX. Therefore equal positive
-        # NaNs compare equal after normalisation, rather than using host IEEE
-        # unordered-comparison behaviour directly.
-        ("c_eq", qnan, qnan, True),
-        ("c_eq", float("inf"), qnan, True),
-        ("c_eq", 1.0e-45, 0.0, True),  # denormal flushes to +0
-        ("c_lt", -1.0, 0.0, True),
-        ("c_lt", 0.0, 0.0, False),
-        ("c_lt", qnan, -1.0, False),  # +FMAX is not less than -1
-        ("c_lt", -1.0, qnan, True),   # -1 is less than +FMAX
-        ("c_le", 0.0, 0.0, True),
-        ("c_le", -2.0, -1.0, True),
-        ("c_le", 2.0, 1.0, False),
-        ("c_le", qnan, 1.0, False),
-        ("c_le", -1.0, qnan, True),
+        ("c_f", 0x3f800000, 0x3f800000, False),
+        ("c_f", 0x7fffffff, 0x7fffffff, False),
+        ("c_eq", 0x3fc00000, 0x3fc00000, True),
+        ("c_eq", 0x3fc00000, 0x40200000, False),
+        ("c_eq", 0x00000000, 0x80000000, True),
+        ("c_eq", 0x7fffffff, 0x7fffffff, True),
+        ("c_eq", 0x7f800000, 0x7f800001, False),
+        ("c_eq", 0x7f800001, 0x7f800000, False),
+        ("c_eq", 0x7f7fffff, 0x7f800000, False),
+        ("c_eq", 0x00000001, 0x00000000, True),
+        ("c_eq", 0x80000001, 0x00000000, True),
+        ("c_eq", 0xffffffff, 0xffffffff, True),
+        ("c_eq", 0x7fffffff, 0xffffffff, False),
+        ("c_lt", 0xbf800000, 0x00000000, True),
+        ("c_lt", 0x80000000, 0x00000000, False),
+        ("c_lt", 0x7fffffff, 0xbf800000, False),
+        ("c_lt", 0xbf800000, 0x7fffffff, True),
+        ("c_lt", 0x7f800000, 0x7f800001, True),
+        ("c_lt", 0x7f800001, 0x7f800000, False),
+        ("c_lt", 0xff800001, 0xff800000, True),
+        ("c_lt", 0xff800000, 0xff800001, False),
+        ("c_lt", 0x80000001, 0x00000001, False),
+        ("c_le", 0x00000000, 0x00000000, True),
+        ("c_le", 0xc0000000, 0xbf800000, True),
+        ("c_le", 0x40000000, 0x3f800000, False),
+        ("c_le", 0x7fffffff, 0x3f800000, False),
+        ("c_le", 0xbf800000, 0x7fffffff, True),
+        ("c_le", 0x7f800000, 0x7f800001, True),
+        ("c_le", 0x7f800001, 0x7f800000, False),
+        ("c_le", 0xff800001, 0xff800000, True),
+        ("c_le", 0xff800000, 0xff800001, False),
+        ("c_le", 0x80000001, 0x00000001, True),
     ]
 
     # CVT.W.S uses the EE's truncating conversion and saturates values whose
@@ -818,23 +831,32 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-fpu-compare-") as directory:
         temp_dir = pathlib.Path(directory)
-        for mode, lhs, rhs, expected in cases:
-            run_case(fixture, temp_dir, target, mode, lhs, rhs, expected)
+        for opt in (0, 3):
+            for mode, lhs, rhs, expected in cases:
+                run_case(fixture, temp_dir, target, mode, lhs, rhs, expected, opt)
         for source_bits, expected_bits, label in cvt_cases:
             run_cvt_w_case(
                 fixture, temp_dir, target, source_bits, expected_bits, label
             )
-        for source_value, label in [
-            (0, "zero"),
-            (1, "positive one"),
-            (-1, "negative one"),
-            (16777217, "round-to-nearest-even tie"),
-            (2147483647, "signed maximum"),
-            (-2147483648, "signed minimum"),
-        ]:
-            run_cvt_s_w_case(
-                fixture, temp_dir, target, source_value, label
-            )
+        # Explicit raw results rather than a host float cast oracle.
+        # Signed maximum and the positive/negative non-exact conversions
+        # distinguish truncation from nearest-even.
+        for opt in (0, 3):
+            for source_value, expected_bits, label in [
+                (0, 0x00000000, "zero"),
+                (1, 0x3f800000, "positive one"),
+                (-1, 0xbf800000, "negative one"),
+                (16777217, 0x4b800000, "positive truncation tie"),
+                (16777219, 0x4b800001, "positive round-up tie"),
+                (-16777219, 0xcb800001, "negative round-away tie"),
+                (2147483647, 0x4effffff, "signed maximum"),
+                (-2147483647, 0xceffffff, "near signed minimum"),
+                (-2147483648, 0xcf000000, "signed minimum"),
+                (0x3fbeb852, 0x4e7efae1, "hardware conversion vector"),
+            ]:
+                run_cvt_s_w_case(
+                    fixture, temp_dir, target, source_value, expected_bits, label, opt
+                )
         run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases)
         run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases)
         run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases)
@@ -868,7 +890,7 @@ def main():
         "MAX.S/MIN.S bitwise ordering; ABS.S/NEG.S raw-bit sign operations; "
         "EE NaN/Inf normalisation, integer "
         "saturation, truncation, FCSR cause-bit clearing and sticky-bit "
-        "preservation; O0 JIT)"
+        "preservation; O0 JIT, comparisons/CVT.S.W also O3 codegen)"
     )
 
 
