@@ -156,9 +156,9 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
     if (worker != nullptr)
     {
         auto job = std::make_unique<ee::s_ee_vu1_job>();
-        job->m_resident.m_state = s;
-        job->m_resident.m_code = code;
-        job->m_resident.m_data = result.m_data;
+        job->m_resident->m_state = s;
+        job->m_resident->m_code = code;
+        job->m_resident->m_data = result.m_data;
         job->m_path1.swap(result.m_path1);
         job->m_address = k_start;
         job->m_top = 123u;
@@ -172,8 +172,8 @@ s_outcome run(ee::t_vu1_code code, ee::c_ee_vu1_aot* backend,
         {
             return result;
         }
-        result.m_state = job->m_resident.m_state;
-        result.m_data = job->m_resident.m_data;
+        result.m_state = job->m_resident->m_state;
+        result.m_data = job->m_resident->m_data;
         result.m_path1.swap(job->m_path1);
         result.m_issue = job->m_issue;
         result.m_ok = job->m_accepted && !job->m_host_failed &&
