@@ -4,6 +4,7 @@
 
 #include "ee_gif.h"
 #include "ee_vu1.h"
+#include "ee_vu1_worker.h"
 #include "ee_runtime.h"
 
 #include <array>
@@ -81,6 +82,23 @@ public:
     bool consume(const uint8_t* data, uint32_t qwc);
     const s_diagnostic& diagnostic() const;
 
+    // Host-side opt-in staged transfer. No guest completion is implied by
+    // pending; the caller must serialize conflicting device operations.
+    enum class e_deferred_result
+    {
+        idle,
+        pending,
+        completed,
+        rejected,
+        busy
+    };
+    bool enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend = {});
+    e_deferred_result begin_deferred(const uint8_t* data, uint32_t qwc);
+    e_deferred_result poll_deferred();
+    e_deferred_result wait_deferred();
+    bool deferred_busy() const;
+    void cancel_deferred();
+
     uint32_t read_register(uint32_t offset) const;
     bool write_register(uint32_t offset, uint32_t value);
     const uint8_t* vu1_data() const;
@@ -126,6 +144,45 @@ private:
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
 
+    struct s_path_range
+    {
+        uint32_t m_path;
+        size_t m_offset;
+        size_t m_size;
+    };
+
+    // Staging and publication are separate. Only the controller accesses
+    // this object; a worker receives a detached resident value and PATH1.
+    struct s_transaction
+    {
+        explicit s_transaction(c_ee_vif1& owner);
+        ~s_transaction();
+        s_transaction(const s_transaction&) = delete;
+        s_transaction& operator=(const s_transaction&) = delete;
+
+        c_ee_vif1& m_owner;
+        s_machine m_next{};
+        std::vector<uint8_t> m_path1;
+        std::vector<uint8_t> m_path2;
+        std::vector<s_path_range> m_ranges;
+        size_t m_index = 0u;
+        size_t m_before1 = 0u;
+        size_t m_before2 = 0u;
+        uint32_t m_waiting_words = 0u;
+        s_ee_vu1_issue m_issue{};
+        e_reject m_rejection = e_reject::none;
+        uint32_t m_rejected_code = 0u;
+        bool m_committed = false;
+    };
+
+    void reject_packet(e_reject reason, uint32_t code);
+    bool prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc);
+    bool advance(s_transaction& tx, c_ee_vu1_worker* worker);
+    bool record_command(s_transaction& tx, uint32_t code, uint32_t words);
+    bool publish(s_transaction& tx);
+    e_deferred_result resume_deferred(bool wait);
+    static void complete_vu_start(s_machine& machine);
+
     static uint32_t command_data_words(const s_machine& machine,
                                        uint32_t code);
     static void unpack(s_machine& machine, uint32_t code,
@@ -146,5 +203,7 @@ private:
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
     const c_ee_gif_path3* m_path3 = nullptr;
+    std::unique_ptr<c_ee_vu1_worker> m_worker;
+    std::unique_ptr<s_transaction> m_deferred;
 };
 } // namespace ee

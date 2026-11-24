@@ -79,6 +79,7 @@ void c_ee_vif1::bind_path3(const c_ee_gif_path3* path3)
 
 void c_ee_vif1::reset()
 {
+    cancel_deferred();
     m_machine = {};
     m_pending_scratch.clear();
     m_path1_scratch.clear();
@@ -388,13 +389,7 @@ bool c_ee_vif1::execute(
             }
             else
             {
-                // Match vif.cpp::run_vu: TOP records the buffer given
-                // to this program, TOPS advances to the next buffer.
-                machine.m_top = machine.m_tops;
-                machine.m_itop = machine.m_itops;
-                machine.m_dbf = !machine.m_dbf;
-                machine.m_tops = machine.m_base +
-                    (machine.m_dbf ? machine.m_ofst : 0u);
+                complete_vu_start(machine);
             }
             break;
         }
@@ -419,73 +414,77 @@ bool c_ee_vif1::execute(
     return accepted;
 }
 
-bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
+void c_ee_vif1::complete_vu_start(s_machine& machine)
 {
-    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_consume, qwc);
-    // A partial DIRECT can carry up to 65536 qwords plus its command.
-    // Allow that residual in addition to the independently bounded batch.
+    // TOP describes the completed start; TOPS selects the next buffer.
+    machine.m_top = machine.m_tops;
+    machine.m_itop = machine.m_itops;
+    machine.m_dbf = !machine.m_dbf;
+    machine.m_tops = machine.m_base +
+        (machine.m_dbf ? machine.m_ofst : 0u);
+}
+
+c_ee_vif1::s_transaction::s_transaction(c_ee_vif1& owner)
+    : m_owner(owner)
+{
+    m_next.m_pending.swap(owner.m_pending_scratch);
+    m_path1.swap(owner.m_path1_scratch);
+    m_path2.swap(owner.m_path2_scratch);
+    m_path1.clear();
+    m_path2.clear();
+}
+
+c_ee_vif1::s_transaction::~s_transaction()
+{
+    if (!m_committed)
+    {
+        m_next.m_pending.clear();
+        m_next.m_pending.swap(m_owner.m_pending_scratch);
+    }
+    m_path1.clear();
+    m_path2.clear();
+    m_path1.swap(m_owner.m_path1_scratch);
+    m_path2.swap(m_owner.m_path2_scratch);
+    constexpr size_t limit =
+        static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
+    if (m_owner.m_path1_scratch.capacity() > limit)
+    {
+        std::vector<uint8_t>().swap(m_owner.m_path1_scratch);
+    }
+    if (m_owner.m_path2_scratch.capacity() > limit)
+    {
+        std::vector<uint8_t>().swap(m_owner.m_path2_scratch);
+    }
+    if (m_owner.m_pending_scratch.capacity() >
+        limit / sizeof(uint32_t) + 0x40000u + 0x400u)
+    {
+        std::vector<uint32_t>().swap(m_owner.m_pending_scratch);
+    }
+}
+
+void c_ee_vif1::reject_packet(e_reject reason, uint32_t code)
+{
+    ++m_diagnostic.m_rejected_batches;
+    if (m_diagnostic.m_first_rejection == e_reject::none)
+    {
+        m_diagnostic.m_first_rejection = reason;
+        m_diagnostic.m_first_rejected_code = code;
+    }
+    m_diagnostic.m_reason = reason;
+    m_diagnostic.m_code = code;
+}
+
+bool c_ee_vif1::prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc)
+{
+    // Bound residual command words independently of aggregate DMA size.
     constexpr size_t k_max_pending_words =
         static_cast<size_t>(k_max_graphics_batch_qwc) * 4u + 0x40000u + 0x400u;
-    // Host-only provenance. A failed DMA may be retried with identical
-    // bytes, so rejection totals count attempts, not unique guest commands.
-    const auto reject_packet = [this](e_reject reason, uint32_t code)
-    {
-        ++m_diagnostic.m_rejected_batches;
-        if (m_diagnostic.m_first_rejection == e_reject::none)
-        {
-            m_diagnostic.m_first_rejection = reason;
-            m_diagnostic.m_first_rejected_code = code;
-        }
-        m_diagnostic.m_reason = reason;
-        m_diagnostic.m_code = code;
-    };
     if (qwc > k_max_graphics_batch_qwc || (qwc != 0u && data == nullptr))
     {
         reject_packet(e_reject::invalid_packet, 0u);
         return false;
     }
-    // Reuse the previous transaction's pending capacity. Guest state
-    // remains private until both VIF execution and the GIF sink succeed.
-    s_machine next{};
-    next.m_pending.swap(m_pending_scratch);
-    auto& path1_bytes = m_path1_scratch;
-    auto& path2_bytes = m_path2_scratch;
-    path1_bytes.clear();
-    path2_bytes.clear();
-    struct s_transaction_scratch
-    {
-        std::vector<uint32_t>& m_pending;
-        std::vector<uint32_t>& m_spare;
-        std::vector<uint8_t>& m_path1;
-        std::vector<uint8_t>& m_path2;
-        bool m_committed = false;
-
-        ~s_transaction_scratch()
-        {
-            if (!m_committed)
-            {
-                m_pending.clear();
-                m_pending.swap(m_spare);
-            }
-            m_path1.clear();
-            m_path2.clear();
-            // Retain at most one normal aggregate batch per path.
-            constexpr size_t limit =
-                static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
-            if (m_path1.capacity() > limit)
-            {
-                std::vector<uint8_t>().swap(m_path1);
-            }
-            if (m_path2.capacity() > limit)
-            {
-                std::vector<uint8_t>().swap(m_path2);
-            }
-            if (m_spare.capacity() > limit / sizeof(uint32_t) + 0x40000u + 0x400u)
-            {
-                std::vector<uint32_t>().swap(m_spare);
-            }
-        }
-    } scratch{next.m_pending, m_pending_scratch, path1_bytes, path2_bytes};
+    auto& next = tx.m_next;
     next = m_machine;
     if (next.m_pending.size() + static_cast<size_t>(qwc) * 4u >
         k_max_pending_words)
@@ -513,76 +512,123 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
         }
     }
 
-    size_t index = 0u;
-    struct s_path_range
-    {
-        uint32_t m_path;
-        size_t m_offset;
-        size_t m_size;
-    };
-    std::vector<s_path_range> ranges;
-    const auto record_range = [&ranges](uint32_t path, size_t before, size_t after)
+    return true;
+}
+
+bool c_ee_vif1::record_command(s_transaction& tx, uint32_t code, uint32_t words)
+{
+    const auto record_range = [&tx](uint32_t path, size_t before, size_t after)
     {
         if (before != after)
         {
-            if (!ranges.empty() && ranges.back().m_path == path)
+            if (!tx.m_ranges.empty() && tx.m_ranges.back().m_path == path)
             {
-                ranges.back().m_size += after - before;
+                tx.m_ranges.back().m_size += after - before;
             }
             else
             {
-                ranges.push_back({path, before, after - before});
+                tx.m_ranges.push_back({path, before, after - before});
             }
         }
     };
-    s_ee_vu1_issue vu_issue{};
-    e_reject rejection = e_reject::none;
-    uint32_t rejected_code = 0u;
-    while (index < next.m_pending.size())
+    record_range(1u, tx.m_before1, tx.m_path1.size());
+    record_range(2u, tx.m_before2, tx.m_path2.size());
+    if (tx.m_path1.size() + tx.m_path2.size() >
+        static_cast<size_t>(k_max_graphics_batch_qwc) * 16u)
     {
-        const uint32_t code = next.m_pending[index];
+        tx.m_rejection = e_reject::pending_limit;
+        tx.m_rejected_code = code;
+        return false;
+    }
+    tx.m_index += 1u + words;
+    return true;
+}
+
+// Returns false only after dispatching a detached VU1 job. No GIF
+// parser or committed VIF machine is touched until publish().
+bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
+{
+    auto& next = tx.m_next;
+    while (tx.m_rejection == e_reject::none &&
+           tx.m_index < next.m_pending.size())
+    {
+        const uint32_t code = next.m_pending[tx.m_index];
         const uint32_t words = command_data_words(next, code);
         if (static_cast<size_t>(words) >
-            next.m_pending.size() - index - 1u)
+            next.m_pending.size() - tx.m_index - 1u)
         {
-            break; // Legitimate command continuation into the next DMA.
+            break;
         }
         const uint32_t opcode = (code >> 24u) & 0x7fu;
-        if (opcode == 0x14u || opcode == 0x15u || opcode == 0x17u)
+        const bool vu_start =
+            opcode == 0x14u || opcode == 0x15u || opcode == 0x17u;
+        if (vu_start)
         {
             ++m_diagnostic.m_vu_start_attempts;
             m_diagnostic.m_last_vu_start_code = code;
         }
-        // MSCALF waits for PATH3 as well as VU1. Completed PATH3
-        // transfers already reached GS in this synchronous runtime.
-        // Fail closed for incomplete packets until stall/resume exists.
         if (opcode == 0x15u && m_path3 != nullptr && m_path3->state().m_active)
         {
-            rejection = e_reject::mscalf_path3_busy;
-            rejected_code = code;
-            vu_issue = {};
+            tx.m_rejection = e_reject::mscalf_path3_busy;
+            tx.m_rejected_code = code;
+            tx.m_issue = {};
             break;
         }
-        const size_t before1 = path1_bytes.size();
-        const size_t before2 = path2_bytes.size();
-        if (!execute(next, code, next.m_pending.data() + index + 1u,
-                     path2_bytes, path1_bytes, &vu_issue, &rejection))
-        {
-            rejected_code = code;
-            break;
-        }
-        record_range(1u, before1, path1_bytes.size());
-        record_range(2u, before2, path2_bytes.size());
-        if (path1_bytes.size() + path2_bytes.size() >
-            static_cast<size_t>(k_max_graphics_batch_qwc) * 16u)
-        {
-            rejection = e_reject::pending_limit;
-            rejected_code = code;
-            break;
-        }
-        index += 1u + words;
-    }
+        tx.m_before1 = tx.m_path1.size();
+        tx.m_before2 = tx.m_path2.size();
 
+        // IRQ and uninitialized MSCNT retain the synchronous rejection
+        // path. Following MPG, UNPACK, FLUSH and MSCNT cannot run until
+        // the preceding worker result has been collected.
+        if (worker != nullptr && vu_start &&
+            ((code & 0x80000000u) == 0u || (next.m_err & 1u) != 0u) &&
+            (opcode != 0x17u || next.m_vu1.m_state.m_initialized))
+        {
+            auto job = std::make_unique<s_ee_vu1_job>();
+            job->m_address = opcode == 0x17u ?
+                next.m_vu1.m_state.m_tpc : (code & 0x7ffu) * 8u;
+            job->m_top = next.m_tops;
+            job->m_itop = next.m_itops;
+            job->m_resident = std::move(next.m_vu1);
+            job->m_path1.swap(tx.m_path1);
+            next.m_code = code;
+            if (worker->submit(job))
+            {
+                tx.m_waiting_words = words;
+                return false;
+            }
+            next.m_vu1 = std::move(job->m_resident);
+            job->m_path1.swap(tx.m_path1);
+            tx.m_rejection = e_reject::unsupported_vu_execution;
+            tx.m_rejected_code = code;
+            tx.m_issue = {};
+            break;
+        }
+
+        if (!execute(next, code, next.m_pending.data() + tx.m_index + 1u,
+                     tx.m_path2, tx.m_path1, &tx.m_issue, &tx.m_rejection))
+        {
+            tx.m_rejected_code = code;
+            break;
+        }
+        if (!record_command(tx, code, words))
+        {
+            break;
+        }
+    }
+    return true;
+}
+
+bool c_ee_vif1::publish(s_transaction& tx)
+{
+    auto& next = tx.m_next;
+    auto& path1_bytes = tx.m_path1;
+    auto& path2_bytes = tx.m_path2;
+    auto& ranges = tx.m_ranges;
+    auto& rejection = tx.m_rejection;
+    const auto rejected_code = tx.m_rejected_code;
+    const auto& vu_issue = tx.m_issue;
+    const auto index = tx.m_index;
     if (rejection == e_reject::none &&
         !path1_bytes.empty() && !path2_bytes.empty())
     {
@@ -698,7 +744,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     // staged vector becomes committed, including an incomplete command.
     m_machine.m_pending.swap(m_pending_scratch);
     m_machine = std::move(next);
-    scratch.m_committed = true;
+    tx.m_committed = true;
     // A successful packet clears only the latest failure, not the
     // lifetime evidence of a previously rejected VU1/GIF command.
     m_diagnostic.m_reason = e_reject::none;
@@ -714,6 +760,120 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     m_diagnostic.m_unpack_commands = m_machine.m_unpack_commands;
     m_diagnostic.m_direct_qwc = m_machine.m_direct_qwc;
     return true;
+}
+
+bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
+{
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_consume, qwc);
+    if (m_deferred != nullptr)
+    {
+        return false;
+    }
+    s_transaction tx(*this);
+    return prepare(tx, data, qwc) && advance(tx, nullptr) && publish(tx);
+}
+
+bool c_ee_vif1::enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend)
+{
+    if (m_worker != nullptr)
+    {
+        return false;
+    }
+    m_worker = std::make_unique<c_ee_vu1_worker>(std::move(backend));
+    return true;
+}
+
+bool c_ee_vif1::deferred_busy() const
+{
+    return m_deferred != nullptr;
+}
+
+c_ee_vif1::e_deferred_result c_ee_vif1::begin_deferred(
+    const uint8_t* data, uint32_t qwc)
+{
+    if (m_deferred != nullptr)
+    {
+        return e_deferred_result::busy;
+    }
+    if (m_worker == nullptr)
+    {
+        return e_deferred_result::rejected;
+    }
+    auto tx = std::make_unique<s_transaction>(*this);
+    if (!prepare(*tx, data, qwc))
+    {
+        return e_deferred_result::rejected;
+    }
+    if (advance(*tx, m_worker.get()))
+    {
+        return publish(*tx) ? e_deferred_result::completed :
+            e_deferred_result::rejected;
+    }
+    m_deferred = std::move(tx);
+    return e_deferred_result::pending;
+}
+
+c_ee_vif1::e_deferred_result c_ee_vif1::resume_deferred(bool wait)
+{
+    if (m_deferred == nullptr)
+    {
+        return e_deferred_result::idle;
+    }
+    do
+    {
+        auto job = wait ? m_worker->wait_take() : m_worker->try_take();
+        if (job == nullptr)
+        {
+            return e_deferred_result::pending;
+        }
+        auto& tx = *m_deferred;
+        auto& next = tx.m_next;
+        const uint32_t code = next.m_pending[tx.m_index];
+        const uint32_t opcode = (code >> 24u) & 0x7fu;
+        next.m_vu1 = std::move(job->m_resident);
+        tx.m_path1.swap(job->m_path1);
+        tx.m_issue = job->m_issue;
+        if (!job->m_accepted || job->m_host_failed)
+        {
+            tx.m_rejection = e_reject::unsupported_vu_execution;
+            tx.m_rejected_code = code;
+        }
+        else
+        {
+            complete_vu_start(next);
+            ++next.m_commands;
+            ++next.m_committed_opcodes[opcode];
+            (void)record_command(tx, code, tx.m_waiting_words);
+        }
+        if (advance(tx, m_worker.get()))
+        {
+            const bool accepted = publish(tx);
+            m_deferred.reset();
+            return accepted ? e_deferred_result::completed :
+                e_deferred_result::rejected;
+        }
+    }
+    while (wait);
+    return e_deferred_result::pending;
+}
+
+c_ee_vif1::e_deferred_result c_ee_vif1::poll_deferred()
+{
+    return resume_deferred(false);
+}
+
+c_ee_vif1::e_deferred_result c_ee_vif1::wait_deferred()
+{
+    return resume_deferred(true);
+}
+
+void c_ee_vif1::cancel_deferred()
+{
+    if (m_deferred != nullptr)
+    {
+        m_worker->discard();
+        m_deferred.reset();
+    }
 }
 
 uint32_t c_ee_vif1::read_register(uint32_t offset) const
@@ -750,6 +910,17 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
 
 bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
 {
+    if (m_deferred != nullptr)
+    {
+        if (offset == 0x10u && (value & 1u) != 0u)
+        {
+            cancel_deferred();
+        }
+        else
+        {
+            return false;
+        }
+    }
     switch (offset)
     {
     case 0x00u:
@@ -882,6 +1053,10 @@ bool c_ee_vif1::mmio_write(void* user, uint32_t address,
         return vif1->consume(quad, 1u);
     }
 
+    if (vif1->deferred_busy())
+    {
+        return false;
+    }
     uint8_t* destination = nullptr;
     uint32_t offset = 0u;
     if (address >= k_vu1_code_base &&

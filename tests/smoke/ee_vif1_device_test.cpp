@@ -508,6 +508,70 @@ int main()
         return 1;
     }
 
+    // Detached VU execution must not expose partial VIF state or GIF
+    // output, even if the worker finishes before the controller polls.
+    {
+        using result = ee::c_ee_vif1::e_deferred_result;
+        ee::c_ee_vif1 deferred{};
+        ee::c_ee_gif_path3 deferred_path{};
+        s_capture deferred_capture{};
+        deferred_path.bind_event_sink(&deferred_capture, capture_gif);
+        deferred.bind_path1(&deferred_path);
+        const auto program = pack_words({
+            0x4a030000u, vi1_two, nop_upper,
+            0x80000efcu, 0x400002ffu, nop_lower, nop_upper, 0u,
+            0x14000000u, 0x10000000u, 0x14000000u, 0u});
+        if (!check(deferred.enable_deferred(), "enable deferred worker") ||
+            !check(ee::c_ee_vif1::mmio_write(
+                &deferred, ee::c_ee_vif1::k_vu1_data_base + 32u,
+                16u, &kick_tag) &&
+                ee::c_ee_vif1::mmio_write(
+                &deferred, ee::c_ee_vif1::k_vu1_data_base + 48u,
+                16u, &kick_body), "deferred GIF fixture setup") ||
+            !check(deferred.begin_deferred(program.data(),
+                static_cast<uint32_t>(program.size() / 16u)) == result::pending,
+                "deferred transaction did not yield to controller") ||
+            !check(deferred.deferred_busy() && deferred_capture.m_calls == 0u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 0u &&
+                deferred.vu1_code()[0u] == 0u &&
+                !send(deferred, {0u, 0u, 0u, 0u}) &&
+                !deferred.write_register(0x30u, 1u),
+                "uncommitted VIF transaction became visible") ||
+            !check(deferred.wait_deferred() == result::completed &&
+                deferred_capture.m_calls == 1u &&
+                deferred_capture.m_events.size() == 4u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 2u &&
+                deferred.diagnostic().m_committed_opcodes[0x10u] == 1u &&
+                !deferred.deferred_busy(),
+                "deferred MSCAL/FLUSHE ordering or publication"))
+        {
+            return 1;
+        }
+
+        const auto bad = pack_words({0x14000000u, 0x06000000u, 0u, 0u});
+        if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
+                deferred.wait_deferred() == result::rejected &&
+                deferred_capture.m_calls == 1u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 2u,
+                "late VIF rejection published worker output"))
+        {
+            return 1;
+        }
+
+        const auto start = pack_words({0x14000000u, 0u, 0u, 0u});
+        if (!check(deferred.begin_deferred(start.data(), 1u) == result::pending &&
+                deferred.write_register(0x10u, 1u) &&
+                !deferred.deferred_busy() &&
+                deferred.poll_deferred() == result::idle &&
+                deferred_capture.m_calls == 1u &&
+                deferred.vu1_data()[32u] == 1u &&
+                deferred.diagnostic().m_committed_opcodes[0x14u] == 0u,
+                "FBRST published or retained cancelled work"))
+        {
+            return 1;
+        }
+    }
+
     // Mixed PATH2 -> PATH1 -> PATH2 must reach the same GS sink in
     // command order. A late invalid GS write must roll the entire batch
     // back, including parser counters and VIF microprogram state.
