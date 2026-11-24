@@ -281,9 +281,9 @@ def run_arithmetic_cases(fixture, temp_dir, target, mode, cases, opt=0):
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_accumulator_cases(fixture, temp_dir, target, mode, cases):
+def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     retained = (engine, module, target_machine)
     writes_fpr = mode in ("madd_s", "msub_s")
@@ -780,15 +780,116 @@ def main():
     add_cases = [
         (0x3FC00000, 0x40100000, 0x40700000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal addition"),
-        (0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFF,
+        (0x7F7FFFFF, 0x7F7FFFFF, 0x7FFFFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF,
          0xA592744E, 0xA592F45E, "positive overflow and early return"),
+        (0x3F800000, 0x33800000, 0x3F800000,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "half-ULP truncation"),
+        (0x3F800001, 0x33800000, 0x3F800001,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "odd significand truncation"),
         (0x00000001, 0x80000001, 0x00000000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "denormal operands flush to signed zero"),
     ]
     sub_cases = [
         (0x3FC00000, 0x40100000, 0xBF400000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal subtraction"),
+        (0x3F800000, 0x33000000, 0x3F800000,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exponent delta 25 discards operand"),
+        (0x3F800000, 0x33800000, 0x3F7FFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exponent delta 24 retains guard"),
+        (0x00800001, 0x00800000, 0x00000000,
+         0xA592B456, 0xA592745E, "cancellation underflow"),
+        (0x00800000, 0x00800001, 0x80000000,
+         0xA592B456, 0xA592745E, "negative cancellation underflow"),
     ]
+    # Literal console result words; ADD/ADDA and SUB/SUBA have identical
+    # corresponding fixtures in ps2autotests ee_fpu/arithmetic.expected.
+    add_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x00000000),
+        (0x80000000, 0x00000000, 0x00000000),
+        (0x80000000, 0x80000000, 0x80000000),
+        (0x00000000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x3F800000, 0x40000000),
+        (0x3F800000, 0x00000000, 0x3F800000),
+        (0x40000000, 0x40000000, 0x40800000),
+        (0x40400000, 0x3F800000, 0x40800000),
+        (0x40400000, 0x40400000, 0x40C00000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x00000000),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0x00000000),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x00000000, 0x7F800000, 0x7F800000),
+        (0x7F800000, 0x7F800000, 0x7FFFFFFF),
+        (0xFF800000, 0x7F800000, 0x00000000),
+        (0x3F800000, 0xBF800000, 0x00000000),
+        (0x3FFFFFFF, 0x3F800000, 0x403FFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x3FFFFFFF, 0x403FFFFF),
+        (0x3F800000, 0x7F800001, 0x7F800001),
+        (0x3F800000, 0x00000001, 0x3F800000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x3F800000, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0x00001337, 0xDEADBEEF, 0xDEADBEEF),
+    ]
+    sub_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x00000000),
+        (0x80000000, 0x00000000, 0x80000000),
+        (0x80000000, 0x80000000, 0x00000000),
+        (0x00000000, 0x3F800000, 0xBF800000),
+        (0x3F800000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x00000000, 0x3F800000),
+        (0x40000000, 0x40000000, 0x00000000),
+        (0x40400000, 0x3F800000, 0x40000000),
+        (0x40400000, 0x40400000, 0x00000000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x00000000),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x00000000),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0x00000000, 0x7F800000, 0xFF800000),
+        (0x7F800000, 0x7F800000, 0x00000000),
+        (0xFF800000, 0x7F800000, 0xFFFFFFFF),
+        (0x3F800000, 0xBF800000, 0x40000000),
+        (0x3FFFFFFF, 0x3F800000, 0x3F7FFFFE),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0xBF800000),
+        (0x3F800000, 0x3FFFFFFF, 0xBF7FFFFE),
+        (0x3F800000, 0x7F800001, 0xFF800001),
+        (0x3F800000, 0x00000001, 0x3F800000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0x3F800000, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0x00001337, 0xDEADBEEF, 0x5EADBEEF),
+    ]
+    for operation, words, scalar_cases, accumulator_cases in (
+        ("ADD", add_hardware_words, add_cases, adda_cases),
+        ("SUB", sub_hardware_words, sub_cases, suba_cases),
+    ):
+        for lhs, rhs, expected in words:
+            # The recorded overflow cases are same-sign exponent-255
+            # sums after applying SUB's sign inversion; exact maximum plus
+            # a tiny operand is not an overflow.
+            effective_rhs = rhs ^ (0x80000000 if operation == "SUB" else 0)
+            overflow = ((lhs & 0x7F800000) == 0x7F800000
+                        and (effective_rhs & 0x7F800000) == 0x7F800000
+                        and ((lhs ^ effective_rhs) & 0x80000000) == 0)
+            for initial in (0xA5903456, fpu_normal_flags):
+                flags = (initial | 0x8010) if overflow else (initial & ~0xC000)
+                scalar_cases.append((lhs, rhs, expected, initial, flags,
+                                     "hardware " + operation))
+                accumulator_cases.append((lhs, rhs, 0xAABBCCDD, expected,
+                                          initial, flags, "hardware " + operation + "A"))
+
     mul_cases = [
         (0x3FC00000, 0x40000000, 0x40400000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal multiplication"),
@@ -987,15 +1088,17 @@ def main():
                 run_cvt_s_w_case(
                     fixture, temp_dir, target, source_value, expected_bits, label, opt
                 )
-        run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases)
-        run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases)
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases, opt)
+            run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases, opt)
         run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases)
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases, opt)
         run_cop1_transfer_cases(fixture, temp_dir, target)
         run_bc1_delay_cases(fixture, temp_dir, target)
-        run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases)
+        for opt in (0, 3):
+            run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases, opt)
+            run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases, opt)
         run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases)
         run_accumulator_cases(fixture, temp_dir, target, "madd_s", madd_cases)
         run_accumulator_cases(fixture, temp_dir, target, "msub_s", msub_cases)
