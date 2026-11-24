@@ -36,7 +36,7 @@ ee::t_vu1_code program()
     // E delay slot stores the old VF6 before the simultaneous upper
     // writeback. Native execution must publish these data bytes too.
     pair(code, 8u, (1u << 25u) | (15u << 21u) | (1u << 16u) |
-        (6u << 11u), upper(0x22u, 6u, 5u, 0u, 15u));
+        (6u << 11u), upper(0x3cu, 0x14u >> 2u, 5u, 6u, 15u));
     return code;
 }
 

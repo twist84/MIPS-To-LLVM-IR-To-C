@@ -77,6 +77,30 @@ int main(int argc, char** argv)
     {
         data[i] = static_cast<uint8_t>((i * 13u + (i >> 8u)) & 255u);
     }
+    const bool conversion_case = std::strcmp(argv[2], "conversions") == 0;
+    if (conversion_case)
+    {
+        constexpr uint32_t edges[] = {
+            0u, 0x80000000u, 1u, 0x807fffffu, 0x00800000u, 0x80800000u,
+            0x3f7fffffu, 0xbf7fffffu, 0x3f800000u, 0xbf800000u,
+            0x3fc00000u, 0xbfc00000u, 0x4effffffu, 0xceffffffu,
+            0x4f000000u, 0xcf000000u, 0x7fffffffu, 0xffffffffu,
+            0x7f800000u, 0xff800000u, 0x00ffffffu, 0x01000001u,
+            0x7ffffffeu, 0x80000001u, 0x01000000u, 0x01000001u,
+            0x01ffffffu, 0x02000001u, 0xfeffffffu, 0x3f000000u,
+            0x40000000u, 0xc0000000u
+        };
+        uint32_t random = 0x12345678u;
+        for (uint32_t i = 0u; i < 128u; ++i)
+        {
+            random = random * 1664525u + 1013904223u;
+            const uint32_t value = i < 32u ? edges[i] : random;
+            for (uint32_t b = 0u; b < 4u; ++b)
+            {
+                data[0x3000u + i * 4u + b] = static_cast<uint8_t>(value >> (b * 8u));
+            }
+        }
+    }
     uint32_t pc = start;
     const auto append = [&](uint32_t lo, uint32_t hi = k_upper)
     {
@@ -147,6 +171,30 @@ int main(int argc, char** argv)
             append(special(0x3fu, 2u, 1u, 6u), k_upper);
             append((15u << 21u) | (20u << 16u) | (1u << 11u), k_upper);
         }
+    }
+    if (conversion_case)
+    {
+        // Eight conversion opcodes x 128 inputs. Save each result to
+        // a separate quadword, so later conversions cannot hide errors.
+        for (uint32_t op = 0x10u; op <= 0x17u; ++op)
+        {
+            const uint32_t index = op - 0x10u;
+            for (uint32_t j = 0u; j < 32u; ++j)
+            {
+                append((15u << 21u) | (26u << 16u) | (0x300u + j), k_upper);
+                const uint32_t target = (j & 1u) ? 26u : 27u;
+                append(k_nop, upper(0x3cu | (op & 3u), op >> 2u,
+                    26u, target, 15u));
+                append((1u << 25u) | (15u << 21u) | (target << 11u) |
+                    (0x100u + index * 32u + j), k_upper);
+            }
+        }
+        // Partial lane write, overlapping LQ in the same pair, VF0
+        // suppression, and unchanged accumulator/flags.
+        append((15u << 21u) | (26u << 16u) | 0x300u, k_upper);
+        append((15u << 21u) | (27u << 16u) | 0x301u,
+            upper(0x3cu, 0x14u >> 2u, 26u, 27u, 10u));
+        append(k_nop, upper(0x3cu, 0x10u >> 2u, 27u, 0u, 15u));
     }
     const bool acc_case = std::strcmp(argv[2], "acc") == 0 ||
         std::strcmp(argv[2], "acc-branches") == 0;
@@ -245,7 +293,8 @@ int main(int argc, char** argv)
     }
     const auto program = ee::vu1_lift_program_ir(code, start);
     if (program.m_ir.empty() || (program.m_steps == 0u) != branches ||
-        program.m_writes_data != (acc_case || std::strcmp(argv[2], "stores") == 0))
+        program.m_writes_data != (conversion_case || acc_case ||
+            std::strcmp(argv[2], "stores") == 0))
     {
         return 1;
     }

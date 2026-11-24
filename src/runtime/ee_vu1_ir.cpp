@@ -174,6 +174,66 @@ define internal i32 @vu_min(i32 %a, i32 %b) alwaysinline {
   %r = select i1 %pick_a, i32 %a, i32 %b
   ret i32 %r
 }
+
+; Integer fixed-point conversion, matching vu1_fp::to_fixed.
+; Clamp the exponent before shifting; LLVM overshifts are poison.
+define internal i32 @vu_to_fixed(i32 %x, i32 %fraction) alwaysinline {
+entry:
+  %exp0 = lshr i32 %x, 23
+  %exp = and i32 %exp0, 255
+  %e = add i32 %exp, %fraction
+  %denormal = icmp eq i32 %exp, 0
+  %small = icmp sle i32 %e, 126
+  %zero = or i1 %denormal, %small
+  br i1 %zero, label %return_zero, label %check_large
+return_zero:
+  ret i32 0
+check_large:
+  %negative = icmp slt i32 %x, 0
+  %large = icmp sge i32 %e, 158
+  br i1 %large, label %saturate, label %convert
+saturate:
+  %limit = select i1 %negative, i32 -2147483648, i32 2147483647
+  ret i32 %limit
+convert:
+  ; e is in [127,157], so shift is in [-23,7].
+  %shift = sub i32 %e, 150
+  %left = icmp sge i32 %shift, 0
+  %negshift = sub i32 0, %shift
+  %ls = select i1 %left, i32 %shift, i32 0
+  %rs = select i1 %left, i32 0, i32 %negshift
+  %m0 = and i32 %x, 8388607
+  %m = or i32 %m0, 8388608
+  %l = shl i32 %m, %ls
+  %r = lshr i32 %l, %rs
+  %neg = sub i32 0, %r
+  %result = select i1 %negative, i32 %neg, i32 %r
+  ret i32 %result
+}
+
+; Every signed i32 divided by a power of two is exactly representable
+; as double. The reference from_double then truncates its mantissa.
+; Normalize the unsigned magnitude directly, including INT32_MIN.
+define internal i32 @vu_from_fixed(i32 %x, i32 %fraction) alwaysinline {
+entry:
+  %zero = icmp eq i32 %x, 0
+  br i1 %zero, label %return_zero, label %convert
+return_zero:
+  ret i32 0
+convert:
+  %negative = icmp slt i32 %x, 0
+  %neg = sub i32 0, %x
+  %mag = select i1 %negative, i32 %neg, i32 %x
+  %sign = and i32 %x, -2147483648
+  %lz = call i32 @llvm.ctlz.i32(i32 %mag, i1 false)
+  %high = sub i32 31, %lz
+  %normalized = shl i32 %mag, %lz
+  %mantissa = lshr i32 %normalized, 8
+  %biased = add i32 %high, 127
+  %e = sub i32 %biased, %fraction
+  %result = call i32 @vu_pack(i32 %sign, i32 %e, i32 %mantissa)
+  ret i32 %result
+}
 )IR";
 
 constexpr uint32_t k_unknown_pc = 0xffffffffu;
@@ -803,9 +863,9 @@ private:
 
         const bool abs = special && op == 0x1du;
         const bool cross = op == 0x2eu;
-        // Conversions and CLIP have distinct side effects; do not
-        // accidentally decode those special indices as arithmetic.
-        if (special && ((op >= 0x10u && op <= 0x17u) || op == 0x1fu))
+        const bool conversion = special && op >= 0x10u && op <= 0x17u;
+        // CLIP has a separate delayed flag pipeline.
+        if (special && op == 0x1fu)
         {
             return false;
         }
@@ -837,11 +897,11 @@ private:
         {
             helper = "vu_min";
         }
-        if (!abs && !cross && !madd && !msub && helper == nullptr)
+        if (!conversion && !abs && !cross && !madd && !msub && helper == nullptr)
         {
             return false;
         }
-        const bool flags = !abs && !(op >= 0x10u && op <= 0x17u) &&
+        const bool flags = !conversion && !abs && !(op >= 0x10u && op <= 0x17u) &&
             op != 0x1du && op != 0x1fu && op != 0x2bu && op != 0x2fu;
         const bool uses_q = op == 0x1cu || op == 0x20u || op == 0x21u ||
             op == 0x24u || op == 0x25u;
@@ -858,7 +918,13 @@ private:
                 continue;
             }
             const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);
-            if (abs)
+            if (conversion)
+            {
+                constexpr uint32_t fractions[]{0u, 4u, 12u, 15u};
+                values[lane] = fp_binary(op <= 0x13u ? "vu_from_fixed" : "vu_to_fixed",
+                    lhs, std::to_string(fractions[op & 3u]));
+            }
+            else if (abs)
             {
                 values[lane] = operation("and i32 " + lhs + ", 2147483647");
             }
@@ -880,11 +946,11 @@ private:
                 }
             }
         }
-        m_upper_target = abs ? ft : fd;
+        m_upper_target = conversion || abs ? ft : fd;
         m_upper_mask = write_mask;
         m_upper_values = std::move(values);
         m_upper_flags = flags;
-        m_upper_acc = special && !abs;
+        m_upper_acc = special && !abs && !conversion;
         return true;
     }
 

@@ -13,7 +13,7 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches"):
+        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches", "conversions"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
@@ -56,6 +56,23 @@ def main():
                 status = ctypes.c_uint32(0x30)
                 data = (ctypes.c_uint8 * 16384)(
                     *((i * 13 + (i >> 8)) & 255 for i in range(16384)))
+                if case == "conversions":
+                    edges = [
+                        0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x80800000,
+                        0x3f7fffff, 0xbf7fffff, 0x3f800000, 0xbf800000,
+                        0x3fc00000, 0xbfc00000, 0x4effffff, 0xceffffff,
+                        0x4f000000, 0xcf000000, 0x7fffffff, 0xffffffff,
+                        0x7f800000, 0xff800000, 0x00ffffff, 0x01000001,
+                        0x7ffffffe, 0x80000001, 0x01000000, 0x01000001,
+                        0x01ffffff, 0x02000001, 0xfeffffff, 0x3f000000,
+                        0x40000000, 0xc0000000,
+                    ]
+                    random = 0x12345678
+                    for i in range(128):
+                        random = (random * 1664525 + 1013904223) & 0xffffffff
+                        value = edges[i] if i < len(edges) else random
+                        offset = 0x3000 + i * 4
+                        data[offset:offset + 4] = value.to_bytes(4, "little")
                 cycles = ctypes.c_uint32(0)
                 last_pc = ctypes.c_uint32(0)
                 steps = function(vi, ctypes.byref(immediate), ctypes.byref(tpc),
