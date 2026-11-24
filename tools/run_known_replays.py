@@ -63,6 +63,7 @@ def read_manifest(path):
           len(set(order)) != len(order) or set(order) != set(hashes)):
         raise ValueError("known-function order does not match IR inventory")
     entries = []
+    seen = set()
     for name in order:
         digest = hashes[name]
         match = IR_NAME.fullmatch(name)
@@ -71,9 +72,10 @@ def read_manifest(path):
         if not isinstance(digest, str) or not DIGEST.fullmatch(digest):
             raise ValueError(f"invalid SHA-256 for {name}")
         address = int(match.group(1), 16)
-        if address == 0 or address & 3 or address in entries:
+        if address == 0 or address & 3 or address in seen:
             raise ValueError(f"duplicate/unaligned function address: 0x{address:08x}")
         entries.append(address)
+        seen.add(address)
     inputs = data.get("inputs")
     elf_hash = inputs.get("ELF") if isinstance(inputs, dict) else None
     if not isinstance(elf_hash, str) or not DIGEST.fullmatch(elf_hash):
@@ -112,9 +114,10 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     generated = [int(fn["vaddr"], 0) for fn in metadata["functions"]]
     expected = set(entries)
-    missing = [pc for pc in entries if pc not in set(generated)]
-    extra = set(generated) - expected
-    if len(generated) != len(set(generated)) or extra:
+    generated_set = set(generated)
+    missing = [pc for pc in entries if pc not in generated_set]
+    extra = generated_set - expected
+    if len(generated) != len(generated_set) or extra:
         raise ValueError("reconstructed entries contain duplicate/unrequested entries")
     if not missing:
         return

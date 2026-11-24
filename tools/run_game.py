@@ -1006,6 +1006,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
         generated[address] = function
 
     pending = []
+    reserved_entries = set(reserved_entries)
     published_owners = set(owned)
     published_names = {Path(item["ir_path"]).name
                        for item in metadata["functions"]}
@@ -1032,7 +1033,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
         # Explicit recovery can reserve independently requested entry PCs
         # for their own functions. Normal live discovery never reserves PCs.
         overlap = set(new_pcs) & published_owners
-        excluded = overlap | (set(reserved_entries) - {address})
+        excluded = overlap | (reserved_entries - {address})
         owned_blocks = [pc for pc in blocks if int(pc, 0) not in excluded]
         if address in overlap or not owned_blocks:
             message = f"entry 0x{address:08x} already owned by another function"

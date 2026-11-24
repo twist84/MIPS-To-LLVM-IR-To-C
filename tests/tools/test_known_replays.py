@@ -169,6 +169,45 @@ def test_reconstruction_is_batched_and_linked_once():
                 raise AssertionError("overwrote prior guest IR")
 
 
+def test_real_append_reserves_future_missing_entries():
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp)
+        ir = work / "ir"
+        ir.mkdir()
+        metadata_path = ir / "ee_functions.json"
+        first, second, third = 0x100008, 0x100010, 0x100020
+        metadata_path.write_text(json.dumps({
+            "function_count": 1,
+            "functions": [{"vaddr": hex(first), "block_pcs": [hex(first)],
+                           "ir_path": "first.ll"}],
+        }))
+
+        def fake_recompiler(command):
+            output = Path(command[2])
+            output.mkdir(parents=True)
+            entry = int(command[3].split("=")[1], 0)
+            path = output / f"sub_{entry:x}.ll"
+            path.write_text("; synthetic test IR")
+            blocks = [hex(entry), hex(third)] if entry == second else [hex(entry)]
+            (output / "ee_functions.json").write_text(json.dumps({
+                "functions": [{"vaddr": hex(entry), "block_pcs": blocks,
+                               "ir_path": str(path)}],
+            }))
+
+        with patch.object(known.run_game, "run", side_effect=fake_recompiler):
+            known.run_game.batch_append_functions(
+                "recomp", work / "elf", work, metadata_path, [second],
+                reserved_entries={second, third})
+            partial = json.loads(metadata_path.read_text())
+            assert third not in known.run_game.covered_pcs(partial)
+            known.run_game.batch_append_functions(
+                "recomp", work / "elf", work, metadata_path, [third],
+                reserved_entries={second, third})
+        final = json.loads(metadata_path.read_text())
+        assert final["function_count"] == 3
+        assert known.run_game.covered_pcs(final) == {first, second, third}
+
+
 def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
@@ -405,6 +444,7 @@ def main():
     test_read_manifest()
     test_hash_comparison()
     test_reconstruction_is_batched_and_linked_once()
+    test_real_append_reserves_future_missing_entries()
     test_explicit_entry_restoration_keeps_all_entries_and_blocks()
     test_reconstruction_hash_mismatch_fails_closed()
     test_replay_pair_is_cpu_only_and_uses_one_library()
