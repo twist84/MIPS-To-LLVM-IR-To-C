@@ -33,14 +33,26 @@ bool write_image(ee::c_ee_gs_state& gs, const uint8_t* bytes, uint32_t qwc)
     return gs.consume(&event, 1u, bytes, qwc);
 }
 
-bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
+bool compare_clut(ee::c_ee_webgpu_bridge& bridge, bool gpu_only = false)
 {
     using namespace ps2::gs;
     gpu::write_state(std::vector<uint32_t>(kMemorySize / 4u, 0u), 1u,
                      std::vector<uint32_t>(512u, 0u));
     ee::c_ee_gs_state gs{};
-    gs.bind_committed_event_observer(&bridge,
+    ee::c_ee_gs_state gpu_gs{};
+    auto& target = gpu_only ? gpu_gs : gs;
+    target.bind_committed_event_observer(&bridge,
         &ee::c_ee_webgpu_bridge::committed_gif_events);
+    if (gpu_only && !gpu_gs.enable_gpu_authority(&bridge,
+            &ee::c_ee_webgpu_bridge::read_vram, &ee::c_ee_webgpu_bridge::read_clut))
+    {
+        return false;
+    }
+    const auto reg = [&](uint32_t address, uint64_t value)
+    {
+        return write_register(gs, address, value) &&
+            (!gpu_only || write_register(gpu_gs, address, value));
+    };
     const auto upload = [&](uint32_t bp, uint32_t cpsm, uint32_t bw,
                             uint32_t x, uint32_t y, uint32_t width,
                             uint32_t height, uint32_t seed)
@@ -52,16 +64,17 @@ bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
             seed = seed * 1664525u + 1013904223u;
             byte = static_cast<uint8_t>(seed >> 24u);
         }
-        return write_register(gs, 0x50u, (uint64_t{bp} << 32u) |
+        return reg(0x50u, (uint64_t{bp} << 32u) |
                    (uint64_t{bw} << 48u) | (uint64_t{cpsm} << 56u)) &&
-            write_register(gs, 0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) &&
-            write_register(gs, 0x52u, width | (uint64_t{height} << 32u)) &&
-            write_register(gs, 0x53u, 0u) && write_image(gs, bytes.data(), qwc);
+            reg(0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) &&
+            reg(0x52u, width | (uint64_t{height} << 32u)) &&
+            reg(0x53u, 0u) && write_image(gs, bytes.data(), qwc) &&
+            (!gpu_only || write_image(gpu_gs, bytes.data(), qwc));
     };
     const auto load = [&](uint32_t reg, uint32_t psm, uint32_t cbp,
                           uint32_t cpsm, uint32_t csm, uint32_t csa, uint32_t cld)
     {
-        return write_register(gs, reg, (uint64_t{psm} << 20u) |
+        return reg(reg, (uint64_t{psm} << 20u) |
             (uint64_t{cbp} << 37u) | (uint64_t{cpsm} << 51u) |
             (uint64_t{csm} << 55u) | (uint64_t{csa} << 56u) |
             (uint64_t{cld} << 61u));
@@ -75,6 +88,14 @@ bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
         }
         for (size_t i = 0u; i < actual.size(); ++i)
         {
+            uint32_t value = 0u;
+            if (gpu_only && (gpu_gs.read_clut_entry(static_cast<uint32_t>(i), value) !=
+                    gs.state().m_clut_valid[i] ||
+                (gs.state().m_clut_valid[i] && value != actual[i])))
+            {
+                std::fprintf(stderr, "GPU-only CLUT accessor mismatch slot=%zu\n", i);
+                return false;
+            }
             if (actual[i] != gs.state().m_clut[i])
             {
                 std::fprintf(stderr, "CLUT mismatch slot=%zu CPU=%08x GPU=%08x\n",
@@ -107,7 +128,7 @@ bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
                         eight ? 16u : 2u, cpsm + entries) ||
                 !load(6u, psm, bp, cpsm, 0u, 3u, 1u) || !compare() ||
                 !upload(bp, cpsm, 6u, 16u, 7u, entries, 1u, cpsm + entries + 1u) ||
-                !write_register(gs, 0x1cu, 6u | (1u << 6u) | (7u << 12u)) ||
+                !reg(0x1cu, 6u | (1u << 6u) | (7u << 12u)) ||
                 !load(7u, psm, bp, cpsm, 1u, 29u, 1u) || !compare())
             {
                 return false;
@@ -212,6 +233,77 @@ bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge, bool gpu_only = fa
            !gpu::download_checked(actual.data(), kMemorySize, 4u) &&
            !gpu::download_checked(nullptr) && actual == original;
 }
+}
+
+bool test_gpu_only_transactions(ee::c_ee_webgpu_bridge& bridge)
+{
+    using namespace ps2::gs;
+    gpu::write_state(std::vector<uint32_t>(kMemorySize / 4u, 0u), 1u,
+                     std::vector<uint32_t>(512u, 0u));
+    ee::c_ee_gs_state cpu{}, gs{};
+    gs.bind_committed_event_observer(&bridge,
+        &ee::c_ee_webgpu_bridge::committed_gif_events);
+    if (!gs.enable_gpu_authority(&bridge,
+            &ee::c_ee_webgpu_bridge::read_vram, &ee::c_ee_webgpu_bridge::read_clut))
+    {
+        return false;
+    }
+    const auto reg = [&](uint32_t address, uint64_t value)
+    {
+        return write_register(cpu, address, value) && write_register(gs, address, value);
+    };
+    constexpr uint32_t bp = 0x200u;
+    const uint64_t layout = (uint64_t{bp} << 32u) | (uint64_t{1} << 48u);
+    std::array<uint8_t, 32> bytes{};
+    for (size_t i = 0u; i < bytes.size(); ++i)
+    {
+        bytes[i] = static_cast<uint8_t>(i + 1u);
+    }
+    if (!reg(0x50u, layout) || !reg(0x51u, 0u) ||
+        !reg(0x52u, 8u | (uint64_t{1} << 32u)) || !reg(0x53u, 0u))
+    {
+        return false;
+    }
+    // A late invalid register must not submit the earlier IMAGE.
+    ee::s_ee_gif_event events[2]{};
+    events[0].m_type = ee::e_ee_gif_event_type::image;
+    events[0].m_qwc = 1u;
+    events[1].m_type = ee::e_ee_gif_event_type::packed;
+    events[1].m_byte_offset = 16u;
+    events[1].m_register = 0xeu;
+    events[1].m_word1 = 0x60u;
+    if (gs.consume(events, 2u, bytes.data(), 2u) ||
+        gs.state().m_transfer_pixels_written != 0u || gs.vram() != cpu.vram() ||
+        !write_image(cpu, bytes.data(), 2u) || !write_image(gs, bytes.data(), 2u) ||
+        gs.vram() != cpu.vram())
+    {
+        std::fprintf(stderr, "GPU-only IMAGE rollback/retry mismatch\n");
+        return false;
+    }
+    // Overlapping local copy with reversed X reads a source snapshot.
+    if (!reg(0x50u, layout | bp | (uint64_t{1} << 16u)) ||
+        !reg(0x51u, (uint64_t{2} << 32u) | (uint64_t{1} << 59u)) ||
+        !reg(0x52u, 6u | (uint64_t{1} << 32u)) ||
+        !reg(0x53u, 2u) || gs.vram() != cpu.vram() ||
+        gs.state().m_local_copy_pixels != cpu.state().m_local_copy_pixels)
+    {
+        std::fprintf(stderr, "GPU-only overlapping local copy mismatch\n");
+        return false;
+    }
+    // A changed transfer layout is rejected before any new pixel commit.
+    if (!write_register(gs, 0x50u, layout) ||
+        !write_register(gs, 0x51u, 0u) ||
+        !write_register(gs, 0x52u, 8u | (uint64_t{1} << 32u)) ||
+        !write_register(gs, 0x53u, 0u) ||
+        !write_register(gs, 0x51u, uint64_t{1} << 32u) ||
+        write_image(gs, bytes.data(), 1u) ||
+        gs.state().m_transfer_pixels_written != 0u || gs.vram() != cpu.vram())
+    {
+        std::fprintf(stderr, "GPU-only transfer mutation did not fail closed\n");
+        return false;
+    }
+    std::puts("GPU-only transactional rejection, retry and overlapping local copy: PASS");
+    return true;
 }
 
 int main()
@@ -319,7 +411,8 @@ int main()
     }
 
     if (!compare_transfer_formats(bridge) ||
-        !compare_transfer_formats(bridge, true) || !compare_clut(bridge))
+        !compare_transfer_formats(bridge, true) || !compare_clut(bridge) ||
+        !compare_clut(bridge, true) || !test_gpu_only_transactions(bridge))
     {
         return 1;
     }
