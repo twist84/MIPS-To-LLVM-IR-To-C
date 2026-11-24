@@ -465,6 +465,61 @@ int main()
             "sparse address span retains bounded sorted dispatch lookup");
     }
 
+    // The HLE runner normally executes exactly one translated function
+    // per boundary. Compare indexed and linear behavior across terminal
+    // exits, the budget, sparse/dense holes, zero and continuation PCs.
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.entry_point = 0x00100000u;
+        compiled.functions.push_back(make_function("caller", 0x00100000u,
+            {0x00100000u, 0x00100008u}));
+        compiled.functions.push_back(make_function("callee", 0x00100010u,
+            {0x00100010u}));
+        compiled.functions.push_back(make_function("null", 0x00100020u,
+            {0x00100020u}));
+        compiled.functions.push_back(make_function("yield", 0x00100030u,
+            {0x00100030u}));
+        compiled.functions.push_back(make_function("external", 0x00100040u,
+            {0x00100040u}));
+        compiled.functions.push_back(make_function("missing_native", 0x00100050u,
+            {0x00100050u}));
+        const ee::t_ee_translated_entry entries[] =
+        {
+            caller_entry, callee_entry, null_return_entry, host_yield_entry,
+            external_return_entry, nullptr
+        };
+        const ee::s_ee_dispatch_table table{&compiled, entries, 6u};
+        const auto index = ee::ee_build_dispatch_index(compiled);
+        bool same = !index.m_dense_owners.empty();
+        for (uint32_t pc : {0u, 0x00100000u, 0x00100004u, 0x00100008u,
+                            0x00100010u, 0x00100020u, 0x00100030u,
+                            0x00100040u, 0x00100050u, 0xdead0000u})
+        {
+            ee::s_ee_cpu_state linear{};
+            linear.m_pc = pc;
+            linear.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+            linear.m_gpr[31].m_lo = 0x00100008u;
+            ee::s_ee_cpu_state indexed = linear;
+            const auto a = ee::ee_dispatch_run(&linear, nullptr, table, 1u);
+            const auto b = ee::ee_dispatch_run_indexed(&indexed, nullptr, table, index, 1u);
+            same = same && a.status == b.status &&
+                a.dispatch_count == b.dispatch_count &&
+                a.guest_pc == b.guest_pc && a.exit_reason == b.exit_reason &&
+                linear.m_pc == indexed.m_pc &&
+                linear.m_exit_reason == indexed.m_exit_reason &&
+                linear.m_gpr[2].m_lo == indexed.m_gpr[2].m_lo &&
+                linear.m_gpr[8].m_lo == indexed.m_gpr[8].m_lo &&
+                linear.m_gpr[31].m_lo == indexed.m_gpr[31].m_lo;
+        }
+        ee::s_ee_cpu_state cpu{};
+        cpu.m_pc = 0x00100000u;
+        const auto result = ee::ee_dispatch_run_indexed(&cpu, nullptr, table, index, 1u);
+        check(same && result.dispatch_count == 1u &&
+              result.status == e_ee_dispatch_status::DISPATCH_LIMIT &&
+              result.guest_pc == 0x00102000u,
+              "single-slice dispatch preserves budget, terminal exits and exact ownership");
+    }
+
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }

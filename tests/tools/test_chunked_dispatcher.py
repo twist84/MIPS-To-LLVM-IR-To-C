@@ -52,6 +52,33 @@ class ChunkDispatcherTests(unittest.TestCase):
         self.assertLess(after.index("ee_dispatch_chunk_0001(&compiled"),
                         after.index("index = ee::ee_build_dispatch_index(compiled);"))
 
+    def test_wrapper_optimized_without_recompiling_metadata_chunks(self):
+        with tempfile.TemporaryDirectory(prefix="ee-wrapper-flags-") as temp:
+            root = Path(temp)
+            compiler = root / "clang++"
+            compiler.write_bytes(b"synthetic compiler")
+            output = root / "game.dll"
+            functions = [make_function(0)]
+            metadata = {"entry_point": "0x00100000"}
+            calls = []
+
+            def compile_unit(command, **kwargs):
+                calls.append(command)
+                Path(command[command.index("-o") + 1]).write_bytes(b"object")
+
+            with mock.patch.object(linker, "runtime_cache_key", side_effect=
+                    lambda sources, source_root, compiler_info, flags: " ".join(flags)), \
+                    mock.patch.object(linker.subprocess, "run", side_effect=compile_unit):
+                linker.cached_dispatch_objects(
+                    output, metadata, functions, str(compiler), root, [], ["-O0"])
+                self.assertEqual(len(calls), 2)
+                self.assertIn("-O2", calls[0])
+                self.assertIn("-O0", calls[1])
+                calls.clear()
+                linker.cached_dispatch_objects(
+                    output, metadata, functions, str(compiler), root, [], ["-O0"])
+                self.assertEqual(calls, [])
+
     def test_chunk_ownership_uses_original_metadata_order(self):
         inputs = [make_function(i) for i in range(3)]
         first = linker.build_dispatch_chunk_source(inputs[:2], 0, 0)

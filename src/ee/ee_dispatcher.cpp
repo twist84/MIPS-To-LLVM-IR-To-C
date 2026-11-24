@@ -84,41 +84,68 @@ s_ee_dispatch_index ee_build_dispatch_index(const s_recompiled_elf& compiled)
     return index;
 }
 
+namespace
+{
+
+// The dense table already contains function indices. Keep the index on the
+// hot dispatch path instead of converting it to a metadata pointer and
+// immediately dividing a pointer difference by sizeof(s_recompiled_fn).
+constexpr size_t k_no_dispatch_owner = std::numeric_limits<size_t>::max();
+
+size_t find_dispatch_owner_index(
+    const s_ee_dispatch_index& index,
+    uint32_t guest_pc,
+    size_t function_count)
+{
+    size_t owner = k_no_dispatch_owner;
+    if (guest_pc == 0u)
+    {
+        if (index.has_zero_owner && index.zero_owner < function_count)
+        {
+            owner = index.zero_owner;
+        }
+    }
+    else
+    {
+        const bool aligned = (guest_pc & 3u) == 0u;
+        const size_t slot = (guest_pc - index.m_dense_base) >> 2u;
+        if (aligned && guest_pc >= index.m_dense_base &&
+            slot < index.m_dense_owners.size())
+        {
+            const uint32_t encoded = index.m_dense_owners[slot];
+            if (encoded != 0u && encoded <= function_count)
+            {
+                owner = encoded - 1u;
+            }
+        }
+        else
+        {
+            const auto found = std::lower_bound(
+                index.pcs.begin(), index.pcs.end(), guest_pc,
+                [](const std::pair<uint32_t, uint32_t>& entry, uint32_t pc)
+                {
+                    return entry.first < pc;
+                });
+            if (found != index.pcs.end() && found->first == guest_pc &&
+                found->second < function_count)
+            {
+                owner = found->second;
+            }
+        }
+    }
+    return owner;
+}
+
+} // namespace
+
 const s_recompiled_fn* ee_find_dispatch_owner(
     const s_recompiled_elf& compiled,
     const s_ee_dispatch_index& index,
     uint32_t guest_pc)
 {
-    if (guest_pc == 0u)
-    {
-        return index.has_zero_owner &&
-               index.zero_owner < compiled.functions.size()
-            ? &compiled.functions[index.zero_owner]
-            : nullptr;
-    }
-    if (!index.m_dense_owners.empty() && (guest_pc & 3u) == 0u &&
-        guest_pc >= index.m_dense_base)
-    {
-        const size_t slot = (guest_pc - index.m_dense_base) >> 2u;
-        if (slot < index.m_dense_owners.size())
-        {
-            const uint32_t owner = index.m_dense_owners[slot];
-            return owner != 0u && owner <= compiled.functions.size()
-                ? &compiled.functions[owner - 1u] : nullptr;
-        }
-    }
-    const auto found = std::lower_bound(
-        index.pcs.begin(), index.pcs.end(), guest_pc,
-        [](const std::pair<uint32_t, uint32_t>& entry, uint32_t pc)
-        {
-            return entry.first < pc;
-        });
-    if (found == index.pcs.end() || found->first != guest_pc ||
-        found->second >= compiled.functions.size())
-    {
-        return nullptr;
-    }
-    return &compiled.functions[found->second];
+    const size_t owner = find_dispatch_owner_index(
+        index, guest_pc, compiled.functions.size());
+    return owner != k_no_dispatch_owner ? &compiled.functions[owner] : nullptr;
 }
 
 namespace
@@ -150,11 +177,6 @@ s_ee_dispatch_result dispatch_run_impl(
         return result;
     }
 
-    const s_recompiled_fn* const first_function =
-        table.compiled->functions.data();
-    const s_recompiled_fn* const end_function =
-        first_function + table.compiled->functions.size();
-
     while (true)
     {
         result.guest_pc = cpu->m_pc;
@@ -166,9 +188,9 @@ s_ee_dispatch_result dispatch_run_impl(
             return result;
         }
 
-        const s_recompiled_fn* const owner = find_owner(cpu->m_pc);
+        const size_t function_index = find_owner(cpu->m_pc);
 
-        if (owner == nullptr)
+        if (function_index == k_no_dispatch_owner)
         {
             // The current PC is outside the registered translated code set.
             // Preserve the architectural exit reason for the outer host.
@@ -177,15 +199,13 @@ s_ee_dispatch_result dispatch_run_impl(
             return result;
         }
 
-        if (owner < first_function || owner >= end_function)
+        if (function_index >= table.entry_count)
         {
             result.status = e_ee_dispatch_status::INVALID_ARGUMENT;
             result.exit_reason = cpu->m_exit_reason;
             return result;
         }
 
-        const size_t function_index =
-            static_cast<size_t>(owner - first_function);
         const t_ee_translated_entry entry = table.entries[function_index];
 
         if (entry == nullptr)
@@ -237,6 +257,15 @@ s_ee_dispatch_result dispatch_run_impl(
             return result;
         }
 
+        // A one-call runner slice is the common HLE case. Finish its
+        // budget directly, without starting another dispatch iteration.
+        // The terminal reason and PC-zero checks above retain precedence.
+        if (result.dispatch_count == max_dispatches)
+        {
+            result.status = e_ee_dispatch_status::DISPATCH_LIMIT;
+            return result;
+        }
+
         // RETURN can lead back into a translated caller continuation; DISPATCH
         // can lead to another translated function. Resolve both through the
         // same block-PC ownership table on the next iteration.
@@ -255,7 +284,10 @@ s_ee_dispatch_result ee_dispatch_run(
         cpu, runtime, table, max_dispatches,
         [&table](uint32_t pc)
         {
-            return find_recompiled_function(*table.compiled, pc);
+            const s_recompiled_fn* owner = find_recompiled_function(*table.compiled, pc);
+            return owner != nullptr
+                ? static_cast<size_t>(owner - table.compiled->functions.data())
+                : k_no_dispatch_owner;
         });
 }
 
@@ -270,7 +302,7 @@ s_ee_dispatch_result ee_dispatch_run_indexed(
         cpu, runtime, table, max_dispatches,
         [&table, &index](uint32_t pc)
         {
-            return ee_find_dispatch_owner(*table.compiled, index, pc);
+            return find_dispatch_owner_index(index, pc, table.entry_count);
         });
 }
 
