@@ -3613,6 +3613,13 @@ int main(int argc, char** argv)
     // at one of them may probe; the one-iteration probe validates itself.
     std::unordered_set<uint32_t> idle_yield_headers;
     std::vector<uint32_t> idle_probe_headers;  // at most four armed headers
+    uint32_t idle_probe_slots[4]{};
+    const auto refresh_idle_probe_slots = [&]()
+    {
+        std::fill(std::begin(idle_probe_slots), std::end(idle_probe_slots), 0u);
+        std::copy(idle_probe_headers.begin(), idle_probe_headers.end(),
+                  std::begin(idle_probe_slots));
+    };
     uint64_t idle_skip_slices = 0u;
     uint64_t idle_skip_instructions = 0u;
     uint64_t idle_skip_mispredictions = 0u;
@@ -4559,12 +4566,10 @@ int main(int argc, char** argv)
                 runtime.m_guest_v0_trace_remaining == 0u &&
                 runtime.m_timing_observer == nullptr)
             {
-                for (uint32_t slot = 0u; slot < 4u; ++slot)
-                {
-                    runtime.m_idle_probe_pcs[slot] =
-                        slot < idle_probe_headers.size()
-                            ? idle_probe_headers[slot] : 0u;
-                }
+                static_assert(sizeof(runtime.m_idle_probe_pcs) ==
+                    sizeof(idle_probe_slots), "idle probe slot count changed");
+                std::memcpy(runtime.m_idle_probe_pcs, idle_probe_slots,
+                            sizeof(idle_probe_slots));
                 runtime.m_idle_probe_state = 0u;
                 runtime.m_idle_probe_hit_pc = 0u;
                 runtime.m_idle_probe_remaining = 0u;
@@ -4701,12 +4706,11 @@ int main(int argc, char** argv)
                             std::remove(idle_probe_headers.begin(),
                                         idle_probe_headers.end(), hit),
                             idle_probe_headers.end());
+                        refresh_idle_probe_slots();
                     }
                 }
-                for (uint32_t slot = 0u; slot < 4u; ++slot)
-                {
-                    runtime.m_idle_probe_pcs[slot] = 0u;
-                }
+                std::memset(runtime.m_idle_probe_pcs, 0,
+                            sizeof(runtime.m_idle_probe_pcs));
                 runtime.m_idle_probe_state = 0u;
             }
             if (runtime.m_timing_observer_failed != 0u)
@@ -5075,6 +5079,7 @@ int main(int argc, char** argv)
                 if (shape->second.eligible && idle_probe_headers.size() < 4u)
                 {
                     idle_probe_headers.push_back(header);
+                    refresh_idle_probe_slots();
                 }
             }
             continue;
