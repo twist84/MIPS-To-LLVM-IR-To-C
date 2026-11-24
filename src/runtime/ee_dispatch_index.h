@@ -13,17 +13,18 @@
 namespace ee
 {
 
-// Sorted guest-PC -> function-index map for one immutable s_recompiled_elf.
-// It answers exactly what find_recompiled_function() answers (the FIRST
-// function, in table order, whose block_pcs contain the PC, plus the PC-zero
-// entry sentinel), but in O(log n) instead of scanning every block PC of every
-// function on each dispatch. A full SDBZ image has ~8,000 functions and
-// ~420,000 block PCs, so the linear scan dominated native dispatch time.
+// Guest-PC -> function-index map for one immutable s_recompiled_elf.
+// First ownership and the PC-zero sentinel match find_recompiled_function().
+// A bounded dense word-address window accelerates compact code images;
+// sparse images and unaligned metadata retain the sorted lookup.
 struct s_ee_dispatch_index
 {
     std::vector<std::pair<uint32_t, uint32_t>> pcs; // (guest pc, function index)
     bool has_zero_owner = false;
     uint32_t zero_owner = 0;
+    uint32_t m_dense_base = 0u;
+    // Zero means unowned; otherwise store the first function index + 1.
+    std::vector<uint32_t> m_dense_owners;
 };
 
 // Build once after the metadata is complete. Rebuild if functions change.

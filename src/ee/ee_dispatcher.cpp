@@ -3,6 +3,7 @@
 #include "ee_exceptions.h"
 
 #include <algorithm>
+#include <limits>
 
 namespace ee
 {
@@ -44,6 +45,42 @@ s_ee_dispatch_index ee_build_dispatch_index(const s_recompiled_elf& compiled)
         std::unique(index.pcs.begin(), index.pcs.end(),
                     [](const auto& a, const auto& b) { return a.first == b.first; }),
         index.pcs.end());
+
+    // Use one direct slot per aligned guest instruction address when
+    // the covered code is compact. Keep the sorted index for sparse
+    // overlays, high-address mappings and exact unaligned metadata.
+    // Bound memory independently of arbitrary ELF address spans.
+    constexpr uint64_t k_max_dense_slots = 4u * 1024u * 1024u;
+    uint32_t first = std::numeric_limits<uint32_t>::max();
+    uint32_t last = 0u;
+    uint64_t aligned_count = 0u;
+    for (const auto& item : index.pcs)
+    {
+        if (item.first != 0u && (item.first & 3u) == 0u)
+        {
+            first = std::min(first, item.first);
+            last = item.first;
+            ++aligned_count;
+        }
+    }
+    if (aligned_count != 0u)
+    {
+        const uint64_t slots =
+            (static_cast<uint64_t>(last) - first) / 4u + 1u;
+        if (slots <= k_max_dense_slots && slots <= aligned_count * 16u)
+        {
+            index.m_dense_base = first;
+            index.m_dense_owners.resize(static_cast<size_t>(slots), 0u);
+            for (const auto& item : index.pcs)
+            {
+                if (item.first != 0u && (item.first & 3u) == 0u)
+                {
+                    index.m_dense_owners[(item.first - first) >> 2u] =
+                        item.second + 1u;
+                }
+            }
+        }
+    }
     return index;
 }
 
@@ -58,6 +95,17 @@ const s_recompiled_fn* ee_find_dispatch_owner(
                index.zero_owner < compiled.functions.size()
             ? &compiled.functions[index.zero_owner]
             : nullptr;
+    }
+    if (!index.m_dense_owners.empty() && (guest_pc & 3u) == 0u &&
+        guest_pc >= index.m_dense_base)
+    {
+        const size_t slot = (guest_pc - index.m_dense_base) >> 2u;
+        if (slot < index.m_dense_owners.size())
+        {
+            const uint32_t owner = index.m_dense_owners[slot];
+            return owner != 0u && owner <= compiled.functions.size()
+                ? &compiled.functions[owner - 1u] : nullptr;
+        }
     }
     const auto found = std::lower_bound(
         index.pcs.begin(), index.pcs.end(), guest_pc,

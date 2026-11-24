@@ -421,6 +421,50 @@ int main()
               "indexed dispatch table runs caller, callee and continuation");
     }
 
+    // A dense window must be exact for overlaps, holes, unaligned
+    // metadata and the zero sentinel, even adjacent to UINT32_MAX.
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.entry_point = 0xfffff000u;
+        compiled.functions.push_back(make_function("first", 0xfffff000u,
+            {0xfffff000u, 0xfffff004u, 0xfffff009u, 0xfffff010u,
+             0xfffff014u, 0xfffff018u, 0xfffff01cu}));
+        compiled.functions.push_back(make_function("overlap", 0xfffff004u,
+            {0xfffff004u, 0xfffff008u, 0xfffff00cu, 0xfffff020u}));
+        // Fill a compact range up to the last representable aligned PC.
+        for (uint32_t offset = 0x100u; offset < 0x1000u; offset += 16u)
+        {
+            compiled.functions[1].block_pcs.push_back(0xfffff000u + offset);
+        }
+        compiled.functions[1].block_pcs.push_back(0xfffffffcu);
+        const auto index = ee::ee_build_dispatch_index(compiled);
+        bool same = index.m_dense_base == 0xfffff000u &&
+            index.m_dense_owners.size() == 1024u;
+        for (uint32_t offset = 0u; offset < 0x1000u; ++offset)
+        {
+            const uint32_t pc = 0xfffff000u + offset;
+            same = same && ee::ee_find_dispatch_owner(compiled, index, pc) ==
+                ee::find_recompiled_function(compiled, pc);
+        }
+        for (uint32_t pc : {0u, 4u, 0xffffeffcu})
+        {
+            same = same && ee::ee_find_dispatch_owner(compiled, index, pc) ==
+                ee::find_recompiled_function(compiled, pc);
+        }
+        check(same, "dense dispatch index matches reference including holes and high PCs");
+
+        compiled.functions.push_back(make_function("far", 0x1000u,
+            {0x1000u}));
+        const auto sparse = ee::ee_build_dispatch_index(compiled);
+        check(sparse.m_dense_owners.empty() &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0x1000u) ==
+                &compiled.functions[2] &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0xfffffffcu) ==
+                &compiled.functions[1] &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0xfffff002u) == nullptr,
+            "sparse address span retains bounded sorted dispatch lookup");
+    }
+
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
 }
