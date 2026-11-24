@@ -401,6 +401,13 @@ bool c_ee_gs_state::read_indexed_clut_value(
     return read_clut_entry(slot, value);
 }
 
+void c_ee_gs_state::bind_vram_readback(void* user, t_vram_readback callback)
+{
+    m_readback_user = user;
+    m_readback_callback = callback;
+    m_gpu_readback_valid = false;
+}
+
 bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_read_image, qwc);
@@ -464,6 +471,27 @@ bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
     const uint64_t offset = m_state.m_download_bytes_read;
     const uint64_t next_offset = offset + requested_bytes;
 
+    // GPU rendering is not represented in the CPU reference VRAM.
+    // Resolve the latest committed GPU work only when real pixels are
+    // requested. Padding requires no GPU access. A failed transfer does
+    // not touch the caller's bytes or advance any guest DMA cursor.
+    const std::vector<uint8_t>* source = &m_vram;
+    if (m_readback_callback != nullptr && offset < logical_bytes)
+    {
+        if (!m_gpu_readback_valid)
+        {
+            m_gpu_readback.resize(k_vram_bytes);
+            if (!m_readback_callback(m_readback_user,
+                    m_gpu_readback.data(), m_gpu_readback.size()))
+            {
+                trace_rejection(__func__, __LINE__);
+                return false;
+            }
+            m_gpu_readback_valid = true;
+        }
+        source = &m_gpu_readback;
+    }
+
     // A byte-oriented cursor naturally preserves 24-bit carry across
     // calls; 4-bit pixels always occupy low/high nibbles of each byte.
     // After the logical rectangle, all QWC padding bytes read as zero.
@@ -479,7 +507,7 @@ bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
             const uint32_t y = (sy + static_cast<uint32_t>(
                 pixel / width)) & 0x7ffu;
             const uint32_t value =
-                read_pixel(m_vram, psm, bp, bw, x, y);
+                read_pixel(*source, psm, bp, bw, x, y);
             if (bits == 4u)
             {
                 const uint64_t second = pixel + 1u;
@@ -493,7 +521,7 @@ bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
                         (sy + static_cast<uint32_t>(second / width)) &
                         0x7ffu;
                     high = read_pixel(
-                        m_vram, psm, bp, bw, x2, y2
+                        *source, psm, bp, bw, x2, y2
                     );
                 }
                 result = static_cast<uint8_t>(
@@ -535,6 +563,10 @@ void c_ee_gs_state::reset()
 {
     m_state = {};
     std::fill(m_vram.begin(), m_vram.end(), 0u);
+    // The external GPU is not reset by this CPU-only operation. Require
+    // its owner to explicitly rebind after resetting GPU state as well.
+    bind_vram_readback(nullptr, nullptr);
+    m_gpu_readback.clear();
 }
 
 const s_ee_gs_state& c_ee_gs_state::state() const
@@ -1729,6 +1761,7 @@ bool c_ee_gs_state::consume(
     if (count != 0u)
     {
         ++next.m_committed_gif_batches;
+        m_gpu_readback_valid = false;
     }
     m_state = std::move(next);
     // Return scratch before invoking an external observer. A callback

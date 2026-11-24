@@ -185,6 +185,31 @@ int main()
         return 1;
     }
 
+    // The CPU reference never rasterized the point above. Guest reverse
+    // DMA must nevertheless observe its actual GPU color, with zero
+    // padding, rather than returning CPU mirror zeros.
+    {
+        ee::c_ee_gs_state gs{};
+        gs.bind_committed_event_observer(&bridge,
+            &ee::c_ee_webgpu_bridge::committed_gif_events);
+        gs.bind_vram_readback(&bridge, &ee::c_ee_webgpu_bridge::read_vram);
+        std::array<uint8_t, 16> downloaded{};
+        if (!write_register(gs, 0x50u, uint64_t{1} << 16u) ||
+            !write_register(gs, 0x51u, 2u | (uint64_t{2} << 16u)) ||
+            !write_register(gs, 0x52u, 1u | (uint64_t{1} << 32u)) ||
+            !write_register(gs, 0x53u, 1u) ||
+            !gs.read_image(downloaded.data(), 1u) ||
+            downloaded[0] != 0x11u || downloaded[1] != 0x55u ||
+            downloaded[2] != 0xaau ||
+            !std::all_of(downloaded.begin() + 4, downloaded.end(),
+                [](uint8_t value) { return value == 0u; }))
+        {
+            std::fprintf(stderr, "GPU raster -> guest reverse DMA failed\n");
+            return 1;
+        }
+        std::puts("GPU raster -> guest reverse DMA: PASS");
+    }
+
     if (!compare_transfer_formats(bridge))
     {
         return 1;

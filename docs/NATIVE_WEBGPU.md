@@ -32,6 +32,15 @@ emulated machine. The GPU bridge is a **one-way render mirror**, fed only
 after the CPU GS transaction has committed. A failure to initialise the GPU
 does not change the semantics of a normal HLE boot.
 
+### Experimental GPU-backed guest readback
+
+Set `SDBZ_GS_GPU_READBACK=1` when running with the native WebGPU renderer.
+Reverse GS DMA then reads a checked GPU VRAM snapshot, including rasterized
+pixels missing from the CPU reference. A failed map rejects the transfer
+without advancing its cursor. Split reads reuse a snapshot until the next
+committed GIF batch. Headless CPU-only runs remain unchanged. This does not
+yet remove CPU-side swizzling, local copies or palette processing.
+
 ## Windows (MSVC / LLVM)
 
 From a Windows command prompt in the repository root:

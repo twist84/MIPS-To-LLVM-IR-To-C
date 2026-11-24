@@ -416,6 +416,14 @@ void c_ee_webgpu_bridge::committed_gif_events(
     }
 }
 
+bool c_ee_webgpu_bridge::read_vram(void* user, uint8_t* memory, size_t bytes)
+{
+    return user != nullptr &&
+        static_cast<c_ee_webgpu_bridge*>(user)->active() &&
+        bytes == ps2::gs::kMemorySize &&
+        ps2::gs::gpu::download_checked(memory);
+}
+
 bool c_ee_webgpu_bridge::supports_display(
     const s_ee_gs_display_registers& registers, uint32_t crt_mode) const
 {

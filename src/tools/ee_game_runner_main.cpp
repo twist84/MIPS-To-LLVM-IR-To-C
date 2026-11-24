@@ -2451,6 +2451,15 @@ int main(int argc, char** argv)
         gs_state.bind_committed_event_observer(
             &webgpu_bridge, &ee::c_ee_webgpu_bridge::committed_gif_events);
         std::printf("GS native WebGPU: enabled, committed GS event mirror\n");
+        std::string gpu_readback_environment;
+        const char* gpu_readback = read_host_environment(
+            "SDBZ_GS_GPU_READBACK", &gpu_readback_environment);
+        if (gpu_readback != nullptr && std::strcmp(gpu_readback, "1") == 0)
+        {
+            gs_state.bind_vram_readback(
+                &webgpu_bridge, &ee::c_ee_webgpu_bridge::read_vram);
+            std::printf("GS reverse DMA: GPU VRAM readback enabled (CPU reference retained)\n");
+        }
     }
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW

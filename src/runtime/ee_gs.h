@@ -110,6 +110,13 @@ public:
         void* user, t_committed_event_callback callback
     );
 
+    // Optional GPU source for guest local-to-host transfers only.
+    // CPU VRAM remains the transactional validation/reference mirror.
+    // The callback must fill exactly one complete 4 MiB physical image
+    // and report failure without publishing partial data to the guest.
+    using t_vram_readback = bool (*)(void* user, uint8_t* memory, size_t bytes);
+    void bind_vram_readback(void* user, t_vram_readback callback);
+
     static constexpr size_t k_max_image_bytes = 4u * 1024u * 1024u;
     static constexpr size_t k_vram_bytes = 4u * 1024u * 1024u;
     // Keep per-batch staged writes bounded for malformed transfer sizes.
@@ -284,6 +291,13 @@ private:
 
     s_ee_gs_state m_state{};
     std::vector<uint8_t> m_vram = std::vector<uint8_t>(k_vram_bytes, 0u);
+
+    // An accepted GIF batch may have changed GPU VRAM (including draws).
+    // Cache a readback only until the next accepted nonempty batch.
+    void* m_readback_user = nullptr;
+    t_vram_readback m_readback_callback = nullptr;
+    std::vector<uint8_t> m_gpu_readback;
+    bool m_gpu_readback_valid = false;
 
     // Host-only scratch. Neither buffer is committed guest state.
     std::vector<s_vram_write> m_write_scratch;

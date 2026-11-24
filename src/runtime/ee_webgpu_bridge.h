@@ -32,6 +32,10 @@ public:
         const uint8_t* data, uint32_t qwc
     );
 
+    // Guest reverse DMA: submit all preceding GS work and return a checked
+    // physical VRAM image. Does not modify the CPU reference mirror.
+    static bool read_vram(void* user, uint8_t* memory, size_t bytes);
+
     // Read-only validation against the same display-source decoder used
     // by present/readback. This does not submit any GPU work.
     bool supports_display(const s_ee_gs_display_registers& registers,
