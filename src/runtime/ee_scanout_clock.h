@@ -38,6 +38,9 @@ public:
     void acknowledge_csr(uint64_t write_one_to_clear);
     bool enabled() const;
     uint64_t next_field_cycle() const;
+    // Both start and end are guest-visible edges. Disabled scanout has
+    // no deadline. This query never publishes an event.
+    uint64_t next_event_cycle() const;
     uint64_t last_ee_cycle() const;
     uint64_t csr() const;
     uint64_t fields_started() const;

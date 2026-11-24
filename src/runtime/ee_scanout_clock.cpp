@@ -87,6 +87,14 @@ bool c_ee_scanout_clock::advance_to(
     }
 
     m_delivered_edges.clear();
+    // Most native function boundaries are between scanout edges.
+    // Preserve validation, timestamp advancement, and edge clearing,
+    // but do not enter the event-delivery loop on those boundaries.
+    if (ee_cycle < next_event_cycle())
+    {
+        m_last_ee_cycle = ee_cycle;
+        return true;
+    }
     while (ee_cycle >= m_next_field_cycle ||
            (m_next_end_cycle != 0u &&
             ee_cycle >= m_next_end_cycle))
@@ -139,6 +147,16 @@ bool c_ee_scanout_clock::enabled() const
 uint64_t c_ee_scanout_clock::next_field_cycle() const
 {
     return m_next_field_cycle;
+}
+
+uint64_t c_ee_scanout_clock::next_event_cycle() const
+{
+    if (!m_enabled)
+    {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return m_next_end_cycle != 0u && m_next_end_cycle < m_next_field_cycle
+        ? m_next_end_cycle : m_next_field_cycle;
 }
 
 uint64_t c_ee_scanout_clock::last_ee_cycle() const

@@ -221,6 +221,9 @@ target_link_libraries(ee_vsync_flag_test PRIVATE ee_core)
 # Cycle-driven GS field events, without a synthetic runtime VBlank producer.
 add_executable(ee_scanout_clock_test tests/smoke/ee_scanout_clock_test.cpp)
 target_link_libraries(ee_scanout_clock_test PRIVATE ee_core)
+add_executable(ee_host_timer_deadline_test tests/smoke/ee_host_timer_deadline_test.cpp)
+target_include_directories(ee_host_timer_deadline_test PRIVATE ${CMAKE_SOURCE_DIR}/src/tools)
+target_link_libraries(ee_host_timer_deadline_test PRIVATE ee_core)
 
 # Isolated, uncalibrated R5900 issue-timing probe; never drives GS events.
 add_executable(ee_issue_timing_probe_test tests/smoke/ee_issue_timing_probe_test.cpp)
@@ -875,6 +878,7 @@ add_test(NAME vu0_macro_fmac COMMAND ee_vu0_macro_fmac_test)
 add_test(NAME ee_vu0_indexed_macro COMMAND ee_vu0_indexed_macro_test)
 add_test(NAME ee_vsync_flag COMMAND ee_vsync_flag_test)
 add_test(NAME ee_scanout_clock COMMAND ee_scanout_clock_test)
+add_test(NAME ee_host_timer_deadline COMMAND ee_host_timer_deadline_test)
 add_test(NAME ee_issue_timing_probe COMMAND ee_issue_timing_probe_test)
 add_test(NAME ee_runtime_profile COMMAND ee_runtime_profile_test)
 add_test(NAME ee_cycle_scheduler COMMAND ee_cycle_scheduler_test)
