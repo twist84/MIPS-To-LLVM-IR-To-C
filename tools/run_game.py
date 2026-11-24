@@ -458,7 +458,7 @@ def archive_known_function_manifest(path, snapshot):
     if (not isinstance(hashes, dict) or not hashes or
             not isinstance(inputs, dict) or
             not isinstance(inputs.get("ELF"), str) or
-            snapshot.get("emit_opt") != 0):
+            snapshot.get("emit_opt") not in range(6)):
         return
     # Preserve guest discovery/batch order independently of JSON key sorting.
     # Reconstructing the same address SET in a different order can change

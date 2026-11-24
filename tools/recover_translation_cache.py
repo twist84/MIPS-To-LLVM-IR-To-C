@@ -76,14 +76,23 @@ def check_source_header(elf, work, ir_sources):
     return count
 
 
+PROFILE_SUFFIXES = ("-O1", "-O2", "-O3", "-IR-O2", "-O2-native")
+
+
 def manifest_candidates(base_work):
     candidates = []
     # Profiles share the unoptimized guest IR inventory. A native profile
     # may have discovered more entries than the last base-library snapshot.
     # Only read the known launcher sibling names, not arbitrary directories.
-    for source in dict.fromkeys((active_work(base_work), base_work)):
+    roots = [active_work(base_work), base_work]
+    # Previous pointer-based recoveries may have a larger native inventory.
+    # Only consider actual recovery roots, not their optimized siblings.
+    for root in sorted(base_work.parent.glob(base_work.name + "-recovery-*")):
+        if root.is_dir() and not root.name.endswith(PROFILE_SUFFIXES):
+            roots.append(root)
+    for source in dict.fromkeys(roots):
         candidates.append(source / "translation-cache.json")
-        for suffix in ("-O1", "-O2", "-O3", "-O2-native"):
+        for suffix in PROFILE_SUFFIXES:
             candidates.append(source.with_name(source.name + suffix) /
                               "translation-cache.json")
     directory = history_dir(base_work)
@@ -108,10 +117,11 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
             manifest, entries = run_known_replays.read_manifest(candidate)
             if manifest["inputs"]["ELF"] != expected_elf:
                 continue
-            # These profiles all fingerprint the raw guest modules. Do
-            # not infer compatibility for an unknown IR transformation.
-            if (manifest.get("emit_opt") not in (0, 1, 2, 3, 5) or
-                    manifest.get("ir_pipeline") is not None):
+            # Profile 4 optimizes in memory during object emission, not
+            # the source .ll files. All six known profiles hash raw IR.
+            profile = manifest.get("emit_opt")
+            if (profile not in range(6) or
+                    manifest.get("ir_pipeline") != run_game.ir_pipeline_id(profile)):
                 continue
             if candidate.parent == history_dir(base_work):
                 # Early snapshots serialized the IR map with sorted keys,
@@ -130,7 +140,9 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
             same_sources = manifest.get("ir_sources") == ir_sources
             if not same_sources and not allow_ir_changes:
                 continue
-            selected.append((len(entries), same_sources, candidate.stat().st_mtime_ns,
+            selected.append((len(entries), same_sources,
+                             candidate.parent != history_dir(base_work),
+                             candidate.stat().st_mtime_ns,
                              candidate, manifest, entries))
         except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
             continue
@@ -140,8 +152,8 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
             "lowering inputs; use --allow-ir-changes explicitly only when "
             "the guest lowering change was intentional"
         )
-    selected.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
-    _, same_sources, _, candidate, manifest, entries = selected[0]
+    selected.sort(key=lambda item: item[:4], reverse=True)
+    _, same_sources, _, _, candidate, manifest, entries = selected[0]
     return candidate, manifest, entries, same_sources
 
 
@@ -151,9 +163,6 @@ def new_recovery_work(base_work):
     if target.exists():
         raise ValueError("recovery staging directory already exists")
     return target
-
-
-PROFILE_SUFFIXES = ("-O1", "-O2", "-O3", "-IR-O2", "-O2-native")
 
 
 def canonical_portable(base_work, work):
@@ -173,8 +182,9 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
         raise ValueError("legacy source ELF location differs")
     hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
                                       require_owned_directory=True)
-    if hashes != manifest["ir_hashes"]:
-        raise ValueError("legacy IR does not match selected inventory")
+    order = manifest.get("known_entries", list(manifest["ir_hashes"]))
+    if hashes != manifest["ir_hashes"] or list(hashes) != order:
+        raise ValueError("legacy IR does not match selected ordered inventory")
     if shared_ir.active(metadata_path):
         shared_ir.current_state(metadata_path, ir_sources, hashes)
     elif manifest.get("metadata_sha256") != run_game.sha256_path(metadata_path):
@@ -249,6 +259,40 @@ def promote_pointer(base_work, work):
         temporary.unlink(missing_ok=True)
 
 
+def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
+    """Authenticate the relocated guest IR and native objects before publication."""
+    from link_native_objects import load_inputs
+
+    metadata_path = directory / "ir" / "ee_functions.json"
+    cache_path = directory / "translation-cache.json"
+    metadata = shared_ir.read_json(metadata_path)
+    if (metadata.get("path_format") != "manifest-relative-v1" or
+            shared_ir.elf_path(metadata, metadata_path.parent) != elf or
+            any(Path(fn["ir_path"]).name != fn["ir_path"]
+                for fn in metadata["functions"])):
+        raise ValueError("recovered function metadata is not portable")
+    snapshot = shared_ir.read_json(cache_path)
+    hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
+                                      require_owned_directory=True)
+    if (snapshot.get("ir_sources") != ir_sources or
+            snapshot.get("ir_hashes") != hashes):
+        raise ValueError("recovered guest IR differs from verified provenance")
+    run_game.validate_translation_cache(cache_path, inputs, 0,
+                                        metadata_path, directory / library_name)
+    _, objects, _, _ = load_inputs(metadata_path, directory / "objects")
+    if objects.get("path_format") != "manifest-relative-v1":
+        raise ValueError("recovered object manifest is not portable")
+    observed = {}
+    for item in objects["objects"]:
+        path = Path(item["input"])
+        if path.is_absolute() or (directory / "objects" / path).resolve() != (
+                metadata_path.parent / path.name).resolve():
+            raise ValueError("recovered object references unexpected guest IR")
+        observed[path.name] = item["ir_sha256"]
+    if observed != hashes:
+        raise ValueError("recovered native objects do not match guest IR")
+
+
 def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
     """Reconstruct, link, validate, then switch active cache without guest runs."""
     source_root = Path(__file__).resolve().parents[1]
@@ -269,14 +313,14 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
     inputs = run_game.translation_inputs(elf, recomp, source_root)
 
     def validate(directory):
-        run_game.validate_translation_cache(
-            directory / "translation-cache.json", inputs, 0,
-            directory / "ir" / "ee_functions.json", directory / library_name)
+        validate_portable_cache(directory, elf, inputs, ir_sources, library_name)
 
     with ExitStack() as locks:
         # Lock the canonical and legacy source stores and all extant native
         # profiles before moving any directory. Shared profiles reuse a lock.
         roots = list(dict.fromkeys((base_work, previous_cache)))
+        if candidate.parent != history_dir(base_work):
+            roots = list(dict.fromkeys((*roots, candidate.parent)))
         for root in roots:
             locks.enter_context(shared_ir.ir_lock(root))
             for suffix in PROFILE_SUFFIXES:

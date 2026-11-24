@@ -339,6 +339,15 @@ def test_recovery_includes_native_profile_inventory():
         assert recovery.select_manifest(base, elf, current_sources, True)[0] == optimized_path
         assert optimized_path.is_file() and base_path.is_file()
 
+        # Profile 4 records the same raw guest IR despite its O2 pipeline.
+        ir_o2 = save(base.with_name(base.name + "-IR-O2"), [4, 8, 12],
+                     4, old_sources, pipeline="llvm-default-O2-v1")
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == ir_o2
+        retired = base.with_name(base.name + "-recovery-20261124-O2-native")
+        retired_path = save(retired, [4, 8, 12, 16], 5, old_sources)
+        retired.with_name(base.name + "-recovery-20261124").mkdir()
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == retired_path
+
 
 def main():
     test_recovery_includes_native_profile_inventory()

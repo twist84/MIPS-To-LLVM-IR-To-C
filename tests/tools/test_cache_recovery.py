@@ -169,7 +169,7 @@ def test_link_or_validation_failure_does_not_activate():
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
              patch.object(recovery.run_game, "translation_inputs", return_value={}), \
-             patch.object(recovery.run_game, "validate_translation_cache", side_effect=ValueError("bad linked library")):
+             patch.object(recovery, "validate_portable_cache", side_effect=ValueError("bad linked library")):
             try:
                 recovery.recover(elf, build, "Release", base, 8)
             except ValueError as exc:
@@ -185,7 +185,7 @@ def test_link_or_validation_failure_does_not_activate():
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
              patch.object(recovery.run_game, "translation_inputs", return_value={}), \
-             patch.object(recovery.run_game, "validate_translation_cache"):
+             patch.object(recovery, "validate_portable_cache"):
             promoted = recovery.recover(elf, build, "Release", base, 8)
         assert promoted == base and recovery.active_work(base) == base
         assert not recovery.pointer_path(base).exists()
@@ -195,6 +195,40 @@ def test_link_or_validation_failure_does_not_activate():
         assert (backups[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
         assert len(builds) == 2
+
+
+def test_verified_legacy_migration_preserves_ir_and_relocates():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        base = root / "ps2-game-hle"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        sources = {"ELF": run_game.sha256_path(elf)}
+        manifest = manifest_for(elf, [0x100008, 0x100010], sources)
+        functions = []
+        for entry, name in zip((0x100008, 0x100010), manifest["ir_hashes"]):
+            path = ir / name
+            path.write_bytes(str(entry).encode())
+            functions.append({"ir_path": str(path), "vaddr": hex(entry)})
+        metadata = ir / "ee_functions.json"
+        shared_ir.write_json(metadata, {"elf": str(elf), "functions": functions,
+                                        "function_count": 2})
+        manifest["metadata_sha256"] = run_game.sha256_path(metadata)
+        stage = root / "ps2-game-hle-recovery-123"
+        report = recovery.stage_verified_ir(elf, base, stage, manifest, sources)
+        assert report["matching"] == 2
+        stage_metadata = stage / "ir" / "ee_functions.json"
+        raw = stage_metadata.read_bytes()
+        converted = shared_ir.read_json(stage_metadata)
+        assert all(Path(fn["ir_path"]).parent == Path(".")
+                   for fn in converted["functions"])
+        backup = recovery.promote_canonical(base, stage, lambda directory: None)
+        assert (base / "ir" / "ee_functions.json").read_bytes() == raw
+        assert shared_ir.elf_path(converted, base / "ir") == elf
+        assert run_game.translated_ir_hashes(base / "ir" / "ee_functions.json") == manifest["ir_hashes"]
+        assert (backup / "ir" / "ee_functions.json").is_file()
 
 
 def test_canonical_promotion_rolls_back_all_names():
@@ -306,6 +340,7 @@ def main():
     test_changed_lowering_requires_explicit_opt_in()
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
+    test_verified_legacy_migration_preserves_ir_and_relocates()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()
     test_launcher_recovers_before_automatic_rebuild()
