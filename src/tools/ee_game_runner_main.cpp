@@ -3584,7 +3584,7 @@ int main(int argc, char** argv)
     uint64_t native_time_ns = 0u;
     // Host-cost breakdown for reports: IOP emulation between EE dispatches,
     // and time paused waiting for live cache-miss compilation.
-    double iop_time_ms = 0.0;
+    uint64_t iop_time_ns = 0u;
     double compile_wait_ms = 0.0;
     // SDBZ_PROFILE_PCS=1: host-only per-entry-PC profile of guest
     // instructions and native wall time, printed when the runner stops.
@@ -3843,6 +3843,15 @@ int main(int argc, char** argv)
     enum class e_intc_service { not_pending, handled, failed };
     const auto service_intc = [&](uint32_t exit_reason) -> e_intc_service
     {
+        // Normal dispatch/return boundaries cannot bridge an interrupt.
+        // Keep their rejection outside the profiler; this scope now
+        // measures exception-path INTC service only.
+        if (!hle_startup || irq_callback_active || callback_active ||
+            exit_reason != static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_EXCEPTION))
+        {
+            return e_intc_service::not_pending;
+        }
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::intc_service);
         // ps2-web-recomp/kernel.cpp::run_intc acknowledges the actual
         // masked INTC cause and runs the registered guest callbacks, then
@@ -3850,10 +3859,7 @@ int main(int argc, char** argv)
         // is not executable in HLE-first mode, so bridge only an observed,
         // architecturally taken INTC exception; all other exceptions
         // remain unsupported. Never manufacture a VBlank or interrupt.
-        if (hle_startup && !irq_callback_active && !callback_active &&
-            exit_reason == static_cast<uint32_t>(
-                ee::e_ee_exit_reason::EE_EXIT_EXCEPTION) &&
-            ((cpu.m_cop0[13] >> 2u) & 31u) == ee::EX_Int &&
+        if (((cpu.m_cop0[13] >> 2u) & 31u) == ee::EX_Int &&
             cpu.m_pc == ee::ee_exception_vector(
                 cpu.m_cop0[12] & ~ee::STATUS_EXL, ee::EX_Int) &&
             (cpu.m_cop0[12] & (ee::STATUS_EXL | ee::STATUS_IE |
@@ -4136,7 +4142,7 @@ int main(int argc, char** argv)
         const uint64_t iop_duration_ns = iop_profile_scope.stop();
         if (report_path != nullptr)
         {
-            iop_time_ms += static_cast<double>(iop_duration_ns) / 1e6;
+            iop_time_ns += iop_duration_ns;
         }
 
         // Kernel HLE services completed device interrupts before handing
@@ -4147,7 +4153,7 @@ int main(int argc, char** argv)
         // enter the registered DMA callback that supplies iSignalSema.
         const bool external_iop_wait = iop_semaphore_wait_turns != 0u;
         if (hle_startup && !irq_callback_active && !callback_active &&
-            (ee::ee_interrupts_enabled(&cpu) || external_iop_wait) &&
+            (ee::ee_interrupts_enabled_inline(&cpu) || external_iop_wait) &&
             hardware.dmac().pending() != 0u)
         {
             const uint32_t pending = hardware.dmac().pending();
@@ -4979,7 +4985,7 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(dispatched),
                 cpu.m_pc, elapsed_ms, static_cast<double>(native_time_ns) / 1e6, report_time_ms,
                 slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
-                iop_time_ms, compile_wait_ms
+                static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
             );
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
@@ -8122,7 +8128,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(dispatched), elapsed_ms,
             static_cast<double>(native_time_ns) / 1e6, report_time_ms,
             slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
-            iop_time_ms, compile_wait_ms
+            static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
         );
     }
     if (std::getenv("SDBZ_TRACE_IOP_THREADS") != nullptr && iop_kernel != nullptr)
