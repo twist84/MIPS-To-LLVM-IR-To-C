@@ -984,19 +984,82 @@ bool c_ee_gs_state::stage_host_upload(
     // Reconstruct the raster cursor once per chunk. Incrementing
     // it avoids a division and remainder for every uploaded pixel,
     // including split rows and transfers wrapping at 11 bits.
+    // Every supported swizzle is periodic over an 8 KiB page.
+    // Precompute the exact in-page byte/nibble addresses once using
+    // the reference scalar address functions. Keep the page stride
+    // and 4 MiB wrap in the transfer cursor, not in the table.
+    struct s_upload_layout
+    {
+        uint32_t m_x_shift = 0u;
+        uint32_t m_y_shift = 0u;
+        std::vector<uint16_t> m_offsets;
+    };
+    static const auto layouts = []
+    {
+        std::array<s_upload_layout, 64> result{};
+        constexpr uint32_t formats[] = {
+            0x00u, 0x01u, 0x02u, 0x0au, 0x13u, 0x14u, 0x1bu,
+            0x24u, 0x2cu, 0x30u, 0x31u, 0x32u, 0x3au
+        };
+        for (uint32_t format : formats)
+        {
+            auto& layout = result[format];
+            const bool indexed = format == 0x13u || format == 0x14u;
+            const bool half = format == 0x02u || format == 0x0au ||
+                format == 0x32u || format == 0x3au;
+            layout.m_x_shift = indexed ? 7u : 6u;
+            layout.m_y_shift = format == 0x14u ? 7u :
+                (half || indexed) ? 6u : 5u;
+            const uint32_t page_width = 1u << layout.m_x_shift;
+            const uint32_t page_height = 1u << layout.m_y_shift;
+            layout.m_offsets.resize(page_width * page_height);
+            for (uint32_t py = 0u; py < page_height; ++py)
+            {
+                for (uint32_t px = 0u; px < page_width; ++px)
+                {
+                    const auto pixel = pixel_write(format, 0u, 2u, px, py, 0u, 0u);
+                    // A page occupies 8192 bytes. One extra bit encodes
+                    // a high-nibble write without expanding the table.
+                    layout.m_offsets[py * page_width + px] =
+                        static_cast<uint16_t>((pixel.m_offset << 1u) |
+                            (pixel.m_shift >> 2u));
+                }
+            }
+        }
+        return result;
+    }();
+    const auto& layout = layouts[psm];
+    const uint32_t x_mask = (1u << layout.m_x_shift) - 1u;
+    const uint32_t y_mask = (1u << layout.m_y_shift) - 1u;
+    const uint32_t page_stride = layout.m_x_shift == 7u ?
+        std::max(1u, width / 2u) : width;
     uint32_t column = state.m_transfer_pixels_written % rrw;
     uint32_t row = state.m_transfer_pixels_written / rrw;
+    uint32_t row_base = 0u;
+    const uint16_t* row_offsets = nullptr;
+    const auto update_row = [&]()
+    {
+        const uint32_t py = (y + row) & 0x7ffu;
+        row_base = base * 256u + ((py >> layout.m_y_shift) * page_stride) * 8192u;
+        row_offsets = layout.m_offsets.data() +
+            ((py & y_mask) << layout.m_x_shift);
+    };
+    update_row();
     const auto stage_pixel = [&](uint32_t value, uint8_t size)
     {
-        writes.push_back(pixel_write(
-            psm, base, width, (x + column) & 0x7ffu,
-            (y + row) & 0x7ffu, value, size
-        ));
+        const uint32_t px = (x + column) & 0x7ffu;
+        const uint32_t packed = row_offsets[px & x_mask];
+        const uint32_t offset = (row_base +
+            ((px >> layout.m_x_shift) * 8192u) + (packed >> 1u)) &
+            (k_vram_bytes - 1u);
+        writes.push_back({offset, value, size,
+            static_cast<uint8_t>((packed & 1u) * 4u)});
         ++state.m_transfer_pixels_written;
         if (++column == rrw)
         {
             column = 0u;
             ++row;
+            update_row();
         }
     };
 
