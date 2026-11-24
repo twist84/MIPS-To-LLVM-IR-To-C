@@ -21,9 +21,11 @@ provide safe concurrent LLVM emission.
 """
 import collections
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 import glob
 import hashlib
 import json
+import multiprocessing
 import re
 import sys
 import time
@@ -38,6 +40,8 @@ _worker_machines = {}
 # middle-end pipeline followed by O2 machine code generation.
 IR_PIPELINE_PROFILE = 4
 IR_PIPELINE_ID = "llvm-default-O2-v1"
+# Bound process-local LLVM/allocator retention during whole-image builds.
+IR_PIPELINE_WORKER_MODULES = 128
 
 
 def ir_pipeline_id(profile):
@@ -84,7 +88,7 @@ def get_target_machine(emit_opt, target_triple):
 def preflight_ir_pipeline(target_triple):
     """Check the installed LLVM pipeline before creating objects or workers."""
     machine = get_target_machine(IR_PIPELINE_PROFILE, target_triple)
-    with llvm.parse_assembly("""
+    with llvm.create_context() as context, llvm.parse_assembly("""
 define i32 @ee_pipeline_probe(i32 %x) {
 entry:
   %slot = alloca i32
@@ -92,7 +96,7 @@ entry:
   %value = load i32, ptr %slot
   ret i32 %value
 }
-""") as module:
+""", context=context) as module:
         module.triple = target_triple
         module.data_layout = str(machine.target_data)
         module.verify()
@@ -107,34 +111,40 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
     started = time.monotonic()
     try:
         ir_bytes = Path(filename).read_bytes()
-        module = llvm.parse_assembly(ir_bytes.decode("utf-8"))
-        module.verify()
-        entry = None
-        object_size = 0
-        if emit_opt is not None:
-            target_machine = get_target_machine(emit_opt, target_triple)
-            # The MIPS/Windows-targeted guest IR must be emitted for the
-            # current host, not the ELF's guest address-space layout.
-            module.triple = target_triple
-            module.data_layout = str(target_machine.target_data)
+        # The global LLVM context may retain uniqued types/metadata across
+        # thousands of modules. Release each optimized module and its
+        # private context before processing the next input.
+        context_scope = (llvm.create_context() if emit_opt == IR_PIPELINE_PROFILE
+                         else nullcontext(None))
+        with context_scope as context, llvm.parse_assembly(
+                ir_bytes.decode("utf-8"), context=context) as module:
             module.verify()
-            if emit_opt == IR_PIPELINE_PROFILE:
-                optimize_guest_ir(module, target_machine)
-            object_data = target_machine.emit_object(module)
-            object_size = len(object_data)
-            if emit_dir is not None:
-                object_name = Path(filename).stem + ".o"
-                write_atomic(Path(emit_dir) / object_name, object_data)
-                entry = {
-                    "input": str(Path(filename)),
-                    "object": object_name,
-                    "size_bytes": object_size,
-                    "sha256": hashlib.sha256(object_data).hexdigest(),
-                    "ir_sha256": hashlib.sha256(ir_bytes).hexdigest(),
-                    "defined_symbols": [
-                        fn.name for fn in module.functions if not fn.is_declaration
-                    ],
-                }
+            entry = None
+            object_size = 0
+            if emit_opt is not None:
+                target_machine = get_target_machine(emit_opt, target_triple)
+                # The MIPS/Windows-targeted guest IR must be emitted for the
+                # current host, not the ELF's guest address-space layout.
+                module.triple = target_triple
+                module.data_layout = str(target_machine.target_data)
+                module.verify()
+                if emit_opt == IR_PIPELINE_PROFILE:
+                    optimize_guest_ir(module, target_machine)
+                object_data = target_machine.emit_object(module)
+                object_size = len(object_data)
+                if emit_dir is not None:
+                    object_name = Path(filename).stem + ".o"
+                    write_atomic(Path(emit_dir) / object_name, object_data)
+                    entry = {
+                        "input": str(Path(filename)),
+                        "object": object_name,
+                        "size_bytes": object_size,
+                        "sha256": hashlib.sha256(object_data).hexdigest(),
+                        "ir_sha256": hashlib.sha256(ir_bytes).hexdigest(),
+                        "defined_symbols": [
+                            fn.name for fn in module.functions if not fn.is_declaration
+                        ],
+                    }
         return {
             "valid": True, "entry": entry, "object_size": object_size,
             "elapsed": time.monotonic() - started, "filename": filename,
@@ -144,6 +154,10 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
             "valid": False, "error": str(exc),
             "elapsed": time.monotonic() - started, "filename": filename,
         }
+
+
+def compile_module_job(args):
+    return compile_module(*args)
 
 
 def cached_objects(emit_dir, emit_opt, target_triple, filenames):
@@ -377,7 +391,20 @@ def main():
     # worker per ~6 modules measured fastest (25 modules: 1.51 s with one
     # worker, 0.87 s with four, 1.14 s with sixteen).
     workers = min(jobs, len(pending), max(1, len(pending) // 6))
-    if workers > 1:
+    if emit_opt == IR_PIPELINE_PROFILE and (
+            workers > 1 or len(pending) > IR_PIPELINE_WORKER_MODULES):
+        # Pool.maxtasksperchild reclaims native allocations even when
+        # LLVM or the process allocator retains them after context teardown.
+        # Spawn rather than fork a process that has initialized LLVM in
+        # preflight. One input per task keeps the recycle limit meaningful.
+        print(f"verify_ir: recycling IR pipeline workers every "
+              f"{IR_PIPELINE_WORKER_MODULES} modules", flush=True)
+        tasks = ((name, emit_opt, emit_dir, target_triple) for name in pending)
+        with multiprocessing.get_context("spawn").Pool(
+                processes=workers, maxtasksperchild=IR_PIPELINE_WORKER_MODULES) as pool:
+            for result in pool.imap_unordered(compile_module_job, tasks, chunksize=1):
+                record(result)
+    elif workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(compile_module, filename, emit_opt, emit_dir, target_triple)

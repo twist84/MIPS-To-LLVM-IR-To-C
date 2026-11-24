@@ -214,7 +214,31 @@ def test_pipeline_binding_preflight():
     print("PASS: renamed LLVM tuning argument and fail-fast pipeline setup")
 
 
+def test_pipeline_worker_recycling():
+    with tempfile.TemporaryDirectory(prefix="ee-ir-recycle-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        objects = root / "objects"
+        # More inputs than two workers can emit without a recycle.
+        for i in range(260):
+            write_ir(ir_dir / f"guest_{i:04d}.ll", i)
+        original = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in ir_dir.glob("*.ll")}
+        out, manifest = run_emitter(ir_dir, objects, opt=4)
+        assert "recycling IR pipeline workers every 128 modules" in out, out
+        assert manifest["complete"] and manifest["object_count"] == 260
+        assert {Path(e["input"]).name: e["ir_sha256"]
+                for e in manifest["objects"]} == original
+        assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in ir_dir.glob("*.ll")} == original
+        out, _ = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 260/260" in out, out
+        print("PASS: recycled workers preserve all object and IR provenance")
+
+
 if __name__ == "__main__":
+    test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
     test_append_only_emission()
