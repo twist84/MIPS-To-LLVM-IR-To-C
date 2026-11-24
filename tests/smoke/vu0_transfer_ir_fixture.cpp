@@ -144,6 +144,13 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
     {
         return vu_macro(0x3cu | (op & 3u), mask, fs, ft, op >> 2u);
     };
+    if (mode == "ir_vitof" || mode == "ir_vftoi" || mode == "ir_vclip" || mode == "ir_vabs")
+    {
+        const uint32_t op = mode == "ir_vitof" ? 0x10u : mode == "ir_vftoi" ? 0x14u :
+                            mode == "ir_vclip" ? 0x1fu : 0x1du;
+        words = {vu_special(op, 15u, 1u, 2u)};
+        return true;
+    }
     if (mode == "ir_vmul" || mode == "ir_vadd" || mode == "ir_vmula_madd" ||
         mode == "ir_vdiv_wait" || mode == "ir_vsqrt_wait")
     {

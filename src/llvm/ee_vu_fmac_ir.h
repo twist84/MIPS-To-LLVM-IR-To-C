@@ -89,4 +89,119 @@ define internal i32 @vu_q_status(i32 %old, i32 %a, i32 %b, i1 %is_sqrt, i1 %is_r
 }
 
 )IR";
+inline constexpr char k_vu_fixed_ir[] = R"IR(
+define internal i32 @vu_flush(i32 %x) alwaysinline {
+  %exp = and i32 %x, 2139095040
+  %zero = icmp eq i32 %exp, 0
+  %sign = and i32 %x, -2147483648
+  %result = select i1 %zero, i32 %sign, i32 %x
+  ret i32 %result
+}
+
+define internal i32 @vu_pack(i32 %sign, i32 %e, i32 %m) alwaysinline {
+  %overflow = icmp sgt i32 %e, 255
+  %underflow = icmp sle i32 %e, 0
+  %exp = shl i32 %e, 23
+  %mantissa = and i32 %m, 8388607
+  %bits = or i32 %exp, %mantissa
+  %normal = select i1 %underflow, i32 0, i32 %bits
+  %mag = select i1 %overflow, i32 2147483647, i32 %normal
+  %result = or i32 %sign, %mag
+  ret i32 %result
+}
+
+define internal i32 @vu_key(i32 %raw) alwaysinline {
+  %x = call i32 @vu_flush(i32 %raw)
+  %mag = and i32 %x, 2147483647
+  %negative = icmp slt i32 %x, 0
+  %neg = sub i32 0, %mag
+  %r = select i1 %negative, i32 %neg, i32 %mag
+  ret i32 %r
+}
+
+define internal i32 @vu_raw_order_key(i32 %x) alwaysinline {
+  %negative = icmp slt i32 %x, 0
+  %neg = xor i32 %x, -1
+  %pos = xor i32 %x, -2147483648
+  %r = select i1 %negative, i32 %neg, i32 %pos
+  ret i32 %r
+}
+
+define internal i32 @vu_max(i32 %a, i32 %b) alwaysinline {
+  %ak = call i32 @vu_raw_order_key(i32 %a)
+  %bk = call i32 @vu_raw_order_key(i32 %b)
+  %pick_a = icmp uge i32 %ak, %bk
+  %r = select i1 %pick_a, i32 %a, i32 %b
+  ret i32 %r
+}
+
+define internal i32 @vu_min(i32 %a, i32 %b) alwaysinline {
+  %ak = call i32 @vu_raw_order_key(i32 %a)
+  %bk = call i32 @vu_raw_order_key(i32 %b)
+  %pick_a = icmp ule i32 %ak, %bk
+  %r = select i1 %pick_a, i32 %a, i32 %b
+  ret i32 %r
+}
+
+; Integer fixed-point conversion, matching vu1_fp::to_fixed.
+; Clamp the exponent before shifting; LLVM overshifts are poison.
+define internal i32 @vu_to_fixed(i32 %x, i32 %fraction) alwaysinline {
+entry:
+  %exp0 = lshr i32 %x, 23
+  %exp = and i32 %exp0, 255
+  %e = add i32 %exp, %fraction
+  %denormal = icmp eq i32 %exp, 0
+  %small = icmp sle i32 %e, 126
+  %zero = or i1 %denormal, %small
+  br i1 %zero, label %return_zero, label %check_large
+return_zero:
+  ret i32 0
+check_large:
+  %negative = icmp slt i32 %x, 0
+  %large = icmp sge i32 %e, 158
+  br i1 %large, label %saturate, label %convert
+saturate:
+  %limit = select i1 %negative, i32 -2147483648, i32 2147483647
+  ret i32 %limit
+convert:
+  ; e is in [127,157], so shift is in [-23,7].
+  %shift = sub i32 %e, 150
+  %left = icmp sge i32 %shift, 0
+  %negshift = sub i32 0, %shift
+  %ls = select i1 %left, i32 %shift, i32 0
+  %rs = select i1 %left, i32 0, i32 %negshift
+  %m0 = and i32 %x, 8388607
+  %m = or i32 %m0, 8388608
+  %l = shl i32 %m, %ls
+  %r = lshr i32 %l, %rs
+  %neg = sub i32 0, %r
+  %result = select i1 %negative, i32 %neg, i32 %r
+  ret i32 %result
+}
+
+; Every signed i32 divided by a power of two is exactly representable
+; as double. The reference from_double then truncates its mantissa.
+; Normalize the unsigned magnitude directly, including INT32_MIN.
+define internal i32 @vu_from_fixed(i32 %x, i32 %fraction) alwaysinline {
+entry:
+  %zero = icmp eq i32 %x, 0
+  br i1 %zero, label %return_zero, label %convert
+return_zero:
+  ret i32 0
+convert:
+  %negative = icmp slt i32 %x, 0
+  %neg = sub i32 0, %x
+  %mag = select i1 %negative, i32 %neg, i32 %x
+  %sign = and i32 %x, -2147483648
+  %lz = call i32 @llvm.ctlz.i32(i32 %mag, i1 false)
+  %high = sub i32 31, %lz
+  %normalized = shl i32 %mag, %lz
+  %mantissa = lshr i32 %normalized, 8
+  %biased = add i32 %high, 127
+  %e = sub i32 %biased, %fraction
+  %result = call i32 @vu_pack(i32 %sign, i32 %e, i32 %mantissa)
+  ret i32 %result
+}
+
+)IR";
 }

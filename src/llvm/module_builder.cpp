@@ -2775,6 +2775,15 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                     ", i32 " + std::to_string(fmac.m_broadcast) +
                     ", i1 " + (fmac.m_acc ? "true" : "false") + ")\n";
             }
+            else if ((ins.opcode_word & 0x3cu) == 0x3cu &&
+                ((special2 >= 0x10u && special2 <= 0x17u) ||
+                 special2 == 0x1du || special2 == 0x1fu || special2 == 0x2fu ||
+                 special2 == 0x30u || special2 == 0x31u))
+            {
+                m_out += "  " + result + " = call i32 @ee_vu0_ir_misc(ptr %cpu, ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " + std::to_string(ins.opcode_word) +
+                    ", i32 " + std::to_string(special2) + ")\n";
+            }
             else if (scalar_q)
             {
                 m_out += "  " + result + " = call i32 @ee_vu0_ir_q(ptr %cpu, ptr %rt, i32 " +
@@ -3495,11 +3504,13 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     end_function();
 
     if (m_out.find("call i32 @ee_vu0_ir_fmac(") != std::string::npos ||
-        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos)
+        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos ||
+        m_out.find("call i32 @ee_vu0_ir_misc(") != std::string::npos)
     {
         m_out += make_vu0_macro_ir();
         m_out += k_vu_fmac_ir;
         m_out += k_vu_q_status_ir;
+        m_out += k_vu_fixed_ir;
     }
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||
@@ -5443,11 +5454,13 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     end_function();
 
     if (m_out.find("call i32 @ee_vu0_ir_fmac(") != std::string::npos ||
-        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos)
+        m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos ||
+        m_out.find("call i32 @ee_vu0_ir_misc(") != std::string::npos)
     {
         m_out += make_vu0_macro_ir();
         m_out += k_vu_fmac_ir;
         m_out += k_vu_q_status_ir;
+        m_out += k_vu_fixed_ir;
     }
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||

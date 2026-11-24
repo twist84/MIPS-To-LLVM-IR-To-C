@@ -353,6 +353,48 @@ def main():
                 and vu0.mac_flags == 0x0e0e and vu0.status_flags == 0x145,
                 "direct VU0 aliasing VADD cancellation flags")
 
+        def init_fixed(cpu, vu0):
+            set_vf(cpu, 1, (0x7fffffff, 0x80000000, 0x01000003, 0xfefffffd))
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vitof", init_fixed)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x4effffff, 0xcf000000, 0x4b800001, 0xcb800001)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "direct VITOF truncates and leaves flags unchanged")
+
+        def init_ftoi(cpu, vu0):
+            set_vf(cpu, 1, (0x7f800000, 0xff800000, 0x3fffffff, 0xbfffffff))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vftoi", init_ftoi)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x7fffffff, 0x80000000, 1, 0xffffffff),
+                "direct VFTOI saturates and truncates without host conversion")
+
+        def init_clip(cpu, vu0):
+            set_vf(cpu, 1, (0x7f800001, 0xff800001, 0x7f800000, 0xffffffff))
+            set_vf(cpu, 2, (0, 0, 0, 0x7f800000))
+            vu0.clip_flags = 0x123456
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vclip", init_clip)
+        require(result == EE_EXIT_DISPATCH and
+                vu0.clip_flags == (((0x123456 << 6) & 0xffffff) | 9)
+                and vu0.vi[18] == vu0.clip_flags and vu0.mac_flags == 0x1234
+                and vu0.status_flags == 0x456,
+                "direct VCLIP distinguishes extended exponent mantissas")
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vabs", init_clip)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x7f800001, 0x7f800001, 0x7f800000, 0x7fffffff),
+                "direct VABS preserves raw mantissa")
+
         def init_mac(cpu, vu0):
             set_vf(cpu, 1, (0x7fffffff, 0, 0, 0))
             set_vf(cpu, 2, (0x40000000, 0, 0, 0))

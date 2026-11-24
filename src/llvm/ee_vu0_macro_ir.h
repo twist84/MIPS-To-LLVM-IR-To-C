@@ -351,6 +351,114 @@ success:
 fail:
   ret i32 1
 }
+; Fixed-point conversions, raw moves, CLIP and NOP. The encoding
+; selects the destination mask; no host float or opcode callback.
+define internal i32 @ee_vu0_ir_misc(ptr %cpu, ptr %rt, i32 %pc, i32 %word, i32 %op) {
+entry:
+  %vu = call ptr @ee_vu0_ir_sync(ptr %cpu, ptr %rt, i32 %pc)
+  %missing = icmp eq ptr %vu, null
+  br i1 %missing, label %fail, label %dispatch
+dispatch:
+  %nop = icmp eq i32 %op, 47
+  br i1 %nop, label %success, label %prepare
+prepare:
+  %fs_shift = lshr i32 %word, 11
+  %ft_shift = lshr i32 %word, 16
+  %mask_shift = lshr i32 %word, 21
+  %fs = and i32 %fs_shift, 31
+  %ft = and i32 %ft_shift, 31
+  %mask = and i32 %mask_shift, 15
+  %source = call <4 x i32> @ee_vu0_ir_read_vf(ptr %cpu, i32 %fs)
+  %old = call <4 x i32> @ee_vu0_ir_read_vf(ptr %cpu, i32 %ft)
+  %clip = icmp eq i32 %op, 31
+  br i1 %clip, label %clip_prepare, label %vector_prepare
+clip_prepare:
+  %w = extractelement <4 x i32> %old, i32 3
+  %abs_w = and i32 %w, 2147483647
+  %limit = call i32 @vu_key(i32 %abs_w)
+  %neg_limit = sub i32 0, %limit
+  %clip_ptr = getelementptr i8, ptr %vu, i64 OFF_CLIP
+  %old_clip = load i32, ptr %clip_ptr
+  %shifted = shl i32 %old_clip, 6
+  %history = and i32 %shifted, 16777215
+  br label %clip_lane
+clip_lane:
+  %c = phi i32 [0, %clip_prepare], [%c_next, %clip_lane]
+  %clip_bits = phi i32 [%history, %clip_prepare], [%new_clip, %clip_lane]
+  %raw = extractelement <4 x i32> %source, i32 %c
+  %value = call i32 @vu_key(i32 %raw)
+  %above = icmp sgt i32 %value, %limit
+  %below = icmp slt i32 %value, %neg_limit
+  %positive = select i1 %above, i32 1, i32 0
+  %negative = select i1 %below, i32 2, i32 0
+  %judge = or i32 %positive, %negative
+  %cshift = shl i32 %c, 1
+  %lane_bits = shl i32 %judge, %cshift
+  %new_clip = or i32 %clip_bits, %lane_bits
+  %c_next = add i32 %c, 1
+  %clip_done = icmp eq i32 %c_next, 3
+  br i1 %clip_done, label %clip_commit, label %clip_lane
+clip_commit:
+  store i32 %new_clip, ptr %clip_ptr
+  %vi18 = getelementptr i8, ptr %vu, i64 OFF_VI18
+  store i32 %new_clip, ptr %vi18
+  br label %success
+vector_prepare:
+  %vf0 = icmp eq i32 %ft, 0
+  br i1 %vf0, label %success, label %config
+config:
+  %is_abs = icmp eq i32 %op, 29
+  %rotate = icmp eq i32 %op, 49
+  %convert = icmp ult i32 %op, 24
+  %to_float = icmp ult i32 %op, 20
+  %idx = and i32 %op, 3
+  %frac = extractelement <4 x i32> <i32 0, i32 4, i32 12, i32 15>, i32 %idx
+  br label %lane
+lane:
+  %n = phi i32 [0, %config], [%next, %merge]
+  %out = phi <4 x i32> [%old, %config], [%out_next, %merge]
+  %shift = sub i32 3, %n
+  %bit = shl i32 1, %shift
+  %selected = and i32 %mask, %bit
+  %active = icmp ne i32 %selected, 0
+  br i1 %active, label %read, label %merge
+read:
+  %n1 = add i32 %n, 1
+  %rotated = and i32 %n1, 3
+  %index = select i1 %rotate, i32 %rotated, i32 %n
+  %bits = extractelement <4 x i32> %source, i32 %index
+  br i1 %convert, label %conversion, label %move
+conversion:
+  br i1 %to_float, label %itof, label %ftoi
+itof:
+  %float_bits = call i32 @vu_from_fixed(i32 %bits, i32 %frac)
+  br label %result
+ftoi:
+  %int_bits = call i32 @vu_to_fixed(i32 %bits, i32 %frac)
+  br label %result
+move:
+  %absolute = and i32 %bits, 2147483647
+  %moved = select i1 %is_abs, i32 %absolute, i32 %bits
+  br label %result
+result:
+  %r = phi i32 [%float_bits, %itof], [%int_bits, %ftoi], [%moved, %move]
+  %updated = insertelement <4 x i32> %out, i32 %r, i32 %n
+  br label %merge
+merge:
+  %out_next = phi <4 x i32> [%out, %lane], [%updated, %result]
+  %next = add i32 %n, 1
+  %done = icmp eq i32 %next, 4
+  br i1 %done, label %commit, label %lane
+commit:
+  %base = getelementptr i8, ptr %cpu, i64 OFF_CPU_VF
+  %dst = getelementptr <4 x i32>, ptr %base, i32 %ft
+  store <4 x i32> %out_next, ptr %dst, align 4
+  br label %success
+success:
+  ret i32 0
+fail:
+  ret i32 1
+}
 )IR";
     // Derive layout offsets from the same C++ ABI used by the runtime.
     const auto substitute = [&ir](const char* token, size_t offset)
@@ -369,6 +477,8 @@ fail:
     substitute("OFF_PENDING", offsetof(ee::s_ee_vu0_state, m_q_pending));
     substitute("OFF_CPU_VF", offsetof(ee::s_ee_cpu_state, m_vu0));
     substitute("OFF_STATUS", offsetof(ee::s_ee_vu0_state, m_status_flags));
+    substitute("OFF_CLIP", offsetof(ee::s_ee_vu0_state, m_clip_flags));
+    substitute("OFF_VI18", offsetof(ee::s_ee_vu0_state, m_vi) + 18 * sizeof(uint32_t));
     substitute("OFF_LATCH", offsetof(ee::s_ee_vu0_state, m_acc_overflow_mask));
     substitute("OFF_READY", offsetof(ee::s_ee_vu0_state, m_q_ready_cycle));
     substitute("OFF_QBITS", offsetof(ee::s_ee_vu0_state, m_q_pending_bits));
