@@ -411,7 +411,7 @@ def test_game_context_menu():
     fields = {key: Mock() for key in ("display_aspect", "deinterlace")}
     instance = SimpleNamespace(fields=fields, toggle_fullscreen=Mock(), close_session=Mock())
     main, aspect, interlace = Mock(), Mock(), Mock()
-    with patch.object(GUI.tk, "Menu", side_effect=[main, aspect, interlace]):
+    with patch.object(GUI.tk, "Menu", side_effect=[main, aspect, interlace], create=True):
         GUI.Launcher.create_game_context_menu(instance)
     assert instance.game_context_menu is main
     for submenu, key, options in (
