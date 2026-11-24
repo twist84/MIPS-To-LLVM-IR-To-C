@@ -552,7 +552,13 @@ def test_launch_close_button():
     session = SimpleNamespace(
         process=process, stop_process=None, close_requested=False,
         embedded_running=True, game_host=Mock(), play=Mock(), status=Mock(),
+        fullscreen_active=False, force_close_timer=None, force_close_press=False,
+        after=Mock(return_value="hold-timer"), after_cancel=Mock(),
     )
+    session.play.instate.return_value = False
+    for name in ("begin_force_close_hold", "cancel_force_close_hold",
+                 "end_force_close_hold", "finish_force_close_hold"):
+        setattr(session, name, getattr(GUI.Launcher, name).__get__(session))
     session.game_host.winfo_id.return_value = 99
     with patch.object(GUI, "request_embedded_close", return_value=True) as graceful, \
             patch.object(GUI, "stop_process_tree", return_value=killer) as force:
@@ -560,11 +566,24 @@ def test_launch_close_button():
         graceful.assert_called_once_with(99)
         force.assert_not_called()
         assert session.close_requested and session.stop_process is None
-        session.play.configure.assert_called_with(text="Force close")
+        session.play.configure.assert_called_with(text="Hold to force close")
         GUI.Launcher.close_session(session)
+        force.assert_not_called()  # Ordinary click/menu activation is safe.
+        assert session.begin_force_close_hold() == "break"
+        assert session.after.call_args.args[0] == 2000
+        assert session.end_force_close_hold() == "break"
+        session.after_cancel.assert_called_with("hold-timer")
+        force.assert_not_called()
+        assert session.begin_force_close_hold() == "break"
+        session.cancel_force_close_hold()  # Pointer leaves the button.
+        assert session.end_force_close_hold() == "break"
+        force.assert_not_called()
+        assert session.begin_force_close_hold() == "break"
+        session.after.call_args.args[1]()  # Full hold elapsed.
         force.assert_called_once_with(process)
         assert session.stop_process is killer
         session.play.configure.assert_called_with(text="Closing…")
+        assert session.end_force_close_hold() == "break"
         GUI.Launcher.close_session(session)
         force.assert_called_once_with(process)
 
@@ -573,6 +592,19 @@ def test_launch_close_button():
     session.embedded_running = False
     with patch.object(GUI, "stop_process_tree", return_value=killer) as force:
         GUI.Launcher.close_session(session)
+        force.assert_not_called()
+        assert session.close_requested
+        assert session.begin_force_close_hold() == "break"
+        callback = session.after.call_args.args[1]
+        # A graceful exit during the hold must not kill the next session.
+        session.cancel_force_close_hold()
+        session.process = Mock()
+        callback()
+        force.assert_not_called()
+        assert session.end_force_close_hold() == "break"
+        session.process = process
+        assert session.begin_force_close_hold() == "break"
+        session.after.call_args.args[1]()
         force.assert_called_once_with(process)
         assert session.stop_process is killer
 

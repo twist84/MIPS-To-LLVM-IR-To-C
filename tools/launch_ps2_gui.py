@@ -15,6 +15,7 @@ from resolve_ps2_boot import resolve_boot_elf
 ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = ROOT / "build" / "ps2-launcher.log"
 SETTINGS_PATH = ROOT / "build" / "ps2-launcher-settings.json"
+FORCE_CLOSE_HOLD_MS = 2000
 
 
 SPEEDS = {"50%": 50, "100%": 100, "150%": 150, "200%": 200, "Unlimited": 0}
@@ -309,7 +310,7 @@ OPTION_HELP = {
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
     "Show --help": "Print the selected tool’s command-line help in the output pane.",
-    "Launch": "Launch the selected command, or close the running session without exiting the launcher.",
+    "Launch": "Launch or close the running session. Hold Force close for two seconds only if normal shutdown is stuck.",
     "Fullscreen": "Show only the embedded game on the entire screen. Press F11 to enter or exit fullscreen.",
 }
 
@@ -783,6 +784,8 @@ class Launcher(ttk.Frame):
         self.process = None
         self.stop_process = None
         self.close_requested = False
+        self.force_close_timer = None
+        self.force_close_press = False
         self.deinterlace_file = None
         self.aspect_file = None
         self.log = None
@@ -1030,6 +1033,10 @@ class Launcher(ttk.Frame):
         self.play = ttk.Button(self.action_bar, text="Launch", command=self.toggle_launch)
         self.play.pack(side="left")
         Tooltip(self.play, OPTION_HELP["Launch"])
+        self.play.bind("<ButtonPress-1>", self.begin_force_close_hold, add="+")
+        self.play.bind("<ButtonRelease-1>", self.end_force_close_hold, add="+")
+        for event in ("<Leave>", "<FocusOut>", "<Unmap>", "<Destroy>"):
+            self.play.bind(event, self.cancel_force_close_hold, add="+")
         self.fullscreen_button = ttk.Button(
             self.action_bar, text="Fullscreen", command=self.toggle_fullscreen
         )
@@ -1098,7 +1105,7 @@ class Launcher(ttk.Frame):
             3, label="Exit fullscreen" if self.fullscreen_active else "Fullscreen"
         )
         self.game_context_menu.entryconfigure(
-            5, label="Force close game" if self.close_requested else "Close game",
+            5, label="Force close… (hold in launcher)" if self.close_requested else "Close game",
             state="disabled" if self.stop_process is not None else "normal",
         )
         self.context_open = True
@@ -1293,6 +1300,7 @@ class Launcher(ttk.Frame):
             self.persist_settings()
         except OSError as error:
             messagebox.showerror("Could not save settings", str(error), parent=self)
+        self.cancel_force_close_hold()
         self.clear_deinterlace_file()
         self.clear_aspect_file()
         self.winfo_toplevel().destroy()
@@ -1414,22 +1422,73 @@ class Launcher(ttk.Frame):
     def close_session(self):
         if self.process is None or self.process.poll() is not None or self.stop_process is not None:
             return
+        if self.close_requested:
+            # Menu and keyboard activation must not bypass the hold.
+            if self.fullscreen_active:
+                self.set_fullscreen(False)
+            self.play.focus_set()
+            self.status.set("Hold Force close for 2 seconds to stop the process tree")
+            return
         # A running embedded game can exit normally, allowing boot logs,
         # snapshots and the optional post-capture IOP build to finish.
-        if not self.close_requested and self.embedded_running:
+        if self.embedded_running:
             try:
                 if request_embedded_close(self.game_host.winfo_id()):
                     self.close_requested = True
-                    self.play.configure(text="Force close")
-                    self.status.set("Closing game; finalizing session and diagnostics")
+                    self.play.configure(text="Hold to force close")
+                    self.status.set("Closing game; finalizing session and diagnostics. Hold for 2 seconds only if stuck.")
                     return
             except OSError:
                 pass
-        # During compilation, headless execution, or an unresponsive
-        # window, stop the full process tree. Keep the launcher responsive.
+        # No graceful HWND close is available (e.g. compilation/headless).
+        # Require the same deliberate hold before terminating the tree.
+        self.close_requested = True
+        self.play.configure(text="Hold to force close")
+        if self.fullscreen_active:
+            self.set_fullscreen(False)
+        self.status.set("Hold Force close for 2 seconds to stop the process tree")
+
+    def begin_force_close_hold(self, _event=None):
+        if not self.close_requested or self.process is None or self.stop_process is not None:
+            return None
+        if self.play.instate(["disabled"]) or self.process.poll() is not None:
+            return "break"
+        self.cancel_force_close_hold()
+        self.force_close_press = True
+        process = self.process
+        self.play.configure(text="Keep holding…")
+        self.status.set("Hold for 2 seconds to force close; release to cancel")
+        self.force_close_timer = self.after(
+            FORCE_CLOSE_HOLD_MS, lambda: self.finish_force_close_hold(process)
+        )
+        return "break"
+
+    def cancel_force_close_hold(self, _event=None):
+        if self.force_close_timer is not None:
+            self.after_cancel(self.force_close_timer)
+            self.force_close_timer = None
+            if self.close_requested and self.stop_process is None:
+                self.play.configure(text="Hold to force close")
+
+    def end_force_close_hold(self, _event=None):
+        if self.force_close_press:
+            self.cancel_force_close_hold()
+            self.force_close_press = False
+            # Suppress the normal ttk release command, even if the
+            # old process exited while the mouse was still held.
+            return "break"
+        return None
+
+    def finish_force_close_hold(self, process):
+        self.force_close_timer = None
+        if (not self.force_close_press or self.process is not process or
+                not self.close_requested or self.stop_process is not None or
+                process.poll() is not None):
+            return
         try:
-            self.stop_process = stop_process_tree(self.process)
+            self.stop_process = stop_process_tree(process)
         except OSError as error:
+            self.play.configure(text="Hold to force close")
             self.status.set(f"Could not close session: {error}")
             return
         if self.stop_process is not None:
@@ -1559,12 +1618,13 @@ class Launcher(ttk.Frame):
             stop_result = self.stop_process.returncode
             self.stop_process = None
             if stop_result != 0 and result is None:
-                self.play.configure(text="Force close")
+                self.play.configure(text="Hold to force close")
                 self.play.state(["!disabled"])
-                self.status.set(f"Could not stop process tree ({stop_result}); retry Close")
+                self.status.set(f"Could not stop process tree ({stop_result}); hold to retry")
         if chunk or result is None or self.stop_process is not None:
             self.after(150, self.read_output)
         else:
+            self.cancel_force_close_hold()
             self.log.close()
             self.log = None
             self.process = None
