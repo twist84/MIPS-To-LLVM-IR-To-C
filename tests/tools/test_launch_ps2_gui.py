@@ -243,12 +243,24 @@ def test_game_tab_command_and_environment():
 def test_runtime_options():
     defaults = GUI.default_settings()
     assert defaults["idle_skip"] is True
+    assert defaults["pad_script"] == "200:8:cross"
+    assert defaults["trace_iop_sema"] == "128"
+    assert defaults["trace_rpc_args"] == "0x80000593"
+    for key in GUI.RUNTIME_GATED_FIELDS:
+        assert defaults[key] and defaults[f"{key}_enabled"] is False
+    assert GUI.runtime_overrides("Full replay", "Neutral", True, True, {}) == {"SDBZ_IDLE_SKIP": "1"}
+    assert GUI.runtime_overrides("Full replay", "Scripted", True, True, {})["SDBZ_PAD0_SCRIPT"] == "200:8:cross"
     with tempfile.TemporaryDirectory() as temporary:
         path = Path(temporary)
         settings_path = path / "settings.json"
-        settings_path.write_text(json.dumps({"pad": "Neutral"}), encoding="utf-8")
+        settings_path.write_text(json.dumps({"pad": "Neutral", "iop_aot": str(path), "iop_capture": "", "pad_script": ""}), encoding="utf-8")
         restored, warning = GUI.load_settings(settings_path)
         assert not warning and restored["idle_skip"] is True
+        assert restored["iop_aot_enabled"] is True and restored["iop_aot"] == str(path)
+        assert restored["iop_capture_enabled"] is False and restored["iop_capture"] == defaults["iop_capture"]
+        assert restored["pad_script"] == defaults["pad_script"]
+        for key in GUI.RUNTIME_GATED_FIELDS:
+            restored[f"{key}_enabled"] = True
         restored["pad"] = "Scripted"
         restored["pad_script"] = "740:8:cross;3500:4:start+circle"
         restored["idle_skip"] = False
@@ -259,7 +271,7 @@ def test_runtime_options():
         restored["trace_cdvd"] = True
         restored["trace_rpc_args"] = "0x80000592"
         restored["trace_iop_sema"] = "0"
-        restored["frame_dir"] = str(path)
+        restored["frame_dir"] = str(path / "frames")
         restored["frame_interval"] = "30"
         restored["dump_ram"] = str(path / "ram.bin")
         GUI.save_settings(settings_path, restored)
@@ -278,8 +290,15 @@ def test_runtime_options():
         assert env["SDBZ_TRACE_IPU"] == env["SDBZ_TRACE_CDVD"] == "1"
         assert env["SDBZ_TRACE_RPC_ARGS"] == str(0x80000592)
         assert env["SDBZ_TRACE_IOP_SEMA"] == "0"
-        assert env["SDBZ_FRAME_DUMP"] == f"{path.resolve()}:30"
+        assert env["SDBZ_FRAME_DUMP"] == f"{path.resolve() / 'frames'}:30"
         assert env["SDBZ_DUMP_RAM"] == str(path.resolve() / "ram.bin")
+        assert not (path / "frames").exists() and not (path / "capture").exists()
+        GUI.prepare_runtime_outputs(env)
+        assert (path / "frames").is_dir() and (path / "capture").is_dir()
+        again["iop_aot_enabled"] = False
+        GUI.save_settings(settings_path, again)
+        disabled, warning = GUI.load_settings(settings_path)
+        assert not warning and not disabled["iop_aot_enabled"] and disabled["iop_aot"] == str(path)
         matched = GUI.runtime_overrides("Matched neutral/Cross", "Scripted", True, True, values)
         assert not any(key in matched for key in ("SDBZ_PAD0_SCRIPT", "SDBZ_IOP_AOT_CAPTURE", "SDBZ_FRAME_DUMP", "SDBZ_DUMP_RAM"))
         assert GUI.runtime_overrides("Recover translation cache", "Scripted", True, True, values) == {}
