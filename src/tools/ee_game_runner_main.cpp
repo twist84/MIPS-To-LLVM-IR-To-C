@@ -3581,7 +3581,7 @@ int main(int argc, char** argv)
     }
     ee::c_vu1_aot_binding vu1_binding(vu1_aot.get());
     double report_time_ms = 0.0;
-    double native_time_ms = 0.0;
+    uint64_t native_time_ns = 0u;
     // Host-cost breakdown for reports: IOP emulation between EE dispatches,
     // and time paused waiting for live cache-miss compilation.
     double iop_time_ms = 0.0;
@@ -3616,7 +3616,7 @@ int main(int argc, char** argv)
     uint64_t idle_skip_slices = 0u;
     uint64_t idle_skip_instructions = 0u;
     uint64_t idle_skip_mispredictions = 0u;
-    double slowest_native_ms = 0.0;
+    uint64_t slowest_native_ns = 0u;
     uint32_t slowest_native_pc = 0u;
 #ifdef EE_ENABLE_RAYLIB_WINDOW
     uint32_t window_pump_stride = 1u;
@@ -4599,7 +4599,7 @@ int main(int argc, char** argv)
             }
             if (resolved != nullptr)
             {
-                const auto result = ee::ee_dispatch_run_resolved(
+                const auto result = ee::ee_dispatch_run_resolved_inline(
                     &cpu, &runtime, from_pc, resolved);
                 reason = result.exit_reason;
                 count = result.dispatch_count;
@@ -4708,12 +4708,10 @@ int main(int argc, char** argv)
             const uint64_t native_duration_ns = native_profile_scope.stop();
             if (report_path != nullptr)
             {
-                const double duration_ms =
-                    static_cast<double>(native_duration_ns) / 1e6;
-                native_time_ms += duration_ms;
-                if (duration_ms > slowest_native_ms)
+                native_time_ns += native_duration_ns;
+                if (native_duration_ns > slowest_native_ns)
                 {
-                    slowest_native_ms = duration_ms;
+                    slowest_native_ns = native_duration_ns;
                     slowest_native_pc = from_pc;
                 }
             }
@@ -4979,8 +4977,8 @@ int main(int argc, char** argv)
                 "slowest_native_pc=0x%08x slowest_native_ms=%.3f "
                 "iop_ms=%.1f compile_wait_ms=%.1f\n",
                 static_cast<unsigned long long>(dispatched),
-                cpu.m_pc, elapsed_ms, native_time_ms, report_time_ms,
-                slowest_native_pc, slowest_native_ms,
+                cpu.m_pc, elapsed_ms, static_cast<double>(native_time_ns) / 1e6, report_time_ms,
+                slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
                 iop_time_ms, compile_wait_ms
             );
             std::fflush(stderr);
@@ -8122,8 +8120,8 @@ int main(int argc, char** argv)
             "report_ms=%.1f slowest_native_pc=0x%08x "
             "slowest_native_ms=%.3f iop_ms=%.1f compile_wait_ms=%.1f\n",
             static_cast<unsigned long long>(dispatched), elapsed_ms,
-            native_time_ms, report_time_ms,
-            slowest_native_pc, slowest_native_ms,
+            static_cast<double>(native_time_ns) / 1e6, report_time_ms,
+            slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
             iop_time_ms, compile_wait_ms
         );
     }

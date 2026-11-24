@@ -5,6 +5,7 @@
 // fingerprint, and a dispatcher lookup change must not invalidate cached IR.
 
 #include "ee_dispatcher.h"
+#include "ee_exceptions.h"
 
 #include <cstdint>
 #include <utility>
@@ -53,6 +54,48 @@ s_ee_dispatch_result ee_dispatch_run_resolved(
     s_ee_runtime* runtime,
     uint32_t guest_pc,
     t_ee_translated_entry entry);
+
+// Keep the single-entry path visible to the host runner optimizer.
+// The out-of-line entry remains available to existing callers.
+inline s_ee_dispatch_result ee_dispatch_run_resolved_inline(
+    s_ee_cpu_state* cpu,
+    s_ee_runtime* runtime,
+    uint32_t guest_pc,
+    t_ee_translated_entry entry)
+{
+    s_ee_dispatch_result result{};
+    if (cpu != nullptr)
+    {
+        result.guest_pc = cpu->m_pc;
+        result.exit_reason = cpu->m_exit_reason;
+        if (entry != nullptr && cpu->m_pc == guest_pc)
+        {
+            result.status = e_ee_dispatch_status::EXITED;
+            if (guest_pc != 0u &&
+                ee_check_interrupts(cpu, runtime, guest_pc, 0u) != 0u)
+            {
+                result.exit_reason = static_cast<uint32_t>(
+                    e_ee_exit_reason::EE_EXIT_EXCEPTION);
+                result.guest_pc = cpu->m_pc;
+            }
+            else
+            {
+                const uint32_t reason = entry(cpu, runtime);
+                cpu->m_exit_reason = reason;
+                result.dispatch_count = 1u;
+                result.exit_reason = reason;
+                result.guest_pc = cpu->m_pc;
+                if (cpu->m_pc != 0u &&
+                    (reason == static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_RETURN) ||
+                     reason == static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH)))
+                {
+                    result.status = e_ee_dispatch_status::DISPATCH_LIMIT;
+                }
+            }
+        }
+    }
+    return result;
+}
 
 // Same contract as ee_dispatch_run(), using the index for owner lookup.
 // The index must have been built from table.compiled.
