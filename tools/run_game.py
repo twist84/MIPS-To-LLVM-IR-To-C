@@ -24,6 +24,8 @@ import sys
 import tempfile
 import time
 
+import shared_ee_ir as shared_ir
+
 
 STOP_PATTERN = re.compile(
     r"EE stopped: dispatched=(\d+) pc=0x([0-9a-fA-F]{8}) "
@@ -62,6 +64,7 @@ def translation_inputs(elf, recomp, source_root):
         ("ee_recomp", recomp),
         ("tools/run_game.py", source_root / "tools" / "run_game.py"),
         ("tools/verify_ir.py", source_root / "tools" / "verify_ir.py"),
+        ("tools/shared_ee_ir.py", source_root / "tools" / "shared_ee_ir.py"),
         ("tools/link_native_objects.py",
          source_root / "tools" / "link_native_objects.py"),
         ("src/ee/ee_dispatcher.cpp",
@@ -184,7 +187,7 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
     owned = covered_pcs({"functions": metadata["functions"][:count]})
     expected_addresses = []
     expected_symbols = set()
-    destination_dir = (work / "ir").resolve()
+    destination_dir = metadata_path.parent.resolve()
     for function in suffix:
         address = int(function["vaddr"], 0)
         if (address == 0 or address & 3 or address in owned or
@@ -351,12 +354,18 @@ def validate_preserved_translation(path, inputs, ir_sources,
     # Normal reuse still requires exact metadata bytes. Interrupted auto-
     # expansion is the only exception: a verified, appended function suffix
     # may have been published before the next cache record was committed.
+    current_ir = translated_ir_hashes(metadata_path)
+    recorded_ir = snapshot.get("ir_hashes")
+    if metadata_changed and shared_ir.verified_extension(
+            snapshot, metadata_path, ir_sources, current_ir):
+        # Another profile committed this shared map. Emit missing objects
+        # incrementally; do not re-lift its already verified guest IR.
+        print("run_game: synchronizing native profile to shared EE IR", flush=True)
+        return [], False
     suffix = (
         recover_append_only_metadata(snapshot, metadata_path)
         if metadata_changed else []
     )
-    current_ir = translated_ir_hashes(metadata_path)
-    recorded_ir = snapshot.get("ir_hashes")
     if suffix:
         if (not isinstance(recorded_ir, dict) or
                 any(current_ir.get(key) != digest
@@ -455,6 +464,8 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
         "ir_sources": ir_sources,
         "ir_hashes": translated_ir_hashes(metadata_path),
     }
+    if shared_ir.active(metadata_path):
+        shared_ir.publish(metadata_path, ir_sources, snapshot["ir_hashes"])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -509,6 +520,9 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
                 f"cached translation {file_path.name} changed; "
                 "rerun without --no-recompile"
             )
+    if shared_ir.active(metadata_path):
+        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"),
+                                translated_ir_hashes(metadata_path))
     # A valid cache created before snapshot support is also preserved.
     archive_known_function_manifest(path, snapshot)
 
@@ -881,6 +895,10 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
     Return the exact NEW IR paths for incremental object emission.
     """
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    shared_state = None
+    if shared_ir.active(metadata_path):
+        recorded = shared_ir.read_json(metadata_path.parent / shared_ir.PROVENANCE)
+        shared_state = shared_ir.current_state(metadata_path, recorded["ir_sources"])
     owned = covered_pcs(metadata)
     targets = [
         address for address in dict.fromkeys(addresses)
@@ -900,7 +918,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
         recomp, elf, output_dir,
         "--functions=" + ",".join(f"0x{pc:08x}" for pc in targets),
     ]
-    discovery_cache = work / "ir" / "ee_discovery_cache.bin"
+    discovery_cache = metadata_path.parent / "ee_discovery_cache.bin"
     if discovery_cache.is_file():
         command.append(f"--discovery-cache={discovery_cache}")
     run(command)
@@ -958,7 +976,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
                 flush=True,
             )
         source = Path(function["ir_path"])
-        destination = work / "ir" / source.name
+        destination = metadata_path.parent / source.name
         if (destination.exists() or
             source.name in published_names):
             raise ValueError(f"IR module filename collision: {destination}")
@@ -1000,6 +1018,11 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
             destination.unlink(missing_ok=True)
         raise
 
+    if shared_state is not None:
+        hashes = dict(shared_state["ir_hashes"])
+        hashes.update({path.name: sha256_path(path) for path in committed})
+        shared_ir.publish(metadata_path, shared_state["ir_sources"], hashes)
+
     print(f"auto-expand: appended {len(pending)} function(s) in one "
           f"discovery and metadata transaction", flush=True)
     return [destination for _, destination, _ in pending]
@@ -1013,7 +1036,7 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
         # modules need LLVM parsing/emission. The native linker still hashes
         # ALL cached guest objects before linking the combined DLL.
         input_files = (list(appended_ir) if appended_ir is not None
-                       else [str(work / "ir" / "*.ll")])
+                       else [str(metadata_path.parent / "*.ll")])
         command = [
             sys.executable, source_root / "tools" / "verify_ir.py",
             *input_files,
@@ -1356,6 +1379,7 @@ def main(argv=None):
         parser.error("--relink-existing cannot be combined with --extra-functions")
     if args.link_only and args.auto_expand:
         parser.error("--link-only cannot be combined with --auto-expand")
+    lock = None
     try:
         functions = args.functions
         if functions not in ("entry", "all") and (
@@ -1370,6 +1394,9 @@ def main(argv=None):
         elf = args.elf.resolve(strict=True)
         build = args.build_dir.resolve()
         work = args.work_dir.resolve()
+        acquired_lock = shared_ir.ir_lock(work)
+        acquired_lock.__enter__()
+        lock = acquired_lock
         entry = elf_entry(elf) if args.entry is None else args.entry
         if not 0 <= entry <= 0xFFFFFFFF or entry & 3:
             parser.error("--entry must be an aligned uint32")
@@ -1378,7 +1405,7 @@ def main(argv=None):
 
         source_root = Path(__file__).resolve().parents[1]
         runner = native_executable(build, "ee_game_runner", args.config)
-        metadata_path = work / "ir" / "ee_functions.json"
+        metadata_path = shared_ir.ir_directory(work) / "ee_functions.json"
         object_dir = work / "objects"
         library_name = "game-translated.dll" if os.name == "nt" else (
             "libgame-translated.dylib" if sys.platform == "darwin" else
@@ -1390,7 +1417,17 @@ def main(argv=None):
         inputs = translation_inputs(elf, recomp, source_root)
         ir_sources = ir_generation_inputs(elf, source_root)
 
+        if args.no_recompile and shared_ir.active(metadata_path) and cache_path.is_file():
+            snapshot = shared_ir.read_json(cache_path)
+            if snapshot.get("metadata_sha256") != sha256_path(metadata_path):
+                # Shared discovery can advance between boot-session passes.
+                # Preserved-translation validation proves the extension.
+                args.no_recompile = False
+                args.relink_existing = True
+
         if not (args.no_recompile or args.relink_existing):
+            if shared_ir.active(metadata_path):
+                raise ValueError("refusing to regenerate shared EE IR; use a new work directory")
             (work / "ir").mkdir(parents=True, exist_ok=True)
             for stale in (work / "ir").glob("*.ll"):
                 stale.unlink()
@@ -1880,6 +1917,9 @@ def main(argv=None):
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"run_game: {error}", file=sys.stderr)
         return 1
+    finally:
+        if lock is not None:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

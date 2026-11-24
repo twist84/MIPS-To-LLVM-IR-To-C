@@ -19,6 +19,7 @@ import threading
 import time
 
 from iop_disc_catalog import build_catalog, reconcile_runtime_loadfile
+from shared_ee_ir import ir_directory
 
 
 LINKED_COUNT_PATTERN = re.compile(
@@ -49,7 +50,7 @@ class c_ll_file_progress:
     """Show IR file counts in a terminal or the GUI launch log."""
 
     def __init__(self, work, stream=None, gui=False):
-        self.m_ir = Path(work) / "ir"
+        self.m_ir = ir_directory(work)
         self.m_stream = sys.stdout if stream is None else stream
         self.m_gui = gui
         self.m_enabled = gui or bool(getattr(self.m_stream, "isatty", lambda: False)())
@@ -283,7 +284,7 @@ def main(argv=None):
                            else "iop-disc-catalog.json")
     boot_log = work / ("quick-probe.log" if args.quick_probe else "boot.log")
     expansion_log = boot_log if args.quick_probe else work / "expansion.log"
-    metadata_path = work / "ir" / "ee_functions.json"
+    metadata_path = ir_directory(work) / "ee_functions.json"
     if report in (args.elf.resolve(), args.driver.resolve(), catalog_path,
                   boot_log, expansion_log, metadata_path, work / "translation-cache.json"):
         parser.error("report path must be distinct from inputs, logs, and cache metadata")

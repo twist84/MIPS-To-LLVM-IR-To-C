@@ -2304,9 +2304,12 @@ def main():
             variant_cache = json.loads((variant / "translation-cache.json").read_text(encoding="utf-8"))
             assert variant_cache["emit_opt"] == 2
             assert variant_cache["ir_hashes"] == json.loads(original_bytes)["ir_hashes"]
-            variant_metadata = json.loads((variant / "ir" / "ee_functions.json").read_text(encoding="utf-8"))
+            shared_marker = json.loads((variant / "shared-ir.json").read_text(encoding="utf-8"))
+            assert Path(shared_marker["ir_dir"]) == metadata_path.parent
+            assert not (variant / "ir").exists()
+            variant_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert len(variant_metadata["functions"]) == 2
-            assert all(Path(fn["ir_path"]).parent == variant / "ir"
+            assert all(Path(fn["ir_path"]).parent == metadata_path.parent
                        for fn in variant_metadata["functions"])
             states = []
             for work_dir, opt in ((root / "out", 0), (variant, 2)):
