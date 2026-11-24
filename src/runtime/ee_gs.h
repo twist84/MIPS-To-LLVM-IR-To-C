@@ -243,11 +243,17 @@ private:
         const uint8_t* data, size_t byte_count
     );
 
-    // Load a CLUT snapshot on TEX0/TEX2 writes. Staged IMAGE writes
-    // are overlaid for same-batch palette uploads before final commit.
+    // Shared transaction-local VRAM view for CLUT and local-copy reads.
+    const std::vector<uint8_t>& staged_vram_view(
+        const std::vector<s_vram_write>& writes,
+        std::vector<uint8_t>& shadow, size_t& applied
+    ) const;
+
+    // Load a CLUT snapshot on TEX0/TEX2 writes, before final commit.
     bool load_clut(
         s_ee_gs_state& state, uint64_t tex0,
-        const std::vector<s_vram_write>& writes
+        const std::vector<s_vram_write>& writes,
+        std::vector<uint8_t>& shadow, size_t& applied
     ) const;
 
     static bool write_register(

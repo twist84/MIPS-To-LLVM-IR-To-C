@@ -362,6 +362,81 @@ int main()
         return fail("unsupported palette storage modified GS state");
     }
 
+    // One transaction repeatedly reads the same palette, interleaved
+    // with full-word and nibble writes, then uses it as a local-copy
+    // source. Later writes must not retroactively change earlier CLUT
+    // slots. A failed transaction must discard the shared shadow.
+    constexpr uint32_t k_copy_cbp = 0x180u;
+    std::vector<ee::s_ee_gif_event> interleaved;
+    std::vector<uint8_t> payload;
+    const auto push_register = [&](uint32_t index, uint64_t value)
+    {
+        ee::s_ee_gif_event event{};
+        event.m_type = ee::e_ee_gif_event_type::packed;
+        event.m_register = 0xeu;
+        event.m_byte_offset = static_cast<uint32_t>(payload.size());
+        event.m_word0 = value;
+        event.m_word1 = index;
+        interleaved.push_back(event);
+        payload.resize(payload.size() + 16u);
+    };
+    const auto push_upload = [&](uint32_t psm, uint32_t value)
+    {
+        push_register(0x50u, bitblt(k_cbp32, 1u, psm));
+        push_register(0x51u, trxpos(0u, 1u));
+        push_register(0x52u, trxreg(1u, 1u));
+        push_register(0x53u, 0u);
+        ee::s_ee_gif_event event{};
+        event.m_type = ee::e_ee_gif_event_type::image;
+        event.m_byte_offset = static_cast<uint32_t>(payload.size());
+        event.m_qwc = 1u;
+        interleaved.push_back(event);
+        payload.resize(payload.size() + 16u);
+        set32(payload.data() + event.m_byte_offset, 0u, value);
+    };
+    const auto push_clut = [&](uint32_t cbp, uint32_t csa)
+    {
+        push_register(0x06u, tex0(
+            k_tbp4, 1u, 0x14u, cbp, 0u, 0u, csa, 1u));
+    };
+    push_clut(k_cbp32, 0u);
+    push_upload(0u, 0x11223344u);
+    push_clut(k_cbp32, 1u);
+    push_upload(0x24u, 0x0au); // PSMT4HL updates the low alpha nibble
+    push_clut(k_cbp32, 2u);
+    push_register(0x50u, bitblt(k_copy_cbp, 1u, 0u) |
+        k_cbp32 | (1ull << 16u));
+    push_register(0x51u, trxpos(0u, 1u) | (1ull << 16u));
+    push_register(0x52u, trxreg(1u, 1u));
+    push_register(0x53u, 2u);
+    push_clut(k_copy_cbp, 3u);
+    push_upload(0u, 0x55667788u);
+    const uint64_t before_interleaved = gs.state().m_clut_load_count;
+    const size_t accepted_count = interleaved.size();
+    push_register(0x60u, 0u);
+    if (gs.consume(interleaved.data(), interleaved.size(), payload.data(),
+            static_cast<uint32_t>(payload.size() / 16u)) ||
+        gs.state().m_clut_load_count != before_interleaved ||
+        !entry(gs, 8u, 0xf00dbabeu) ||
+        !gs.read_vram32(k_cbp32 * 256u + 8u, missing) ||
+        missing != 0xf00dbabeu ||
+        !gs.read_vram32(k_copy_cbp * 256u + 8u, missing) ||
+        missing != 0u ||
+        !gs.consume(interleaved.data(), accepted_count, payload.data(),
+            static_cast<uint32_t>(accepted_count)) ||
+        gs.state().m_clut_load_count != before_interleaved + 4u ||
+        !entry(gs, 8u, 0xf00dbabeu) ||
+        !entry(gs, 24u, 0x11223344u) ||
+        !entry(gs, 40u, 0x1a223344u) ||
+        !entry(gs, 56u, 0x1a223344u) ||
+        !gs.read_vram32(k_cbp32 * 256u + 8u, missing) ||
+        missing != 0x55667788u ||
+        !gs.read_vram32(k_copy_cbp * 256u + 8u, missing) ||
+        missing != 0x1a223344u)
+    {
+        return fail("incremental CLUT/local-copy view, nibble ordering or rollback");
+    }
+
     gs.reset();
     if (gs.read_clut_entry(8u, missing) ||
         gs.state().m_clut_load_count != 0u ||

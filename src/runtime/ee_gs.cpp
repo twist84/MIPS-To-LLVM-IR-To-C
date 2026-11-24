@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <unordered_map>
 #include <utility>
 
 namespace ee
@@ -553,9 +552,32 @@ uint64_t c_ee_gs_state::register_value(uint32_t reg) const
         m_state.m_registers[reg] : 0u;
 }
 
+const std::vector<uint8_t>& c_ee_gs_state::staged_vram_view(
+    const std::vector<s_vram_write>& writes,
+    std::vector<uint8_t>& shadow, size_t& applied) const
+{
+    // Committed VRAM is already the correct view until a transaction
+    // stages its first write. Only allocate a shadow when needed.
+    if (writes.empty())
+    {
+        return m_vram;
+    }
+    if (shadow.empty())
+    {
+        shadow = m_vram;
+    }
+    while (applied < writes.size())
+    {
+        apply_vram_write(shadow, writes[applied]);
+        ++applied;
+    }
+    return shadow;
+}
+
 bool c_ee_gs_state::load_clut(
     s_ee_gs_state& state, uint64_t tex0,
-    const std::vector<s_vram_write>& writes) const
+    const std::vector<s_vram_write>& writes,
+    std::vector<uint8_t>& shadow, size_t& applied) const
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_clut);
     const uint32_t cld = static_cast<uint32_t>((tex0 >> 61u) & 7u);
@@ -595,13 +617,10 @@ bool c_ee_gs_state::load_clut(
     const uint32_t cou = (texclut >> 6u) & 0x3fu;
     const uint32_t cov = (texclut >> 12u) & 0x3ffu;
 
-    std::array<uint32_t, 256> addresses{};
-    // Collect at most 1024 palette bytes. An optional same-batch IMAGE
-    // is overlaid only at these bytes, not copied into a 4 MiB VRAM
-    // snapshot or scanned separately for every palette entry.
-    std::unordered_map<uint32_t, uint8_t> palette_bytes;
-    palette_bytes.reserve(entries * entry_bytes);
-
+    // Read the exact VRAM contents visible at this TEX0/TEX2 write.
+    // Both CLUT loads and local copies share one transaction-local
+    // shadow, applying each staged write at most once to that view.
+    const auto& vram = staged_vram_view(writes, shadow, applied);
     for (uint32_t i = 0u; i < entries; ++i)
     {
         uint32_t x = 0u;
@@ -627,60 +646,11 @@ bool c_ee_gs_state::load_clut(
         const uint32_t address = cpsm == 0u ?
             psmct32_address(cbp, std::max(1u, cbw), x, y) :
             psmct16_address(cbp, std::max(1u, cbw), x, y, cpsm);
-        addresses[i] = address;
-        for (uint32_t b = 0u; b < entry_bytes; ++b)
-        {
-            const uint32_t at = (address + b) & (k_vram_bytes - 1u);
-            palette_bytes.emplace(at, m_vram[at]);
-        }
-    }
-
-    // Model exactly the bytes visible at this TEX0/TEX2 instruction.
-    // This also handles multiple writes to a single nibble in order.
-    for (const s_vram_write& write : writes)
-    {
-        if (write.m_bytes == 0u)
-        {
-            auto it = palette_bytes.find(write.m_offset);
-            if (it != palette_bytes.end())
-            {
-                const uint8_t mask = static_cast<uint8_t>(
-                    0x0fu << write.m_shift
-                );
-                it->second = static_cast<uint8_t>(
-                    (it->second & static_cast<uint8_t>(~mask)) |
-                    static_cast<uint8_t>(
-                        (write.m_value & 0x0fu) << write.m_shift
-                    )
-                );
-            }
-        }
-        else
-        {
-            for (uint32_t b = 0u; b < write.m_bytes; ++b)
-            {
-                const uint32_t at =
-                    (write.m_offset + b) & (k_vram_bytes - 1u);
-                auto it = palette_bytes.find(at);
-                if (it != palette_bytes.end())
-                {
-                    it->second = static_cast<uint8_t>(
-                        write.m_value >> (8u * b)
-                    );
-                }
-            }
-        }
-    }
-
-    for (uint32_t i = 0u; i < entries; ++i)
-    {
         uint32_t value = 0u;
         for (uint32_t b = 0u; b < entry_bytes; ++b)
         {
-            const uint32_t at =
-                (addresses[i] + b) & (k_vram_bytes - 1u);
-            value |= static_cast<uint32_t>(palette_bytes.at(at))
-                << (8u * b);
+            const uint32_t at = (address + b) & (k_vram_bytes - 1u);
+            value |= static_cast<uint32_t>(vram[at]) << (8u * b);
         }
 
         const uint32_t slot = csm != 0u ?
@@ -1372,23 +1342,14 @@ bool c_ee_gs_state::consume(
     std::vector<s_vram_write> writes;
     const uint64_t bytes = static_cast<uint64_t>(qwc) * 16u;
 
-    // Allocate a frozen VRAM view only for TRXDIR=2. Replay earlier
-    // staged IMAGE/copy writes before each local copy, so multiple
-    // operations within one GIF event batch observe the right order.
-    std::vector<uint8_t> local_source_vram;
+    // Shared, lazy transactional VRAM view. CLUT loads and local
+    // copies see only writes preceding the current GIF event.
+    std::vector<uint8_t> shadow_vram;
     size_t shadow_applied = 0u;
     const auto copy_local = [&]() -> bool
     {
-        if (local_source_vram.empty())
-        {
-            local_source_vram = m_vram;
-        }
-        while (shadow_applied < writes.size())
-        {
-            apply_vram_write(local_source_vram, writes[shadow_applied]);
-            ++shadow_applied;
-        }
-        return stage_local_copy(next, local_source_vram, writes);
+        const auto& source = staged_vram_view(writes, shadow_vram, shadow_applied);
+        return stage_local_copy(next, source, writes);
     };
 
     // A+D HWREG writes are 8-byte host-to-local image chunks. They
@@ -1428,7 +1389,8 @@ bool c_ee_gs_state::consume(
         {
             return true;
         }
-        return load_clut(next, next.m_registers[tex0_reg], writes);
+        return load_clut(next, next.m_registers[tex0_reg], writes,
+            shadow_vram, shadow_applied);
     };
 
     for (size_t i = 0; i < count; ++i)
