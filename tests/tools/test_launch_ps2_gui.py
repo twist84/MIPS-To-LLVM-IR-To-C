@@ -264,6 +264,8 @@ def test_runtime_options():
         restored["pad"] = "Scripted"
         restored["pad_script"] = "740:8:cross;3500:4:start+circle"
         restored["idle_skip"] = False
+        library = path / ("test.dll" if sys.platform == "win32" else "test.so")
+        library.touch()
         restored["iop_aot"] = str(path)
         restored["iop_capture"] = str(path / "capture")
         restored["iop_verify"] = True
@@ -304,6 +306,33 @@ def test_runtime_options():
         assert GUI.runtime_overrides("Recover translation cache", "Scripted", True, True, values) == {}
         neutral = GUI.runtime_overrides("Full replay", "Neutral", False, False, values)
         assert "SDBZ_PAD0_SCRIPT" not in neutral and "SDBZ_FRAME_DUMP" not in neutral
+
+        # A clean installation has no module directory yet. Both enabled
+        # controls must launch capture, not reject the missing library.
+        modules = path / "iop-aot" / "modules"
+        bootstrap = {
+            "iop_aot_enabled": True, "iop_aot": str(modules),
+            "iop_capture_enabled": True, "iop_capture": str(path / "capture"),
+        }
+        first = GUI.runtime_overrides("Full replay", "Neutral", True, True, bootstrap)
+        assert first["SDBZ_IOP_AOT_BUILD_OUT"] == str(modules.parent.resolve())
+        assert "SDBZ_IOP_AOT" not in first
+        assert "SDBZ_IOP_AOT_CAPTURE" in first
+        modules.mkdir(parents=True)
+        empty = GUI.runtime_overrides("Full replay", "Neutral", True, True, bootstrap)
+        assert empty == first
+        (modules / library.name).touch()
+        second = GUI.runtime_overrides("Full replay", "Neutral", True, True, bootstrap)
+        assert second["SDBZ_IOP_AOT"] == str(modules.resolve())
+        assert "SDBZ_IOP_AOT_BUILD_OUT" not in second
+        try:
+            GUI.runtime_overrides("Full replay", "Neutral", True, True,
+                                  {**bootstrap, "iop_capture_enabled": False,
+                                   "iop_aot": str(path / "missing.dll")})
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("accepted a missing load-only library")
     for raw in ("", "0:1:cross", "1:601:cross", "1:1:bad", "1:1:cross+", "1234567890:1:cross"):
         try:
             GUI.validate_pad_script(raw)

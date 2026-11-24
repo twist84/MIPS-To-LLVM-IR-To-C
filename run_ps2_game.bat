@@ -465,6 +465,18 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
     --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
+rem First-run GUI AOT bootstrap: the interpreter has now captured linked IRX.
+rem Build only after the runner exits (no loaded DLLs to replace). Preserve
+rem the session result even if optional AOT compilation fails.
+if defined SDBZ_IOP_AOT_BUILD_OUT if defined SDBZ_IOP_AOT_CAPTURE (
+    echo === Building captured IOP IRX module libraries ===
+    python tools\build_iop_aot.py --build-dir build --capture "%SDBZ_IOP_AOT_CAPTURE%" --out "%SDBZ_IOP_AOT_BUILD_OUT%" --bootstrap
+    if errorlevel 1 (
+        echo WARNING: IOP AOT build failed; captures retained for retry.
+    ) else (
+        echo IOP AOT libraries ready for the next launch.
+    )
+)
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.
 rem Keep the original native exit code; archive failure is non-fatal.

@@ -130,12 +130,24 @@ def runtime_overrides(mode, pad, window, snapshot, values):
         if not aot:
             raise ValueError("Choose an IOP AOT library or directory.")
         path = Path(aot).expanduser().resolve()
-        if not (path.is_file() or path.is_dir()):
-            raise ValueError("Choose an existing IOP AOT library or directory.")
-        env["SDBZ_IOP_AOT"] = str(path)
+        suffix = ".dll" if os.name == "nt" else ".so"
+        capture_enabled = values["iop_capture_enabled"] and mode != "Matched neutral/Cross"
+        # Both boxes enabled is the normal first-run workflow. No DLL can
+        # exist until the game has captured and linked its IRX modules.
+        has_libraries = path.is_file() or (
+            path.is_dir() and any(p.is_file() for p in path.glob(f"*{suffix}"))
+        )
+        if has_libraries:
+            env["SDBZ_IOP_AOT"] = str(path)
+        elif capture_enabled and path.name == "modules" and (not path.exists() or path.is_dir()):
+            if values["iop_verify"]:
+                raise ValueError("Disable IOP AOT verification until the first capture has been compiled.")
+            env["SDBZ_IOP_AOT_BUILD_OUT"] = str(path.parent)
+        else:
+            raise ValueError("No IOP AOT libraries found. Enable IRX capture and use an OUT/modules directory for the first build.")
     if values["iop_verify"]:
-        if not aot:
-            raise ValueError("IOP AOT verification requires an AOT library or directory.")
+        if "SDBZ_IOP_AOT" not in env:
+            raise ValueError("IOP AOT verification requires an existing AOT library.")
         env["SDBZ_IOP_AOT_VERIFY"] = "1"
     # Output-producing probes are excluded from matched runs to avoid one
     # replay overwriting the other. Capture is supported in ordinary sessions.
@@ -271,7 +283,7 @@ OPTION_HELP = {
     "Trace V0 writes": "Trace low-64-bit V0 assignments within an aligned guest PC range START:END (first 64 events). Example: 0x00137970:0x00137d18.",
     "Accelerate idle polling loops": "Enable the runtime idle-loop accelerator. Uncheck for baseline comparisons.",
     "Pad script": "Select Scripted on the Game tab. Example: 740:8:cross,2900:8:cross,3500:4:start. Combine buttons with +.",
-    "IOP AOT library or directory": "Load a single compiled IRX library or the modules directory produced by tools/build_iop_aot.py.",
+    "IOP AOT library or directory": "Load an IRX library or OUT/modules directory. With capture enabled, missing libraries are built after the first replay.",
     "Capture linked IRX modules": "Capture relocated and linked IRX bytes for tools/build_iop_aot.py. Directory created when enabled.",
     "Verify IOP AOT (diagnostic only)": "Replay translated calls on the interpreter; expensive and may repeat MMIO side effects. Do not use for normal play.",
     "Trace IPU": "Log IPU commands and MMIO activity.",
@@ -802,7 +814,7 @@ class Launcher(ttk.Frame):
                 Tooltip(caption, OPTION_HELP[label])
                 Tooltip(entry, OPTION_HELP[label])
         ttk.Label(
-            self.runtime, text="AOT: capture IRX modules, build with tools/build_iop_aot.py, then select OUT/modules. "
+            self.runtime, text="AOT: enable loading and capture together to build missing DLLs after the first replay. Next launch loads them. "
             "Matched runs suppress scripted input and output dumps. Cache recovery ignores runtime options.",
             wraplength=670,
         ).grid(row=len(visible_runtime) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
@@ -1071,6 +1083,7 @@ class Launcher(ttk.Frame):
         for key, _, _ in RUNTIME_SETTINGS.values():
             if key is not None:
                 env.pop(key, None)
+        env.pop("SDBZ_IOP_AOT_BUILD_OUT", None)
         prepare_runtime_outputs(overrides)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
                    SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))
