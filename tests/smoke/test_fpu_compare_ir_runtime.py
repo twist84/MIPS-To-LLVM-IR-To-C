@@ -504,7 +504,7 @@ def ee_fpu_clamp_result_bits(bits):
 
 def expected_sqrt_bits(source_bits):
     if (source_bits & 0x7F800000) == 0:
-        return source_bits & 0x80000000
+        return 0
     normalised = ee_fpu_normalise_bits(source_bits)
     absolute = normalised & 0x7FFFFFFF
     return ieee_f32_bits(math.sqrt(f32_value(absolute)))
@@ -527,13 +527,14 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words):
         fixture, temp_dir, "sqrt_s", target
     )
     retained = (engine, module, target_machine)
-    initial_fcsr = 0xA593F47E
+    initial_fcsr = 0xA593F43E
     cleared_fcsr = initial_fcsr & ~0x00030000
 
     for source_bits, label in source_words:
         backing, state = aligned_state()
         _ = (backing, retained)
-        state.fpr[1] = source_bits
+        state.fpr[0] = 0x41800000  # fs is not an operand (sqrt(16) = 4)
+        state.fpr[2] = source_bits
         state.fpr[6] = 0xAABBCCDD11223344
         state.fcsr = initial_fcsr
 
@@ -547,12 +548,12 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words):
 
         expected = expected_sqrt_bits(source_bits)
         expected_fcsr = cleared_fcsr
-        if (source_bits & 0x7F800000) != 0 and (source_bits & 0x80000000):
+        if source_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
         require(state.fpr[6] == expected,
                 prefix + f"FPR[6] got 0x{state.fpr[6]:016x}, "
                          f"expected 0x{expected:08x}")
-        require(state.fpr[1] == source_bits,
+        require(state.fpr[2] == source_bits and state.fpr[0] == 0x41800000,
                 prefix + "source FPR was modified")
         require(state.fcsr == expected_fcsr,
                 prefix + f"FCSR got 0x{state.fcsr:08x}, "

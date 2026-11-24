@@ -106,6 +106,8 @@ int main(int argc, char** argv)
     else if (std::strcmp(mode, "cvt_s_w") == 0)
         word = (0x11u << 26) | (0x14u << 21) | (1u << 11) |
                (static_cast<uint32_t>(destination_or_cc) << 6) | funct;
+    else if (std::strcmp(mode, "sqrt_s") == 0)
+        word = make_cop1_s(2, 0, destination_or_cc, funct);
     else
         word = make_cop1_s(2, 1, destination_or_cc, funct);
     std::map<uint32_t, ee::s_ee_instruction> insn_map;
