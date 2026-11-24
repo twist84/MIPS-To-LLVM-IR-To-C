@@ -779,7 +779,11 @@ int main()
     expect("mtc1", R(0x11,0x04,4,5,0,0), "cop1_transfer", V);
     expect("cfc1 fcsr", R(0x11,0x02,4,31,0,0), "cop1_fcsr", V);
     expect("ctc1 fcsr", R(0x11,0x06,4,31,0,0), "cop1_fcsr", V);
-    expect("cfc1 other", R(0x11,0x02,4,0,0,0), "cop1_control", U);
+    expect("cfc1 fcr0", R(0x11,0x02,4,0,0,0), "cop1_control", V);
+    expect("cfc1 fcr0 alias", R(0x11,0x02,4,15,0,0), "cop1_control", V);
+    expect("cfc1 fcr31 alias", R(0x11,0x02,4,16,0,0), "cop1_control", V);
+    expect("ctc1 fcr0", R(0x11,0x06,4,0,0,0), "cop1_control", V);
+    expect("ctc1 other", R(0x11,0x06,4,16,0,0), "cop1_control", U);
     expect("add.s", R(0x11,0x10,5,6,7,0x00), "cop1_s", V);
     expect("rsqrt.s", R(0x11,0x10,5,6,7,0x16), "cop1_s", V);
     expect("madda.s", R(0x11,0x10,5,6,7,0x1e), "cop1_s", V);

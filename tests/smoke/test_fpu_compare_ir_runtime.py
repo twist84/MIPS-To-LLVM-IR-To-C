@@ -378,8 +378,7 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
     state.gpr[6][1] = gpr_hi_sentinel
 
     result = guest_fn(ctypes.pointer(state), None)
-    expected_fcsr = initial_fcsr
-    expected_gpr = ctypes.c_int32(expected_fcsr).value & 0xFFFFFFFFFFFFFFFF
+    expected_gpr = 0x0182C051 # reserved bits masked; hardwired bits set
     require(result == 3, f"CFC1: expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.gpr[6][0] == expected_gpr,
             f"CFC1 failed to sign-extend FCSR: 0x{state.gpr[6][0]:016x}")
@@ -398,11 +397,52 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
 
     result = guest_fn(ctypes.pointer(state), None)
     require(result == 3, f"CTC1: expected EE_EXIT_DISPATCH (3), got {result}")
-    require(state.fcsr == 0xABCDEF01,
-            f"CTC1 failed to write the low GPR word to FCSR: 0x{state.fcsr:08x}")
+    require(state.fcsr == 0x0181C001,
+            f"CTC1 failed to mask FCSR: 0x{state.fcsr:08x}")
     require(state.gpr[8][0] == 0x12345678ABCDEF01 and
             state.gpr[8][1] == gpr_hi_sentinel,
             "CTC1 modified its source GPR")
+
+    # Hardware observations in ps2autotests ee_fpu/fcr.expected.
+    for mode, expected in [
+        ("cfc1_fcr0", 0x00002e30),
+        ("cfc1_alias15", 0x00002e30),
+        ("cfc1_alias16", 0x0183c079),
+        ("cfc1", 0x0183c079),
+    ]:
+        guest_fn, engine, module, target_machine = compile_jit(
+            fixture, temp_dir, mode, target
+        )
+        backing, state = aligned_state()
+        _ = (backing, engine, module, target_machine)
+        state.fcsr = 0xffffffff
+        state.gpr[6][1] = gpr_hi_sentinel
+        require(guest_fn(ctypes.pointer(state), None) == 3 and
+                state.gpr[6][0] == expected and
+                state.gpr[6][1] == gpr_hi_sentinel and
+                state.fcsr == 0xffffffff,
+                f"{mode}: FCR read alias or read-only state mismatch")
+
+    guest_fn, engine, module, target_machine = compile_jit(
+        fixture, temp_dir, "ctc1_fcr0", target
+    )
+    backing, state = aligned_state()
+    _ = (backing, engine, module, target_machine)
+    state.fcsr = 0x01000079
+    state.gpr[8][0] = 0xffffffff
+    require(guest_fn(ctypes.pointer(state), None) == 3 and
+            state.fcsr == 0x01000079 and state.gpr[8][0] == 0xffffffff,
+            "CTC1 FCR0 must not modify FCR31 or the source GPR")
+
+    guest_fn, engine, module, target_machine = compile_jit(
+        fixture, temp_dir, "ctc1", target
+    )
+    backing, state = aligned_state()
+    _ = (backing, engine, module, target_machine)
+    state.gpr[8][0] = 0xffffffff
+    require(guest_fn(ctypes.pointer(state), None) == 3 and
+            state.fcsr == 0x0183c079,
+            "CTC1 FCR31 all-one write must preserve only architectural bits")
 
     guest_fn, engine, module, target_machine = compile_jit(
         fixture, temp_dir, "ctc1_after_branch", target
@@ -418,7 +458,7 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
             f"CTC1 after branch: expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.pc == ENTRY_PC + 16,
             f"CTC1 after branch: unexpected exit PC 0x{state.pc:08x}")
-    require(state.fcsr == 0x2345,
+    require(state.fcsr == 0x01000041,
             f"CTC1 successor read stale GPR state: FCSR=0x{state.fcsr:08x}")
     require(state.gpr[8][0] == 0x2345,
             f"ADDIU predecessor write was lost: GPR8=0x{state.gpr[8][0]:016x}")
@@ -441,7 +481,7 @@ def run_bc1_delay_cases(fixture, temp_dir, target):
     result = guest_fn(ctypes.pointer(state), None)
     require(result == 0,
             f"BC1T delay-slot: expected return exit (0), got {result}")
-    require(state.fcsr == 0,
+    require(state.fcsr == 0x01000001,
             f"BC1T delay-slot CTC1 did not execute: FCSR=0x{state.fcsr:08x}")
     require(state.gpr[10][0] == 0x2222,
             "BC1T was evaluated after its delay slot instead of before it")

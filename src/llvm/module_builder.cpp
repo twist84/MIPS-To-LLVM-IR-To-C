@@ -2140,22 +2140,47 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP1_CFC1))
         {
-            // Move from FCR; only FCR31 (FCSR) is meaningful here.
-            std::string p = newtemp();
-            std::string v = newtemp();
-            std::string sx = newtemp();
-            m_out += "  " + p + " = " + fcsr_ptr() + "\n";
-            m_out += "  " + v + " = load i32, ptr " + p + "\n";
-            m_out += "  " + sx + " = sext i32 " + v + " to i64\n";
-            set_gpr_lo64(ft, sx);
+            // Hardware FCR read aliases: selectors 0..15 read FCR0,
+            // 16..31 read FCR31. See ps2autotests ee_fpu/fcr.expected.
+            if (fs < 16u)
+            {
+                set_gpr_lo64(ft, "11824"); // R5900 FPU revision 0x2e30
+            }
+            else
+            {
+                const std::string p = newtemp();
+                const std::string raw = newtemp();
+                const std::string masked = newtemp();
+                const std::string value = newtemp();
+                const std::string sx = newtemp();
+                m_out += "  " + p + " = " + fcsr_ptr() + "\n";
+                m_out += "  " + raw + " = load i32, ptr " + p + "\n";
+                m_out += "  " + masked + " = and i32 " + raw + ", " +
+                         std::to_string(0x0083c078u) + "\n";
+                m_out += "  " + value + " = or i32 " + masked + ", " +
+                         std::to_string(0x01000001u) + "\n";
+                m_out += "  " + sx + " = zext i32 " + value + " to i64\n";
+                set_gpr_lo64(ft, sx);
+            }
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP1_CTC1))
         {
-            std::string lo32 = newtemp();
-            std::string p = newtemp();
-            m_out += "  " + lo32 + " = trunc i64 " + src_lo(ft) + " to i32\n";
-            m_out += "  " + p + " = " + fcsr_ptr() + "\n";
-            m_out += "  store i32 " + lo32 + ", ptr " + p + "\n";
+            // FCR0 is read-only. FCR31 exposes only condition,
+            // cause and sticky bits plus hardwired FS and RM bits.
+            if (fs == 31u)
+            {
+                const std::string lo32 = newtemp();
+                const std::string masked = newtemp();
+                const std::string value = newtemp();
+                const std::string p = newtemp();
+                m_out += "  " + lo32 + " = trunc i64 " + src_lo(ft) + " to i32\n";
+                m_out += "  " + masked + " = and i32 " + lo32 + ", " +
+                         std::to_string(0x0083c078u) + "\n";
+                m_out += "  " + value + " = or i32 " + masked + ", " +
+                         std::to_string(0x01000001u) + "\n";
+                m_out += "  " + p + " = " + fcsr_ptr() + "\n";
+                m_out += "  store i32 " + value + ", ptr " + p + "\n";
+            }
         }
         else if (fmt == 0x08)
         {

@@ -66,6 +66,10 @@ int main(int argc, char** argv)
     else if (std::strcmp(mode, "mfc1") == 0 ||
              std::strcmp(mode, "mtc1") == 0 ||
              std::strcmp(mode, "cfc1") == 0 ||
+             std::strcmp(mode, "cfc1_fcr0") == 0 ||
+             std::strcmp(mode, "cfc1_alias15") == 0 ||
+             std::strcmp(mode, "cfc1_alias16") == 0 ||
+             std::strcmp(mode, "ctc1_fcr0") == 0 ||
              std::strcmp(mode, "ctc1") == 0 ||
              std::strcmp(mode, "ctc1_after_branch") == 0 ||
              std::strcmp(mode, "bc1_t_delay") == 0 ||
@@ -101,6 +105,14 @@ int main(int argc, char** argv)
         word = make_cop1_transfer(4, 8, 6);
     else if (std::strcmp(mode, "cfc1") == 0)
         word = make_cop1_transfer(2, 6, 31);
+    else if (std::strcmp(mode, "cfc1_fcr0") == 0)
+        word = make_cop1_transfer(2, 6, 0);
+    else if (std::strcmp(mode, "cfc1_alias15") == 0)
+        word = make_cop1_transfer(2, 6, 15);
+    else if (std::strcmp(mode, "cfc1_alias16") == 0)
+        word = make_cop1_transfer(2, 6, 16);
+    else if (std::strcmp(mode, "ctc1_fcr0") == 0)
+        word = make_cop1_transfer(6, 8, 0);
     else if (std::strcmp(mode, "ctc1") == 0)
         word = make_cop1_transfer(6, 8, 31);
     else if (std::strcmp(mode, "cvt_s_w") == 0)

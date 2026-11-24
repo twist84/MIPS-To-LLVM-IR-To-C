@@ -886,6 +886,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                 insn.valid = e_ee_valid::VALID;
                 set_mnemonic(insn, "cop1_fcsr");
             }
+            else if (insn.rs == static_cast<uint8_t>(e_ee_opcode::COP1_CFC1) ||
+                     insn.rd == 0)
+            {
+                // FCR0 is read-only; CFC1 read aliases are observed on PS2.
+                // Other CTC1 selectors remain unsupported.
+                insn.valid = e_ee_valid::VALID;
+                set_mnemonic(insn, "cop1_control");
+            }
             else
             {
                 insn.valid = e_ee_valid::UNSUPPORTED;
