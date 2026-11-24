@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <string>
 #include <vector>
@@ -318,7 +319,7 @@ private:
     bool estimate_module_size(
         const std::vector<uint8_t>& bytes, uint32_t* size
     ) const;
-    uint32_t next_ready() const;
+    uint32_t next_ready(uint64_t& next_wake) const;
     void wake_due();
     bool start_guest_interrupt(uint32_t line,
                                const s_kernel_interrupt_target& target);
@@ -340,6 +341,9 @@ private:
     uint32_t m_critical_thread_id = 0u;
     bool m_interrupts_suspended = false;
     uint64_t m_cycles = 0u;
+    // Conservative lower bound on timed thread wakes. Cancellation may
+    // leave it early, but scheduling a sleep must never leave it late.
+    uint64_t m_next_thread_wake = std::numeric_limits<uint64_t>::max();
     bool m_rom0_boot_active = false;
     uint32_t m_next_module_id = 1u;
     uint32_t m_next_thread_id = 1u;

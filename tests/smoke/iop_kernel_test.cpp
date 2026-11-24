@@ -447,6 +447,87 @@ int main()
         return fail("kernel reset did not clear isolated IOP state");
     }
 
+    // Two timed sleeps installed in descending deadline order, with
+    // an intervening HLE event. The wake hint must never skip an
+    // earlier inserted deadline or move the HLE event.
+    const uint32_t sleeper_program[] =
+    {
+        0x2402000bu, // addiu v0,zero,11
+        0x0000000cu, // syscall
+        0x25080001u, // addiu t0,t0,1
+        0x1000fffeu, // beq zero,zero,-2
+        0x00000000u
+    };
+    if (!put_program(kernel.cpu(), 0x1000u, sleeper_program, 5u) ||
+        !put_program(kernel.cpu(), 0x1100u, sleeper_program, 5u))
+    {
+        return fail("cannot install timed sleep fixture");
+    }
+    const uint32_t late = kernel.create_thread(0x1000u, 0u, 4u, 0x400u);
+    const uint32_t early = kernel.create_thread(0x1100u, 0u, 4u, 0x400u);
+    if (!late || !early || !kernel.start_thread(late) ||
+        !kernel.start_thread(early))
+    {
+        return fail("cannot start timed sleep fixture");
+    }
+    kernel.bind_syscall(
+        [&](iop::c_kernel& active, uint32_t service) -> bool
+        {
+            return service == 11u && active.sleep_current(
+                active.current_thread_id() == late ? 20u : 8u);
+        });
+    result = kernel.run(4u, 2u);
+    if (result.m_executed != 4u ||
+        kernel.thread(late)->m_status != iop::e_thread_status::blocked ||
+        kernel.thread(early)->m_status != iop::e_thread_status::blocked)
+    {
+        return fail("timed sleep fixture did not block");
+    }
+    const uint64_t late_wake = kernel.thread(late)->m_wake_cycle;
+    const uint64_t early_wake = kernel.thread(early)->m_wake_cycle;
+    const uint64_t event_cycle = kernel.cycles() + 2u;
+    uint64_t observed_event_cycle = 0u;
+    if (event_cycle >= early_wake || early_wake >= late_wake ||
+        !kernel.schedule_hle_event(2u, [&]()
+        {
+            observed_event_cycle = kernel.cycles();
+        }))
+    {
+        return fail("cannot schedule intervening HLE event");
+    }
+    result = kernel.run(early_wake - kernel.cycles(), 1u);
+    if (result.m_executed != 0u || kernel.cycles() != early_wake ||
+        observed_event_cycle != event_cycle ||
+        kernel.thread(early)->m_status != iop::e_thread_status::blocked)
+    {
+        return fail("idle advance did not preserve event/deadline boundaries");
+    }
+    result = kernel.run(1u, 1u);
+    if (result.m_executed != 1u || result.m_thread_id != early ||
+        kernel.thread(early)->m_cpu.m_gpr[8] != 1u ||
+        kernel.thread(late)->m_status != iop::e_thread_status::blocked)
+    {
+        return fail("earliest timed thread did not resume on deadline");
+    }
+    // Cancellation leaves a conservative hint until the next scan,
+    // but must not create a phantom idle deadline.
+    if (!kernel.stop_thread(early) || !kernel.wake_thread(late) ||
+        !kernel.stop_thread(late))
+    {
+        return fail("cannot cancel timed sleep fixture");
+    }
+    result = kernel.run(late_wake - kernel.cycles() + 1u, 1u);
+    if (result.m_stop != iop::e_kernel_stop::idle ||
+        result.m_executed != 0u || kernel.cycles() != late_wake + 1u)
+    {
+        return fail("cancelled sleep changed idle timing");
+    }
+    kernel.reset();
+    if (kernel.cycles() != 0u || !kernel.threads().empty())
+    {
+        return fail("timed sleep reset did not clear guest state");
+    }
+
     std::printf("IOP kernel: PASS\n");
     return 0;
 }

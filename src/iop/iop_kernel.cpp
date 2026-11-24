@@ -86,6 +86,7 @@ void c_kernel::reset()
     m_critical_thread_id = 0u;
     m_interrupts_suspended = false;
     m_cycles = 0u;
+    m_next_thread_wake = std::numeric_limits<uint64_t>::max();
     m_next_module_id = 1u;
     m_next_thread_id = 1u;
     m_next_alarm_id = 1u;
@@ -1379,6 +1380,7 @@ bool c_kernel::sleep_current(uint64_t delay_cycles)
     }
     found->second.m_status = e_thread_status::blocked;
     found->second.m_wake_cycle = m_cycles + delay_cycles;
+    m_next_thread_wake = std::min(m_next_thread_wake, found->second.m_wake_cycle);
     found->second.m_wait_type = 2u;
     return true;
 }
@@ -1436,7 +1438,7 @@ bool c_kernel::start_guest_interrupt(
     return true;
 }
 
-uint32_t c_kernel::next_ready() const
+uint32_t c_kernel::next_ready(uint64_t& next_wake) const
 {
     if (m_interrupts_suspended && m_critical_thread_id != 0u)
     {
@@ -1465,6 +1467,14 @@ uint32_t c_kernel::next_ready() const
         const s_kernel_thread& thread = item.second;
         if (thread.m_status != e_thread_status::ready)
         {
+            // Discover exact idle deadlines in the same traversal.
+            // Do not use the conservative wake hint to advance time:
+            // early cancellation must not introduce a new boundary.
+            if (thread.m_status == e_thread_status::blocked &&
+                thread.m_wake_cycle > m_cycles)
+            {
+                next_wake = std::min(next_wake, thread.m_wake_cycle);
+            }
             continue;
         }
         if (thread.m_priority < priority)
@@ -1538,16 +1548,29 @@ void c_kernel::wake_due()
         thread.m_cpu = state;
         start_thread(alarm.m_thread_id);
     }
-    for (auto& item : m_threads)
+    // HLE callbacks and alarms retain their original ordering. Only
+    // the timed-thread scan can be skipped when no sleep is due.
+    if (m_cycles >= m_next_thread_wake)
     {
-        s_kernel_thread& thread = item.second;
-        if (thread.m_status == e_thread_status::blocked &&
-            thread.m_wake_cycle != 0u &&
-            thread.m_wake_cycle <= m_cycles)
+        m_next_thread_wake = std::numeric_limits<uint64_t>::max();
+        for (auto& item : m_threads)
         {
-            thread.m_status = e_thread_status::ready;
-            thread.m_wake_cycle = 0u;
-            thread.m_wait_type = 0u;
+            s_kernel_thread& thread = item.second;
+            if (thread.m_status == e_thread_status::blocked &&
+                thread.m_wake_cycle != 0u)
+            {
+                if (thread.m_wake_cycle <= m_cycles)
+                {
+                    thread.m_status = e_thread_status::ready;
+                    thread.m_wake_cycle = 0u;
+                    thread.m_wait_type = 0u;
+                }
+                else
+                {
+                    m_next_thread_wake = std::min(
+                        m_next_thread_wake, thread.m_wake_cycle);
+                }
+            }
         }
     }
 }
@@ -1662,22 +1685,10 @@ s_kernel_run_result c_kernel::run(
                 }
             }
         }
-        const uint32_t id = next_ready();
+        uint64_t next_wake = std::numeric_limits<uint64_t>::max();
+        const uint32_t id = next_ready(next_wake);
         if (id == 0u)
         {
-            uint64_t next_wake =
-                std::numeric_limits<uint64_t>::max();
-            for (const auto& item : m_threads)
-            {
-                const s_kernel_thread& thread = item.second;
-                if (thread.m_status == e_thread_status::blocked &&
-                    thread.m_wake_cycle > m_cycles)
-                {
-                    next_wake = std::min(
-                        next_wake, thread.m_wake_cycle
-                    );
-                }
-            }
             for (const auto& item : m_alarms)
             {
                 if (!item.second.m_cancelled &&
