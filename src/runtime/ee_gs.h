@@ -115,7 +115,8 @@ public:
     // Keep per-batch staged writes bounded for malformed transfer sizes.
     static constexpr size_t k_max_local_copy_pixels = k_vram_bytes;
 
-    // GS VRAM is a separate 4 MiB allocation, not EE RAM.
+    // GS VRAM is separate from EE RAM. The vector reference remains
+    // valid, but its backing storage may change after consume().
     const std::vector<uint8_t>& vram() const;
     bool read_vram8(uint32_t offset, uint8_t& value) const;
     // Returns false for out-of-range raw VRAM accesses.

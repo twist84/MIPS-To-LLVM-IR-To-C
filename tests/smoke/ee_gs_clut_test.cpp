@@ -413,6 +413,21 @@ int main()
     push_upload(0u, 0x55667788u);
     const uint64_t before_interleaved = gs.state().m_clut_load_count;
     const size_t accepted_count = interleaved.size();
+    // Independent single-event commits never need the transaction's
+    // accumulated shadow. Compare every VRAM byte against that path.
+    ee::c_ee_gs_state reference = gs;
+    for (const auto& original : interleaved)
+    {
+        auto event = original;
+        event.m_byte_offset = 0u;
+        if (!reference.consume(&event, 1u,
+                payload.data() + original.m_byte_offset, 1u))
+        {
+            return fail("single-event reference rejected valid interleaved event");
+        }
+    }
+    const auto& live_vram = gs.vram();
+    const auto original_vram = live_vram;
     push_register(0x60u, 0u);
     if (gs.consume(interleaved.data(), interleaved.size(), payload.data(),
             static_cast<uint32_t>(payload.size() / 16u)) ||
@@ -422,6 +437,7 @@ int main()
         missing != 0xf00dbabeu ||
         !gs.read_vram32(k_copy_cbp * 256u + 8u, missing) ||
         missing != 0u ||
+        live_vram != original_vram ||
         !gs.consume(interleaved.data(), accepted_count, payload.data(),
             static_cast<uint32_t>(accepted_count)) ||
         gs.state().m_clut_load_count != before_interleaved + 4u ||
@@ -432,9 +448,36 @@ int main()
         !gs.read_vram32(k_cbp32 * 256u + 8u, missing) ||
         missing != 0x55667788u ||
         !gs.read_vram32(k_copy_cbp * 256u + 8u, missing) ||
-        missing != 0x1a223344u)
+        missing != 0x1a223344u ||
+        live_vram != reference.vram())
     {
         return fail("incremental CLUT/local-copy view, nibble ordering or rollback");
+    }
+    // Alternate a direct commit and a shadow-backed commit so scratch
+    // reuse cannot accidentally resurrect bytes from a previous batch.
+    if (!upload(gs, k_copy_cbp, 1u, 0u, 0u, 1u,
+                1u, 1u, revised.data(), 1u) ||
+        !upload(reference, k_copy_cbp, 1u, 0u, 0u, 1u,
+                1u, 1u, revised.data(), 1u))
+    {
+        return fail("direct upload after shadow publication failed");
+    }
+    for (const auto& original : std::vector<ee::s_ee_gif_event>(
+            interleaved.begin(), interleaved.begin() + accepted_count))
+    {
+        auto event = original;
+        event.m_byte_offset = 0u;
+        if (!reference.consume(&event, 1u,
+                payload.data() + original.m_byte_offset, 1u))
+        {
+            return fail("second single-event reference failed");
+        }
+    }
+    if (!gs.consume(interleaved.data(), accepted_count, payload.data(),
+            static_cast<uint32_t>(accepted_count)) ||
+        live_vram != reference.vram())
+    {
+        return fail("second shadow publication differs from direct commits");
     }
 
     // Exercise every CSM1 table entry for both palette sizes and all

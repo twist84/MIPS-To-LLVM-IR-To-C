@@ -1710,12 +1710,21 @@ bool c_ee_gs_state::consume(
         }
     }
 
-    // Commit only after every event has passed validation, including
-    // TRXDIR=2. Reuse the same byte/nibble application as the frozen
-    // local-copy view to keep single-batch ordering deterministic.
-    for (const s_vram_write& write : writes)
+    // Commit only after every event has passed validation. If a CLUT
+    // or local copy materialized the shadow, it already contains the
+    // applied prefix of the journal. Complete just its remaining suffix
+    // and publish it by swapping the two reusable VRAM allocations.
+    if (!shadow_vram.empty())
     {
-        apply_vram_write(m_vram, write);
+        (void)staged_vram_view(writes, shadow_vram, shadow_applied);
+        m_vram.swap(shadow_vram);
+    }
+    else
+    {
+        for (const s_vram_write& write : writes)
+        {
+            apply_vram_write(m_vram, write);
+        }
     }
     if (count != 0u)
     {
