@@ -1,6 +1,7 @@
 #include "ee_vu1.h"
 #include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
+#include "ee_vu1_dependency.h"
 
 #include <array>
 #include <cstdint>
@@ -232,6 +233,79 @@ int main()
                "FMAC vector RAW dependency stalls"))
     {
         return 1;
+    }
+
+    // A resident decode cache must not retain stale dependency metadata
+    // when MPG replaces either half of the instruction at the same PC.
+    // Check the load and vector masks against a fresh decode, then revisit
+    // the original pair (as after an uncommitted VIF transaction).
+    {
+        ee::c_ee_vu1_decode_cache cache;
+        const uint32_t ilw = (0x04u << 25u) | (8u << 21u) |
+            (9u << 16u) | (4u << 11u);
+        const uint32_t add_x = upper(0x28u, 4u, 2u, 3u, 8u);
+        const uint32_t add_w = upper(0x28u, 4u, 2u, 3u, 1u);
+        const s_pair pairs[] = {
+            {k_lower_nop, add_x},
+            {k_lower_nop, add_x},
+            {ilw, add_x},
+            {ilw, add_w},
+            {ilw, add_w | 0x80000000u},
+            {k_lower_nop, add_x}
+        };
+        for (const auto& pair : pairs)
+        {
+            const auto expected = ee::s_ee_vu1_dependency::decode(
+                pair.m_lower, pair.m_upper);
+            const auto& actual = cache.lookup(
+                0x3ff8u, pair.m_lower, pair.m_upper);
+            if (!check(actual.m_reg == expected.m_reg &&
+                       actual.m_mask == expected.m_mask &&
+                       actual.m_wreg == expected.m_wreg &&
+                       actual.m_wmask == expected.m_wmask &&
+                       actual.m_n == expected.m_n &&
+                       actual.m_wn == expected.m_wn &&
+                       actual.m_vi_reads == expected.m_vi_reads &&
+                       actual.m_vi_load == expected.m_vi_load,
+                       "VU1 decode cache reused stale metadata"))
+            {
+                return 1;
+            }
+        }
+    }
+
+    // Reuse the same micro-PCs with a dependent X lane, then replace
+    // the consumer with an unrelated W lane. The scoreboard is fresh
+    // on each run, and the changed upper word must remove the stall.
+    {
+        const uint32_t producer = upper(0x28u, 4u, 2u, 3u, 8u);
+        const uint32_t consumer_x =
+            upper(0x2au, 5u, 4u, 3u, 8u) | 0x40000000u;
+        const uint32_t consumer_w =
+            upper(0x2au, 5u, 4u, 3u, 1u) | 0x40000000u;
+        ee::s_ee_vu1_state initial{};
+        initial.m_initialized = true;
+        initial.m_vf[2][0] = 0x3f800000u;
+        initial.m_vf[3][0] = 0x40000000u;
+        initial.m_vf[3][3] = 0x40000000u;
+        initial.m_vf[4][3] = 0x40400000u;
+        for (uint32_t consumer : {consumer_x, consumer_w, consumer_x})
+        {
+            auto resident = initial;
+            if (!check(run(resident, {
+                           {k_lower_nop, producer},
+                           {k_lower_nop, consumer},
+                           {k_lower_nop, k_upper_nop}
+                       }, data, issue) &&
+                       issue.m_steps == 3u &&
+                       issue.m_cycles == (consumer == consumer_x ? 6u : 3u) &&
+                       resident.m_vf[5][consumer == consumer_x ? 0u : 3u] ==
+                           0x40c00000u,
+                       "VU1 replacement microcode dependency timing"))
+            {
+                return 1;
+            }
+        }
     }
 
     // Unsupported debug/interrupt upper bits still fail closed.

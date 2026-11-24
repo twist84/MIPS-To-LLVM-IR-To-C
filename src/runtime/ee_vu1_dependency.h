@@ -292,4 +292,37 @@ struct s_ee_vu1_dependency
         }
     }
 };
+
+// One entry per aligned microinstruction address. The exact instruction
+// words, not an address or a hash alone, identify cached metadata. A
+// staged MPG upload, rollback, or different VIF instance can reuse a PC
+// with different code; comparing both words makes that reuse safe.
+// No guest state, scoreboard timestamps or execution result is cached.
+class c_ee_vu1_decode_cache
+{
+public:
+    const s_ee_vu1_use& lookup(uint32_t pc, uint32_t lo, uint32_t hi)
+    {
+        auto& entry = m_entries[(pc >> 3u) & 0x7ffu];
+        if (!entry.m_valid || entry.m_lower != lo || entry.m_upper != hi)
+        {
+            entry.m_use = s_ee_vu1_dependency::decode(lo, hi);
+            entry.m_lower = lo;
+            entry.m_upper = hi;
+            entry.m_valid = true;
+        }
+        return entry.m_use;
+    }
+
+private:
+    struct s_entry
+    {
+        s_ee_vu1_use m_use{};
+        uint32_t m_lower = 0u;
+        uint32_t m_upper = 0u;
+        bool m_valid = false;
+    };
+
+    std::array<s_entry, 2048> m_entries{};
+};
 } // namespace ee

@@ -962,6 +962,9 @@ bool c_ee_vu1::run(
     int32_t fsset = -1;
     s_flag_pipe pipe{};
     s_ee_vu1_dependency dependencies{};
+    // This bounded host-only cache survives MSCAL/MSCNT calls. Each
+    // lookup checks the current staged microinstruction's exact bits.
+    static thread_local c_ee_vu1_decode_cache decode_cache;
     pipe.start(state);
 
     for (uint32_t step = 0u; step < k_max_steps; ++step)
@@ -980,7 +983,7 @@ bool c_ee_vu1::run(
         }
 
         ++pipe.m_t;
-        const s_ee_vu1_use use = dependencies.decode(lo, hi);
+        const s_ee_vu1_use& use = decode_cache.lookup(pc, lo, hi);
         const uint32_t issued = dependencies.issue(use, pipe.now());
         if (issued > pipe.now())
         {
