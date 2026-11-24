@@ -4565,8 +4565,13 @@ int main(int argc, char** argv)
             }
             if (resolved != nullptr)
             {
-                const auto result = ee::ee_dispatch_run_resolved_inline(
-                    &cpu, &runtime, from_pc, resolved);
+                // The runner's lookup is for from_pc, and neither
+                // lookup nor the host-only VU1 timing guard changes PC.
+                // Retain the checked failure path if that invariant breaks.
+                const auto result = cpu.m_pc == from_pc ?
+                    ee::ee_dispatch_run_owned_inline(cpu, &runtime, resolved) :
+                    ee::ee_dispatch_run_resolved_inline(
+                        &cpu, &runtime, from_pc, resolved);
                 reason = result.exit_reason;
                 count = result.dispatch_count;
                 out_pc = result.guest_pc;
@@ -4576,41 +4581,41 @@ int main(int argc, char** argv)
             else
             {
                 reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
-            }
-            // A module that does not own the PC returns EXITED with zero
-            // dispatches and leaves the CPU, PC and exit reason untouched.
-            // Only then consult the live cache-miss overlays (each owns
-            // disjoint, newly translated block PCs). A resolved overlay PC
-            // is cached so hot overlay code costs one map lookup, not a scan.
-            const auto unowned = [&]()
-            {
-                return count == 0u && status == 0u &&
-                       reason == exit_reason_before &&
-                       out_pc == from_pc && cpu.m_pc == from_pc &&
-                       runtime.m_guest_instruction_attempts ==
-                           instructions_before_dispatch;
-            };
-            if (resolved == nullptr && !overlay_runs.empty() && unowned())
-            {
-                const auto cached = overlay_owner_by_pc.find(from_pc);
-                if (cached != overlay_owner_by_pc.end())
+                // A module that does not own the PC returns EXITED with zero
+                // dispatches and leaves the CPU, PC and exit reason untouched.
+                // Only then consult the live cache-miss overlays (each owns
+                // disjoint, newly translated block PCs). A resolved overlay PC
+                // is cached so hot overlay code costs one map lookup, not a scan.
+                const auto unowned = [&]()
                 {
-                    runtime.m_loop_safepoint_remaining = safepoint_budget;
-                    reason = overlay_runs[cached->second](
-                        &cpu, &runtime, slice, &count, &out_pc, &status);
-                }
-                else
+                    return count == 0u && status == 0u &&
+                           reason == exit_reason_before &&
+                           out_pc == from_pc && cpu.m_pc == from_pc &&
+                           runtime.m_guest_instruction_attempts ==
+                               instructions_before_dispatch;
+                };
+                if (!overlay_runs.empty() && unowned())
                 {
-                    for (size_t overlay = 0;
-                         overlay < overlay_runs.size() && unowned();
-                         ++overlay)
+                    const auto cached = overlay_owner_by_pc.find(from_pc);
+                    if (cached != overlay_owner_by_pc.end())
                     {
                         runtime.m_loop_safepoint_remaining = safepoint_budget;
-                        reason = overlay_runs[overlay](
+                        reason = overlay_runs[cached->second](
                             &cpu, &runtime, slice, &count, &out_pc, &status);
-                        if (!unowned())
+                    }
+                    else
+                    {
+                        for (size_t overlay = 0;
+                             overlay < overlay_runs.size() && unowned();
+                             ++overlay)
                         {
-                            overlay_owner_by_pc.emplace(from_pc, overlay);
+                            runtime.m_loop_safepoint_remaining = safepoint_budget;
+                            reason = overlay_runs[overlay](
+                                &cpu, &runtime, slice, &count, &out_pc, &status);
+                            if (!unowned())
+                            {
+                                overlay_owner_by_pc.emplace(from_pc, overlay);
+                            }
                         }
                     }
                 }

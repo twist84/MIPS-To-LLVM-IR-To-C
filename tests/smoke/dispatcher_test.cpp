@@ -536,12 +536,25 @@ int main()
                     normal.m_cop0[13] = 0x00000400u;
                 }
                 ee::s_ee_cpu_state direct = normal;
+                ee::s_ee_cpu_state owned = normal;
                 const auto target = ee::ee_resolve_dispatch_entry(table, index, pc);
                 const auto a = ee::ee_dispatch_run_indexed(&normal, nullptr,
                     table, index, 1u);
                 const auto b = ee::ee_dispatch_run_resolved(&direct, nullptr,
                     pc, target);
+                const auto fast = ee::ee_dispatch_run_owned_inline(
+                    owned, nullptr, target);
                 direct_same = direct_same && target != nullptr &&
+                    b.status == fast.status && b.exit_reason == fast.exit_reason &&
+                    b.dispatch_count == fast.dispatch_count && b.guest_pc == fast.guest_pc &&
+                    direct.m_pc == owned.m_pc &&
+                    direct.m_exit_reason == owned.m_exit_reason &&
+                    direct.m_cop0[12] == owned.m_cop0[12] &&
+                    direct.m_cop0[13] == owned.m_cop0[13] &&
+                    direct.m_cop0[14] == owned.m_cop0[14] &&
+                    direct.m_gpr[2].m_lo == owned.m_gpr[2].m_lo &&
+                    direct.m_gpr[8].m_lo == owned.m_gpr[8].m_lo &&
+                    direct.m_gpr[31].m_lo == owned.m_gpr[31].m_lo &&
                     a.status == b.status && a.exit_reason == b.exit_reason &&
                     a.dispatch_count == b.dispatch_count && a.guest_pc == b.guest_pc &&
                     normal.m_pc == direct.m_pc &&
@@ -558,7 +571,17 @@ int main()
         const auto hole = ee::ee_resolve_dispatch_entry(table, index, 0x00100004u);
         const auto wrong = ee::ee_dispatch_run_resolved(&cpu, nullptr,
             0x00100000u, caller_entry);
+        const auto null_cpu = ee::ee_dispatch_run_resolved_inline(
+            nullptr, nullptr, 0u, caller_entry);
+        const auto null_entry = ee::ee_dispatch_run_resolved_inline(
+            &cpu, nullptr, cpu.m_pc, nullptr);
         check(direct_same && missing == nullptr && hole == nullptr &&
+              null_cpu.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              null_cpu.dispatch_count == 0u &&
+              null_entry.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              null_entry.dispatch_count == 0u &&
+              null_entry.guest_pc == cpu.m_pc &&
+              null_entry.exit_reason == cpu.m_exit_reason &&
               wrong.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
               wrong.dispatch_count == 0u && cpu.m_pc == 0x00102000u,
               "resolved single-entry execution matches indexed dispatch including interrupts");
