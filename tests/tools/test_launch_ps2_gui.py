@@ -500,10 +500,6 @@ def test_fullscreen_controls():
     assert hotkey.after.call_count == 5
 
     # Entering/exiting keeps the native viewport intact and restores layout.
-    layout = [("Notebook.tab", {"sticky": "nswe"})]
-    instance.fullscreen_style = Mock()
-    instance.fullscreen_style.layout.return_value = layout
-    instance.fullscreen_tab_layout = None
     instance.fullscreen_active = False
     instance.winfo_toplevel = Mock()
     instance.configure = Mock()
@@ -514,14 +510,18 @@ def test_fullscreen_controls():
     GUI.Launcher.set_fullscreen(instance, True)
     assert instance.fullscreen_active
     instance.winfo_toplevel.return_value.attributes.assert_called_with("-fullscreen", True)
-    instance.fullscreen_style.layout.assert_called_with("TNotebook.Tab", [])
+    instance.tabs.grid_remove.assert_called_once_with()
+    instance.game_host.grid.assert_called_with(in_=instance, row=0, column=0, columnspan=3, sticky="nsew")
     instance.output.grid_remove.assert_called_once_with()
     GUI.Launcher.set_fullscreen(instance, False)
     assert not instance.fullscreen_active
     instance.winfo_toplevel.return_value.attributes.assert_called_with("-fullscreen", False)
-    instance.fullscreen_style.layout.assert_called_with("TNotebook.Tab", layout)
+    instance.tabs.grid.assert_called_once_with()
     instance.output.grid.assert_called_once_with()
-    assert not instance.game_host.mock_calls
+    instance.game_host.grid.assert_called_with(in_=instance.game_view, row=0, column=0, columnspan=1, sticky="nsew")
+    assert instance.game_host.grid_remove.call_count == 2
+    assert instance.game_host.tkraise.call_count == 2
+    instance.game_host.destroy.assert_not_called()
 
 
 def test_launch_close_button():

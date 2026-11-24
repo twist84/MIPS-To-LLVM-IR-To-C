@@ -789,8 +789,6 @@ class Launcher(ttk.Frame):
         self.embedded_running = False
         self.fullscreen_active = False
         self.fullscreen_key_down = False
-        self.fullscreen_style = ttk.Style(self)
-        self.fullscreen_tab_layout = None
         self.read_fullscreen_key = fullscreen_key_reader(window)
         self.previous_mode = self.mode.get()
         self.numeric = {
@@ -821,11 +819,14 @@ class Launcher(ttk.Frame):
         # A real Win32 child HWND is parented to this black Tk viewport.
         # tk.Frame, rather than a canvas image, keeps controller input and
         # native WebGPU presentation in the game's own process.
+        # Parent to the launcher itself so geometry can move between the
+        # notebook page and the full client area without replacing the HWND.
         self.game_host = tk.Frame(
-            self.game_view, background="black", width=800, height=450,
+            self, background="black", width=800, height=450,
             highlightthickness=0, borderwidth=0,
         )
-        self.game_host.grid(row=0, column=0, sticky="nsew")
+        self.game_host.grid(in_=self.game_view, row=0, column=0, sticky="nsew")
+        self.game_host.tkraise()
         self.context_pressed = False
         self.context_armed = False
         self.context_open = False
@@ -1139,25 +1140,24 @@ class Launcher(ttk.Frame):
             return
         window = self.winfo_toplevel()
         if enabled:
-            self.fullscreen_tab_layout = self.fullscreen_style.layout("TNotebook.Tab")
-            self.fullscreen_style.layout("TNotebook.Tab", [])
-            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar,
-                           self.game_hint, self.game_speed):
+            self.game_host.grid_remove()
+            # Hiding the entire notebook eliminates its native theme border,
+            # not merely the tab headers. Keep the renderer's HWND alive.
+            self.tabs.grid_remove()
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar):
                 widget.grid_remove()
             self.configure(padding=0)
-            self.game_view.configure(padding=0)
-            self.tabs.grid_configure(pady=0)
             self.rowconfigure(4, weight=0)
+            self.game_host.grid(in_=self, row=0, column=0, columnspan=3, sticky="nsew")
         else:
-            self.fullscreen_style.layout("TNotebook.Tab", self.fullscreen_tab_layout)
-            self.fullscreen_tab_layout = None
-            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar,
-                           self.game_hint, self.game_speed):
+            self.game_host.grid_remove()
+            self.tabs.grid()
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar):
                 widget.grid()
             self.configure(padding=18)
-            self.game_view.configure(padding=6)
-            self.tabs.grid_configure(pady=(0, 10))
             self.rowconfigure(4, weight=1)
+            self.game_host.grid(in_=self.game_view, row=0, column=0, columnspan=1, sticky="nsew")
+        self.game_host.tkraise()
         window.attributes("-fullscreen", enabled)
         self.fullscreen_active = enabled
         self.update_fullscreen_button()
