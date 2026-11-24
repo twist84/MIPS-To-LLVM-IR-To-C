@@ -301,7 +301,7 @@ OPTION_HELP = {
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
     "Show --help": "Print the selected tool’s command-line help in the output pane.",
-    "Launch": "Run the command configured in the selected tab.",
+    "Launch": "Launch the selected command, or close the running session without exiting the launcher.",
 }
 
 
@@ -614,6 +614,35 @@ def direct_command(tool, executable, arguments, help_only=False):
     return command + arguments
 
 
+def request_embedded_close(parent_handle):
+    """Request a normal close of the native child so the runner can finalize."""
+    if os.name != "nt" or not parent_handle:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    find_window = user32.FindWindowExW
+    find_window.argtypes = (wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
+    find_window.restype = wintypes.HWND
+    post_message = user32.PostMessageW
+    post_message.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    post_message.restype = wintypes.BOOL
+    child = find_window(parent_handle, None, None, "Super Dragon Ball Z - native WebGPU")
+    return bool(child and post_message(child, 0x0010, 0, 0))  # WM_CLOSE
+
+
+def stop_process_tree(process):
+    """Stop the batch/Python/native/compile tree, not just its cmd.exe root."""
+    if process.poll() is not None:
+        return None
+    return subprocess.Popen(
+        ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+
+
 class Launcher(ttk.Frame):
     def __init__(self, window):
         super().__init__(window, padding=18)
@@ -648,6 +677,8 @@ class Launcher(ttk.Frame):
         self.executable = self.fields["executable"]
         self.status = tk.StringVar(value=warning)
         self.process = None
+        self.stop_process = None
+        self.close_requested = False
         self.log = None
         self.embedded_running = False
         self.previous_mode = self.mode.get()
@@ -873,7 +904,7 @@ class Launcher(ttk.Frame):
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.pad.trace_add("write", self.update_fields)
         self.update_fields()
-        self.play = ttk.Button(self, text="Launch", command=self.launch)
+        self.play = ttk.Button(self, text="Launch", command=self.toggle_launch)
         self.play.grid(row=3, column=0, sticky="w", pady=(0, 10))
         Tooltip(self.play, OPTION_HELP["Launch"])
         ttk.Label(self, textvariable=self.status).grid(
@@ -1096,6 +1127,39 @@ class Launcher(ttk.Frame):
                    EE_WEBGPU_ASPECT=DISPLAY_ASPECTS[self.fields["display_aspect"].get()])
         return ["cmd.exe", "/d", "/c", "run_ps2_game.bat", *args]
 
+    def toggle_launch(self):
+        if self.process is None:
+            self.launch()
+        else:
+            self.close_session()
+
+    def close_session(self):
+        if self.process is None or self.process.poll() is not None or self.stop_process is not None:
+            return
+        # A running embedded game can exit normally, allowing boot logs,
+        # snapshots and the optional post-capture IOP build to finish.
+        if not self.close_requested and self.embedded_running:
+            try:
+                if request_embedded_close(self.game_host.winfo_id()):
+                    self.close_requested = True
+                    self.play.configure(text="Force close")
+                    self.status.set("Closing game; finalizing session and diagnostics")
+                    return
+            except OSError:
+                pass
+        # During compilation, headless execution, or an unresponsive
+        # window, stop the full process tree. Keep the launcher responsive.
+        try:
+            self.stop_process = stop_process_tree(self.process)
+        except OSError as error:
+            self.status.set(f"Could not close session: {error}")
+            return
+        if self.stop_process is not None:
+            self.close_requested = True
+            self.play.configure(text="Closing…")
+            self.play.state(["disabled"])
+            self.status.set("Stopping the running process tree")
+
     def launch(self, help_only=False):
         if self.process is not None:
             return
@@ -1159,7 +1223,10 @@ class Launcher(ttk.Frame):
         self.output.configure(state="normal")
         self.output.delete("1.0", tk.END)
         self.output.configure(state="disabled")
-        self.play.state(["disabled"])
+        self.close_requested = False
+        self.stop_process = None
+        self.play.configure(text="Close")
+        self.play.state(["!disabled"])
         self.help_button.state(["disabled"])
         self.speed_status.set("")
         self.status.set("Running command")
@@ -1171,9 +1238,9 @@ class Launcher(ttk.Frame):
             for line in chunk.splitlines():
                 if line.startswith("EE speed: "):
                     self.speed_status.set(line.removeprefix("EE speed: "))
-            if "live cache-miss: PC=" in chunk:
+            if not self.close_requested and "live cache-miss: PC=" in chunk:
                 self.status.set("Compiling missing EE code; game state paused")
-            if "EE hot-expand: resumed guest pc=" in chunk:
+            if not self.close_requested and "EE hot-expand: resumed guest pc=" in chunk:
                 self.status.set("Guest execution resumed after live IR expansion")
             self.output.configure(state="normal")
             self.output.insert(tk.END, chunk)
@@ -1184,13 +1251,22 @@ class Launcher(ttk.Frame):
             self.output.configure(state="disabled")
 
         result = self.process.poll()
-        if chunk or result is None:
+        if self.stop_process is not None and self.stop_process.poll() is not None:
+            stop_result = self.stop_process.returncode
+            self.stop_process = None
+            if stop_result != 0 and result is None:
+                self.play.configure(text="Force close")
+                self.play.state(["!disabled"])
+                self.status.set(f"Could not stop process tree ({stop_result}); retry Close")
+        if chunk or result is None or self.stop_process is not None:
             self.after(150, self.read_output)
         else:
             self.log.close()
             self.log = None
             self.process = None
             self.embedded_running = False
+            self.close_requested = False
+            self.play.configure(text="Launch")
             self.play.state(["!disabled"])
             self.help_button.state(["!disabled"])
             self.status.set(f"Launcher exited ({result}). Log: {LOG_PATH.name}")

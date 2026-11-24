@@ -354,6 +354,59 @@ def test_runtime_options():
         raise AssertionError("accepted AOT verification without a library")
 
 
+def test_launch_close_button():
+    from unittest.mock import Mock, patch
+
+    launch = Mock()
+    close_session = Mock()
+    instance = SimpleNamespace(process=None, launch=launch, close_session=close_session)
+    GUI.Launcher.toggle_launch(instance)
+    launch.assert_called_once_with()
+    close_session.assert_not_called()
+    instance.process = Mock()
+    GUI.Launcher.toggle_launch(instance)
+    close_session.assert_called_once_with()
+
+    process = Mock()
+    process.pid = 1234
+    process.poll.return_value = None
+    killer = Mock()
+    with patch.object(GUI.subprocess, "Popen", return_value=killer) as popen, \
+            patch.object(GUI.subprocess, "CREATE_NO_WINDOW", 0x08000000, create=True):
+        assert GUI.stop_process_tree(process) is killer
+        assert popen.call_args.args[0] == ["taskkill.exe", "/PID", "1234", "/T", "/F"]
+    process.poll.return_value = 0
+    assert GUI.stop_process_tree(process) is None
+    process.poll.return_value = None
+
+    session = SimpleNamespace(
+        process=process, stop_process=None, close_requested=False,
+        embedded_running=True, game_host=Mock(), play=Mock(), status=Mock(),
+    )
+    session.game_host.winfo_id.return_value = 99
+    with patch.object(GUI, "request_embedded_close", return_value=True) as graceful, \
+            patch.object(GUI, "stop_process_tree", return_value=killer) as force:
+        GUI.Launcher.close_session(session)
+        graceful.assert_called_once_with(99)
+        force.assert_not_called()
+        assert session.close_requested and session.stop_process is None
+        session.play.configure.assert_called_with(text="Force close")
+        GUI.Launcher.close_session(session)
+        force.assert_called_once_with(process)
+        assert session.stop_process is killer
+        session.play.configure.assert_called_with(text="Closing…")
+        GUI.Launcher.close_session(session)
+        force.assert_called_once_with(process)
+
+    session.stop_process = None
+    session.close_requested = False
+    session.embedded_running = False
+    with patch.object(GUI, "stop_process_tree", return_value=killer) as force:
+        GUI.Launcher.close_session(session)
+        force.assert_called_once_with(process)
+        assert session.stop_process is killer
+
+
 def test_game_window_environment():
     env = {"SDBZ_GS_PARENT_HWND": "123", "UNRELATED": "retained"}
     GUI.configure_game_window_environment(env, 987654)
@@ -446,6 +499,7 @@ def main():
     test_launcher_flags_and_bounds()
     test_game_tab_command_and_environment()
     test_runtime_options()
+    test_launch_close_button()
     test_game_window_environment()
     test_direct_commands()
     test_batch_route()
