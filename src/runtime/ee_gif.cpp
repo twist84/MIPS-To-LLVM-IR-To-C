@@ -11,6 +11,38 @@ namespace ee
 {
 namespace
 {
+// A lease owns its vector throughout the sink callback, including nested
+// consumes. No parser copy shares live events. Retain at most 16 MiB per
+// scratch vector after a call; unusually large batches release storage.
+template <typename t_element>
+class c_gif_scratch_lease
+{
+public:
+    explicit c_gif_scratch_lease(std::vector<t_element>& scratch)
+        : m_scratch(scratch)
+    {
+        m_data.swap(m_scratch);
+    }
+    ~c_gif_scratch_lease()
+    {
+        constexpr size_t limit = 16u * 1024u * 1024u / sizeof(t_element);
+        m_data.clear();
+        if (m_data.capacity() <= limit &&
+            m_data.capacity() > m_scratch.capacity())
+        {
+            m_data.swap(m_scratch);
+        }
+    }
+    c_gif_scratch_lease(const c_gif_scratch_lease&) = delete;
+    c_gif_scratch_lease& operator=(const c_gif_scratch_lease&) = delete;
+
+    std::vector<t_element>& data() { return m_data; }
+
+private:
+    std::vector<t_element>& m_scratch;
+    std::vector<t_element> m_data;
+};
+
 void trace_rejection(const char* function, int line)
 {
     const char* dump_path = std::getenv("EE_REJECTED_PATH2_DUMP");
@@ -99,7 +131,9 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     s_ee_gif_path3_state next = m_state;
     uint64_t tags = 0u, primitives = 0u, packed = 0u, reglist = 0u;
     uint64_t images = 0u, image_qwc = 0u;
-    std::vector<s_ee_gif_event> events;
+    static thread_local std::vector<s_ee_gif_event> event_scratch;
+    c_gif_scratch_lease<s_ee_gif_event> event_lease(event_scratch);
+    auto& events = event_lease.data();
     // One reglist quad can generate two events; the tag may additionally
     // synthesize a PRE/PRIM event. Do not permanently queue events.
     events.reserve(static_cast<size_t>(qwc) * 2u);
@@ -293,11 +327,15 @@ bool c_ee_gif_path3::consume_ordered(
         return true;
     }
 
+    static thread_local std::vector<uint8_t> data_scratch;
+    static thread_local std::vector<s_ee_gif_event> event_scratch;
+    c_gif_scratch_lease<uint8_t> data_lease(data_scratch);
+    c_gif_scratch_lease<s_ee_gif_event> event_lease(event_scratch);
     struct s_staged_events
     {
-        std::vector<uint8_t> m_data;
-        std::vector<s_ee_gif_event> m_events;
-    } staged;
+        std::vector<uint8_t>& m_data;
+        std::vector<s_ee_gif_event>& m_events;
+    } staged{data_lease.data(), event_lease.data()};
     staged.m_data.reserve(static_cast<size_t>(total_qwc) * 16u);
     const auto collect = [](void* user, const s_ee_gif_event* events,
                             size_t event_count, const uint8_t* data, uint32_t qwc)

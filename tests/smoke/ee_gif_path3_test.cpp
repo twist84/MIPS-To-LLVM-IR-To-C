@@ -443,6 +443,42 @@ int main()
         return fail("unbound GIF parser falsely completed DMA");
     }
 
+    // A nested consume must not invalidate or overwrite the outer event
+    // array while its sink still owns the callback's borrowed view.
+    struct s_nested
+    {
+        ee::c_ee_gif_path3 parser;
+        uint8_t packet[16]{};
+        s_capture capture;
+    } nested;
+    nested.parser.bind_event_sink(&nested.capture, on_events);
+    ee::c_ee_gif_path3 outer;
+    outer.bind_event_sink(&nested, [](void* user,
+        const ee::s_ee_gif_event* events, size_t count,
+        const uint8_t*, uint32_t) -> bool
+    {
+        auto& inner = *static_cast<s_nested*>(user);
+        if (count != 2u || events[1].m_word0 != 0x5au)
+        {
+            return false;
+        }
+        return inner.parser.consume(inner.packet, 1u) &&
+            inner.capture.m_events.size() == 1u &&
+            events[0].m_type == t_type::tag &&
+            events[1].m_type == t_type::packed &&
+            events[1].m_word0 == 0x5au;
+    });
+    uint8_t packet[32]{};
+    packet[0] = 1u;
+    packet[7] = 0x10u;
+    packet[8] = 0xeu;
+    packet[16] = 0x5au;
+    if (!outer.consume(packet, 2u) ||
+        outer.counters().m_packed_events != 1u)
+    {
+        return fail("nested parser invalidated outer event storage");
+    }
+
     std::puts("EE GIF PATH3 streaming PACKED/REGLIST/IMAGE parser: PASS");
     return 0;
 }
