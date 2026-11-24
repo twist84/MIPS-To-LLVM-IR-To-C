@@ -291,7 +291,25 @@ def test_windows_launcher_preserves_guest_cache():
     )[0]
     assert cache_probes.count('--emit-opt=0') == 2, "both probes use boot optimization"
     assert cache_probes.count('--work-dir "%WORK_DIR%"') == 2, "same guest cache"
-    assert cache_probes.count('set "CACHE_FLAG=--no-recompile"') == 2
+    # Optimized full replays defer source validation to the shared IR
+    # builder. Only profile 0 enters the native-library probes below.
+    optimized = cache_probes.index(
+        'if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\\translation-cache.json" (')
+    baseline = cache_probes.index(
+        'if not defined CACHE_FLAG if exist "%WORK_DIR%\\translation-cache.json" (')
+    assert optimized < baseline
+    assert 'set "CACHE_FLAG=--no-recompile"' in cache_probes[optimized:baseline]
+    assert '--link-only' not in cache_probes[optimized:baseline]
+    assert cache_probes[baseline:].count('set "CACHE_FLAG=--no-recompile"') == 2
+
+    # All optimization profiles now use the canonical IR directly.
+    variants = probe.split("rem Build only the selected profile", 1)[1]
+    assert variants.count('python tools\\build_optimized_cache.py') == 3
+    assert variants.count('--source-work-dir "%WORK_DIR%"') == 3
+    assert '--source-opt=2' not in variants
+    assert '--work-dir "%WORK_DIR%-IR-O2" --emit-opt=4' in variants
+    assert '--work-dir "%WORK_DIR%-O2-native" --emit-opt=5' in variants
+    assert '--work-dir "%WORK_DIR%-O2" --emit-opt=2' not in variants
     assert "if not errorlevel 1 (" in probe, "failed relink must not reuse"
     assert "full IR rebuild required" in probe
 
