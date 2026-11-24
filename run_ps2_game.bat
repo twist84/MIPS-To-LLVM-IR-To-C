@@ -134,6 +134,10 @@ rem guest for a ~3 s compile and relink at each cache miss. Live cache-miss
 rem expansion still covers PCs that static discovery missed.
 rem PRECOMPILE_ALL=0 restores the entry-only cold start.
 if not defined PRECOMPILE_ALL set "PRECOMPILE_ALL=1"
+rem Pure guest poll loops (e.g. the SDBZ VSync wait) run one real iteration
+rem per native slice; the runner charges the remaining budgeted iterations.
+rem Guest-visible results are identical. SDBZ_IDLE_SKIP=0 disables it.
+if not defined SDBZ_IDLE_SKIP set "SDBZ_IDLE_SKIP=1"
 if not defined SIF_POLL_LIMIT set "SIF_POLL_LIMIT=2048"
 rem Bound each native auto-expansion session; both limits are configurable.
 rem EXPANSION_PASSES: 1..64, number of bounded passes (default 8).

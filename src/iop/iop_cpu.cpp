@@ -1,7 +1,11 @@
 #include "iop_cpu.h"
+#include "iop_aot.h"
 #include "iop_hw.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -773,12 +777,153 @@ e_step_result c_cpu::step(uint32_t* opcode)
     return e_step_result::completed;
 }
 
+int c_cpu::aot_read(void* cpu, uint32_t address, uint32_t width,
+                    uint32_t* value)
+{
+    return static_cast<const c_cpu*>(cpu)->read(address, width, value) ? 1 : 0;
+}
+
+int c_cpu::aot_write(void* cpu, uint32_t address, uint32_t width,
+                     uint32_t value)
+{
+    return static_cast<c_cpu*>(cpu)->write(address, width, value) ? 1 : 0;
+}
+
 s_run_result c_cpu::run(uint32_t instruction_budget)
 {
     s_run_result result{};
     result.m_result = e_step_result::budget_exhausted;
     for (uint32_t index = 0u; index < instruction_budget; ++index)
     {
+        // Translated IRX code runs from an ordinary instruction boundary
+        // and returns the exact resume state. Fallback instructions are
+        // executed by the interpreter step below in the same iteration.
+        if (m_aot != nullptr && !m_guest_exceptions &&
+            !m_state.m_in_delay_slot &&
+            m_state.m_next_pc == m_state.m_pc + 4u)
+        {
+            const s_iop_aot_module* module = m_aot->find(m_state.m_pc);
+            if (module != nullptr)
+            {
+                s_iop_aot_context context{};
+                context.m_gpr = m_state.m_gpr;
+                context.m_hi = &m_state.m_hi;
+                context.m_lo = &m_state.m_lo;
+                context.m_ram = m_ram.data();
+                context.m_cpu = this;
+                context.m_read = &c_cpu::aot_read;
+                context.m_write = &c_cpu::aot_write;
+                context.m_budget = instruction_budget - index;
+                // SDBZ_IOP_AOT_VERIFY: replay every translated call on the
+                // interpreter from the same state and report divergence
+                // (diagnostic; MMIO side effects are repeated).
+                static const bool verify =
+                    std::getenv("SDBZ_IOP_AOT_VERIFY") != nullptr;
+                s_cpu_state verify_state{};
+                std::vector<uint8_t> verify_ram;
+                if (verify)
+                {
+                    verify_state = m_state;
+                    verify_ram = m_ram;
+                }
+                const uint32_t entry_pc = m_state.m_pc;
+                const auto aot_started = std::chrono::steady_clock::now();
+                const uint32_t reason =
+                    module->m_entry(&context, m_state.m_pc);
+                m_aot->add_time(std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - aot_started).count());
+                if (verify)
+                {
+                    s_cpu_state aot_state = m_state;
+                    aot_state.m_pc = context.m_pc;
+                    aot_state.m_next_pc = context.m_next_pc;
+                    std::vector<uint8_t> aot_ram = m_ram;
+                    m_state = verify_state;
+                    m_ram = verify_ram;
+                    c_iop_aot* saved = m_aot;
+                    m_aot = nullptr;
+                    for (uint32_t k = 0u; k < context.m_executed; ++k)
+                    {
+                        if (step() != e_step_result::completed)
+                        {
+                            break;
+                        }
+                    }
+                    m_aot = saved;
+                    bool same = m_state.m_pc == aot_state.m_pc &&
+                        m_state.m_next_pc == aot_state.m_next_pc &&
+                        m_state.m_hi == aot_state.m_hi &&
+                        m_state.m_lo == aot_state.m_lo &&
+                        std::memcmp(m_state.m_gpr, aot_state.m_gpr,
+                                    sizeof(m_state.m_gpr)) == 0;
+                    size_t ram_diff = m_ram.size();
+                    for (size_t b = 0; b < m_ram.size(); ++b)
+                    {
+                        if (m_ram[b] != aot_ram[b]) { ram_diff = b; break; }
+                    }
+                    static uint32_t reports = 0u;
+                    if ((!same || ram_diff != m_ram.size()) && reports < 20u)
+                    {
+                        ++reports;
+                        std::fprintf(stderr,
+                            "IOP AOT VERIFY mismatch: module=%s entry=0x%08x "
+                            "executed=%u reason=%u interp_pc=0x%08x/0x%08x "
+                            "aot_pc=0x%08x/0x%08x ram_diff=0x%zx\n",
+                            module->m_name, entry_pc, context.m_executed, reason,
+                            m_state.m_pc, m_state.m_next_pc,
+                            aot_state.m_pc, aot_state.m_next_pc, ram_diff);
+                        for (int r = 0; r < 32; ++r)
+                        {
+                            if (m_state.m_gpr[r] != aot_state.m_gpr[r])
+                            {
+                                std::fprintf(stderr,
+                                    "  r%d interp=0x%08x aot=0x%08x\n", r,
+                                    m_state.m_gpr[r], aot_state.m_gpr[r]);
+                            }
+                        }
+                        if (m_state.m_hi != aot_state.m_hi ||
+                            m_state.m_lo != aot_state.m_lo)
+                        {
+                            std::fprintf(stderr, "  hi/lo interp=%08x/%08x aot=%08x/%08x\n",
+                                m_state.m_hi, m_state.m_lo, aot_state.m_hi, aot_state.m_lo);
+                        }
+                    }
+                    // Continue from the interpreter's (reference) result.
+                    context.m_pc = m_state.m_pc;
+                    context.m_next_pc = m_state.m_next_pc;
+                    context.m_in_delay = m_state.m_in_delay_slot ? 1u : 0u;
+                    context.m_branch_pc = m_state.m_branch_pc;
+                }
+                m_state.m_pc = context.m_pc;
+                m_state.m_next_pc = context.m_next_pc;
+                m_state.m_in_delay_slot = context.m_in_delay != 0u;
+                m_state.m_branch_pc =
+                    context.m_in_delay != 0u ? context.m_branch_pc : 0u;
+                m_state.m_gpr[0] = 0u;
+                m_aot->record(context.m_executed);
+                if (context.m_executed != 0u)
+                {
+                    m_cycles += context.m_executed;
+                    if (m_hardware != nullptr)
+                    {
+                        m_hardware->advance_cycles(context.m_executed);
+                    }
+                    result.m_instructions += context.m_executed;
+                    index += context.m_executed;
+                    if (index >= instruction_budget)
+                    {
+                        break;
+                    }
+                }
+                // An exit without progress (unknown entry pc) interprets
+                // one instruction instead of re-entering forever.
+                if (reason != IOP_AOT_INTERPRET && context.m_executed != 0u)
+                {
+                    --index;
+                    continue;
+                }
+            }
+        }
         uint32_t opcode = 0u;
         const e_step_result next_result = step(&opcode);
         if (next_result != e_step_result::completed)

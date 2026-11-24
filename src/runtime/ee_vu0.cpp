@@ -2003,6 +2003,188 @@ uint32_t vu0_fmac_result_bits(float value, uint32_t lane, uint32_t* flags)
 }
 } // namespace
 
+namespace
+{
+enum class e_vu0_macro_arith : uint8_t
+{
+    add, sub, mul, madd, msub, max, mini
+};
+
+enum class e_vu0_macro_source : uint8_t
+{
+    vector, broadcast, q, i, outer
+};
+
+struct s_vu0_macro_fmac_op
+{
+    e_vu0_macro_arith m_arith;
+    e_vu0_macro_source m_source;
+    uint32_t m_broadcast;
+    bool m_to_acc;
+};
+
+// VU User's Manual v6.0 chapter 5 upper-instruction encodings shared by
+// COP2 macro mode. SPECIAL1 writes fd; SPECIAL2 accumulator forms write ACC.
+bool vu0_macro_decode_fmac(uint32_t funct, uint32_t special2, bool special,
+                           s_vu0_macro_fmac_op* op)
+{
+    using arith = e_vu0_macro_arith;
+    using source = e_vu0_macro_source;
+    const uint32_t code = special ? special2 : funct;
+    const uint32_t bc = code & 3u;
+    if (code < 0x10u || (code >= 0x18u && code < 0x1cu) ||
+        (!special && code >= 0x10u && code < 0x18u))
+    {
+        static constexpr arith k_groups[8] = {
+            arith::add, arith::sub, arith::madd, arith::msub,
+            arith::max, arith::mini, arith::mul, arith::mul
+        };
+        const arith kind = k_groups[(code >> 2u) & 7u];
+        if (special && (kind == arith::max || kind == arith::mini))
+        {
+            return false; // SPECIAL2 0x10..0x17 are ITOF/FTOI.
+        }
+        *op = {kind, source::broadcast, bc, special};
+        return true;
+    }
+    switch (code)
+    {
+    case 0x1cu: *op = {arith::mul, source::q, 0u, special}; return true;
+    case 0x1du:
+        if (special) return false; // VABS
+        *op = {arith::max, source::i, 0u, false}; return true;
+    case 0x1eu: *op = {arith::mul, source::i, 0u, special}; return true;
+    case 0x1fu:
+        if (special) return false; // VCLIP
+        *op = {arith::mini, source::i, 0u, false}; return true;
+    case 0x20u: *op = {arith::add, source::q, 0u, special}; return true;
+    case 0x21u: *op = {arith::madd, source::q, 0u, special}; return true;
+    case 0x22u: *op = {arith::add, source::i, 0u, special}; return true;
+    case 0x23u: *op = {arith::madd, source::i, 0u, special}; return true;
+    case 0x24u: *op = {arith::sub, source::q, 0u, special}; return true;
+    case 0x25u: *op = {arith::msub, source::q, 0u, special}; return true;
+    case 0x26u: *op = {arith::sub, source::i, 0u, special}; return true;
+    case 0x27u: *op = {arith::msub, source::i, 0u, special}; return true;
+    case 0x28u: *op = {arith::add, source::vector, 0u, special}; return true;
+    case 0x29u: *op = {arith::madd, source::vector, 0u, special}; return true;
+    case 0x2au: *op = {arith::mul, source::vector, 0u, special}; return true;
+    case 0x2bu:
+        if (special) return false;
+        *op = {arith::max, source::vector, 0u, false}; return true;
+    case 0x2cu: *op = {arith::sub, source::vector, 0u, special}; return true;
+    case 0x2du: *op = {arith::msub, source::vector, 0u, special}; return true;
+    case 0x2eu: // VOPMULA (ACC) / VOPMSUB (fd)
+        *op = {special ? arith::mul : arith::msub, source::outer, 0u, special};
+        return true;
+    case 0x2fu:
+        if (special) return false; // VNOP
+        *op = {arith::mini, source::vector, 0u, false}; return true;
+    default:
+        return false;
+    }
+}
+
+void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags)
+{
+    vu0->m_mac_flags = mac_flags;
+    vu0->m_vi[17] = mac_flags;
+    const uint32_t current = ((mac_flags & 0x000fu) ? 1u : 0u) |
+        ((mac_flags & 0x00f0u) ? 2u : 0u) |
+        ((mac_flags & 0x0f00u) ? 4u : 0u) |
+        ((mac_flags & 0xf000u) ? 8u : 0u);
+    // VU User's Manual v6.0 section 3.3.2: SF[3:0] reflects the
+    // latest FMAC result; SF[9:6] accumulates sticky Z/S/U/O by OR.
+    // Retain existing I/D (bits 4/5) and all sticky flags, including
+    // IS/DS at 10/11.
+    vu0->m_status_flags = (vu0->m_status_flags & 0x0ff0u) |
+        current | (current << 6u);
+    vu0->m_vi[16] = vu0->m_status_flags;
+}
+
+uint32_t vu0_macro_bits(float value)
+{
+    uint32_t bits = 0u;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+uint32_t vu0_macro_ftoi(uint32_t bits, double scale)
+{
+    const double value = static_cast<double>(vu0_fmac_operand(bits)) * scale;
+    if (value >= 2147483647.0) return 0x7fffffffu;
+    if (value <= -2147483648.0) return 0x80000000u;
+    return static_cast<uint32_t>(static_cast<int32_t>(value));
+}
+
+void vu0_macro_write_vi16(s_ee_vu0_state* vu0, uint32_t index, uint32_t value)
+{
+    if ((index & 15u) != 0u)
+    {
+        ee_vu0_write_vi(vu0, index & 15u, value & 0xffffu);
+    }
+}
+
+uint32_t vu0_macro_read_vi16(const s_ee_vu0_state* vu0, uint32_t index)
+{
+    return ee_vu0_read_vi(vu0, index & 15u) & 0xffffu;
+}
+
+uint32_t vu0_macro_memory_address(const s_ee_vu0_state* vu0, uint32_t is)
+{
+    return (vu0_macro_read_vi16(vu0, is) << 4u) &
+        (EE_VU0_DATA_MEMORY_SIZE - 1u);
+}
+
+uint32_t vu0_macro_load32(const s_ee_vu0_state* vu0, uint32_t address)
+{
+    uint32_t bits = 0u;
+    for (uint32_t byte = 0u; byte < 4u; ++byte)
+    {
+        bits |= static_cast<uint32_t>(vu0->m_data_memory[
+            (address + byte) & (EE_VU0_DATA_MEMORY_SIZE - 1u)]) << (byte * 8u);
+    }
+    return bits;
+}
+
+void vu0_macro_store32(s_ee_vu0_state* vu0, uint32_t address, uint32_t bits)
+{
+    for (uint32_t byte = 0u; byte < 4u; ++byte)
+    {
+        vu0->m_data_memory[(address + byte) & (EE_VU0_DATA_MEMORY_SIZE - 1u)] =
+            static_cast<uint8_t>(bits >> (byte * 8u));
+    }
+}
+
+// R is a 23-bit mantissa with an implicit 1.0 exponent (VU manual 4.2.5).
+uint32_t vu0_macro_r(uint32_t value)
+{
+    return 0x3f800000u | (value & 0x007fffffu);
+}
+
+bool vu0_macro_is_supported(uint32_t funct, uint32_t special2)
+{
+    if (funct < 0x3cu)
+    {
+        s_vu0_macro_fmac_op op{};
+        return vu0_macro_decode_fmac(funct, special2, false, &op) ||
+            funct == 0x30u || funct == 0x31u || funct == 0x32u ||
+            funct == 0x34u || funct == 0x35u;
+    }
+    s_vu0_macro_fmac_op op{};
+    return vu0_macro_decode_fmac(funct, special2, true, &op) ||
+        (special2 >= 0x10u && special2 <= 0x17u) ||
+        special2 == 0x1du || special2 == 0x1fu || special2 == 0x2fu ||
+        special2 == 0x30u || special2 == 0x31u || special2 == 0x38u ||
+        (special2 >= 0x3cu && special2 <= 0x43u);
+}
+} // namespace
+
+// Executes every COP2 macro-mode SPECIAL1/SPECIAL2 VU0 operation except
+// VCALLMS/VCALLMSR, LQI/SQI/LQD/SQD (ee_vu0_macro_indexed_memory) and
+// SQRT/RSQRT/WAITQ (ee_vu0_macro_scalar). Floating-point semantics follow
+// the VU: subnormal operands flush to zero, exponent 255 is a finite max,
+// products are rounded before accumulation, and MAC/status flags update only
+// for FMAC arithmetic. A rejected encoding commits no architectural state.
 extern "C" uint32_t ee_vu0_macro_fmac(
     s_ee_cpu_state* cpu,
     s_ee_runtime* rt,
@@ -2016,23 +2198,9 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
     }
 
-    // Only the actually reached SDBZ FMAC encodings: matrix
-    // multiply/accumulate and vector length/SQRT preparation.
-    // Unsupported SPECIAL1/2 operations must never silently execute.
     const uint32_t funct = word & 63u;
     const uint32_t special2 = (word & 3u) | ((word >> 4) & 0x7cu);
-    const bool multiply_acc = funct >= 0x3cu && special2 == 0x18u;
-    const bool accumulate_y = funct >= 0x3cu && special2 == 0x09u;
-    const bool accumulate_z = funct >= 0x3cu && special2 == 0x0au;
-    const bool store_w = funct == 0x0bu;
-    const bool elementwise_mul = funct == 0x2au;
-    const bool broadcast_y = funct == 0x01u;
-    const bool broadcast_z = funct == 0x02u;
-    const bool broadcast_q = funct == 0x20u;
-    const bool multiply_q = funct == 0x1cu;
-    if (!multiply_acc && !accumulate_y && !accumulate_z &&
-        !store_w && !elementwise_mul && !broadcast_y &&
-        !broadcast_z && !broadcast_q && !multiply_q)
+    if (!vu0_macro_is_supported(funct, special2))
     {
         return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
     }
@@ -2052,77 +2220,304 @@ extern "C" uint32_t ee_vu0_macro_fmac(
     const uint32_t fd = (word >> 6) & 31u;
     const uint32_t mask = (word >> 21) & 15u;
     s_ee_vu0_state* vu0 = rt->m_vu0_state;
-    if ((broadcast_q || multiply_q) && vu0->m_q_pending != 0u)
+    const auto complete = static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+    const auto write_vf = [cpu](uint32_t index, const s_ee_u128& value)
     {
-        // VADDq and VMULq cannot read an in-flight Q result.
-        // The original retail guest executes VWAITQ first.
-        return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
-    }
-    const uint32_t bc = multiply_acc ? 0u : accumulate_y ? 1u :
-        accumulate_z ? 2u : broadcast_y ? 1u :
-        broadcast_z ? 2u : 3u;
-    const float broadcast = (broadcast_q || multiply_q)
-        ? vu0_fmac_operand(static_cast<uint32_t>(vu0->m_q.m_lo))
-        : vu0_fmac_operand(vu0_fmac_read_vf(cpu, ft, bc));
-    const bool store_vf = store_w || elementwise_mul || broadcast_y ||
-        broadcast_z || broadcast_q || multiply_q;
-    const bool accumulate = accumulate_y || accumulate_z || store_w;
-
-    // Stage a separate result: VMUL can have fs==ft==fd and must read
-    // original source lanes while producing each new destination lane.
-    s_ee_u128 output = store_vf && fd != 0 ? cpu->m_vu0[fd] : vu0->m_acc;
-    uint32_t mac_flags = vu0->m_mac_flags;
-    for (uint32_t lane = 0; lane < 4; ++lane)
-    {
-        if (!(mask & (8u >> lane)))
+        if (index != 0u)
         {
-            mac_flags &= ~(0x1111u << (3u - lane));
-            continue;
+            cpu->m_vu0[index] = value;
         }
-        const float fs_value = vu0_fmac_operand(vu0_fmac_read_vf(cpu, fs, lane));
-        const float ft_value = elementwise_mul
-            ? vu0_fmac_operand(vu0_fmac_read_vf(cpu, ft, lane))
-            : broadcast;
-        volatile float product = fs_value * ft_value; // no host FMA
-        const float answer = accumulate
-            ? vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane)) +
-                  static_cast<float>(product)
-            : (multiply_acc || elementwise_mul || multiply_q)
-                ? static_cast<float>(product)
-                : fs_value + ft_value;
-        const uint32_t result_bits = vu0_fmac_result_bits(
-            answer, lane, &mac_flags
-        );
-        vu0_fmac_set_lane(&output, lane, result_bits);
+    };
+    const auto lanes_of = [cpu](uint32_t index)
+    {
+        return index == 0u
+            ? s_ee_u128{0u, 0x3f80000000000000ull} : cpu->m_vu0[index];
+    };
+
+    const bool special = funct >= 0x3cu;
+    s_vu0_macro_fmac_op op{};
+    if (vu0_macro_decode_fmac(funct, special2, special, &op))
+    {
+        const bool reads_q = op.m_source == e_vu0_macro_source::q;
+        if (reads_q && vu0->m_q_pending != 0u)
+        {
+            // Q readers cannot consume an in-flight DIV/SQRT/RSQRT result.
+            // The original retail guest executes VWAITQ first.
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const uint32_t scalar_bits =
+            reads_q ? static_cast<uint32_t>(vu0->m_q.m_lo) :
+            op.m_source == e_vu0_macro_source::i ? vu0->m_vi[21] : 0u;
+        const bool flags = op.m_arith != e_vu0_macro_arith::max &&
+            op.m_arith != e_vu0_macro_arith::mini;
+        // Stage a separate result: fs==ft==fd must read original lanes.
+        s_ee_u128 output = op.m_to_acc ? vu0->m_acc : lanes_of(fd);
+        uint32_t mac_flags = vu0->m_mac_flags;
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (!(mask & (8u >> lane)))
+            {
+                if (flags)
+                {
+                    mac_flags &= ~(0x1111u << (3u - lane));
+                }
+                continue;
+            }
+            uint32_t fs_lane = lane;
+            uint32_t ft_lane = lane;
+            if (op.m_source == e_vu0_macro_source::outer)
+            {
+                if (lane == 3u)
+                {
+                    continue; // OPMULA/OPMSUB define x, y and z only.
+                }
+                fs_lane = (lane + 1u) % 3u;
+                ft_lane = (lane + 2u) % 3u;
+            }
+            else if (op.m_source == e_vu0_macro_source::broadcast)
+            {
+                ft_lane = op.m_broadcast;
+            }
+            const float a = vu0_fmac_operand(vu0_fmac_read_vf(cpu, fs, fs_lane));
+            const float b = vu0_fmac_operand(
+                op.m_source == e_vu0_macro_source::q ||
+                op.m_source == e_vu0_macro_source::i
+                    ? scalar_bits : vu0_fmac_read_vf(cpu, ft, ft_lane));
+            if (!flags)
+            {
+                const bool take_a = op.m_arith == e_vu0_macro_arith::max
+                    ? a >= b : a <= b;
+                vu0_fmac_set_lane(&output, lane, vu0_macro_bits(take_a ? a : b));
+                continue;
+            }
+            volatile float product = a * b; // rounded before accumulation
+            const float acc = vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane));
+            float answer = 0.0f;
+            switch (op.m_arith)
+            {
+            case e_vu0_macro_arith::add: answer = a + b; break;
+            case e_vu0_macro_arith::sub: answer = a - b; break;
+            case e_vu0_macro_arith::mul: answer = product; break;
+            case e_vu0_macro_arith::madd: answer = acc + product; break;
+            case e_vu0_macro_arith::msub: answer = acc - product; break;
+            default: break;
+            }
+            vu0_fmac_set_lane(&output, lane,
+                vu0_fmac_result_bits(answer, lane, &mac_flags));
+        }
+        if (op.m_to_acc)
+        {
+            vu0->m_acc = output;
+        }
+        else
+        {
+            write_vf(fd, output);
+        }
+        if (flags)
+        {
+            vu0_macro_update_status(vu0, mac_flags);
+        }
+        return complete;
     }
 
-    if (store_vf)
+    if (!special)
     {
-        if (fd != 0)
+        // SPECIAL1 integer ALU: VIADD/VISUB/VIAND/VIOR id,is,it; VIADDI.
+        const uint32_t is = vu0_macro_read_vi16(vu0, fs);
+        const uint32_t it = vu0_macro_read_vi16(vu0, ft);
+        switch (funct)
         {
-            cpu->m_vu0[fd] = output;
+        case 0x30u: vu0_macro_write_vi16(vu0, fd, is + it); break;
+        case 0x31u: vu0_macro_write_vi16(vu0, fd, is - it); break;
+        case 0x32u:
+        {
+            const uint32_t imm = (fd & 0x10u) ? (fd | 0xffffffe0u) : fd;
+            vu0_macro_write_vi16(vu0, ft, is + imm);
+            break;
         }
+        case 0x34u: vu0_macro_write_vi16(vu0, fd, is & it); break;
+        case 0x35u: vu0_macro_write_vi16(vu0, fd, is | it); break;
+        default:
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
+        }
+        return complete;
     }
-    else
+
+    const s_ee_u128 source = lanes_of(fs);
+    s_ee_u128 output = lanes_of(ft);
+    const uint32_t fsf = (word >> 21) & 3u;
+    const uint32_t ftf = (word >> 23) & 3u;
+    switch (special2)
     {
-        vu0->m_acc = output;
+    case 0x10u: case 0x11u: case 0x12u: case 0x13u: // VITOF0/4/12/15
+    case 0x14u: case 0x15u: case 0x16u: case 0x17u: // VFTOI0/4/12/15
+    {
+        static constexpr double k_scale[4] = {1.0, 16.0, 4096.0, 32768.0};
+        const double scale = k_scale[special2 & 3u];
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (!(mask & (8u >> lane)))
+            {
+                continue;
+            }
+            const uint32_t bits = vu0_fmac_lane(source, lane);
+            vu0_fmac_set_lane(&output, lane, special2 < 0x14u
+                ? vu0_macro_bits(static_cast<float>(
+                      static_cast<double>(static_cast<int32_t>(bits)) / scale))
+                : vu0_macro_ftoi(bits, scale));
+        }
+        write_vf(ft, output);
+        return complete;
     }
-    vu0->m_mac_flags = mac_flags;
-    vu0->m_vi[17] = mac_flags;
-    const uint32_t current = ((mac_flags & 0x000fu) ? 1u : 0u) |
-        ((mac_flags & 0x00f0u) ? 2u : 0u) |
-        ((mac_flags & 0x0f00u) ? 4u : 0u) |
-        ((mac_flags & 0xf000u) ? 8u : 0u);
-    // VU User's Manual v6.0 section 3.3.2: SF[3:0] reflects the
-    // latest FMAC result; SF[9:6] accumulates sticky Z/S/U/O by OR.
-    // Retain existing I/D (bits 4/5) and all sticky flags, including
-    // IS/DS at 10/11. Do not derive sticky state from *old current*
-    // bits, because that loses historical exceptions on a later FMAC.
-    const uint32_t previous_status = vu0->m_status_flags;
-    vu0->m_status_flags = (previous_status & 0x0ff0u) |
-        current | (current << 6u);
-    vu0->m_vi[16] = vu0->m_status_flags;
-    return static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+    case 0x1du: // VABS
+    case 0x30u: // VMOVE
+    case 0x31u: // VMR32
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (!(mask & (8u >> lane)))
+            {
+                continue;
+            }
+            uint32_t bits = vu0_fmac_lane(
+                source, special2 == 0x31u ? (lane + 1u) & 3u : lane);
+            if (special2 == 0x1du)
+            {
+                bits = vu0_macro_bits(std::fabs(vu0_fmac_operand(bits)));
+            }
+            vu0_fmac_set_lane(&output, lane, bits);
+        }
+        write_vf(ft, output);
+        return complete;
+    case 0x1fu: // VCLIPw.xyz fs, ft: six judgement bits per call.
+    {
+        const float limit = std::fabs(
+            vu0_fmac_operand(vu0_fmac_read_vf(cpu, ft, 3u)));
+        uint32_t clip = (vu0->m_clip_flags << 6u) & 0x00ffffffu;
+        for (uint32_t lane = 0; lane < 3; ++lane)
+        {
+            const float value = vu0_fmac_operand(vu0_fmac_lane(source, lane));
+            if (value > limit) clip |= 1u << (lane * 2u);
+            if (value < -limit) clip |= 2u << (lane * 2u);
+        }
+        vu0->m_clip_flags = clip;
+        vu0->m_vi[18] = clip;
+        return complete;
+    }
+    case 0x2fu: // VNOP
+        return complete;
+    case 0x38u: // VDIV Q, fs.fsf, ft.ftf (seven-cycle Q latency)
+    {
+        if (vu0->m_q_pending != 0u || vu0->m_cycle > UINT64_MAX - 7u)
+        {
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const uint32_t fs_bits = vu0_fmac_lane(source, fsf);
+        const uint32_t ft_bits = vu0_fmac_read_vf(cpu, ft, ftf);
+        const float numerator = vu0_fmac_operand(fs_bits);
+        const float denominator = vu0_fmac_operand(ft_bits);
+        uint32_t current_flags = 0u;
+        uint32_t result_bits = 0u;
+        if (denominator == 0.0f)
+        {
+            // PCSX2 _vuDIV: 0/0 sets I, x/0 sets D; signed max result.
+            current_flags = numerator == 0.0f ? 0x10u : 0x20u;
+            result_bits = ((fs_bits ^ ft_bits) & 0x80000000u) | 0x7f7fffffu;
+        }
+        else
+        {
+            result_bits = vu0_macro_bits(numerator / denominator);
+            const uint32_t exponent = result_bits & 0x7f800000u;
+            if (exponent == 0u)
+            {
+                result_bits &= 0x80000000u;
+            }
+            else if (exponent == 0x7f800000u)
+            {
+                result_bits = (result_bits & 0x80000000u) | 0x7f7fffffu;
+            }
+        }
+        vu0->m_q_pending_bits = result_bits;
+        vu0->m_q_ready_cycle = vu0->m_cycle + 7u;
+        vu0->m_q_pending = 1u;
+        vu0->m_status_flags = (vu0->m_status_flags & ~0x30u) |
+            current_flags | (current_flags << 6u);
+        vu0->m_vi[16] = vu0->m_status_flags;
+        return complete;
+    }
+    case 0x3cu: // VMTIR it, fs.fsf
+        vu0_macro_write_vi16(vu0, ft, vu0_fmac_lane(source, fsf));
+        return complete;
+    case 0x3du: // VMFIR ft, is: sign-extended VI into each masked lane.
+    {
+        const uint32_t value = static_cast<uint32_t>(static_cast<int32_t>(
+            static_cast<int16_t>(vu0_macro_read_vi16(vu0, fs))));
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (mask & (8u >> lane))
+            {
+                vu0_fmac_set_lane(&output, lane, value);
+            }
+        }
+        write_vf(ft, output);
+        return complete;
+    }
+    case 0x3eu: // VILWR it, (is): the single selected lane's low 16 bits.
+    {
+        const uint32_t address = vu0_macro_memory_address(vu0, fs);
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (mask & (8u >> lane))
+            {
+                vu0_macro_write_vi16(vu0, ft,
+                    vu0_macro_load32(vu0, address + lane * 4u));
+                break;
+            }
+        }
+        return complete;
+    }
+    case 0x3fu: // VISWR it, (is): zero-extended VI into each masked lane.
+    {
+        const uint32_t address = vu0_macro_memory_address(vu0, fs);
+        const uint32_t value = vu0_macro_read_vi16(vu0, ft);
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (mask & (8u >> lane))
+            {
+                vu0_macro_store32(vu0, address + lane * 4u, value);
+            }
+        }
+        return complete;
+    }
+    case 0x40u: // VRNEXT ft: advance the 23-bit LFSR, then read R.
+    case 0x41u: // VRGET ft
+    {
+        uint32_t r = vu0->m_vi[20];
+        if (special2 == 0x40u)
+        {
+            const uint32_t feedback = ((r >> 4u) ^ (r >> 22u)) & 1u;
+            r = vu0_macro_r((r << 1u) ^ feedback);
+            vu0->m_vi[20] = r;
+        }
+        for (uint32_t lane = 0; lane < 4; ++lane)
+        {
+            if (mask & (8u >> lane))
+            {
+                vu0_fmac_set_lane(&output, lane, r);
+            }
+        }
+        write_vf(ft, output);
+        return complete;
+    }
+    case 0x42u: // VRINIT R, fs.fsf
+        vu0->m_vi[20] = vu0_macro_r(vu0_fmac_lane(source, fsf));
+        return complete;
+    case 0x43u: // VRXOR R, fs.fsf
+        vu0->m_vi[20] = vu0_macro_r(
+            vu0->m_vi[20] ^ vu0_fmac_lane(source, fsf));
+        return complete;
+    default:
+        return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
+    }
 }
 
 

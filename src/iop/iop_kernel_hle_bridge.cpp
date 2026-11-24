@@ -1863,7 +1863,15 @@ bool c_kernel_hle_bridge::handle_thsemap(uint32_t ordinal)
         [&](const char* action, uint32_t sema_id,
             uint32_t old_count, uint32_t new_count, uint32_t target)
     {
-        if (m_semaphore_trace_events < 128u)
+        // SDBZ_TRACE_IOP_SEMA=<n> raises the bounded event count.
+        static const uint32_t s_trace_limit = []
+        {
+            const char* text = std::getenv("SDBZ_TRACE_IOP_SEMA");
+            return text != nullptr
+                ? static_cast<uint32_t>(std::strtoul(text, nullptr, 0))
+                : 128u;
+        }();
+        if (m_semaphore_trace_events < s_trace_limit)
         {
             ++m_semaphore_trace_events;
             std::fprintf(stderr,

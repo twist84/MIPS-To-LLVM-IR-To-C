@@ -202,6 +202,25 @@ def main():
                  "guest_branch_liveness_test", check_branch_liveness,
                  verify_branch_liveness, expected_exit=0)
 
+        def check_branch_likely_kill(state):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[3].lo = 1  # BEQL not taken: its delay slot is annulled
+            state.gpr[16].lo = 0  # stale S0 must not survive
+            state.gpr[19].lo = 0x004581e0
+
+        def verify_branch_likely_kill(state):
+            require(state.pc == 0x00300000,
+                    f"branch-likely kill: wrong PC 0x{state.pc:08x}")
+            require(state.gpr[17].lo == 0x66,
+                    f"BEQL took the wrong route: s1=0x{state.gpr[17].lo:x}")
+            require(state.gpr[16].lo == 0x004581e0,
+                    "value killed only by an annulled BEQL slot was lost: "
+                    f"s0=0x{state.gpr[16].lo:x}")
+
+        run_case(fixture_exe, temp_dir, target, retained, "branch_likely_kill",
+                 "guest_branch_likely_kill_test", check_branch_likely_kill,
+                 verify_branch_likely_kill, expected_exit=0)
+
         def check_mov_liveness(state, condition):
             state.gpr[31].lo = 0x00300000
             state.gpr[8].lo = 0x004581e0

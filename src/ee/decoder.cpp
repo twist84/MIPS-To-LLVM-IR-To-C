@@ -1024,10 +1024,8 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                     defined = cop2_special2_defined(special2_index);
                 }
                 insn.valid = defined ? e_ee_valid::UNSUPPORTED : e_ee_valid::INVALID;
-                // Identify the retail SDBZ matrix-multiply FMAC operations
-                // exactly, while keeping them UNSUPPORTED until their VU0
-                // ACC/flag pipeline and operand forwarding are implemented.
-                // SPECIAL2 uses {sa, funct[1:0]}, not the raw funct field.
+                // Name the retail SDBZ FMAC operations first reached by the
+                // replay. SPECIAL2 uses {sa, funct[1:0]}, not raw funct.
                 const char* name = defined ? "vu0_macro" : "cop2_reserved";
                 if (defined && funct == 0x0bu)
                 {
@@ -1072,24 +1070,10 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                     default: break;
                     }
                 }
-                // Matrix FMAC, actual reached vector length and Q
-                // square-root instructions, and indexed vector memory
-                // are native. All other COP2 macros remain unsupported.
-                const uint32_t special2_index =
-                    (word & 0x3u) | ((word >> 4) & 0x7cu);
-                if (defined && (funct == 0x0bu ||
-                    funct == 0x01u || funct == 0x02u ||
-                    funct == 0x20u || funct == 0x1cu ||
-                    funct == 0x2au ||
-                    (funct >= 0x3cu &&
-                     (special2_index == 0x39u ||
-                      special2_index == 0x3au ||
-                       special2_index == 0x3bu ||
-                      special2_index == 0x18u ||
-                      special2_index == 0x09u ||
-                      special2_index == 0x0au ||
-                       (special2_index >= 0x34u &&
-                        special2_index <= 0x37u)))))
+                // Every defined macro executes through the general VU0
+                // macro runtime helpers except VCALLMS/VCALLMSR, which need
+                // the VU0 micro-program engine and stay fail-closed.
+                if (defined && funct != 0x38u && funct != 0x39u)
                 {
                     insn.valid = e_ee_valid::VALID;
                 }

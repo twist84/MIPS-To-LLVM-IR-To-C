@@ -64,6 +64,10 @@ public:
         uint32_t m_cdvd_count = 0u;
         uint32_t m_cdvd_destination = 0u;
         uint32_t m_cdvd_stream_command = 0u;
+        // sceCdRead (N fno 1) 24-byte send: IOP writes the unaligned
+        // remainder struct and the read position back to these EE addresses.
+        uint32_t m_cdvd_remainder_destination = 0u;
+        uint32_t m_cdvd_readpos_destination = 0u;
         uint32_t m_cdvd_stream_position = 0u;
         uint32_t m_cdvd_lookup_lba = 0u;
         uint32_t m_cdvd_lookup_size = 0u;

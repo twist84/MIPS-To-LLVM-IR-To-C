@@ -342,6 +342,17 @@ struct s_ee_runtime
     uint32_t m_guest_store_trace_capacity = 0u;
     uint32_t m_guest_store_trace_count = 0u;
     uint32_t m_guest_store_trace_next = 0u;
+
+    // Host-only idle-loop probe (appended; existing offsets unchanged).
+    // When a translated loop header's PC is armed here, its first visit in
+    // a native call records the remaining safepoint budget and its second
+    // visit (one completed iteration later) returns HOST_YIELD instead of
+    // spinning. The host then charges the remaining budgeted iterations of
+    // a verified pure, idempotent poll loop. All zero disables the probe.
+    uint32_t m_idle_probe_pcs[4] = {0u, 0u, 0u, 0u};
+    uint32_t m_idle_probe_state = 0u;      // 0 armed, 1 first visit, 2 yielded
+    uint32_t m_idle_probe_hit_pc = 0u;
+    uint32_t m_idle_probe_remaining = 0u;  // budget at the first visit
 };
 
 // Never infer cycles from these observations or implicitly install

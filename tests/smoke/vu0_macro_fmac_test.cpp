@@ -61,6 +61,120 @@ bool same_vector(const ee::s_ee_u128& a, const ee::s_ee_u128& b)
 {
     return a.m_lo == b.m_lo && a.m_hi == b.m_hi;
 }
+
+// COP2 macro encodings (VU User's Manual chapter 5). dest: x=8 y=4 z=2 w=1.
+constexpr uint32_t special1(uint32_t dest, uint32_t ft, uint32_t fs,
+                            uint32_t fd, uint32_t funct)
+{
+    return 0x4a000000u | (dest << 21) | (ft << 16) | (fs << 11) |
+        (fd << 6) | funct;
+}
+
+constexpr uint32_t special2(uint32_t dest, uint32_t ft, uint32_t fs,
+                            uint32_t op)
+{
+    return 0x4a000000u | (dest << 21) | (ft << 16) | (fs << 11) |
+        ((op >> 2) << 6) | 0x3cu | (op & 3u);
+}
+
+uint32_t run_macro(ee::s_ee_cpu_state& cpu, ee::s_ee_runtime& runtime,
+                   uint32_t word)
+{
+    return ee::ee_vu0_macro_fmac(&cpu, &runtime, word, 0x00107d5cu);
+}
+
+void check_general_macros(ee::s_ee_cpu_state& cpu, ee::s_ee_runtime& runtime,
+                          ee::s_ee_vu0_state& vu0)
+{
+    // Retail SDBZ 0x00107d5c: VMULx.x vf7, vf6, vf6x (first word that
+    // stopped the 2026-11-23 replay before general macro support).
+    static_assert(special1(8u, 6u, 6u, 7u, 0x18u) == 0x4b0631d8u,
+                  "VMULx.x encoding");
+    cpu.m_vu0[6] = make_vector(3.f, 1.f, 1.f, 1.f);
+    cpu.m_vu0[7] = make_vector(0.f, 8.f, 7.f, 6.f);
+    check(run_macro(cpu, runtime, 0x4b0631d8u) == 0 &&
+          same_vector(cpu.m_vu0[7], make_vector(9.f, 8.f, 7.f, 6.f)),
+          "retail VMULx.x squares only the X lane");
+
+    cpu.m_vu0[1] = make_vector(1.f, 2.f, 3.f, 4.f);
+    check(run_macro(cpu, runtime, special2(15u, 2u, 1u, 0x31u)) == 0 &&
+          same_vector(cpu.m_vu0[2], make_vector(2.f, 3.f, 4.f, 1.f)),
+          "VMR32 rotates fs into ft");
+
+    cpu.m_vu0[1] = make_vector(1.5f, -2.25f, 0.f, 1e20f);
+    check(run_macro(cpu, runtime, special2(15u, 2u, 1u, 0x15u)) == 0 &&
+          lane(cpu.m_vu0[2], 0) == 24u &&
+          lane(cpu.m_vu0[2], 1) == static_cast<uint32_t>(-36) &&
+          lane(cpu.m_vu0[2], 2) == 0u &&
+          lane(cpu.m_vu0[2], 3) == 0x7fffffffu,
+          "VFTOI4 scales, truncates and saturates");
+    check(run_macro(cpu, runtime, special2(8u, 3u, 2u, 0x11u)) == 0 &&
+          lane(cpu.m_vu0[3], 0) == bits(1.5f),
+          "VITOF4 restores the fixed-point value");
+
+    cpu.m_vu0[1] = make_vector(1.f, 0.f, 0.f, 0.f);
+    cpu.m_vu0[2] = make_vector(0.f, 1.f, 0.f, 0.f);
+    check(run_macro(cpu, runtime, special2(14u, 2u, 1u, 0x2eu)) == 0 &&
+          run_macro(cpu, runtime, special1(14u, 1u, 2u, 3u, 0x2eu)) == 0 &&
+          lane(cpu.m_vu0[3], 0) == bits(0.f) &&
+          lane(cpu.m_vu0[3], 1) == bits(0.f) &&
+          lane(cpu.m_vu0[3], 2) == bits(1.f),
+          "VOPMULA/VOPMSUB compute the cross product");
+
+    cpu.m_vu0[1] = make_vector(6.f, 0.f, 0.f, 0.f);
+    cpu.m_vu0[2] = make_vector(0.f, 2.f, 0.f, 0.f);
+    // VDIV Q, vf1.x, vf2.y: fsf bits 22:21 = 0, ftf bits 24:23 = 1.
+    const uint32_t vdiv = special2(0u, 2u, 1u, 0x38u) | (1u << 23);
+    check(run_macro(cpu, runtime, vdiv) == 0 && vu0.m_q_pending == 1u,
+          "VDIV queues Q");
+    check(ee::ee_vu0_macro_scalar(&cpu, &runtime,
+              special2(0u, 0u, 0u, 0x3bu), 0x00107d60u) == 0 &&
+          static_cast<uint32_t>(vu0.m_q.m_lo) == bits(3.f),
+          "VWAITQ retires VDIV quotient");
+
+    check(run_macro(cpu, runtime, special1(0u, 1u, 0u, 0x1du, 0x32u)) == 0 &&
+          vu0.m_vi[1] == 0xfffdu &&
+          run_macro(cpu, runtime, special1(0u, 1u, 1u, 2u, 0x30u)) == 0 &&
+          vu0.m_vi[2] == 0xfffau,
+          "VIADDI sign-extends imm5 and VIADD wraps to 16 bits");
+    check(run_macro(cpu, runtime, special2(8u, 5u, 2u, 0x3du)) == 0 &&
+          lane(cpu.m_vu0[5], 0) == 0xfffffffau &&
+          run_macro(cpu, runtime, special2(0u, 3u, 5u, 0x3cu)) == 0 &&
+          vu0.m_vi[3] == 0xfffau,
+          "VMFIR sign-extends and VMTIR truncates");
+
+    vu0.m_clip_flags = 0u;
+    cpu.m_vu0[1] = make_vector(5.f, -5.f, 0.5f, 0.f);
+    cpu.m_vu0[2] = make_vector(0.f, 0.f, 0.f, -1.f);
+    check(run_macro(cpu, runtime, special2(14u, 2u, 1u, 0x1fu)) == 0 &&
+          vu0.m_clip_flags == 0x9u,
+          "VCLIPw judges x>+|w| and y<-|w|");
+
+    vu0.m_vi[21] = bits(2.f);
+    cpu.m_vu0[1] = make_vector(1.f, 3.f, 0.f, 0.f);
+    const uint32_t mac_before_max = vu0.m_mac_flags;
+    check(run_macro(cpu, runtime, special1(12u, 0u, 1u, 4u, 0x1du)) == 0 &&
+          lane(cpu.m_vu0[4], 0) == bits(2.f) &&
+          lane(cpu.m_vu0[4], 1) == bits(3.f) &&
+          vu0.m_mac_flags == mac_before_max,
+          "VMAXi selects per lane without touching MAC flags");
+
+    cpu.m_vu0[1] = make_vector(0.f, 0.f, 0.f, 0.f);
+    cpu.m_vu0[1].m_lo = 1u;
+    check(run_macro(cpu, runtime, special2(0u, 0u, 1u, 0x42u)) == 0 &&
+          vu0.m_vi[20] == 0x3f800001u &&
+          run_macro(cpu, runtime, special2(8u, 6u, 0u, 0x40u)) == 0 &&
+          lane(cpu.m_vu0[6], 0) == 0x3f800002u,
+          "VRINIT seeds R and VRNEXT advances the LFSR");
+
+    check(run_macro(cpu, runtime, special1(0u, 4u, 0u, 2u, 0x32u)) == 0 &&
+          run_macro(cpu, runtime, special1(0u, 5u, 0u, 9u, 0x32u)) == 0 &&
+          run_macro(cpu, runtime, special2(4u, 5u, 4u, 0x3fu)) == 0 &&
+          vu0.m_data_memory[0x24] == 9u &&
+          run_macro(cpu, runtime, special2(4u, 6u, 4u, 0x3eu)) == 0 &&
+          vu0.m_vi[6] == 9u,
+          "VISWR/VILWR use VI*16 plus the selected lane");
+}
 } // namespace
 
 int main()
@@ -382,16 +496,19 @@ int main()
               &cpu, &runtime, k_vwaitq, 0x0010698cu) == 0,
           "zero-over-zero Q retires");
 
+    check_general_macros(cpu, runtime, vu0);
+
     // Unsupported instructions or a busy VU0 must fail closed. Confirm no
     // architectural writes, not merely a non-zero return value.
     const ee::s_ee_cpu_state cpu_before = cpu;
     const ee::s_ee_vu0_state vu0_before = vu0;
-    const uint32_t unsupported = s_matrix_words[0] ^ 1u;
+    // SPECIAL1 funct 0x3a is reserved (VCALLMS is 0x38, VCALLMSR 0x39).
+    const uint32_t unsupported = (s_matrix_words[0] & ~63u) | 0x3au;
     check(ee::ee_vu0_macro_fmac(&cpu, &runtime, unsupported, 0x108240) ==
               static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT) &&
           std::memcmp(&cpu, &cpu_before, sizeof(cpu)) == 0 &&
           std::memcmp(&vu0, &vu0_before, sizeof(vu0)) == 0,
-          "unsupported SPECIAL2 operation leaves CPU and VU0 unmodified");
+          "reserved COP2 macro operation leaves CPU and VU0 unmodified");
     vu0.m_running = 1;
     const ee::s_ee_cpu_state busy_before = cpu;
     const ee::s_ee_vu0_state busy_vu0 = vu0;

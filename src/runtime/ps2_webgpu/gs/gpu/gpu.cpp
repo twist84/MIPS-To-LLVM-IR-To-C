@@ -778,7 +778,19 @@ void queue_pre(const PreOp &op) {
 
 void submit(WGPUTextureView present_view);
 
+// Submit only drains the arena. A headless host submits on readback alone,
+// so a long run of uploads/draws (e.g. an MPEG movie streamed through GIF
+// IMAGE transfers) could otherwise exceed the 2 GiB storage-buffer limit.
+constexpr std::size_t kArenaSoftLimitWords = (256u << 20) / 4;
+
+void bound_arena() {
+    if (g_arena.size() < kArenaSoftLimitWords) return;
+    emit_all();
+    submit(nullptr);
+}
+
 std::uint64_t queue_upload(const std::uint8_t *bytes, std::size_t size, std::uint32_t lead_bits) {
+    bound_arena();
     Image &im = g_image;
     const std::uint64_t bits = static_cast<std::uint64_t>(size) * 8;
     if (bits <= lead_bits) return 0;
@@ -896,6 +908,15 @@ void rebuild_group() {
 void ensure_capacity() {
     bool changed = false;
     const std::uint64_t data_bytes = std::max<std::uint64_t>(g_arena.size() * 4, 16);
+    if (data_bytes > (1ull << 30)) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "[gpu] arena %llu bytes in one submit: commands=%zu params=%zu batch_prims=%zu pre=%zu\n",
+                static_cast<unsigned long long>(data_bytes), g_commands.size(), g_param_records.size(),
+                g_batch.prims.size() / kPrimWords, g_pre.size());
+        }
+    }
     if (data_bytes > g_data_size) {
         if (g_data) wgpuBufferRelease(g_data);
         g_data_size = std::max<std::uint64_t>(g_data_size * 2, (data_bytes + (4u << 20) - 1) & ~((4ull << 20) - 1));
@@ -1501,6 +1522,7 @@ void invalidate_native_atlases()
 
 void draw(const State &st, const Vertex *v, int count) {
     if (g_image.active && !g_image.pending.empty()) flush_image();
+    bound_arena();
     std::uint64_t attr = st.prim;
     if (!(st.prmodecont & 1u)) attr = (st.prim & 7u) | (st.prmode & ~7ull);
     const std::uint32_t prim = static_cast<std::uint32_t>(st.prim) & 7u;

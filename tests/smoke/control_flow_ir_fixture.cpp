@@ -86,6 +86,16 @@ int main(int argc, char** argv)
         is_branch_liveness = true;
         function_name = "guest_branch_liveness_test";
     }
+    else if (mode == "branch_likely_kill")
+    {
+        // SDBZ 0x1663fc..0x166414: a register produced before a BEQL on an
+        // unrelated GPR must stay live when only the annulled (taken-only)
+        // delay slot overwrites it.
+        control_word = make_i(0x04, 0, 0, 1); // beq zero,zero,entry+8
+        delay_word = make_r(19, 0, 16, 0, 0x2d); // daddu s0,s3,zero
+        is_branch_liveness = true;
+        function_name = "guest_branch_likely_kill_test";
+    }
     else if (mode == "movz_liveness" || mode == "movn_liveness" ||
              mode == "srav_liveness")
     {
@@ -316,8 +326,12 @@ int main(int argc, char** argv)
         };
         const uint32_t words[] =
         {
-            make_i(0x14, 2, 0, 3),     // beql v0,zero,entry+24
-            make_i(0x09, 0, 2, 0x15),  // taken slot: overwrite v0
+            mode == "branch_likely_kill"
+                ? make_i(0x14, 3, 0, 3)    // beql v1,zero,entry+24
+                : make_i(0x14, 2, 0, 3),   // beql v0,zero,entry+24
+            mode == "branch_likely_kill"
+                ? make_i(0x09, 0, 16, 0x15) // taken slot: overwrite s0
+                : make_i(0x09, 0, 2, 0x15), // taken slot: overwrite v0
             make_r(31, 0, 0, 0, 0x08), // not-taken: jr ra
             make_i(0x09, 0, 17, 0x66), // not-taken marker
             make_r(31, 0, 0, 0, 0x08), // taken: jr ra

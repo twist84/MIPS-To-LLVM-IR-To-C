@@ -38,10 +38,16 @@ private:
     bool read_path(uint32_t pointer, std::string* path) const;
     bool handle_read_clock(uint32_t destination);
     void complete_read();
+    bool start_drive_command(uint32_t function);
+    void complete_drive_command();
+    void finish_command(uint32_t function);
+    bool busy() const { return m_read_pending || m_drive_command != 0u; }
 
     c_kernel& m_kernel;
     c_folder_sector_source& m_source;
     bool m_read_pending = false;
+    // Pending non-read N-command (SCECdFunc: 5 standby, 6 stop, 7 pause).
+    uint32_t m_drive_command = 0u;
     uint32_t m_read_destination = 0u;
     std::vector<uint8_t> m_read_data;
     std::vector<uint32_t> m_sync_waiters;

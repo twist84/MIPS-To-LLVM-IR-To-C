@@ -6,6 +6,10 @@
 #include "ee_scanout_clock.h"
 #include "ee_sif.h"
 #include "ee_vif1.h"
+#include "ipu/ee_ipu.h"
+
+#include <cstdint>
+#include <vector>
 
 namespace ee
 {
@@ -14,6 +18,15 @@ namespace ee
 class c_ee_hw_bus
 {
 public:
+    c_ee_hw_bus()
+    {
+        // The IPU pulls/pushes through DMA channels 4/3 and raises INTC 8.
+        m_ipu.bind(&m_dmac, &m_intc);
+        m_dmac.bind_ipu(&m_ipu, &c_ee_ipu::dma_started_callback);
+    }
+    c_ee_hw_bus(const c_ee_hw_bus&) = delete;
+    c_ee_hw_bus& operator=(const c_ee_hw_bus&) = delete;
+
     void bind_cpu(s_ee_cpu_state* cpu)
     {
         m_intc.bind_cpu(cpu);
@@ -51,6 +64,7 @@ public:
             m_vif1->reset();
         }
         m_sif.reset();
+        m_ipu.reset();
         m_gs_imr = 0u;
         m_gs_display = {};
         m_scanout = {};
@@ -72,6 +86,11 @@ public:
     c_ee_sif& sif()
     {
         return m_sif;
+    }
+
+    c_ee_ipu& ipu()
+    {
+        return m_ipu;
     }
 
     c_ee_scanout_clock& scanout()
@@ -160,6 +179,49 @@ public:
         return true;
     }
 
+    // Host-only observation of IPU registers, IPU FIFOs and DMA channels
+    // 3/4 (fromIPU/toIPU). Observation never claims the access.
+    struct s_ipu_observation
+    {
+        struct s_access
+        {
+            uint32_t address = 0u;
+            uint32_t width = 0u;
+            uint64_t value = 0u;
+            bool write = false;
+        };
+        uint64_t reads = 0u;
+        uint64_t writes = 0u;
+        uint64_t commands[16] = {};
+        std::vector<s_access> first;
+    };
+
+    static bool is_ipu_address(uint32_t address)
+    {
+        return (address >= 0x10002000u && address < 0x10002040u) ||
+               (address >= 0x10007000u && address < 0x10007020u) ||
+               (address >= 0x1000b000u && address < 0x1000b040u) ||
+               (address >= 0x1000b400u && address < 0x1000b440u);
+    }
+
+    void observe_ipu(uint32_t address, uint32_t width, uint64_t value, bool write)
+    {
+        (write ? m_ipu_observation.writes : m_ipu_observation.reads) += 1u;
+        if (write && address == 0x10002000u)
+        {
+            m_ipu_observation.commands[(value >> 28u) & 15u] += 1u;
+        }
+        if (m_ipu_observation.first.size() < 4096u)
+        {
+            m_ipu_observation.first.push_back({address, width, value, write});
+        }
+    }
+
+    const s_ipu_observation& ipu_observation() const
+    {
+        return m_ipu_observation;
+    }
+
     static bool mmio_read(void* user, uint32_t address,
                           uint32_t width, s_ee_u128* value)
     {
@@ -167,6 +229,21 @@ public:
         {
             return false;
         }
+        if (is_ipu_address(address))
+        {
+            // Observe the value actually returned by the device.
+            const bool handled = mmio_read_device(user, address, width, value);
+            static_cast<c_ee_hw_bus*>(user)->observe_ipu(
+                address, width,
+                handled && value != nullptr ? value->m_lo : 0u, false);
+            return handled;
+        }
+        return mmio_read_device(user, address, width, value);
+    }
+
+    static bool mmio_read_device(void* user, uint32_t address,
+                                 uint32_t width, s_ee_u128* value)
+    {
 
         c_ee_hw_bus* bus = static_cast<c_ee_hw_bus*>(user);
         const int32_t display_index = display_register_index(address);
@@ -196,7 +273,8 @@ public:
             value->m_hi = 0u;
             return true;
         }
-        return (bus->m_vif1 != nullptr &&
+        return c_ee_ipu::mmio_read(&bus->m_ipu, address, width, value) ||
+               (bus->m_vif1 != nullptr &&
                 c_ee_vif1::mmio_read(bus->m_vif1, address, width, value)) ||
                c_ee_intc::mmio_read(&bus->m_intc, address, width, value) ||
                c_ee_dmac::mmio_read(&bus->m_dmac, address, width, value) ||
@@ -209,6 +287,11 @@ public:
         if (user == nullptr)
         {
             return false;
+        }
+        if (is_ipu_address(address))
+        {
+            static_cast<c_ee_hw_bus*>(user)->observe_ipu(
+                address, width, value != nullptr ? value->m_lo : 0u, true);
         }
 
         c_ee_hw_bus* bus = static_cast<c_ee_hw_bus*>(user);
@@ -259,7 +342,8 @@ public:
             }
             return true;
         }
-        return (bus->m_vif1 != nullptr &&
+        return c_ee_ipu::mmio_write(&bus->m_ipu, address, width, value) ||
+               (bus->m_vif1 != nullptr &&
                 c_ee_vif1::mmio_write(bus->m_vif1, address, width, value)) ||
                c_ee_intc::mmio_write(&bus->m_intc, address, width, value) ||
                c_ee_dmac::mmio_write(&bus->m_dmac, address, width, value) ||
@@ -271,11 +355,13 @@ private:
     c_ee_dmac m_dmac;
     c_ee_vif1* m_vif1 = nullptr;
     c_ee_sif m_sif;
+    c_ee_ipu m_ipu;
     c_ee_scanout_clock m_scanout;
     uint64_t m_gs_imr = 0u;
     s_ee_gs_display_registers m_gs_display{};
     uint32_t m_gs_crt_interlace = 0u;
     uint32_t m_gs_crt_mode = 0u;
     uint32_t m_gs_crt_ffmd = 0u;
+    s_ipu_observation m_ipu_observation;
 };
 } // namespace ee

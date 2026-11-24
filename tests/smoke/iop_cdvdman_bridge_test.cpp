@@ -361,6 +361,8 @@ int main()
     {
         return fail("sceCdStandby fabricated CDVD completion or failed");
     }
+    // Let the accepted standby N-command complete before idle checks.
+    (void)standby_kernel.run(256u, 64u);
     for (uint32_t mode : {0u, 1u, 17u})
     {
         standby_kernel.cpu().state().m_gpr[4] = mode;
@@ -583,12 +585,13 @@ int main()
         if (!callback_bridge.handle_syscall(
                 callback_kernel,
                 iop::c_cdvdman_bridge::k_service_base + ordinal) ||
-            callback_kernel.cpu().state().m_gpr[2] != 1u ||
+            callback_kernel.cpu().state().m_gpr[2] != 0u ||
             !callback_bridge.handle_syscall(
                 callback_kernel,
                 iop::c_cdvdman_bridge::k_service_base + 28u) ||
             callback_kernel.cpu().state().m_gpr[2] != 6u)
         {
+            // Stop/Pause are N-commands: refused while a read is busy.
             return fail("sceCdStop/Pause fabricated pending read completion");
         }
     }
@@ -632,6 +635,31 @@ int main()
         callback_kernel.hardware().cdvd_ncmd_pending())
     {
         return fail("completed CDVD read did not run real guest callback");
+    }
+    // sceCdStandby is an N-command as well: accepted now (drive busy),
+    // then completion runs the guest callback with SCECdFuncStandby (5).
+    // ARKD_DVD.IRX releases its drive mutex only from that callback.
+    if (!callback_bridge.handle_syscall(
+            callback_kernel,
+            iop::c_cdvdman_bridge::k_service_base + 5u) ||
+        callback_kernel.cpu().state().m_gpr[2] != 1u ||
+        !callback_bridge.handle_syscall(
+            callback_kernel,
+            iop::c_cdvdman_bridge::k_service_base + 13u) ||
+        callback_kernel.cpu().state().m_gpr[2] != 6u)
+    {
+        return fail("sceCdStandby was not accepted as a pending N-command");
+    }
+    (void)callback_kernel.run(256u, 64u);
+    if (!callback_kernel.cpu().read32(
+            k_guest_callback_result, &callback_reason) ||
+        callback_reason != 5u ||
+        !callback_bridge.handle_syscall(
+            callback_kernel,
+            iop::c_cdvdman_bridge::k_service_base + 13u) ||
+        callback_kernel.cpu().state().m_gpr[2] != 2u)
+    {
+        return fail("sceCdStandby completion did not run guest callback 5");
     }
     // The guest callback must be replaceable and unregisterable,
     // returning the previous function address as the PS2 ABI requires.
@@ -707,9 +735,9 @@ int main()
     // Observe immutable mounted media and absence of pending CDVDMAN
     // commands; these queries cannot fabricate a DMA completion.
     for (const auto& query : std::array<std::array<uint32_t, 2u>, 7u>{{
-        {{4u, 1u}}, {{5u, 1u}}, {{8u, 0u}},
+        {{4u, 1u}}, {{8u, 0u}},
         {{11u, 0u}}, {{12u, 0x14u}}, {{13u, 2u}},
-        {{28u, 0x0au}}
+        {{28u, 0x0au}}, {{5u, 1u}}
     }})
     {
         if (!clock_bridge.handle_syscall(

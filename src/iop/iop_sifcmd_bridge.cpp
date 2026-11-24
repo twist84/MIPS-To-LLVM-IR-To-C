@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <utility>
 
 namespace iop
@@ -491,6 +492,27 @@ bool c_sifcmd_bridge::handle_rpc_syscall(uint32_t ordinal)
             thread_id, server->second.m_handler, argument,
             server->second.m_buffer, request.m_bytes.size(),
             static_cast<unsigned long long>(m_kernel.cycles()));
+        // SDBZ_TRACE_RPC_ARGS=<server id> dumps that server's request bytes
+        // (host-only diagnostic; never alters the guest buffer or reply).
+        static const char* trace_server = std::getenv("SDBZ_TRACE_RPC_ARGS");
+        if (trace_server != nullptr && !request.m_bytes.empty() &&
+            std::strtoul(trace_server, nullptr, 0) == request.m_server_id &&
+            request.m_method != 2u)
+        {
+            std::fprintf(stderr, "IOP guest RPC args: token=%u method=%u bytes:",
+                         request.m_token, request.m_method);
+            for (size_t i = 0; i < request.m_bytes.size(); ++i)
+            {
+                std::fprintf(stderr, "%s%02x", i % 16u == 0u ? "\n  " : " ",
+                             request.m_bytes[i]);
+            }
+            std::fprintf(stderr, "\n  ascii: ");
+            for (const uint8_t byte : request.m_bytes)
+            {
+                std::fputc(byte >= 0x20u && byte < 0x7fu ? byte : '.', stderr);
+            }
+            std::fprintf(stderr, "\n");
+        }
         cpu.m_gpr[4] = request.m_method;
         cpu.m_gpr[5] = server->second.m_buffer;
         cpu.m_gpr[6] =

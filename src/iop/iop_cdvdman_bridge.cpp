@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <utility>
@@ -77,6 +79,7 @@ bool c_cdvdman_bridge::install()
         }
     }
     m_read_pending = false;
+    m_drive_command = 0u;
     m_read_destination = 0u;
     m_read_data.clear();
     m_sync_waiters.clear();
@@ -224,6 +227,44 @@ void c_cdvdman_bridge::complete_read()
     m_read_data.clear();
     m_read_destination = 0u;
     m_read_pending = false;
+    finish_command(1u);
+}
+
+bool c_cdvdman_bridge::start_drive_command(uint32_t function)
+{
+    // Standby, stop and pause are N-commands on real hardware: the call
+    // returns 1 once the command is accepted (0 while the drive is busy),
+    // completion raises the CDVD interrupt, and CDVDMAN then calls the
+    // user callback with the SCECdFunc code. ARKD_DVD.IRX locks its drive
+    // mutex before sceCdStandby and releases it only from that callback.
+    if (!m_source.valid() || m_source.sector_count() == 0u || busy())
+    {
+        return false;
+    }
+    if (!m_kernel.schedule_hle_event(32u,
+            [this]() { complete_drive_command(); }))
+    {
+        return false;
+    }
+    m_drive_command = function;
+    m_last_error = 0u;
+    return true;
+}
+
+void c_cdvdman_bridge::complete_drive_command()
+{
+    const uint32_t function = m_drive_command;
+    if (function == 0u)
+    {
+        return;
+    }
+    m_drive_command = 0u;
+    finish_command(function);
+}
+
+void c_cdvdman_bridge::finish_command(uint32_t function)
+{
+    const size_t sync_waiters = m_sync_waiters.size();
 
     for (const uint32_t id : m_sync_waiters)
     {
@@ -237,16 +278,27 @@ void c_cdvdman_bridge::complete_read()
     }
     m_sync_waiters.clear();
 
-    // The original guest callback is scheduled only after an actual
-    // mounted-sector transfer completed, with the PS2 CDVD READ reason.
+    // The guest callback runs only after the accepted command completed,
+    // with its SCECdFunc reason (1 read, 5 standby, 6 stop, 7 pause).
     // It executes as an R3000 guest function and returns via a bounded
     // one-shot kernel trampoline. Never claim a callback was delivered
     // if its guest entry cannot be scheduled.
-    if (m_callback != 0u &&
-        !m_kernel.start_guest_callback(
-            m_callback, m_callback_gp, 1u, m_callback_origin))
+    const bool started = m_callback == 0u ||
+        m_kernel.start_guest_callback(
+            m_callback, m_callback_gp, function, m_callback_origin);
+    if (!started)
     {
         m_last_error = 1u;
+    }
+    static const bool trace_cdvd = std::getenv("SDBZ_TRACE_CDVD") != nullptr;
+    if (trace_cdvd)
+    {
+        std::fprintf(stderr,
+            "IOP CDVD command complete: function=%u callback=0x%08x "
+            "started=%d error=%u woken_sync=%zu cycles=%llu\n",
+            function, m_callback, started ? 1 : 0, m_last_error,
+            sync_waiters,
+            static_cast<unsigned long long>(m_kernel.cycles()));
     }
 }
 
@@ -275,12 +327,7 @@ bool c_cdvdman_bridge::handle_syscall(
         return true;
 
     case k_service_base + 5u: // sceCdStandby
-        // An extracted, already-mounted DVD requires no physical
-        // spindle transition. Acknowledge that idempotent operation,
-        // without setting a pending N-command, raising an interrupt,
-        // or completing DMA on behalf of the guest.
-        state.m_gpr[2] = m_source.valid() &&
-            m_source.sector_count() != 0u ? 1u : 0u;
+        state.m_gpr[2] = start_drive_command(5u) ? 1u : 0u;
         return true;
 
     case k_service_base + 6u: // sceCdRead
@@ -290,15 +337,28 @@ bool c_cdvdman_bridge::handle_syscall(
         const uint32_t destination = state.m_gpr[6];
         const uint32_t mode = state.m_gpr[7];
         uint32_t physical = 0u;
+        static const bool trace_cdvd = std::getenv("SDBZ_TRACE_CDVD") != nullptr;
         // Only 2048-byte sectors written to regular IOP RAM. Reject
         // unsupported sizes, alias regions and invalid disc extents
         // without touching the guest destination.
-        if (m_read_pending || sectors == 0u ||
-            sectors > c_cpu::k_ram_size / 2048u ||
-            static_cast<uint64_t>(lba) + sectors >
-                m_source.sector_count() ||
-            !ram_pointer(destination, sectors * 2048u, &physical) ||
-            (mode != 0u && !ram_pointer(mode, 4u, &physical)))
+        const char* rejected =
+            busy() ? "drive busy" :
+            sectors == 0u ? "zero sectors" :
+            sectors > c_cpu::k_ram_size / 2048u ? "too many sectors" :
+            static_cast<uint64_t>(lba) + sectors > m_source.sector_count()
+                ? "past end of disc" :
+            !ram_pointer(destination, sectors * 2048u, &physical)
+                ? "destination outside IOP RAM" :
+            (mode != 0u && !ram_pointer(mode, 4u, &physical))
+                ? "mode outside IOP RAM" : nullptr;
+        if (trace_cdvd)
+        {
+            std::fprintf(stderr,
+                "IOP CDVD sceCdRead lba=%u sectors=%u dst=0x%08x mode=0x%08x thread=%u %s\n",
+                lba, sectors, destination, mode, m_kernel.current_thread_id(),
+                rejected != nullptr ? rejected : "accepted");
+        }
+        if (rejected != nullptr)
         {
             state.m_gpr[2] = 0u;
             return true;
@@ -337,10 +397,10 @@ bool c_cdvdman_bridge::handle_syscall(
     case k_service_base + 11u: // sceCdSync
         if (state.m_gpr[4] == 1u || state.m_gpr[4] == 17u)
         {
-            state.m_gpr[2] = m_read_pending ? 1u : 0u;
+            state.m_gpr[2] = busy() ? 1u : 0u;
             return true;
         }
-        if (m_read_pending)
+        if (busy())
         {
             const uint32_t id = m_kernel.current_thread_id();
             if (id == 0u || !m_kernel.block_current(18u))
@@ -359,17 +419,14 @@ bool c_cdvdman_bridge::handle_syscall(
         return true;
 
     case k_service_base + 13u: // sceCdDiskReady
-        // No native CDVDMAN command can be pending in this HLE subset;
-        // this checks the mounted sector backend, not physical hardware.
-        state.m_gpr[2] = m_source.valid() &&
-            m_source.sector_count() != 0u ? 2u : 0u;
+        // 2 = SCECdComplete, 6 = SCECdNotReady while an N-command runs.
+        // This checks the mounted sector backend, not physical hardware.
+        state.m_gpr[2] = !m_source.valid() ||
+            m_source.sector_count() == 0u ? 0u : busy() ? 6u : 2u;
         return true;
 
     case k_service_base + 15u: // sceCdStop
-        // The extracted DVD is already mounted: this acknowledges an
-        // idempotent physical spindle request without stopping or
-        // completing a previously accepted file-backed read.
-        state.m_gpr[2] = m_source.valid() ? 1u : 0u;
+        state.m_gpr[2] = start_drive_command(6u) ? 1u : 0u;
         return true;
 
     case k_service_base + 24u: // sceCdReadClock
@@ -383,7 +440,7 @@ bool c_cdvdman_bridge::handle_syscall(
         return true;
 
     case k_service_base + 28u: // sceCdStatus
-        state.m_gpr[2] = m_read_pending ? 0x06u :
+        state.m_gpr[2] = busy() ? 0x06u :
             (m_source.valid() && m_source.sector_count() != 0u
                 ? 0x0au : 0u);
         return true;
@@ -433,8 +490,7 @@ bool c_cdvdman_bridge::handle_syscall(
     }
 
     case k_service_base + 38u: // sceCdPause
-        // Same physical-drive compatibility contract as sceCdStop.
-        state.m_gpr[2] = m_source.valid() ? 1u : 0u;
+        state.m_gpr[2] = start_drive_command(7u) ? 1u : 0u;
         return true;
 
     case k_service_base + 75u: // sceCdMmode
@@ -473,7 +529,16 @@ bool c_cdvdman_bridge::handle_syscall(
          name.substr(0u, 7u) == "CDROM0:");
     const std::string guest_path = qualified ? name : "cdrom0:" + name;
     s_folder_file_info file{};
-    if (!m_source.find_file(guest_path, &file))
+    const bool found = m_source.find_file(guest_path, &file);
+    static const bool trace_search = std::getenv("SDBZ_TRACE_CDVD") != nullptr;
+    if (trace_search)
+    {
+        std::fprintf(stderr,
+            "IOP CDVD sceCdSearchFile %s found=%d lba=%u size=%u thread=%u\n",
+            guest_path.c_str(), found ? 1 : 0, found ? file.m_lba : 0u,
+            found ? file.m_size : 0u, m_kernel.current_thread_id());
+    }
+    if (!found)
     {
         // A missing/unsupported filename is a genuine search miss.
         // Leave the caller's output structure untouched.
