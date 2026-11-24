@@ -32,6 +32,7 @@ class EEState(ctypes.Structure):
         ("vu0", (ctypes.c_uint64 * 2) * 32),
         ("fcsr", ctypes.c_uint32),
         ("fpu_acc", ctypes.c_uint32),
+        ("fpu_acc_overflow", ctypes.c_uint32),
     ]
 
 
@@ -290,7 +291,7 @@ def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
     fpr_sentinel = 0xAABBCCDD11223344
 
     for (fs_bits, ft_bits, acc_bits, expected_bits,
-         initial_fcsr, expected_fcsr, label) in cases:
+         initial_fcsr, expected_fcsr, label, *latch_case) in cases:
         backing, state = aligned_state()
         _ = (backing, retained)
         state.fpr[1] = fs_bits
@@ -298,6 +299,8 @@ def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
         state.fpr[6] = fpr_sentinel
         state.fpu_acc = acc_bits
         state.fcsr = initial_fcsr
+        initial_latch = latch_case[0] if latch_case else 0
+        state.fpu_acc_overflow = initial_latch
 
         result = guest_fn(ctypes.pointer(state), None)
         prefix = (
@@ -325,9 +328,18 @@ def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
             require(state.fpr[6] == fpr_sentinel,
                     prefix + "accumulator-only operation modified FPR[6]")
 
-        require(state.fcsr == expected_fcsr,
-                prefix + f"FCSR got 0x{state.fcsr:08x}, "
-                         f"expected 0x{expected_fcsr:08x}")
+        if expected_fcsr is not None:
+            require(state.fcsr == expected_fcsr,
+                    prefix + f"FCSR got 0x{state.fcsr:08x}, "
+                             f"expected 0x{expected_fcsr:08x}")
+        if writes_fpr:
+            require(state.fpu_acc_overflow == initial_latch,
+                    prefix + "FPR destination changed ACC overflow latch")
+        elif latch_case or expected_fcsr is not None:
+            expected_latch = (latch_case[1] if latch_case
+                              else int(bool(expected_fcsr & 0x8000)))
+            require(state.fpu_acc_overflow == expected_latch,
+                    prefix + f"wrong ACC overflow latch {state.fpu_acc_overflow}")
 
 
 def run_cop1_transfer_cases(fixture, temp_dir, target):
@@ -717,9 +729,7 @@ def main():
         (0xFFC00000, 0x0000000080000000, "negative quiet NaN saturates"),
     ]
 
-    # Accumulator operations use distinct EE arithmetic paths:
-    # MADD/MSUB normalise the accumulator and rounded product; MADDA/MSUBA
-    # keep both raw after multiplying normalised source operands.
+    # MAC instructions share arithmetic but differ in destination and latch writes.
     accumulator_normal_flags = 0xA592F45E
     accumulator_no_exception = accumulator_normal_flags & ~0xC000
     adda_cases = [
@@ -734,42 +744,248 @@ def main():
         (0x3FC00000, 0x40000000, 0x3F800000, 0x40400000,
          accumulator_normal_flags, accumulator_no_exception, "1.5 * 2.0"),
     ]
-    madd_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0x40800000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 + 1.5 * 2.0"),
-        # The rounded product is subnormal, then fpuDouble flushes it to zero.
-        (0x00800000, 0x3F000000, 0x00000000, 0x00000000,
-         accumulator_normal_flags, accumulator_no_exception, "rounded product denormal normalises before accumulation"),
-        # An Inf product is saturated to FMAX before the accumulator add.
-        (0x7F7FFFFF, 0x40000000, 0x00000000, 0x7F7FFFFF,
-         accumulator_normal_flags, accumulator_no_exception, "product infinity normalises to FMAX"),
-        # A denormal ACC is normalised to zero before accumulation.
-        (0x00000000, 0x00000000, 0x00000001, 0x00000000,
-         accumulator_normal_flags, accumulator_no_exception, "denormal ACC normalises to zero"),
-    ]
-    msub_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0xC0000000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 - 1.5 * 2.0"),
-    ]
-    madda_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0x40800000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 + 1.5 * 2.0"),
-        # Unlike MADD.S, the denormal product is not normalised before the
-        # accumulator add, so the final result is flushed and U|SU is set.
-        (0x00800000, 0x3F000000, 0x00000000, 0x00000000,
-         0xA592B456, 0xA592745E, "raw subnormal product flushes after accumulation"),
-        # MADDA.S keeps the infinity product raw, so the final operation
-        # overflows, saturates, and returns before clearing the U cause bit.
-        (0x7F7FFFFF, 0x40000000, 0x00000000, 0x7F7FFFFF,
-         0xA592744E, 0xA592F45E, "raw infinity product overflows"),
-        # The raw denormal accumulator participates in the final sum.
-        (0x00000000, 0x00000000, 0x00000001, 0x00000000,
-         0xA592B456, 0xA592745E, "raw denormal ACC flushes after accumulation"),
-    ]
-    msuba_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0xC0000000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 - 1.5 * 2.0"),
-    ]
+    # Literal console results from muldiv.expected. ACC initialization
+    # uses ADDA with -0, so exponent-zero payloads are flushed.
+    # That fixture does not record FCSR or the internal ACC overflow latch.
+    mac_hardware_words = {
+        "madd_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0x3f800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x40000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0x40c00000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x40c00000),
+            (0x40400000, 0x40400000, 0x00000000, 0x41100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0xffffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x00000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0x7fffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0xbf800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0x3fffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0x7f800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0x3ffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0x7f800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0x407ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0x7ffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0xfffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "msub_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0xbf800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x00000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0xc0000000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x00000000),
+            (0x40400000, 0x40400000, 0x00000000, 0xc1100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x80000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0xffffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0x3f800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0xbfffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0xff800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0xbffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0xff800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0xc07ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0xfffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0x7ffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "madda_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0x3f800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x40000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0x40c00000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x40c00000),
+            (0x40400000, 0x40400000, 0x00000000, 0x41100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0xffffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x00000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0x7fffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0xbf800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0x3fffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0x7f800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0x3ffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0x7f800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0x407ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0x7ffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0xfffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "msuba_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0xbf800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x00000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0xc0000000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x00000000),
+            (0x40400000, 0x40400000, 0x00000000, 0xc1100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x80000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0xffffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0x3f800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0xbfffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0xff800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0xbffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0xff800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0xc07ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0xfffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0x7ffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+    }
+    mac_cases = {}
+    for mode, words in mac_hardware_words.items():
+        mac_cases[mode] = [
+            (*values, initial, None, "hardware result")
+            for values in words
+            for initial in (0, accumulator_normal_flags)
+        ]
+        subtract = mode in ("msub_s", "msuba_s")
+        writes_acc = mode in ("madda_s", "msuba_s")
+        opposite_max = 0x7fffffff if subtract else 0xffffffff
+        product_max = 0xffffffff if subtract else 0x7fffffff
+        mac_cases[mode].extend([
+            (0x7fffffff, 0x3f800000, opposite_max, 0,
+             0, 0, "finite exponent-255 cancellation", 0, 0),
+            (0x7fffffff, 0x3f800000, opposite_max, opposite_max,
+             0, 0x8010, "previous ACC overflow dominates finite product", 1, 1),
+            (0x7fffffff, 0x40000000, opposite_max, product_max,
+             0, 0x8010, "product overflow dominates opposite ACC", 0, int(writes_acc)),
+            (0x7fffffff, 0x40000000, opposite_max, product_max,
+             0x4008, 0x8018, "product overflow dominates latched ACC", 1, 1),
+            (0x00800000, 0x3f000000, 0x3f800000, 0x3f800000,
+             0, 8, "product underflow sets sticky only", 0, 0),
+            (0x00800000 if subtract else 0x80800000, 0x3f800000,
+             0x00800001, 0, 0, 0x4008, "final sum underflow", 0, 0),
+            (0x3fc00000, 0x40000000, 0x3f800000,
+             0xc0000000 if subtract else 0x40800000,
+             accumulator_normal_flags, accumulator_no_exception,
+             "ordinary MAC clears previous O/U cause", 0, 0),
+        ])
 
     # PCSX2 EE reference semantics:
     # - ADD/SUB/MUL normalise zero/denormal and Inf/NaN operands first.
@@ -1151,10 +1367,9 @@ def main():
             run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases, opt)
         for opt in (0, 3):
             run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases, opt)
-        run_accumulator_cases(fixture, temp_dir, target, "madd_s", madd_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "msub_s", msub_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "madda_s", madda_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "msuba_s", msuba_cases)
+        for opt in (0, 3):
+            for mode, cases in mac_cases.items():
+                run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt)
         sqrt_hardware_words = [
             (word, "hardware SQRT.S vector")
             for word in (0x00000000, 0x80000000, 0x3F800000, 0x40000000,

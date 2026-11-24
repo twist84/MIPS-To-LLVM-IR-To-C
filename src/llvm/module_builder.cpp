@@ -49,7 +49,7 @@ void module_builder::header()
     m_out += "\n";
     // Layout must match s_ee_cpu_state:
     // 0 gpr[32]{lo,hi}, 1 hi, 2 lo, 3 hi1, 4 lo1, 5 sa, 6 pc, 7 exit, 8 pad,
-    // 9 cop0[32], 10 fpr[32], 11 vu0[32]{lo,hi}, 12 fcsr, 13 fpu_acc
+    // 9 cop0[32], 10 fpr[32], 11 vu0[32]{lo,hi}, 12 fcsr, 13 fpu_acc, 14 fpu_acc_overflow
     m_out += "%ee_cpu_state = type { "
              "[32 x { i64, i64 }], "
              "i64, i64, i64, i64, "
@@ -57,7 +57,7 @@ void module_builder::header()
              "[32 x i32], "
              "[32 x i64], "
              "[32 x { i64, i64 }], "
-             "i32, i32 }\n";
+             "i32, i32, i32 }\n";
     m_out += "\n";
 }
 
@@ -2216,26 +2216,17 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         else if (fmt == 0x10 || fmt == 0x14)
         {
             // fmt S (16) or W (20). Encodings match PCSX2 tbl_COP1_S.
-            auto load_acc_f32 = [&]() -> std::string {
-                std::string p = newtemp();
-                std::string bits = newtemp();
-                std::string f = newtemp();
-                m_out += "  " + p + " = " + fpu_acc_ptr() + "\n";
-                m_out += "  " + bits + " = load i32, ptr " + p + "\n";
-                m_out += "  " + f + " = bitcast i32 " + bits + " to float\n";
-                return f;
-            };
-            auto store_acc_f32 = [&](const std::string& fval) {
-                std::string bits = newtemp();
-                std::string p = newtemp();
-                m_out += "  " + bits + " = bitcast float " + fval + " to i32\n";
-                m_out += "  " + p + " = " + fpu_acc_ptr() + "\n";
-                m_out += "  store i32 " + bits + ", ptr " + p + "\n";
-            };
             auto store_acc_i32 = [&](const std::string& bits) {
                 const std::string p = newtemp();
                 m_out += "  " + p + " = " + fpu_acc_ptr() + "\n";
                 m_out += "  store i32 " + bits + ", ptr " + p + "\n";
+            };
+            auto store_acc_overflow = [&](const std::string& overflow) {
+                const std::string p = newtemp();
+                const std::string word = newtemp();
+                m_out += "  " + p + " = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 14\n";
+                m_out += "  " + word + " = zext i1 " + overflow + " to i32\n";
+                m_out += "  store i32 " + word + ", ptr " + p + "\n";
             };
             auto set_fcc = [&](const std::string& cmp_i1) {
                 std::string p = newtemp();
@@ -2249,113 +2240,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + bit + " = select i1 " + cmp_i1 + ", i32 8388608, i32 0\n";
                 m_out += "  " + merged + " = or i32 " + cleared + ", " + bit + "\n";
                 m_out += "  store i32 " + merged + ", ptr " + p + "\n";
-            };
-
-            // The R5900 FPU normalises operands before most scalar arithmetic:
-            // exponent-zero inputs become signed zero and exponent-all-ones
-            // inputs become signed FMAX. Keep this separate from raw-bit
-            // operations such as ABS.S, NEG.S, MAX.S and MIN.S.
-            auto normalise_ee_f32_bits = [&](const std::string& raw) -> std::string {
-                const std::string exponent = newtemp();
-                const std::string is_zero_exp = newtemp();
-                const std::string is_special_exp = newtemp();
-                const std::string sign = newtemp();
-                const std::string fmax = newtemp();
-                const std::string finite_or_special = newtemp();
-                const std::string normalised = newtemp();
-
-                m_out += "  " + exponent + " = and i32 " + raw + ", 2139095040\n";
-                m_out += "  " + is_zero_exp + " = icmp eq i32 " + exponent + ", 0\n";
-                m_out += "  " + is_special_exp + " = icmp eq i32 " + exponent + ", 2139095040\n";
-                m_out += "  " + sign + " = and i32 " + raw + ", -2147483648\n";
-                m_out += "  " + fmax + " = or i32 " + sign + ", 2139095039\n";
-                m_out += "  " + finite_or_special + " = select i1 " + is_special_exp +
-                         ", i32 " + fmax + ", i32 " + raw + "\n";
-                m_out += "  " + normalised + " = select i1 " + is_zero_exp +
-                         ", i32 " + sign + ", i32 " + finite_or_special + "\n";
-                return normalised;
-            };
-
-            auto load_ee_fpr_f32 = [&](uint8_t freg) -> std::string {
-                const std::string raw = load_fpr_i32(freg);
-                const std::string bits = normalise_ee_f32_bits(raw);
-                const std::string value = newtemp();
-                m_out += "  " + value + " = bitcast i32 " + bits + " to float\n";
-                return value;
-            };
-            auto load_ee_acc_f32 = [&]() -> std::string {
-                const std::string p = newtemp();
-                const std::string raw = newtemp();
-                const std::string value = newtemp();
-                m_out += "  " + p + " = " + fpu_acc_ptr() + "\n";
-                m_out += "  " + raw + " = load i32, ptr " + p + "\n";
-                const std::string bits = normalise_ee_f32_bits(raw);
-                m_out += "  " + value + " = bitcast i32 " + bits + " to float\n";
-                return value;
-            };
-
-            // Apply the EE's post-operation overflow/underflow handling.
-            // update_flags=true matches checkOverflow(O|SO), followed by
-            // checkUnderflow(U|SU). Overflow returns early and therefore
-            // leaves the previous underflow cause bit untouched.
-            auto clamp_ee_f32_result = [&](const std::string& value,
-                                           bool update_flags) -> std::string {
-                const std::string raw = newtemp();
-                const std::string absolute = newtemp();
-                const std::string is_overflow = newtemp();
-                const std::string sign = newtemp();
-                const std::string fmax = newtemp();
-                const std::string clamped = newtemp();
-                const std::string exponent = newtemp();
-                const std::string mantissa = newtemp();
-                const std::string is_zero_exp = newtemp();
-                const std::string has_mantissa = newtemp();
-                const std::string is_underflow = newtemp();
-                const std::string flushed = newtemp();
-
-                m_out += "  " + raw + " = bitcast float " + value + " to i32\n";
-                m_out += "  " + absolute + " = and i32 " + raw + ", 2147483647\n";
-                m_out += "  " + is_overflow + " = icmp eq i32 " + absolute + ", 2139095040\n";
-                m_out += "  " + sign + " = and i32 " + raw + ", -2147483648\n";
-                m_out += "  " + fmax + " = or i32 " + sign + ", 2139095039\n";
-                m_out += "  " + clamped + " = select i1 " + is_overflow +
-                         ", i32 " + fmax + ", i32 " + raw + "\n";
-                m_out += "  " + exponent + " = and i32 " + clamped + ", 2139095040\n";
-                m_out += "  " + mantissa + " = and i32 " + clamped + ", 8388607\n";
-                m_out += "  " + is_zero_exp + " = icmp eq i32 " + exponent + ", 0\n";
-                m_out += "  " + has_mantissa + " = icmp ne i32 " + mantissa + ", 0\n";
-                m_out += "  " + is_underflow + " = and i1 " + is_zero_exp + ", " + has_mantissa + "\n";
-                m_out += "  " + flushed + " = select i1 " + is_underflow +
-                         ", i32 " + sign + ", i32 " + clamped + "\n";
-
-                if (update_flags)
-                {
-                    const std::string fcsr = newtemp();
-                    const std::string old_flags = newtemp();
-                    const std::string overflow_flags = newtemp();
-                    const std::string no_overflow_flags = newtemp();
-                    const std::string after_overflow = newtemp();
-                    const std::string underflow_flags = newtemp();
-                    const std::string no_underflow_flags = newtemp();
-                    const std::string after_underflow = newtemp();
-                    const std::string final_flags = newtemp();
-
-                    m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
-                    m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
-                    m_out += "  " + overflow_flags + " = or i32 " + old_flags + ", 32784\n";
-                    m_out += "  " + no_overflow_flags + " = and i32 " + old_flags + ", -32769\n";
-                    m_out += "  " + after_overflow + " = select i1 " + is_overflow +
-                             ", i32 " + overflow_flags + ", i32 " + no_overflow_flags + "\n";
-                    m_out += "  " + underflow_flags + " = or i32 " + after_overflow + ", 16392\n";
-                    m_out += "  " + no_underflow_flags + " = and i32 " + after_overflow + ", -16385\n";
-                    m_out += "  " + after_underflow + " = select i1 " + is_underflow +
-                             ", i32 " + underflow_flags + ", i32 " + no_underflow_flags + "\n";
-                    m_out += "  " + final_flags + " = select i1 " + is_overflow +
-                             ", i32 " + after_overflow + ", i32 " + after_underflow + "\n";
-                    m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
-                }
-
-                return flushed;
             };
 
             // ADD/SUB/MUL share the result and exception interface for
@@ -2409,6 +2293,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 if (fp_funct >= 0x18)
                 {
                     store_acc_i32(bits);
+                    store_acc_overflow(overflow);
                 }
                 else
                 {
@@ -2603,40 +2488,64 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                          ", i32 " + zero_flags + ", i32 " + base_flags + "\n";
                 m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
             }
-            else if (fmt == 0x10 && (fp_funct == 0x1c || fp_funct == 0x1d))
+            else if (fmt == 0x10 && fp_funct >= 0x1c && fp_funct <= 0x1f)
             {
-                // MADD.S / MSUB.S: round the product to f32, then apply
-                // fpuDouble to both the rounded product and the accumulator.
-                const std::string fa = load_ee_fpr_f32(fs);
-                const std::string fb = load_ee_fpr_f32(ft);
-                const std::string prod = newtemp();
-                const std::string prod_raw = newtemp();
-                const std::string prod_value = newtemp();
-                const std::string acc = load_ee_acc_f32();
-                const std::string fr = newtemp();
-                m_out += "  " + prod + " = fmul float " + fa + ", " + fb + "\n";
-                m_out += "  " + prod_raw + " = bitcast float " + prod + " to i32\n";
-                const std::string prod_bits = normalise_ee_f32_bits(prod_raw);
-                m_out += "  " + prod_value + " = bitcast i32 " + prod_bits + " to float\n";
-                const char* op = (fp_funct == 0x1d) ? "fsub" : "fadd";
-                m_out += "  " + fr + " = " + std::string(op) + " float " + acc + ", " + prod_value + "\n";
-                const std::string result = clamp_ee_f32_result(fr, true);
-                store_fpr_i32(fd, result);
-            }
-            else if (fmt == 0x10 && (fp_funct == 0x1e || fp_funct == 0x1f))
-            {
-                // MADDA.S / MSUBA.S retain the raw accumulator and rounded
-                // product; only the source FPR operands use fpuDouble.
-                const std::string fa = load_ee_fpr_f32(fs);
-                const std::string fb = load_ee_fpr_f32(ft);
-                const std::string prod = newtemp();
-                const std::string acc = load_acc_f32();
-                const std::string fr = newtemp();
-                m_out += "  " + prod + " = fmul float " + fa + ", " + fb + "\n";
-                const char* op = (fp_funct == 0x1f) ? "fsub" : "fadd";
-                m_out += "  " + fr + " = " + std::string(op) + " float " + acc + ", " + prod + "\n";
-                const std::string result = clamp_ee_f32_result(fr, true);
-                store_acc_i32(result);
+                const bool subtract = (fp_funct & 1u) != 0;
+                const std::string lhs = load_fpr_i32(fs);
+                const std::string rhs = load_fpr_i32(ft);
+                const std::string acc_ptr = newtemp();
+                const std::string acc = newtemp();
+                const std::string latch_ptr = newtemp();
+                const std::string latch_word = newtemp();
+                const std::string latch = newtemp();
+                const std::string tuple = newtemp();
+                const std::string bits = newtemp();
+                const std::string overflow = newtemp();
+                const std::string underflow = newtemp();
+                const std::string product_underflow = newtemp();
+                m_out += "  " + acc_ptr + " = " + fpu_acc_ptr() + "\n";
+                m_out += "  " + acc + " = load i32, ptr " + acc_ptr + "\n";
+                m_out += "  " + latch_ptr + " = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 14\n";
+                m_out += "  " + latch_word + " = load i32, ptr " + latch_ptr + "\n";
+                m_out += "  " + latch + " = icmp ne i32 " + latch_word + ", 0\n";
+                m_out += "  " + tuple + " = call { i32, i1, i1, i1 } @ee_cop1_mac_bits(i32 " +
+                         acc + ", i32 " + lhs + ", i32 " + rhs + ", i1 " +
+                         (subtract ? "true" : "false") + ", i1 " + latch + ")\n";
+                m_out += "  " + bits + " = extractvalue { i32, i1, i1, i1 } " + tuple + ", 0\n";
+                m_out += "  " + overflow + " = extractvalue { i32, i1, i1, i1 } " + tuple + ", 1\n";
+                m_out += "  " + underflow + " = extractvalue { i32, i1, i1, i1 } " + tuple + ", 2\n";
+                m_out += "  " + product_underflow + " = extractvalue { i32, i1, i1, i1 } " + tuple + ", 3\n";
+
+                // Product underflow contributes sticky SU independently
+                // of the final accumulation's cause bits.
+                const std::string fcsr = newtemp();
+                const std::string old_flags = newtemp();
+                const std::string cleared = newtemp();
+                const std::string o_flags = newtemp();
+                const std::string u_flags = newtemp();
+                const std::string product_flags = newtemp();
+                const std::string after_o = newtemp();
+                const std::string after_u = newtemp();
+                const std::string final_flags = newtemp();
+                m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
+                m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
+                m_out += "  " + cleared + " = and i32 " + old_flags + ", -49153\n";
+                m_out += "  " + o_flags + " = select i1 " + overflow + ", i32 32784, i32 0\n";
+                m_out += "  " + u_flags + " = select i1 " + underflow + ", i32 16392, i32 0\n";
+                m_out += "  " + product_flags + " = select i1 " + product_underflow + ", i32 8, i32 0\n";
+                m_out += "  " + after_o + " = or i32 " + cleared + ", " + o_flags + "\n";
+                m_out += "  " + after_u + " = or i32 " + after_o + ", " + u_flags + "\n";
+                m_out += "  " + final_flags + " = or i32 " + after_u + ", " + product_flags + "\n";
+                m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
+                if (fp_funct >= 0x1e)
+                {
+                    store_acc_i32(bits);
+                    store_acc_overflow(overflow);
+                }
+                else
+                {
+                    store_fpr_i32(fd, bits);
+                }
             }
             else if (fmt == 0x10 && (fp_funct == 0x28 || fp_funct == 0x29)) // MAX/MIN
             {
@@ -3599,6 +3508,10 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
+    }
+    if (m_out.find("@ee_cop1_mac_bits(") != std::string::npos)
+    {
+        m_out += k_ee_cop1_mac_ir;
     }
     if (m_out.find("@ee_cop1_add_bits(") != std::string::npos)
     {
@@ -5535,6 +5448,10 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
         m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
+    }
+    if (m_out.find("@ee_cop1_mac_bits(") != std::string::npos)
+    {
+        m_out += k_ee_cop1_mac_ir;
     }
     if (m_out.find("@ee_cop1_add_bits(") != std::string::npos)
     {

@@ -158,4 +158,35 @@ multiply:
   ret { i32, i1, i1 } %result2
 }
 )IR";
+
+// Non-fused MAC with product-overflow priority over the independent ACC
+// latch. A finite exponent-255 value alone does not imply overflow.
+inline constexpr char k_ee_cop1_mac_ir[] = R"IR(
+define internal { i32, i1, i1, i1 } @ee_cop1_mac_bits(i32 %acc, i32 %lhs, i32 %rhs, i1 %subtract, i1 %acc_overflow) {
+entry:
+  %product = call { i32, i1, i1 } @ee_cop1_mul_bits(i32 %lhs, i32 %rhs)
+  %product_bits = extractvalue { i32, i1, i1 } %product, 0
+  %product_overflow = extractvalue { i32, i1, i1 } %product, 1
+  %product_underflow = extractvalue { i32, i1, i1 } %product, 2
+  %sum = call { i32, i1, i1 } @ee_cop1_add_bits(i32 %acc, i32 %product_bits, i1 %subtract)
+  %sum_bits = extractvalue { i32, i1, i1 } %sum, 0
+  %sum_overflow = extractvalue { i32, i1, i1 } %sum, 1
+  %sum_underflow = extractvalue { i32, i1, i1 } %sum, 2
+  %subtract_sign = select i1 %subtract, i32 -2147483648, i32 0
+  %signed_product = xor i32 %product_bits, %subtract_sign
+  %acc_sign = and i32 %acc, -2147483648
+  %saturated_acc = or i32 %acc_sign, 2147483647
+  %acc_or_sum = select i1 %acc_overflow, i32 %saturated_acc, i32 %sum_bits
+  %bits = select i1 %product_overflow, i32 %signed_product, i32 %acc_or_sum
+  %prior_overflow = or i1 %product_overflow, %acc_overflow
+  %overflow = or i1 %prior_overflow, %sum_overflow
+  %no_prior_overflow = xor i1 %prior_overflow, true
+  %underflow = and i1 %sum_underflow, %no_prior_overflow
+  %out0 = insertvalue { i32, i1, i1, i1 } poison, i32 %bits, 0
+  %out1 = insertvalue { i32, i1, i1, i1 } %out0, i1 %overflow, 1
+  %out2 = insertvalue { i32, i1, i1, i1 } %out1, i1 %underflow, 2
+  %out3 = insertvalue { i32, i1, i1, i1 } %out2, i1 %product_underflow, 3
+  ret { i32, i1, i1, i1 } %out3
+}
+)IR";
 }

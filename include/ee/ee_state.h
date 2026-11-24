@@ -125,7 +125,12 @@ struct alignas(16) s_ee_cpu_state
     s_ee_u128 m_vu0[32];   // COP2 VU0 vector registers (128-bit each)
     uint32_t m_fcsr;       // COP1 floating-point control/status (condition bit in FCC)
     uint32_t m_fpu_acc;    // COP1 accumulator (ADDA/MULA/MADD family)
+    uint32_t m_fpu_acc_overflow; // Independent overflow latch in existing tail padding
 };
+
+static_assert(offsetof(s_ee_cpu_state, m_fpu_acc_overflow) ==
+              offsetof(s_ee_cpu_state, m_fpu_acc) + sizeof(uint32_t));
+static_assert(sizeof(s_ee_cpu_state) == 1472);
 
 enum class e_ee_exit_reason : uint32_t
 {
