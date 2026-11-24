@@ -1974,6 +1974,105 @@ float vu0_fmac_operand(uint32_t bits)
     return value;
 }
 
+struct s_vu0_adder_result
+{
+    uint32_t m_bits;
+    bool m_overflow;
+    bool m_underflow;
+};
+
+// The VU0 adder retains one alignment guard bit and, on cancellation
+// underflow, the normalized fraction in an exponent-zero result word.
+// See the physical SCPH-900xx observations in PCSX2 PR #12001.
+s_vu0_adder_result vu0_fmac_add(uint32_t a, uint32_t b, bool subtract)
+{
+    if (subtract)
+    {
+        b ^= 0x80000000u;
+    }
+    const int ea = static_cast<int>((a >> 23u) & 255u);
+    const int eb = static_cast<int>((b >> 23u) & 255u);
+    int exponent = ea > eb ? ea : eb;
+    const int da = exponent - ea;
+    const int db = exponent - eb;
+    const uint32_t ma = ea == 0 || da >= 25 ? 0u :
+        (((a & 0x7fffffu) | 0x800000u) << 1u) >> da;
+    const uint32_t mb = eb == 0 || db >= 25 ? 0u :
+        (((b & 0x7fffffu) | 0x800000u) << 1u) >> db;
+    const int32_t sa = (a & 0x80000000u) != 0u ?
+        -static_cast<int32_t>(ma) : static_cast<int32_t>(ma);
+    const int32_t sb = (b & 0x80000000u) != 0u ?
+        -static_cast<int32_t>(mb) : static_cast<int32_t>(mb);
+    const int32_t sum = sa + sb;
+    if (sum == 0)
+    {
+        return {(a & b) & 0x80000000u, false, false};
+    }
+    const uint32_t sign = sum < 0 ? 0x80000000u : 0u;
+    uint32_t magnitude = static_cast<uint32_t>(sum < 0 ? -sum : sum);
+    if (magnitude >= 0x2000000u)
+    {
+        magnitude >>= 1u;
+        ++exponent;
+    }
+    else
+    {
+        while (magnitude < 0x1000000u)
+        {
+            magnitude <<= 1u;
+            --exponent;
+        }
+    }
+    const uint32_t fraction = (magnitude >> 1u) & 0x7fffffu;
+    if (exponent > 255)
+    {
+        return {sign | 0x7fffffffu, true, false};
+    }
+    if (exponent <= 0)
+    {
+        return {sign | fraction, false, true};
+    }
+    return {sign | (static_cast<uint32_t>(exponent) << 23u) | fraction,
+            false, false};
+}
+
+void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
+                            uint32_t lane, uint32_t* flags)
+{
+    const uint32_t shift = 3u - lane;
+    *flags &= ~(0x1111u << shift);
+    if ((bits & 0x80000000u) != 0u)
+    {
+        *flags |= 0x10u << shift;
+    }
+    if ((bits & 0x7f800000u) == 0u)
+    {
+        *flags |= 1u << shift;
+    }
+    if (underflow)
+    {
+        *flags |= 0x100u << shift;
+    }
+    if (overflow)
+    {
+        *flags |= 0x1000u << shift;
+    }
+}
+
+bool vu0_fmac_product_underflows(uint32_t a, uint32_t b)
+{
+    const int ea = static_cast<int>((a >> 23u) & 255u);
+    const int eb = static_cast<int>((b >> 23u) & 255u);
+    if (ea == 0 || eb == 0)
+    {
+        return false;
+    }
+    const uint64_t product =
+        static_cast<uint64_t>((a & 0x7fffffu) | 0x800000u) *
+        ((b & 0x7fffffu) | 0x800000u);
+    return ea + eb - 127 + static_cast<int>(product >> 47u) <= 0;
+}
+
 uint32_t vu0_fmac_result_bits(float value, uint32_t lane, uint32_t* flags)
 {
     uint32_t bits = 0;
@@ -2299,6 +2398,24 @@ extern "C" uint32_t ee_vu0_macro_fmac(
                 const bool take_a = op.m_arith == e_vu0_macro_arith::max
                     ? a_key >= b_key : a_key <= b_key;
                 vu0_fmac_set_lane(&output, lane, take_a ? a_bits : b_bits);
+                continue;
+            }
+            if (op.m_arith == e_vu0_macro_arith::add ||
+                op.m_arith == e_vu0_macro_arith::sub)
+            {
+                const auto result = vu0_fmac_add(a_bits, b_bits,
+                    op.m_arith == e_vu0_macro_arith::sub);
+                vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
+                    result.m_underflow, lane, &mac_flags);
+                vu0_fmac_set_lane(&output, lane, result.m_bits);
+                continue;
+            }
+            if (op.m_arith == e_vu0_macro_arith::mul &&
+                vu0_fmac_product_underflows(a_bits, b_bits))
+            {
+                const uint32_t bits = (a_bits ^ b_bits) & 0x80000000u;
+                vu0_fmac_integer_flags(bits, false, true, lane, &mac_flags);
+                vu0_fmac_set_lane(&output, lane, bits);
                 continue;
             }
             const float a = vu0_fmac_operand(a_bits);

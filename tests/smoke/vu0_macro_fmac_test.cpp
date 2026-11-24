@@ -684,6 +684,56 @@ int main()
           vu0.m_status_flags == 0u,
           "masked product underflow cannot set sticky US");
 
+    // Directed physical VU0 cancellation and multiplier-underflow
+    // observations (PCSX2 PR #12001, July 24 2026).
+    struct s_adder_case
+    {
+        uint32_t m_a;
+        uint32_t m_b;
+        uint32_t m_opcode;
+        uint32_t m_result;
+    };
+    constexpr s_adder_case adder_cases[] =
+    {
+        {0x0080008bu, 0x008000eau, 0x2cu, 0x803e0000u},
+        {0x8080002cu, 0x008000ecu, 0x28u, 0x00400000u},
+        {0x80800036u, 0x00829f6au, 0x28u, 0x0027cd00u},
+        {0x80c1aa65u, 0x01200000u, 0x28u, 0x007cab36u},
+    };
+    for (const auto& entry : adder_cases)
+    {
+        cpu.m_vu0[1] = {entry.m_a, 0u};
+        cpu.m_vu0[2] = {entry.m_b, 0u};
+        for (uint32_t to_acc = 0u; to_acc < 2u; ++to_acc)
+        {
+            vu0.m_mac_flags = 0xffffu;
+            vu0.m_status_flags = 0u;
+            const bool negative = (entry.m_result & 0x80000000u) != 0u;
+            const uint32_t word = to_acc
+                ? special2(8u, 2u, 1u, entry.m_opcode)
+                : special1(8u, 2u, 1u, 3u, entry.m_opcode);
+            check(run_macro(cpu, runtime, word) == 0u &&
+                  lane(to_acc ? vu0.m_acc : cpu.m_vu0[3], 0u) == entry.m_result &&
+                  vu0.m_mac_flags == (negative ? 0x0888u : 0x0808u) &&
+                  vu0.m_status_flags == (negative ? 0x01c7u : 0x0145u),
+                  "VU0 cancellation retains exponent-zero fraction and sets Z/U");
+        }
+    }
+    cpu.m_vu0[1] = {0x16a08bd5u, 0u};
+    cpu.m_vu0[2] = {0x03f4fe21u, 0u};
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x2au)) == 0u &&
+          lane(cpu.m_vu0[3], 0u) == 0u &&
+          vu0.m_mac_flags == 0x0808u && vu0.m_status_flags == 0x0145u,
+          "VU0 multiplier underflow sets Z and U even when result is zero");
+    cpu.m_vu0[1] = {0x7f800000u, 0u};
+    cpu.m_vu0[2] = {0u, 0u};
+    vu0.m_status_flags = 0u;
+    check(run_macro(cpu, runtime, special1(8u, 2u, 1u, 3u, 0x28u)) == 0u &&
+          lane(cpu.m_vu0[3], 0u) == 0x7f800000u &&
+          vu0.m_mac_flags == 0u && vu0.m_status_flags == 0u,
+          "VU0 finite exponent-255 add is not overflow");
+
     // Unsupported instructions or a busy VU0 must fail closed. Confirm no
     // architectural writes, not merely a non-zero return value.
     const ee::s_ee_cpu_state cpu_before = cpu;

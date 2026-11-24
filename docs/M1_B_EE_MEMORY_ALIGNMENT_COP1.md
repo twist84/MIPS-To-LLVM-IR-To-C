@@ -58,3 +58,9 @@ Physical SCPH-900xx traces in [PCSX2 PR #12001, July 24 2026](https://github.com
 ## Follow-up: FCSR same-unit cause replacement
 
 The EE Core User's Manual v6.0 pp. 158–159 describes cause flags as current-result indicators and sticky flags as accumulated events. DIV.S now replaces I/D rather than indefinitely retaining both cause bits; ADD/SUB/MUL and ACC variants update both O and U even when the result overflows, rather than leaving a previous underflow cause set. Existing MAC and SQRT/RSQRT already replace their same-unit causes. Tests preseed conflicting cause/sticky states at O0/O3 and verify replacement with preservation of accumulated bits. This is a manual-derived policy; cross-unit cause retention is intentionally unchanged pending physical-console sequence traces, including early-hardware divide-unit differences.
+
+## Follow-up: COP1 execution paths and VU0 FMAC
+
+Both LLVM function builders share emit_insn, including control-transfer delay slots, and emit the required private COP1 helpers. The legacy native C++ emitter and RAM callback interpreter do not currently implement COP1 arithmetic. Their unsupported operations remain open rather than silently using approximations.
+
+VU0 macro-mode VADD/VSUB and accumulator variants now use a guard-bit integer adder with extended exponent range, explicit O/U status, and cancellation fractions. Physical-console VU0 observations in [PCSX2 PR #12001](https://github.com/PCSX2/pcsx2/pull/12001) support the fraction and Z/U behavior. Standalone VMUL/VMULA explicitly detect true product underflow even when host arithmetic would already return zero. Added directed VU0 tests for cancellation, product underflow, ACC destinations and finite exponent-255 addition. Normal multiply precision, MAC intermediates, Q arithmetic, VU0 micro-mode and VU1 interpreter/AOT parity remain open; this batch does not change VU1 generated arithmetic.
