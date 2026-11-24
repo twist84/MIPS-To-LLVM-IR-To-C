@@ -2041,10 +2041,27 @@ bool present(const DisplaySource &src) {
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
     // Correct the host display aspect without changing guest scanout/readback.
-    const char* aspect = std::getenv("EE_WEBGPU_ASPECT");
-    if (aspect == nullptr && std::getenv("EE_WEBGPU_FORCE_SQUARE") != nullptr)
+    static const char* aspect = []()
     {
-        aspect = "1:1";
+        const char* value = std::getenv("EE_WEBGPU_ASPECT");
+        if (value == nullptr)
+        {
+            value = std::getenv("EE_WEBGPU_FORCE_SQUARE") != nullptr ? "1:1" : "4:3";
+        }
+        return value;
+    }();
+    static const char* aspect_path = std::getenv("EE_WEBGPU_ASPECT_FILE");
+    static auto next_aspect_poll = std::chrono::steady_clock::time_point::min();
+    if (aspect_path != nullptr && now >= next_aspect_poll)
+    {
+        aspect = read_display_aspect(aspect_path, aspect);
+        next_aspect_poll = now + std::chrono::milliseconds(100);
+    }
+    static std::string reported_aspect;
+    if (reported_aspect != aspect)
+    {
+        reported_aspect = aspect;
+        std::fprintf(stderr, "[gpu] display aspect=%s\n", aspect);
     }
     g_present_viewport = window_viewport(static_cast<int>(g_surface_width), static_cast<int>(g_surface_height),
         static_cast<int>(src.width), static_cast<int>(src.height), aspect);

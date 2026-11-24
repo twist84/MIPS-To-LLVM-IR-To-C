@@ -247,7 +247,7 @@ OPTION_HELP = {
     ),
     "WebGPU window": "Open the raylib game window with live controller input. Available for Full replay and Automatic.",
     "Deinterlacing": "Reconstruct interlaced fields at presentation: weave, bob, blend or motion-adaptive. TFF/BFF selects top/bottom field first. Changes apply during gameplay; raw captures are unchanged.",
-    "Display aspect": "Host presentation aspect ratio. 4:3 corrects PS2 non-square pixels; Native pixels preserves raw GS dimensions. Captures are unaffected.",
+    "Display aspect": "Host presentation aspect ratio. 4:3 corrects PS2 non-square pixels; Native pixels preserves raw GS dimensions. Changes apply during gameplay; captures are unaffected.",
     "Speed": "Target emulation speed for the game window. Headless expansion remains unpaced.",
     "WebGPU snapshot": "Save a WebGPU-rendered display snapshot. Available for Full replay and Automatic.",
     "Show game in launcher tab": (
@@ -623,19 +623,26 @@ def direct_command(tool, executable, arguments, help_only=False):
     return command + arguments
 
 
-def write_deinterlace_mode(path, selection):
-    """Publish one complete mode value to the current native session."""
-    mode = DEINTERLACE_MODES[selection]
+def write_presentation_setting(path, value):
+    """Publish one complete presentation setting to the current native session."""
     temporary = None
     try:
         with NamedTemporaryFile(mode="w", encoding="ascii", dir=path.parent,
                                 delete=False) as output:
             temporary = Path(output.name)
-            output.write(mode)
+            output.write(value)
         temporary.replace(path)
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def write_deinterlace_mode(path, selection):
+    write_presentation_setting(path, DEINTERLACE_MODES[selection])
+
+
+def write_display_aspect(path, selection):
+    write_presentation_setting(path, DISPLAY_ASPECTS[selection])
 
 
 def request_embedded_close(parent_handle):
@@ -704,6 +711,7 @@ class Launcher(ttk.Frame):
         self.stop_process = None
         self.close_requested = False
         self.deinterlace_file = None
+        self.aspect_file = None
         self.log = None
         self.embedded_running = False
         self.previous_mode = self.mode.get()
@@ -930,6 +938,7 @@ class Launcher(ttk.Frame):
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.pad.trace_add("write", self.update_fields)
         self.fields["deinterlace"].trace_add("write", self.change_deinterlace)
+        self.fields["display_aspect"].trace_add("write", self.change_display_aspect)
         self.update_fields()
         self.play = ttk.Button(self, text="Launch", command=self.toggle_launch)
         self.play.grid(row=3, column=0, sticky="w", pady=(0, 10))
@@ -1035,6 +1044,21 @@ class Launcher(ttk.Frame):
                 pass
             self.deinterlace_file = None
 
+    def change_display_aspect(self, *_):
+        if self.aspect_file is not None:
+            try:
+                write_display_aspect(self.aspect_file, self.fields["display_aspect"].get())
+            except OSError as error:
+                self.status.set(f"Could not update display aspect: {error}")
+
+    def clear_aspect_file(self):
+        if self.aspect_file is not None:
+            try:
+                self.aspect_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.aspect_file = None
+
     def persist_settings(self):
         settings = {key: variable.get() for key, variable in self.fields.items()}
         settings["numeric"] = {
@@ -1063,6 +1087,7 @@ class Launcher(ttk.Frame):
         except OSError as error:
             messagebox.showerror("Could not save settings", str(error), parent=self)
         self.clear_deinterlace_file()
+        self.clear_aspect_file()
         self.winfo_toplevel().destroy()
 
     def update_fields(self, *_):
@@ -1078,10 +1103,10 @@ class Launcher(ttk.Frame):
         self.snapshot_picker.state(graphics_state)
         self.speed_picker.configure(state="readonly" if self.window.get() and
                                     mode in ("Automatic", "Full replay") else "disabled")
-        self.aspect_picker.configure(state="readonly" if self.window.get() and
-                                     mode in ("Automatic", "Full replay") else "disabled")
-        self.deinterlace_picker.configure(state="readonly" if self.window.get() and
-                                          mode in ("Automatic", "Full replay") else "disabled")
+        self.aspect_picker.configure(state="readonly" if self.aspect_file is not None or (
+            self.window.get() and mode in ("Automatic", "Full replay")) else "disabled")
+        self.deinterlace_picker.configure(state="readonly" if self.deinterlace_file is not None or (
+            self.window.get() and mode in ("Automatic", "Full replay")) else "disabled")
         self.ir_picker.state(["!disabled"] if mode == "Recover translation cache" else ["disabled"])
         self.cache_miss_picker.state(
             ["disabled"] if special else ["!disabled"]
@@ -1251,6 +1276,7 @@ class Launcher(ttk.Frame):
                 self.persist_settings()
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             env.pop("EE_WEBGPU_DEINTERLACE_FILE", None)
+            env.pop("EE_WEBGPU_ASPECT_FILE", None)
             graphical = not help_only and (
                 (not is_direct and self.window.get() and
                  self.mode.get() in ("Automatic", "Full replay"))
@@ -1264,6 +1290,13 @@ class Launcher(ttk.Frame):
                     output.write(DEINTERLACE_MODES[selection])
                 env["EE_WEBGPU_DEINTERLACE"] = DEINTERLACE_MODES[selection]
                 env["EE_WEBGPU_DEINTERLACE_FILE"] = str(self.deinterlace_file)
+                aspect = DISPLAY_ASPECTS[self.fields["display_aspect"].get()]
+                with NamedTemporaryFile(mode="w", encoding="ascii", dir=LOG_PATH.parent,
+                                        prefix="aspect-", suffix=".mode", delete=False) as output:
+                    self.aspect_file = Path(output.name)
+                    output.write(aspect)
+                env["EE_WEBGPU_ASPECT"] = aspect
+                env["EE_WEBGPU_ASPECT_FILE"] = str(self.aspect_file)
             with LOG_PATH.open("wb") as output:
                 self.process = subprocess.Popen(
                     command,
@@ -1276,8 +1309,10 @@ class Launcher(ttk.Frame):
                 )
             self.log = LOG_PATH.open(encoding="utf-8", errors="replace")
             self.embedded_running = embed_game
+            self.update_fields()
         except (OSError, ValueError) as error:
             self.clear_deinterlace_file()
+            self.clear_aspect_file()
             self.status.set(str(error))
             return
 
@@ -1326,9 +1361,11 @@ class Launcher(ttk.Frame):
             self.log = None
             self.process = None
             self.clear_deinterlace_file()
+            self.clear_aspect_file()
             self.embedded_running = False
             self.close_requested = False
             self.play.configure(text="Launch")
+            self.update_fields()
             self.play.state(["!disabled"])
             self.help_button.state(["!disabled"])
             self.status.set(f"Launcher exited ({result}). Log: {LOG_PATH.name}")

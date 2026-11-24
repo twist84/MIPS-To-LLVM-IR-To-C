@@ -97,6 +97,29 @@ bool display(
 int main()
 {
     using ps2::gs::gpu::window_viewport;
+    using ps2::gs::gpu::read_display_aspect;
+    const char* aspect = "4:3";
+    for (const char* value : {"16:9", "native", "1:1", "4:3", "invalid", "", "16:9\n"})
+    {
+        FILE* stream = std::tmpfile();
+        if (stream == nullptr)
+        {
+            fail("could not create aspect mode test stream");
+            return 1;
+        }
+        std::fputs(value, stream);
+        std::rewind(stream);
+        const char* actual = read_display_aspect(stream, aspect);
+        std::fclose(stream);
+        const bool valid = std::strcmp(value, "16:9") == 0 || std::strcmp(value, "native") == 0 ||
+            std::strcmp(value, "1:1") == 0 || std::strcmp(value, "4:3") == 0;
+        if (std::strcmp(actual, valid ? value : aspect) != 0)
+        {
+            fail("live aspect selection did not preserve the last valid value");
+            return 1;
+        }
+        aspect = actual;
+    }
     const auto title = window_viewport(906, 540, 512, 448);
     const auto movie = window_viewport(906, 540, 640, 384);
     const auto narrow = window_viewport(600, 900, 512, 448);

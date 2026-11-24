@@ -385,6 +385,26 @@ def test_live_deinterlacing():
         assert not path.exists() and other.exists()
 
 
+def test_live_display_aspect():
+    from unittest.mock import Mock
+    with tempfile.TemporaryDirectory() as temporary:
+        path = Path(temporary) / "session.aspect"
+        other = Path(temporary) / "session.mode"
+        other.write_bytes(b"7")
+        variable = c_fake_variable("4:3 (PS2)")
+        session = SimpleNamespace(aspect_file=path, fields={"display_aspect": variable},
+                                  status=Mock())
+        for name, value in GUI.DISPLAY_ASPECTS.items():
+            variable.m_value = name
+            GUI.Launcher.change_display_aspect(session)
+            assert path.read_bytes() == value.encode("ascii")
+            assert other.read_bytes() == b"7"
+        GUI.Launcher.clear_aspect_file(session)
+        assert session.aspect_file is None and not path.exists()
+        GUI.Launcher.change_display_aspect(session)
+        assert not path.exists() and other.exists()
+
+
 def test_launch_close_button():
     from unittest.mock import Mock, patch
 
@@ -531,6 +551,7 @@ def main():
     test_game_tab_command_and_environment()
     test_runtime_options()
     test_live_deinterlacing()
+    test_live_display_aspect()
     test_launch_close_button()
     test_game_window_environment()
     test_direct_commands()
