@@ -296,8 +296,12 @@ add_test(NAME iop_aot COMMAND iop_aot_test ${CMAKE_BINARY_DIR}/iop-aot-test)
 
 # Standalone host for translated EE functions and optional, explicit
 # IOP IRX execution at SIF polling rendezvous points.
+add_executable(ee_gs_worker_test tests/smoke/ee_gs_worker_test.cpp)
+target_link_libraries(ee_gs_worker_test PRIVATE ee_core)
+
 add_executable(ee_hot_loop_diagnostics_test tests/smoke/ee_hot_loop_diagnostics_test.cpp)
 add_test(NAME ee_hot_loop_diagnostics COMMAND ee_hot_loop_diagnostics_test)
+add_test(NAME ee_gs_worker COMMAND ee_gs_worker_test)
 
 # Pure host watchdog gate: no guest IR, EE runtime or GPU dependency.
 add_executable(ee_host_loop_yield_budget_test
