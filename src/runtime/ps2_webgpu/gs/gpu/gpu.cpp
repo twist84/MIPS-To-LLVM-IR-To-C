@@ -1874,6 +1874,18 @@ void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes)
     (void)download_checked(memory, offset, bytes);
 }
 
+bool read_clut_checked(std::uint32_t *entries, std::size_t count)
+{
+    if (g_mode == Mode::off || entries == nullptr || count != kClutEntries)
+    {
+        return false;
+    }
+    flush_all();
+    submit();
+    return read_back(g_clut, kClutEntries * 4u, entries,
+        static_cast<std::uint64_t>(g_clut_slot) * kClutEntries * 4u);
+}
+
 void read_state(std::vector<std::uint32_t> &vram, std::uint32_t &scale, std::vector<std::uint32_t> &clut) {
     flush_all();
     submit();

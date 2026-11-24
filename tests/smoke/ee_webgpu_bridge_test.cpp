@@ -70,6 +70,11 @@ void load_clut(uint64_t, uint64_t)
     ++s_clut_loads;
 }
 
+bool download_checked(uint8_t*, uint32_t, uint32_t)
+{
+    return false;
+}
+
 void texflush()
 {
     ++s_texflushes;
@@ -238,6 +243,32 @@ int main()
     if (s_local_copies != 1)
     {
         fail("native local VRAM copy path was not forwarded");
+        return 1;
+    }
+
+    // Conditional loads share CBP0/CBP1 across TEX0 and TEX2.
+    const auto cld = [&](uint32_t reg, uint32_t mode, uint32_t cbp)
+    {
+        ee::s_ee_gif_event event{};
+        event.m_type = ee::e_ee_gif_event_type::reglist;
+        event.m_register = reg;
+        event.m_word0 = (uint64_t{mode} << 61u) |
+            (uint64_t{cbp} << 37u) | (uint64_t{0x13u} << 20u);
+        bridge.consume(&event, 1u, bytes, 1u);
+    };
+    cld(6u, 0u, 1u);
+    cld(6u, 2u, 1u);
+    cld(7u, 4u, 1u);
+    cld(7u, 4u, 2u);
+    cld(0x16u, 3u, 2u);
+    cld(0x17u, 5u, 2u);
+    cld(0x17u, 5u, 3u);
+    cld(6u, 6u, 4u);
+    cld(6u, 7u, 4u);
+    cld(6u, 1u, 4u);
+    if (s_clut_loads != 5)
+    {
+        fail("CLD reload and shared CBP controls are incorrect");
         return 1;
     }
 

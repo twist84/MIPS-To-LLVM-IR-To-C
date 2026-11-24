@@ -33,6 +33,91 @@ bool write_image(ee::c_ee_gs_state& gs, const uint8_t* bytes, uint32_t qwc)
     return gs.consume(&event, 1u, bytes, qwc);
 }
 
+bool compare_clut(ee::c_ee_webgpu_bridge& bridge)
+{
+    using namespace ps2::gs;
+    gpu::write_state(std::vector<uint32_t>(kMemorySize / 4u, 0u), 1u,
+                     std::vector<uint32_t>(512u, 0u));
+    ee::c_ee_gs_state gs{};
+    gs.bind_committed_event_observer(&bridge,
+        &ee::c_ee_webgpu_bridge::committed_gif_events);
+    const auto upload = [&](uint32_t bp, uint32_t cpsm, uint32_t bw,
+                            uint32_t x, uint32_t y, uint32_t width,
+                            uint32_t height, uint32_t seed)
+    {
+        const uint32_t qwc = (width * height * (cpsm == 0u ? 4u : 2u) + 15u) / 16u;
+        std::vector<uint8_t> bytes(qwc * 16u);
+        for (auto& byte : bytes)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            byte = static_cast<uint8_t>(seed >> 24u);
+        }
+        return write_register(gs, 0x50u, (uint64_t{bp} << 32u) |
+                   (uint64_t{bw} << 48u) | (uint64_t{cpsm} << 56u)) &&
+            write_register(gs, 0x51u, (uint64_t{x} << 32u) | (uint64_t{y} << 48u)) &&
+            write_register(gs, 0x52u, width | (uint64_t{height} << 32u)) &&
+            write_register(gs, 0x53u, 0u) && write_image(gs, bytes.data(), qwc);
+    };
+    const auto load = [&](uint32_t reg, uint32_t psm, uint32_t cbp,
+                          uint32_t cpsm, uint32_t csm, uint32_t csa, uint32_t cld)
+    {
+        return write_register(gs, reg, (uint64_t{psm} << 20u) |
+            (uint64_t{cbp} << 37u) | (uint64_t{cpsm} << 51u) |
+            (uint64_t{csm} << 55u) | (uint64_t{csa} << 56u) |
+            (uint64_t{cld} << 61u));
+    };
+    const auto compare = [&]()
+    {
+        std::array<uint32_t, 512> actual{};
+        if (!gpu::read_clut_checked(actual.data(), actual.size()))
+        {
+            return false;
+        }
+        for (size_t i = 0u; i < actual.size(); ++i)
+        {
+            if (actual[i] != gs.state().m_clut[i])
+            {
+                std::fprintf(stderr, "CLUT mismatch slot=%zu CPU=%08x GPU=%08x\n",
+                    i, gs.state().m_clut[i], actual[i]);
+                return false;
+            }
+        }
+        return true;
+    };
+    constexpr uint32_t bp = 0x100u;
+    if (!upload(bp, 0u, 1u, 0u, 0u, 16u, 16u, 1u) ||
+        !load(6u, 0x13u, bp, 0u, 0u, 0u, 2u) || !compare() ||
+        !upload(bp, 0u, 1u, 0u, 0u, 16u, 16u, 2u) ||
+        !load(7u, 0x13u, bp, 0u, 0u, 0u, 4u) ||
+        !load(6u, 0x13u, bp, 0u, 0u, 0u, 7u) || !compare() ||
+        !load(0x17u, 0x13u, bp, 0u, 0u, 0u, 3u) || !compare() ||
+        !upload(bp, 0u, 1u, 0u, 0u, 16u, 16u, 3u) ||
+        !load(0x16u, 0x13u, bp, 0u, 0u, 0u, 5u) || !compare() ||
+        !load(6u, 0x13u, bp, 0u, 0u, 0u, 1u) || !compare())
+    {
+        return false;
+    }
+    for (uint32_t cpsm : {0u, 2u, 0x0au})
+    {
+        for (uint32_t eight : {0u, 1u})
+        {
+            const uint32_t psm = eight ? 0x13u : 0x14u;
+            const uint32_t entries = eight ? 256u : 16u;
+            if (!upload(bp, cpsm, 1u, 0u, 0u, eight ? 16u : 8u,
+                        eight ? 16u : 2u, cpsm + entries) ||
+                !load(6u, psm, bp, cpsm, 0u, 3u, 1u) || !compare() ||
+                !upload(bp, cpsm, 6u, 16u, 7u, entries, 1u, cpsm + entries + 1u) ||
+                !write_register(gs, 0x1cu, 6u | (1u << 6u) | (7u << 12u)) ||
+                !load(7u, psm, bp, cpsm, 1u, 29u, 1u) || !compare())
+            {
+                return false;
+            }
+        }
+    }
+    std::puts("GS CPU/GPU CLUT snapshots, CLD/TEX2, CSM1/CSM2: PASS");
+    return true;
+}
+
 bool compare_transfer_formats(ee::c_ee_webgpu_bridge& bridge)
 {
     // A fresh zero-filled GPU VRAM/CLUT and CPU GS receive the exact
@@ -210,7 +295,7 @@ int main()
         std::puts("GPU raster -> guest reverse DMA: PASS");
     }
 
-    if (!compare_transfer_formats(bridge))
+    if (!compare_transfer_formats(bridge) || !compare_clut(bridge))
     {
         return 1;
     }

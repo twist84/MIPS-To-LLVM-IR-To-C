@@ -91,6 +91,7 @@ bool c_ee_webgpu_bridge::init()
     {
         m_state = {};
         m_state.q = 1.0f;
+        m_clut_cbp0 = m_clut_cbp1 = 0xffffffffu;
         ++ps2::gs::g_setup_generation;
     }
     return m_ready;
@@ -170,6 +171,27 @@ void c_ee_webgpu_bridge::vertex(
     kick(draw);
 }
 
+void c_ee_webgpu_bridge::refresh_clut(uint64_t tex0)
+{
+    const uint32_t cld = static_cast<uint32_t>((tex0 >> 61u) & 7u);
+    const uint32_t cbp = static_cast<uint32_t>((tex0 >> 37u) & 0x3fffu);
+    if (cld == 0u || cld >= 6u ||
+        (cld == 4u && m_clut_cbp0 == cbp) ||
+        (cld == 5u && m_clut_cbp1 == cbp))
+    {
+        return;
+    }
+    ps2::gs::gpu::load_clut(tex0, m_state.texclut);
+    if (cld == 2u || cld == 4u)
+    {
+        m_clut_cbp0 = cbp;
+    }
+    else if (cld == 3u || cld == 5u)
+    {
+        m_clut_cbp1 = cbp;
+    }
+}
+
 void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
 {
     auto& s = m_state;
@@ -213,10 +235,7 @@ void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
         break;
     case 0x06u: case 0x07u:
         s.ctx[reg - 0x06u].tex0 = value;
-        if (((value >> 61u) & 7u) != 0u)
-        {
-            ps2::gs::gpu::load_clut(value, s.texclut);
-        }
+        refresh_clut(value);
         break;
     case 0x08u: case 0x09u:
         s.ctx[reg - 0x08u].clamp = value;
@@ -230,10 +249,7 @@ void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
         auto& c = s.ctx[reg - 0x16u];
         constexpr uint64_t k_mask = 0xffffffe003f00000ull;
         c.tex0 = (c.tex0 & ~k_mask) | (value & k_mask);
-        if (((c.tex0 >> 61u) & 7u) != 0u)
-        {
-            ps2::gs::gpu::load_clut(c.tex0, s.texclut);
-        }
+        refresh_clut(c.tex0);
         break;
     }
     case 0x18u: case 0x19u:

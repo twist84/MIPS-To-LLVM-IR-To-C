@@ -64,12 +64,15 @@ public:
     );
 
 private:
+    void refresh_clut(uint64_t tex0);
     void register_write(uint32_t reg, uint64_t value);
     void packed_write(uint32_t reg, uint64_t low, uint64_t high);
     void vertex(uint32_t x, uint32_t y, uint32_t z, uint8_t f, bool draw);
     void kick(bool draw);
     bool m_ready = false;
     uint64_t m_draw_count = 0u;
+    uint32_t m_clut_cbp0 = 0xffffffffu;
+    uint32_t m_clut_cbp1 = 0xffffffffu;
     ps2::gs::State m_state{};
 };
 }
