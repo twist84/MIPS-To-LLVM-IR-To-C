@@ -259,6 +259,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         }
     }
     PollInputEvents();
+    // The launcher handles F11 for embedded child windows. Standalone
+    // presentation has no Tk owner, so raylib toggles borderless fullscreen.
+    if (m_parent_window_handle == nullptr && IsKeyPressed(KEY_F11))
+    {
+        ToggleBorderlessWindowed();
+    }
     if (WindowShouldClose())
     {
         if (iop_hardware != nullptr)

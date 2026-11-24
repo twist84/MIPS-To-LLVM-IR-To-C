@@ -310,6 +310,7 @@ OPTION_HELP = {
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
     "Show --help": "Print the selected tool’s command-line help in the output pane.",
     "Launch": "Launch the selected command, or close the running session without exiting the launcher.",
+    "Fullscreen": "Show only the embedded game on the entire screen. Press F11 to enter or exit fullscreen.",
 }
 
 
@@ -645,6 +646,34 @@ def write_display_aspect(path, selection):
     write_presentation_setting(path, DISPLAY_ASPECTS[selection])
 
 
+def fullscreen_key_reader(window):
+    """Read F11 only while the launcher or its native child owns foreground focus."""
+    if os.name != "nt":
+        return lambda: False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    foreground = user32.GetForegroundWindow
+    foreground.argtypes = ()
+    foreground.restype = wintypes.HWND
+    ancestor = user32.GetAncestor
+    ancestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    ancestor.restype = wintypes.HWND
+    key_state = user32.GetAsyncKeyState
+    key_state.argtypes = (ctypes.c_int,)
+    key_state.restype = ctypes.c_short
+
+    def pressed():
+        active = foreground()
+        # GA_ROOT includes the Tk Win32 wrapper and the embedded raylib HWND.
+        if not active or ancestor(active, 2) != ancestor(window.winfo_id(), 2):
+            return False
+        return bool(key_state(0x7A) & 0x8000)  # VK_F11
+
+    return pressed
+
+
 def request_embedded_close(parent_handle):
     """Request a normal close of the native child so the runner can finalize."""
     if os.name != "nt" or not parent_handle:
@@ -714,6 +743,11 @@ class Launcher(ttk.Frame):
         self.aspect_file = None
         self.log = None
         self.embedded_running = False
+        self.fullscreen_active = False
+        self.fullscreen_key_down = False
+        self.fullscreen_style = ttk.Style(self)
+        self.fullscreen_tab_layout = None
+        self.read_fullscreen_key = fullscreen_key_reader(window)
         self.previous_mode = self.mode.get()
         self.numeric = {
             label: tk.StringVar(value=settings["numeric"][key])
@@ -748,13 +782,14 @@ class Launcher(ttk.Frame):
             highlightthickness=0, borderwidth=0,
         )
         self.game_host.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(
+        self.game_hint = ttk.Label(
             self.game_view,
             text="The native game will appear here after Launch. "
-                 "The log remains visible below.",
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-
-        ttk.Label(self.game_view, textvariable=self.speed_status).grid(row=2, column=0, sticky="w")
+                 "The log remains visible below. F11 toggles fullscreen.",
+        )
+        self.game_hint.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.game_speed = ttk.Label(self.game_view, textvariable=self.speed_status)
+        self.game_speed.grid(row=2, column=0, sticky="w")
 
         self.path_row(self.setup, 0, "Extracted disc", self.disc, filedialog.askdirectory)
         self.path_row(self.setup, 1, "Memory card", self.card, filedialog.askopenfilename)
@@ -940,22 +975,87 @@ class Launcher(ttk.Frame):
         self.fields["deinterlace"].trace_add("write", self.change_deinterlace)
         self.fields["display_aspect"].trace_add("write", self.change_display_aspect)
         self.update_fields()
-        self.play = ttk.Button(self, text="Launch", command=self.toggle_launch)
-        self.play.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        self.action_bar = ttk.Frame(self)
+        self.action_bar.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        self.play = ttk.Button(self.action_bar, text="Launch", command=self.toggle_launch)
+        self.play.pack(side="left")
         Tooltip(self.play, OPTION_HELP["Launch"])
-        ttk.Label(self, textvariable=self.status).grid(
-            row=3, column=1, columnspan=2, sticky="w"
+        self.fullscreen_button = ttk.Button(
+            self.action_bar, text="Fullscreen", command=self.toggle_fullscreen
         )
+        Tooltip(self.fullscreen_button, OPTION_HELP["Fullscreen"])
+        self.status_label = ttk.Label(self, textvariable=self.status)
+        self.status_label.grid(row=3, column=1, columnspan=2, sticky="w")
         self.output = tk.Text(self, height=16, width=80, wrap="word", state="disabled")
         self.output.grid(row=4, column=0, columnspan=2, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self, command=self.output.yview)
-        scrollbar.grid(row=4, column=2, sticky="ns")
-        self.output.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(self, command=self.output.yview)
+        self.scrollbar.grid(row=4, column=2, sticky="ns")
+        self.output.configure(yscrollcommand=self.scrollbar.set)
+        self.tabs.bind("<<NotebookTabChanged>>", self.update_fullscreen_button)
+        self.update_fullscreen_button()
+        if os.name == "nt":
+            self.after(25, self.poll_fullscreen_hotkey)
         if os.name != "nt":
             self.play.state(["disabled"])
             self.help_button.state(["disabled"])
             if not warning:
                 self.status.set("The native raylib window is available on Windows.")
+
+    def update_fullscreen_button(self, *_):
+        visible = self.tabs.select() == str(self.game_view)
+        if visible:
+            if not self.fullscreen_button.winfo_manager():
+                self.fullscreen_button.pack(side="left", padx=(8, 0))
+            self.fullscreen_button.state(
+                ["!disabled"] if self.embedded_running else ["disabled"]
+            )
+        else:
+            self.fullscreen_button.pack_forget()
+
+    def poll_fullscreen_hotkey(self):
+        # The game is a child HWND in another process, so Tk's ordinary key
+        # bindings cannot see keyboard events while raylib owns focus.
+        pressed = self.read_fullscreen_key()
+        if pressed and not self.fullscreen_key_down:
+            self.toggle_fullscreen()
+        self.fullscreen_key_down = pressed
+        self.after(25, self.poll_fullscreen_hotkey)
+
+    def toggle_fullscreen(self):
+        if self.fullscreen_active:
+            self.set_fullscreen(False)
+        elif self.embedded_running and self.tabs.select() == str(self.game_view):
+            self.set_fullscreen(True)
+
+    def set_fullscreen(self, enabled):
+        if self.fullscreen_active == enabled:
+            return
+        window = self.winfo_toplevel()
+        if enabled:
+            self.fullscreen_tab_layout = self.fullscreen_style.layout("TNotebook.Tab")
+            self.fullscreen_style.layout("TNotebook.Tab", [])
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar,
+                           self.game_hint, self.game_speed):
+                widget.grid_remove()
+            self.configure(padding=0)
+            self.game_view.configure(padding=0)
+            self.tabs.grid_configure(pady=0)
+            self.rowconfigure(4, weight=0)
+        else:
+            self.fullscreen_style.layout("TNotebook.Tab", self.fullscreen_tab_layout)
+            self.fullscreen_tab_layout = None
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar,
+                           self.game_hint, self.game_speed):
+                widget.grid()
+            self.configure(padding=18)
+            self.game_view.configure(padding=6)
+            self.tabs.grid_configure(pady=(0, 10))
+            self.rowconfigure(4, weight=1)
+        window.attributes("-fullscreen", enabled)
+        self.fullscreen_active = enabled
+        self.update_fullscreen_button()
+        # Keep the original game_host HWND: the native child automatically
+        # follows its size, without recreating a WebGPU surface or guest state.
 
     def show_tool(self, *_):
         for tool, form in self.tool_forms.items():
@@ -1310,6 +1410,7 @@ class Launcher(ttk.Frame):
             self.log = LOG_PATH.open(encoding="utf-8", errors="replace")
             self.embedded_running = embed_game
             self.update_fields()
+            self.update_fullscreen_button()
         except (OSError, ValueError) as error:
             self.clear_deinterlace_file()
             self.clear_aspect_file()
@@ -1363,6 +1464,8 @@ class Launcher(ttk.Frame):
             self.clear_deinterlace_file()
             self.clear_aspect_file()
             self.embedded_running = False
+            self.set_fullscreen(False)
+            self.update_fullscreen_button()
             self.close_requested = False
             self.play.configure(text="Launch")
             self.update_fields()

@@ -405,6 +405,72 @@ def test_live_display_aspect():
         assert not path.exists() and other.exists()
 
 
+def test_fullscreen_controls():
+    from unittest.mock import Mock
+
+    game_view = Mock()
+    tabs = Mock()
+    button = Mock()
+    button.winfo_manager.return_value = ""
+    instance = SimpleNamespace(
+        tabs=tabs, game_view=game_view, fullscreen_button=button,
+        embedded_running=False, fullscreen_active=False, set_fullscreen=Mock(),
+    )
+    tabs.select.return_value = "setup"
+    GUI.Launcher.update_fullscreen_button(instance)
+    button.pack_forget.assert_called_once_with()
+    GUI.Launcher.toggle_fullscreen(instance)
+    instance.set_fullscreen.assert_not_called()
+
+    tabs.select.return_value = str(game_view)
+    GUI.Launcher.update_fullscreen_button(instance)
+    button.pack.assert_called_once_with(side="left", padx=(8, 0))
+    button.state.assert_called_with(["disabled"])
+    instance.embedded_running = True
+    GUI.Launcher.update_fullscreen_button(instance)
+    button.state.assert_called_with(["!disabled"])
+    GUI.Launcher.toggle_fullscreen(instance)
+    instance.set_fullscreen.assert_called_with(True)
+    instance.fullscreen_active = True
+    GUI.Launcher.toggle_fullscreen(instance)
+    instance.set_fullscreen.assert_called_with(False)
+
+    # Held F11 must not repeatedly toggle fullscreen.
+    hotkey = SimpleNamespace(
+        read_fullscreen_key=Mock(side_effect=[False, True, True, False, True]),
+        fullscreen_key_down=False, toggle_fullscreen=Mock(), after=Mock(),
+    )
+    hotkey.poll_fullscreen_hotkey = lambda: GUI.Launcher.poll_fullscreen_hotkey(hotkey)
+    for _ in range(5):
+        hotkey.poll_fullscreen_hotkey()
+    assert hotkey.toggle_fullscreen.call_count == 2
+    assert hotkey.after.call_count == 5
+
+    # Entering/exiting keeps the native viewport intact and restores layout.
+    layout = [("Notebook.tab", {"sticky": "nswe"})]
+    instance.fullscreen_style = Mock()
+    instance.fullscreen_style.layout.return_value = layout
+    instance.fullscreen_tab_layout = None
+    instance.fullscreen_active = False
+    instance.winfo_toplevel = Mock()
+    instance.configure = Mock()
+    instance.rowconfigure = Mock()
+    instance.update_fullscreen_button = Mock()
+    for key in ("action_bar", "status_label", "output", "scrollbar", "game_hint", "game_speed", "game_host"):
+        setattr(instance, key, Mock())
+    GUI.Launcher.set_fullscreen(instance, True)
+    assert instance.fullscreen_active
+    instance.winfo_toplevel.return_value.attributes.assert_called_with("-fullscreen", True)
+    instance.fullscreen_style.layout.assert_called_with("TNotebook.Tab", [])
+    instance.output.grid_remove.assert_called_once_with()
+    GUI.Launcher.set_fullscreen(instance, False)
+    assert not instance.fullscreen_active
+    instance.winfo_toplevel.return_value.attributes.assert_called_with("-fullscreen", False)
+    instance.fullscreen_style.layout.assert_called_with("TNotebook.Tab", layout)
+    instance.output.grid.assert_called_once_with()
+    assert not instance.game_host.mock_calls
+
+
 def test_launch_close_button():
     from unittest.mock import Mock, patch
 
@@ -552,6 +618,7 @@ def main():
     test_runtime_options()
     test_live_deinterlacing()
     test_live_display_aspect()
+    test_fullscreen_controls()
     test_launch_close_button()
     test_game_window_environment()
     test_direct_commands()
