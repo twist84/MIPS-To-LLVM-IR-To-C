@@ -4,7 +4,7 @@
 // Algorithm references: DOI 10.1109/ARITH.1995.465363 and the hardware-derived
 // model in PCSX2 PR #12001. Result words checked against ps2autotests
 // tests/cpu/ee_fpu/sqrt.expected. All arithmetic wraps at 32 bits.
-// Keep these helpers private and emit them only in modules using DIV.S/RSQRT.S.
+// Keep these helpers private and emit them only in modules using DIV.S/SQRT.S/RSQRT.S.
 namespace llvm
 {
 inline constexpr char k_ee_cop1_rsqrt_ir[] = R"IR(

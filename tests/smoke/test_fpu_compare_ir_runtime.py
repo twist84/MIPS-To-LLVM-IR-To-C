@@ -553,15 +553,6 @@ def ee_fpu_clamp_result_bits(bits):
     return bits
 
 
-def expected_sqrt_bits(source_bits):
-    if (source_bits & 0x7F800000) == 0:
-        return 0
-    absolute = source_bits & 0x7FFFFFFF
-    exponent = (absolute >> 23) - 127
-    significand = 1.0 + (absolute & 0x007FFFFF) / (1 << 23)
-    return ieee_f32_bits(math.sqrt(math.ldexp(significand, exponent)))
-
-
 def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
     guest_fn, engine, module, target_machine = compile_jit(
         fixture, temp_dir, "sqrt_s", target, opt
@@ -596,7 +587,16 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
             0x3FFFFFFF: 0x3FB504F3, 0xDEADBEEF: 0x4F152108,
             0x3FC00000: 0x3F9CC471, 0x7FC00000: 0x5F9CC471,
         }
-        expected = hardware.get(source_bits, expected_sqrt_bits(source_bits))
+        # Additional model controls: not claimed as physical-console captures.
+        model = {
+            0x40800000: 0x40000000, 0xC0800000: 0x40000000,
+            0x00000001: 0x00000000, 0x80000001: 0x00000000,
+            0x7FC12345: 0x5F9D3B2D, 0xFFC12345: 0x5F9D3B2D,
+            0x0080EFD3: 0x200077B1, 0x3F80EFD3: 0x3F8077B1,
+            0x4000EFD3: 0x3FB5AE39, 0x7F80EFD3: 0x5F8077B1,
+            0xBF80EFD3: 0x3F8077B1,
+        }
+        expected = {**hardware, **model}[source_bits]
         expected_fcsr = cleared_fcsr
         if source_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
@@ -1241,10 +1241,15 @@ def main():
         (0x80000000, "negative zero"),
         (0x00000001, "positive denormal"),
         (0x80000001, "negative denormal"),
-        (0x7F800000, "positive infinity saturates to FMAX"),
+        (0x7F800000, "positive extended exponent"),
         (0xFF800000, "negative infinity is invalid"),
-        (0x7FC12345, "positive NaN normalises to FMAX"),
+        (0x7FC12345, "positive extended mantissa"),
         (0xFFC12345, "negative NaN is invalid"),
+        (0x0080EFD3, "minimum exponent root model"),
+        (0x3F80EFD3, "non-nearest root model"),
+        (0x4000EFD3, "even exponent root model"),
+        (0x7F80EFD3, "extended exponent non-nearest root model"),
+        (0xBF80EFD3, "negative non-nearest root model"),
     ]
     # Literal result words from the physical-console ps2autotests
     # tests/cpu/ee_fpu/sqrt.expected, including expanded CF_* constants.

@@ -2341,44 +2341,12 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             else if (fmt == 0x10 && fp_funct == 0x04) // SQRT.S fd, ft
             {
                 const std::string raw = load_fpr_i32(ft);
-                const std::string exponent = newtemp();
-                const std::string exponent_is_zero = newtemp();
-                const std::string sign = newtemp();
                 const std::string negative = newtemp();
-                const std::string extended = newtemp();
-                const std::string absolute = newtemp();
-                const std::string quarter = newtemp();
-                const std::string scaled = newtemp();
-                const std::string safe_bits = newtemp();
-                const std::string input = newtemp();
-                const std::string root = newtemp();
-                const std::string root_bits = newtemp();
-                const std::string doubled = newtemp();
                 const std::string result = newtemp();
-
-                m_out += "  " + exponent + " = and i32 " + raw + ", 2139095040\n";
-                m_out += "  " + exponent_is_zero + " = icmp eq i32 " + exponent + ", 0\n";
-                m_out += "  " + sign + " = and i32 " + raw + ", -2147483648\n";
-                m_out += "  " + negative + " = icmp ne i32 " + sign + ", 0\n";
-                // Exponent 255 is finite on the EE. For that binade,
-                // sqrt(|Ft| / 4) * 2 preserves the mantissa and rounds
-                // exactly once in the host single-precision sqrt unit.
-                // Hardware: ps2autotests ee_fpu/sqrt.expected and
-                // PCSX2 issue #14794. Do not apply this clamp fix to
-                // RSQRT.S in isolation; its quotient has distinct rounding.
-                m_out += "  " + extended + " = icmp eq i32 " + exponent + ", 2139095040\n";
-                m_out += "  " + absolute + " = and i32 " + raw + ", 2147483647\n";
-                m_out += "  " + quarter + " = sub i32 " + absolute + ", 16777216\n";
-                m_out += "  " + scaled + " = select i1 " + extended +
-                         ", i32 " + quarter + ", i32 " + absolute + "\n";
-                m_out += "  " + safe_bits + " = select i1 " + exponent_is_zero +
-                         ", i32 0, i32 " + scaled + "\n";
-                m_out += "  " + input + " = bitcast i32 " + safe_bits + " to float\n";
-                m_out += "  " + root + " = call float @llvm.sqrt.f32(float " + input + ")\n";
-                m_out += "  " + root_bits + " = bitcast float " + root + " to i32\n";
-                m_out += "  " + doubled + " = add i32 " + root_bits + ", 8388608\n";
-                m_out += "  " + result + " = select i1 " + extended +
-                         ", i32 " + doubled + ", i32 " + root_bits + "\n";
+                m_out += "  " + negative + " = icmp slt i32 " + raw + ", 0\n";
+                // The divide unit's signed-digit root is not always the
+                // nearest IEEE result. Reuse the RSQRT.S root recurrence.
+                m_out += "  " + result + " = call i32 @ee_cop1_radix_root(i32 " + raw + ")\n";
                 store_fpr_i32(fd, result);
 
                 // The R5900 checks Ft's raw sign before flushing exponent
@@ -3505,7 +3473,8 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     end_function();
 
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
-        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
+        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||
+        m_out.find("call i32 @ee_cop1_radix_root(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
     }
@@ -5445,7 +5414,8 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     end_function();
 
     if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
-        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
+        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos ||
+        m_out.find("call i32 @ee_cop1_radix_root(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
     }
