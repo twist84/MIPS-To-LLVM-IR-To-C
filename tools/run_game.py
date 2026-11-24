@@ -955,7 +955,8 @@ def covered_pcs(metadata):
     }
 
 
-def batch_append_functions(recomp, elf, work, metadata_path, addresses):
+def batch_append_functions(recomp, elf, work, metadata_path, addresses,
+                           *, reserved_entries=()):
     """Translate a group of newly reachable entries in one discovery pass.
 
     The EE CFG emitter writes one IR/metadata result per requested function.
@@ -1028,8 +1029,11 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
             print(f"auto-expand: ignoring speculative table sibling "
                   f"0x{address:08x}: {message}", file=sys.stderr)
             continue
+        # Explicit recovery can reserve independently requested entry PCs
+        # for their own functions. Normal live discovery never reserves PCs.
         overlap = set(new_pcs) & published_owners
-        owned_blocks = [pc for pc in blocks if int(pc, 0) not in overlap]
+        excluded = overlap | (set(reserved_entries) - {address})
+        owned_blocks = [pc for pc in blocks if int(pc, 0) not in excluded]
         if address in overlap or not owned_blocks:
             message = f"entry 0x{address:08x} already owned by another function"
             if address == targets[0]:

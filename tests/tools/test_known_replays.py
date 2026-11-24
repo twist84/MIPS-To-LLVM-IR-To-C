@@ -169,6 +169,53 @@ def test_reconstruction_is_batched_and_linked_once():
                 raise AssertionError("overwrote prior guest IR")
 
 
+def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp)
+        metadata_path = work / "ee_functions.json"
+        entries = [0x100008, 0x100010, 0x100020, 0x100030]
+        first, second, third, fourth = entries
+        original = {
+            "functions": [
+                {"vaddr": hex(first), "block_pcs": [hex(first), hex(second), "0x100014"]},
+                {"vaddr": hex(third), "block_pcs": [hex(third), "0x100024"]},
+            ],
+            "function_count": 2,
+        }
+        metadata_path.write_text(json.dumps(original))
+        try:
+            known.restore_missing_entries("recomp", work / "elf", work,
+                                          metadata_path, entries, False)
+        except ValueError as exc:
+            assert "0x00100010" in str(exc) and "0x00100030" in str(exc)
+        else:
+            raise AssertionError("strict recovery accepted missing entries")
+        assert json.loads(metadata_path.read_text()) == original
+        calls = []
+
+        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries):
+            assert reserved_entries == {second, fourth}
+            pc = addresses[0]
+            calls.append(pc)
+            metadata = json.loads(path.read_text())
+            assert pc not in known.run_game.covered_pcs(metadata)
+            metadata["functions"].append({
+                "vaddr": hex(pc), "block_pcs": [hex(pc), hex(pc + 8)]})
+            metadata["function_count"] = len(metadata["functions"])
+            path.write_text(json.dumps(metadata))
+
+        with patch.object(known.run_game, "batch_append_functions", side_effect=append):
+            known.restore_missing_entries("recomp", work / "elf", work,
+                                          metadata_path, entries, True)
+        restored = json.loads(metadata_path.read_text())
+        assert calls == [second, fourth]
+        assert [int(fn["vaddr"], 0) for fn in restored["functions"]] == entries
+        assert restored["function_count"] == len(entries)
+        assert known.run_game.covered_pcs(original).issubset(
+            known.run_game.covered_pcs(restored))
+        assert restored["functions"][0]["block_pcs"] == [hex(first), "0x100014"]
+
+
 def test_reconstruction_hash_mismatch_fails_closed():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -358,6 +405,7 @@ def main():
     test_read_manifest()
     test_hash_comparison()
     test_reconstruction_is_batched_and_linked_once()
+    test_explicit_entry_restoration_keeps_all_entries_and_blocks()
     test_reconstruction_hash_mismatch_fails_closed()
     test_replay_pair_is_cpu_only_and_uses_one_library()
     test_incomplete_branch_trace_is_not_evidence()

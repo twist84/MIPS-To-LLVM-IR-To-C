@@ -100,6 +100,70 @@ def compare_ir(work_dir, hashes):
     }
 
 
+def restore_missing_entries(recomp, elf, work, metadata_path, entries,
+                            allow_mismatches):
+    """Re-lift missing explicit entries without stealing existing block PCs.
+
+    Different reconstruction batch boundaries can give a later entry's PC
+    to an earlier function. Changed lowering is already an explicit opt-in;
+    in that mode reserve missing entries and translate each independently.
+    Never accept a smaller module set or invent a dispatch target.
+    """
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    generated = [int(fn["vaddr"], 0) for fn in metadata["functions"]]
+    expected = set(entries)
+    missing = [pc for pc in entries if pc not in set(generated)]
+    extra = set(generated) - expected
+    if len(generated) != len(set(generated)) or extra:
+        raise ValueError("reconstructed entries contain duplicate/unrequested entries")
+    if not missing:
+        return
+    prior_coverage = run_game.covered_pcs(metadata)
+    covered = [pc for pc in missing if pc in prior_coverage]
+    print(f"Reconstruction missing {len(missing)} explicit entries; "
+          f"{len(covered)} already owned as block PCs: " +
+          ", ".join(f"0x{pc:08x}" for pc in missing), flush=True)
+    if not allow_mismatches:
+        raise ValueError(f"reconstructed entries differ: expected={len(entries)} "
+                         f"generated={len(generated)}; missing=" +
+                         ", ".join(f"0x{pc:08x}" for pc in missing))
+    if run_game.shared_ir.active(metadata_path):
+        raise ValueError("cannot change ownership in a published shared IR store")
+
+    reserved = set(missing)
+    # Only remove the exact missing entry PCs from previous owners, not
+    # their surrounding blocks. Each will be restored by fresh translation.
+    for fn in metadata["functions"]:
+        blocks = fn.get("block_pcs")
+        if not isinstance(blocks, list):
+            raise ValueError("reconstructed function has no block map")
+        fn["block_pcs"] = [pc for pc in blocks if int(pc, 0) not in reserved]
+        if int(fn["vaddr"], 0) not in {int(pc, 0) for pc in fn["block_pcs"]}:
+            raise ValueError("existing entry lost its dispatch block")
+    run_game.shared_ir.write_json(metadata_path, metadata)
+    for pc in missing:
+        print(f"Restoring explicit known entry 0x{pc:08x}", flush=True)
+        run_game.batch_append_functions(recomp, elf, work, metadata_path, [pc],
+                                        reserved_entries=reserved)
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    by_entry = {int(fn["vaddr"], 0): fn for fn in metadata["functions"]}
+    if (len(by_entry) != len(metadata["functions"]) or
+            set(by_entry) != expected):
+        raise ValueError("explicit entry restoration did not reconstruct all known entries")
+    owners = set()
+    for pc in entries:
+        blocks = [int(block, 0) for block in by_entry[pc]["block_pcs"]]
+        if pc not in blocks or len(blocks) != len(set(blocks)) or owners.intersection(blocks):
+            raise ValueError(f"invalid restored block ownership at 0x{pc:08x}")
+        owners.update(blocks)
+    if not prior_coverage.issubset(owners):
+        raise ValueError("restoration lost previously reconstructed block coverage")
+    metadata["functions"] = [by_entry[pc] for pc in entries]
+    run_game.shared_ir.write_json(metadata_path, metadata)
+    print(f"Restored {len(missing)} explicit entries; all {len(entries)} "
+          "known function entries retained", flush=True)
+
+
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 allow_mismatches):
     """Build known guest entries without any intermediate game execution."""
@@ -131,13 +195,8 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
               f"of {len(entries)}", flush=True)
         run_game.batch_append_functions(recomp, elf, work, metadata_path, batch)
 
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    generated = [int(item["vaddr"], 0) for item in metadata["functions"]]
-    if len(generated) != len(entries) or set(generated) != set(entries):
-        raise ValueError(
-            f"reconstructed entries differ: expected={len(entries)} "
-            f"generated={len(generated)}"
-        )
+    restore_missing_entries(recomp, elf, work, metadata_path, entries,
+                            allow_mismatches)
     comparison = compare_ir(work, manifest["ir_hashes"])
     print("Known IR SHA-256 verification: "
           f"{comparison['matching']}/{comparison['expected']} identical; "
