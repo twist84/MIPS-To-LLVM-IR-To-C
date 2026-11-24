@@ -54,6 +54,12 @@ destination rectangles, layout mutation during upload and copies exceeding
 the compute scratch capacity. It does not support switching back to stale
 CPU VRAM mid-run.
 
+For performance-only replays, `SDBZ_GIF_IMAGE_DIGEST=0` skips the
+per-byte diagnostic FNV-1a digest and nonzero-byte count of accepted IMAGE
+payloads. Event/QWC counters, parsing, committed payload bytes and DMA
+semantics remain unchanged. Reports mark the digest disabled and emit null
+for unavailable byte-level statistics. The default retains full provenance.
+
 ## Windows (MSVC / LLVM)
 
 From a Windows command prompt in the repository root:

@@ -1181,8 +1181,8 @@ void write_gif_path_counters_json(
         "\"committed_reglist_events\": %llu, "
         "\"committed_image_events\": %llu, "
         "\"committed_image_qwc\": %llu, "
-        "\"committed_image_nonzero_bytes\": %llu, "
-        "\"committed_image_payload_fnv1a64\": %llu}",
+        "\"image_payload_digest_enabled\": %s, "
+        "\"committed_image_nonzero_bytes\": ",
         comma ? "," : "", name,
         static_cast<unsigned long long>(counters.m_accepted_batches),
         static_cast<unsigned long long>(counters.m_rejected_batches),
@@ -1193,8 +1193,17 @@ void write_gif_path_counters_json(
         static_cast<unsigned long long>(counters.m_reglist_events),
         static_cast<unsigned long long>(counters.m_image_events),
         static_cast<unsigned long long>(counters.m_image_qwc),
-        static_cast<unsigned long long>(counters.m_image_nonzero_bytes),
-        static_cast<unsigned long long>(counters.m_image_payload_fnv1a64));
+        counters.m_image_payload_digest_enabled ? "true" : "false");
+    if (counters.m_image_payload_digest_enabled)
+    {
+        std::fprintf(output, "%llu, \"committed_image_payload_fnv1a64\": %llu}",
+            static_cast<unsigned long long>(counters.m_image_nonzero_bytes),
+            static_cast<unsigned long long>(counters.m_image_payload_fnv1a64));
+    }
+    else
+    {
+        std::fputs("null, \"committed_image_payload_fnv1a64\": null}", output);
+    }
 }
 
 void write_gif_paths_json(
@@ -2323,6 +2332,16 @@ int main(int argc, char** argv)
     ee::c_ee_gif_path3 gif_path3{};
     ee::c_ee_gif_path3 gif_path2{};
     ee::c_ee_gif_path3 gif_path1{};
+    std::string gif_digest_environment;
+    const char* gif_digest = read_host_environment(
+        "SDBZ_GIF_IMAGE_DIGEST", &gif_digest_environment);
+    if (gif_digest != nullptr && std::strcmp(gif_digest, "0") == 0)
+    {
+        gif_path1.set_image_payload_digest(false);
+        gif_path2.set_image_payload_digest(false);
+        gif_path3.set_image_payload_digest(false);
+        std::puts("GIF image payload digest: disabled (event and QWC counters retained)");
+    }
     ee::c_ee_vif1 vif1{};
     ee::c_ee_gs_state gs_state{};
     gif_path3.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);

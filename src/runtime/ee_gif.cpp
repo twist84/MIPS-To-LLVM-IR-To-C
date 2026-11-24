@@ -54,8 +54,20 @@ void c_ee_gif_path3::bind_event_sink(
 
 void c_ee_gif_path3::reset()
 {
+    const bool digest = m_counters.m_image_payload_digest_enabled;
     m_state = {};
     m_counters = {};
+    m_counters.m_image_payload_digest_enabled = digest;
+}
+
+bool c_ee_gif_path3::set_image_payload_digest(bool enabled)
+{
+    if (m_counters.m_accepted_batches != 0u)
+    {
+        return enabled == m_counters.m_image_payload_digest_enabled;
+    }
+    m_counters.m_image_payload_digest_enabled = enabled;
+    return true;
 }
 
 const s_ee_gif_path3_state& c_ee_gif_path3::state() const
@@ -230,13 +242,18 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
             // Do not count rejected or partially staged guest DMA input.
             // This does not imply the bytes were sampled as textures,
             // transformed into pixels, or selected by scanout.
-            if (m_counters.m_image_events == 0u)
+            const bool first = m_counters.m_image_events == 0u;
+            ++m_counters.m_image_events;
+            m_counters.m_image_qwc += item.m_qwc;
+            if (!m_counters.m_image_payload_digest_enabled)
+            {
+                break;
+            }
+            if (first)
             {
                 m_counters.m_image_payload_fnv1a64 =
                     0xcbf29ce484222325ull;
             }
-            ++m_counters.m_image_events;
-            m_counters.m_image_qwc += item.m_qwc;
             const size_t begin = static_cast<size_t>(item.m_byte_offset);
             const size_t end = begin + static_cast<size_t>(item.m_qwc) * 16u;
             for (size_t byte = begin; byte < end; ++byte)

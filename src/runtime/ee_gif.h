@@ -42,6 +42,8 @@ struct s_ee_gif_path_counters
     uint64_t m_image_qwc = 0u;
     // Read-only provenance of accepted GIF IMAGE/IMAGE2 payload bytes.
     // These bytes are not necessarily visible texture/framebuffer pixels.
+    // Disabled only by an explicit host diagnostic configuration.
+    bool m_image_payload_digest_enabled = true;
     uint64_t m_image_nonzero_bytes = 0u;
     uint64_t m_image_payload_fnv1a64 = 0u;
 };
@@ -79,6 +81,8 @@ public:
 
     void bind_event_sink(void* user, t_event_callback callback);
     void reset();
+    // Select before the first accepted batch; never mix partial digests.
+    bool set_image_payload_digest(bool enabled);
     const s_ee_gif_path3_state& state() const;
     const s_ee_gif_path_counters& counters() const;
 

@@ -333,6 +333,42 @@ int main()
         return fail("accepted all-zero IMAGE content provenance");
     }
 
+    // Structural provenance and exact sink payload survive an opt-out
+    // of the diagnostic byte scan. No mid-stream partial digest.
+    hardware.reset();
+    parser.reset();
+    reset_capture(capture);
+    if (!parser.set_image_payload_digest(false))
+    {
+        return fail("cannot disable IMAGE byte digest before first batch");
+    }
+    program_gif(&runtime, 0x600u, 3u);
+    program_gif(&runtime, 0x630u, 3u);
+    if (parser.state().m_active ||
+        parser.counters().m_image_payload_digest_enabled ||
+        parser.counters().m_image_events != 3u ||
+        parser.counters().m_image_qwc != 4u ||
+        parser.counters().m_image_nonzero_bytes != 0u ||
+        parser.counters().m_image_payload_fnv1a64 != 0u ||
+        capture.m_image_data.size() != 64u ||
+        parser.set_image_payload_digest(true))
+    {
+        return fail("disabled IMAGE digest changed parser or structural provenance");
+    }
+    for (uint32_t i = 0u; i < 64u; ++i)
+    {
+        if (capture.m_image_data[i] != static_cast<uint8_t>(i))
+        {
+            return fail("disabled digest changed IMAGE payload bytes");
+        }
+    }
+    parser.reset();
+    if (parser.counters().m_image_payload_digest_enabled ||
+        !parser.set_image_payload_digest(true))
+    {
+        return fail("IMAGE digest configuration reset semantics");
+    }
+
     // A rejected batch cannot advance the parser or the DMA channel.
     // Retrying the same stream after STR is cleared must parse identically.
     hardware.reset();
