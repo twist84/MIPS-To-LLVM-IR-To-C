@@ -224,6 +224,9 @@ def main(argv=None):
         help="Legacy mode: restart the guest after each cache miss instead of resuming live",
     )
     parser.add_argument("--no-recompile", action="store_true")
+    parser.add_argument("--skip-headless-expansion", action="store_true",
+                        help="Cached graphics replay: skip the preliminary boot; "
+                             "retain live cache-miss expansion in final replay")
     parser.add_argument(
         "--quick-probe", action="store_true",
         help="Use the last expansion pass as the final report, with no traced replay",
@@ -268,6 +271,10 @@ def main(argv=None):
         parser.error("--expansion-passes must be between 1 and 64")
     if not 1 <= args.expansion_per_pass <= 1024:
         parser.error("--expansion-per-pass must be between 1 and 1024")
+    if args.skip_headless_expansion and (
+            not args.no_recompile or args.quick_probe or args.replay_after_expand or
+            not (args.gs_webgpu_window or args.gs_webgpu_snapshot is not None)):
+        parser.error("--skip-headless-expansion requires a cached graphics replay with live expansion")
     if args.quick_probe and (args.gs_snapshot or args.gs_upload_snapshot or
                              args.gs_webgpu_snapshot or args.gs_webgpu_window):
         parser.error("GS snapshots and the WebGPU window require a full boot session")
@@ -379,7 +386,11 @@ def main(argv=None):
         print("Expansion runs headless. The game window opens for the final traced replay.", flush=True)
 
     reuse = args.no_recompile
-    for index in range(args.expansion_passes):
+    if args.skip_headless_expansion:
+        message = "Headless expansion skipped: cached graphics replay with live cache misses"
+        print(message, flush=True)
+        expansion_log.write_text("# " + message + "\n", encoding="utf-8")
+    for index in range(0 if args.skip_headless_expansion else args.expansion_passes):
         command = [*base, *expansion_args, f"--auto-expand={args.expansion_per_pass}"]
         if reuse:
             command.append("--no-recompile")

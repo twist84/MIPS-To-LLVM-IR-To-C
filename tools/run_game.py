@@ -516,15 +516,8 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
             temporary.unlink()
 
 
-def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
-                               *, verified_ir_hashes=None):
-    """Never reuse a translated DLL whose guest code provenance is unknown.
-
-    Only the profile builder may supply freshly verified IR hashes from
-    the same shared-store lock scope. Independent invocations always
-    hash the IR again; no persistent shortcut or timestamp trust.
-    """
-    started = time.monotonic()
+def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, library):
+    """Check the saved native identity; this alone does NOT authorize execution."""
     if not path.is_file():
         raise ValueError(
             "cached translation has no provenance record; "
@@ -565,6 +558,15 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
                 f"cached translation {file_path.name} changed; "
                 "rerun without --no-recompile"
             )
+    return snapshot
+
+
+def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
+                               *, verified_ir_hashes=None):
+    """Authenticate native identity and current IR before execution."""
+    started = time.monotonic()
+    snapshot = validate_cached_library_identity(
+        path, inputs, emit_opt, metadata_path, library)
     library_checked = time.monotonic()
     if shared_ir.active(metadata_path):
         current = (translated_ir_hashes(metadata_path) if verified_ir_hashes is None

@@ -140,7 +140,8 @@ def remove_verified_duplicates(work, metadata_path, hashes):
     print(f"Shared EE IR: removed {len(paths)} verified duplicate modules", flush=True)
 
 
-def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0):
+def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0,
+            *, defer_warm_validation=False):
     elf = elf.resolve(strict=True)
     source_work = source_work.resolve(strict=True)
     work = work.resolve()
@@ -149,7 +150,8 @@ def prepare(elf, build, config, source_work, work, opt, jobs, source_opt=0):
             work == shared_ir.ir_directory(source_work).parent):
         raise ValueError("optimized cache must be separate from the source")
     with shared_ir.ir_lock(source_work), shared_ir.ir_lock(work):
-        prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)
+        prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
+                       defer_warm_validation=defer_warm_validation)
 
 
 def validate_source_ir(elf, source_work, source_opt, ir_sources):
@@ -184,7 +186,28 @@ def validate_source_ir(elf, source_work, source_opt, ir_sources):
     return metadata_path, hashes
 
 
-def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt):
+def warm_profile_ready(source_work, work, inputs, ir_sources, opt, library):
+    """Preflight only. The actual runner must perform full IR validation."""
+    try:
+        directory = shared_ir.ir_directory(source_work)
+        if (not (work / shared_ir.MARKER).is_file() or
+                shared_ir.ir_directory(work) != directory or
+                not shared_ir.active(directory / "ee_functions.json") or
+                (work / "ir" / "ee_functions.json").exists()):
+            return False
+        metadata = directory / "ee_functions.json"
+        snapshot = run_game.validate_cached_library_identity(
+            work / "translation-cache.json", inputs, opt, metadata, library)
+        state = shared_ir.current_state(metadata, ir_sources)
+        return (snapshot.get("ir_sources") == ir_sources and
+                snapshot.get("ir_hashes") == state["ir_hashes"] and
+                (work / "objects" / "objects.json").is_file())
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
+                   *, defer_warm_validation=False):
     root = Path(__file__).resolve().parents[1]
     recomp = run_game.native_executable(build.resolve(), "ee_recomp", config)
     inputs = run_game.translation_inputs(elf, recomp, root)
@@ -192,11 +215,15 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt)
     library_name = ("game-translated.dll" if os.name == "nt" else
                     "libgame-translated.dylib" if sys.platform == "darwin" else
                     "libgame-translated.so")
-    metadata_path, hashes = validate_source_ir(
-        elf, source_work, source_opt, ir_sources)
-
     cache = work / "translation-cache.json"
     library = work / library_name
+    if defer_warm_validation and warm_profile_ready(
+            source_work, work, inputs, ir_sources, opt, library):
+        print(f"Warm O{opt} profile: native identity matches; "
+              "full IR verification deferred to runner", flush=True)
+        return
+    metadata_path, hashes = validate_source_ir(
+        elf, source_work, source_opt, ir_sources)
     if work.exists():
         fresh_hashes = hashes
         if shared_ir.ir_directory(work) == work / "ir":
@@ -244,6 +271,9 @@ def main(argv=None):
     parser.add_argument("--source-opt", type=int, choices=(0, 2), default=0,
                         help="legacy source provenance profile (shared IR is independent of native profile)")
     parser.add_argument("--emit-jobs", type=int, default=2)
+    parser.add_argument("--defer-warm-validation", action="store_true",
+                        help="Preflight an existing shared profile only; "
+                             "requires full run_game validation before execution")
     args = parser.parse_args(argv)
     if args.source_opt == 2 and args.emit_opt not in (4, 5):
         parser.error("O2 source is only supported for independent IR/native profiles")
@@ -251,7 +281,8 @@ def main(argv=None):
         parser.error("--emit-jobs must be between 1 and 32")
     try:
         prepare(args.elf, args.build_dir, args.config, args.source_work_dir,
-                args.work_dir, args.emit_opt, args.emit_jobs, args.source_opt)
+                args.work_dir, args.emit_opt, args.emit_jobs, args.source_opt,
+                defer_warm_validation=args.defer_warm_validation)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             subprocess.CalledProcessError) as error:
         print(f"Optimized cache refused: {error}", file=sys.stderr)

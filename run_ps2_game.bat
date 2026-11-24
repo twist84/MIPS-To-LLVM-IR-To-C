@@ -387,6 +387,28 @@ if not defined CACHE_FLAG (
 )
 
 rem Build only the selected profile from the canonical shared IR.
+set "DIRECT_REPLAY_ARG="
+set "WARM_VALIDATION_ARG="
+if "%SDBZ_SKIP_HEADLESS_EXPANSION%"=="1" (
+    if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+        echo ERROR: SDBZ_SKIP_HEADLESS_EXPANSION requires --full.
+        exit /b 1
+    )
+    if not defined CACHE_FLAG (
+        echo ERROR: Direct replay requires an existing translation cache.
+        exit /b 1
+    )
+    if defined CACHE_MISS_ARGS (
+        echo ERROR: Direct replay requires live cache misses.
+        exit /b 1
+    )
+    if not "%EE_WEBGPU_WINDOW%"=="1" if not "%EE_WEBGPU_SNAPSHOT%"=="1" (
+        echo ERROR: Direct replay requires native WebGPU window or snapshot.
+        exit /b 1
+    )
+    set "DIRECT_REPLAY_ARG=--skip-headless-expansion"
+    set "WARM_VALIDATION_ARG=--defer-warm-validation"
+)
 if not "%SDBZ_EE_OPT%"=="0" (
     if not defined CACHE_FLAG (
         echo ERROR: Optimized EE replay requires a verified shared IR cache.
@@ -396,21 +418,21 @@ if not "%SDBZ_EE_OPT%"=="0" (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --source-work-dir "%WORK_DIR%" ^
-            --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS%
+            --work-dir "%WORK_DIR%-IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-IR-O2"
     ) else if "%SDBZ_EE_OPT%"=="5" (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --source-work-dir "%WORK_DIR%" ^
-            --work-dir "%WORK_DIR%-O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS%
+            --work-dir "%WORK_DIR%-O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-O2-native"
     ) else (
         python tools\build_optimized_cache.py "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%-O%SDBZ_EE_OPT%" ^
-            --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
+            --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
         if errorlevel 1 exit /b 1
         set "WORK_DIR=%WORK_DIR%-O%SDBZ_EE_OPT%"
     )
@@ -523,7 +545,7 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %DIRECT_REPLAY_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
 rem First-run GUI AOT bootstrap: the interpreter has now captured linked IRX.
 rem Build only after the runner exits (no loaded DLLs to replace). Preserve

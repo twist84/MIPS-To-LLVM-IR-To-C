@@ -310,6 +310,9 @@ def test_windows_launcher_preserves_guest_cache():
     assert '--work-dir "%WORK_DIR%-IR-O2" --emit-opt=4' in variants
     assert '--work-dir "%WORK_DIR%-O2-native" --emit-opt=5' in variants
     assert '--work-dir "%WORK_DIR%-O2" --emit-opt=2' not in variants
+    assert 'set "DIRECT_REPLAY_ARG=--skip-headless-expansion"' in variants
+    assert 'set "WARM_VALIDATION_ARG=--defer-warm-validation"' in variants
+    assert variants.count('%WARM_VALIDATION_ARG%') == 3
     assert "if not errorlevel 1 (" in probe, "failed relink must not reuse"
     assert "full IR rebuild required" in probe
 
@@ -568,6 +571,16 @@ def main():
                  initial_reuse=True, graphics="window", dispatch_limits=limits)
         run_case([{"trace": False, "exit_reason": 5}],
                  initial_reuse=True, quick_probe=True, dispatch_limits=limits)
+
+    code, calls, expansion, boot = run_case([
+        {"trace": True, "live": True, "dispatch_status": 1, "code": 4},
+    ], initial_reuse=True, graphics="window", expansion_per_pass=7,
+       dispatch_limits=("--skip-headless-expansion", "--max-replay-dispatches=4000"))
+    assert code == 4 and len(calls) == 1
+    assert "--trace" in calls[0] and "--auto-expand=7" in calls[0]
+    assert "--skip-headless-expansion" not in calls[0]
+    assert "Headless expansion skipped" in expansion
+    assert "Executing translated EE code" in boot
 
     test_clean_ctrl_c_cancellation()
     test_guest_rpc_snapshots_in_cached_probe()

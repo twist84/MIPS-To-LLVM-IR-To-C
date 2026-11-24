@@ -2402,8 +2402,29 @@ def main():
             for key in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert states[0][key] == states[1][key], (key, states)
+            warm = subprocess.run([*prepare, "--defer-warm-validation"],
+                                  capture_output=True, text=True, check=False)
+            assert warm.returncode == 0, warm.stdout + warm.stderr
+            assert "full IR verification deferred to runner" in warm.stdout
+            assert "Shared EE IR: verified" not in warm.stdout
             module = Path(variant_metadata["functions"][0]["ir_path"])
             module.write_bytes(module.read_bytes() + b"\n; modified\n")
+            # Preflight does not claim to authenticate the IR. The actual
+            # driver must fail before native execution when IR is damaged.
+            warm = subprocess.run([*prepare, "--defer-warm-validation"],
+                                  capture_output=True, text=True, check=False)
+            assert warm.returncode == 0, warm.stdout + warm.stderr
+            assert "full IR verification deferred to runner" in warm.stdout
+            rejected_report = variant / "rejected.json"
+            rejected_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(variant),
+                "--emit-opt=2", "--max-dispatches=8", "--no-recompile",
+                f"--report={rejected_report}",
+            ], capture_output=True, text=True, check=False)
+            assert rejected_run.returncode != 0
+            assert not rejected_report.exists()
+            assert "shared EE IR provenance is stale or incompatible" in rejected_run.stderr
             refused = subprocess.run(prepare, capture_output=True, text=True, check=False)
             assert refused.returncode != 0, refused.stdout + refused.stderr
             assert "verified IR hashes do not match" in refused.stderr
