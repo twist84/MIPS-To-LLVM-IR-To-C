@@ -314,6 +314,59 @@ int main()
         return 1;
     }
 
+    // Many small tags can form a legal chain well below the payload
+    // limit. Reuse a RET subroutine with distinct CALL return addresses.
+    // Each CALL and RET also sends a TTE quadword.
+    large_dmac.reset();
+    sink = {};
+    constexpr uint32_t k_calls = 2048u;
+    constexpr uint32_t k_start = 0x100u;
+    constexpr uint32_t k_subroutine = 0x10000u;
+    for (uint32_t i = 0u; i < k_calls; ++i)
+    {
+        write_tag(large_memory, k_start + i * 16u, 0u, 5u, 0u,
+                  k_subroutine, static_cast<uint64_t>(i) << 32u);
+    }
+    write_tag(large_memory, k_start + k_calls * 16u, 0u, 7u, 0u, 0u,
+              0x5566778800000000ull);
+    write_tag(large_memory, k_subroutine, 0u, 6u, 0u, 0u,
+              0x1122334400000000ull);
+    if (!check(begin(large_dmac, k_start), "long CALL/RET chain start refused") ||
+        !check(sink.m_calls == 1u &&
+               sink.m_packet.size() == (2u * k_calls + 1u) * 16u &&
+               sink.m_packet[28u] == 0x44u &&
+               sink.m_packet[44u] == 1u &&
+               sink.m_packet[sink.m_packet.size() - 4u] == 0x88u &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.vif1_channel_state().m_tadr ==
+                   k_start + (k_calls + 1u) * 16u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x130u) == 0u &&
+               large_dmac.status() == 2u,
+               "long chain or repeated CALL/RET did not commit"))
+    {
+        return 1;
+    }
+
+    // Even a tag-only chain is bounded. Reject the full batch if its
+    // terminal tag is beyond the host budget.
+    large_dmac.reset();
+    sink = {};
+    constexpr uint32_t k_budget = 65536u;
+    for (uint32_t i = 0u; i < k_budget; ++i)
+    {
+        write_tag(large_memory, k_start + i * 16u, 0u, 1u, 0u, 0u, 0u);
+    }
+    write_tag(large_memory, k_start + k_budget * 16u, 0u, 7u, 0u, 0u, 0u);
+    if (!check(begin(large_dmac, k_start, 0x185u), "over-budget chain start refused") ||
+        !check(large_dmac.vif1_chain_last_reject() == reject::chain_tag_limit &&
+               sink.m_calls == 0u && large_dmac.status() == 0u &&
+               large_dmac.vif1_channel_state().m_tadr == k_start &&
+               large_dmac.vif1_channel_state().m_chcr == 0x185u,
+               "over-budget chain did not fail closed"))
+    {
+        return 1;
+    }
+
     std::puts("EE VIF1 source chain TTE/TIE/rollback: PASS");
     return 0;
 }

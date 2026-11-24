@@ -707,7 +707,10 @@ bool c_ee_dmac::transfer_vif1_source_chain()
         return true;
     };
 
-    constexpr uint32_t k_max_tags = 1024u;
+    // Tag count is a host work budget, not an architectural DMA limit.
+    // SDBZ's pre-battle chain exceeds 1024 tags. Bound preflight
+    // independently of payload size (zero-QWC tags still cost work).
+    constexpr uint32_t k_max_tags = 65536u;
     constexpr size_t k_max_packet_qwc = k_max_graphics_batch_qwc;
     s_spr_channel next = current;
     uint64_t tag_address = next.m_tadr;
