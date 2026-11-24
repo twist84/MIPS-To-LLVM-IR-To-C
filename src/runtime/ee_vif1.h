@@ -136,6 +136,10 @@ private:
                         e_reject* reject);
 
     s_machine m_machine{};
+    // Host-only transaction storage. Never part of committed VIF state.
+    std::vector<uint32_t> m_pending_scratch;
+    std::vector<uint8_t> m_path1_scratch;
+    std::vector<uint8_t> m_path2_scratch;
     s_diagnostic m_diagnostic{};
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;

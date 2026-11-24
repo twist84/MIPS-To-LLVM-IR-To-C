@@ -80,6 +80,9 @@ void c_ee_vif1::bind_path3(const c_ee_gif_path3* path3)
 void c_ee_vif1::reset()
 {
     m_machine = {};
+    m_pending_scratch.clear();
+    m_path1_scratch.clear();
+    m_path2_scratch.clear();
     m_diagnostic = {};
 }
 
@@ -335,14 +338,17 @@ bool c_ee_vif1::execute(
         {
             const uint32_t qwc = imm != 0u ? imm : 0x10000u;
             const size_t previous = path2_bytes.size();
-            path2_bytes.resize(previous + static_cast<size_t>(qwc) * 16u);
             if (host_little_endian())
             {
-                std::memcpy(path2_bytes.data() + previous, words,
-                            static_cast<size_t>(qwc) * 16u);
+                // Append initialized bytes directly, avoiding resize's
+                // zero fill followed by an overwrite of the entire span.
+                const auto* begin = reinterpret_cast<const uint8_t*>(words);
+                path2_bytes.insert(path2_bytes.end(), begin,
+                    begin + static_cast<size_t>(qwc) * 16u);
             }
             else
             {
+                path2_bytes.resize(previous + static_cast<size_t>(qwc) * 16u);
                 for (uint32_t i = 0u; i < qwc * 4u; ++i)
                 {
                     const uint32_t word = words[i];
@@ -438,7 +444,49 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
         reject_packet(e_reject::invalid_packet, 0u);
         return false;
     }
-    s_machine next = m_machine;
+    // Reuse the previous transaction's pending capacity. Guest state
+    // remains private until both VIF execution and the GIF sink succeed.
+    s_machine next{};
+    next.m_pending.swap(m_pending_scratch);
+    auto& path1_bytes = m_path1_scratch;
+    auto& path2_bytes = m_path2_scratch;
+    path1_bytes.clear();
+    path2_bytes.clear();
+    struct s_transaction_scratch
+    {
+        std::vector<uint32_t>& m_pending;
+        std::vector<uint32_t>& m_spare;
+        std::vector<uint8_t>& m_path1;
+        std::vector<uint8_t>& m_path2;
+        bool m_committed = false;
+
+        ~s_transaction_scratch()
+        {
+            if (!m_committed)
+            {
+                m_pending.clear();
+                m_pending.swap(m_spare);
+            }
+            m_path1.clear();
+            m_path2.clear();
+            // Retain at most one normal aggregate batch per path.
+            constexpr size_t limit =
+                static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
+            if (m_path1.capacity() > limit)
+            {
+                std::vector<uint8_t>().swap(m_path1);
+            }
+            if (m_path2.capacity() > limit)
+            {
+                std::vector<uint8_t>().swap(m_path2);
+            }
+            if (m_spare.capacity() > limit / sizeof(uint32_t) + 0x40000u + 0x400u)
+            {
+                std::vector<uint32_t>().swap(m_spare);
+            }
+        }
+    } scratch{next.m_pending, m_pending_scratch, path1_bytes, path2_bytes};
+    next = m_machine;
     if (next.m_pending.size() + static_cast<size_t>(qwc) * 4u >
         k_max_pending_words)
     {
@@ -466,8 +514,6 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     }
 
     size_t index = 0u;
-    std::vector<uint8_t> path2_bytes;
-    std::vector<uint8_t> path1_bytes;
     struct s_path_range
     {
         uint32_t m_path;
@@ -648,7 +694,11 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
     next.m_pending.erase(next.m_pending.begin(),
                          next.m_pending.begin() +
                              static_cast<std::ptrdiff_t>(index));
+    // Preserve the old pending allocation as the next spare. The
+    // staged vector becomes committed, including an incomplete command.
+    m_machine.m_pending.swap(m_pending_scratch);
     m_machine = std::move(next);
+    scratch.m_committed = true;
     // A successful packet clears only the latest failure, not the
     // lifetime evidence of a previously rejected VU1/GIF command.
     m_diagnostic.m_reason = e_reject::none;

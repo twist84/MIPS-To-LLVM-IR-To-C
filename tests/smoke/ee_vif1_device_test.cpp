@@ -297,6 +297,64 @@ int main()
         }
     }
 
+    // Scratch reuse must not retain rejected DIRECT data, including a
+    // split command that was already partially committed before refusal.
+    {
+        ee::c_ee_vif1 reused{};
+        ee::c_ee_gif_path3 path{};
+        std::vector<uint8_t> received;
+        bool accept = false;
+        struct s_sink
+        {
+            bool* m_accept;
+            std::vector<uint8_t>* m_received;
+        } sink{&accept, &received};
+        path.bind_event_sink(&sink,
+            [](void* user, const ee::s_ee_gif_event*, size_t,
+               const uint8_t* data, uint32_t qwc)
+            {
+                auto& sink = *static_cast<s_sink*>(user);
+                if (!*sink.m_accept)
+                {
+                    return false;
+                }
+                sink.m_received->assign(data, data + static_cast<size_t>(qwc) * 16u);
+                return true;
+            });
+        reused.bind_path2(&path);
+        // DIRECT(2), split after seven payload words. The final word is
+        // sent with three NOPs in a second qword-aligned packet.
+        const std::vector<uint32_t> first{0x50000002u,
+            0x00008001u, 0x08000000u, 0u, 0u,
+            0x12345678u, 0x89abcdefu, 0x10203040u};
+        const std::vector<uint32_t> last{0xfedcba98u, 0u, 0u, 0u};
+        std::vector<uint32_t> payload(first.begin() + 1u, first.end());
+        payload.push_back(last.front());
+        if (!check(send(reused, first) && !send(reused, last) &&
+                   received.empty() && path.counters().m_accepted_batches == 0u,
+                   "rejected split DIRECT published scratch bytes"))
+        {
+            return 1;
+        }
+        accept = true;
+        if (!check(send(reused, last) && received == pack_words(payload) &&
+                   reused.diagnostic().m_pending_words == 0u &&
+                   path.counters().m_accepted_batches == 1u,
+                   "split DIRECT retry reused stale transaction bytes"))
+        {
+            return 1;
+        }
+        reused.reset();
+        path.reset();
+        received.clear();
+        if (!check(send(reused, first) && send(reused, last) &&
+                   received == pack_words(payload),
+                   "reset left stale VIF transaction scratch"))
+        {
+            return 1;
+        }
+    }
+
     // Unknown commands and IRQ stalls fail closed without altering
     // the accepted VIF state or delivering a second PATH2 batch.
     const uint32_t calls_before = capture.m_calls;
