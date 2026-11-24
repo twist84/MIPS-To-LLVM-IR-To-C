@@ -1544,6 +1544,15 @@ bool write_report(
     std::fputs(",\n  \"runtime_profile\": ", output);
     ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
         graphics_probe.present_succeeded());
+    if (ee::g_runtime_profile.m_enabled)
+    {
+        // Retain phase deltas in the archived replay log, even though
+        // the periodic JSON report itself is overwritten.
+        ee::write_runtime_profile_interval(stderr, dispatched,
+            runtime.m_ee_cycle_scheduler.current_cycle(),
+            hardware.scanout().fields_started(), graphics_probe.present_succeeded(),
+            !in_progress);
+    }
     std::fputs("\n}\n", output);
     const bool no_write_error = std::ferror(output) == 0;
     const bool closed = std::fclose(output) == 0;

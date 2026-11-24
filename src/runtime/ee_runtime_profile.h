@@ -111,6 +111,19 @@ struct s_runtime_profile_counter
 
 class c_runtime_profile_scope;
 
+// Completed-scope baseline for a wall-clock interval. Field endpoints
+// are retained rather than assuming scanout counters never reset.
+struct s_runtime_profile_interval
+{
+    t_runtime_profile_clock::time_point m_start{};
+    uint64_t m_dispatches = 0u;
+    uint64_t m_cycles = 0u;
+    uint64_t m_fields = 0u;
+    uint64_t m_presentations = 0u;
+    uint64_t m_covered_ns = 0u;
+    std::array<s_runtime_profile_counter, k_runtime_profile_descriptors.size()> m_counters{};
+};
+
 struct s_runtime_profile_state
 {
     bool m_enabled = false;
@@ -118,6 +131,7 @@ struct s_runtime_profile_state
     c_runtime_profile_scope* m_active = nullptr;
     uint64_t m_covered_ns = 0u;
     std::array<s_runtime_profile_counter, k_runtime_profile_descriptors.size()> m_counters{};
+    s_runtime_profile_interval m_interval{};
 };
 
 // The current synchronous runner owns all measured scopes on its thread.
@@ -131,6 +145,7 @@ inline void runtime_profile_begin(bool enabled)
     if (enabled)
     {
         g_runtime_profile.m_start = t_runtime_profile_clock::now();
+        g_runtime_profile.m_interval.m_start = g_runtime_profile.m_start;
     }
 }
 
@@ -221,6 +236,71 @@ private:
     bool m_active = false;
     bool m_measure_only = false;
 };
+
+// Sample only at a completed-scope report boundary. Periodic reports
+// are overwritten on disk; a compact interval record in the replay log
+// preserves the phase history without per-dispatch clocks or guest changes.
+// Endpoints (not inferred frame deltas) expose scanout reconfiguration.
+inline bool write_runtime_profile_interval(FILE* output, uint64_t dispatches,
+    uint64_t cycles, uint64_t fields, uint64_t presentations, bool final,
+    t_runtime_profile_clock::time_point now = t_runtime_profile_clock::now())
+{
+    auto& state = g_runtime_profile;
+    if (!state.m_enabled || state.m_active != nullptr || output == nullptr)
+    {
+        return false;
+    }
+    auto& previous = state.m_interval;
+    const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        now - previous.m_start).count();
+    if (elapsed <= 0 || (!final && elapsed < 1000000000ll))
+    {
+        return false;
+    }
+    const uint64_t wall_ns = static_cast<uint64_t>(elapsed);
+    const uint64_t covered_ns = state.m_covered_ns - previous.m_covered_ns;
+    std::fprintf(output,
+        "EE profile interval: {\"schema\":\"ee-runtime-profile-interval-v1\","
+        "\"start_dispatch\":%llu,\"end_dispatch\":%llu,"
+        "\"start_cycle\":%llu,\"end_cycle\":%llu,"
+        "\"start_fields\":%llu,\"end_fields\":%llu,"
+        "\"start_presentations\":%llu,\"end_presentations\":%llu,"
+        "\"wall_ns\":%llu,\"covered_ns\":%llu,\"uninstrumented_ns\":%llu,"
+        "\"gpu_execution_ns\":null,\"subsystems\":{",
+        static_cast<unsigned long long>(previous.m_dispatches),
+        static_cast<unsigned long long>(dispatches),
+        static_cast<unsigned long long>(previous.m_cycles),
+        static_cast<unsigned long long>(cycles),
+        static_cast<unsigned long long>(previous.m_fields),
+        static_cast<unsigned long long>(fields),
+        static_cast<unsigned long long>(previous.m_presentations),
+        static_cast<unsigned long long>(presentations),
+        static_cast<unsigned long long>(wall_ns),
+        static_cast<unsigned long long>(covered_ns),
+        static_cast<unsigned long long>(wall_ns >= covered_ns ? wall_ns - covered_ns : 0u));
+    for (std::size_t i = 0u; i < k_runtime_profile_descriptors.size(); ++i)
+    {
+        const auto& current = state.m_counters[i];
+        const auto& old = previous.m_counters[i];
+        std::fprintf(output,
+            "%s\"%s\":{\"calls\":%llu,\"inclusive_ns\":%llu,"
+            "\"exclusive_ns\":%llu,\"work\":%llu}",
+            i != 0u ? "," : "", k_runtime_profile_descriptors[i].m_name,
+            static_cast<unsigned long long>(current.m_calls - old.m_calls),
+            static_cast<unsigned long long>(current.m_inclusive_ns - old.m_inclusive_ns),
+            static_cast<unsigned long long>(current.m_exclusive_ns - old.m_exclusive_ns),
+            static_cast<unsigned long long>(current.m_work - old.m_work));
+    }
+    std::fputs("}}\n", output);
+    previous.m_start = now;
+    previous.m_dispatches = dispatches;
+    previous.m_cycles = cycles;
+    previous.m_fields = fields;
+    previous.m_presentations = presentations;
+    previous.m_covered_ns = state.m_covered_ns;
+    previous.m_counters = state.m_counters;
+    return true;
+}
 
 inline void write_runtime_profile_json(FILE* output, uint64_t dispatches,
     uint64_t fields, uint64_t presentations)

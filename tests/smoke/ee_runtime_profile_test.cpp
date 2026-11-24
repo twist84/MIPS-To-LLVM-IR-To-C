@@ -106,8 +106,57 @@ int main()
     {
         return 5;
     }
+    // Intervals contain only completed-scope deltas. A throttled
+    // sample must not consume its baseline, and the final short sample
+    // must retain the last interval (including scanout counter reset).
+    FILE* intervals = std::tmpfile();
+    if (intervals == nullptr)
+    {
+        return 8;
+    }
+    const auto start = state.m_interval.m_start;
+    const auto first = start + std::chrono::seconds(2);
+    const auto second = first + std::chrono::milliseconds(250);
+    const bool throttled = !ee::write_runtime_profile_interval(intervals,
+        10u, 20u, 2u, 1u, false, start + std::chrono::milliseconds(500));
+    bool active_refused = false;
+    {
+        ee::c_runtime_profile_scope scope(e_runtime_profile_id::gif_consume, 7u);
+        active_refused = !ee::write_runtime_profile_interval(intervals,
+            10u, 20u, 2u, 1u, true, first);
+    }
+    const bool emitted = ee::write_runtime_profile_interval(intervals,
+        100u, 200u, 3u, 2u, false, first);
+    {
+        ee::c_runtime_profile_scope scope(e_runtime_profile_id::gif_consume, 11u);
+    }
+    const bool final_emitted = ee::write_runtime_profile_interval(intervals,
+        150u, 300u, 1u, 3u, true, second);
+    std::rewind(intervals);
+    std::string records;
+    char buffer[1024];
+    while (std::fgets(buffer, sizeof(buffer), intervals) != nullptr)
+    {
+        records += buffer;
+    }
+    std::fclose(intervals);
+    const auto first_record = records.find("EE profile interval: ");
+    const auto second_record = records.find("EE profile interval: ", first_record + 1u);
+    if (!throttled || !active_refused || !emitted || !final_emitted ||
+        first_record == std::string::npos || second_record == std::string::npos ||
+        records.find("\"start_dispatch\":0,\"end_dispatch\":100") == std::string::npos ||
+        records.find("\"start_dispatch\":100,\"end_dispatch\":150", second_record) == std::string::npos ||
+        records.find("\"start_fields\":3,\"end_fields\":1", second_record) == std::string::npos ||
+        records.find("\"wall_ns\":250000000", second_record) == std::string::npos ||
+        records.find("\"gif_consume\":{\"calls\":1,", second_record) == std::string::npos ||
+        records.find("\"work\":11}", second_record) == std::string::npos)
+    {
+        return 9;
+    }
+
     ee::runtime_profile_begin(false);
-    if (ee::g_runtime_profile.m_covered_ns != 0u || ee::g_runtime_profile.m_enabled)
+    if (ee::g_runtime_profile.m_covered_ns != 0u || ee::g_runtime_profile.m_enabled ||
+        ee::g_runtime_profile.m_interval.m_dispatches != 0u)
     {
         return 4;
     }
