@@ -60,22 +60,11 @@ bool c_ee_scanout_clock::configure(
     return true;
 }
 
-bool c_ee_scanout_clock::advance_to(
+bool c_ee_scanout_clock::deliver_due_edges(
     uint64_t ee_cycle, c_ee_intc* intc,
     c_ee_vsync_flags* flags, ee_memory* memory
 )
 {
-    // Keep enough headroom to queue the field *after* every delivered
-    // boundary. Otherwise an UINT64_MAX-adjacent timestamp could wrap the
-    // rational next-field accumulator and repeatedly fire a past event.
-    if (!m_enabled || ee_cycle < m_last_ee_cycle ||
-        ee_cycle > std::numeric_limits<uint64_t>::max() -
-            2u * k_ee_clock_hz ||
-        intc == nullptr || flags == nullptr || memory == nullptr)
-    {
-        return false;
-    }
-
     // Reject impractically huge jumps without producing a partial series
     // of VBlank events. This protects against malformed cycle timestamps.
     constexpr uint64_t k_max_fields_per_advance = 1024ull;
@@ -87,14 +76,6 @@ bool c_ee_scanout_clock::advance_to(
     }
 
     m_delivered_edges.clear();
-    // Most native function boundaries are between scanout edges.
-    // Preserve validation, timestamp advancement, and edge clearing,
-    // but do not enter the event-delivery loop on those boundaries.
-    if (ee_cycle < next_event_cycle())
-    {
-        m_last_ee_cycle = ee_cycle;
-        return true;
-    }
     while (ee_cycle >= m_next_field_cycle ||
            (m_next_end_cycle != 0u &&
             ee_cycle >= m_next_end_cycle))
@@ -154,9 +135,4 @@ uint64_t c_ee_scanout_clock::last_ee_cycle() const
     return m_last_ee_cycle;
 }
 
-const std::vector<uint8_t>&
-c_ee_scanout_clock::delivered_vblank_edges() const
-{
-    return m_delivered_edges;
-}
 } // namespace ee

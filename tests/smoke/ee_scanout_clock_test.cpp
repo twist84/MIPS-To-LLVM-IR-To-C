@@ -97,6 +97,15 @@ int main()
           clock.fields_started() == 1u &&
           clock.next_event_cycle() == clock.next_field_cycle(),
           "VBlank end fires from the actual field-start clock");
+    // An invalid call must not clear the previous edge; an equal-cycle
+    // valid call consumes the edge list without redelivering anything.
+    check(!clock.advance_to(first_end, nullptr, &flags, &memory) &&
+          clock.delivered_vblank_edges().size() == 1u &&
+          clock.advance_to(first_end, &intc, &flags, &memory) &&
+          clock.delivered_vblank_edges().empty() &&
+          clock.fields_ended() == 1u &&
+          clock.last_ee_cycle() == first_end,
+          "same-cycle no-event advance clears edges, invalid call does not");
     const uint64_t second_field = clock.next_field_cycle();
     clock.acknowledge_csr(ee::c_ee_scanout_clock::k_csr_vsint);
     check((clock.csr() & ee::c_ee_scanout_clock::k_csr_vsint) == 0u &&

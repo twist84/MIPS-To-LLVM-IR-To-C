@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 namespace ee
@@ -32,7 +33,28 @@ public:
     // The INTC cause is asserted regardless of INTC_MASK; the controller
     // decides whether to raise the CPU's interrupt pending line.
     bool advance_to(uint64_t ee_cycle, c_ee_intc* intc,
-                    c_ee_vsync_flags* flags, ee_memory* memory);
+                    c_ee_vsync_flags* flags, ee_memory* memory)
+    {
+        // Reject invalid calls before touching the edge list or clock.
+        if (!m_enabled || ee_cycle < m_last_ee_cycle ||
+            ee_cycle > std::numeric_limits<uint64_t>::max() -
+                2u * k_ee_clock_hz ||
+            intc == nullptr || flags == nullptr || memory == nullptr)
+        {
+            return false;
+        }
+
+        // Between edges, the large-jump check cannot apply.
+        // Advance the same timestamp and clear previously delivered edges.
+        if (ee_cycle < m_next_field_cycle &&
+            (m_next_end_cycle == 0u || ee_cycle < m_next_end_cycle))
+        {
+            m_delivered_edges.clear();
+            m_last_ee_cycle = ee_cycle;
+            return true;
+        }
+        return deliver_due_edges(ee_cycle, intc, flags, memory);
+    }
 
     // CSR.VSINT is sticky, cleared only by the guest write-one-to-clear.
     void acknowledge_csr(uint64_t write_one_to_clear);
@@ -62,10 +84,15 @@ public:
     }
     // Ordered edges since the most recent guest-cycle advance.
     // 1 = start, 0 = end; the caller emits only these real events.
-    const std::vector<uint8_t>& delivered_vblank_edges() const;
+    const std::vector<uint8_t>& delivered_vblank_edges() const
+    {
+        return m_delivered_edges;
+    }
 
 private:
     void queue_next_field();
+    bool deliver_due_edges(uint64_t ee_cycle, c_ee_intc* intc,
+                           c_ee_vsync_flags* flags, ee_memory* memory);
 
     uint64_t m_last_ee_cycle = 0u;
     uint64_t m_next_field_cycle = 0u;
