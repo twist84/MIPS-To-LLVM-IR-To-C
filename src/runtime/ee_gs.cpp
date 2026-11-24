@@ -795,20 +795,21 @@ c_ee_gs_state::s_vram_write c_ee_gs_state::pixel_write(
 void c_ee_gs_state::apply_vram_write(
     std::vector<uint8_t>& vram, const s_vram_write& write)
 {
-    const uint32_t offset = write.m_offset;
+    const uint32_t offset = write.offset();
     const uint32_t value = write.m_value;
-    if (write.m_bytes == 0u)
+    const uint32_t bytes = write.bytes();
+    if (bytes == 0u)
     {
         const uint8_t mask =
-            static_cast<uint8_t>(0x0fu << write.m_shift);
+            static_cast<uint8_t>(0x0fu << write.shift());
         vram[offset] = static_cast<uint8_t>(
             (vram[offset] & static_cast<uint8_t>(~mask)) |
-            static_cast<uint8_t>((value & 0x0fu) << write.m_shift)
+            static_cast<uint8_t>((value & 0x0fu) << write.shift())
         );
     }
     else
     {
-        for (uint32_t b = 0u; b < write.m_bytes; ++b)
+        for (uint32_t b = 0u; b < bytes; ++b)
         {
             const uint32_t at = (offset + b) & (k_vram_bytes - 1u);
             vram[at] = static_cast<uint8_t>(value >> (8u * b));
@@ -1021,8 +1022,8 @@ bool c_ee_gs_state::stage_host_upload(
                     // A page occupies 8192 bytes. One extra bit encodes
                     // a high-nibble write without expanding the table.
                     layout.m_offsets[py * page_width + px] =
-                        static_cast<uint16_t>((pixel.m_offset << 1u) |
-                            (pixel.m_shift >> 2u));
+                        static_cast<uint16_t>((pixel.offset() << 1u) |
+                            (pixel.shift() >> 2u));
                 }
             }
         }
@@ -1429,12 +1430,41 @@ bool c_ee_gs_state::consume(
 
     // A local snapshot makes every accepted DMA event batch atomic.
     s_ee_gs_state next = m_state;
-    std::vector<s_vram_write> writes;
+    // Keep scratch storage across transactions, but never retain its
+    // logical contents. Release exceptionally large journals to bound
+    // the persistent allocation (at most 32 MiB plus the 4 MiB shadow).
+    struct s_scratch_scope
+    {
+        std::vector<s_vram_write>& m_writes;
+        std::vector<uint8_t>& m_shadow;
+        bool m_active = true;
+
+        void finish()
+        {
+            if (m_active)
+            {
+                m_writes.clear();
+                m_shadow.clear();
+                if (m_writes.capacity() > k_max_local_copy_pixels)
+                {
+                    std::vector<s_vram_write>().swap(m_writes);
+                }
+                m_active = false;
+            }
+        }
+
+        ~s_scratch_scope()
+        {
+            finish();
+        }
+    };
+    auto& writes = m_write_scratch;
+    auto& shadow_vram = m_shadow_scratch;
+    s_scratch_scope scratch{writes, shadow_vram};
     const uint64_t bytes = static_cast<uint64_t>(qwc) * 16u;
 
     // Shared, lazy transactional VRAM view. CLUT loads and local
     // copies see only writes preceding the current GIF event.
-    std::vector<uint8_t> shadow_vram;
     size_t shadow_applied = 0u;
     const auto copy_local = [&]() -> bool
     {
@@ -1620,6 +1650,9 @@ bool c_ee_gs_state::consume(
         ++next.m_committed_gif_batches;
     }
     m_state = std::move(next);
+    // Return scratch before invoking an external observer. A callback
+    // can synchronously start another transaction on this same GS.
+    scratch.finish();
     if (m_committed_callback != nullptr)
     {
         // Observer receives the already validated guest event stream.

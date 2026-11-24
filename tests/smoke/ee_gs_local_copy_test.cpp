@@ -502,15 +502,38 @@ bool test_ordering_and_rollback()
         return false;
     }
 
+    // A second transaction with different data must not see the
+    // rejected transaction's journal or its populated shadow.
+    set32(data.data(), 0u, 0x12345678u);
     if (!gs.consume(events, 5u, data.data(), 5u) ||
-        !read32(gs, k_bp * 256u + 0u, 0xdeadbeefu) ||
-        !read32(gs, k_bp * 256u + 4u, 0xdeadbeefu) ||
-        !read32(gs, k_bp * 256u + 16u, 0xdeadbeefu) ||
+        !read32(gs, k_bp * 256u + 0u, 0x12345678u) ||
+        !read32(gs, k_bp * 256u + 4u, 0x12345678u) ||
+        !read32(gs, k_bp * 256u + 16u, 0x12345678u) ||
         gs.state().m_image_qwc != 1u ||
         gs.state().m_local_copy_count != 2u ||
         gs.state().m_local_copy_pixels != 2u ||
         gs.state().m_transfer_started ||
         image(gs, data.data(), 1u))
+    {
+        return false;
+    }
+
+    // Reuse the same allocations after reset. Both the old source
+    // and its shadow must be replaced by the new committed VRAM.
+    gs.reset();
+    if (!reg(gs, 0x50u, bitblt(k_bp, 1u, 0u, k_bp, 1u, 0u)) ||
+        !reg(gs, 0x51u, trxpos(0u, 0u, 0u, 0u)) ||
+        !reg(gs, 0x52u, trxreg(1u, 1u)) ||
+        !reg(gs, 0x53u, 0u))
+    {
+        return false;
+    }
+    set32(data.data(), 0u, 0x89abcdefu);
+    if (!gs.consume(events, 5u, data.data(), 5u) ||
+        !read32(gs, k_bp * 256u + 0u, 0x89abcdefu) ||
+        !read32(gs, k_bp * 256u + 4u, 0x89abcdefu) ||
+        !read32(gs, k_bp * 256u + 16u, 0x89abcdefu) ||
+        gs.state().m_local_copy_count != 2u)
     {
         return false;
     }

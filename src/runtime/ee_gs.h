@@ -168,11 +168,26 @@ public:
 private:
     struct s_vram_write
     {
-        uint32_t m_offset = 0;
-        uint32_t m_value = 0;
-        uint8_t m_bytes = 4u; // 0 = nibble write; otherwise 1..4 bytes
-        uint8_t m_shift = 0u; // nibble position: 0 (low) or 4 (high)
+        // 4 MiB VRAM requires only 22 address bits. Encode the byte
+        // count (0 = nibble, 1..4 = bytes) and high-nibble bit alongside
+        // the offset to keep the transaction journal at eight bytes.
+        uint32_t m_address_and_format;
+        uint32_t m_value;
+
+        s_vram_write(uint32_t offset, uint32_t value, uint8_t bytes, uint8_t shift)
+            : m_address_and_format(offset |
+                (static_cast<uint32_t>(bytes) << 22u) |
+                (static_cast<uint32_t>(shift >> 2u) << 25u)),
+              m_value(value)
+        {
+        }
+
+        uint32_t offset() const { return m_address_and_format & 0x3fffffu; }
+        uint32_t bytes() const { return (m_address_and_format >> 22u) & 7u; }
+        uint32_t shift() const { return ((m_address_and_format >> 25u) & 1u) * 4u; }
     };
+
+    static_assert(sizeof(s_vram_write) == 8u, "compact VRAM journal entry");
 
     // GS PSMCT32/24: 64x32 pages, 8 KiB per page, 256-byte blocks.
     // Addresses wrap at 4 MiB, matching ps2-web-recomp GS memory.
@@ -268,5 +283,9 @@ private:
 
     s_ee_gs_state m_state{};
     std::vector<uint8_t> m_vram = std::vector<uint8_t>(k_vram_bytes, 0u);
+
+    // Host-only scratch. Neither buffer is committed guest state.
+    std::vector<s_vram_write> m_write_scratch;
+    std::vector<uint8_t> m_shadow_scratch;
 };
 } // namespace ee
