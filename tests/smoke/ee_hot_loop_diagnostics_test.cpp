@@ -87,10 +87,8 @@ int main()
     assert(json.find("\"gif_chcr\": 256") != std::string::npos);
     assert(json.find("\"gif_write_sequence\": 4") != std::string::npos);
 
-    // These PC and transition keys intentionally collide in the
-    // direct-mapped counter caches. Cache hits, collisions, untracked
-    // keys after capacity fills, zero and unaligned PCs must preserve
-    // the exact bounded map counts and ordering.
+    // Zero, unaligned addresses, and untracked keys after capacity fills
+    // must preserve the exact bounded map counts and ordering.
     ee::c_ee_dispatch_hotspots collision(3u, 3u);
     for (uint32_t i = 0u; i < 100u; ++i)
     {
@@ -111,6 +109,21 @@ int main()
     assert(collided.find("\"from_pc\": 4096, \"to_pc\": 4096, \"visits\": 100") != std::string::npos);
     assert(collided.find("\"from_pc\": 8193, \"to_pc\": 8193, \"visits\": 100") != std::string::npos);
     assert(collided.find("\"total_state_changes\": 0") != std::string::npos);
+
+    // The low address bits differ but the word-based cache slots match.
+    // Repeated rejected keys must remain cacheable after capacity fills.
+    ee::c_ee_dispatch_hotspots cache(1u, 1u);
+    cache.record(1u, 0u, 0u, {});
+    cache.record(2u, 0u, 0u, {});
+    cache.record(3u, 1u, 1u, {});
+    cache.record(4u, 1u, 1u, {});
+    cache.record(5u, 0u, 0u, {});
+    const std::string cached = serialize(cache);
+    assert(cache.untracked_pc_samples() == 2u);
+    assert(cache.untracked_edge_samples() == 2u);
+    assert(cached.find("\"pc\": 0, \"visits\": 3") != std::string::npos);
+    assert(cached.find("\"pc_cache_misses\": 3") != std::string::npos);
+    assert(cached.find("\"edge_cache_misses\": 3") != std::string::npos);
 
     ee::c_ee_dispatch_hotspots changes;
     ee::s_ee_hot_loop_state state{};
