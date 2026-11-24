@@ -72,6 +72,10 @@ int main(int argc, char** argv)
     }
     const uint32_t start = std::strcmp(argv[2], "wrap") == 0 ? 0x3ff0u : 0x80u;
     t_code code{}, data{};
+    for (size_t i = 0u; i < data.size(); ++i)
+    {
+        data[i] = static_cast<uint8_t>((i * 13u + (i >> 8u)) & 255u);
+    }
     uint32_t pc = start;
     const auto append = [&](uint32_t lo, uint32_t hi = k_upper)
     {
@@ -108,6 +112,25 @@ int main(int argc, char** argv)
         append(k_nop, upper(0x22u, 12u, 2u, 0u, 15u)); // new I
         append(k_nop, upper(0x2cu, 0u, 2u, 2u, 15u)); // flags, VF0 preserved
         append(k_nop, upper(0x2au, 13u, 2u, 3u, 5u));
+        // Exact SDBZ LQ encoding and a negative offset wrapping VU RAM.
+        append(0x01e10000u, k_upper);
+        append((15u << 21u) | (14u << 16u) | (1u << 11u) | 0x7ffu, k_upper);
+        // Upper reads the old VF2; its X write wins over same-pair LQ.xw.
+        append((9u << 21u) | (2u << 16u) | 1u, upper(0x28u, 2u, 2u, 3u, 8u));
+        append(0x81062bfeu, k_upper); // captured ILWR
+        append((4u << 25u) | (15u << 21u) | (14u << 16u) | 3u, k_upper);
+        append(integer(0x30u, 15u, 14u, 6u), k_upper); // VI load stall
+        const auto special = [](uint32_t index, uint32_t ft, uint32_t fs, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) | (fs << 11u) |
+                ((index >> 2u) << 6u) | 0x3cu | (index & 3u);
+        };
+        append(special(0x34u, 16u, 1u, 15u), k_upper);
+        append(special(0x36u, 17u, 1u, 10u), k_upper);
+        append(special(0x31u, 16u, 16u, 15u), k_upper); // aliased MR32
+        append(special(0x30u, 18u, 17u, 15u), k_upper);
+        append(special(0x3cu, 5u, 18u, 1u), k_upper);
+        append(special(0x3du, 19u, 5u, 15u), k_upper);
     }
     append(k_nop, k_end);
     append(integer(0x30u, 12u, 10u, 11u)); // E delay slot

@@ -272,7 +272,7 @@ void c_ee_vu1_aot::capture(const t_vu1_code& code, uint32_t pc)
 }
 
 bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
-    uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue)
+    const t_vu1_code& data, uint32_t pc, uint32_t top, uint32_t itop, s_ee_vu1_issue& issue)
 {
     pc &= 0x3ff8u;
     // A compiled entry assumes initialized constant registers. If a
@@ -297,7 +297,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
                 program.m_steps);
             const uint32_t steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), next.m_q, &next.m_mac,
-                &next.m_status);
+                &next.m_status, data.data());
             if (steps != program.m_steps || next.m_tpc != program.m_next_pc ||
                 next.m_vi[0] != 0u || vf[0] != 0u || vf[1] != 0u ||
                 vf[2] != 0u || vf[3] != 0x3f800000u)

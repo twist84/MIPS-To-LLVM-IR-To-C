@@ -30,7 +30,8 @@ ee::t_vu1_code program()
     const uint32_t add_vi =
         0x80000030u | (2u << 16u) | (1u << 11u) | (3u << 6u);
     pair(code, k_start, add_vi, upper(0x28u, 4u, 2u, 3u, 15u));
-    pair(code, 0u, k_lower_nop, upper(0x2au, 5u, 4u, 3u, 15u) | 0x40000000u);
+    // Same-pair LQ reads memory while the upper consumes the old VF4.
+    pair(code, 0u, 0x01e40001u, upper(0x2au, 5u, 4u, 3u, 15u) | 0x40000000u);
     pair(code, 8u, 0x3f800000u, upper(0x22u, 6u, 5u, 0u, 15u) | 0x80000000u);
     return code;
 }

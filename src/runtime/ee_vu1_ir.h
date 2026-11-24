@@ -8,7 +8,8 @@ namespace ee
 {
 // Straight-line LLVM backend for integer lower and selected FMAC upper
 // instructions. Empty IR means the entire program uses the interpreter.
-// Entry ABI: VI[16], I, TPC, TOP, ITOP, VF[32][4], Q, MAC, STATUS.
+// Entry ABI: VI[16], I, TPC, TOP, ITOP, VF[32][4], Q, MAC, STATUS, data[16384].
+// Data is read-only in this subset.
 // All pointer arguments are disjoint; Q is passed by value.
 // Caller must supply initialized state with canonical VI0/VF0. The
 // caller owns code identity, issue diagnostics and transactional commit.

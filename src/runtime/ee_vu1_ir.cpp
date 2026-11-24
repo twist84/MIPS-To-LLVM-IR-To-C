@@ -181,18 +181,26 @@ public:
         m_ir = k_fp_ir;
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, i32 %q, "
-            "ptr %mac, ptr %status) {\nentry:\n";
+            "ptr %mac, ptr %status, ptr %data) {\nentry:\n";
     }
 
     bool emit(uint32_t lo, uint32_t hi)
     {
-        // Reject unimplemented control bits before emitting any pair.
-        // Lower coverage cannot read or write VF or flags, so emitting
-        // the upper first preserves simultaneous issue (including LOI).
-        if ((hi & 0x38000000u) != 0u || !emit_upper(hi))
+        // Compute upper operands before the lower executes, then
+        // retire upper writes after lower writeback, as in the interpreter.
+        m_upper_mask = 0u;
+        m_upper_flags = false;
+        if ((hi & 0x38000000u) != 0u || !emit_upper(hi) ||
+            !emit_lower(lo, hi))
         {
             return false;
         }
+        commit_upper();
+        return true;
+    }
+
+    bool emit_lower(uint32_t lo, uint32_t hi)
+    {
         if ((hi & 0x80000000u) != 0u)
         {
             line("store i32 " + std::to_string(lo) + ", ptr %i, align 4");
@@ -208,6 +216,24 @@ public:
         const uint32_t is = (lo >> 11u) & 15u;
         const uint32_t id = (lo >> 6u) & 15u;
         const uint32_t funct = lo & 63u;
+        const uint32_t ft = (lo >> 16u) & 31u;
+        const uint32_t fs = (lo >> 11u) & 31u;
+        const uint32_t mask = (lo >> 21u) & 15u;
+        const int32_t raw = static_cast<int32_t>(lo & 0x7ffu);
+        const int32_t offset = raw >= 1024 ? raw - 2048 : raw;
+        if (major == 0x00u || major == 0x04u)
+        {
+            const auto address = data_address(is, offset);
+            if (major == 0x00u)
+            {
+                load_vector(ft, mask, address);
+            }
+            else
+            {
+                load_integer(it, mask, address, false);
+            }
+            return true;
+        }
         if (major == 0x08u || major == 0x09u)
         {
             const uint32_t imm = ((lo >> 10u) & 0x7800u) | (lo & 0x7ffu);
@@ -237,6 +263,51 @@ public:
         if (funct >= 0x3cu)
         {
             const uint32_t index = (((lo >> 6u) & 31u) << 2u) | (funct & 3u);
+            if (index == 0x34u || index == 0x36u)
+            {
+                // LQD pre-decrements; LQI post-increments, including
+                // suppressed VI0 updates and 16-bit integer wrapping.
+                if (index == 0x36u)
+                {
+                    binary("sub", is, is, "1");
+                }
+                load_vector(ft, mask, data_address(is, 0));
+                if (index == 0x34u)
+                {
+                    binary("add", is, is, "1");
+                }
+                return true;
+            }
+            if (index == 0x3eu)
+            {
+                load_integer(it, mask, data_address(is, 0), true);
+                return true;
+            }
+            if (index == 0x30u || index == 0x31u)
+            {
+                std::array<std::string, 4> values{};
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
+                {
+                    if ((mask & (8u >> lane)) != 0u)
+                    {
+                        values[lane] = vf(fs, index == 0x30u ? lane : (lane + 1u) & 3u);
+                    }
+                }
+                write_vector(ft, mask, values);
+                return true;
+            }
+            if (index == 0x3cu) // MTIR
+            {
+                store(it, operation("trunc i32 " + vf(fs, (lo >> 21u) & 3u) + " to i16"));
+                return true;
+            }
+            if (index == 0x3du) // MFIR
+            {
+                const auto value = operation("sext i16 " + reg(is) + " to i32");
+                const std::array<std::string, 4> values{value, value, value, value};
+                write_vector(ft, mask, values);
+                return true;
+            }
             if (index == 0x68u || index == 0x69u)
             {
                 const auto value = tmp();
@@ -279,6 +350,80 @@ private:
         }
         return operation("load i32, ptr " + vf_pointer(reg_index, lane) +
             ", align 4");
+    }
+
+    std::string data_address(uint32_t reg_index, int32_t offset)
+    {
+        const auto base = operation("zext i16 " + reg(reg_index) + " to i32");
+        const auto sum = operation("add i32 " + base + ", " + std::to_string(offset));
+        const auto wrapped = operation("and i32 " + sum + ", 1023");
+        return operation("shl i32 " + wrapped + ", 4");
+    }
+
+    std::string data_lane(const std::string& address, uint32_t lane)
+    {
+        const auto offset = operation("add i32 " + address + ", " +
+            std::to_string(lane * 4u));
+        const auto ptr = operation("getelementptr i8, ptr %data, i32 " + offset);
+        return operation("load i32, ptr " + ptr + ", align 1");
+    }
+
+    void write_vector(uint32_t target, uint32_t mask,
+        const std::array<std::string, 4>& values)
+    {
+        if (target != 0u)
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    line("store i32 " + values[lane] + ", ptr " +
+                        vf_pointer(target, lane) + ", align 4");
+                }
+            }
+        }
+    }
+
+    void load_vector(uint32_t target, uint32_t mask, const std::string& address)
+    {
+        std::array<std::string, 4> values{};
+        if (target != 0u)
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    values[lane] = data_lane(address, lane);
+                }
+            }
+            write_vector(target, mask, values);
+        }
+    }
+
+    void load_integer(uint32_t target, uint32_t mask, const std::string& address,
+        bool first_lane)
+    {
+        // ILW uses the last selected lane, ILWR the first selected lane.
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                store(target, operation("trunc i32 " + data_lane(address, lane) + " to i16"));
+                if (first_lane)
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    void commit_upper()
+    {
+        write_vector(m_upper_target, m_upper_mask, m_upper_values);
+        if (m_upper_flags)
+        {
+            emit_flags(m_upper_values, m_upper_mask);
+        }
     }
 
     void emit_flags(const std::array<std::string, 4>& values, uint32_t mask)
@@ -393,22 +538,10 @@ private:
                     "(i32 " + lhs + ", i32 " + rhs + ")");
             }
         }
-        const uint32_t target = abs ? ft : fd;
-        if (target != 0u)
-        {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
-            {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    line("store i32 " + values[lane] + ", ptr " +
-                        vf_pointer(target, lane) + ", align 4");
-                }
-            }
-        }
-        if (flags)
-        {
-            emit_flags(values, mask);
-        }
+        m_upper_target = abs ? ft : fd;
+        m_upper_mask = mask;
+        m_upper_values = std::move(values);
+        m_upper_flags = flags;
         return true;
     }
 
@@ -465,6 +598,10 @@ private:
     }
 
     std::string m_ir;
+    std::array<std::string, 4> m_upper_values{};
+    uint32_t m_upper_target = 0u;
+    uint32_t m_upper_mask = 0u;
+    bool m_upper_flags = false;
     uint32_t m_counter = 0u;
 };
 } // namespace
