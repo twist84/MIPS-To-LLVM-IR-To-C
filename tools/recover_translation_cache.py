@@ -50,10 +50,15 @@ def active_work(base_work):
 
 
 def manifest_candidates(base_work):
-    candidates = [
-        active_work(base_work) / "translation-cache.json",
-        base_work / "translation-cache.json",
-    ]
+    candidates = []
+    # Profiles share the unoptimized guest IR inventory. A native profile
+    # may have discovered more entries than the last base-library snapshot.
+    # Only read the known launcher sibling names, not arbitrary directories.
+    for source in dict.fromkeys((active_work(base_work), base_work)):
+        candidates.append(source / "translation-cache.json")
+        for suffix in ("-O1", "-O2", "-O3", "-O2-native"):
+            candidates.append(source.with_name(source.name + suffix) /
+                              "translation-cache.json")
     directory = history_dir(base_work)
     if directory.is_dir():
         candidates.extend(directory.glob("*.json"))
@@ -76,7 +81,10 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
             manifest, entries = run_known_replays.read_manifest(candidate)
             if manifest["inputs"]["ELF"] != expected_elf:
                 continue
-            if manifest.get("emit_opt") != 0:
+            # These profiles all fingerprint the raw guest modules. Do
+            # not infer compatibility for an unknown IR transformation.
+            if (manifest.get("emit_opt") not in (0, 1, 2, 3, 5) or
+                    manifest.get("ir_pipeline") is not None):
                 continue
             if candidate.parent == history_dir(base_work):
                 # Early snapshots serialized the IR map with sorted keys,

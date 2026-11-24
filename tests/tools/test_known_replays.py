@@ -11,6 +11,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import run_known_replays as known
+import recover_translation_cache as recovery
 
 
 def digest(data):
@@ -303,7 +304,44 @@ def test_matched_launcher_never_falls_back_to_guest_rebuild():
     assert 'run_boot_session.py' not in section
 
 
+def test_recovery_includes_native_profile_inventory():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        base = root / "ps2-game-hle"
+        current_sources = {"lowering": "new"}
+        old_sources = {"lowering": "old"}
+
+        def save(work, entries, profile, sources, pipeline=None, elf_bytes=b"fixture-elf"):
+            work.mkdir(exist_ok=True)
+            manifest = sample_manifest(entries, elf_bytes)
+            manifest.update(emit_opt=profile, ir_sources=sources, ir_pipeline=pipeline)
+            path = work / "translation-cache.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            return path
+
+        base_path = save(base, [0x100008], 0, current_sources)
+        optimized = base.with_name(base.name + "-O2-native")
+        optimized_path = save(optimized, [0x180000, 0x100008], 5, old_sources)
+        assert recovery.select_manifest(base, elf, current_sources)[0] == base_path
+        chosen = recovery.select_manifest(base, elf, current_sources, True)
+        assert chosen[0] == optimized_path
+        assert chosen[2] == [0x180000, 0x100008]
+        assert chosen[3] is False
+
+        # Source-change consent never relaxes the ELF guard or accepts
+        # an unknown IR pipeline.
+        save(base.with_name(base.name + "-O2"), [4, 8, 12], 2,
+             current_sources, elf_bytes=b"different-elf")
+        save(base.with_name(base.name + "-O3"), [4, 8, 12], 3,
+             current_sources, pipeline="unknown")
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == optimized_path
+        assert optimized_path.is_file() and base_path.is_file()
+
+
 def main():
+    test_recovery_includes_native_profile_inventory()
     test_matched_launcher_never_falls_back_to_guest_rebuild()
     test_read_manifest()
     test_hash_comparison()
