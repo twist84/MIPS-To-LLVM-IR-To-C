@@ -1,4 +1,5 @@
 #include "ee_gs.h"
+#include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 
 #include <algorithm>
@@ -402,6 +403,7 @@ bool c_ee_gs_state::read_indexed_clut_value(
 
 bool c_ee_gs_state::read_image(uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_read_image, qwc);
     if (data == nullptr || qwc == 0u || qwc > 0xffffu ||
         !m_state.m_written[0x53u] ||
         (m_state.m_registers[0x53u] & 3u) != 1u)
@@ -555,6 +557,7 @@ bool c_ee_gs_state::load_clut(
     s_ee_gs_state& state, uint64_t tex0,
     const std::vector<s_vram_write>& writes) const
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_clut);
     const uint32_t cld = static_cast<uint32_t>((tex0 >> 61u) & 7u);
     if (cld == 0u || cld >= 6u)
     {
@@ -847,6 +850,7 @@ bool c_ee_gs_state::stage_local_copy(
     s_ee_gs_state& state, const std::vector<uint8_t>& source_vram,
     std::vector<s_vram_write>& writes)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_local_copy);
     const uint64_t buf = state.m_registers[0x50u];
     const uint64_t pos = state.m_registers[0x51u];
     const uint64_t reg = state.m_registers[0x52u];
@@ -928,6 +932,7 @@ bool c_ee_gs_state::stage_host_upload(
     s_ee_gs_state& state, std::vector<s_vram_write>& writes,
     const uint8_t* data, size_t byte_count)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_host_upload, byte_count);
     if (!state.m_transfer_started ||
         !state.m_written[0x50u] ||
         !state.m_written[0x51u] ||
@@ -1353,6 +1358,7 @@ bool c_ee_gs_state::consume(
     const s_ee_gif_event* events, size_t count,
     const uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gs_transaction, count);
     if ((count != 0u && events == nullptr) ||
         (qwc != 0u && data == nullptr) ||
         qwc > k_max_graphics_batch_qwc)

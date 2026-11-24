@@ -1,4 +1,5 @@
 #include "ee_dmac.h"
+#include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 
 #include <cstring>
@@ -553,6 +554,7 @@ bool c_ee_dmac::read_spr_channel(uint32_t address, uint32_t* value) const
 
 bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dmac_normal);
     if (channel_index > 2u || m_memory == nullptr)
     {
         return false;
@@ -662,6 +664,7 @@ bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
 // 64 tag bits as a qword with its first eight bytes zeroed.
 bool c_ee_dmac::transfer_vif1_source_chain()
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dmac_vif1_chain);
     using reject = e_vif1_chain_reject;
     m_vif1_chain_last_reject = reject::none;
     s_spr_channel& current = m_device_channels[1u];
@@ -880,6 +883,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
 
 bool c_ee_dmac::transfer_gif_source_chain()
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dmac_gif_chain);
     s_spr_channel& channel = m_device_channels[2u];
     m_gif_last_reject = e_gif_dma_reject::none;
     if (m_memory == nullptr || m_device_transfer == nullptr)

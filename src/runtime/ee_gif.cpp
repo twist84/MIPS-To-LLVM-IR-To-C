@@ -1,4 +1,5 @@
 #include "ee_gif.h"
+#include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 
 #include <algorithm>
@@ -69,6 +70,7 @@ const s_ee_gif_path_counters& c_ee_gif_path3::counters() const
 
 bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gif_consume, qwc);
     // A host GIF transaction may aggregate multiple 16-bit DMA tags.
     // Zero-length DMA has no GIF words to parse or forward.
     if (qwc == 0u)
@@ -256,6 +258,7 @@ bool c_ee_gif_path3::consume_ordered(
     c_ee_gif_path3& path1, c_ee_gif_path3& path2,
     const s_ee_gif_segment* segments, size_t count)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gif_ordered, count);
     if (&path1 == &path2 || path1.m_sink == nullptr ||
         path1.m_sink != path2.m_sink || path1.m_sink_user != path2.m_sink_user ||
         (count != 0u && segments == nullptr))

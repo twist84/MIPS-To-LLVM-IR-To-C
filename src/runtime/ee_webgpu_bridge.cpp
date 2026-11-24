@@ -1,4 +1,5 @@
 #include "ee_webgpu_bridge.h"
+#include "ee_runtime_profile.h"
 #include "ee_gs_presentation_probe.h"
 
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
@@ -364,6 +365,7 @@ void c_ee_webgpu_bridge::consume(
     const s_ee_gif_event* events, size_t count,
     const uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_bridge, count);
     if (!m_ready || (events == nullptr && count != 0u) ||
         (data == nullptr && qwc != 0u))
     {

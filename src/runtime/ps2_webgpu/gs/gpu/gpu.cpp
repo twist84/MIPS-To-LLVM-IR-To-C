@@ -1,4 +1,5 @@
 #include "gpu.hpp"
+#include "../../../ee_runtime_profile.h"
 #include "native_viewport.hpp"
 #include "native_deinterlace.hpp"
 // Native-only WebGPU backend adapted from ps2-web-recomp:SDBZ (MIT).
@@ -623,6 +624,7 @@ void note_raster(std::uint32_t prims, std::uint32_t tiles, std::uint32_t entries
 }
 
 void flush_batch() {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_batch_cpu);
     Batch &b = g_batch;
     if (b.prims.empty()) {
         b.key = ~0ull;
@@ -856,6 +858,7 @@ void pump() {
 }
 
 void wait_until(const bool &flag) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_wait_cpu);
     while (!flag) pump();
 }
 
@@ -1009,6 +1012,7 @@ void profile_submit() {
 
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
 void submit(WGPUTextureView present_view = nullptr) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_submit_cpu);
     if (g_commands.empty() && !present_view) return;
     if (g_profile_out && !present_view && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
         profile_submit();
@@ -1105,6 +1109,7 @@ void submit(WGPUTextureView present_view = nullptr) {
 }
 
 void read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t offset = 0) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_readback_cpu, bytes);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     wgpuCommandEncoderCopyBufferToBuffer(enc, source, offset, g_readback, 0, bytes);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
@@ -1499,6 +1504,7 @@ void invalidate_native_atlases()
 }
 
 void draw(const State &st, const Vertex *v, int count) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_draw_cpu);
     if (g_image.active && !g_image.pending.empty()) flush_image();
     bound_arena();
     std::uint64_t attr = st.prim;
@@ -2005,6 +2011,7 @@ void resize_surface(std::uint32_t width, std::uint32_t height) {
 bool has_surface() { return g_surface != nullptr; }
 
 bool present(const DisplaySource &src) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_present_cpu);
     if (!g_surface) return false;
     apply_requested_render_scale();
     flush_all();

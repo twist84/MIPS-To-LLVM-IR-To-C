@@ -3,6 +3,7 @@
 // This first batch intentionally rejects unported instructions and timing
 // dependencies instead of silently treating them as NOPs.
 #include "ee_vu1.h"
+#include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
 #include "ee_vu1_dependency.h"
@@ -81,6 +82,7 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
             uint32_t address, std::vector<uint8_t>& output,
             s_ee_vu1_issue& issue)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vu1_xgkick);
     std::vector<uint8_t> packet;
     uint32_t qword = address & 0x3ffu;
     bool finished = false;
@@ -944,6 +946,7 @@ bool c_ee_vu1::run(
         return false;
     }
     *issue = {};
+    c_runtime_profile_scope profile_scope(e_runtime_profile_id::vu1_run, 0u, &issue->m_steps);
     if (!state.m_initialized)
     {
         state = {};

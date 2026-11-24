@@ -1,6 +1,7 @@
 // Adapted from ps2-web-recomp:SDBZ by Samir Nuri (2026), MIT license.
 // Upstream license: src/runtime/ps2_webgpu/gs/LICENSE.upstream
 #include "ee_vif1.h"
+#include "ee_runtime_profile.h"
 #include "ee_graphics_batch.h"
 
 #include <algorithm>
@@ -131,6 +132,7 @@ uint32_t c_ee_vif1::command_data_words(
 void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
                        const uint32_t* words)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_unpack);
     const uint32_t vn = (code >> 26u) & 3u;
     const uint32_t vl = (code >> 24u) & 3u;
     const bool masked = (code & 0x10000000u) != 0u;
@@ -247,6 +249,7 @@ bool c_ee_vif1::execute(
     std::vector<uint8_t>& path1_bytes,
     s_ee_vu1_issue* vu_issue, e_reject* reject)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_command);
     const uint32_t op = (code >> 24u) & 0x7fu;
     const uint32_t imm = code & 0xffffu;
     const uint32_t num = (code >> 16u) & 0xffu;
@@ -288,6 +291,7 @@ bool c_ee_vif1::execute(
         case 0x4au: // MPG: 8 bytes per microinstruction
         {
             const uint32_t count = num != 0u ? num : 256u;
+            c_runtime_profile_scope profile_scope(e_runtime_profile_id::vif1_mpg, count);
             for (uint32_t i = 0u; i < count; ++i)
             {
                 const uint32_t offset = ((imm + i) * 8u) & 0x3fffu;
@@ -374,6 +378,7 @@ bool c_ee_vif1::execute(
 
 bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vif1_consume, qwc);
     // A partial DIRECT can carry up to 65536 qwords plus its command.
     // Allow that residual in addition to the independently bounded batch.
     constexpr size_t k_max_pending_words =

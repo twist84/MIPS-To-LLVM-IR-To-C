@@ -1,5 +1,6 @@
 #include "ee_scanout_clock.h"
 #include "ee_runtime.h"
+#include "ee_runtime_profile.h"
 #include "ee_exceptions.h"
 #include "ee_memory.h"
 #include "ee_ram_interpreter.h"
@@ -1532,6 +1533,9 @@ bool write_report(
     dma_wait_probe.write_json(output);
     std::fputs(",\n  \"m2_sdbz_ee_pad_return\": ", output);
     pad_return_probe.write_json(output);
+    std::fputs(",\n  \"runtime_profile\": ", output);
+    ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
+        graphics_probe.present_succeeded());
     std::fputs("\n}\n", output);
     const bool no_write_error = std::ferror(output) == 0;
     const bool closed = std::fclose(output) == 0;
@@ -3275,6 +3279,11 @@ int main(int argc, char** argv)
     }
     std::chrono::steady_clock::time_point last_snapshot_time{};
     const auto wall_start = std::chrono::steady_clock::now();
+    std::string runtime_profile_environment;
+    const char* runtime_profile_value = read_host_environment(
+        "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
+    ee::runtime_profile_begin(runtime_profile_value != nullptr &&
+        std::strcmp(runtime_profile_value, "1") == 0);
     double report_time_ms = 0.0;
     double native_time_ms = 0.0;
     // Host-cost breakdown for reports: IOP emulation between EE dispatches,
@@ -3638,6 +3647,7 @@ int main(int argc, char** argv)
         // elapsed EE cycle, including polling, timer, and idle periods.
         // Dividing by eight is reference compatibility timing, not an
         // assertion of verified R5900 cycle accuracy.
+        ee::c_runtime_profile_scope iop_profile_scope(ee::e_runtime_profile_id::iop_service);
         const auto iop_start = report_path != nullptr
             ? std::chrono::steady_clock::now()
             : std::chrono::steady_clock::time_point{};
@@ -3770,6 +3780,7 @@ int main(int argc, char** argv)
                 guest_rpc_idle_diagnostic_reported = false;
             }
         }
+        iop_profile_scope.stop();
         if (report_path != nullptr)
         {
             iop_time_ms += std::chrono::duration<double, std::milli>(
@@ -4191,6 +4202,7 @@ int main(int argc, char** argv)
             // One translated function invocation per native guest boundary.
             runtime.m_loop_safepoint_remaining = safepoint_budget;
             const auto native_start = std::chrono::steady_clock::now();
+            ee::c_runtime_profile_scope native_profile_scope(ee::e_runtime_profile_id::ee_native_boundary);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
             // A module that does not own the PC returns EXITED with zero
@@ -4283,6 +4295,7 @@ int main(int argc, char** argv)
                     "(no hardware event published)\n");
                 return 1;
             }
+            native_profile_scope.stop();
             if (report_path != nullptr)
             {
                 const double duration_ms =
