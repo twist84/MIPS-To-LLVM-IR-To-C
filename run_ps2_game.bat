@@ -259,7 +259,7 @@ if exist "build\CMakeCache.txt" (
 if errorlevel 1 exit /b 1
 
 echo === Building native EE runner and recompiler ===
-cmake --build build --config Release --parallel 8 --target ee_recomp ee_game_runner
+cmake --build build --config Release --parallel 8 --target ee_recomp ee_game_runner vu1_recomp
 if errorlevel 1 exit /b 1
 if defined SDBZ_IOP_AOT_CAPTURE (
     cmake --build build --config Release --parallel 8 --target iop_recomp

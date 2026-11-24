@@ -54,7 +54,9 @@ add_library(ee_core STATIC
     src/runtime/ee_scanout_clock.cpp
     src/runtime/ee_cycle_scheduler.cpp
 )
-target_link_libraries(ee_core PUBLIC ${CMAKE_DL_LIBS})
+if(CMAKE_DL_LIBS)
+    target_link_libraries(ee_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 # Standalone IOP R3000A interpreter, initially isolated from the EE
 # runner until module loading, timing and SIF transport are integrated.
@@ -532,6 +534,9 @@ add_executable(ee_vu1_ir_fixture tests/smoke/ee_vu1_ir_fixture.cpp)
 target_link_libraries(ee_vu1_ir_fixture PRIVATE ee_core)
 add_test(NAME ee_vu1_ir_rejection COMMAND ee_vu1_ir_fixture)
 
+add_executable(ee_vu1_aot_fixture tests/smoke/ee_vu1_aot_fixture.cpp)
+target_link_libraries(ee_vu1_aot_fixture PRIVATE ee_core)
+
 add_executable(ee_sdbz_dma_wait_probe_test tests/smoke/ee_sdbz_dma_wait_probe_test.cpp)
 target_link_libraries(ee_sdbz_dma_wait_probe_test PRIVATE ee_core)
 add_test(NAME ee_sdbz_dma_wait_probe COMMAND ee_sdbz_dma_wait_probe_test)
@@ -873,6 +878,15 @@ add_test(NAME multi_function COMMAND ee_multi_test)
 add_test(NAME function_discovery COMMAND ee_function_discovery_test)
 add_test(NAME smoke COMMAND ee_smoke_test)
 add_test(NAME mmi_ops COMMAND ee_mmi_ops_test)
+if(Python3_EXECUTABLE)
+    add_test(NAME ee_vu1_aot_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_vu1_aot_runtime.py
+                $<TARGET_FILE:ee_vu1_aot_fixture>
+                $<TARGET_FILE:vu1_recomp>
+                ${CMAKE_SOURCE_DIR}/tools/build_vu1_aot.py)
+    set_tests_properties(ee_vu1_aot_runtime PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 if(EE_HAVE_LLVM_JIT_TEST)
     add_test(NAME ee_vu1_integer_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
