@@ -293,7 +293,11 @@ def test_matched_launcher_never_falls_back_to_guest_rebuild():
     assert 'exit /b 1' in section
     assert 'exit /b\n)' in section
     assert 'exit /b %ERRORLEVEL%' not in section
-    assert '--max-dispatches=%MAX_DISPATCHES%' in section
+    assert '--max-dispatches=%MAX_REPLAY_DISPATCHES%' in section
+    assert 'if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"' in section
+    assert section.index('if not defined MAX_REPLAY_DISPATCHES') < section.index(
+        'if /I "%REQUESTED_SESSION_MODE%"=="matched" ('
+    )
     assert '--timeout-seconds=%BOOT_TIMEOUT_SECONDS%' in section
     assert '--auto-expand' not in section
     assert 'run_boot_session.py' not in section
