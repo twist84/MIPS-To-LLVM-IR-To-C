@@ -70,7 +70,8 @@ bool make_display_source(
 
     src = ps2::gs::gpu::DisplaySource{
         base, fbw, psm, dbx, dby, w, h,
-        (registers.m_smode2 & 3u) == 3u
+        (registers.m_smode2 & 3u) == 3u,
+        (registers.m_smode2 & 1u) != 0u
     };
     return true;
 }
@@ -421,11 +422,16 @@ bool c_ee_webgpu_bridge::supports_display(
 }
 
 bool c_ee_webgpu_bridge::present(
-    const s_ee_gs_display_registers& registers, uint32_t crt_mode)
+    const s_ee_gs_display_registers& registers, uint32_t crt_mode,
+    uint64_t guest_field)
 {
     ps2::gs::gpu::DisplaySource src{};
-    return m_ready && make_display_source(registers, crt_mode, src)
-        && ps2::gs::gpu::present(src);
+    if (!m_ready || !make_display_source(registers, crt_mode, src))
+    {
+        return false;
+    }
+    src.guest_field = guest_field;
+    return ps2::gs::gpu::present(src);
 }
 
 bool c_ee_webgpu_bridge::readback(

@@ -1,6 +1,7 @@
 #include "ee_webgpu_bridge.h"
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 #include "ps2_webgpu/gs/gpu/native_viewport.hpp"
+#include "ps2_webgpu/gs/gpu/native_deinterlace.hpp"
 
 #include <cassert>
 #include <cstdint>
@@ -114,6 +115,36 @@ int main()
         fail("host display aspect or viewport fitting is incorrect");
         return 1;
     }
+    using ps2::gs::gpu::e_deinterlace_mode;
+    using ps2::gs::gpu::e_field_method;
+    using ps2::gs::gpu::parse_deinterlace_mode;
+    using ps2::gs::gpu::select_field_presentation;
+    for (uint32_t index = 2u; index <= 9u; ++index)
+    {
+        const char value[] = {static_cast<char>('0' + index), '\0'};
+        const auto mode = parse_deinterlace_mode(value);
+        const auto field = select_field_presentation(mode, true, true, 5u, 4u, true);
+        const auto next = select_field_presentation(mode, true, true, 6u, 5u, true);
+        const auto gap = select_field_presentation(mode, true, true, 7u, 5u, true);
+        const auto progressive = select_field_presentation(mode, false, false, 5u, 4u, true);
+        if (static_cast<uint32_t>(mode) != index ||
+            static_cast<uint32_t>(field.m_method) != 1u + (index - 2u) / 2u ||
+            field.m_parity != (index & 1u) || next.m_parity == field.m_parity ||
+            !field.m_history || gap.m_history || gap.m_method != e_field_method::bob ||
+            progressive.m_method != e_field_method::off)
+        {
+            fail("deinterlace mode, field parity or history selection is incorrect");
+            return 1;
+        }
+    }
+    const auto automatic = select_field_presentation(e_deinterlace_mode::automatic, true, true, 2u, 1u, true);
+    const auto off = select_field_presentation(e_deinterlace_mode::off, true, true, 2u, 1u, true);
+    if (automatic.m_method != e_field_method::blend || off.m_method != e_field_method::off ||
+        parse_deinterlace_mode("invalid") != e_deinterlace_mode::automatic)
+    {
+        fail("automatic/off deinterlace mode selection is incorrect");
+        return 1;
+    }
     ee::c_ee_webgpu_bridge bridge{};
     if (!bridge.init() || !bridge.active())
     {
@@ -207,13 +238,20 @@ int main()
         fail("valid GS scanout display was not presented");
         return 1;
     }
+    display.m_smode2 = 3u;
+    if (!bridge.present(display, 2u, 42u) || !s_last_source.interlaced ||
+        !s_last_source.halved || s_last_source.guest_field != 42u)
+    {
+        fail("guest field and interlace state were not forwarded");
+        return 1;
+    }
     display.m_dispfb[0] |= 0x13ull << 15u;
     if (bridge.readback(display, 2u, output, width, height))
     {
         fail("unsupported indexed display source was accepted");
         return 1;
     }
-    if (bridge.present(display, 2u) || s_presents != 1)
+    if (bridge.present(display, 2u) || s_presents != 2)
     {
         fail("unsupported indexed display source was presented");
         return 1;

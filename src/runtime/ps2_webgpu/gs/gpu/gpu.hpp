@@ -12,6 +12,8 @@ enum class Mode { off, mirror, primary };
 struct DisplaySource {
     std::uint32_t fbp, fbw, psm, dbx, dby, width, height;
     bool halved;
+    bool interlaced = false;
+    std::uint64_t guest_field = 0u;
 };
 
 struct SurfaceTarget {

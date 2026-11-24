@@ -292,7 +292,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         // Count the actual window attempt separately from the guest field
         // count. A native surface/present failure is not a guest event.
         const bool supported = bridge.supports_display(registers, crt_mode);
-        const bool presented = bridge.present(registers, crt_mode);
+        const bool presented = bridge.present(registers, crt_mode, field_count);
         if (probe != nullptr)
         {
             probe->record_present(

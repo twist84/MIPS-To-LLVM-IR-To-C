@@ -1,5 +1,6 @@
 #include "gpu.hpp"
 #include "native_viewport.hpp"
+#include "native_deinterlace.hpp"
 // Native-only WebGPU backend adapted from ps2-web-recomp:SDBZ (MIT).
 // No PS2 runtime, browser, frontend, resource-pack, or font dependency.
 #include <webgpu/webgpu.h>
@@ -97,6 +98,8 @@ WGPUBindGroup g_blit_group = nullptr;
 WGPUBuffer g_blit_params = nullptr;
 std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
+std::uint64_t g_last_guest_field = 0u;
+bool g_last_interlaced = false, g_last_halved = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -1974,14 +1977,14 @@ bool attach_surface(const SurfaceTarget &target) {
     g_blit = wgpuDeviceCreateRenderPipeline(g_device, &rd);
     wgpuShaderModuleRelease(module);
     wgpuPipelineLayoutRelease(pipeline_layout);
-    g_blit_params = make_buffer(36, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    g_blit_params = make_buffer(48, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     WGPUBindGroupEntry be[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
     be[0].binding = 0;
     be[0].buffer = g_scratch;
     be[0].size = WGPU_WHOLE_SIZE;
     be[1].binding = 1;
     be[1].buffer = g_blit_params;
-    be[1].size = 36;
+    be[1].size = 48;
     WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     bd.layout = layout;
     bd.entryCount = 2;
@@ -2005,19 +2008,16 @@ bool present(const DisplaySource &src) {
     apply_requested_render_scale();
     flush_all();
     const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
-    static const bool weave_off = std::getenv("PS2_NO_DEINTERLACE") != nullptr;
-    static const bool env_force_blend = []()
-    {
-        const char *value = std::getenv("PS2_FORCE_DEINTERLACE");
-        const bool enabled = value && std::strcmp(value, "1") == 0;
-        if (enabled)
-        {
-            std::fprintf(stderr, "[gpu] forced field blending enabled\n");
-        }
-        return enabled;
-    }();
-    const bool force_blend = env_force_blend;
-    const bool blend = (src.halved || force_blend) && g_have_previous && g_last_width == src.width && g_last_height == src.height && !weave_off;
+    static const char* mode_text = std::getenv("EE_WEBGPU_DEINTERLACE");
+    static const auto mode = parse_deinterlace_mode(mode_text);
+    static const bool legacy_off = mode_text == nullptr && std::getenv("PS2_NO_DEINTERLACE") != nullptr;
+    static const char* force_text = std::getenv("PS2_FORCE_DEINTERLACE");
+    static const bool legacy_force = mode_text == nullptr && force_text != nullptr && std::strcmp(force_text, "1") == 0;
+    const bool compatible_history = g_have_previous &&
+        g_last_width == src.width && g_last_height == src.height &&
+        g_last_interlaced == src.interlaced && g_last_halved == src.halved;
+    const auto field = select_field_presentation(mode, src.interlaced, src.halved,
+        src.guest_field, g_last_guest_field, compatible_history, legacy_force, legacy_off);
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
     // Correct the host display aspect without changing guest scanout/readback.
@@ -2028,15 +2028,19 @@ bool present(const DisplaySource &src) {
     }
     g_present_viewport = window_viewport(static_cast<int>(g_surface_width), static_cast<int>(g_surface_height),
         static_cast<int>(src.width), static_cast<int>(src.height), aspect);
-    const std::uint32_t blit[9] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u,
+    const std::uint32_t blit[12] = {src.width * g_scale, src.height * g_scale, current, previous,
+        static_cast<std::uint32_t>(field.m_method),
         static_cast<std::uint32_t>(g_present_viewport.width), static_cast<std::uint32_t>(g_present_viewport.height),
         std::getenv("EE_WEBGPU_NEAREST") ? 1u : 0u,
-        0u};
+        0u, g_scale, field.m_parity, field.m_history ? 1u : 0u};
     wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
     ++g_field;
     g_have_previous = true;
     g_last_width = src.width;
     g_last_height = src.height;
+    g_last_guest_field = src.guest_field;
+    g_last_interlaced = src.interlaced;
+    g_last_halved = src.halved;
     WGPUSurfaceTexture st = WGPU_SURFACE_TEXTURE_INIT;
     wgpuSurfaceGetCurrentTexture(g_surface, &st);
     if (st.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal && st.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
@@ -2215,7 +2219,7 @@ bool change_render_scale(std::uint32_t scale)
         entries[0].size = WGPU_WHOLE_SIZE;
         entries[1].binding = 1;
         entries[1].buffer = g_blit_params;
-        entries[1].size = 36;
+        entries[1].size = 48;
         WGPUBindGroupDescriptor descriptor = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         descriptor.layout = layout;
         descriptor.entryCount = 2;
