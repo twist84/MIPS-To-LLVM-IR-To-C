@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
+#include <initializer_list>
 #include <cstdio>
 #include <cstring>
 
@@ -18,21 +20,27 @@ struct s_native_viewport
 // The session file contains exactly one supported ASCII aspect token.
 // Return stable string literals, and keep the previous mode on invalid
 // or incomplete input (including transient failures during replacement).
+inline const char* parse_display_aspect(const char* value, std::size_t count, const char* fallback)
+{
+    for (const char* aspect : {"4:3", "16:9", "native", "1:1"})
+    {
+        if (count == std::strlen(aspect) && std::memcmp(value, aspect, count) == 0)
+        {
+            return aspect;
+        }
+    }
+    return fallback;
+}
+
 inline const char* read_display_aspect(FILE* input, const char* fallback)
 {
     char value[7]{};
     if (input != nullptr)
     {
-        const size_t count = std::fread(value, 1u, sizeof(value), input);
+        const std::size_t count = std::fread(value, 1u, sizeof(value), input);
         if (!std::ferror(input))
         {
-            for (const char* aspect : {"4:3", "16:9", "native", "1:1"})
-            {
-                if (count == std::strlen(aspect) && std::memcmp(value, aspect, count) == 0)
-                {
-                    return aspect;
-                }
-            }
+            fallback = parse_display_aspect(value, count, fallback);
         }
     }
     return fallback;

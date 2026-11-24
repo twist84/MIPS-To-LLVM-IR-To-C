@@ -97,20 +97,11 @@ bool display(
 int main()
 {
     using ps2::gs::gpu::window_viewport;
-    using ps2::gs::gpu::read_display_aspect;
+    using ps2::gs::gpu::parse_display_aspect;
     const char* aspect = "4:3";
     for (const char* value : {"16:9", "native", "1:1", "4:3", "invalid", "", "16:9\n"})
     {
-        FILE* stream = std::tmpfile();
-        if (stream == nullptr)
-        {
-            fail("could not create aspect mode test stream");
-            return 1;
-        }
-        std::fputs(value, stream);
-        std::rewind(stream);
-        const char* actual = read_display_aspect(stream, aspect);
-        std::fclose(stream);
+        const char* actual = parse_display_aspect(value, std::strlen(value), aspect);
         const bool valid = std::strcmp(value, "16:9") == 0 || std::strcmp(value, "native") == 0 ||
             std::strcmp(value, "1:1") == 0 || std::strcmp(value, "4:3") == 0;
         if (std::strcmp(actual, valid ? value : aspect) != 0)
