@@ -11,6 +11,7 @@ import tempfile
 import llvmlite.binding as llvm
 
 from ee_diagnostic_stubs import register_ee_diagnostic_stubs
+from mmi_hardware_vectors import run_hardware_vectors
 from test_mmi_ir_runtime import EEState, U128, make_aligned_state, require
 
 
@@ -124,7 +125,7 @@ def compile_guest(fixture, directory, mode, opt_level, target):
     return fn, engine, module, machine
 
 
-def test_case(fn, mode, pattern):
+def test_case(fn, mode, pattern, hardware=None):
     lo0, hi0, lo1, hi1, lhs, rhs = pattern
     backing, cpu = make_aligned_state()
     cpu.gpr[4] = U128(lhs & MASK64, lhs >> 64)
@@ -154,6 +155,8 @@ def test_case(fn, mode, pattern):
     expected_banks, expected_destination = reference(
         base, used_a, used_b, [lo0, hi0, lo1, hi1], target, chain,
     )
+    if hardware is not None:
+        expected_destination, expected_banks = hardware
     if base.startswith("pmult") and alias_rs:
         wanted_rs = expected_destination
         wanted_rt = rhs
@@ -232,6 +235,7 @@ def main():
                 for pattern in patterns:
                     test_case(fn, mode, pattern)
                     completed += 1
+                completed += run_hardware_vectors(fn, mode, test_case)
                 _ = engine, module, machine
 
     print(f"mmi_word_ir_runtime: PASS ({completed} native executions; "
