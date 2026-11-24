@@ -35,6 +35,17 @@ enum class e_runtime_profile_id : std::size_t
     webgpu_wait_cpu,
     webgpu_present_cpu,
     webgpu_readback_cpu,
+    device_service,
+    frame_pacing_sleep,
+    window_pump,
+    intc_service,
+    thread_schedule,
+    ee_hle_syscall,
+    dispatch_diagnostics,
+    progress_log,
+    dispatch_trace_log,
+    compile_wait,
+    report_snapshot_body,
     count
 };
 
@@ -70,7 +81,18 @@ inline constexpr std::array<s_runtime_profile_descriptor,
     {"webgpu_submit_cpu", "none"},
     {"webgpu_wait_cpu", "none"},
     {"webgpu_present_cpu", "none"},
-    {"webgpu_readback_cpu", "requested_bytes"}
+    {"webgpu_readback_cpu", "requested_bytes"},
+    {"device_service", "none"},
+    {"frame_pacing_sleep", "none"},
+    {"window_pump", "none"},
+    {"intc_service", "none"},
+    {"thread_schedule", "none"},
+    {"ee_hle_syscall", "none"},
+    {"dispatch_diagnostics", "none"},
+    {"progress_log", "none"},
+    {"dispatch_trace_log", "none"},
+    {"compile_wait", "none"},
+    {"report_snapshot_body", "none"}
 }};
 
 using t_runtime_profile_clock = std::chrono::steady_clock;

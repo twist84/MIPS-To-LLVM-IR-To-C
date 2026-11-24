@@ -1324,6 +1324,7 @@ bool write_report(
     bool in_progress
 )
 {
+    ee::c_runtime_profile_scope report_profile_scope(ee::e_runtime_profile_id::report_snapshot_body);
     FILE* output = open_host_file(path, "wb");
     if (output == nullptr)
     {
@@ -1533,6 +1534,10 @@ bool write_report(
     dma_wait_probe.write_json(output);
     std::fputs(",\n  \"m2_sdbz_ee_pad_return\": ", output);
     pad_return_probe.write_json(output);
+    // Finish the report-body scope before serializing the profile so
+    // completed child counters and covered time remain consistent.
+    // Profile serialization and final stream close remain uninstrumented.
+    report_profile_scope.stop();
     std::fputs(",\n  \"runtime_profile\": ", output);
     ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
         graphics_probe.present_succeeded());
@@ -3056,6 +3061,7 @@ int main(int argc, char** argv)
     uint64_t idle_cycles = 0u;
     const auto schedule_threads = [&]() -> bool
     {
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::thread_schedule);
         uint32_t next_id = 0u;
         for (uint32_t id = 1u; id < 256u; ++id)
         {
@@ -3332,6 +3338,7 @@ int main(int argc, char** argv)
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
         // Service guest-programmed timer compare/overflow events against
         // the same reached-instruction compatibility clock as scanout.
         // Timer COUNT reads inside a long native loop sample the live
@@ -3433,7 +3440,10 @@ int main(int argc, char** argv)
                             (clock_hz * speed_percent)));
                     if (target > now && target - now <= std::chrono::milliseconds(500))
                     {
-                        std::this_thread::sleep_until(target);
+                        {
+                            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::frame_pacing_sleep);
+                            std::this_thread::sleep_until(target);
+                        }
                         now = t_clock::now();
                     }
                     // Re-anchor after a stall or a large guest clock jump.
@@ -3462,12 +3472,15 @@ int main(int argc, char** argv)
                 }
                 paced_field = field;
             }
-            raylib_window.pump(
-                webgpu_bridge,
-                hardware.gs_display_registers(),
-                hardware.gs_crt_mode(),
-                hardware.scanout().fields_started(), &graphics_probe,
-                iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+            {
+                ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::window_pump);
+                raylib_window.pump(
+                    webgpu_bridge,
+                    hardware.gs_display_registers(),
+                    hardware.gs_crt_mode(),
+                    hardware.scanout().fields_started(), &graphics_probe,
+                    iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+            }
             if (raylib_window.closed())
             {
                 return e_device_service::window_closed;
@@ -3493,6 +3506,7 @@ int main(int argc, char** argv)
     enum class e_intc_service { not_pending, handled, failed };
     const auto service_intc = [&](uint32_t exit_reason) -> e_intc_service
     {
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::intc_service);
         // ps2-web-recomp/kernel.cpp::run_intc acknowledges the actual
         // masked INTC cause and runs the registered guest callbacks, then
         // restores the interrupted EE thread. The ROM0 exception vector
@@ -4338,9 +4352,11 @@ int main(int argc, char** argv)
             bool replacement_is_overlay = false;
             std::string failure;
             const auto compile_start = std::chrono::steady_clock::now();
+            ee::c_runtime_profile_scope compile_profile_scope(ee::e_runtime_profile_id::compile_wait);
             const bool expanded = request_hot_expand(
                 hot_expand_dir, ++hot_expand_sequence, from_pc,
                 &replacement, &replacement_is_overlay, &failure);
+            compile_profile_scope.stop();
             compile_wait_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - compile_start).count();
             if (!expanded)
@@ -4509,6 +4525,7 @@ int main(int argc, char** argv)
         }
         if (report_path != nullptr && count != 0)
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_diagnostics);
             if (history.size() == k_report_history_limit)
             {
                 history.erase(history.begin());
@@ -4542,6 +4559,7 @@ int main(int argc, char** argv)
         if (report_path != nullptr &&
             dispatched - last_progress_dispatch >= k_report_progress_interval)
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::progress_log);
             const double elapsed_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wall_start
             ).count();
@@ -4573,6 +4591,7 @@ int main(int argc, char** argv)
             dispatched % dispatch_trace_every == 0u ||
             !ordinary_transition || status != 1u))
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_trace_log);
             std::printf("dispatch=%llu pc=0x%08x -> 0x%08x reason=%s(%u) status=%u\n",
                         static_cast<unsigned long long>(dispatched), from_pc,
                         out_pc, exit_name(reason), reason, status);
@@ -4786,6 +4805,7 @@ int main(int argc, char** argv)
                 ee::e_ee_exit_reason::EE_EXIT_EXCEPTION) &&
             ((cpu.m_cop0[13] >> 2) & 0x1fu) == 8u)
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::ee_hle_syscall);
             const int32_t signed_service =
                 static_cast<int32_t>(cpu.m_gpr[3].m_lo);
             // Reject all unknown negative syscall encodings. An

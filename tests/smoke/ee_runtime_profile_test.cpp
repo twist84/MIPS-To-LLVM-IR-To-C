@@ -52,6 +52,33 @@ int main()
     {
         return 3;
     }
+    // A device-service scope can contain pacing and presentation without
+    // counting either child twice. Snapshot timing is completed before
+    // report serialization, just as in the runner.
+    {
+        ee::c_runtime_profile_scope device(e_runtime_profile_id::device_service);
+        {
+            ee::c_runtime_profile_scope sleep(e_runtime_profile_id::frame_pacing_sleep);
+        }
+        {
+            ee::c_runtime_profile_scope window(e_runtime_profile_id::window_pump);
+            ee::c_runtime_profile_scope present(e_runtime_profile_id::webgpu_present_cpu);
+        }
+    }
+    {
+        ee::c_runtime_profile_scope report(e_runtime_profile_id::report_snapshot_body);
+        report.stop();
+    }
+    uint64_t exclusive = 0u;
+    for (const auto& counter : state.m_counters)
+    {
+        exclusive += counter.m_exclusive_ns;
+    }
+    if (exclusive != state.m_covered_ns || state.m_active != nullptr ||
+        state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::report_snapshot_body)].m_calls != 1u)
+    {
+        return 5;
+    }
     ee::runtime_profile_begin(false);
     if (ee::g_runtime_profile.m_covered_ns != 0u || ee::g_runtime_profile.m_enabled)
     {
