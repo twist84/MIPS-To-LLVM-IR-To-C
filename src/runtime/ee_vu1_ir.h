@@ -6,9 +6,10 @@
 
 namespace ee
 {
-// Initial LLVM backend: straight-line upper NOP + integer lower pairs.
-// Empty IR means the entire program must use the interpreter. The
-// generated entry takes separate VI[16], I and TPC pointers plus TOP/ITOP.
+// Straight-line LLVM backend for integer lower and selected FMAC upper
+// instructions. Empty IR means the entire program uses the interpreter.
+// Entry ABI: VI[16], I, TPC, TOP, ITOP, VF[32][4], Q, MAC, STATUS.
+// All pointer arguments are disjoint; Q is passed by value.
 // Caller must supply initialized state with canonical VI0/VF0. The
 // caller owns code identity, issue diagnostics and transactional commit.
 // No native execution is selected by the retail runtime yet.
@@ -20,7 +21,7 @@ struct s_ee_vu1_ir_program
     uint32_t m_next_pc = 0u;
 };
 
-s_ee_vu1_ir_program vu1_lift_integer_ir(
+s_ee_vu1_ir_program vu1_lift_straight_line_ir(
     const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
     uint32_t address);
 } // namespace ee

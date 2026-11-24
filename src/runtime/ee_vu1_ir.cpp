@@ -1,4 +1,7 @@
 #include "ee_vu1_ir.h"
+#include "ee_vu1_dependency.h"
+
+#include <utility>
 
 namespace ee
 {
@@ -12,20 +15,180 @@ uint32_t read_word(const uint8_t* bytes)
         (static_cast<uint32_t>(bytes[3]) << 24u);
 }
 
-class c_integer_emitter
+// Integer-only VU arithmetic matching ee_vu1_fp.h. No host FP,
+// fast-math, or out-of-range shifts. These helpers are module-local.
+constexpr const char* k_fp_ir = R"IR(
+declare i32 @llvm.ctlz.i32(i32, i1 immarg)
+
+define internal i32 @vu_flush(i32 %x) alwaysinline {
+  %exp = and i32 %x, 2139095040
+  %zero = icmp eq i32 %exp, 0
+  %sign = and i32 %x, -2147483648
+  %result = select i1 %zero, i32 %sign, i32 %x
+  ret i32 %result
+}
+
+define internal i32 @vu_pack(i32 %sign, i32 %e, i32 %m) alwaysinline {
+  %overflow = icmp sgt i32 %e, 255
+  %underflow = icmp sle i32 %e, 0
+  %exp = shl i32 %e, 23
+  %mantissa = and i32 %m, 8388607
+  %bits = or i32 %exp, %mantissa
+  %normal = select i1 %underflow, i32 0, i32 %bits
+  %mag = select i1 %overflow, i32 2147483647, i32 %normal
+  %result = or i32 %sign, %mag
+  ret i32 %result
+}
+
+define internal i32 @vu_add(i32 %a0, i32 %b0) alwaysinline {
+  %a = call i32 @vu_flush(i32 %a0)
+  %b = call i32 @vu_flush(i32 %b0)
+  %am = and i32 %a, 2147483647
+  %bm = and i32 %b, 2147483647
+  %az = icmp eq i32 %am, 0
+  %bz = icmp eq i32 %bm, 0
+  br i1 %bz, label %zero_b, label %check_a
+zero_b:
+  %both_sign = and i32 %a, %b
+  %zero_result = select i1 %az, i32 %both_sign, i32 %a
+  ret i32 %zero_result
+check_a:
+  br i1 %az, label %zero_a, label %calc
+zero_a:
+  ret i32 %b
+calc:
+  %swap = icmp ugt i32 %bm, %am
+  %large = select i1 %swap, i32 %b, i32 %a
+  %small = select i1 %swap, i32 %a, i32 %b
+  %large_mag = and i32 %large, 2147483647
+  %small_mag = and i32 %small, 2147483647
+  %e = lshr i32 %large_mag, 23
+  %se = lshr i32 %small_mag, 23
+  %diff = sub i32 %e, %se
+  %far = icmp ugt i32 %diff, 25
+  %safe_diff = select i1 %far, i32 0, i32 %diff
+  %ma0 = and i32 %large_mag, 8388607
+  %mb0 = and i32 %small_mag, 8388607
+  %ma1 = or i32 %ma0, 8388608
+  %mb1 = or i32 %mb0, 8388608
+  %ma = shl i32 %ma1, 1
+  %mb2 = shl i32 %mb1, 1
+  %mb3 = lshr i32 %mb2, %safe_diff
+  %mb = select i1 %far, i32 0, i32 %mb3
+  %sign = and i32 %large, -2147483648
+  %xor = xor i32 %large, %small
+  %opposite = icmp slt i32 %xor, 0
+  br i1 %opposite, label %subtract, label %same
+subtract:
+  %delta = sub i32 %ma, %mb
+  %cancel = icmp eq i32 %delta, 0
+  br i1 %cancel, label %cancelled, label %normalize
+cancelled:
+  ret i32 0
+normalize:
+  %lz = call i32 @llvm.ctlz.i32(i32 %delta, i1 false)
+  %shift = sub i32 %lz, 7
+  %norm = shl i32 %delta, %shift
+  %ne = sub i32 %e, %shift
+  %nm = lshr i32 %norm, 1
+  %nr = call i32 @vu_pack(i32 %sign, i32 %ne, i32 %nm)
+  ret i32 %nr
+same:
+  %sum = add i32 %ma, %mb
+  %carry_bit = and i32 %sum, 33554432
+  %carry = icmp ne i32 %carry_bit, 0
+  %half = lshr i32 %sum, 1
+  %adjust = select i1 %carry, i32 %half, i32 %sum
+  %inc = zext i1 %carry to i32
+  %ee = add i32 %e, %inc
+  %mm = lshr i32 %adjust, 1
+  %rr = call i32 @vu_pack(i32 %sign, i32 %ee, i32 %mm)
+  ret i32 %rr
+}
+
+define internal i32 @vu_sub(i32 %a, i32 %b) alwaysinline {
+  %neg = xor i32 %b, -2147483648
+  %r = call i32 @vu_add(i32 %a, i32 %neg)
+  ret i32 %r
+}
+
+define internal i32 @vu_mul(i32 %a, i32 %b) alwaysinline {
+  %xor = xor i32 %a, %b
+  %sign = and i32 %xor, -2147483648
+  %ae = lshr i32 %a, 23
+  %be = lshr i32 %b, 23
+  %ea = and i32 %ae, 255
+  %eb = and i32 %be, 255
+  %az = icmp eq i32 %ea, 0
+  %bz = icmp eq i32 %eb, 0
+  %zero = or i1 %az, %bz
+  br i1 %zero, label %signed_zero, label %calc
+signed_zero:
+  ret i32 %sign
+calc:
+  %a0 = and i32 %a, 8388607
+  %b0 = and i32 %b, 8388607
+  %a1 = or i32 %a0, 8388608
+  %b1 = or i32 %b0, 8388608
+  %a2 = zext i32 %a1 to i64
+  %b2 = zext i32 %b1 to i64
+  %product = mul i64 %a2, %b2
+  %high = lshr i64 %product, 47
+  %carry = icmp ne i64 %high, 0
+  %shift = select i1 %carry, i64 24, i64 23
+  %mantissa = lshr i64 %product, %shift
+  %m = trunc i64 %mantissa to i32
+  %e0 = add i32 %ea, %eb
+  %e1 = sub i32 %e0, 127
+  %inc = zext i1 %carry to i32
+  %e = add i32 %e1, %inc
+  %r = call i32 @vu_pack(i32 %sign, i32 %e, i32 %m)
+  ret i32 %r
+}
+
+define internal i32 @vu_key(i32 %raw) alwaysinline {
+  %x = call i32 @vu_flush(i32 %raw)
+  %mag = and i32 %x, 2147483647
+  %negative = icmp slt i32 %x, 0
+  %neg = sub i32 0, %mag
+  %r = select i1 %negative, i32 %neg, i32 %mag
+  ret i32 %r
+}
+
+define internal i32 @vu_max(i32 %a, i32 %b) alwaysinline {
+  %ak = call i32 @vu_key(i32 %a)
+  %bk = call i32 @vu_key(i32 %b)
+  %pick_a = icmp sge i32 %ak, %bk
+  %r = select i1 %pick_a, i32 %a, i32 %b
+  ret i32 %r
+}
+
+define internal i32 @vu_min(i32 %a, i32 %b) alwaysinline {
+  %ak = call i32 @vu_key(i32 %a)
+  %bk = call i32 @vu_key(i32 %b)
+  %pick_a = icmp sle i32 %ak, %bk
+  %r = select i1 %pick_a, i32 %a, i32 %b
+  ret i32 %r
+}
+)IR";
+
+class c_straight_line_emitter
 {
 public:
-    c_integer_emitter()
+    c_straight_line_emitter()
     {
-        m_ir = "define dso_local i32 @ee_vu1_integer_program(ptr %vi, ptr %i, "
-            "ptr %tpc, i32 %top, i32 %itop) {\nentry:\n";
+        m_ir = k_fp_ir;
+        m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
+            "ptr %tpc, i32 %top, i32 %itop, ptr %vf, i32 %q, "
+            "ptr %mac, ptr %status) {\nentry:\n";
     }
 
     bool emit(uint32_t lo, uint32_t hi)
     {
-        // Only the canonical upper NOP with optional I/E bits. No
-        // vector writes, flag producers, debug interrupts or M bit.
-        if ((hi & 0x3fffffffu) != 0x000002ffu)
+        // Reject unimplemented control bits before emitting any pair.
+        // Lower coverage cannot read or write VF or flags, so emitting
+        // the upper first preserves simultaneous issue (including LOI).
+        if ((hi & 0x38000000u) != 0u || !emit_upper(hi))
         {
             return false;
         }
@@ -94,6 +257,160 @@ public:
     }
 
 private:
+    std::string operation(const std::string& instruction)
+    {
+        const auto value = tmp();
+        line(value + " = " + instruction);
+        return value;
+    }
+
+    std::string vf_pointer(uint32_t reg_index, uint32_t lane)
+    {
+        return operation("getelementptr i32, ptr %vf, i32 " +
+            std::to_string(reg_index * 4u + lane));
+    }
+
+    std::string vf(uint32_t reg_index, uint32_t lane)
+    {
+        if (reg_index == 0u)
+        {
+            return lane == 3u ? "1065353216" : "0";
+        }
+        return operation("load i32, ptr " + vf_pointer(reg_index, lane) +
+            ", align 4");
+    }
+
+    void emit_flags(const std::array<std::string, 4>& values, uint32_t mask)
+    {
+        std::string mac = "0";
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            const uint32_t bit = 8u >> lane;
+            if ((mask & bit) == 0u)
+            {
+                continue;
+            }
+            const auto exp = operation("and i32 " + values[lane] + ", 2139095040");
+            const auto zero = operation("icmp eq i32 " + exp + ", 0");
+            const auto sign = operation("icmp slt i32 " + values[lane] + ", 0");
+            const auto mag = operation("and i32 " + values[lane] + ", 2147483647");
+            const auto overflow = operation("icmp eq i32 " + mag + ", 2147483647");
+            for (const auto& test : {std::make_pair(zero, bit),
+                                     std::make_pair(sign, bit << 4u),
+                                     std::make_pair(overflow, bit << 12u)})
+            {
+                const auto flag = operation("select i1 " + test.first +
+                    ", i32 " + std::to_string(test.second) + ", i32 0");
+                mac = operation("or i32 " + mac + ", " + flag);
+            }
+        }
+        line("store i32 " + mac + ", ptr %mac, align 4");
+        const auto old = operation("load i32, ptr %status, align 4");
+        auto status = operation("and i32 " + old + ", 4080");
+        for (uint32_t group = 0u; group < 4u; ++group)
+        {
+            const auto bits = operation("and i32 " + mac + ", " +
+                std::to_string(15u << (group * 4u)));
+            const auto any = operation("icmp ne i32 " + bits + ", 0");
+            const auto flag = operation("select i1 " + any + ", i32 " +
+                std::to_string((1u << group) | (1u << (group + 6u))) + ", i32 0");
+            status = operation("or i32 " + status + ", " + flag);
+        }
+        line("store i32 " + status + ", ptr %status, align 4");
+    }
+
+    bool emit_upper(uint32_t hi)
+    {
+        const uint32_t funct = hi & 63u;
+        const bool special = funct >= 0x3cu;
+        const uint32_t op = special ?
+            (((hi >> 6u) & 31u) << 2u) | (funct & 3u) : funct;
+        const uint32_t mask = (hi >> 21u) & 15u;
+        const uint32_t fs = (hi >> 11u) & 31u;
+        const uint32_t ft = (hi >> 16u) & 31u;
+        const uint32_t fd = (hi >> 6u) & 31u;
+        if (special && op == 0x2fu)
+        {
+            return true;
+        }
+
+        const bool abs = special && op == 0x1du;
+        const char* helper = nullptr;
+        if (!special)
+        {
+            if (op <= 0x03u || op == 0x20u || op == 0x22u || op == 0x28u)
+            {
+                helper = "vu_add";
+            }
+            else if ((op >= 0x04u && op <= 0x07u) ||
+                op == 0x24u || op == 0x26u || op == 0x2cu)
+            {
+                helper = "vu_sub";
+            }
+            else if ((op >= 0x18u && op <= 0x1cu) || op == 0x1eu || op == 0x2au)
+            {
+                helper = "vu_mul";
+            }
+            else if ((op >= 0x10u && op <= 0x13u) || op == 0x1du || op == 0x2bu)
+            {
+                helper = "vu_max";
+            }
+            else if ((op >= 0x14u && op <= 0x17u) || op == 0x1fu || op == 0x2fu)
+            {
+                helper = "vu_min";
+            }
+        }
+        if (!abs && helper == nullptr)
+        {
+            return false;
+        }
+        const bool flags = !abs && !(op >= 0x10u && op <= 0x17u) &&
+            op != 0x1du && op != 0x1fu && op != 0x2bu && op != 0x2fu;
+        const bool uses_q = op == 0x1cu || op == 0x20u || op == 0x24u;
+        const bool uses_i = op == 0x1du || op == 0x1eu || op == 0x1fu ||
+            op == 0x22u || op == 0x26u;
+        std::array<std::string, 4> values{};
+        // Read all lanes before any destination store (broadcast aliases
+        // and source/destination overlap must see the original values).
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) == 0u)
+            {
+                continue;
+            }
+            const auto lhs = vf(fs, lane);
+            if (abs)
+            {
+                values[lane] = operation("and i32 " + lhs + ", 2147483647");
+            }
+            else
+            {
+                const auto rhs = op <= 0x1bu ? vf(ft, funct & 3u) :
+                    uses_q ? "%q" : uses_i ?
+                    operation("load i32, ptr %i, align 4") : vf(ft, lane);
+                values[lane] = operation(std::string("call i32 @") + helper +
+                    "(i32 " + lhs + ", i32 " + rhs + ")");
+            }
+        }
+        const uint32_t target = abs ? ft : fd;
+        if (target != 0u)
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    line("store i32 " + values[lane] + ", ptr " +
+                        vf_pointer(target, lane) + ", align 4");
+                }
+            }
+        }
+        if (flags)
+        {
+            emit_flags(values, mask);
+        }
+        return true;
+    }
+
     std::string tmp()
     {
         return "%v" + std::to_string(m_counter++);
@@ -151,7 +468,7 @@ private:
 };
 } // namespace
 
-s_ee_vu1_ir_program vu1_lift_integer_ir(
+s_ee_vu1_ir_program vu1_lift_straight_line_ir(
     const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
     uint32_t address)
 {
@@ -159,7 +476,9 @@ s_ee_vu1_ir_program vu1_lift_integer_ir(
     {
         return {};
     }
-    c_integer_emitter emitter;
+    c_straight_line_emitter emitter;
+    s_ee_vu1_dependency dependencies{};
+    uint32_t cycle = 16u;
     uint32_t pc = address & 0x3ff8u;
     bool ending = false;
     // A straight-line program must encounter E within one revolution
@@ -172,11 +491,15 @@ s_ee_vu1_ir_program vu1_lift_integer_ir(
         {
             return {};
         }
+        // With no branches, Q/P producers or dynamic waits, the
+        // same scoreboard can calculate all issue cycles at lift time.
+        const auto use = s_ee_vu1_dependency::decode(lo, hi);
+        cycle = dependencies.issue(use, cycle + 1u);
+        dependencies.retire(use, cycle);
         pc = (pc + 8u) & 0x3fffu;
         if (ending)
         {
-            // No supported operation produces a scoreboard stall.
-            return {emitter.finish(steps, pc), steps, steps, pc};
+            return {emitter.finish(steps, pc), steps, cycle - 16u, pc};
         }
         ending = (hi & 0x40000000u) != 0u;
     }
