@@ -2380,33 +2380,17 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const std::string ft_exponent = newtemp();
                 const std::string numerator_is_zero = newtemp();
                 const std::string divisor_is_zero = newtemp();
-                const std::string sign_xor = newtemp();
-                const std::string sign = newtemp();
-                const std::string divide_by_zero_result = newtemp();
 
                 m_out += "  " + fs_exponent + " = and i32 " + raw_fs + ", 2139095040\n";
                 m_out += "  " + ft_exponent + " = and i32 " + raw_ft + ", 2139095040\n";
                 m_out += "  " + numerator_is_zero + " = icmp eq i32 " + fs_exponent + ", 0\n";
                 m_out += "  " + divisor_is_zero + " = icmp eq i32 " + ft_exponent + ", 0\n";
-                m_out += "  " + sign_xor + " = xor i32 " + raw_fs + ", " + raw_ft + "\n";
-                m_out += "  " + sign + " = and i32 " + sign_xor + ", -2147483648\n";
-                // Sony EE Core User's Manual v6.0, Table 8-5:
-                // unlike IEEE FMAX (0x7F7FFFFF), the R5900's
-                // exceptional quotient is signed 0x7FFFFFFF.
-                m_out += "  " + divide_by_zero_result +
-                         " = or i32 " + sign + ", 2147483647\n";
-
-                const std::string fa = load_ee_fpr_f32(fs);
-                const std::string fb = load_ee_fpr_f32(ft);
-                const std::string safe_divisor = newtemp();
-                const std::string quotient = newtemp();
-                m_out += "  " + safe_divisor + " = select i1 " + divisor_is_zero +
-                         ", float 1.000000e+00, float " + fb + "\n";
-                m_out += "  " + quotient + " = fdiv float " + fa + ", " + safe_divisor + "\n";
-                const std::string quotient_bits = clamp_ee_f32_result(quotient, false);
+                // Use the same signed-digit divider as RSQRT.S. This
+                // retains exponent 255 and the hardware quotient rounding,
+                // including signed zero and saturation to the EE maximum.
                 const std::string result = newtemp();
-                m_out += "  " + result + " = select i1 " + divisor_is_zero +
-                         ", i32 " + divide_by_zero_result + ", i32 " + quotient_bits + "\n";
+                m_out += "  " + result + " = call i32 @ee_cop1_radix_quotient(i32 " +
+                         raw_fs + ", i32 " + raw_ft + ")\n";
                 store_fpr_i32(fd, result);
 
                 const std::string divide_zero_flags = newtemp();
@@ -2531,7 +2515,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const std::string divisor_is_zero = newtemp();
                 const std::string sign = newtemp();
                 const std::string negative = newtemp();
-                 m_out += "  " + ft_exponent + " = and i32 " + raw_ft + ", 2139095040\n";
+                m_out += "  " + ft_exponent + " = and i32 " + raw_ft + ", 2139095040\n";
                 m_out += "  " + divisor_is_zero + " = icmp eq i32 " + ft_exponent + ", 0\n";
                 m_out += "  " + sign + " = and i32 " + raw_ft + ", -2147483648\n";
                 m_out += "  " + negative + " = icmp ne i32 " + sign + ", 0\n";
@@ -3577,7 +3561,8 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     m_out += "\n";
     end_function();
 
-    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos)
+    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
+        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
     }
@@ -5504,7 +5489,8 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     m_out += "\n";
     end_function();
 
-    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos)
+    if (m_out.find("call i32 @ee_cop1_rsqrt_bits(") != std::string::npos ||
+        m_out.find("call i32 @ee_cop1_radix_quotient(") != std::string::npos)
     {
         m_out += k_ee_cop1_rsqrt_ir;
     }

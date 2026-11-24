@@ -247,9 +247,9 @@ def run_sign_operation_cases(fixture, temp_dir, target, mode, source_words):
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_arithmetic_cases(fixture, temp_dir, target, mode, cases):
+def run_arithmetic_cases(fixture, temp_dir, target, mode, cases, opt=0):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     retained = (engine, module, target_machine)
 
@@ -816,9 +816,58 @@ def main():
          0xA5903456, 0xA5923456, "positive zero over negative zero retains sign"),
         (0x00800000, 0x40000000, 0x00000000,
          0xA592F45E, 0xA592F45E, "division subnormal result flushes without flags"),
-        (0x7F7FFFFF, 0x00800000, 0x7F7FFFFF,
-         0xA592F45E, 0xA592F45E, "division overflow clamps without flags"),
+        (0x7F7FFFFF, 0x00800000, 0x7FFFFFFF,
+         0xA592F45E, 0xA592F45E, "division overflow saturates without changing existing flags"),
+        (0x7F800000, 0x40000000, 0x7F000000,
+         0xA592F45E, 0xA592F45E, "extended operand divided by two"),
     ]
+
+    # Unique physical-console results from ps2autotests
+    # tests/cpu/ee_fpu/muldiv.expected (expanded CF_* operands).
+    div_hardware_words = [
+        (0x00000000, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x80000000, 0xFFFFFFFF),
+        (0x80000000, 0x00000000, 0xFFFFFFFF),
+        (0x80000000, 0x80000000, 0x7FFFFFFF),
+        (0x00000000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x00000000, 0x7FFFFFFF),
+        (0x40000000, 0x40000000, 0x3F800000),
+        (0x40400000, 0x3F800000, 0x40400000),
+        (0x40400000, 0x40400000, 0x3F800000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x3F800000),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0xBF800000),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xBF800000),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x3F800000),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0x00000000),
+        (0x00000000, 0x7F800000, 0x00000000),
+        (0x7F800000, 0x7F800000, 0x3F800000),
+        (0xFF800000, 0x7F800000, 0xBF800000),
+        (0x3F800000, 0xBF800000, 0xBF800000),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3FFFFFFF, 0x3F000001),
+        (0x3F800000, 0x7F800001, 0x00000000),
+        (0x3F800000, 0x00000001, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x00000000),
+        (0x3F800000, 0xFFFFFFFF, 0x80000000),
+        (0x00001337, 0xDEADBEEF, 0x80000000),
+    ]
+    # Check both clear and previously populated cause/sticky flags. This
+    # intentionally preserves the pre-existing flag policy; the captured
+    # hardware file provides result words, not an FCSR trace.
+    for lhs, rhs, expected in div_hardware_words:
+        for initial in (0xA5903456, 0xA593F47E):
+            flags = initial
+            if (rhs & 0x7F800000) == 0:
+                flags |= (0x00020040 if (lhs & 0x7F800000) == 0
+                          else 0x00010020)
+            div_cases.append((lhs, rhs, expected, initial, flags,
+                              "hardware DIV.S result"))
 
     sqrt_words = [
         (0x40800000, "positive four"),
@@ -941,7 +990,8 @@ def main():
         run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases)
         run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases)
         run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases)
-        run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases)
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases, opt)
         run_cop1_transfer_cases(fixture, temp_dir, target)
         run_bc1_delay_cases(fixture, temp_dir, target)
         run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases)
