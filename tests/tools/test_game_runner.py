@@ -4155,6 +4155,24 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert sampled_state[key] == snapshot[key], key
+            assert sampled_state["vu1_worker"]["enabled"] is False
+            worker_report = root / "worker.json"
+            worker_env = dict(env, SDBZ_VU1_ASYNC="1")
+            worker_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(worker_report),
+            ], capture_output=True, text=True, check=False, timeout=60,
+                env=worker_env)
+            assert worker_run.returncode == 4, worker_run.stdout + worker_run.stderr
+            worker_state = json.loads(worker_report.read_text(encoding="utf-8"))
+            assert worker_state["vu1_worker"]["enabled"] is True
+            assert worker_state["vu1_worker"]["pending"] is False
+            assert worker_state["vu1_worker"]["submitted_jobs"] == 0
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert worker_state[key] == snapshot[key], key
 
         with tempfile.TemporaryDirectory(prefix="ee-native-loop-budget-") as tmp:
             root = Path(tmp)

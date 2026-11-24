@@ -692,11 +692,47 @@ int main()
         }
     }
 
+    // Deferred continuation must see the MPG and UNPACK writes that
+    // follow the first VU job, not a pre-handoff snapshot of those writes.
+    {
+        using result = ee::c_ee_vif1::e_deferred_result;
+        ee::c_ee_vif1 continued{};
+        constexpr uint32_t end_nop = 0x400002ffu;
+        const auto sequence = pack_words({
+            0x4a020000u, nop_lower, end_nop, nop_lower, nop_upper,
+            0x14000000u, 0x11000000u,
+            0x4a020002u, nop_lower, end_nop, nop_lower, nop_upper,
+            0x01000101u, 0x6c010004u, 0x11223344u, 2u, 3u, 4u,
+            0x17000000u, 0x13000000u, 0x15000000u, 0u, 0u, 0u});
+        if (!check(continued.enable_deferred() &&
+                continued.begin_deferred(sequence.data(),
+                    static_cast<uint32_t>(sequence.size() / 16u)) == result::pending &&
+                lane32(continued.vu1_data(), 4u, 0u) == 0u,
+                "deferred continuation published before completion") ||
+            !check(continued.wait_deferred() == result::completed &&
+                lane32(continued.vu1_data(), 4u, 0u) == 0x11223344u &&
+                continued.diagnostic().m_committed_opcodes[0x14u] == 1u &&
+                continued.diagnostic().m_committed_opcodes[0x17u] == 1u &&
+                continued.diagnostic().m_committed_opcodes[0x15u] == 1u &&
+                continued.diagnostic().m_committed_opcodes[0x4au] == 2u &&
+                continued.diagnostic().m_committed_opcodes[0x11u] == 1u &&
+                continued.diagnostic().m_committed_opcodes[0x13u] == 1u,
+                "deferred MPG/UNPACK/MSCNT/MSCALF ordering"))
+        {
+            return 1;
+        }
+    }
+
     // Mixed PATH2 -> PATH1 -> PATH2 must reach the same GS sink in
     // command order. A late invalid GS write must roll the entire batch
     // back, including parser counters and VIF microprogram state.
+    for (bool worker_mode : {false, true})
     {
         ee::c_ee_vif1 mixed{};
+        if (worker_mode && !mixed.enable_deferred())
+        {
+            return 1;
+        }
         ee::c_ee_gif_path3 first{}, second{};
         ee::c_ee_gs_state gs{};
         s_capture observer{};
