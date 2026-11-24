@@ -23,6 +23,41 @@ static std::string serialize(const ee::c_ee_dispatch_hotspots& hotspots)
 
 int main()
 {
+    ee::c_bounded_diagnostic_history<uint64_t, 64u> history;
+    assert(history.empty());
+    for (uint64_t i = 0u; i < 257u; ++i)
+    {
+        history.push_back(i);
+        assert(history.size() == (i < 64u ? i + 1u : 64u));
+        assert(history[history.size() - 1u] == i);
+    }
+    for (size_t i = 0u; i < history.size(); ++i)
+    {
+        assert(history[i] == 193u + i);
+    }
+
+    ee::c_ee_dispatch_hotspots zero(0u, 0u);
+    zero.record(1u, 4u, 8u, {});
+    assert(zero.untracked_pc_samples() == 1u);
+    assert(zero.untracked_edge_samples() == 1u);
+
+    // Ties must serialize in key order independent of insertion order.
+    ee::c_ee_dispatch_hotspots ties;
+    ties.record(1u, 16u, 24u, {});
+    ties.record(2u, 4u, 12u, {});
+    ties.record(3u, 4u, 8u, {});
+    ties.record(4u, 16u, 20u, {});
+    const std::string ordered = serialize(ties);
+    const auto pc_a = ordered.find("\"pc\": 4, \"visits\": 2");
+    const auto pc_b = ordered.find("\"pc\": 16, \"visits\": 2");
+    assert(pc_a < pc_b && pc_b != std::string::npos);
+    const auto edge_a = ordered.find("\"from_pc\": 4, \"to_pc\": 8");
+    const auto edge_b = ordered.find("\"from_pc\": 4, \"to_pc\": 12");
+    const auto edge_c = ordered.find("\"from_pc\": 16, \"to_pc\": 20");
+    const auto edge_d = ordered.find("\"from_pc\": 16, \"to_pc\": 24");
+    assert(edge_a < edge_b && edge_b < edge_c && edge_c < edge_d &&
+        edge_d != std::string::npos);
+
     ee::c_ee_dispatch_hotspots empty;
     const std::string baseline = serialize(empty);
     assert(baseline.find("\"schema\": \"ee-m2-dispatch-hotspots-v1\"") != std::string::npos);
@@ -62,6 +97,13 @@ int main()
     const std::string bounded = serialize(changes);
     assert(bounded.find("\"total_state_changes\": 99") != std::string::npos);
     assert(bounded.find("\"dispatch\": 2,") == std::string::npos);
-    assert(bounded.find("\"dispatch\": 100,") != std::string::npos);
+    size_t offset = 0u;
+    for (uint32_t i = 69u; i <= 100u; ++i)
+    {
+        offset = bounded.find("\"dispatch\": " + std::to_string(i) + ",", offset);
+        assert(offset != std::string::npos);
+        ++offset;
+    }
+    assert(bounded.find("\"dispatch\": 68,") == std::string::npos);
     return 0;
 }

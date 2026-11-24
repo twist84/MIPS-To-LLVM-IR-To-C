@@ -6,12 +6,47 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <map>
+#include <array>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace ee
 {
+
+// Chronological bounded history with constant-time append and no allocation.
+template <typename t_sample, size_t k_capacity>
+class c_bounded_diagnostic_history
+{
+public:
+    static_assert(k_capacity > 0u, "history capacity must be positive");
+
+    void push_back(const t_sample& sample)
+    {
+        m_samples[(m_first + m_size) % k_capacity] = sample;
+        if (m_size == k_capacity)
+        {
+            m_first = (m_first + 1u) % k_capacity;
+        }
+        else
+        {
+            ++m_size;
+        }
+    }
+
+    size_t size() const { return m_size; }
+    bool empty() const { return m_size == 0u; }
+
+    const t_sample& operator[](size_t index) const
+    {
+        return m_samples[(m_first + index) % k_capacity];
+    }
+
+private:
+    std::array<t_sample, k_capacity> m_samples{};
+    size_t m_first = 0u;
+    size_t m_size = 0u;
+};
 
 struct s_ee_hot_loop_state
 {
@@ -72,6 +107,8 @@ public:
         : m_pc_capacity(pc_capacity),
           m_edge_capacity(edge_capacity)
     {
+        m_pcs.reserve(pc_capacity);
+        m_edges.reserve(edge_capacity);
     }
 
     void record(uint64_t dispatch, uint32_t from_pc, uint32_t to_pc,
@@ -83,10 +120,6 @@ public:
                       m_edge_capacity, m_untracked_edge_samples);
         if (m_has_state && state != m_last_state)
         {
-            if (m_changes.size() == k_change_capacity)
-            {
-                m_changes.erase(m_changes.begin());
-            }
             m_changes.push_back({dispatch, from_pc, m_last_state, state});
             ++m_total_state_changes;
         }
@@ -184,8 +217,21 @@ private:
         s_ee_hot_loop_state m_after;
     };
 
-    template <typename t_key>
-    static void count_bounded(std::map<t_key, uint64_t>& counts,
+    struct s_edge_hash
+    {
+        size_t operator()(const std::pair<uint32_t, uint32_t>& key) const
+        {
+            // Mix both aligned guest PCs before bucket selection.
+            uint64_t value = (static_cast<uint64_t>(key.first) << 32u) | key.second;
+            value ^= value >> 33u;
+            value *= 0xff51afd7ed558ccdull;
+            value ^= value >> 33u;
+            return static_cast<size_t>(value);
+        }
+    };
+
+    template <typename t_key, typename t_hash>
+    static void count_bounded(std::unordered_map<t_key, uint64_t, t_hash>& counts,
                               const t_key& key, size_t capacity,
                               uint64_t& untracked)
     {
@@ -204,9 +250,9 @@ private:
         }
     }
 
-    template <typename t_key>
+    template <typename t_key, typename t_hash>
     static std::vector<std::pair<t_key, uint64_t>> top_counts(
-        const std::map<t_key, uint64_t>& counts)
+        const std::unordered_map<t_key, uint64_t, t_hash>& counts)
     {
         std::vector<std::pair<t_key, uint64_t>> sorted(
             counts.begin(), counts.end());
@@ -257,9 +303,9 @@ private:
     uint64_t m_total_state_changes = 0u;
     bool m_has_state = false;
     s_ee_hot_loop_state m_last_state{};
-    std::map<uint32_t, uint64_t> m_pcs;
-    std::map<std::pair<uint32_t, uint32_t>, uint64_t> m_edges;
-    std::vector<s_change> m_changes;
+    std::unordered_map<uint32_t, uint64_t> m_pcs;
+    std::unordered_map<std::pair<uint32_t, uint32_t>, uint64_t, s_edge_hash> m_edges;
+    c_bounded_diagnostic_history<s_change, k_change_capacity> m_changes;
 };
 
 } // namespace ee

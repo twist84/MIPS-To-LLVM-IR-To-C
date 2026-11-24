@@ -1309,7 +1309,7 @@ bool write_report(
     const ee::c_ee_vsync_flags& vsync_flags,
     uint32_t reason,
     uint32_t status,
-    const std::vector<s_dispatch_sample>& history,
+    const ee::c_bounded_diagnostic_history<s_dispatch_sample, k_report_history_limit>& history,
     const std::vector<s_syscall_sample>& syscall_history,
     const ee::s_ee_gs_state& gs,
     const ee::c_ee_gif_path3& gif_path1,
@@ -3276,11 +3276,7 @@ int main(int argc, char** argv)
     bool guest_rpc_idle_diagnostic_reported = false;
     uint64_t next_iop_guest_rpc_snapshot = 50000u;
     ee::c_ee_dispatch_hotspots hotspots;
-    std::vector<s_dispatch_sample> history;
-    if (report_path != nullptr)
-    {
-        history.reserve(k_report_history_limit);
-    }
+    ee::c_bounded_diagnostic_history<s_dispatch_sample, k_report_history_limit> history;
     uint32_t status = 0;
     uint32_t reason = cpu.m_exit_reason;
     uint32_t completed_loop_yields = 0u;
@@ -4606,10 +4602,6 @@ int main(int argc, char** argv)
         if (report_path != nullptr && count != 0)
         {
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_diagnostics);
-            if (history.size() == k_report_history_limit)
-            {
-                history.erase(history.begin());
-            }
             history.push_back({
                 dispatched, from_pc, out_pc, reason, status,
                 static_cast<uint32_t>(cpu_before_dispatch.m_gpr[16].m_lo),
