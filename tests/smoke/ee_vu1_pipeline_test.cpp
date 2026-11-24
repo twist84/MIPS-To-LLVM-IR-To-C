@@ -134,6 +134,47 @@ int main()
         return 1;
     }
 
+    // Directed Q cases: physical VU0 flag observations and shared
+    // signed-digit arithmetic model. Native O0/O3 parity is covered by
+    // the q case of ee_vu1_ir_fixture.
+    struct s_q_case
+    {
+        uint32_t m_op;
+        uint32_t m_fs;
+        uint32_t m_ft;
+        uint32_t m_q;
+        uint32_t m_flags;
+    };
+    constexpr s_q_case q_cases[] =
+    {
+        {0x38u, 0u, 0u, 0x7fffffffu, 0x10u},
+        {0x38u, 0x3f800000u, 0x80000000u, 0xffffffffu, 0x20u},
+        {0x39u, 0u, 0xbf800000u, 0x3f800000u, 0x10u},
+        {0x39u, 0u, 0x3f80efd3u, 0x3f8077b1u, 0u},
+        {0x3au, 0xff3cf542u, 0x80000000u, 0xffffffffu, 0x30u},
+        {0x3au, 0x7fffffffu, 0x7fffffffu, 0x5fb504f2u, 0u},
+        {0x38u, 0x3f800000u, 0x3fffffffu, 0x3f000001u, 0u},
+    };
+    for (const auto& entry : q_cases)
+    {
+        ee::s_ee_vu1_state state{};
+        state.m_initialized = true;
+        state.m_vf[2][0] = entry.m_fs;
+        state.m_vf[3][0] = entry.m_ft;
+        state.m_status = 0x430u;
+        const uint32_t expected_status = 0x400u | entry.m_flags | (entry.m_flags << 6u);
+        if (!check(run(state, {
+                       {special(entry.m_op, 3u, 2u), k_upper_nop},
+                       {special(0x3bu), k_upper_end},
+                       {k_lower_nop, k_upper_nop}
+                   }, data, issue) &&
+                   state.m_q == entry.m_q && state.m_status == expected_status,
+                   "Q result, current I/D replacement and sticky preservation"))
+        {
+            return 1;
+        }
+    }
+
     // The EFU producer updates P after ESUM latency. MFP must first
     // observe old P and then new P only after WAITP.
     ee::s_ee_vu1_state p{};

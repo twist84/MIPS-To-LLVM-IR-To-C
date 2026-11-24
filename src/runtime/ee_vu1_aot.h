@@ -9,7 +9,7 @@
 namespace ee
 {
 // ABI changes invalidate native VU1 libraries, never the EE IR cache.
-inline constexpr uint32_t k_vu1_aot_abi = 10u; // MAX/MINI raw-word ordering changes native semantics.
+inline constexpr uint32_t k_vu1_aot_abi = 11u; // Q-unit arithmetic and status semantics changed.
 using t_vu1_aot_kick = uint32_t (*)(void*, uint32_t);
 using t_vu1_aot_efu = uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,

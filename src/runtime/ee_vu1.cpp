@@ -671,15 +671,16 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const auto result = vu1_fp::div(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
             pipe.schedule_q(state, result.value, 7u);
-            state.m_status = (state.m_status & ~0x30u) |
-                (result.invalid ? 0x20u : 0u);
+            state.m_status = vu_scalar_fp::update_status(state.m_status, result.current_flags);
             return true;
         }
         case 0x39u: // SQRT
         {
             const uint32_t ftf = (lo >> 23u) & 3u;
-            pipe.schedule_q(state,
-                vu1_fp::sqrt(state.m_vf[ft][ftf]), 7u);
+            const uint32_t raw = state.m_vf[ft][ftf];
+            pipe.schedule_q(state, vu1_fp::sqrt(raw), 7u);
+            state.m_status = vu_scalar_fp::update_status(state.m_status,
+                vu_scalar_fp::current_flags(0u, raw, true, false));
             return true;
         }
         case 0x3au: // RSQRT
@@ -689,8 +690,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const auto result = vu1_fp::rsqrt(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
             pipe.schedule_q(state, result.value, 13u);
-            state.m_status = (state.m_status & ~0x30u) |
-                (result.invalid ? 0x20u : 0u);
+            state.m_status = vu_scalar_fp::update_status(state.m_status, result.current_flags);
             return true;
         }
         case 0x3bu: pipe.wait_q(state); return true; // WAITQ

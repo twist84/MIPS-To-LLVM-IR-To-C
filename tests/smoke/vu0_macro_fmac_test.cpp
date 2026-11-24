@@ -489,7 +489,7 @@ int main()
     vu0.m_status_flags = 0u;
     check(ee::ee_vu0_macro_scalar(
               &cpu, &runtime, k_vrsqrt, 0x00106988u) == 0 &&
-          vu0.m_q_pending_bits == 0x7f7fffffu &&
+          vu0.m_q_pending_bits == 0x7fffffffu &&
           (vu0.m_status_flags & 0x820u) == 0x820u,
           "positive zero denominator saturates +max and sets D/DS");
     check(ee::ee_vu0_macro_scalar(
@@ -506,26 +506,30 @@ int main()
     };
     constexpr s_scalar_case rsqrt_cases[] =
     {
-        {0x3f800000u, 0x80000000u, 0x7f7fffffu, 0x30u},
-        {0xbf800000u, 0x80000000u, 0xff7fffffu, 0x30u},
-        {0x00000000u, 0x00000000u, 0x7f7fffffu, 0x10u},
-        {0x00000000u, 0x80000000u, 0x7f7fffffu, 0x10u},
-        {0x80000000u, 0x00000000u, 0xff7fffffu, 0x10u},
-        {0x80000000u, 0x80000000u, 0xff7fffffu, 0x10u},
-        {0x3f800000u, 0x80000001u, 0x7f7fffffu, 0x30u},
-        {0x80000001u, 0x00000001u, 0xff7fffffu, 0x10u},
+        {0x3f800000u, 0x80000000u, 0x7fffffffu, 0x30u},
+        {0xbf800000u, 0x80000000u, 0xffffffffu, 0x30u},
+        {0x00000000u, 0x00000000u, 0x7fffffffu, 0x10u},
+        {0x00000000u, 0x80000000u, 0x7fffffffu, 0x10u},
+        {0x80000000u, 0x00000000u, 0xffffffffu, 0x10u},
+        {0x80000000u, 0x80000000u, 0xffffffffu, 0x10u},
+        {0x3f800000u, 0x80000001u, 0x7fffffffu, 0x30u},
+        {0x80000001u, 0x00000001u, 0xffffffffu, 0x10u},
         {0x3f800000u, 0x41800000u, 0x3e800000u, 0u},
         {0xbf800000u, 0xc1800000u, 0xbe800000u, 0x10u},
+        {0x40400000u, 0x40400000u, 0x3fddb3d7u, 0u},
+        {0x7fffffffu, 0x7fffffffu, 0x5fb504f2u, 0u},
     };
     constexpr s_scalar_case div_cases[] =
     {
-        {0x3f800000u, 0x80000000u, 0xff7fffffu, 0x20u},
-        {0xbf800000u, 0x80000000u, 0x7f7fffffu, 0x20u},
-        {0x00000000u, 0x00000000u, 0x7f7fffffu, 0x10u},
-        {0x00000000u, 0x80000000u, 0xff7fffffu, 0x10u},
-        {0x80000000u, 0x00000000u, 0xff7fffffu, 0x10u},
-        {0x3f800000u, 0x80000001u, 0xff7fffffu, 0x20u},
+        {0x3f800000u, 0x80000000u, 0xffffffffu, 0x20u},
+        {0xbf800000u, 0x80000000u, 0x7fffffffu, 0x20u},
+        {0x00000000u, 0x00000000u, 0x7fffffffu, 0x10u},
+        {0x00000000u, 0x80000000u, 0xffffffffu, 0x10u},
+        {0x80000000u, 0x00000000u, 0xffffffffu, 0x10u},
+        {0x3f800000u, 0x80000001u, 0xffffffffu, 0x20u},
         {0x40800000u, 0xc0000000u, 0xc0000000u, 0u},
+        {0x3f800000u, 0x3fffffffu, 0x3f000001u, 0u},
+        {0x7f800001u, 0x3f800000u, 0x7f800001u, 0u},
     };
     constexpr s_scalar_case sqrt_cases[] =
     {
@@ -535,6 +539,8 @@ int main()
         {0u, 0x80000001u, 0u, 0x10u},
         {0u, 0xc1800000u, 0x40800000u, 0x10u},
         {0u, 0x41800000u, 0x40800000u, 0u},
+        {0u, 0x3f80efd3u, 0x3f8077b1u, 0u},
+        {0u, 0x7fffffffu, 0x5fb504f3u, 0u},
     };
     const auto check_scalar_case = [&](const s_scalar_case& entry,
                                       uint32_t opcode, uint32_t latency)

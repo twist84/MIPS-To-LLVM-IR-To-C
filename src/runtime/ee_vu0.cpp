@@ -1,4 +1,5 @@
 #include "ee_runtime.h"
+#include "ee_vu_scalar_fp.h"
 #include <cmath>
 #include <cstring>
 
@@ -2609,29 +2610,9 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         }
         const uint32_t fs_bits = vu0_fmac_lane(source, fsf);
         const uint32_t ft_bits = vu0_fmac_read_vf(cpu, ft, ftf);
-        const float numerator = vu0_fmac_operand(fs_bits);
-        const float denominator = vu0_fmac_operand(ft_bits);
-        uint32_t current_flags = 0u;
-        uint32_t result_bits = 0u;
-        if (denominator == 0.0f)
-        {
-            // PCSX2 _vuDIV: 0/0 sets I, x/0 sets D; signed max result.
-            current_flags = numerator == 0.0f ? 0x10u : 0x20u;
-            result_bits = ((fs_bits ^ ft_bits) & 0x80000000u) | 0x7f7fffffu;
-        }
-        else
-        {
-            result_bits = vu0_macro_bits(numerator / denominator);
-            const uint32_t exponent = result_bits & 0x7f800000u;
-            if (exponent == 0u)
-            {
-                result_bits &= 0x80000000u;
-            }
-            else if (exponent == 0x7f800000u)
-            {
-                result_bits = (result_bits & 0x80000000u) | 0x7f7fffffu;
-            }
-        }
+        const uint32_t current_flags =
+            vu_scalar_fp::current_flags(fs_bits, ft_bits, false, false);
+        const uint32_t result_bits = vu_scalar_fp::quotient(fs_bits, ft_bits);
         vu0->m_q_pending_bits = result_bits;
         vu0->m_q_ready_cycle = vu0->m_cycle + 7u;
         vu0->m_q_pending = 1u;
@@ -2785,38 +2766,13 @@ extern "C" uint32_t ee_vu0_macro_scalar(
     const uint32_t fs_lane = (word >> 21u) & 3u;
     const uint32_t ft_bits = vu0_fmac_read_vf(cpu, ft, ft_lane);
     const uint32_t fs_bits = vu0_fmac_read_vf(cpu, fs, fs_lane);
-    const float denominator = vu0_fmac_operand(ft_bits);
-    const float numerator = vu0_fmac_operand(fs_bits);
-
-    // SQRT/RSQRT check the raw denominator sign, even if its exponent
-    // flushes to zero. Unlike DIV, RSQRT divides by an absolute root:
-    // a zero divisor saturates with the numerator's sign alone.
-    // VU manual v6.0 sections 3.3.2/RSQRT; PCSX2 VUops.cpp at
-    // 4e56d430595164106eab9606cb46c94c902802cd.
-    uint32_t current_flags = (ft_bits & 0x80000000u) != 0u ? 0x10u : 0u;
-    uint32_t result_bits = 0u;
-    if (reciprocal && denominator == 0.0f)
-    {
-        current_flags |= numerator == 0.0f ? 0x10u : 0x20u;
-        result_bits = (fs_bits & 0x80000000u) | 0x7f7fffffu;
-    }
-    else
-    {
-        const float root = std::sqrt(std::fabs(denominator));
-        const float value = reciprocal ? numerator / root : root;
-        std::memcpy(&result_bits, &value, sizeof(result_bits));
-        const uint32_t exponent = result_bits & 0x7f800000u;
-        // Normalize scalar Q like VU floating-point operands:
-        // subnormal -> signed zero, exponent 255 -> finite max.
-        if (exponent == 0u)
-        {
-            result_bits &= 0x80000000u;
-        }
-        else if (exponent == 0x7f800000u)
-        {
-            result_bits = (result_bits & 0x80000000u) | 0x7f7fffffu;
-        }
-    }
+    // Raw denominator sign raises I even when exponent zero; RSQRT
+    // divides by the absolute root and can raise I and D together.
+    const uint32_t current_flags =
+        vu_scalar_fp::current_flags(fs_bits, ft_bits, !reciprocal, reciprocal);
+    const uint32_t root = vu_scalar_fp::root(ft_bits);
+    const uint32_t result_bits = reciprocal ?
+        vu_scalar_fp::quotient(fs_bits, root) : root;
 
     vu0->m_q_pending_bits = result_bits;
     vu0->m_q_ready_cycle = vu0->m_cycle + latency;

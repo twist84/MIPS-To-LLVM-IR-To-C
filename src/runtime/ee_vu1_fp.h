@@ -2,6 +2,8 @@
 // Samir Nuri (2026), MIT. License: ps2_webgpu/gs/LICENSE.upstream.
 #pragma once
 
+#include "ee_vu_scalar_fp.h"
+
 #include <cstring>
 #include <cmath>
 #include <cstdint>
@@ -108,30 +110,24 @@ inline std::uint32_t from_double(double d) {
 
 struct s_result {
     std::uint32_t value;
-    bool invalid;
+    std::uint32_t current_flags;
 };
 
-inline s_result div(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b);
-    const std::uint32_t sign = (a ^ b) & kSign;
-    if (!(b & kAbs)) return {sign | kAbs, true};
-    if (!(a & kAbs)) return {sign, false};
-    return {from_double(to_double(a) / to_double(b)), false};
+inline s_result div(std::uint32_t a, std::uint32_t b)
+{
+    return {vu_scalar_fp::quotient(a, b),
+            vu_scalar_fp::current_flags(a, b, false, false)};
 }
 
-inline std::uint32_t sqrt(std::uint32_t a) {
-    a = flush(a) & kAbs;
-    if (!a) return 0;
-    return from_double(std::sqrt(to_double(a)));
+inline std::uint32_t sqrt(std::uint32_t a)
+{
+    return vu_scalar_fp::root(a);
 }
 
-inline s_result rsqrt(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b) & kAbs;
-    if (!b) return {(a & kSign) | kAbs, true};
-    if (!(a & kAbs)) return {a & kSign, false};
-    return {from_double(to_double(a) / std::sqrt(to_double(b))), false};
+inline s_result rsqrt(std::uint32_t a, std::uint32_t b)
+{
+    return {vu_scalar_fp::quotient(a, vu_scalar_fp::root(b)),
+            vu_scalar_fp::current_flags(a, b, false, true)};
 }
 
 inline std::int32_t key(std::uint32_t x) {

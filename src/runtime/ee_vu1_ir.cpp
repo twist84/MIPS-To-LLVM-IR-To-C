@@ -1,6 +1,7 @@
 #include "ee_vu1_ir.h"
 #include "ee_vu1_dependency.h"
 #include "ee_vu1_aot.h"
+#include "../llvm/ee_cop1_rsqrt_ir.h"
 
 #include <utility>
 #include <bitset>
@@ -322,103 +323,41 @@ result:
   ret i32 %value
 }
 
-; PS2 extended exponent values are finite in binary64. Match the
-; interpreter's conversion and truncation rather than using binary32.
-declare double @llvm.sqrt.f64(double)
-
-define internal double @vu_to_double(i32 %x) alwaysinline {
-  %e0 = lshr i32 %x, 23
-  %e = and i32 %e0, 255
-  %zero = icmp eq i32 %e, 0
-  %sign0 = and i32 %x, -2147483648
-  %sign1 = zext i32 %sign0 to i64
-  %sign = shl i64 %sign1, 32
-  %biased = add i32 %e, 896
-  %e64 = zext i32 %biased to i64
-  %exponent = shl i64 %e64, 52
-  %m0 = and i32 %x, 8388607
-  %m1 = zext i32 %m0 to i64
-  %m = shl i64 %m1, 29
-  %mag0 = or i64 %exponent, %m
-  %mag = select i1 %zero, i64 0, i64 %mag0
-  %bits = or i64 %sign, %mag
-  %r = bitcast i64 %bits to double
-  ret double %r
-}
-
-define internal i32 @vu_from_double(double %x) alwaysinline {
-  %bits = bitcast double %x to i64
-  %s64 = lshr i64 %bits, 32
-  %s32 = trunc i64 %s64 to i32
-  %sign = and i32 %s32, -2147483648
-  %e64 = lshr i64 %bits, 52
-  %e32 = trunc i64 %e64 to i32
-  %e0 = and i32 %e32, 2047
-  %e = sub i32 %e0, 896
-  %m64 = lshr i64 %bits, 29
-  %m = trunc i64 %m64 to i32
-  %r = call i32 @vu_pack(i32 %sign, i32 %e, i32 %m)
+; Q-unit arithmetic calls the module-local signed-digit recurrence.
+define internal i32 @vu_div(i32 %a, i32 %b) alwaysinline {
+  %r = call i32 @ee_cop1_radix_quotient(i32 %a, i32 %b)
   ret i32 %r
 }
 
-define internal i32 @vu_div(i32 %a0, i32 %b0) alwaysinline {
-entry:
-  %a = call i32 @vu_flush(i32 %a0)
-  %b = call i32 @vu_flush(i32 %b0)
-  %xor = xor i32 %a, %b
-  %sign = and i32 %xor, -2147483648
-  %bmag = and i32 %b, 2147483647
-  %bz = icmp eq i32 %bmag, 0
-  br i1 %bz, label %invalid, label %check_a
-invalid:
-  %limit = or i32 %sign, 2147483647
-  ret i32 %limit
-check_a:
-  %amag = and i32 %a, 2147483647
-  %az = icmp eq i32 %amag, 0
-  br i1 %az, label %zero, label %calc
-zero:
-  ret i32 %sign
-calc:
-  %ad = call double @vu_to_double(i32 %a)
-  %bd = call double @vu_to_double(i32 %b)
-  %d = fdiv double %ad, %bd
-  %r = call i32 @vu_from_double(double %d)
+define internal i32 @vu_sqrt(i32 %a) alwaysinline {
+  %r = call i32 @ee_cop1_radix_root(i32 %a)
   ret i32 %r
 }
 
-define internal i32 @vu_sqrt(i32 %a0) alwaysinline {
-  %a = and i32 %a0, 2147483647
-  %d = call double @vu_to_double(i32 %a)
-  %root = call double @llvm.sqrt.f64(double %d)
-  %r = call i32 @vu_from_double(double %root)
+define internal i32 @vu_rsqrt(i32 %a, i32 %b) alwaysinline {
+  %r = call i32 @ee_cop1_rsqrt_bits(i32 %a, i32 %b)
   ret i32 %r
 }
 
-define internal i32 @vu_rsqrt(i32 %a0, i32 %b0) alwaysinline {
-entry:
-  %a = call i32 @vu_flush(i32 %a0)
-  %b1 = call i32 @vu_flush(i32 %b0)
-  %b = and i32 %b1, 2147483647
-  %sign = and i32 %a, -2147483648
-  %bz = icmp eq i32 %b, 0
-  br i1 %bz, label %invalid, label %check_a
-invalid:
-  %limit = or i32 %sign, 2147483647
-  ret i32 %limit
-check_a:
-  %amag = and i32 %a, 2147483647
-  %az = icmp eq i32 %amag, 0
-  br i1 %az, label %zero, label %calc
-zero:
-  ret i32 %sign
-calc:
-  %ad = call double @vu_to_double(i32 %a)
-  %bd = call double @vu_to_double(i32 %b)
-  %root = call double @llvm.sqrt.f64(double %bd)
-  %d = fdiv double %ad, %root
-  %r = call i32 @vu_from_double(double %d)
-  ret i32 %r
+define internal i32 @vu_q_status(i32 %old, i32 %a, i32 %b, i1 %is_sqrt, i1 %is_rsqrt) alwaysinline {
+  %root_op = or i1 %is_sqrt, %is_rsqrt
+  %negative = icmp slt i32 %b, 0
+  %invalid_root = and i1 %root_op, %negative
+  %a_exp = and i32 %a, 2139095040
+  %b_exp = and i32 %b, 2139095040
+  %a_zero = icmp eq i32 %a_exp, 0
+  %b_zero = icmp eq i32 %b_exp, 0
+  %uses_div = xor i1 %is_sqrt, true
+  %zero_divisor = and i1 %uses_div, %b_zero
+  %zero_flags = select i1 %a_zero, i32 16, i32 32
+  %div_flags = select i1 %zero_divisor, i32 %zero_flags, i32 0
+  %root_flags = select i1 %invalid_root, i32 16, i32 0
+  %current = or i32 %div_flags, %root_flags
+  %sticky = shl i32 %current, 6
+  %cleared = and i32 %old, -49
+  %merged = or i32 %cleared, %current
+  %result = or i32 %merged, %sticky
+  ret i32 %result
 }
 
 ; The same scalar pipeline machinery can be used for Q and P. Ready=0
@@ -558,7 +497,8 @@ class c_straight_line_emitter
 public:
     c_straight_line_emitter()
     {
-        m_ir = k_fp_ir;
+        m_ir = llvm::k_ee_cop1_rsqrt_ir;
+        m_ir += k_fp_ir;
         m_ir += "define dso_local i32 @ee_vu1_program(ptr %vi, ptr %i, "
             "ptr %tpc, i32 %top, i32 %itop, ptr %vf, ptr %q, "
             "ptr %mac, ptr %status, ptr %data, ptr %cycles_out, "
@@ -1047,20 +987,18 @@ private:
             return true;
         }
         const auto rhs = vf(ft, (lo >> 23u) & 3u);
-        if (index == 0x39u)
-        {
-            schedule_scalar("q", operation("call i32 @vu_sqrt(i32 " + rhs + ")"), 7u);
-            return true;
-        }
-        const auto lhs = vf(fs, (lo >> 21u) & 3u);
-        const auto value = fp_binary(index == 0x38u ? "vu_div" : "vu_rsqrt", lhs, rhs);
-        schedule_scalar("q", value, index == 0x38u ? 7u : 13u);
-        const auto exponent = operation("and i32 " + rhs + ", 2139095040");
-        const auto invalid = operation("icmp eq i32 " + exponent + ", 0");
-        const auto bit = operation("select i1 " + invalid + ", i32 32, i32 0");
+        const bool is_sqrt = index == 0x39u;
+        const bool is_rsqrt = index == 0x3au;
+        const auto lhs = is_sqrt ? std::string("0") : vf(fs, (lo >> 21u) & 3u);
+        const auto value = is_sqrt
+            ? operation("call i32 @vu_sqrt(i32 " + rhs + ")")
+            : fp_binary(is_rsqrt ? "vu_rsqrt" : "vu_div", lhs, rhs);
+        schedule_scalar("q", value, is_rsqrt ? 13u : 7u);
         const auto old = operation("load i32, ptr %status, align 4");
-        const auto cleared = operation("and i32 " + old + ", -49");
-        const auto status = operation("or i32 " + cleared + ", " + bit);
+        const auto status = operation("call i32 @vu_q_status(i32 " + old +
+            ", i32 " + lhs + ", i32 " + rhs + ", i1 " +
+            (is_sqrt ? "true" : "false") + ", i1 " +
+            (is_rsqrt ? "true" : "false") + ")");
         line("store i32 " + status + ", ptr %status, align 4");
         return true;
     }
