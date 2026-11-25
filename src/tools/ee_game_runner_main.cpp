@@ -2879,6 +2879,29 @@ int main(int argc, char** argv)
                                 export_library.push_back(safe ? static_cast<char>(ch) : '_');
                             }
                         }
+                        // LOADFILE's original filename is preferable to an
+                        // internal module title or a secondary export name.
+                        std::string source_name = module.m_source_name;
+                        const size_t version = source_name.find(';');
+                        if (version != std::string::npos)
+                        {
+                            source_name.erase(version);
+                        }
+                        const size_t extension = source_name.rfind('.');
+                        if (extension != std::string::npos)
+                        {
+                            source_name.erase(extension);
+                        }
+                        for (char& ch : source_name)
+                        {
+                            const bool safe = (ch >= 'A' && ch <= 'Z') ||
+                                (ch >= 'a' && ch <= 'z') ||
+                                (ch >= '0' && ch <= '9') || ch == '_';
+                            if (!safe)
+                            {
+                                ch = '_';
+                            }
+                        }
                         char stem[128];
                         std::snprintf(stem, sizeof(stem), "%s/%s@%08x",
                                       capture_storage.c_str(), name.c_str(), module.m_base);
@@ -2895,12 +2918,13 @@ int main(int argc, char** argv)
                                 "{\"name\": \"%s\", \"base\": %u, "
                                 "\"text_size\": %u, \"entry\": %u, "
                                 "\"gp\": %u, \"hash\": \"%016llx\", "
+                                "\"source_name\": \"%s\", "
                                 "\"export_library\": \"%s\", \"exports\": [",
                                 name.c_str(), module.m_base, module.m_text_size,
                                 module.m_entry, module.m_gp,
                                 static_cast<unsigned long long>(
                                     iop::iop_aot_hash(text.data(), text.size())),
-                                export_library.c_str());
+                                source_name.c_str(), export_library.c_str());
                             for (size_t index = 0; index < module.m_exports.size();
                                  ++index)
                             {
@@ -3194,7 +3218,8 @@ int main(int argc, char** argv)
                 std::fprintf(stderr, "IOP IRX read failed: %s\n", path.c_str());
                 return 1;
             }
-            const iop::s_module_load_result loaded = iop_kernel->load_module(bytes);
+            const iop::s_module_load_result loaded = iop_kernel->load_module(
+                bytes, std::filesystem::path(path).filename().string());
             if (loaded.m_status != iop::e_irx_load_result::success)
             {
                 std::fprintf(stderr,
