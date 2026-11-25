@@ -186,6 +186,38 @@ public:
     // UINT64_MAX means none known; zero requires immediate service.
     // Does not authorize deferring externally initiated MMIO or DMA.
     uint64_t idle_event_cycles_remaining() const;
+
+    // Passive diagnostic state, including masked/latched events that
+    // cannot be observed through pending_interrupts() alone. Never read
+    // the guest MMIO registers here: I_CTRL and Timer5 MODE have side effects.
+    struct s_scheduler_checkpoint
+    {
+        uint32_t m_irq_stat;
+        uint32_t m_irq_mask;
+        uint32_t m_irq_ctrl;
+        uint32_t m_dma_icr;
+        uint32_t m_dma_icr2;
+        uint32_t m_timer_count;
+        uint32_t m_timer_mode;
+        uint32_t m_timer_target;
+        uint32_t m_timer_remainder;
+        bool m_timer_armed;
+        uint32_t m_dma4_remaining;
+        uint32_t m_dma7_remaining;
+        bool m_auto_dma4;
+        bool m_auto_dma7;
+        bool m_cdvd_pending;
+    };
+
+    s_scheduler_checkpoint scheduler_checkpoint() const
+    {
+        return {m_i_stat, m_i_mask, m_i_ctrl, m_dma_icr, m_dma_icr2,
+            m_timer5_count, m_timer5_mode, m_timer5_target,
+            m_timer5_remainder, m_timer5_irq_armed,
+            m_spu2_dma_remaining[0u], m_spu2_dma_remaining[1u],
+            m_spu2_auto[0u].m_active, m_spu2_auto[1u].m_active,
+            m_cdvd_ncmd_pending};
+    }
     uint64_t spu2_auto_dma_started() const { return m_spu2_auto_started; }
     uint64_t spu2_auto_dma_completed() const { return m_spu2_auto_completed; }
     uint64_t spu2_auto_dma_bytes() const { return m_spu2_auto_bytes; }
