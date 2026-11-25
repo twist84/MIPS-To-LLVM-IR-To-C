@@ -173,6 +173,7 @@ public:
     bool pad_trace_window() const;
     bool spu2_ram_word(uint32_t address, uint16_t* value) const;
     const c_spu2& spu2() const { return m_spu2; }
+    void enable_spu2_audio_profile(bool enabled) { m_spu2.enable_audio_profile(enabled); }
     void bind_spu2_pcm_sink(void* user, c_spu2::t_pcm_sink sink)
     {
         m_spu2.bind_pcm_sink(user, sink);

@@ -16,7 +16,7 @@ set "SDBZ_SPEED_PERCENT=0"
 rem Opt-in real-time listening; default P40 remains uncapped and device-free.
 if "%SDBZ_P40_LISTEN%"=="1" (
     set "SDBZ_SPEED_PERCENT=100"
-    set "SDBZ_HOST_AUDIO=1"
+    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"
 )
 if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"
 

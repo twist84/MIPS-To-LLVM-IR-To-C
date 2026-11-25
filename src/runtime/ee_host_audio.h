@@ -19,7 +19,7 @@ public:
     c_ee_host_audio(const c_ee_host_audio&) = delete;
     c_ee_host_audio& operator=(const c_ee_host_audio&) = delete;
 
-    void start(iop::c_hw* hardware);
+    void start(iop::c_hw* hardware, bool profile = false);
     void pause();
     void resume();
     void shutdown();

@@ -20,6 +20,8 @@ struct c_ee_host_audio::s_impl
     c_ee_pcm_queue<4096u, 2048u> m_queue;
     iop::c_hw* m_hardware = nullptr;
     AudioStream m_stream{};
+    bool m_profile_enabled = false;
+    iop::s_audio_profile_counter m_callback_profile{};
     bool m_ready = false;
     bool m_paused = false;
     uint32_t m_device_rate = 0u;
@@ -37,6 +39,8 @@ struct c_ee_host_audio::s_impl
         s_impl* active = m_active.load(std::memory_order_acquire);
         if (active != nullptr)
         {
+            iop::c_audio_profile_scope profile(active->m_profile_enabled,
+                active->m_callback_profile);
             active->m_queue.pop(samples, frames);
         }
         else
@@ -55,7 +59,7 @@ c_ee_host_audio::~c_ee_host_audio()
     shutdown();
 }
 
-void c_ee_host_audio::start(iop::c_hw* hardware)
+void c_ee_host_audio::start(iop::c_hw* hardware, bool profile)
 {
     if (m_impl != nullptr)
     {
@@ -67,6 +71,7 @@ void c_ee_host_audio::start(iop::c_hw* hardware)
         return;
     }
     m_impl = std::make_unique<s_impl>();
+    m_impl->m_profile_enabled = profile;
     s_impl* expected = nullptr;
     if (!s_impl::m_active.compare_exchange_strong(expected, m_impl.get(),
             std::memory_order_acq_rel))
@@ -140,6 +145,10 @@ void c_ee_host_audio::shutdown()
 void c_ee_host_audio::report() const
 {
     // Caller has shut down the device, so all queue counters are quiescent.
+    if (m_impl != nullptr && m_impl->m_profile_enabled)
+    {
+        m_impl->m_callback_profile.report("host_pcm_callback");
+    }
     const s_pcm_queue_stats stats = m_impl != nullptr
         ? m_impl->m_queue.stats() : s_pcm_queue_stats{};
     std::printf(

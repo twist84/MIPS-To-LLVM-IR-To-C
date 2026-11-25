@@ -1,5 +1,7 @@
 #pragma once
 
+#include "iop_audio_profile.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -20,6 +22,8 @@ public:
 
     c_spu2();
     void reset();
+    void enable_audio_profile(bool enabled) { m_audio_profile_enabled = enabled; }
+    void report_audio_profile() const;
 
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
@@ -160,6 +164,17 @@ private:
     bool write16(uint32_t offset, uint16_t value);
     bool read_core(uint32_t index, uint32_t offset, uint16_t* value);
     bool write_core(uint32_t index, uint32_t offset, uint16_t value);
+
+    // Host diagnostics accumulate across guest resets; no guest-visible state.
+    bool m_audio_profile_enabled = false;
+    s_audio_profile_counter m_profile_mix{};
+    s_audio_profile_counter m_profile_voices{};
+    s_audio_profile_counter m_profile_adpcm{};
+    s_audio_profile_counter m_profile_input_mix{};
+    s_audio_profile_counter m_profile_input_dma{};
+    s_audio_profile_counter m_profile_rings{};
+    s_audio_profile_counter m_profile_sink{};
+    s_audio_profile_counter m_profile_silent_rings{};
 
     bool m_clock_active = false;
     uint64_t m_clock_cycles = 0u;

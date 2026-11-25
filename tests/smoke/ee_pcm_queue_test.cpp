@@ -1,4 +1,5 @@
 #include "ee_pcm_queue.h"
+#include "../../src/iop/iop_audio_profile.h"
 
 #include <atomic>
 #include <cstdint>
@@ -17,6 +18,15 @@
 
 int main()
 {
+    iop::s_audio_profile_counter counter{};
+    {
+        iop::c_audio_profile_scope disabled(false, counter);
+    }
+    CHECK(counter.m_calls == 0u && counter.m_ns == 0u);
+    {
+        iop::c_audio_profile_scope enabled(true, counter);
+    }
+    CHECK(counter.m_calls == 1u && counter.m_ns == counter.m_max_ns);
     ee::c_ee_pcm_queue<4u> queue;
     const int16_t first[] = {1, -1, 2, -2, 3, -3, 4, -4, 5, -5};
     int16_t out[12]{};

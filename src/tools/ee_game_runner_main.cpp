@@ -3051,9 +3051,19 @@ int main(int argc, char** argv)
         }
     }
 
+    std::string audio_profile_environment;
+    const char* audio_profile_value = read_host_environment(
+        "SDBZ_AUDIO_PROFILE", &audio_profile_environment);
+    const bool audio_profile_enabled = audio_profile_value != nullptr &&
+        std::strcmp(audio_profile_value, "1") == 0;
+    if (iop_kernel != nullptr)
+    {
+        iop_kernel->hardware().enable_spu2_audio_profile(audio_profile_enabled);
+    }
     if (host_audio_enabled)
     {
-        host_audio.start(iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+        host_audio.start(iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr,
+            audio_profile_enabled);
     }
 
     if (instruction_trace_window_seen && instruction_trace_path == nullptr)
@@ -8775,6 +8785,7 @@ int main(int argc, char** argv)
     if (iop_kernel != nullptr)
     {
         const auto& spu2 = iop_kernel->hardware().spu2();
+        spu2.report_audio_profile();
         std::printf(
             "IOP SPU2 clock: active=%u iop_cycles=%llu spu_cycles=%llu "
             "elapsed_samples=%llu sample_phase=%u cycles_per_sample=%u\n",

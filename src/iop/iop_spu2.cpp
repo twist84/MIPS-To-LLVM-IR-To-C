@@ -10,6 +10,21 @@ c_spu2::c_spu2()
     reset();
 }
 
+void c_spu2::report_audio_profile() const
+{
+    if (m_audio_profile_enabled)
+    {
+        m_profile_mix.report("spu2_mix_frames");
+        m_profile_voices.report("spu2_advance_voices");
+        m_profile_adpcm.report("spu2_decode_voice_block");
+        m_profile_input_mix.report("spu2_advance_input");
+        m_profile_input_dma.report("spu2_push_input");
+        m_profile_rings.report("spu2_write_mixer_rings");
+        m_profile_sink.report("spu2_pcm_sink");
+        m_profile_silent_rings.report("spu2_silent_ring_revolutions");
+    }
+}
+
 void c_spu2::reset()
 {
     m_clock_active = false;
@@ -171,6 +186,7 @@ uint32_t c_spu2::voice_address(const s_core& core, uint32_t voice, uint32_t fiel
 
 void c_spu2::decode_voice_block(s_voice& voice, uint32_t slot)
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_adpcm);
     const uint32_t address = voice.m_next & (k_ram_words - 1u);
     uint16_t words[8];
     for (uint32_t i = 0u; i < 8u; ++i)
@@ -226,6 +242,7 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
 
 void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2])
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_voices);
     constexpr uint32_t block_length = 28u << 12u;
     for (uint32_t core_index = 0u; core_index < 2u; ++core_index)
     {
@@ -345,6 +362,7 @@ uint32_t c_spu2::input_refill_cycles(uint32_t core) const
 
 bool c_spu2::push_input(uint32_t core, const uint8_t* data, uint32_t bytes)
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_input_dma);
     if (core >= 2u || data == nullptr || bytes == 0u ||
         bytes > k_input_chunk_bytes || (bytes & 3u) != 0u ||
         input_frames(core) > k_input_frames - 256u)
@@ -390,6 +408,7 @@ void c_spu2::check_input_irq(uint32_t address, uint32_t words)
 
 void c_spu2::advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2])
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_input_mix);
     for (uint32_t core = 0u; core < 2u; ++core)
     {
         s_core& state = m_cores[core];
@@ -448,6 +467,7 @@ void c_spu2::emit_pcm(int16_t left, int16_t right)
         m_pcm_batch[m_pcm_pending * 2u + 1u] = right;
         if (++m_pcm_pending == k_input_batch)
         {
+            c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_sink);
             m_pcm_sink(m_pcm_user, m_pcm_batch, k_input_batch);
             m_pcm_pending = 0u;
         }
@@ -464,6 +484,7 @@ void c_spu2::count_mixer_irq(uint32_t address, uint32_t words)
 
 void c_spu2::write_mixer_rings()
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_rings);
     // Reference tick N writes 32 frames at (N*32) modulo 512. The
     // first tick writes words 32..63, not words 0..31.
     const uint32_t position = static_cast<uint32_t>(m_mixed_frames % k_input_frames);
@@ -483,6 +504,7 @@ void c_spu2::write_mixer_rings()
 
 void c_spu2::mix_frames(uint64_t samples)
 {
+    c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_mix);
     while (samples != 0u)
     {
         const uint32_t offset = static_cast<uint32_t>(m_mixed_frames % k_input_batch);
@@ -496,6 +518,7 @@ void c_spu2::mix_frames(uint64_t samples)
             // external callbacks within this advance; IRQ latches may
             // rise only once per core. Preserve the exact batch phase.
             const uint64_t frames = samples / k_input_frames * k_input_frames;
+            c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_silent_rings);
             std::fill_n(m_ram.begin(), 0x2000u, 0u);
             count_mixer_irq(0u, 0x2000u);
             m_mixed_frames += frames;
