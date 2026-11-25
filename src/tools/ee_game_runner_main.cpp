@@ -3375,8 +3375,21 @@ int main(int argc, char** argv)
     ee::s_ee_cpu_state irq_interrupted_cpu{};
     ee::s_ee_vu0_state irq_interrupted_vu0{};
     constexpr uint32_t k_irq_kernel_stack = 0x8007fff0u;
+    constexpr uint32_t k_slot_callback_limit = 16u;
+    uint32_t slot_callback_samples = 0u;
+    bool slot_callback_armed = false;
+    ee::c_ee_sdbz_dma_wait_probe::s_slot_observation slot_callback_before{};
     const auto enter_irq_callback = [&](const s_kernel_interrupt_handler& handler)
     {
+        // Observe only the identified VIF1 handler while the retail
+        // wait is suspended, with a fixed log bound per replay.
+        slot_callback_armed = report_path != nullptr &&
+            slot_callback_samples < k_slot_callback_limit &&
+            ee::c_ee_sdbz_dma_wait_probe::is_slot_callback(
+                irq_callback_is_intc, irq_callback_cause,
+                handler.m_address, irq_interrupted_cpu.m_pc) &&
+            ee::c_ee_sdbz_dma_wait_probe::sample_slots(
+                memory.get(), slot_callback_before);
         cpu.m_cop0[12] = (irq_interrupted_cpu.m_cop0[12] & ~0x10001u) | 2u;
         cpu.m_gpr[4] = {irq_callback_cause, 0u};
         cpu.m_gpr[5] = {handler.m_arg, 0u};
@@ -5117,6 +5130,24 @@ int main(int argc, char** argv)
              reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH)))
         {
             const int32_t result = static_cast<int32_t>(cpu.m_gpr[2].m_lo);
+            if (slot_callback_armed)
+            {
+                slot_callback_armed = false;
+                ee::c_ee_sdbz_dma_wait_probe::s_slot_observation after{};
+                if (ee::c_ee_sdbz_dma_wait_probe::sample_slots(memory.get(), after))
+                {
+                    ++slot_callback_samples;
+                    std::fprintf(stderr,
+                        "EE SDBZ slot callback: dispatch=%llu "
+                        "handler=0x00102a60 resume=0x001025a4 result=%d "
+                        "selector=%u->%u flags=[%u,%u]->[%u,%u] "
+                        "(read-only callback boundaries)\n",
+                        static_cast<unsigned long long>(dispatched), result,
+                        slot_callback_before.m_selector, after.m_selector,
+                        slot_callback_before.m_flag0, slot_callback_before.m_flag1,
+                        after.m_flag0, after.m_flag1);
+                }
+            }
             if (result >= 0 && irq_callback_index < irq_callback_handlers.size())
             {
                 enter_irq_callback(irq_callback_handlers[irq_callback_index++]);

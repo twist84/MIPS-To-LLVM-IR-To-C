@@ -115,6 +115,33 @@ int main()
         std::fputs("M2 SDBZ red-loop snapshot or RAM was altered\n", stderr);
         return 1;
     }
+    using t_probe = ee::c_ee_sdbz_dma_wait_probe;
+    t_probe::s_slot_observation before{}, after{};
+    if (!t_probe::is_slot_callback(false, 1u, 0x00102a60u, 0x001025a4u) ||
+        t_probe::is_slot_callback(true, 1u, 0x00102a60u, 0x001025a4u) ||
+        t_probe::is_slot_callback(false, 5u, 0x00102a60u, 0x001025a4u) ||
+        t_probe::is_slot_callback(false, 1u, 0x00102a64u, 0x001025a4u) ||
+        t_probe::is_slot_callback(false, 1u, 0x00102a60u, 0x00102560u) ||
+        t_probe::sample_slots(nullptr, before) ||
+        !t_probe::sample_slots(&memory, before))
+    {
+        std::fputs("M2 SDBZ callback selection or slot sample failed\n", stderr);
+        return 1;
+    }
+    // Only the fixture (standing in for guest execution) changes RAM.
+    memory.write32(t_probe::k_slot_flag_base + 4u, 8u);
+    if (!t_probe::sample_slots(&memory, after) ||
+        before.m_selector != 0u || after.m_selector != 0u ||
+        before.m_flag0 != 2u || after.m_flag0 != 2u ||
+        before.m_flag1 != 9u || after.m_flag1 != 8u ||
+        memory.read32(t_probe::k_slot_flag_base + 4u) != 8u ||
+        dmac.vif1_channel_state().m_chcr != 0x105u ||
+        dmac.pending() != 0u)
+    {
+        std::fputs("M2 SDBZ callback slot sample mutated hardware or RAM\n", stderr);
+        return 1;
+    }
+
     FILE* output = std::tmpfile();
     if (output == nullptr)
     {

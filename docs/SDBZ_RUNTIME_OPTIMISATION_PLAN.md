@@ -188,3 +188,34 @@ hint. Existing earlier-insertion and HLE deadline tests cover the case
 where an intervening real event changes the earliest alarm.
 No lowering or AOT cache change. No standalone retail replay required;
 performance remains to be measured with the next combined run.
+
+## Batch 5: command-slot loop and VIF1 completion audit
+
+The 11:23 replay records 3461 entries to 0x00102560, 273065681
+native instructions, and 1563.086 ms of per-PC wall time. It contains
+39 HOST_YIELD edges to 0x001025a4, 39 DMAC1 callback returns to that
+header, 227 DMAC5 returns, and 48 INTC callback returns. All 3447
+logged DMAC1 callback entries use handler 0x00102a60. No red-loop
+snapshot was reached. The earlier ELF-derived
+[M2.4 audit](M2_4_SDBZ_COMMAND_SLOT_TIMEOUT.md) identifies a loop
+counter threshold of 3001, Timer0 COUNT (0x10000000) threshold 60001,
+and the DMAC1 handler's pending-count decrement at 0x00102b08..10.
+The latest ZIP has no ELF or IR instruction bytes; the static facts are
+from that earlier exact-ELF audit, not newly reconstructed from logs.
+
+This is not the pure idempotent VBlank poll. Do not relax internal
+branch, loop-carried register or timer-read guards. The native code
+still has to execute the counter and timeout path correctly. The
+observed channel-1 returns are consistent with the expected producer,
+but do not by themselves establish which pending count changed.
+
+Record at most 16 before/after slot-selector and flag pairs around
+actual completed DMAC1 callbacks at 0x00102a60 interrupting 0x001025a4.
+The log includes the return dispatch and result; capture before entering
+each matching handler and before restoring the interrupted context or
+chaining the next callback. No new MMIO reads, guest writes, fabricated
+interrupts, or timer changes. The smoke test checks filter selection
+and immutable backed-RAM observations. Callback-boundary correlation
+is not an instruction-level writer trace. No EE or VU1 cache changes;
+collect the new diagnostic in the next combined retail replay rather
+than request a standalone run.
