@@ -30,6 +30,8 @@ struct s_idle_loop_shape
     // Instruction words from header_pc through the backedge delay slot.
     std::vector<uint32_t> words;
     const char* reason = "not analyzed";
+    uint32_t carried_read_pc = 0u;
+    uint32_t carried_read_register = 0u;
 };
 
 enum class e_idle_iteration : uint8_t
@@ -333,7 +335,7 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
             }
         }
     };
-    const auto apply = [&](const s_decoded& d, uint32_t& mask)
+    const auto apply = [&](const s_decoded& d, uint32_t& mask, uint32_t index)
     {
         for (uint32_t s = 0u; s < d.source_count; ++s)
         {
@@ -341,6 +343,8 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
             if (reg != 0u && (written_anywhere & (1u << reg)) != 0u &&
                 (mask & (1u << reg)) == 0u)
             {
+                shape.carried_read_pc = header_pc + 4u * index;
+                shape.carried_read_register = reg;
                 return false;
             }
         }
@@ -358,7 +362,7 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
         }
         uint32_t mask = written[i];
         const s_decoded d = decode(shape.words[i]);
-        if (!apply(d, mask))
+        if (!apply(d, mask, i))
         {
             shape.reason = "loop-carried register";
             return shape;
@@ -368,7 +372,7 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
             merge(i + 1u, mask);
             continue;
         }
-        if (!apply(decode(shape.words[i + 1u]), mask))
+        if (!apply(decode(shape.words[i + 1u]), mask, i + 1u))
         {
             shape.reason = "loop-carried register";
             return shape;
