@@ -360,6 +360,41 @@ unserviced under the baseline cadence. A chain must not pay that final
 interval early. Reject or fall back before executing a path that
 cannot prove these requirements.
 
+## Third retail horizon and quiet service replay (db10666)
+
+All five CI workflows passed. The opt-in 40,000,000-dispatch
+retail run stopped at 0x001082a0 with DISPATCH/status=1 and zero IOP
+debt. There were 1,616,595 source-bound matches and zero mismatches;
+261,268 also had matching linked IR certificates (0.653% of dispatches).
+The identity cache hit 1,609,934 times and missed 6,661 times.
+The projected quiet count was 13,003,240. VIF1 deferred transactions
+accounted for all 19,001,061 VU entry barriers, with no CMSAR1 or
+VU0-running barriers. These are overlapping observations, not a
+wall-time profile.
+
+IOP quiet service accepted 26,628,385 of 30,530,526 attempts,
+advancing 514,464,166 IOP cycles. Coalescing saved 844,276
+of 42,482,932 logical turns, leaving 41,638,656 service invocations.
+After subtracting direct quiet advances, 15,010,271 ordinary kernel
+runs remained (64.67% of logical turns avoided the general scheduler).
+This is a reduction in invocations, not measured speedup.
+
+## VIF1 host-only overlap timing opt-out
+
+`SDBZ_VU1_NATIVE_OVERLAP_PROFILE=0` disables only the per-native
+boundary overlap timing (default remains enabled). It bypasses
+the controller's native interval start/end clock and worker timestamp
+reads, including submission-time overlap capture. Worker execution
+and wait timing, command counts, controller polling, DMA/IRQ
+publication and explicit joins are unchanged. The worker JSON
+`native_overlap_profile` field distinguishes unavailable overlap
+metrics from a genuinely zero measured overlap. Directed VIF1
+transaction tests run with both modes, including in-native job
+submission, pending-state isolation, late rejection and reset.
+This does not authorize removing any worker completion checkpoints.
+No guest IR lowering changes. Measure paired retail wall time before
+adopting the opt-out as a performance preset.
+
 ## Remaining activation gates (not implemented)
 
 
