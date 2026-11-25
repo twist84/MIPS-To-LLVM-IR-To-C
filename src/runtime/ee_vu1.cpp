@@ -552,50 +552,56 @@ bool branch_delay_exempt(uint32_t lower)
 bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
                 uint32_t fsf, uint32_t& value, uint32_t& latency)
 {
-    const float x = to_float(source[0]);
-    const float y = to_float(source[1]);
-    const float z = to_float(source[2]);
-    const float scalar = to_float(source[fsf]);
-    const float sum = x * x + y * y + z * z;
-    float result = 0.0f;
-
+    // EFU uses the PS2's full exponent range (including exponent 255).
+    // Compose the already validated integer FMAC and signed-digit
+    // root/quotient primitives instead of host IEEE float arithmetic.
+    const uint32_t scalar = source[fsf];
+    const auto squares = [&]()
+    {
+        return vu1_fp::add(vu1_fp::add(
+            vu1_fp::mul(source[0], source[0]),
+            vu1_fp::mul(source[1], source[1])),
+            vu1_fp::mul(source[2], source[2]));
+    };
+    const auto reciprocal = [](uint32_t bits)
+    {
+        return vu_scalar_fp::quotient(vu1_fp::kOne, bits);
+    };
     switch (index)
     {
-    case 0x70u: result = sum; latency = 11u; break; // ESADD
-    case 0x71u:
-        result = sum != 0.0f ? 1.0f / sum : 3.4e38f;
-        latency = 18u;
-        break; // ERSADD
-    case 0x72u: result = std::sqrt(sum); latency = 18u; break; // ELENG
+    case 0x70u: value = squares(); latency = 11u; return true; // ESADD
+    case 0x71u: value = reciprocal(squares()); latency = 18u; return true; // ERSADD
+    case 0x72u: value = vu_scalar_fp::root(squares()); latency = 18u; return true; // ELENG
     case 0x73u:
-        result = sum != 0.0f ? 1.0f / std::sqrt(sum) : 3.4e38f;
+        value = reciprocal(vu_scalar_fp::root(squares()));
         latency = 24u;
-        break; // ERLENG
-    case 0x74u: result = std::atan2(y, x); latency = 54u; break;
-    case 0x75u: result = std::atan2(z, x); latency = 54u; break;
+        return true; // ERLENG
     case 0x76u:
-        result = x + y + z + to_float(source[3]);
+        value = vu1_fp::add(vu1_fp::add(vu1_fp::add(
+            source[0], source[1]), source[2]), source[3]);
         latency = 12u;
-        break; // ESUM
-    case 0x78u: result = std::sqrt(std::fabs(scalar)); latency = 12u; break;
+        return true; // ESUM
+    case 0x78u: value = vu_scalar_fp::root(scalar); latency = 12u; return true; // ESQRT
     case 0x79u:
-    {
-        const float root = std::sqrt(std::fabs(scalar));
-        result = root != 0.0f ? 1.0f / root : 3.4e38f;
+        value = reciprocal(vu_scalar_fp::root(scalar));
         latency = 18u;
-        break;
-    }
-    case 0x7au:
-        result = scalar != 0.0f ? 1.0f / scalar : 3.4e38f;
-        latency = 12u;
-        break;
-    case 0x7cu: result = std::sin(scalar); latency = 29u; break;
-    case 0x7du: result = std::atan(scalar); latency = 54u; break;
-    case 0x7eu: result = std::exp(-scalar); latency = 44u; break;
+        return true; // ERSQRT
+    case 0x7au: value = reciprocal(scalar); latency = 12u; return true; // ERCPR
+    // Transcendentals still use the previous approximate model until the
+    // VU-specific coefficient and evaluation pipeline is audited.
+    case 0x74u:
+        value = to_bits(std::atan2(to_float(source[1]), to_float(source[0])));
+        latency = 54u;
+        return true;
+    case 0x75u:
+        value = to_bits(std::atan2(to_float(source[2]), to_float(source[0])));
+        latency = 54u;
+        return true;
+    case 0x7cu: value = to_bits(std::sin(to_float(scalar))); latency = 29u; return true;
+    case 0x7du: value = to_bits(std::atan(to_float(scalar))); latency = 54u; return true;
+    case 0x7eu: value = to_bits(std::exp(-to_float(scalar))); latency = 44u; return true;
     default: return false;
     }
-    value = to_bits(result);
-    return true;
 }
 
 bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,

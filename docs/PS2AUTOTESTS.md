@@ -1027,3 +1027,17 @@ VI24 stores mask 0xc0c. Apply these generic control-transfer semantics
 without changing existing FBRST strobes, CMSAR1 or VU execution.
 Synthetic tests exercise different write patterns and GPR high-half
 preservation. Original exact match remains pending validation.
+
+### EFU integer arithmetic batch
+
+The original EFU run prints all 208 numerical results. The previous
+host-float model matched 87 of 208 words. A standalone calculation
+transcribing the repository's existing VU FMAC, signed-digit root and
+signed-digit quotient primitives reproduced 128/128 expected words
+for ESADD, ERSADD, ELENG, ERLENG, ESUM, ESQRT, ERSQRT and ERCPR.
+Use those same primitives in the shared runtime EFU implementation,
+which is also called by the AOT helper. Preserve instruction latencies.
+No special-casing original vectors or changing the expected transcript.
+New word-level tests cover ordinary, exponent-255 and zero inputs.
+EATAN/xy/xz, ESIN and EEXP are still approximate and separately tracked;
+this arithmetic calculation is not a complete original ELF pass.
