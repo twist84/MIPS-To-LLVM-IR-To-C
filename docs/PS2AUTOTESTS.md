@@ -199,3 +199,12 @@ boundaries. Instruction-attempt scheduling remains a reference-compatible
 budget, not calibrated EE timing; unsupported upper operations, flags and
 other microinstructions continue to reject. Existing EE ABI offsets and
 VU1 AOT code are unchanged. Only actual transcript runs establish passes.
+
+### Batch A: VU0 flag readback and lower NOP
+
+The pinned original VU test runner spills CLIP, MAC and STATUS with
+FCGET, FMOR and FSOR before its E-bit exit. Implement these and the
+other read-only flag predicates in the partial VU0 engine, using the
+existing four-cycle FMAC reservation for flag reads. The canonical
+lower MOVE-to-VF0 NOP has no FMAC reservation. General MOVE, flag
+writes and non-NOP upper execution are not enabled by this change.

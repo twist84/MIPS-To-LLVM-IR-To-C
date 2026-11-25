@@ -851,6 +851,69 @@ bool vu0_is_supported_lower_ialu(const s_ee_vu0_micro_instruction& instruction)
     }
 }
 
+bool vu0_is_supported_lower_flag_read(const s_ee_vu0_micro_instruction& instruction)
+{
+    using op = e_ee_vu0_micro_opcode;
+    switch (instruction.m_lower_fields.m_operation)
+    {
+    case op::FCEQ:
+    case op::FCAND:
+    case op::FCOR:
+    case op::FSEQ:
+    case op::FSAND:
+    case op::FSOR:
+    case op::FMEQ:
+    case op::FMAND:
+    case op::FMOR:
+    case op::FCGET:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void vu0_execute_lower_flag_read(
+    s_ee_vu0_state* vu0, const s_ee_vu0_micro_instruction& instruction)
+{
+    using op = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const uint32_t clip = vu0->m_clip_flags & 0xffffffu;
+    const uint32_t status = vu0->m_status_flags & 0xfffu;
+    const uint32_t mac = vu0->m_mac_flags & 0xffffu;
+    const uint32_t source = vu0_read_ialu_vi(vu0, fields.m_is);
+    const uint32_t imm24 = instruction.m_lower & 0xffffffu;
+    const uint32_t imm12 = (instruction.m_lower & 0x7ffu) |
+        ((instruction.m_lower >> 10u) & 0x800u);
+    uint32_t destination = fields.m_it;
+    uint32_t value = 0;
+    switch (fields.m_operation)
+    {
+    case op::FCEQ: destination = 1; value = clip == imm24; break;
+    case op::FCAND: destination = 1; value = (clip & imm24) != 0; break;
+    case op::FCOR: destination = 1; value = (clip | imm24) == 0xffffffu; break;
+    case op::FSEQ: value = status == imm12; break;
+    case op::FSAND: value = status & imm12; break;
+    case op::FSOR: value = status | imm12; break;
+    case op::FMEQ: value = mac == source; break;
+    case op::FMAND: value = mac & source; break;
+    case op::FMOR: value = mac | source; break;
+    case op::FCGET: value = clip & 0xfffu; break;
+    default: return;
+    }
+    vu0_write_ialu_vi(vu0, destination, static_cast<uint16_t>(value));
+}
+
+void vu0_record_lower_fmac(s_ee_vu0_state* vu0, uint32_t reg, uint32_t lanes)
+{
+    const uint64_t ready = vu0->m_cycle + 4u;
+    vu0->m_vf_memory_ready_cycle = ready;
+    auto& issue = vu0->m_vf_memory_issues[vu0->m_vf_memory_issue_index & 3u];
+    ++vu0->m_vf_memory_issue_index;
+    issue.m_ready_cycle = ready;
+    issue.m_register = reg;
+    issue.m_lane_mask = reg != 0 ? lanes : 0u;
+}
+
 bool vu0_is_supported_lower_memory(const s_ee_vu0_micro_instruction& instruction)
 {
     using op = e_ee_vu0_micro_opcode;
@@ -1439,6 +1502,9 @@ uint32_t ee_vu0_execute_ialu_callback(
 
         const bool lower_ialu = vu0_is_supported_lower_ialu(instruction);
         const bool lower_branch = vu0_is_supported_lower_branch(instruction);
+        const bool lower_flag_read = vu0_is_supported_lower_flag_read(instruction);
+        // Canonical lower NOP is MOVE to VF0 with no enabled lanes.
+        const bool lower_nop = instruction.m_lower == 0x8000033cu;
         const bool lower_memory = vu0_is_supported_lower_memory(instruction);
         const uint32_t memory_address = lower_memory
             ? vu0_memory_byte_address(vu0, instruction) : 0;
@@ -1450,7 +1516,7 @@ uint32_t ee_vu0_execute_ialu_callback(
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_I | EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
             instruction.m_upper_fields.m_operation != e_ee_vu0_micro_opcode::NOP ||
-            (!lower_ialu && !lower_branch && !lower_memory) ||
+            (!lower_ialu && !lower_branch && !lower_memory && !lower_flag_read && !lower_nop) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
@@ -1560,21 +1626,12 @@ uint32_t ee_vu0_execute_ialu_callback(
                 memory_op == e_ee_vu0_micro_opcode::LQD ||
                 memory_op == e_ee_vu0_micro_opcode::SQD)
             {
-                const uint64_t ready = vu0->m_cycle + 4u;
-                vu0->m_vf_memory_ready_cycle = ready;
-                auto& issue = vu0->m_vf_memory_issues[
-                    vu0->m_vf_memory_issue_index & 3u
-                ];
-                ++vu0->m_vf_memory_issue_index;
-                issue.m_ready_cycle = ready;
-                issue.m_register =
+                const uint32_t reg =
                     (memory_op == e_ee_vu0_micro_opcode::LQ ||
                      memory_op == e_ee_vu0_micro_opcode::LQI ||
                      memory_op == e_ee_vu0_micro_opcode::LQD)
                         ? instruction.m_lower_fields.m_ft : 0u;
-                issue.m_lane_mask =
-                    issue.m_register != 0
-                        ? instruction.m_lower_fields.m_xyzw : 0u;
+                vu0_record_lower_fmac(vu0, reg, instruction.m_lower_fields.m_xyzw);
             }
             const uint32_t schedule_result = ee_vu0_ialu_schedule_write(
                 vu0, write_mask, 4
@@ -1584,7 +1641,13 @@ uint32_t ee_vu0_execute_ialu_callback(
                 return schedule_result;
             }
         }
-        else
+        else if (lower_flag_read)
+        {
+            // Flag reads occupy the lower FMAC pipe but write no VF lane.
+            vu0_execute_lower_flag_read(vu0, instruction);
+            vu0_record_lower_fmac(vu0, 0u, 0u);
+        }
+        else if (lower_branch)
         {
             s_vu0_branch_action branch_action{};
             if (!vu0_prepare_lower_branch(vu0, instruction, &branch_action))

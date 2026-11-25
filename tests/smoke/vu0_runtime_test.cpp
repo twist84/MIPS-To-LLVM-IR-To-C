@@ -384,6 +384,37 @@ int main()
               "VCALLMSR reads CMSAR0");
     }
 
+    // Read the three flag banks using the original microinstruction forms.
+    {
+        ee::s_ee_cpu_state flag_cpu{};
+        ee::s_ee_vu0_state flag_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        flag_vu.m_vpu_status = 1u;
+        flag_vu.m_clip_flags = 0xabc123u;
+        flag_vu.m_mac_flags = 0x3456u;
+        flag_vu.m_status_flags = 0x245u;
+        flag_vu.m_vi[1] = 0xabcd0000u;
+        flag_vu.m_vi[4] = 0x80u;
+        flag_vu.m_vi[0] = 0xdeadbeefu;
+        install_vu0_pair(&flag_vu, 0, (0x1cu << 25u) | (1u << 16u),
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 1, (0x1bu << 25u) | (2u << 16u) | (4u << 11u),
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 2, (0x17u << 25u) | (3u << 16u) | (1u << 21u) | 0x20u,
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 3, (0x1cu << 25u),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&flag_vu, 4, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &flag_cpu,
+            &flag_vu, 20u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              flag_vu.m_running == 0u && flag_vu.m_micro_pc == 40u &&
+              flag_vu.m_vi[1] == 0xabcd0123u && flag_vu.m_vi[2] == 0x34d6u &&
+              flag_vu.m_vi[3] == 0xa65u && flag_vu.m_vi[0] == 0xdeadbeefu &&
+              flag_vu.m_cycle == 8u,
+              "VU0 flag reads, VI0 and lower NOP/E completion");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
