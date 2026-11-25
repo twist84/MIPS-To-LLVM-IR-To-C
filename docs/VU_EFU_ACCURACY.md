@@ -125,3 +125,38 @@ Artifacts: [combined original suite summary](https://github.com/twist84/MIPS-To-
 ## Retail replay preflight recovery
 
 The first post-EFU Windows P40 attempt verified all 16,250 shared EE IR modules but refused the O5 native profile because its saved lowering fingerprint for `include/ee/ee_cycle_scheduler.h` differed from the current source. No retail dispatch occurred. The canonical shared source was already current; this is a stale native profile, not an EFU execution failure. After authenticating the canonical source and locking the profile, rebuild the native library through the full incremental object verifier, which checks IR and object hashes and target/LLVM identity. Publish fresh native provenance only after a successful link. Never bypass stale canonical-source validation or overwrite guest IR. A regression simulates a stale profile fingerprint with an unchanged verified source; the previous modified-IR rejection remains in place. The user's actual replay and new CI are pending.
+
+### Cache recovery and bounded retail verification (2026-11-25, 18:53)
+
+User archive: `sdbz-graphics-pr148-neutral-20261125-185358362.zip`.
+The O5 cache preflight succeeded, preserving 16,250 EE modules. The native
+process reached its configured 40,000,000-dispatch cap, final PC
+`0x00398db0`, reason DISPATCH, in 49.234 s process wall (44.576 s
+profiled runner wall). The archive contains no explicit Git HEAD; the
+user supplied it following the cache recovery patch. Do not claim a
+cryptographically revision-pinned retail run from the filename alone.
+
+| Metric | Earlier warmed baseline | New bounded replay |
+| --- | ---: | ---: |
+| Native VU1 invocations | 411642 | 390362 |
+| VU1 interpreter fallbacks | 0 | 0 |
+| IOP guest faults | 0 | 0 |
+| Successful window presents | 2886 | 3541 |
+| Nonzero guest PCM frames | 1858699 | 1587046 |
+| Process wall (s) | 49.406 | 49.234 |
+
+Spawn boundaries were reached; 512x448 display and WebGPU PPM files are
+byte-identical, but both read GPU-authoritative VRAM. 3,176,982 GPU draws,
+4,947 guest fields, no host audio device, 3,960,368 guest PCM frames.
+One VU1 job was pending at the dispatch cap; no worker failures/rejections.
+SIO2 recorded zero Cross-pressed polls out of 3,444, but the EE pad-return
+observer recorded 190 Cross-bit-low candidates out of 3,152. Therefore
+this is a bounded retail regression pass, not a strictly input-matched
+neutral comparison or proof of performance improvement or audible sound.
+The old and new workloads differ. Timing remains reference_compatibility.
+
+At PR head `a2aece6`, all five workflows passed again, including
+[original suite 45678885192](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45678885192)
+(55/55 exact, 208/208 direct EFU, zero existing-model latency differences)
+and [build/test 45678885324](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45678885324).
+Independent hardware vectors and fully matched replay evidence remain open.
