@@ -922,6 +922,43 @@ def make_thread_priority_elf(path):
     path.write_bytes(image)
 
 
+def make_thread_lifecycle_elf(path):
+    """Real HLE dispatch: delete/terminate validity, restart and ID reuse."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    instructions = []
+
+    def call(service, arg, saved_register):
+        if arg == 0x00100200:
+            instructions.extend((0x3c040010, 0x34840200))
+        else:
+            instructions.append(0x24040000 | arg)
+        instructions.extend((0x24050000, 0x24030000 | service, 0x0000000c,
+                             0x00400021 | (saved_register << 11)))
+
+    call(0x21, 1, 16)  # self delete fails
+    call(0x20, 0x00100200, 17)  # create dormant thread 2
+    call(0x25, 2, 18)  # dormant terminate fails
+    call(0x22, 2, 19)  # start thread 2 (lower priority)
+    call(0x21, 2, 20)  # READY delete fails
+    call(0x25, 2, 21)  # terminate READY thread
+    call(0x22, 2, 22)  # restart terminated thread
+    call(0x25, 2, 23)  # terminate again
+    call(0x21, 2, 24)  # delete dormant thread
+    call(0x21, 2, 25)  # deleted ID fails
+    call(0x20, 0x00100200, 15)  # lowest free ID reused
+    instructions.extend((0x00000008, 0x00000000))
+    for index, word in enumerate(instructions):
+        struct.pack_into("<I", image, 0x108 + 4 * index, word)
+    struct.pack_into("<2I", image, 0x280, 0x03e00008, 0)
+    struct.pack_into("<9I", image, 0x300, 0, 0x00100180, 0x00102000,
+                     0x800, 0x0010f000, 64, 0, 0, 0)
+    path.write_bytes(image)
+
+
 def make_get_thread_id_elf(path):
     """GetThreadId must return the running main thread, not a dormant child."""
     make_elf(path)
@@ -3533,6 +3570,26 @@ def main():
             assert regs[22] == 0xffffffffffffffff, state # invalid ID
             assert "HLE EE thread switch: id=2" not in combined, combined
             assert state["final_pc"] != 0x001000f0, state
+
+        with tempfile.TemporaryDirectory(prefix="ee-native-thread-lifecycle-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-lifecycle.elf"
+            make_thread_lifecycle_elf(elf)
+            report_path = root / "lifecycle.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=100", "--trace", "--report", str(report_path),
+                "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE SetSyscall:" not in combined, combined
+            assert "HLE EE thread switch: id=2" not in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            regs = state["gpr_lo"]
+            failure = 0xffffffffffffffff
+            assert regs[16:26] == [failure, 2, failure, 2, failure, 2, 2, 2, 2, failure], state
+            assert regs[15] == 2, state
 
         with tempfile.TemporaryDirectory(prefix="ee-native-thread-priority-") as tmp:
             root = Path(tmp)

@@ -3390,6 +3390,15 @@ int main(int argc, char** argv)
     bool reschedule_requested = false;
     uint64_t idle_started_cycle = 0u;
     uint64_t idle_cycles = 0u;
+    const auto make_thread_dormant = [](s_kernel_thread& thread)
+    {
+        thread.m_status = ee_kernel_thread::k_dormant;
+        thread.m_has_context = false;
+        thread.m_wait_type = 0u;
+        thread.m_wait_semaphore = 0u;
+        thread.m_wakeups = 0u;
+        thread.m_priority = thread.m_initial_priority;
+    };
     const auto schedule_threads = [&]() -> bool
     {
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::thread_schedule);
@@ -3421,7 +3430,7 @@ int main(int argc, char** argv)
         if (next_id != current_thread_id)
         {
             s_kernel_thread& current = threads[current_thread_id];
-            if (current.m_used)
+            if (current.m_used && current.m_status != ee_kernel_thread::k_dormant)
             {
                 current.m_context = cpu;
                 current.m_vu0_context = vu0;
@@ -5363,8 +5372,7 @@ int main(int argc, char** argv)
             !callback_active)
         {
             s_kernel_thread& finished = threads[current_thread_id];
-            finished.m_status = 16u;
-            finished.m_has_context = false;
+            make_thread_dormant(finished);
             if (trace)
             {
                 std::printf("HLE EE thread returned: id=%u\n",
@@ -5490,7 +5498,7 @@ int main(int argc, char** argv)
             if (service == 0x02u ||
                 (service >= 0x10u && service <= 0x17u) ||
                 (service >= 0x1au && service <= 0x1du) ||
-                (service >= 0x20u && service <= 0x24u) ||
+                (service >= 0x20u && service <= 0x25u) ||
                 service == 0x29u || service == 0x2au || service == 0x2bu ||
                 service == 0x2du || service == 0x2eu ||
                 service == 0x2fu || service == 0x30u || service == 0x31u ||
@@ -5794,6 +5802,58 @@ int main(int argc, char** argv)
                     }
                 }
 
+                else if (service == 0x21u || service == 0x25u)
+                {
+                    // DeleteThread only frees dormant threads. TerminateThread
+                    // makes an existing non-current active thread dormant.
+                    const uint32_t id = static_cast<uint32_t>(cpu.m_gpr[4].m_lo);
+                    const bool deleting = service == 0x21u;
+                    s_kernel_thread* target = id > 0u && id < 256u &&
+                        threads[id].m_used ? &threads[id] : nullptr;
+                    const bool allowed = target != nullptr && (deleting
+                        ? ee_kernel_thread::can_delete(target->m_status, id == current_thread_id)
+                        : ee_kernel_thread::can_terminate(target->m_status, id == current_thread_id));
+                    if (allowed)
+                    {
+                        if (deleting)
+                        {
+                            *target = {};
+                        }
+                        else
+                        {
+                            // Detach semaphore waiters before changing thread state.
+                            // Never leave a dead thread in a live wait queue.
+                            if (target->m_wait_type == 2u)
+                            {
+                                const uint32_t sema = target->m_wait_semaphore;
+                                if (sema == 0u || sema > 64u ||
+                                    !semaphores[sema - 1u].m_used)
+                                {
+                                    std::fprintf(stderr, "TerminateThread HLE refused invalid semaphore\n");
+                                    break;
+                                }
+                                auto& waiters = semaphores[sema - 1u].m_waiters;
+                                const auto waiter = std::find(waiters.begin(), waiters.end(), id);
+                                if (waiter == waiters.end())
+                                {
+                                    std::fprintf(stderr, "TerminateThread HLE refused untracked waiter\n");
+                                    break;
+                                }
+                                waiters.erase(waiter);
+                            }
+                            make_thread_dormant(*target);
+                        }
+                    }
+                    cpu.m_gpr[2].m_lo = allowed ? id : static_cast<uint64_t>(-1ll);
+                    cpu.m_gpr[2].m_hi = 0u;
+                    if (trace)
+                    {
+                        std::printf("HLE %sThread: id=%u result=%d\n",
+                            deleting ? "Delete" : "Terminate", id,
+                            allowed ? static_cast<int>(id) : -1);
+                    }
+                }
+
                 else if (service == 0x22u)
                 {
                     const uint32_t id =
@@ -5873,11 +5933,7 @@ int main(int argc, char** argv)
                         break;
                     }
                     s_kernel_thread& thread = threads[current_thread_id];
-                    thread.m_status = 16u;
-                    thread.m_has_context = false;
-                    thread.m_wait_type = 0u;
-                    thread.m_wait_semaphore = 0u;
-                    thread.m_wakeups = 0u;
+                    make_thread_dormant(thread);
                     if (service == 0x24u)
                     {
                         thread.m_used = false;
@@ -8187,7 +8243,7 @@ int main(int argc, char** argv)
                     cpu.m_gpr[2].m_hi = 0u;
                 }
 
-                else
+                else if (service == 0x74u)
                 {
                     // SetSyscall(number, handler) installs an EE kernel
                     // callback in the native dispatcher AND in guest RAM.
@@ -8251,6 +8307,12 @@ int main(int argc, char** argv)
                     // including for unsupported out-of-range indices.
                     cpu.m_gpr[2].m_lo = 0u;
                     cpu.m_gpr[2].m_hi = 0u;
+                }
+
+                else
+                {
+                    std::fprintf(stderr, "Unhandled EE HLE syscall 0x%02x\n", service);
+                    break;
                 }
 
                 // Syscall HLE returns to the interrupted guest callback.

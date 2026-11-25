@@ -641,3 +641,20 @@ The smoke test checks both directions, readback, QWC, STR, D_STAT and
 payload wrapping. The original chain mismatch appears to involve the
 source payload itself; investigate allocation/guest memory writes before
 changing DMA tag handling. No new exact transcript is claimed yet.
+
+### Kernel lifecycle dispatch
+
+The pinned original thread/delete ELF stops at syscall 0x21 (V1=0x21,
+EPC 0x00104964), but the runner reports a SetSyscall handler rejection.
+0x21 was in the HLE allowlist without a matching branch; it fell through
+to the final unconditional SetSyscall handler. Restrict SetSyscall to
+0x74 and fail closed for unimplemented recognized services. Implement
+ordinary DeleteThread (0x21) and TerminateThread (0x25), according to
+PS2SDK syscallnr.h and original hardware thread/delete and thread/terminate
+transcripts: self and invalid targets fail; delete requires dormant;
+terminate accepts non-current ready/wait/suspend/waitsuspend and removes
+semaphore queue membership. Reset current priority to initial on dormant
+transition, including ordinary exit and return; avoid saving a dormant
+CPU context during reschedule. Add status and synthetic guest dispatch
+coverage for failed/valid operations, restart and ID reuse. Interrupt-safe
+termination and additional scheduling behavior remain separate audits.
