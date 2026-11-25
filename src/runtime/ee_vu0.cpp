@@ -1937,7 +1937,8 @@ uint32_t ee_vu0_execute_ialu_callback(
             {
                 lanes = (lanes >> 1u) | ((lanes << 3u) & 8u);
             }
-            if (lower_op != e_ee_vu0_micro_opcode::MFIR)
+            if (lower_op != e_ee_vu0_micro_opcode::MFIR &&
+                !(lower_op == e_ee_vu0_micro_opcode::MOVE && lower.m_ft == 0u))
             {
                 vu0_stall_vf_read(vu0, lower.m_fs, lanes);
             }
