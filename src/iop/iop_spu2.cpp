@@ -23,6 +23,9 @@ void c_spu2::reset()
     m_mixed_frames = 0u;
     m_nonzero_frames = 0u;
     m_pcm_peak = 0u;
+    m_clipped_samples = 0u;
+    m_mixer_ring_batches = 0u;
+    m_mixer_irq_events = 0u;
     m_pcm_pending = 0u;
     for (s_core& core : m_cores)
     {
@@ -53,6 +56,11 @@ int32_t signed_halfword(uint32_t value)
 {
     value &= 0xffffu;
     return static_cast<int32_t>(value) - (value >= 0x8000u ? 0x10000 : 0);
+}
+
+int16_t clamp_sample(int32_t value)
+{
+    return static_cast<int16_t>(std::clamp(value, -32768, 32767));
 }
 
 int32_t master_gain(uint16_t value)
@@ -296,6 +304,13 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2
                 }
                 const int32_t enveloped = floor_shift(
                     interpolated * voice.m_envelope.m_level, 15u);
+                if (index == 1u || index == 3u)
+                {
+                    const uint32_t ring = index == 1u ? 2u : 3u;
+                    const uint32_t slot = static_cast<uint32_t>(
+                        m_mixed_frames % k_input_batch) + sample;
+                    m_mixer_rings[core_index][ring][slot] = clamp_sample(enveloped);
+                }
                 for (uint32_t channel = 0u; channel < 2u; ++channel)
                 {
                     const int32_t gain = voice.m_volume[channel].m_level;
@@ -396,6 +411,14 @@ void c_spu2::advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]
             const uint32_t slot = (state.m_input_read + sample) % k_input_frames;
             for (uint32_t channel = 0u; channel < 2u; ++channel)
             {
+                // Core 0 taps the raw input; core 1's input tap is
+                // the post-master core 0 output, populated by the mixer.
+                if (core == 0u)
+                {
+                    const uint32_t ring_slot = static_cast<uint32_t>(
+                        m_mixed_frames % k_input_batch) + sample;
+                    m_mixer_rings[0u][channel][ring_slot] = state.m_input[slot][channel];
+                }
                 // B-volume is the signed AutoDMA input gain.
                 sum[core][sample][channel] += floor_shift(
                     static_cast<int32_t>(state.m_input[slot][channel]) *
@@ -431,38 +454,108 @@ void c_spu2::emit_pcm(int16_t left, int16_t right)
     }
 }
 
+void c_spu2::count_mixer_irq(uint32_t address, uint32_t words)
+{
+    const uint32_t prior = irq_latches();
+    check_input_irq(address, words);
+    const uint32_t raised = irq_latches() & ~prior;
+    m_mixer_irq_events += (raised & 1u) + ((raised >> 1u) & 1u);
+}
+
+void c_spu2::write_mixer_rings()
+{
+    // Reference tick N writes 32 frames at (N*32) modulo 512. The
+    // first tick writes words 32..63, not words 0..31.
+    const uint32_t position = static_cast<uint32_t>(m_mixed_frames % k_input_frames);
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        for (uint32_t ring = 0u; ring < 8u; ++ring)
+        {
+            const uint32_t address = (ring < 4u ? 0u : 0x1000u) +
+                core * 0x800u + (ring & 3u) * k_input_frames + position;
+            std::copy_n(m_mixer_rings[core][ring], k_input_batch,
+                m_ram.begin() + address);
+            count_mixer_irq(address, k_input_batch);
+        }
+    }
+    ++m_mixer_ring_batches;
+}
+
 void c_spu2::mix_frames(uint64_t samples)
 {
     while (samples != 0u)
     {
-        if (m_pcm_sink == nullptr &&
-            (m_cores[0].m_key_mask | m_cores[1].m_key_mask |
-             m_cores[0].m_input_count | m_cores[1].m_input_count) == 0u)
+        const uint32_t offset = static_cast<uint32_t>(m_mixed_frames % k_input_batch);
+        const bool silent = (m_cores[0].m_key_mask | m_cores[1].m_key_mask |
+            m_cores[0].m_input_count | m_cores[1].m_input_count) == 0u;
+        if (silent && m_pcm_sink == nullptr && offset == 0u &&
+            samples >= k_input_frames)
         {
-            // Headless silence is still real elapsed PCM frames. Avoid
-            // a per-frame loop when no active source can change state.
-            m_mixed_frames += samples;
-            return;
+            // A complete silent ring revolution writes every reserved
+            // mixer word exactly once. There are no source reads or
+            // external callbacks within this advance; IRQ latches may
+            // rise only once per core. Preserve the exact batch phase.
+            const uint64_t frames = samples / k_input_frames * k_input_frames;
+            std::fill_n(m_ram.begin(), 0x2000u, 0u);
+            count_mixer_irq(0u, 0x2000u);
+            m_mixed_frames += frames;
+            m_mixer_ring_batches += frames / k_input_batch;
+            samples -= frames;
+            continue;
         }
         const uint32_t count = static_cast<uint32_t>(
-            std::min<uint64_t>(samples, k_input_batch));
-        int32_t sum[2][k_input_batch][2]{};
-        advance_voices(count, sum);
-        advance_input(count, sum);
-        for (uint32_t sample = 0u; sample < count; ++sample)
+            std::min<uint64_t>(samples, k_input_batch - offset));
+        for (auto& core : m_mixer_rings)
         {
-            int16_t pcm[2]{};
-            for (uint32_t channel = 0u; channel < 2u; ++channel)
+            for (auto& ring : core)
             {
-                int32_t mixed = 0;
-                for (uint32_t core = 0u; core < 2u; ++core)
-                {
-                    mixed += scale_mix(sum[core][sample][channel],
-                        master_gain(m_cores[core].m_master[channel]));
-                }
-                pcm[channel] = static_cast<int16_t>(std::clamp(mixed, -32768, 32767));
+                std::fill_n(ring + offset, count, int16_t{0});
             }
-            emit_pcm(pcm[0], pcm[1]);
+        }
+        if (silent && m_pcm_sink == nullptr)
+        {
+            m_mixed_frames += count;
+        }
+        else
+        {
+            int32_t sum[2][k_input_batch][2]{};
+            advance_voices(count, sum);
+            // Dry taps precede AutoDMA input gain and master scaling.
+            for (uint32_t core = 0u; core < 2u; ++core)
+            {
+                for (uint32_t sample = 0u; sample < count; ++sample)
+                {
+                    for (uint32_t channel = 0u; channel < 2u; ++channel)
+                    {
+                        m_mixer_rings[core][4u + channel][offset + sample] =
+                            clamp_sample(sum[core][sample][channel]);
+                    }
+                }
+            }
+            advance_input(count, sum);
+            for (uint32_t sample = 0u; sample < count; ++sample)
+            {
+                int16_t pcm[2]{};
+                for (uint32_t channel = 0u; channel < 2u; ++channel)
+                {
+                    const int32_t core0 = scale_mix(sum[0u][sample][channel],
+                        master_gain(m_cores[0u].m_master[channel]));
+                    const int32_t core1 = scale_mix(sum[1u][sample][channel],
+                        master_gain(m_cores[1u].m_master[channel]));
+                    m_mixer_rings[1u][channel][offset + sample] = clamp_sample(core0);
+                    const int32_t mixed = core0 + core1;
+                    if (mixed < -32768 || mixed > 32767)
+                    {
+                        ++m_clipped_samples;
+                    }
+                    pcm[channel] = clamp_sample(mixed);
+                }
+                emit_pcm(pcm[0], pcm[1]);
+            }
+        }
+        if (m_mixed_frames % k_input_batch == 0u)
+        {
+            write_mixer_rings();
         }
         samples -= count;
     }
@@ -538,6 +631,29 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
                     earliest = cycles;
                 }
             }
+        }
+    }
+    // The reserved 0x0000..0x1fff sound-RAM mixer rings are updated
+    // even when no voices are active. Each IRQA within that range is
+    // visited once per 512 samples, at the matching 32-frame tick.
+    const uint32_t phase = static_cast<uint32_t>(m_mixed_frames % k_input_frames);
+    const uint32_t next_tick = (phase / k_input_batch + 1u) * k_input_batch;
+    for (const s_core& candidate : m_cores)
+    {
+        if ((candidate.m_attr & 0x40u) == 0u || candidate.m_irq ||
+            candidate.m_irqa >= 0x2000u)
+        {
+            continue;
+        }
+        const uint32_t target = (candidate.m_irqa % k_input_frames) /
+            k_input_batch * k_input_batch;
+        const uint32_t distance = (target + k_input_frames - next_tick) %
+            k_input_frames;
+        const uint32_t cycles = (next_tick - phase + distance) *
+            k_cycles_per_sample - sample_phase();
+        if (earliest == 0u || cycles < earliest)
+        {
+            earliest = cycles;
         }
     }
     // This is an opportunity, not a promised IRQ: address comparison

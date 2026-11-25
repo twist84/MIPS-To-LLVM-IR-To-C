@@ -7,7 +7,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// Stereo PCM mixer; mixer-ring writeback/IRQ and reverb remain separate.
+// Stereo PCM mixer and guest-visible mixer rings; reverb remains unimplemented.
 class c_spu2
 {
 public:
@@ -25,7 +25,7 @@ public:
     // Count elapsed guest cycles, not generated audio frames or host time.
     // Returns newly latched playback IRQ core bits (zero if none).
     uint32_t advance_cycles(uint32_t cycles);
-    // Earliest possible voice fetch edge while a core can latch IRQ.
+    // Earliest possible voice/input fetch or mixer-ring IRQ edge.
     // Zero means no pending playback IRQ opportunity.
     uint32_t voice_irq_cycles_remaining() const;
     uint64_t playback_irq_events() const { return m_playback_irq_events; }
@@ -76,6 +76,9 @@ public:
     uint64_t mixed_frames() const { return m_mixed_frames; }
     uint64_t nonzero_frames() const { return m_nonzero_frames; }
     uint32_t pcm_peak() const { return m_pcm_peak; }
+    uint64_t clipped_samples() const { return m_clipped_samples; }
+    uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
+    uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
     uint32_t input_frames(uint32_t core) const;
     uint32_t input_refill_cycles(uint32_t core) const;
     bool push_input(uint32_t core, const uint8_t* data, uint32_t bytes);
@@ -144,6 +147,8 @@ private:
     void check_input_irq(uint32_t address, uint32_t words);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     void mix_frames(uint64_t samples);
+    void write_mixer_rings();
+    void count_mixer_irq(uint32_t address, uint32_t words);
     void emit_pcm(int16_t left, int16_t right);
     void start_voice(s_core& core, uint32_t index);
     static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
@@ -167,6 +172,11 @@ private:
     uint64_t m_mixed_frames = 0u;
     uint64_t m_nonzero_frames = 0u;
     uint32_t m_pcm_peak = 0u;
+    uint64_t m_clipped_samples = 0u;
+    uint64_t m_mixer_ring_batches = 0u;
+    uint64_t m_mixer_irq_events = 0u;
+    // Per-core input L/R, voice 1/3, dry L/R and wet L/R.
+    int16_t m_mixer_rings[2][8][k_input_batch]{};
     void* m_pcm_user = nullptr;
     t_pcm_sink m_pcm_sink = nullptr;
     int16_t m_pcm_batch[k_input_batch * 2u]{};

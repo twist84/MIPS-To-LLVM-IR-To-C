@@ -8756,6 +8756,11 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(spu2.mixed_frames()),
             static_cast<unsigned long long>(spu2.nonzero_frames()),
             spu2.pcm_peak(), iop::c_spu2::k_sample_rate);
+        std::printf(
+            "IOP SPU2 mixer rings: batches=%llu irq_events=%llu clipped_samples=%llu\n",
+            static_cast<unsigned long long>(spu2.mixer_ring_batches()),
+            static_cast<unsigned long long>(spu2.mixer_irq_events()),
+            static_cast<unsigned long long>(spu2.clipped_samples()));
     }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,

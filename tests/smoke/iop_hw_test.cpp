@@ -551,6 +551,84 @@ bool test_authentic_spu2_dma()
     return true;
 }
 
+bool test_spu2_mixer_rings()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    uint32_t value = 0u;
+    uint16_t word = 0u;
+    // Program a real voice-1 sample, outside reserved mixer RAM.
+    // IRQA targets its enveloped (pre-volume) tap, not its ADPCM data.
+    if (!hw.write(base + 0x1aau, 2u, 0x5000u) ||
+        !hw.write(base + 0x1acu, 2u, 0u) ||
+        !hw.write(base + 0x1acu, 2u, 0x4444u) ||
+        !hw.write(base + 0x1ceu, 2u, 0x5000u) ||
+        !hw.write(base + 0x10u, 2u, 0x3fffu) ||
+        !hw.write(base + 0x16u, 2u, 0x000fu) ||
+        !hw.write(base + 0x19eu, 2u, 0x420u) ||
+        !hw.write(base + 0x19au, 2u, 0x40u) ||
+        !hw.write(base + 0x1a0u, 2u, 2u))
+    {
+        return false;
+    }
+    (void)kernel.run(31u * period);
+    if (hw.spu2().mixer_ring_batches() != 0u ||
+        hw.spu2().mixer_irq_events() != 0u ||
+        !hw.spu2_ram_word(0x420u, &word) || word != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period);
+    if (hw.spu2().mixer_ring_batches() != 1u ||
+        hw.spu2().mixer_irq_events() != 1u ||
+        !hw.spu2_ram_word(0x420u, &word) || word != 7168u ||
+        !hw.spu2_ram_word(0x1020u, &word) || word != 7167u ||
+        !hw.spu2_ram_word(0x820u, &word) || word != 7166u ||
+        !hw.spu2_ram_word(0x1420u, &word) || word != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
+    {
+        return false;
+    }
+
+    // No active voice is necessary for a mixer-ring write/IRQ.
+    // Sound RAM advances even in a headless idle kernel.
+    kernel.reset();
+    if (!kernel.attach_hle_hardware() ||
+        !hw.write(base + 0x1aau, 2u, 0x400u) ||
+        !hw.write(base + 0x1acu, 2u, 0x1234u) ||
+        !hw.write(base + 0x59eu, 2u, 0x400u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        hw.spu2().voice_irq_cycles_remaining() != 512u * period ||
+        !kernel.has_guest_work())
+    {
+        return false;
+    }
+    (void)kernel.run(512u * period - 1u);
+    if (!hw.spu2_ram_word(0x400u, &word) || word != 0x1234u ||
+        hw.spu2().mixer_irq_events() != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (!hw.spu2_ram_word(0x400u, &word) || word != 0u ||
+        hw.spu2().mixer_ring_batches() != 16u ||
+        hw.spu2().mixer_irq_events() != 1u ||
+        hw.spu2().irq_latches() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
+    {
+        return false;
+    }
+    return true;
+}
+
 bool test_spu2_pcm_mixer()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1535,6 +1613,10 @@ int main()
     if (!test_guest_sio2_controller())
     {
         return fail("guest SIO2 PIO/DMA11/12 transport or IRQ17 fidelity");
+    }
+    if (!test_spu2_mixer_rings())
+    {
+        return fail("SPU2 mixer-ring taps, silent IRQ or ring wrap");
     }
     if (!test_spu2_pcm_mixer())
     {
