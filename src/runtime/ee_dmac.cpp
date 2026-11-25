@@ -1903,7 +1903,10 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
     case 0x10u:
     {
         const uint32_t previous = channel->m_madr;
-        channel->m_madr = value;
+        // MADR.SPR is not implemented on the two dedicated SPR channels.
+        // Clear the bit at register write, before readback or DMA validation.
+        channel->m_madr = (channel_index == 8u || channel_index == 9u)
+            ? value & 0x7fffffffu : value;
         if (channel_index == 2u)
         {
             trace_gif_write(0x10u, value, previous);
