@@ -80,7 +80,12 @@ def _block_words(lines, pc):
 def extract_bounds(ir, symbol, block_pcs):
     """Return {exact switch PC: exact instruction words}; fail closed."""
     header = f"define i32 @{symbol}(ptr %cpu, ptr %rt) {{"
-    lines = [line.strip() for line in ir.splitlines()]
+    # emit_insn writes a standalone "; guest PC: mnemonic" line before
+    # every counted ordinary/delay instruction. These comments and blank
+    # lines have no IR semantics; leave inline text and unknown syntax
+    # subject to the strict grammar.
+    lines = [line for raw in ir.splitlines()
+             if (line := raw.strip()) and not line.startswith(";")]
     try:
         start = lines.index(header) + 1
         end = lines.index("}", start)
