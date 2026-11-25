@@ -101,8 +101,12 @@ struct s_ee_hot_loop_state
 class c_ee_dispatch_hotspots
 {
 public:
-    static constexpr size_t k_pc_capacity = 4096u;
-    static constexpr size_t k_edge_capacity = 8192u;
+    // Retail P40 exhausted the previous 4096/8192 limits during
+    // startup, losing approximately half of later dispatch observations.
+    // Keep the maps bounded but allow a larger exact working set. The
+    // independent hot counter caches remain unchanged.
+    static constexpr size_t k_pc_capacity = 32768u;
+    static constexpr size_t k_edge_capacity = 65536u;
     static constexpr size_t k_change_capacity = 32u;
     static constexpr size_t k_top_count = 16u;
 
