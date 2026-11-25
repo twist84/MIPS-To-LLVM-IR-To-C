@@ -653,6 +653,48 @@ int main()
               "native target cache preserves exact keys, misses and invalidation");
     }
 
+    // A certificate is tied to an exact PC, callable owner and source
+    // bound. Negative results are reusable only for the same loaded owner.
+    {
+        ee::c_native_alu_identity_cache cache(true);
+        ee::c_native_alu_identity_cache disabled(false);
+        constexpr uint32_t a = 0x00100000u;
+        constexpr uint32_t b = a + 65536u * 4u;
+        uint32_t lookups = 0u;
+        const auto verify = [&](uint32_t pc, ee::t_ee_translated_entry entry,
+            uint32_t slots) -> ee::s_native_alu_identity
+        {
+            ++lookups;
+            if (pc == a && entry == caller_entry && slots == 2u)
+            {
+                return {a, true};
+            }
+            if (pc == b && entry == callee_entry)
+            {
+                return {b, false};
+            }
+            return {0u, true}; // A failed owner can never certify a path.
+        };
+        const bool ok =
+            !disabled.resolve(a, caller_entry, 2u, verify).m_certified &&
+            !cache.resolve(0u, caller_entry, 2u, verify).m_certified &&
+            !cache.resolve(a, nullptr, 2u, verify).m_certified &&
+            !cache.resolve(a, caller_entry, 0u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_owner == a &&
+            !cache.resolve(a, caller_entry, 3u, verify).m_certified &&
+            !cache.resolve(a, caller_entry, 3u, verify).m_certified &&
+            !cache.resolve(a, callee_entry, 2u, verify).m_certified &&
+            cache.resolve(b, callee_entry, 2u, verify).m_owner == b &&
+            !cache.resolve(b, callee_entry, 2u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+            cache.hits() == 3u && cache.misses() == 5u && lookups == 5u;
+        cache.clear();
+        check(ok && cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+              cache.misses() == 6u && lookups == 6u,
+              "native ALU identity cache preserves exact proof keys and lifetime");
+    }
+
     // Exhaust all control-bit combinations and individual interrupt lines,
     // with the pending line either masked or unmasked.
     bool eligibility_same = !ee::ee_interrupts_enabled_inline(nullptr);
