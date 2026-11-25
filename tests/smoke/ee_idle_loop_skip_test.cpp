@@ -143,8 +143,10 @@ int main()
     carried.words[2] = 0u; // v1 now has no reaching write on the taken path.
     const auto carried_shape = ee::analyze_idle_loop(carried.base, carried, true);
     check(!carried_shape.eligible &&
-        std::strcmp(carried_shape.reason, "loop-carried register") == 0,
-        "merge rejects a register not written on every incoming path");
+        std::strcmp(carried_shape.reason, "loop-carried register") == 0 &&
+        carried_shape.carried_read_pc == carried.base + 16u &&
+        carried_shape.carried_read_register == 3u,
+        "merge identifies the register and PC lacking an incoming write");
     auto delay_entry = forward_poll;
     delay_entry.words[1] = 0x10400004u; // target the final branch delay slot.
     check(!ee::analyze_idle_loop(delay_entry.base, delay_entry, true).eligible,
