@@ -334,3 +334,13 @@ what lower opcode they resemble. Execute the upper using the previous
 I value, then commit the literal to VI21. No lower dependency, branch,
 memory, or integer ALU side effects. Tests cover consecutive ADDi/I
 pairs, arbitrary literal bits, and I+E termination. D/T remain unsupported.
+
+## VU0 non-flag-writing upper instructions
+
+All four workflows at 8fd574c passed; original pilot remains six exact
+matches. Upper ABS, ITOF0/4/12/15, FTOI0/4/12/15, MAX and MINI (vector,
+broadcast, I) share macro arithmetic primitives. Unary forms write Ft,
+not the secondary opcode field Fd. Their VF reservations still mature
+after four cycles but do not publish a MAC/status update. Test chains
+cover masked destinations, exact arithmetic and delayed dependencies.
+No new original transcript pass claimed.

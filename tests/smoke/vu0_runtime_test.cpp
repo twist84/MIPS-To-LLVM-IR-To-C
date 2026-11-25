@@ -613,6 +613,49 @@ int main()
               "upper ADDi reads previous I and commits exact new literal bits");
     }
 
+    // Non-flag-writing upper operations reserve VF lanes but preserve MAC/SF.
+    {
+        ee::s_ee_cpu_state unary_cpu{};
+        ee::s_ee_vu0_state unary_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        unary_vu.m_vpu_status = 1u;
+        unary_vu.m_mac_flags = 0x1234u;
+        unary_vu.m_status_flags = 0x345u;
+        unary_cpu.m_vu0[1].m_lo = 0x80000000bfc00000ull; // -0, -1.5
+        unary_cpu.m_vu0[2].m_lo = 0xdeadbeef00000000ull;
+        unary_cpu.m_vu0[6].m_lo = 0x7fffffff00000000ull;
+        const auto unary = [](uint32_t code, uint32_t ft, uint32_t fs, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) |
+                ((code >> 2u) << 6u) | (0x3cu | (code & 3u));
+        };
+        const auto binary = [](uint32_t code, uint32_t fd, uint32_t fs, uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | code;
+        };
+        const uint32_t nop = 0x8000033cu;
+        install_vu0_pair(&unary_vu, 0, nop, unary(0x1d, 2, 1, 8)); // ABS.x
+        install_vu0_pair(&unary_vu, 1, nop, unary(0x15, 3, 2, 8)); // FTOI4.x
+        install_vu0_pair(&unary_vu, 2, nop, unary(0x11, 4, 3, 8)); // ITOF4.x
+        install_vu0_pair(&unary_vu, 3, nop, binary(0x2b, 5, 4, 1, 8)); // MAX.x
+        install_vu0_pair(&unary_vu, 4, nop, binary(0x2f, 6, 5, 1, 8)); // MINI.x
+        install_vu0_pair(&unary_vu, 5, nop, make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&unary_vu, 6, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &unary_cpu,
+            &unary_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              unary_vu.m_running == 0u && unary_vu.m_cycle == 21u,
+              "non-flag FMAC chain has four-cycle VF interlocks");
+        check(unary_cpu.m_vu0[2].m_lo == 0xdeadbeef3fc00000ull &&
+              unary_cpu.m_vu0[3].m_lo == 24u &&
+              unary_cpu.m_vu0[4].m_lo == 0x3fc00000u &&
+              unary_cpu.m_vu0[5].m_lo == 0x3fc00000u &&
+              unary_cpu.m_vu0[6].m_lo == 0x7fffffffbfc00000ull,
+              "ABS/FTOI/ITOF/MAX/MINI use correct destinations and preserve masked lanes");
+        check(unary_vu.m_mac_flags == 0x1234u && unary_vu.m_status_flags == 0x345u,
+              "non-flag FMAC does not clear or alter existing flags");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
