@@ -61,7 +61,7 @@ int main(int argc, char** argv)
         make_i(0x09, 0, 14, 0x5678),       // addiu $t6,$zero,0x5678
         make_i(0x04, 0, 0, 2),             // beq $zero,$zero, target (split CFG)
         0x00000000u,                       // delay-slot nop
-        make_i(0x09, 0, 14, 0x9999),       // not-taken path must not execute
+        make_i(0x09, 0, 14, -26215),       // not-taken path must not execute
         make_i(0x09, 0, 27, -2),           // addiu $k1,$zero,-2
         make_i(0x09, 0, 28, 3),            // addiu $gp,$zero,3
         make_mmi(27, 28, 23, 0, 0x00),     // madd $s7,$k1,$gp
