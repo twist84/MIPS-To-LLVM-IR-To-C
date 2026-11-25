@@ -35,9 +35,10 @@ def verify_real_probe_location():
         key = "src/runtime/" + probe_name
         assert key in host, "host relink must fingerprint the native diagnostic"
         assert key not in guest, "host-only diagnostic must not fingerprint guest IR"
-        vu1_key = "src/runtime/ee_vu_fmac4_ir.h"
-        assert vu1_key in host, "VU1 SIMD source must fingerprint the native host"
-        assert vu1_key not in guest, "VU1-only SIMD must not invalidate EE IR"
+        shared_fmac_key = "src/runtime/ee_vu_fmac4_ir.h"
+        assert shared_fmac_key in host, "shared SIMD source must fingerprint the native host"
+        assert shared_fmac_key in guest, "VU0 consumes the shared SIMD lowering template"
+        assert guest[shared_fmac_key] == host[shared_fmac_key]
         assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
 
 
@@ -60,6 +61,7 @@ def verify_preservation_when_host_only_inputs_change():
             "src/tools/ee_recomp_main.cpp": b"recomp front-end",
             "include/ee/guest_lifter_input.h": b"guest header",
             "src/runtime/ee_sdbz_pad_return_probe.h": b"first host probe",
+            "src/runtime/ee_vu_fmac4_ir.h": b"shared FMAC lowering",
         }
         for name, content in paths.items():
             path = source_root / name
@@ -139,6 +141,23 @@ def verify_preservation_when_host_only_inputs_change():
             cache, next_host, next_guest, 0, metadata_path, object_dir
         )
         assert ir.read_text(encoding="utf-8") == "; synthetic verified IR\n"
+
+        # A shared runtime header actually consumed by the EE emitter
+        # must invalidate guest IR, unlike an unrelated host-only probe.
+        shared_fmac = source_root / "src/runtime/ee_vu_fmac4_ir.h"
+        shared_fmac.write_bytes(b"changed shared FMAC lowering")
+        changed_fmac = run_game.ir_generation_inputs(elf, source_root)
+        assert changed_fmac != initial_guest
+        try:
+            run_game.validate_preserved_translation(
+                cache, next_host, changed_fmac, 0, metadata_path, object_dir
+            )
+        except ValueError as error:
+            assert "guest IR generation input changed:" in str(error)
+            assert "ee_vu_fmac4_ir.h" in str(error)
+        else:
+            raise AssertionError("changed shared FMAC template unexpectedly reused")
+        shared_fmac.write_bytes(paths["src/runtime/ee_vu_fmac4_ir.h"])
 
         # A genuinely changed guest lowering header must still fail closed.
         (source_root / "include/ee/guest_lifter_input.h").write_bytes(
