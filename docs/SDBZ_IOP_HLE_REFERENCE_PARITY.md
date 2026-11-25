@@ -1,5 +1,8 @@
 # SDBZ USA IOP HLE — ps2-web-recomp parity audit
 
+> **Record status (2026-11-25):** Pinned IOP HLE parity investigation; the initial ordinal counts are not a fresh count of the merged runtime. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Baseline and scope
 
 Main architectural reference: [twist84/ps2-web-recomp, `SDBZ` branch](https://github.com/twist84/ps2-web-recomp/tree/SDBZ), specifically [`runtime/src/iop/libs.cpp`](https://github.com/twist84/ps2-web-recomp/blob/SDBZ/runtime/src/iop/libs.cpp), blob `061b8a092688660005764d9d45d9fb1f348546df`.

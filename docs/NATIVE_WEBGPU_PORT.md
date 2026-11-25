@@ -1,5 +1,8 @@
 # Native WebGPU GS raster (no browser)
 
+> **Record status (2026-11-25):** Initial WebGPU port record; use [Native WebGPU guide](NATIVE_WEBGPU.md) for current configuration and acceptance limits. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Provenance and scope
 
 The native GS compute backend, VRAM/CLUT/upload/raster/display WGSL, and

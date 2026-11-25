@@ -1,5 +1,8 @@
 # M2 — SDBZ native runtime progression, GS/VIF/VU and EE ISA coverage
 
+> **Record status (2026-11-25):** Historical M2 implementation plan; its initial boot/ISA gaps are not a current feature inventory. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 > **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](SDBZ_RUNTIME_VALIDATION_20261125.md). The earlier boot milestones below are historical; the HLE-first runner now reaches bounded interactive training gameplay with audible audio. Full compatibility and hardware accuracy remain open.
 
 **Status:** implementation plan; not a claim of successful title-screen boot or GPU presentation  

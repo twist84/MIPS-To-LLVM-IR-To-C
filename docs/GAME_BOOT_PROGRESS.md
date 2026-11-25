@@ -1,5 +1,8 @@
 # Native game boot research — Super Dragon Ball Z (USA)
 
+> **Record status (2026-11-25):** Historical boot milestones and debugging log. Use the latest retail evidence for current progression rather than the initial stop PCs and pending requests below. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 > **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](SDBZ_RUNTIME_VALIDATION_20261125.md). The earlier boot milestones below are historical; the HLE-first runner now reaches bounded interactive training gameplay with audible audio. Full compatibility and hardware accuracy remain open.
 
 > **Current M2 implementation plan:** [SDBZ runtime progression, GS/VIF/VU and EE ISA coverage](M2_SDBZ_NATIVE_RUNTIME_AND_ISA_PLAN.md). This plan supersedes earlier static-gap priority assumptions where the 2026-11-19 07:27 boot provides newer runtime evidence.

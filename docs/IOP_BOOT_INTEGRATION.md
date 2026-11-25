@@ -1,5 +1,8 @@
 # IOP boot integration for SDBZ (US)
 
+> **Record status (2026-11-25):** Initial firmware/IOP integration record. The HLE-first runner now executes original game IRX modules and has reached training gameplay; the initial SMFLAG stop is no longer the current blocker. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 Status: staged integration; **the IOP is not yet booted by `ee_game_runner`**.
 
 ## Reproduced stop state (2026-11-16)

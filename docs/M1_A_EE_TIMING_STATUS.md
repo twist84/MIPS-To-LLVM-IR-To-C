@@ -1,6 +1,8 @@
 # M1-A — EE timing / scheduler implementation status
 
-**Branch:** feature/sdbz-hle-first-bootstrap  
+> **Current status:** The default HLE runtime now uses the approximate reference-compatibility clock, delivered real guest fields, and passes the original COP0 performance transcript. The manual-cache-hit profile is offline only; a validated R5900 clock is still outstanding. See [current status](README.md) and [accuracy plan](ACCURACY_PLAN.md). All branch/status claims below refer to the recorded development stages.
+
+**Historical branch:** feature/sdbz-hle-first-bootstrap  
 **PR:** #142 (draft, do not merge without authorization)  
 **Checkpoint:** 18 November 2026
 

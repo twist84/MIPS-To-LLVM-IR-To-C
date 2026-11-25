@@ -1,5 +1,8 @@
 # SDBZ US: authentic IOP ROM0 reset-vector bootstrap (experimental)
 
+> **Record status (2026-11-25):** Historical opt-in ROM0 boot investigation; the current normal target is HLE-first, without ROM0. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Why this exists
 
 The SDBZ US EE has consistently stalled at `0x001750B4` polling

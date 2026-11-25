@@ -1,5 +1,8 @@
 # Batch 1 — PS2-web-recomp reference architecture and R5900 timing audit
 
+> **Record status (2026-11-25):** Pinned reference-architecture audit. Its coverage and timing findings apply to the audited revision; the present HLE clock is approximate and the manual profile is offline. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Date:** 2026-11-18  
 **Repository/branch:** twist84/MIPS-To-LLVM-IR-To-C / `feature/sdbz-hle-first-bootstrap`  
 **PR:** #142 (draft; do not merge)  

@@ -1,5 +1,8 @@
 # IOP ROM0: first hardware register milestone
 
+> **Record status (2026-11-25):** Historical ROM0 initial MMIO investigation, not the normal HLE launch path. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 The IOP ROM0 reset-vector path introduced in PR #81 now has a small
 guest-visible hardware model. It handles only the devices below,
 rather than returning a zero value for every unimplemented register.

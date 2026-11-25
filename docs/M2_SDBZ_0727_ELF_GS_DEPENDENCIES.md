@@ -1,5 +1,8 @@
 # M2.1: verified USA ELF DMA/VU predicate map (07:27 trace)
 
+> **Record status (2026-11-25):** Pinned 07:27 ELF analysis; preserve the original instruction/provenance findings without treating the old replay as today's state. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 USA `SLUS_214.42` ELF was SHA-256 checked independently:
 `1b213a85a2c305dc0f893c007a502c93e0851d1bb7db6164f9e0b72adb074a16`.
 This exactly matches the 07:27 IOP catalog. The game ELF was not committed.

@@ -1,5 +1,8 @@
 # SDBZ (US) native boot: on-demand IRX loader backend
 
+> **Record status (2026-11-25):** Historical IOP disc backend implementation record, not a current blocker list. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Real game evidence
 
 The 2026-11-16 07:13 boot logs still stop at `0x001750B4`

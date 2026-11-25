@@ -1,5 +1,8 @@
 # SDBZ native graphics integration — post-PR #145
 
+> **Record status (2026-11-25):** Initial graphics integration workstream; bounded retail gameplay and native presentation have subsequently been observed. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 **Target:** Super Dragon Ball Z (USA), `SLUS_214.42`  
 **Base:** `main` after squash-merged PR #145 (`451ddff0d5ac2a1823de0666107e78299ce9cefb`)  
 **Working branch:** `feature/sdbz-native-gs-presentation`  

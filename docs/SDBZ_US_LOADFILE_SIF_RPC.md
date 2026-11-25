@@ -1,5 +1,8 @@
 # SDBZ US: guest SIF LOADFILE RPC binding and module-start transport
 
+> **Record status (2026-11-25):** Historical LOADFILE/SIF RPC audit; early pending service and stop claims apply to their recorded revision. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Scope
 
 The native runner now constructs a bounded IOP LOADFILE RPC service **only**

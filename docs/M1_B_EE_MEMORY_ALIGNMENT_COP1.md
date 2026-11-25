@@ -1,5 +1,8 @@
 # EE R5900 architecture fidelity — deterministic alignment/COP1 batch
 
+> **Record status (2026-11-25):** Implementation and validation history for alignment/COP1. Later original tests and retail evidence supersede the early ARKD and replay gates. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 ## Baseline and scope
 
 Base: `feature/sdbz-deferred-arkd-rpc-binds` PR #145 at `90e9cfd74342a1d4082d1bcd82df443ce5c6fd67`. The original review inspected `main` at `4939867` and the earlier PR commit `a58816d`. The batch changes shared EE lowering only. It does **not** claim a new retail boot replay or resolve ARKD method `0x500:1`.

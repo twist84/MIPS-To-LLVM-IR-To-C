@@ -1,6 +1,8 @@
 # MIPS To LLVM IR To C
 
-PS2 Emotion Engine (R5900) static recompiler research and implementation.
+PS2 Emotion Engine (R5900) static recompiler and experimental HLE-first native PS2 runtime.
+
+[Current status and documentation index](docs/README.md) · [Accuracy roadmap](docs/ACCURACY_PLAN.md) · [Original console test results](docs/PS2AUTOTESTS.md)
 
 The project loads a PS2 ELF, discovers guest functions, builds control-flow
 graphs, decodes and lifts supported R5900 instructions into per-function LLVM
@@ -20,7 +22,7 @@ guest-PC dispatcher.
 - Regression coverage for instruction semantics, control flow, function
   discovery, COP1/MMI and VU execution, including hardware-derived COP1 vectors.
 - HLE-first EE/IOP runtime, original game IRX execution, CDVD/SIF/DMA,
-  controller input and guest-cycle device scheduling.
+  controller input and compatibility-clock device scheduling (not calibrated R5900 cycles).
 - Native VU1 microprogram compilation, validated AOT loading with fallback,
   asynchronous VU1/GS workers and native WebGPU presentation.
 - Guest-clock SPU2 playback, DMA/AutoDMA, voice envelopes, Gaussian
@@ -30,7 +32,7 @@ guest-PC dispatcher.
 - Recoverable EE translation caches, live cache-miss overlays and
   profile-driven runtime diagnostics.
 
-For the USA SLUS_214.42 ELF, the latest full-image validation discovered
+For the USA SLUS_214.42 ELF, the historical November 12 full-image validation discovered
 7,901 functions, emitted and verified 7,901 LLVM modules, generated 7,901
 native objects, and linked them into a shared translated-code library. This is
 a successful translation/link milestone, not proof that every instruction is
@@ -53,6 +55,8 @@ configured 40-million-dispatch limit, with 16,219 cached EE IR modules,
 396,717 native VU1 invocations and zero interpreter fallbacks or IOP
 guest faults. CPU and GPU display captures were byte-identical; 2,705
 window presentations succeeded. The tester confirmed audio restoration.
+
+A later warmed 12:06 replay reached the 40-million-dispatch cap in 49.406 s with 16,250 cached EE modules, 411,642 native VU1 runs, zero VU1 fallbacks or IOP guest faults, 2,886 successful presents, and 1,858,699 nonzero PCM frames. It predates the final PR #156 code. Matching GPU-authoritative display captures are not independent CPU/GPU raster validation.
 
 This is a bounded retail milestone, not a claim of complete game or
 PS2 hardware compatibility. The input was not strictly neutral,
@@ -91,7 +95,8 @@ ctest --test-dir build --output-on-failure
 ~~~
 
 For full-image validation and the PCSX2 differential workflow, see
-docs/FULL_GAME_NATIVE_LINK_VALIDATION.md and tools/vu0_diff/README.md.
+[full-image validation](docs/FULL_GAME_NATIVE_LINK_VALIDATION.md) and [the differential adapter](tools/vu0_diff/README.md).
+Install Python with llvmlite for LLVM verification, native-object generation and the complete CTest configuration. The CMake build is the supported validation route; `scripts/build.sh` is a legacy direct compiler helper, not a replacement for the complete build/test workflow.
 
 ## Live translation-cache miss recovery
 
@@ -197,8 +202,8 @@ With a verified translation cache, `scripts\run_ps2_game.bat` stops after the
 bounded coverage probe and writes `quick-probe.json` and `quick-probe.log`.
 Run `scripts\run_ps2_game.bat --full` for the full dispatch trace, IOP catalog, and
 GS snapshots. Cold builds and explicit WebGPU requests also use the full path.
-The cached quick probe defaults to 100,000 EE dispatches, whereas the full
-retail diagnostic run defaults to 500,000. Use `scripts\run_ps2_game.bat --quick`
+The cached quick probe defaults to 100,000 EE dispatches and 120 s; the full
+retail diagnostic run defaults to 6,000,000 dispatches and 600 s. Use `scripts\run_ps2_game.bat --quick`
 to **force a non-traced probe** even when the preserved guest translation
 cache cannot be reused after pulling changes. The script still rebuilds
 or relinks guest IR as required; it simply avoids the large final trace.
@@ -211,8 +216,7 @@ thread/PC checkpoints and final instruction/register samples without
 the large per-dispatch full trace. For a long cached probe, use
 `set MAX_DISPATCHES=4000000` and `scripts\run_ps2_game.bat --quick`; inspect the
 **current** `quick-probe.log` and `quick-probe.json`, not preserved
-`boot.log` or `first-boot.json`. Override the per-pass ceiling or
-subprocess timeout for a full traced run with:
+`boot.log` or `first-boot.json`. Override the common budget, the separate expansion/replay budgets (`MAX_EXPANSION_DISPATCHES`, `MAX_REPLAY_DISPATCHES`), or the subprocess timeout for a full traced run with:
 
 ```bat
 set MAX_DISPATCHES=1000000
@@ -256,4 +260,4 @@ not synthesize hardware progress to force a successful boot.
 
 ## Original console test suite
 
-Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. The default is four parallel tests; override with `--jobs 8 --emit-jobs 1` or use `--jobs 1` for sequential validation. The standalone Original ps2autotests workflow builds only `ee_recomp` and `ee_game_runner` plus their dependencies, independently of CTest. All 55 original ELFs run on every invocation in six parallel groups, with one combined exact-transcript summary. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Latest complete pre-merge CI: **54/55 exact transcripts (98.18%)** at PR head `8bbc80d` ([run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559)); 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. Remaining: VU EFU. Clean guest termination is tracked separately. Synthetic vectors are not counted as complete ELF passes.
+Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. The default is four parallel tests; override with `--jobs 8 --emit-jobs 1` or use `--jobs 1` for sequential validation. The standalone Original ps2autotests workflow builds only `ee_recomp` and `ee_game_runner` plus their dependencies, independently of CTest. All 55 original ELFs run on every invocation in six parallel groups, with one combined exact-transcript summary. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Latest complete pre-merge CI: **54/55 exact transcripts (98.18%)** at PR head `8bbc80d` ([run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559)); 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. Remaining: VU EFU (201/208 matching numerical words, verified in the VU artifact). The same pre-merge revision passed 174/174 CTest across seven shards and all five workflows. Clean guest termination is tracked separately. Synthetic vectors are not counted as complete ELF passes.

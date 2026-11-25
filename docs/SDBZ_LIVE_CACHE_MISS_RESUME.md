@@ -27,14 +27,8 @@ still requires a new replay. No cross-process restoration is claimed.
 4. `tools/run_game.py` validates that the guest PC is in an executable ELF
    segment and absent from the current compiled PC map, and verifies that the
    original ELF and translation-source fingerprints are unchanged.
-5. It generates the missing function (with optional nearby anchored jump-table
-   siblings), verifies appended LLVM IR, emits host objects, and links a new,
-   uniquely named DLL/shared library. The stable dispatcher/runtime *object
-   caches* remain reusable.
-6. The runner opens the new library, confirms the `ee_game_run` export,
-   swaps the loaded module, restores the pre-dispatch EE CPU snapshot, and
-   invokes the new dispatcher **inside the same scheduler boundary**. No guest
-   callback, CPU instruction, VBlank or controller input is repeated.
+5. It generates the missing function (with optional nearby anchored jump-table siblings), verifies appended LLVM IR and emits host objects. The default fast path links a small overlay library for the new objects; `--live-full-relink` selects the full-library replacement path. The stable dispatcher/runtime object caches remain reusable.
+6. The runner validates the loaded library and installs an overlay resolver or replaces the full native module, restores the pre-dispatch EE CPU snapshot, and retries the guest PC **inside the same scheduler boundary**. No guest callback, CPU instruction, VBlank or controller input is repeated.
 7. Once the process exits, the driver atomically publishes the latest library
    (plus a matching PDB when enabled) and updates the normal SHA-256-verified
    translation cache. Previously generated IR modules are not regenerated.
@@ -45,7 +39,7 @@ a compiler that disappears while the process is paused.
 
 ## Using it
 
-The default auto-expansion mode now uses live resume:
+The default auto-expansion mode uses live resume; fast overlays are the default and are consolidated into the full cache at exit:
 
 ```bat
 git pull --ff-only
@@ -82,15 +76,13 @@ contains a guest-state snapshot; the running process owns that state.
 - `ee_live_cache_miss` tests two requests in one native child process,
   retention of simulated consumed input, bounded-stop behaviour and
   fail-closed compiler errors.
-- `game_runner_end_to_end` exercises real LLVM emission and native hot
+- The `game_runner_end_to_end_0` through `_3` integration groups exercise real LLVM emission and native hot
   relinking on a synthetic caller/callee ELF. It asserts that the guest entry
   PC executes once and the new function runs without launching a second
   process.
-- **Retail SDBZ acceptance target:** Cross reaches the Auto-Save notice, hits
+- **Historical retail SDBZ acceptance target:** Cross reaches the Auto-Save notice, hits
   missing function `0x00348570`, compiles it, then resumes into the
-  health-warning screen without rebooting or requiring Cross again. This
-  specific disc replay must still be validated on a user's original game
-  files and the compiled Windows runtime.
+  health-warning screen without rebooting or requiring Cross again. This specific historical cache-miss transition is not established by later gameplay alone; see [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md).
 
 ## Persistent savestates are separate work
 

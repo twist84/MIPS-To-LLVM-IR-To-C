@@ -1,5 +1,8 @@
 # SDBZ USA spawn-boundary investigation
 
+> **Record status (2026-11-25):** Historical spawn-boundary investigation with its original evidence limits. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 Original ELF SHA-256 verified:
 `1b213a85a2c305dc0f893c007a502c93e0851d1bb7db6164f9e0b72adb074a16`.
 No retail executable or data table is committed.

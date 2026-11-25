@@ -1,5 +1,8 @@
 # PR #148 — matched USA retail graphics replay (21 November 2026)
 
+> **Record status (2026-11-25):** Preserved historical PR #148 replay evidence; the reported stop PCs and black images are not current runtime status. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 Source archive: **sdbz-graphics-pr148.zip**, containing boot.log,
 expansion.log, first-boot.json, translation-cache.json,
 iop-disc-catalog.json, and all three CPU/GPU/upload PPMs.

@@ -1,5 +1,8 @@
 # VU0 / COP2 implementation research
 
+> **Record status (2026-11-25):** Early COP2/VU0 research, superseded as a feature inventory. The runtime now includes VU0 macro execution and a wider microprogram implementation; the original COP2 transfer transcript passes. Full VU timing and hardware parity remain unverified. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 ## Decision
 
 The decoder and LLVM lifter support the COP2 transfer/control forms QMFC2, QMTC2, CFC2, CTC2 and the four BC2 branches through runtime helpers. The in-tree runtime also has a deliberately narrow VU0 micro-instruction slice: lower IADD, ISUB, IAND, IOR, IADDI, IADDIU and ISUBIU, plus B, BAL, JR, JALR, IBEQ, IBNE, IBLTZ, IBGTZ, IBLEZ and IBGEZ, each paired with upper NOP. It models zero-latency lower integer writes, branch delay/nested-branch state, the conditional-branch VI-backup window and source interlocks. The generic four-entry IALU reservation queue remains available for future lower operations with nonzero latency; it is not used by this scalar integer subset. The scheduler remains host-integrated: the host supplies VU1 catch-up and EE event services, while unsupported VU0 pairs fail closed.

@@ -1,5 +1,8 @@
 # Standalone IOP ROM0 diagnostics: OpenPS2BIOS-compatible
 
+> **Record status (2026-11-25):** Historical optional OpenPS2BIOS diagnostic path, not the current BIOS-free launcher. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Why
 
 The [OpenPS2BIOS](https://github.com/TamaribaEmu/OpenPS2BIOS) project

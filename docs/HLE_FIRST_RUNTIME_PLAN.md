@@ -1,5 +1,8 @@
 # HLE-first native PS2 runtime: boot and service contract
 
+> **Record status (2026-11-25):** The HLE-first architecture decision remains relevant. The original migration status predates working retail training gameplay. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 Status: architecture decision and migration plan (2026-11-18). This document
 does **not** claim the HLE-first path already boots Super Dragon Ball Z.
 

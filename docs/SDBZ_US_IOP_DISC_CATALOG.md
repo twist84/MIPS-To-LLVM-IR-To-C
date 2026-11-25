@@ -1,5 +1,8 @@
 # SDBZ US — IRX disc discovery and explicit bootstrap resolution
 
+> **Record status (2026-11-25):** Historical disc catalog investigation; retain the original catalog and its provenance. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Current state
 
 The real-game boot stops at EE `0x001750B4` because IOP SMFLAG

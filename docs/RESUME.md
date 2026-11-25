@@ -1,6 +1,14 @@
 # Resume Point
 
-## Current baseline
+## Current baseline — 2026-11-25
+
+Main [`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea) contains PR #156, with 54/55 original exact console transcripts, 174/174 CTest and all five pre-merge workflows passing. The sole remaining transcript is EFU (201/208 words). Earlier retail SDBZ USA replays reached interactive training with audible audio and native presentation; no fresh retail replay on the squash commit is recorded. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md), [original tests](PS2AUTOTESTS.md) and [accuracy plan](ACCURACY_PLAN.md).
+
+For the relocated launchers, use `scripts\run_ps2_game.bat --full --neutral` or `scripts\run_sdbz_p40.bat` from the repository root. Retain compatible caches; request a matched retail replay when required by changed runtime behavior.
+
+## Historical recovery baseline (November 11–12)
+
+The following sections preserve the original recovery-era checkpoint. Their “current” and “latest” statements apply to that historical revision, not the merged baseline above.
 
 The current working baseline is main. It contains the reconstructed 2026-11-11 09:57 MMI/HI1/LO1 source snapshot plus the subsequent decoder, lifting, control-flow, dispatcher, and validation work.
 

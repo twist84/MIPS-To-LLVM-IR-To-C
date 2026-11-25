@@ -1,5 +1,8 @@
 # SDBZ (US): IOP startup and EE-to-IOP SIF1 transport
 
+> **Record status (2026-11-25):** Historical SIF1/startup investigation; early synchronization stops are not current gameplay blockers. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Observed boot blocker (16 November 2026)
 
 The latest real-game boot capture reached 6,945 EE dispatches and stopped at

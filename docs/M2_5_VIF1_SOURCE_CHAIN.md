@@ -1,5 +1,8 @@
 # M2.5 — VIF1 source-chain DMAC transport (bounded, fail-closed)
 
+> **Record status (2026-11-25):** Historical VIF1 source-chain transport batch; subsequent VIF and DMA work is recorded in the original-test log. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 ## Evidence: 19 November 2026, 13:53 matched USA boot
 
 Sources: `boot(20261119-135356).log`,

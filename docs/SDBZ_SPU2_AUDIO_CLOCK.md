@@ -1,5 +1,8 @@
 # SPU2 guest-clock foundation
 
+> **Record status (2026-11-25):** SPU2 implementation history. Later retail audio restoration and disabled-effect optimisations are documented in the validation and optimisation records. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 > **Current status (2026-11-25):** Guest-clock stereo PCM is audible in retail SDBZ. Batches 1–28 below document implementation history, not the current absence of features. Batch 28's ATTR bit 14 mute gate was reverted after a retail silence regression; hardware-accurate mute and full differential validation remain open. See [latest retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md).
 
 Reference: [ps2-web-recomp/SDBZ SPU2](https://github.com/twist84/ps2-web-recomp/blob/SDBZ/runtime/src/iop/spu2.cpp), `kCyclesPerSample = 768`. The nominal sample rate is 48 kHz at 36.864 MHz IOP clock. The reference batches 32 samples per event; this first batch tracks the elapsed sample count and fractional phase, not rendered samples or a hardware-cycle-validated timeline.
