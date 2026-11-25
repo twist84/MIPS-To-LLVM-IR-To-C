@@ -4674,7 +4674,7 @@ int main(int argc, char** argv)
                     "timer_count=%u timer_mode=%08x timer_target=%u timer_rem=%u timer_armed=%u "
                     "dma4=%u dma7=%u auto4=%u auto7=%u cdvd=%u "
                     "ee_dmac=%08x ee_intc=%08x mscom=%08x smcom=%08x msflag=%08x smflag=%08x "
-                    "iop_smcom=%08x iop_smflag=%08x rpc_pending=%u reason=%u\n",
+                    "rpc_pending=%u reason=%u\n",
                     static_cast<unsigned long long>(dispatched), cpu.m_pc,
                     static_cast<unsigned long long>(ee_cycle),
                     static_cast<unsigned long long>(iop_kernel->cycles()),
@@ -4696,7 +4696,6 @@ int main(int argc, char** argv)
                     static_cast<unsigned>(device.m_cdvd_pending),
                     hardware.dmac().status(), hardware.intc().pending(),
                     ee_mscom, ee_smcom, ee_msflag, ee_smflag,
-                    iop_hw.sif_smcom(), iop_hw.sif_smflag(),
                     static_cast<unsigned>(iop_rpc != nullptr &&
                         iop_rpc->pending_guest_calls() != 0u),
                     reason);
