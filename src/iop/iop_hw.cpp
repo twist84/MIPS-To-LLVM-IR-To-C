@@ -1779,10 +1779,17 @@ uint64_t c_hw::idle_event_cycles_remaining() const
         return 0u;
     }
     uint64_t next = none;
-    const uint32_t dma = spu2_dma_cycles_remaining();
-    if (dma != 0u)
+    // AutoDMA was rejected above. Only the ordinary two countdowns
+    // can contribute here; no input-refill query or generic DMA scan.
+    const uint32_t dma0 = m_spu2_dma_remaining[0u];
+    const uint32_t dma1 = m_spu2_dma_remaining[1u];
+    if (dma0 != 0u)
     {
-        next = dma;
+        next = dma0;
+    }
+    if (dma1 != 0u)
+    {
+        next = std::min(next, static_cast<uint64_t>(dma1));
     }
     // Even with IRQs disabled the mixer can write guest sound RAM.
     // Stop at the next sample, not only at a predicted voice IRQ.
