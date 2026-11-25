@@ -754,6 +754,29 @@ def main():
             assert "compilation failed" in summary
             assert "dispatches=? stop=unknown" in summary
 
+    # All shipped Windows entry points are rooted in scripts/, while
+    # their working directory and build/disc paths remain repo-relative.
+    batch_names = (
+        "build.bat", "build_cdvd.bat", "build_sdbz_all_native.bat",
+        "probe_sdbz_all_native.bat", "run_ps2_game.bat", "run_sdbz_cdvd.bat",
+        "run_sdbz_native.bat", "run_sdbz_p40.bat", "test_sdbz_native.bat",
+        "trace_sdbz_vblank.bat",
+    )
+    for filename in batch_names:
+        script = ROOT / "scripts" / filename
+        assert script.is_file(), filename
+        assert not (ROOT / filename).exists(), filename
+        assert 'cd /d "%~dp0.."' in script.read_text(encoding="utf-8"), filename
+    for parent, child in (
+        ("build.bat", "run_sdbz_cdvd.bat"),
+        ("run_sdbz_cdvd.bat", "build_cdvd.bat"),
+        ("build_sdbz_all_native.bat", "probe_sdbz_all_native.bat"),
+        ("run_sdbz_p40.bat", "run_ps2_game.bat"),
+    ):
+        assert f'call "%~dp0{child}"' in (
+            ROOT / "scripts" / parent
+        ).read_text(encoding="utf-8"), (parent, child)
+
     # Keep the reproducible P40 retail profiling preset identical to the
     # manually validated replay environment, and propagate launcher failure.
     preset = (ROOT / "scripts" / "run_sdbz_p40.bat").read_text(encoding="utf-8")
@@ -813,6 +836,15 @@ def main():
             )
             assert resolved.returncode == 0, resolved.stdout + resolved.stderr
             assert "Boot ELF:" in resolved.stdout and "FIXTURE.ELF" in resolved.stdout, resolved.stdout
+            # Exercise a real invocation from outside the checkout, using
+            # a quoted absolute script path (also covers paths with spaces).
+            launcher = ROOT / "scripts" / "run_ps2_game.bat"
+            external = subprocess.run(
+                f'cmd.exe /d /c call "{launcher}" --full --neutral --overwrite-ir',
+                cwd=disc, env=env, capture_output=True, text=True, timeout=30,
+            )
+            assert external.returncode == 0, external.stdout + external.stderr
+            assert "Boot ELF:" in external.stdout and "FIXTURE.ELF" in external.stdout, external.stdout
 
     print("boot session orchestration: PASS")
 

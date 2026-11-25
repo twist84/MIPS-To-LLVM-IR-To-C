@@ -66,6 +66,23 @@ See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_202
 [native boot plan](docs/SDBZ_NATIVE_BOOT_PLAN.md) and
 [native WebGPU documentation](docs/NATIVE_WEBGPU.md).
 
+## Repository layout
+
+| Path | Contents |
+| --- | --- |
+| `src/`, `include/` | Recompiler, runtime, and native tools |
+| `scripts/` | Windows batch build, replay, profiling, and diagnostic entry points |
+| `tools/` | Python tooling and GUI launcher |
+| `tests/` | Regression tests and fixtures |
+| `docs/` | Architecture, plans, research, validation, and development records |
+| `recovery/metadata/` | Preserved recovery provenance and historical snapshot records |
+
+Run the Windows commands in this README from the repository root.
+The batch files also resolve the root from their own path when launched
+from elsewhere (including Explorer). Build output and extracted game
+files remain in their existing root-relative locations. The Linux
+`build.sh` entry point is unchanged.
+
 ## Build and test
 
 ~~~sh
