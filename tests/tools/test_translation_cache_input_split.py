@@ -55,6 +55,7 @@ def verify_preservation_when_host_only_inputs_change():
             "tools/verify_ir.py": b"verify",
             "tools/shared_ee_ir.py": b"shared source store",
             "tools/link_native_objects.py": b"link",
+            "tools/native_alu_certificate.py": b"certificate",
             "src/ee/ee_dispatcher.cpp": b"dispatch",
             "src/ee/recompiled_functions.cpp": b"dispatch map",
             "src/ee/decoder.cpp": b"decoder",
@@ -70,6 +71,18 @@ def verify_preservation_when_host_only_inputs_change():
 
         initial_host = run_game.translation_inputs(elf, recomp, source_root)
         initial_guest = run_game.ir_generation_inputs(elf, source_root)
+        from unittest.mock import patch
+        import os
+        with patch.dict(os.environ, {"SDBZ_NATIVE_ALU_CERTIFICATES": "0"}):
+            disabled = run_game.translation_inputs(elf, recomp, source_root)
+        with patch.dict(os.environ, {"SDBZ_NATIVE_ALU_CERTIFICATES": "1"}):
+            enabled = run_game.translation_inputs(elf, recomp, source_root)
+            assert run_game.ir_generation_inputs(elf, source_root) == initial_guest
+        assert {key for key in enabled if enabled[key] != disabled[key]} == {
+            "native_alu_certificate_mode"
+        }
+        assert "tools/native_alu_certificate.py" in initial_host
+        assert "tools/native_alu_certificate.py" not in initial_guest
         work = root / "work"
         ir = work / "ir" / "function_00100000.ll"
         ir.parent.mkdir(parents=True, exist_ok=True)
