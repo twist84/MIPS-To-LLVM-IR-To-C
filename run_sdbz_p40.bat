@@ -25,7 +25,8 @@ set "MAX_EXPANSION_DISPATCHES=40000000"
 set "MAX_REPLAY_DISPATCHES=40000000"
 set "BOOT_TIMEOUT_SECONDS=600"
 
-set "SDBZ_RUNTIME_PROFILE=1"
+rem Preserve full profiling by default, but allow a profiler-off control.
+if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"
 set "SDBZ_TRACE_BUFFERED=1"
 set "SDBZ_REPORT_SNAPSHOT_MS=2000"
 rem Progress text only; retain exact dispatch counters and periodic snapshots.
