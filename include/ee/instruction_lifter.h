@@ -68,7 +68,8 @@ enum e_lift_op_kind
     LOP_MMI_PERMUTE,
     LOP_MFSA,
     LOP_MTSA,
-    LOP_BC0
+    LOP_BC0,
+    LOP_COP0_PERF
 };
 
 struct s_lifted_op

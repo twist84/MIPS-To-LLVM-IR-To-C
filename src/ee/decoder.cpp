@@ -783,7 +783,15 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         {
         case e_ee_opcode::COP0_MFC0:
         case e_ee_opcode::COP0_MTC0:
-            if (insn.sa == 0 && insn.funct == 0)
+            if (insn.rd == 25u && insn.sa == 0u)
+            {
+                insn.valid = e_ee_valid::VALID;
+                const bool counter = (insn.funct & 1u) != 0u;
+                set_mnemonic(insn, insn.rs == 0
+                    ? (counter ? "mfpc" : "mfps")
+                    : (counter ? "mtpc" : "mtps"));
+            }
+            else if (insn.sa == 0 && insn.funct == 0)
             {
                 insn.valid = e_ee_valid::VALID;
                 set_mnemonic(insn, insn.rs == 0 ? "mfc0" : "mtc0");

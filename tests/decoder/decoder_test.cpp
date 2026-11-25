@@ -848,6 +848,15 @@ int main()
 
     expect("mfc0", R(0x10,0x00,4,12,0,0), "mfc0", V);
     expect("mtc0", R(0x10,0x04,4,12,0,0), "mtc0", V);
+    for (uint32_t selector = 0; selector < 64; ++selector)
+    {
+        expect("perf read alias", R(0x10,0,4,25,0,selector),
+               (selector & 1u) ? "mfpc" : "mfps", V);
+        expect("perf write alias", R(0x10,4,4,25,0,selector),
+               (selector & 1u) ? "mtpc" : "mtps", V);
+    }
+    expect("perf reserved high selector", R(0x10,4,4,25,1,1),
+           "cop0_transfer", U);
     expect("tlbwi", R(0x10,0x10,0,0,0,0x02), "tlb", U);
     expect("bad cop0 co", R(0x10,0x10,0,0,0,0x3f), "cop0_reserved", X);
     for (uint32_t rt = 0; rt < 4; ++rt)

@@ -92,6 +92,7 @@ void module_builder::declare_memory_helpers()
     m_out += "declare i32 @ee_raise_exception(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_exception_return(ptr)\n";
     m_out += "declare void @ee_cop0_write(ptr, i32, i32)\n";
+    m_out += "declare i32 @ee_cop0_perf_transfer(ptr, ptr, i32)\n";
     m_out += "declare i32 @ee_vu0_qmfc2(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_qmtc2(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_cfc2(ptr, ptr, i32, i32, i32, i32)\n";
@@ -2097,7 +2098,34 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         const uint8_t cp0_reg = ins.rd;
         const uint8_t gpr = ins.rt;
 
-        if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0))
+        if (cp0_reg == 25u &&
+            (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0) ||
+             fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MTC0)))
+        {
+            // The core-global performance bank lives in the runtime.
+            // Commit cached GPR operands before the helper reads/writes them.
+            const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
+            store_dirty_regs(dirty);
+            reset_tracking();
+            const std::string result = newtemp();
+            const std::string success = newtemp();
+            const std::string suffix = std::to_string(m_temp_counter++);
+            const std::string fail = "perf_fail_" + suffix;
+            const std::string ready = "perf_ready_" + suffix;
+            m_out += "  " + result +
+                " = call i32 @ee_cop0_perf_transfer(ptr %cpu, ptr %rt, i32 " +
+                std::to_string(ins.opcode_word) + ")\n";
+            m_out += "  " + success + " = icmp eq i32 " + result + ", 0\n";
+            m_out += "  br i1 " + success + ", label %" + ready + ", label %" + fail + "\n";
+            m_out += fail + ":\n";
+            const std::string pc_ptr = state_field(6);
+            const std::string exit_ptr = state_field(7);
+            m_out += "  store i32 " + std::to_string(ins.pc) + ", ptr " + pc_ptr + "\n";
+            m_out += "  store i32 4, ptr " + exit_ptr + "\n";
+            m_out += "  ret i32 4\n";
+            m_out += ready + ":\n";
+        }
+        else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0))
         {
             // GPR.rt = sext32(COP0[rd])
             std::string p = newtemp();

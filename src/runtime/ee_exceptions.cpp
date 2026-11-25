@@ -164,6 +164,116 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
     }
 }
 
+namespace
+{
+constexpr uint32_t k_perf_control_mask = 0x800ffbfeu;
+constexpr uint32_t k_perf_cte = 0x80000000u;
+
+bool perf_event_supported(uint32_t control, unsigned index, bool validated)
+{
+    const uint32_t modes = (control >> (1u + index * 10u)) & 15u;
+    const uint32_t event = (control >> (5u + index * 10u)) & 31u;
+    if ((control & k_perf_cte) == 0u || modes == 0u ||
+        event == 0u || event >= 16u)
+    {
+        return true;
+    }
+    return event == 1u && validated;
+}
+}
+
+extern "C" uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu,
+                                          s_ee_runtime* rt,
+                                          uint32_t word)
+{
+    if (cpu == nullptr || rt == nullptr || (word >> 26u) != 0x10u ||
+        ((word >> 11u) & 31u) != 25u || (word & 0x7c0u) != 0u)
+    {
+        return 4u;
+    }
+    const uint32_t fmt = (word >> 21u) & 31u;
+    const uint32_t gpr = (word >> 16u) & 31u;
+    const uint32_t selector = word & 63u;
+    const bool counter = (selector & 1u) != 0u;
+    const uint32_t index = (selector >> 1u) & 1u;
+    if (fmt == 0u)
+    {
+        const uint32_t value = counter ? rt->m_perf_counter[index] : rt->m_perf_control;
+        if (gpr != 0u)
+        {
+            cpu->m_gpr[gpr].m_lo = static_cast<uint64_t>(
+                static_cast<int64_t>(static_cast<int32_t>(value)));
+        }
+        return 0u;
+    }
+    if (fmt != 4u)
+    {
+        return 4u;
+    }
+    const uint32_t value = gpr == 0u ? 0u :
+        static_cast<uint32_t>(cpu->m_gpr[gpr].m_lo);
+    if (counter)
+    {
+        rt->m_perf_counter[index] = value;
+    }
+    else if (selector == 0u)
+    {
+        const uint32_t control = value & k_perf_control_mask;
+        const bool validated = rt->m_ee_cycle_scheduler.source() ==
+            e_ee_cycle_source::VALIDATED_R5900;
+        if (!perf_event_supported(control, 0u, validated) ||
+            !perf_event_supported(control, 1u, validated))
+        {
+            return 4u;
+        }
+        rt->m_perf_control = control;
+    }
+    // Nonzero MTPS selectors are architecturally ignored.
+    return 0u;
+}
+
+extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
+                                     uint32_t status, uint64_t cycles)
+{
+    if (rt == nullptr || rt->m_ee_cycle_scheduler.source() !=
+        e_ee_cycle_source::VALIDATED_R5900)
+    {
+        return false;
+    }
+    const uint32_t control = rt->m_perf_control;
+    if ((control & k_perf_cte) == 0u || (status & STATUS_ERL) != 0u)
+    {
+        return true;
+    }
+    uint32_t next[2] = {rt->m_perf_counter[0], rt->m_perf_counter[1]};
+    for (unsigned index = 0; index < 2; ++index)
+    {
+        if (!perf_event_supported(control, index, true))
+        {
+            return false;
+        }
+        const uint32_t shift = index * 10u;
+        const uint32_t event = (control >> (5u + shift)) & 31u;
+        const uint32_t ksu = (status >> 3u) & 3u;
+        const uint32_t mode_mask = ((status & STATUS_EXL) != 0u ? 2u : 0u) |
+            (ksu < 3u ? (1u << (ksu + 2u)) : 0u);
+        if (event == 1u && ((control >> shift) & mode_mask) != 0u && cycles != 0u)
+        {
+            // Level-2 performance overflow exception is not implemented.
+            // Reject before either counter changes rather than lose it.
+            if (next[index] >= 0x80000000u ||
+                cycles >= 0x80000000ull - next[index])
+            {
+                return false;
+            }
+            next[index] += static_cast<uint32_t>(cycles);
+        }
+    }
+    rt->m_perf_counter[0] = next[0];
+    rt->m_perf_counter[1] = next[1];
+    return true;
+}
+
 // ---- Interrupts ----------------------------------------------------------
 
 extern "C" void ee_interrupt_request(s_ee_cpu_state* cpu, uint32_t line)

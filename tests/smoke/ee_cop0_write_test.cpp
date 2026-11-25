@@ -102,6 +102,62 @@ int main()
           callable.find("cpu->m_cop0[11] =") == std::string::npos,
           "native callable emitter calls the shared COP0 write helper");
 
+    // Original console performance register semantics, including all 32
+    // alias indices, with no dependence on host or diagnostic timing.
+    ee::s_ee_runtime runtime{};
+    const auto transfer = [&](uint32_t fmt, uint32_t gpr, uint32_t selector)
+    {
+        return ee::ee_cop0_perf_transfer(&cpu, &runtime,
+            (0x10u << 26u) | (fmt << 21u) | (gpr << 16u) |
+            (25u << 11u) | selector);
+    };
+    cpu.m_gpr[4].m_lo = 0x89abcdefu;
+    check(transfer(4u, 4u, 1u) == 0u, "MTPC0 full width");
+    cpu.m_gpr[4].m_lo = 0x01234567u;
+    check(transfer(4u, 4u, 3u) == 0u, "MTPC1 full width");
+    cpu.m_gpr[5].m_hi = 0x1234abcdu;
+    for (uint32_t i = 0; i < 32u; ++i)
+    {
+        check(transfer(0u, 5u, (i << 1u) | 1u) == 0u &&
+              cpu.m_gpr[5].m_lo == ((i & 1u) ? 0x01234567ull : 0xffffffff89abcdefull) &&
+              cpu.m_gpr[5].m_hi == 0x1234abcdu, "MFPC alias and sign extension");
+    }
+    cpu.m_gpr[4].m_lo = 0x7fffffffu;
+    check(transfer(4u, 4u, 0u) == 0u, "MTPS disabled");
+    for (uint32_t i = 0; i < 32u; ++i)
+    {
+        check(transfer(0u, 5u, i << 1u) == 0u &&
+              cpu.m_gpr[5].m_lo == 0x000ffbfeu, "MFPS alias and mask");
+    }
+    check(transfer(4u, 0u, 30u) == 0u &&
+          runtime.m_perf_control == 0x000ffbfeu, "nonzero MTPS ignored");
+    check(transfer(0u, 0u, 1u) == 0u && cpu.m_gpr[0].m_lo == 0u,
+          "MFPC zero destination");
+    cpu.m_gpr[4].m_lo = 0x8000003eu;
+    check(transfer(4u, 4u, 0u) == 4u &&
+          runtime.m_perf_control == 0x000ffbfeu,
+          "active cycle event without validated timing fails closed");
+    check(runtime.m_ee_cycle_scheduler.install_reference_compatibility_source() &&
+          transfer(4u, 4u, 0u) == 4u &&
+          !ee::ee_cop0_perf_advance(&runtime, 0u, 100u),
+          "compatibility clock is not validated performance timing");
+    runtime.m_ee_cycle_scheduler.reset();
+    check(runtime.m_ee_cycle_scheduler.install_validated_source(), "explicit validated test source");
+    check(transfer(4u, 0u, 1u) == 0u && transfer(4u, 0u, 3u) == 0u &&
+          transfer(4u, 4u, 0u) == 0u, "enable processor-cycle counter 0");
+    check(ee::ee_cop0_perf_advance(&runtime, 0u, 17u) &&
+          runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
+          "explicit cycle interval updates selected counter only");
+    check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_ERL, 99u) &&
+          runtime.m_perf_counter[0] == 17u, "ERL inhibits counting");
+    check(!ee::ee_cop0_perf_advance(&runtime, 0u, 0x80000000ull) &&
+          runtime.m_perf_counter[0] == 17u, "overflow fails transactionally");
+    cpu.m_gpr[4].m_lo = 0x80008020u;
+    check(transfer(4u, 4u, 0u) == 0u &&
+          ee::ee_cop0_perf_advance(&runtime, 0u, 9u) &&
+          runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
+          "no mode enables means neither cycle counter counts");
+
     std::printf("ee_cop0_write_test: %d failure(s)\n", s_failures);
     return s_failures != 0 ? 1 : 0;
 }

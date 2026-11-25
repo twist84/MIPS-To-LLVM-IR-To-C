@@ -51,7 +51,7 @@ and result.json. Default exit is nonzero unless every selected output
 matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
 pilot uses separate EE and VU matrix runners with two tests and one emit
-worker per test; it includes the original six ELFs plus funnel, shuffle and cpcond.
+worker per test; it includes the original six ELFs plus funnel, shuffle, cpcond and performance.
 Manually dispatch Build and test with autotests_full enabled to run all
 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
 with transcripts and a summary; these are observational artifacts,
@@ -263,3 +263,24 @@ completion is sourced from the existing device, never manufactured by
 the branch. D_PCR arbitration/enabling behavior is not added here.
 Test the original cpcond ELF in the observational pilot; no new PASS
 claimed before that run.
+
+## Confirmed DMAC pilot (b021e1b, 2026-11-25)
+
+[CI](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45625569495):
+all four workflows passed. Original cpcond, funnel and shuffle match
+exactly. EE/DMA pilot 6/6, VU pilot 0/3. Combined evidence is 23 distinct
+passes across revisions, not a fresh full-suite score.
+
+## COP0 performance register bank
+
+The pinned performance transcript establishes PCCR mask 0x800ffbfe,
+even/odd PCR index aliases, all-index MFPS reads and nonzero MTPS writes
+as no-ops. The bank is core-global runtime state, appended without moving
+existing CPU/IR fields. LLVM uses a checked helper for MFPC/MFPS/MTPC/MTPS.
+A validated timing producer can deliver processor-cycle intervals via
+ ee_cop0_perf_advance, with the status of the interval. Non-cycle events
+and performance overflow exceptions are not implemented. The stock
+reference-compatibility scheduler is not a validated R5900 cycle source;
+active processor-cycle events fail closed rather than interpreting guest
+attempts as cycles. The original performance test is expected to remain
+incomplete until that timing producer is wired. No transcript exemption.

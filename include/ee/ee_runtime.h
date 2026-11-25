@@ -358,6 +358,11 @@ struct s_ee_runtime
     // synchronization callback, but its fourth argument is a slot address.
     // Append to preserve cached EE IR offsets. Missing engine fails closed.
     t_ee_vu0_sync_callback m_vu0_start = nullptr;
+
+    // Core-global COP0 performance registers, not part of per-thread GPR
+    // context. Appended to preserve the runtime and translated CPU ABI.
+    uint32_t m_perf_control = 0u;
+    uint32_t m_perf_counter[2]{};
 };
 
 // Never infer cycles from these observations or implicitly install
@@ -590,6 +595,14 @@ uint32_t ee_cop0_get_branch_condition(const s_ee_runtime* rt);
 // Other registers retain the existing raw write behavior until their writable
 // masks and side effects are independently audited.
 void ee_cop0_write(s_ee_cpu_state* cpu, uint32_t reg, uint32_t value);
+
+// MFPS/MTPS/MFPC/MTPC. Return 0 on success, 4 on unavailable semantics.
+uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu, s_ee_runtime* rt,
+                               uint32_t instruction_word);
+// A validated timing producer must call this in architectural order, with
+// the status for the elapsed interval. No diagnostic slot/attempt fallback.
+// False means unsupported event/overflow or unavailable timing; no mutation.
+bool ee_cop0_perf_advance(s_ee_runtime* rt, uint32_t status, uint64_t cycles);
 
 // Exception entry / return and interrupt helpers (ee_exceptions.cpp).
 uint32_t ee_raise_exception(s_ee_cpu_state* cpu, s_ee_runtime* rt,
