@@ -9,7 +9,9 @@ import tempfile
 import llvmlite.binding as llvm
 
 from test_vu0_transfer_ir_runtime import (
-    EEState, U128, ENTRY_PC, compile_jit, aligned_instance, require
+    EEState, U128, ENTRY_PC, compile_jit, aligned_instance, require,
+    register_trace_symbols, set_store_trace_enabled, RUNTIME_BACKING_BYTES,
+    UNEXPECTED_TRACES,
 )
 
 EE_EXIT_EXCEPTION = 1
@@ -83,9 +85,9 @@ def install_symbols(path):
         ("ee_mem_write16", write16),
         ("ee_mem_write32", write32),
         ("ee_mem_write64", write64),
-        ("ee_trace_guest_store", trace_store),
     ):
         llvm.add_symbol(name, ctypes.cast(callback, ctypes.c_void_p).value)
+    register_trace_symbols(trace_store)
     helper = library.ee_raise_exception
     llvm.add_symbol(
         "ee_raise_exception",
@@ -108,7 +110,9 @@ def execute(fixture, directory, target, mode, address):
     )
     require(offset + 8 < 0x4000, "JIT counter outside runtime backing")
     cpu_backing, cpu = aligned_instance(EEState)
-    rt_backing = ctypes.create_string_buffer(0x4000)
+    rt_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
+    set_store_trace_enabled(rt_backing, module, True)
+    UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
     cpu.fpr[8] = 0xaabbccdd11223344
@@ -118,6 +122,7 @@ def execute(fixture, directory, target, mode, address):
         ctypes.pointer(cpu),
         ctypes.cast(rt_backing, ctypes.c_void_p)
     )
+    require(not UNEXPECTED_TRACES, f"disabled trace called: {UNEXPECTED_TRACES}")
     _ = (cpu_backing, rt_backing, engine, module, machine)
     return result, cpu, before
 

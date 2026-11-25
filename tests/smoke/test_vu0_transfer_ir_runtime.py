@@ -161,7 +161,57 @@ def aligned_instance(struct_type):
     return backing, value
 
 
+# All generated modules now contain the two guarded trace definitions.
+# MCJIT must resolve their external targets even when no guest instruction
+# can reach the invoke block. Retain callbacks for the whole JIT lifetime.
+TRACE_STORE_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint64,
+    ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64,
+    ctypes.c_uint64, ctypes.c_uint64,
+)
+TRACE_V0_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.c_uint64, ctypes.c_uint64,
+)
+UNEXPECTED_TRACES = []
+
+
+@TRACE_STORE_CALLBACK
+def unexpected_store_trace(*args):
+    UNEXPECTED_TRACES.append("store")
+
+
+@TRACE_V0_CALLBACK
+def unexpected_v0_trace(*args):
+    UNEXPECTED_TRACES.append("v0")
+
+
+def register_trace_symbols(store_callback=unexpected_store_trace):
+    for name, callback in (
+        ("ee_trace_guest_store", store_callback),
+        ("ee_trace_guest_v0_write", unexpected_v0_trace),
+    ):
+        llvm.add_symbol(name, ctypes.cast(callback, ctypes.c_void_p).value)
+
+
+RUNTIME_BACKING_BYTES = 0x4000
+
+
+def set_store_trace_enabled(backing, module, enabled):
+    # The generated guard is the source of truth for the C++ ABI offset.
+    match = re.search(
+        r"%enabled_ptr = getelementptr i8, ptr %rt, i64 ([0-9]+)",
+        str(module),
+    )
+    require(match is not None, "missing store trace enable flag offset")
+    offset = int(match.group(1))
+    require(offset < ctypes.sizeof(backing), "store trace flag outside runtime")
+    ctypes.c_uint8.from_buffer(backing, offset).value = int(enabled)
+
+
 def register_runtime_symbols(library_path):
+    register_trace_symbols()
     library = ctypes.CDLL(str(library_path))
     for name in (
         "ee_vu0_qmfc2",
@@ -207,6 +257,16 @@ def compile_jit(fixture, temp_dir, mode, target):
     counter_offset = max(counter_offset, int(reference_match.group(1)))
     require(counter_offset >= ctypes.sizeof(Runtime),
             "instrumentation counter overlaps VU0 callback ABI")
+    # Other diagnostics access fields beyond both accounting counters,
+    # including the optional timing observer and idle-loop probe.
+    runtime_offsets = [
+        int(offset) for offset in re.findall(
+            r"getelementptr i8, ptr %rt, i64 ([0-9]+)", ir_text
+        )
+    ]
+    require(all(offset + 16 <= RUNTIME_BACKING_BYTES
+                for offset in runtime_offsets),
+            "generated runtime field outside JIT backing")
 
     module = llvm.parse_assembly(ir_text)
     module.verify()
@@ -264,11 +324,10 @@ def run_guest(fixture, temp_dir, target, mode, setup=None,
     runtime, sync_ref, control_ref, sync_state, control_state = make_runtime(
         vu0, sync_result=sync_result, control_result=control_result
     )
-    # Allocate every byte accessed by the JIT, including the appended
-    # diagnostic counter. Keep ABI-prefix fields exactly as before.
-    runtime_backing = ctypes.create_string_buffer(
-        max(ctypes.sizeof(Runtime), counter_offset + ctypes.sizeof(ctypes.c_uint64))
-    )
+    # Zero-initialize the entire runtime backing, not merely the prefix
+    # ending at the reference-slot counter. Optional diagnostics must see
+    # null callbacks and disabled flags even when a fixture never uses them.
+    runtime_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
     # Pointer.contents assignment would *retarget* the ctypes pointer to
     # the original 48-byte Runtime object, rather than copy into the
     # extended allocation. Copy the ABI prefix into the owned backing.
@@ -289,7 +348,9 @@ def run_guest(fixture, temp_dir, target, mode, setup=None,
 
     print("VU0 JIT: call", mode, "counter_offset", counter_offset,
           "runtime_backing_bytes", ctypes.sizeof(runtime_backing), flush=True)
+    UNEXPECTED_TRACES.clear()
     result = guest_fn(ctypes.pointer(cpu), ctypes.byref(runtime_ptr.contents))
+    require(not UNEXPECTED_TRACES, f"disabled trace called: {UNEXPECTED_TRACES}")
     print("VU0 JIT: returned", mode, "exit", result, flush=True)
     retained = (
         cpu_backing, vu0_backing, runtime_backing, engine, module, target_machine,

@@ -9,7 +9,9 @@ import tempfile
 import llvmlite.binding as llvm
 
 from test_vu0_transfer_ir_runtime import (
-    EEState, U128, ENTRY_PC, compile_jit, aligned_instance, require
+    EEState, U128, ENTRY_PC, compile_jit, aligned_instance, require,
+    register_trace_symbols, set_store_trace_enabled, RUNTIME_BACKING_BYTES,
+    UNEXPECTED_TRACES,
 )
 
 EE_EXIT_EXCEPTION = 1
@@ -71,14 +73,11 @@ def register_callbacks(library_path):
         "ee_mem_write64",
         ctypes.cast(memory_write64, ctypes.c_void_p).value
     )
-    llvm.add_symbol(
-        "ee_trace_guest_store",
-        ctypes.cast(trace_guest_store, ctypes.c_void_p).value
-    )
+    register_trace_symbols(trace_guest_store)
     return library
 
 
-def execute(fixture, directory, target, mode, address):
+def execute(fixture, directory, target, mode, address, trace_enabled=True):
     MEMORY.clear()
     READS.clear()
     WRITES.clear()
@@ -91,7 +90,9 @@ def execute(fixture, directory, target, mode, address):
     )
     require(offset + 8 < 0x4000, "runtime counter outside JIT backing")
     cpu_backing, cpu = aligned_instance(EEState)
-    runtime_backing = ctypes.create_string_buffer(0x4000)
+    runtime_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
+    set_store_trace_enabled(runtime_backing, module, trace_enabled)
+    UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[31] = U128(0x00140000, 0)
     cpu.vu0[0] = U128(0xaabbccddeeff0011, 0x1122334455667788)
@@ -102,6 +103,7 @@ def execute(fixture, directory, target, mode, address):
         ctypes.pointer(cpu),
         ctypes.cast(runtime_backing, ctypes.c_void_p)
     )
+    require(not UNEXPECTED_TRACES, f"disabled trace called: {UNEXPECTED_TRACES}")
     # Hold all JIT-managed buffers and callback objects through execution.
     _ = cpu_backing, runtime_backing, engine, module, machine
     return ret, cpu
@@ -149,6 +151,13 @@ def main():
             (0x108, 0x7777777766666666)
         ], "SQC2 preserves 128-bit vector and order")
         require(len(TRACES) == 2, "SQC2 retains trace instrumentation")
+        result, cpu = execute(
+            fixture, directory, target, "sqc2_vf6", 0x100, trace_enabled=False
+        )
+        require(result == EE_EXIT_DISPATCH and WRITES == [
+            (0x100, 0x9999999988888888),
+            (0x108, 0x7777777766666666)
+        ] and not TRACES, "disabled SQC2 trace must preserve both writes")
 
         result, cpu = execute(
             fixture, directory, target, "sqc2_vf0", 0x100
