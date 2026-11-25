@@ -204,6 +204,16 @@ int main(int argc, char** argv)
         delay_word = make_i(0x09, 0, 2, 0);
         function_name = "guest_beq_not_taken_delay_test";
     }
+    else if (mode == "bc0f" || mode == "bc0t" ||
+             mode == "bc0fl" || mode == "bc0tl")
+    {
+        const uint8_t rt = mode == "bc0f" ? 0u :
+                           mode == "bc0t" ? 1u :
+                           mode == "bc0fl" ? 2u : 3u;
+        control_word = make_i(0x10, 8, rt, 4);
+        delay_word = make_i(0x09, 2, 2, 1);
+        function_name = "guest_bc0_delay_test";
+    }
     else if (mode == "bltzal")
     {
         // BLTZAL $v0, +4; its delay slot executes on both branch outcomes and

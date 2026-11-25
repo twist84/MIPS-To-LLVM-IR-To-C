@@ -105,6 +105,14 @@ def main():
     register_ee_diagnostic_stubs()
     target = llvm.Target.from_default_triple()
     retained = []
+    # Inject only the device predicate to exercise the generated CFG.
+    # Real D_STAT/D_PCR semantics are independently covered in ee_dmac_test.
+    condition = ctypes.c_uint32(0)
+    predicate_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p)
+    predicate = predicate_type(lambda _runtime: condition.value)
+    llvm.add_symbol("ee_cop0_get_branch_condition",
+                    ctypes.cast(predicate, ctypes.c_void_p).value)
+    retained.append(predicate)
 
     with tempfile.TemporaryDirectory(prefix="ee-control-flow-") as temp:
         temp_dir = pathlib.Path(temp)
@@ -138,6 +146,31 @@ def main():
 
         run_case(fixture_exe, temp_dir, target, retained, "beq_not_taken",
                  "guest_beq_not_taken_delay_test", check_beq_not_taken, verify_beq_not_taken)
+
+        for rt, mode in enumerate(("bc0f", "bc0t", "bc0fl", "bc0tl")):
+            for value in (0, 1, 2):
+                condition.value = value
+                unavailable = value == 2
+                taken = not unavailable and value == (rt & 1)
+                slot_executes = not unavailable and (taken or not (rt & 2))
+                expected_pc = (0x00100000 if unavailable else
+                               0x00100014 if taken else 0x00100008)
+
+                def setup_bc0(state):
+                    state.gpr[2].lo = 0x1234
+                    state.gpr[2].hi = 0x2222333344445555
+
+                def verify_bc0(state):
+                    require(state.pc == expected_pc,
+                            f"{mode}/{value}: incorrect branch PC 0x{state.pc:08x}")
+                    require(state.gpr[2].lo == 0x1234 + int(slot_executes),
+                            f"{mode}/{value}: incorrect delay-slot execution")
+                    require(state.gpr[2].hi == 0x2222333344445555,
+                            f"{mode}/{value}: upper GPR changed")
+
+                run_case(fixture_exe, temp_dir, target, retained, mode,
+                         "guest_bc0_delay_test", setup_bc0, verify_bc0,
+                         expected_exit=4 if unavailable else 3)
 
         def check_jr(state):
             state.gpr[2].lo = 0x00200000
