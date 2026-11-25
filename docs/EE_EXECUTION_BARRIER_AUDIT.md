@@ -10,7 +10,7 @@ provenance changes unless explicitly necessary.
 | Batch | Audit scope | Explicit success criteria | Status |
 | --- | --- | --- | --- |
 | P1-A | Timer/delegated EE MMIO | Accepted and rejected accesses advance the generation; passive queries do not; MMIO-free plus touched equals lookahead candidates. Enumerate direct helpers separately. | Observation implemented; direct helpers open |
-| P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Started-channel entry observation added; transition audit open |
+| P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Started-channel observation and narrow passive HLE SIF0 exception added; transition audit open |
 | P1-C | Asynchronous GS worker | Idle healthy worker is quiet; queued or executing batch and failed worker are not quiet; drained healthy worker is quiet again; no new fence or guest event. Headless shadow reports zero GS barriers. Any submission after the snapshot requires an independent pre-execution guard. | Entry observation implemented; CI pending |
 | P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | VU callback and COP0 endpoint observations added; pre-access guards open |
 | P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | RPC ownership observation added; debt flush and shared-memory audit open |
@@ -57,6 +57,43 @@ deferral, distinguish dormant channels using proved producer/consumer
 dependencies, and cover transitions/completion/faults and native accesses.
 The new classifications can reduce the earlier shadow candidate counts;
 do not compare them as performance measurements.
+
+## Retail validation and passive receive refinement
+
+The 40,000,000-dispatch replay at the coalescing validation stage
+completed at PC 0x0019d2a0 (DISPATCH, status 1), with zero final debt.
+44,481,558 logical IOP service turns became 43,527,167 physical
+kernel runs: 954,391 saved calls in 942,867 combined batches.
+This is a 2.15% call-count reduction, not a matched wall-time speedup.
+The replay had 39,993,844 barrier samples, of which 23,839,190 were
+attributed to the blanket started-DMA check. Only 6,044 projected
+normal exits were MMIO-free and observationally direct-helper-quiet.
+
+The HLE SIF0 channel can remain armed in receive-chain mode with
+zero QWC, no bound FIFO start callback, no latched chain end and no
+raw DMA5 completion. In HLE scheduling mode only, when SIF0 is the
+sole started channel and RPC ownership/reboot are absent, the shadow
+model now retains the normal IOP deadline rather than treating
+readiness as an autonomous DMA event. IOP lookahead still requires
+the kernel idle-event projection. SIFMAN guest calls can publish
+directly to EE RAM during IOP execution, so no real scheduling is
+changed by this exemption. Other started channels and genuine FIFO
+transports remain barriers.
+
+`dmac_str0` ... `dmac_str9` count started-channel observations after
+the earlier entry/clock barriers; they can overlap.
+`dmac_sif0_only` counts masks containing only channel 5;
+`dmac_passive_sif0` counts the narrower exemption.
+`entry_callback`, `entry_idle`, `entry_irq`, `entry_vu`, and
+`entry_other` are independently counted entry states and may overlap.
+Do not sum them as exclusive barrier counts. The prior retail log
+did not contain channel attribution, so SIF0 dominance is a hypothesis
+to test, not an established result.
+
+Tests cover nonzero QWC, genuine FIFO binding, raw completion, stop
+and wrong transfer mode. The native idle coalescing fixture now also
+arms SIF0 and checks the shadow classification without changing the
+A/B architectural or IOP clock comparison.
 
 ## Direct-helper observations (P1-D)
 
