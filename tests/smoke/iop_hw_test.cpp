@@ -27,6 +27,77 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
     }
 }
 
+bool test_timer5_free_running_clock()
+{
+    iop::c_hw hw{};
+    constexpr uint32_t count = iop::c_hw::k_timer5_count;
+    constexpr uint32_t mode = iop::c_hw::k_timer5_mode;
+    constexpr uint32_t target = iop::c_hw::k_timer5_target;
+    uint32_t actual = 0u;
+
+    // A target value does not enable comparison in mode zero.
+    if (!hw.write(target, 4u, 3u) ||
+        !hw.write(count, 4u, 0xfffffffeu) ||
+        hw.idle_event_cycles_remaining() != 2u)
+    {
+        return false;
+    }
+    hw.advance_cycles(0u);
+    hw.advance_cycles(1u);
+    if (!hw.read(count, 4u, &actual) || actual != 0xffffffffu ||
+        hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(5u);
+    if (!hw.read(count, 4u, &actual) || actual != 4u ||
+        hw.pending_interrupts() != 0u ||
+        !hw.read(mode, 4u, &actual) || actual != 0x400u ||
+        hw.idle_event_cycles_remaining() != (uint64_t{1u} << 32u) - 4u)
+    {
+        return false;
+    }
+
+    // Switch through a prescaled mode with a fractional remainder;
+    // the mode-zero write must reset that remainder and count.
+    if (!hw.write(mode, 4u, 0x6058u))
+    {
+        return false;
+    }
+    hw.advance_cycles(257u);
+    if (!hw.read(count, 4u, &actual) || actual != 1u ||
+        hw.idle_event_cycles_remaining() != 511u ||
+        !hw.write(mode, 4u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(0xffffffffu);
+    hw.advance_cycles(2u);
+    if (!hw.read(count, 4u, &actual) || actual != 1u ||
+        hw.pending_interrupts() != 0u)
+    {
+        return false;
+    }
+
+    // Reset and re-enter compare mode: the ordinary path still
+    // advances to the modeled target and delivers its IRQ.
+    hw.reset();
+    if (!hw.write(target, 4u, 3u) ||
+        !hw.write(mode, 4u, 0x0058u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u);
+    if (hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    return hw.read(count, 4u, &actual) && actual == 0u &&
+        hw.read(iop::c_hw::k_i_stat, 4u, &actual) &&
+        (actual & (1u << iop::c_hw::k_timer5_irq)) != 0u;
+}
+
 bool test_spu2_sample_clock()
 {
     constexpr uint32_t spu = iop::c_spu2::k_base;
@@ -2986,6 +3057,10 @@ int main()
     if (!test_spu2_adpcm_voice_progression())
     {
         return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
+    if (!test_timer5_free_running_clock())
+    {
+        return fail("Timer5 free-running clock, wrap or mode transition");
     }
     if (!test_spu2_sample_clock())
     {
