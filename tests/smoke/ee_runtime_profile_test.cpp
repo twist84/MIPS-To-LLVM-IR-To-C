@@ -1,4 +1,5 @@
 #include "ee_runtime_profile.h"
+#include "ee_performance_overlay.h"
 #include "../../src/tools/ee_pc_profile.h"
 
 #include <cstdio>
@@ -7,6 +8,70 @@
 int main()
 {
     using ee::e_runtime_profile_id;
+    {
+        ee::c_ee_performance_overlay overlay;
+        ee::s_ee_performance_counters counters{};
+        if (overlay.visible() || overlay.sample(0.0, counters))
+        {
+            return 11;
+        }
+        overlay.toggle();
+        counters.m_clock_available = true;
+        if (!overlay.visible() || !overlay.sample(1.0, counters) ||
+            overlay.sample(1.1, counters))
+        {
+            return 12;
+        }
+        counters.m_cycles = 147456000u;
+        counters.m_presentations = 30u;
+        counters.m_fields = 30u;
+        counters.m_dispatches = 500000u;
+        counters.m_instructions = 147000000u;
+        counters.m_draws = 50000u;
+        if (!overlay.sample(1.5, counters))
+        {
+            return 13;
+        }
+        ee::s_ee_overlay_text expected{};
+        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(1u, "SPEED 100.0% / UNLIMITED");
+        expected.set_line(2u, "PRESENT 60.0 FPS");
+        expected.set_line(3u, "GUEST 60.0 FIELDS/S");
+        expected.set_line(4u, "EE 294.0 M INST/S");
+        expected.set_line(5u, "DISPATCH 1000.0 K/S");
+        expected.set_line(6u, "GS 100.0 K DRAWS/S");
+        expected.set_line(7u, "CPU PROFILE OFF");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 14;
+        }
+        // Counter reset must not manufacture enormous rates.
+        counters.m_fields = 0u;
+        if (!overlay.sample(1.6, counters))
+        {
+            return 15;
+        }
+        expected = {};
+        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(1u, "SAMPLING...");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 16;
+        }
+        overlay.toggle();
+        if (overlay.visible() || overlay.sample(3.0, counters) ||
+            overlay.text().m_words != ee::s_ee_overlay_text{}.m_words)
+        {
+            return 17;
+        }
+        // Last row of A is 10001; first row is 01110.
+        const auto a = ee::ee_overlay_glyph('A');
+        if ((a[0] & 31u) != 14u || a[1] != 17u)
+        {
+            return 18;
+        }
+    }
+
     // A tiny cache forces collisions, including zero, unaligned and
     // full-width PCs. Rehashing the owning map must preserve references.
     ee::c_ee_pc_profile<4u> pcs(true);

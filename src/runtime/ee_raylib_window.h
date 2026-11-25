@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_gs_display.h"
+#include "ee_performance_overlay.h"
 
 #include <cstdint>
 
@@ -26,9 +27,12 @@ public:
     void pump(c_ee_webgpu_bridge& bridge,
         const s_ee_gs_display_registers& registers,
         uint32_t crt_mode, uint64_t field_count,
-        c_ee_gs_presentation_probe* probe, iop::c_hw* iop_hardware);
+        c_ee_gs_presentation_probe* probe, iop::c_hw* iop_hardware,
+        const s_ee_performance_counters& counters);
 
 private:
+    c_ee_performance_overlay m_performance_overlay{};
+    uint64_t m_presentations = 0u;
     bool m_ready = false;
     bool m_closed = false;
     uint64_t m_last_fields = 0u;

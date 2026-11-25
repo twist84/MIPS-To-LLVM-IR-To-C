@@ -4095,12 +4095,29 @@ int main(int argc, char** argv)
             if (window_pump_gate.should_pump(field))
             {
                 ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::window_pump);
+                ee::s_ee_performance_counters counters{};
+                counters.m_cycles = runtime.m_ee_cycle_scheduler.current_cycle();
+                counters.m_dispatches = dispatched;
+                counters.m_instructions = runtime.m_guest_instruction_attempts;
+                counters.m_draws = webgpu_bridge.rendered_primitives();
+                counters.m_target_speed = speed_percent;
+                counters.m_clock_available = runtime.m_ee_cycle_scheduler.source() !=
+                    ee::e_ee_cycle_source::UNAVAILABLE;
+                counters.m_profile_enabled = ee::g_runtime_profile.m_enabled;
+                if (counters.m_profile_enabled)
+                {
+                    counters.m_ee_host_ns = ee::g_runtime_profile.m_counters[
+                        static_cast<size_t>(ee::e_runtime_profile_id::ee_native_boundary)].m_exclusive_ns;
+                    counters.m_iop_host_ns = ee::g_runtime_profile.m_counters[
+                        static_cast<size_t>(ee::e_runtime_profile_id::iop_service)].m_exclusive_ns;
+                }
                 raylib_window.pump(
                     webgpu_bridge,
                     hardware.gs_display_registers(),
                     hardware.gs_crt_mode(),
                     hardware.scanout().fields_started(), &graphics_probe,
-                    iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+                    iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr,
+                    counters);
             }
             if (raylib_window.closed())
             {

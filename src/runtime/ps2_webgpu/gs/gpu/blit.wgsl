@@ -15,6 +15,7 @@ struct Blit {
 
 @group(0) @binding(0) var<storage, read> pixels: array<u32>;
 @group(0) @binding(1) var<uniform> blit: Blit;
+@group(0) @binding(2) var<storage, read> overlay_words: array<u32>;
 
 struct VertexOut {
     @builtin(position) position: vec4<f32>,
@@ -135,6 +136,34 @@ fn edge_aa(uv: vec2<f32>, center: vec3<f32>) -> vec3<f32> {
 
 @fragment
 fn fs(in: VertexOut) -> @location(0) vec4<f32> {
+    // Native host overlay: fixed 32x8 glyph grid; never touches GS VRAM.
+    // Only evaluate when F9 is enabled. Adapt scale to the presentation viewport.
+    if ((blit.options & 2u) != 0u) {
+        let pixel_scale = max(1u, min(3u, min(blit.out_width / 208u, blit.out_height / 80u)));
+        let local = vec2<i32>(floor(in.uv * vec2<f32>(f32(blit.out_width), f32(blit.out_height)))) - vec2<i32>(8);
+        if (all(local >= vec2<i32>(0))) {
+            let p = vec2<u32>(local) / pixel_scale;
+            if (p.x < 200u && p.y < 72u) {
+                let dark = vec4<f32>(0.025, 0.035, 0.05, 1.0);
+                if (p.x >= 4u && p.x < 196u && p.y >= 4u && p.y < 68u) {
+                    let q = p - vec2<u32>(4u);
+                    let cell = vec2<u32>(q.x / 6u, q.y / 8u);
+                    let col = q.x % 6u;
+                    let row = q.y % 8u;
+                    if (col < 5u && row < 7u) {
+                        let index = (cell.y * 32u + cell.x) * 2u;
+                        let bits = overlay_words[index + select(0u, 1u, row == 6u)];
+                        let shift = (row % 6u) * 5u + 4u - col;
+                        if (((bits >> shift) & 1u) != 0u) {
+                            return select(vec4<f32>(0.94, 0.96, 0.98, 1.0),
+                                vec4<f32>(0.40, 0.85, 1.0, 1.0), cell.y == 0u);
+                        }
+                    }
+                }
+                return dark;
+            }
+        }
+    }
     var c = scene(in.uv);
     if ((blit.options & 1u) != 0u) { c = edge_aa(in.uv, c); }
     return vec4<f32>(clamp(c, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);

@@ -183,3 +183,18 @@ cap, syscall override and unrecognized service handling, VU timing,
 scanout phase and device event ordering. Those are not claimed equivalent.
 Fresh retail replay required; shared runtime header changed and IR source
 provenance must be refreshed. Original 55-suite remains the acceptance gate.
+
+## Native performance overlay
+
+F9 toggles a hidden-by-default host performance overlay in the focused
+native game window. The WebGPU blit composites a fixed-size glyph panel
+inside the displayed viewport, independent of raylib's GL backbuffer,
+including embedded and fullscreen presentation. Sample at 4 Hz only when
+visible: presented FPS, guest fields/s, compatibility speed/target,
+EE instruction attempts/s, dispatches/s, GS committed draws/s and optional
+completed exclusive EE/IOP host scope percentages (profile off otherwise).
+Rates reset on counter/time discontinuities. The next real guest present
+shows/hides the panel; no extra field, swap or readback is requested.
+Guest VRAM, GS captures and input state are unaffected. CPU unit tests cover
+sampling, rate conversion, glyph packing and toggle/reset. Windows visual
+validation is still required; no physical console measurement is implied.

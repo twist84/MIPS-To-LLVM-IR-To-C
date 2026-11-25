@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace ee { struct s_gpu_timestamp_profile; }
+namespace ee { struct s_gpu_timestamp_profile; struct s_ee_overlay_text; }
 
 namespace ps2::gs::gpu {
 
@@ -58,6 +58,8 @@ bool attach_surface(const SurfaceTarget &target);
 void resize_surface(std::uint32_t width, std::uint32_t height);
 bool has_surface();
 bool present(const DisplaySource &src);
+// Owner-thread host presentation only. Null disables the overlay.
+void set_performance_overlay(const ee::s_ee_overlay_text* text);
 // Snapshot can be called by the EE while the GS worker owns the GPU.
 // Collection touches the device and is owner-only, after draining work.
 ee::s_gpu_timestamp_profile timestamp_profile();
