@@ -288,6 +288,11 @@ public:
     // EE/SIF operations must be checked separately by the caller.
     uint64_t idle_event_cycles_remaining() const;
 
+    // Host-only fast service for a strictly pre-event idle interval.
+    // A false return leaves guest time and architectural state untouched.
+    // The caller still owns EE/IOP RPC ordering and cycle debt accounting.
+    bool try_advance_quiet_cycles(uint32_t cycles);
+
     // Timers use the same bounded virtual-clock domain as sleep_current.
     // Callback return values of zero disarm, otherwise they reschedule by
     // the returned system-clock tick count. This is not a calibrated IRQ.
