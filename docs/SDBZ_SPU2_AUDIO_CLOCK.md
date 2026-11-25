@@ -148,3 +148,29 @@ References: PS2SDK libspu2 register mapping
 reverb model (https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp).
 The rounding choice follows that compatibility model, not a new bit-exact
 hardware validation.
+
+### Two-stage all-pass cascade (Batch 20)
+
+The two APF delay sizes are the native pairs at 0x2e4 and 0x2e8;
+channel-specific destinations are 0x32c/0x330 and 0x334/0x338. Each
+stage reads the wrapped destination-minus-delay tap, calculates a wide
+feedback state and passes a wide output to the next stage. Signed Q15
+rounding follows the preceding filters. Only final output and actual
+RAM writes saturate to signed 16-bit. Wide signed offset subtraction
+avoids host signed-overflow UB; extreme offsets remain a differential
+validation item.
+
+The complete channel transaction calculates reflections, comb and both
+APF stages before any write. Enabled writes occur in SAME, DIFF, APF1,
+APF2 order. Disabled processing computes a return but suppresses writes
+and effect IRQs, consistent with Batch 17. No guest clock or mixer call
+site is introduced yet. The following timing batch must drive this
+transaction from real sample ticks and account for effect tails and IRQ
+deadlines even with silent source voices.
+
+The DMA-seeded regression checks signed left/right cascades, delayed
+source wrap, aliasing with reflection destinations, disabled operation,
+read and write IRQs, full-width intermediate state, saturated actual
+writeback and invalid input. Reference: documented PSX SPU reverb math
+(https://psx-spx.consoledev.net/soundprocessingunitspu/) and PCSX2's SPU2
+compatibility behavior (https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp).

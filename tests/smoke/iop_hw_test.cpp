@@ -946,6 +946,137 @@ bool test_spu2_effect_comb()
     return sum == 1001 && spu.effect_irq_events() == 1u;
 }
 
+bool test_spu2_effect_allpass()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    const int16_t words[16] = {2000, 0, 345, -401, -2001, 234, -200, 0,
+        0, 456, 201, 0, 0, 0, 123, 400};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true) ||
+        !spu.write(base + 0x2e0u, 2u, 0u) ||
+        !spu.write(base + 0x2e2u, 2u, 0xfff0u) ||
+        !spu.write(base + 0x33cu, 2u, 0u))
+    {
+        return false;
+    }
+    // Both reflection destinations deliberately alias APF source taps.
+    const uint32_t regs[] = {0x2e4u, 0x2e8u, 0x2ecu, 0x2f0u,
+        0x2f4u, 0x2f8u, 0x30cu, 0x310u, 0x32cu, 0x330u, 0x334u, 0x338u};
+    const uint16_t offsets[] = {1u, 2u, 15u, 3u, 0u, 4u, 6u, 10u,
+        0u, 4u, 8u, 12u};
+    for (uint32_t i = 0u; i < 12u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, offsets[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x776u, 2u, 0x4000u) ||
+        !spu.write(base + 0x780u, 2u, 0x4000u) ||
+        !spu.write(base + 0x782u, 2u, 0xc000u))
+    {
+        return false;
+    }
+    iop::c_spu2::s_effect_allpass apf{};
+    // APF1 source wraps to word 15, APF2 source is word 6.
+    if (!spu.calculate_effect_allpass(0u, 0u, 16u, 1000, &apf) ||
+        apf.m_offset[0] != 0 || apf.m_offset[1] != 8 ||
+        apf.m_sample[0] != 800 || apf.m_sample[1] != 700 ||
+        apf.m_output != -550 ||
+        !spu.calculate_effect_allpass(0u, 1u, 0u, -1001, &apf) ||
+        apf.m_offset[0] != 4 || apf.m_offset[1] != 12 ||
+        apf.m_sample[0] != -800 || apf.m_sample[1] != -700 ||
+        apf.m_output != 551)
+    {
+        return false;
+    }
+    // The cascade uses the full internal state, not clipped writeback.
+    if (!spu.calculate_effect_allpass(0u, 0u, 0u, 131072, &apf) ||
+        apf.m_sample[0] != 130872 || apf.m_sample[1] != 65736 ||
+        apf.m_output != -32768)
+    {
+        return false;
+    }
+    int16_t output = 0;
+    uint16_t word = 0;
+    // Disabled reverb computes its output but leaves all RAM unchanged.
+    if (!spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -550 || !spu.ram_word(0xffffu, &word) || word != 400u ||
+        !spu.ram_word(0xfff0u, &word) || word != 2000u ||
+        spu.effect_irq_events() != 0u)
+    {
+        return false;
+    }
+    // One core targets a real APF source, the other a destination.
+    if (!spu.write(base + 0x19cu, 2u, 0u) ||
+        !spu.write(base + 0x19eu, 2u, 0xfff8u) ||
+        !spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xffffu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write(base + 0x19au, 2u, 0xc0u) ||
+        !spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -550 || spu.irq_latches() != 3u ||
+        spu.effect_irq_events() != 2u ||
+        !spu.ram_word(0xffffu, &word) || word != 123u ||
+        !spu.ram_word(0xfff6u, &word) || word != 234u ||
+        !spu.ram_word(0xfff0u, &word) || word != 800u ||
+        !spu.ram_word(0xfff8u, &word) || word != 700u)
+    {
+        return false;
+    }
+    if (!spu.process_effect_channel(0u, 1u, 0u, 0, &output) ||
+        output != 551 ||
+        !spu.ram_word(0xfff3u, &word) || word != 345u ||
+        !spu.ram_word(0xfffau, &word) || word != 456u ||
+        !spu.ram_word(0xfff4u, &word) || word != static_cast<uint16_t>(-800) ||
+        !spu.ram_word(0xfffcu, &word) || word != static_cast<uint16_t>(-700) ||
+        spu.effect_irq_events() != 2u)
+    {
+        return false;
+    }
+    // Saturation is applied at real APF writeback, not in the cascade.
+    // A single -32768 tap with -1 gain yields +32768; four yield 131072.
+    if (!spu.write_effect_sample(0u, 0u, 13, -32768))
+    {
+        return false;
+    }
+    constexpr uint32_t comb_regs[] = {0x2f4u, 0x2fcu, 0x314u, 0x31cu};
+    for (uint32_t tap = 0u; tap < 4u; ++tap)
+    {
+        if (!spu.write(base + comb_regs[tap] + 2u, 2u, 13u) ||
+            !spu.write(base + 0x776u + tap * 2u, 2u, 0x8000u))
+        {
+            return false;
+        }
+    }
+    if (!spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -32768 ||
+        !spu.ram_word(0xfff0u, &word) || word != 32767u ||
+        !spu.ram_word(0xfff8u, &word) || word != 32767u)
+    {
+        return false;
+    }
+    // Invalid requests leave the result and latches untouched.
+    return !spu.calculate_effect_allpass(2u, 0u, 0u, 0, &apf) &&
+        !spu.calculate_effect_allpass(0u, 2u, 0u, 0, &apf) &&
+        !spu.calculate_effect_allpass(0u, 0u, 0u, 131073, &apf) &&
+        !spu.calculate_effect_allpass(0u, 0u, 0u, 0, nullptr) &&
+        !spu.process_effect_channel(0u, 0u, 0u, 0, nullptr) &&
+        spu.write(base + 0x2e0u, 2u, 1u) &&
+        !spu.process_effect_channel(0u, 0u, 0u, 0, &output) &&
+        output == -32768 && spu.effect_irq_events() == 2u;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -2113,6 +2244,10 @@ int main()
     if (!test_spu2_effect_comb())
     {
         return fail("SPU2 four-tap comb accumulator, rounding and read IRQs");
+    }
+    if (!test_spu2_effect_allpass())
+    {
+        return fail("SPU2 all-pass cascade, staged aliasing and saturated writeback");
     }
     if (!test_spu2_effect_registers())
     {

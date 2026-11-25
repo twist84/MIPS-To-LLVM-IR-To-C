@@ -300,6 +300,71 @@ bool c_spu2::calculate_effect_comb(uint32_t core, uint32_t channel,
     return valid;
 }
 
+bool c_spu2::calculate_effect_allpass(uint32_t core, uint32_t channel,
+    uint64_t step, int32_t input, s_effect_allpass* result)
+{
+    // Four signed Q15 products of signed halfwords cannot exceed this
+    // range. Reject arbitrary wider inputs to keep intermediates bounded.
+    bool valid = core < 2u && channel < 2u && result != nullptr &&
+        input >= -131072 && input <= 131072 && effect_start(core) < effect_end(core);
+    if (valid)
+    {
+        const uint16_t* coeff = m_cores[core].m_effect_coefficients;
+        s_effect_allpass next{};
+        int32_t signal = input;
+        for (uint32_t stage = 0u; stage < 2u && valid; ++stage)
+        {
+            const int64_t destination = effect_tap_offset(core,
+                0x32cu + stage * 8u + channel * 4u);
+            const int64_t delay = effect_tap_offset(core, 0x2e4u + stage * 4u);
+            int16_t history = 0;
+            valid = read_effect_sample(core, step, destination - delay, &history);
+            if (valid)
+            {
+                const int32_t gain = signed_halfword(coeff[6u + stage]);
+                // Delay-line state and output are distinct: the stored
+                // sample is clipped only when actually written to RAM.
+                const int32_t state = signal - scale_mix(history, gain);
+                next.m_offset[stage] = destination;
+                next.m_sample[stage] = state;
+                signal = history + scale_mix(state, gain);
+            }
+        }
+        if (valid)
+        {
+            next.m_output = clamp_sample(signal);
+            *result = next;
+        }
+    }
+    return valid;
+}
+
+bool c_spu2::process_effect_channel(uint32_t core, uint32_t channel,
+    uint64_t step, int16_t input, int16_t* output)
+{
+    s_effect_reflections reflections{};
+    s_effect_allpass allpass{};
+    int32_t comb = 0;
+    bool valid = output != nullptr &&
+        calculate_effect_reflections(core, channel, step, input, &reflections) &&
+        calculate_effect_comb(core, channel, step, &comb) &&
+        calculate_effect_allpass(core, channel, step, comb, &allpass);
+    if (valid && effect_enabled(core))
+    {
+        valid = commit_effect_reflections(core, step, reflections);
+        for (uint32_t stage = 0u; stage < 2u && valid; ++stage)
+        {
+            valid = write_effect_sample(core, step, allpass.m_offset[stage],
+                allpass.m_sample[stage]);
+        }
+    }
+    if (valid)
+    {
+        *output = allpass.m_output;
+    }
+    return valid;
+}
+
 void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
 {
     // Reference SDBZ envelope clock. Counter is retained across phase and

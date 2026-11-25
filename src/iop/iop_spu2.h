@@ -114,6 +114,19 @@ public:
     // Four read-only comb taps feed the wide all-pass accumulator.
     bool calculate_effect_comb(uint32_t core, uint32_t channel,
         uint64_t step, int32_t* result);
+    struct s_effect_allpass
+    {
+        int64_t m_offset[2]{};
+        int32_t m_sample[2]{};
+        int16_t m_output = 0;
+    };
+    // Input is the wide four-tap comb sum, not a clipped PCM sample.
+    bool calculate_effect_allpass(uint32_t core, uint32_t channel,
+        uint64_t step, int32_t input, s_effect_allpass* result);
+    // Complete one half-rate channel filter transaction. All reads
+    // precede the reflection and APF writes. Clocking is external.
+    bool process_effect_channel(uint32_t core, uint32_t channel,
+        uint64_t step, int16_t input, int16_t* output);
     uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
