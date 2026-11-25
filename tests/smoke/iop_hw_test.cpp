@@ -1045,8 +1045,12 @@ bool test_spu2_effect_allpass()
         return false;
     }
     // Saturation is applied at real APF writeback, not in the cascade.
+    // Restore the APF history used by the wide calculation above, since
+    // the aliasing test deliberately replaced these two source words.
     // A single -32768 tap with -1 gain yields +32768; four yield 131072.
-    if (!spu.write_effect_sample(0u, 0u, 13, -32768))
+    if (!spu.write_effect_sample(0u, 0u, 15, 400) ||
+        !spu.write_effect_sample(0u, 0u, 6, -200) ||
+        !spu.write_effect_sample(0u, 0u, 13, -32768))
     {
         return false;
     }
