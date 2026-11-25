@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -58,7 +59,20 @@ from verify_ir import optimize_guest_ir
 def compile_guest(fixture, directory, target, mode, opt_level, pipeline=False):
     path = directory / f"{mode}_o{opt_level}.ll"
     subprocess.run([str(fixture), str(path), mode, str(opt_level)], check=True)
-    module = llvm.parse_assembly(path.read_text(encoding="utf-8"))
+    ir_text = path.read_text(encoding="utf-8")
+    if not mode.endswith("_delay"):
+        guest_ir = ir_text.split("define i32 @guest_checked_exception_test(", 1)[1]
+        fault = re.search(
+            r"(?ms)^checked_fault_\d+:\n(.*?)^checked_continue_\d+:",
+            guest_ir,
+        )
+        require(fault is not None, f"{mode}: missing checked exception edge")
+        require("store i64 " not in guest_ir[:fault.start()],
+                f"{mode}: successful checked path prematurely spills GPR state")
+        require("store i64 " in fault.group(1) and
+                "@ee_raise_exception" in fault.group(1),
+                f"{mode}: fault edge must commit prior GPR state")
+    module = llvm.parse_assembly(ir_text)
     module.verify()
     machine = target.create_target_machine(opt=2 if pipeline else 0)
     module.triple = llvm.get_default_triple()

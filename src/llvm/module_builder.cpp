@@ -1106,20 +1106,21 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         m_out += aligned + ":\n";
     };
 
-    // Precise conditional exception: publish prior SSA state before
-    // exception entry, but do not commit a faulting arithmetic result.
+    // Publish prior SSA state only on the terminal exception edge.
+    // The normal path calls no architectural helper and keeps its cached
+    // register values, including any packed upper halves. Never commit
+    // the faulting arithmetic result before the check.
     const auto emit_checked_exception =
         [&](const std::string& condition, uint32_t excode)
     {
-        const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
-        store_dirty_regs(dirty);
-        reset_tracking();
         const std::string suffix = std::to_string(m_temp_counter++);
         const std::string fault = "checked_fault_" + suffix;
         const std::string normal = "checked_continue_" + suffix;
         m_out += "  br i1 " + condition + ", label %" + fault +
                  ", label %" + normal + "\n";
         m_out += fault + ":\n";
+        const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
+        store_dirty_regs(dirty);
         m_out += "  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 " +
                  std::to_string(excode) + ", i32 " + std::to_string(ins.pc) +
                  ", i32 " + std::to_string(in_delay_slot ? 1u : 0u) +
@@ -1979,19 +1980,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             m_out += "  " + wide + " = " + operation + " i64 " + lhs + ", " + rhs + "\n";
             const std::string result = trunc32_sext64(wide);
             const std::string overflow = newtemp();
-            const std::string suffix = std::to_string(m_temp_counter++);
             m_out += "  " + overflow + " = icmp ne i64 " + result + ", " + wide + "\n";
-            const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
-            store_dirty_regs(dirty);
-            reset_tracking();
-            m_out += "  br i1 " + overflow + ", label %word_overflow_" + suffix +
-                     ", label %word_result_" + suffix + "\n";
-            m_out += "word_overflow_" + suffix + ":\n";
-            m_out += "  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 12, i32 " +
-                     std::to_string(ins.pc) + ", i32 " +
-                     std::to_string(in_delay_slot ? 1u : 0u) + ", i32 0)\n";
-            m_out += "  ret i32 1\n";
-            m_out += "word_result_" + suffix + ":\n";
+            emit_checked_exception(overflow, 12u);
             set_gpr_lo64(ins.rd, result);
         }
         else if (ins.funct == 0x14 || ins.funct == 0x16 || ins.funct == 0x17)
