@@ -13,6 +13,21 @@ import subprocess
 import tempfile
 
 
+def build_library(clang, ir, library, opt, march):
+    command = [clang, f"-O{opt}", "-shared", "-fuse-ld=lld",
+               "-Wno-override-module", str(ir), "-o", str(library)]
+    if march == "native":
+        command.append("-march=native")
+    if os.name == "nt":
+        # Generated code can require __chkstk for register spills or other
+        # large stack frames. Keep the Windows stack probes and link the
+        # normal MSVC support libraries. /noentry still prevents CRT startup.
+        command += ["-Wl,/noentry"]
+    else:
+        command += ["-fPIC"]
+    subprocess.run(command, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
@@ -65,15 +80,7 @@ def main():
                 return False
             result.check_returncode()
             library = Path(directory) / ("program" + suffix)
-            command = [clang, f"-O{args.opt}", "-shared", "-fuse-ld=lld",
-                       "-Wno-override-module", str(ir), "-o", str(library)]
-            if args.march == "native":
-                command.append("-march=native")
-            if os.name == "nt":
-                command += ["-nostdlib", "-Wl,/noentry"]
-            else:
-                command += ["-fPIC"]
-            subprocess.run(command, check=True)
+            build_library(clang, ir, library, args.opt, args.march)
             library.replace(out / (capture.stem + suffix))
             return True
 

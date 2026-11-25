@@ -5,7 +5,7 @@
 #include "../llvm/ee_cop1_add_ir.h"
 #include "../llvm/ee_cop1_mul_ir.h"
 #include "../llvm/ee_vu_fmac_ir.h"
-#include "../llvm/ee_vu_fmac4_ir.h"
+#include "ee_vu_fmac4_ir.h"
 
 #include <utility>
 #include <bitset>

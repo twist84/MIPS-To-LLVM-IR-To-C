@@ -35,6 +35,10 @@ def verify_real_probe_location():
         key = "src/runtime/" + probe_name
         assert key in host, "host relink must fingerprint the native diagnostic"
         assert key not in guest, "host-only diagnostic must not fingerprint guest IR"
+        vu1_key = "src/runtime/ee_vu_fmac4_ir.h"
+        assert vu1_key in host, "VU1 SIMD source must fingerprint the native host"
+        assert vu1_key not in guest, "VU1-only SIMD must not invalidate EE IR"
+        assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
 
 
 def verify_preservation_when_host_only_inputs_change():

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """End-to-end capture, IR lifting, object generation and VU1 native dispatch."""
+import importlib.util
 import os
 import platform
 from pathlib import Path
@@ -7,6 +8,39 @@ import shutil
 import subprocess
 import sys
 import tempfile
+
+
+def verify_windows_stack_probe(builder, clang, root):
+    if os.name != "nt":
+        return
+    spec = importlib.util.spec_from_file_location("vu1_aot_builder", builder)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    ir = root / "stack_probe.ll"
+    ir.write_text("""
+define dllexport i32 @test_stack_probe(i64 %size) {
+entry:
+  %buf = alloca i8, i64 %size, align 16
+  %end = sub i64 %size, 1
+  %last = getelementptr i8, ptr %buf, i64 %end
+  store volatile i8 17, ptr %buf
+  store volatile i8 25, ptr %last
+  %a = load volatile i8, ptr %buf
+  %b = load volatile i8, ptr %last
+  %x = zext i8 %a to i32
+  %y = zext i8 %b to i32
+  %sum = add i32 %x, %y
+  ret i32 %sum
+}
+""", encoding="utf-8")
+    library = root / "stack_probe.dll"
+    module.build_library(clang, ir, library, "3", "native")
+    # Run in a subprocess so Windows can release the DLL before cleanup.
+    subprocess.run([sys.executable, "-c",
+                    "import ctypes,sys; d=ctypes.CDLL(sys.argv[1]); "
+                    "f=d.test_stack_probe; f.argtypes=[ctypes.c_uint64]; "
+                    "f.restype=ctypes.c_uint32; assert f(32768)==42",
+                    str(library)], check=True)
 
 
 def main():
@@ -21,6 +55,7 @@ def main():
         return 77
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
+        verify_windows_stack_probe(builder, clang, root)
         capture = root / "capture"
         subprocess.run([str(fixture), "capture", str(capture)], check=True)
         variants = [("0", "generic"), ("3", "generic")]
