@@ -72,3 +72,14 @@ nonzero DMA input, invalid areas and re-enable. The runner reports
 `fast_ticks` and `zero_fir_skips` per core. No hardware behavior is changed
 or newly claimed. Performance gain requires a matched retail measurement;
 this batch does not alter EE lowering or VU1 AOT provenance.
+
+### Matched reference/optimised replay
+
+The host-only `SDBZ_SPU2_EFFECT_FAST_PATH` switch selects the full reference
+path with value 0; unset or 1 selects the default optimisation. Both use
+the same guest clock, source input, cache provenance and runtime code.
+Warm the compatible cache first. Use the uncapped device-free preset above,
+run once with `set "SDBZ_SPU2_EFFECT_FAST_PATH=0"`, preserve the archive, then
+repeat with `set "SDBZ_SPU2_EFFECT_FAST_PATH=1"`. Keep physical controller
+input neutral and compare actual input observations, dispatch and work
+counts before interpreting timings. The log prints the selected mode.

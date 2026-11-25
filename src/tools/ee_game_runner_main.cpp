@@ -3056,9 +3056,17 @@ int main(int argc, char** argv)
         "SDBZ_AUDIO_PROFILE", &audio_profile_environment);
     const bool audio_profile_enabled = audio_profile_value != nullptr &&
         std::strcmp(audio_profile_value, "1") == 0;
+    std::string effect_fast_path_environment;
+    const char* effect_fast_path_value = read_host_environment(
+        "SDBZ_SPU2_EFFECT_FAST_PATH", &effect_fast_path_environment);
+    const bool effect_fast_path_enabled = effect_fast_path_value == nullptr ||
+        std::strcmp(effect_fast_path_value, "0") != 0;
     if (iop_kernel != nullptr)
     {
         iop_kernel->hardware().enable_spu2_audio_profile(audio_profile_enabled);
+        iop_kernel->hardware().enable_spu2_effect_fast_path(effect_fast_path_enabled);
+        std::printf("IOP SPU2 effect fast path: %s\n",
+            effect_fast_path_enabled ? "enabled" : "disabled (reference)");
     }
     if (host_audio_enabled)
     {
