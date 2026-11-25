@@ -56,6 +56,24 @@ inline t_ee_horizon_cop0_snapshot ee_horizon_cop0_snapshot(
     }};
 }
 
+// A host continuation may advance the live budget without publishing it
+// yet. Never project an event horizon from a stale clock or outstanding
+// IOP debt. These checks do not authorize executing a native function.
+inline bool ee_horizon_checkpoint_ready(const s_ee_runtime& runtime,
+    const c_ee_iop_clock& iop_clock, bool iop_scheduled)
+{
+    uint64_t live = 0u;
+    const uint64_t published = runtime.m_ee_cycle_scheduler.current_cycle();
+    return runtime.m_ee_cycle_scheduler.source() ==
+            e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
+        published != k_ee_no_deadline &&
+        ee_reference_compatibility_cycle(runtime, live) &&
+        live == published &&
+        (!iop_scheduled ||
+            (iop_clock.anchored_at(published) && iop_clock.due() == 0u &&
+                iop_clock.next_cycle() != k_ee_no_deadline));
+}
+
 // Count advances modulo 2^32 in the existing compatibility model.
 // IP7 is sticky; pending delivery is handled by the barrier check.
 // Equality at the anchor means the next full wrap, not an immediate edge.
