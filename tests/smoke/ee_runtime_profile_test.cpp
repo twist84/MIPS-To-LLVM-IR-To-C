@@ -78,7 +78,7 @@ int main()
     ee::c_ee_pc_profile<4u> disabled(false);
     disabled.record(0u, 1u, 2u, 0u, 3u);
     pcs.record(0u, 0u, 0u, 0u, 7u);
-    pcs.record(0u, 1u, 10u, 2u, 11u);
+    pcs.record(0u, 1u, 10u, 2u, 11u, 3u);
     pcs.record(1u, 1u, 3u, 0u, 13u);
     pcs.record(16u, 1u, 4u, 0u, 17u);
     pcs.record(0xffffffffu, 1u, 5u, 1u, 19u);
@@ -90,12 +90,13 @@ int main()
     {
         pcs.record(i * 16u + 4u, 1u, 1u, 0u, 1u);
     }
-    pcs.record(0u, 1u, 30u, 4u, 29u);
+    pcs.record(0u, 1u, 30u, 4u, 29u, 7u);
     const auto& entry = pcs.entries().at(0u);
     if (!disabled.entries().empty() || &entry != zero ||
         pcs.entries().size() != 4100u || entry.m_calls != 4u ||
         entry.m_dispatches != 3u || entry.m_instructions != 60u ||
         entry.m_idle_instructions != 14u || entry.m_wall_ns != 70u ||
+        entry.m_nested_ns != 10u || pcs.entries().at(1u).m_nested_ns != 0u ||
         pcs.entries().at(1u).m_wall_ns != 13u ||
         pcs.entries().at(16u).m_wall_ns != 17u ||
         pcs.entries().at(0xffffffffu).m_idle_instructions != 1u)
@@ -141,6 +142,7 @@ int main()
     }
     ee::runtime_profile_begin(true);
     uint32_t steps = 0u;
+    uint64_t root_child_ns = 0u;
     {
         ee::c_runtime_profile_scope root(e_runtime_profile_id::ee_native_boundary);
         {
@@ -152,12 +154,15 @@ int main()
             child.stop();
             child.stop();
         }
+        root.stop();
+        root_child_ns = root.child_ns();
     }
     const auto& state = ee::g_runtime_profile;
     const auto& root = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::ee_native_boundary)];
     const auto& child = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::vu1_run)];
     const auto& kick = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::vu1_xgkick)];
     if (root.m_calls != 1u || child.m_calls != 1u || kick.m_calls != 1u ||
+        root_child_ns != child.m_inclusive_ns ||
         root.m_inclusive_ns != root.m_exclusive_ns + child.m_inclusive_ns ||
         child.m_inclusive_ns != child.m_exclusive_ns + kick.m_inclusive_ns ||
         state.m_covered_ns != root.m_exclusive_ns + child.m_exclusive_ns + kick.m_exclusive_ns ||
