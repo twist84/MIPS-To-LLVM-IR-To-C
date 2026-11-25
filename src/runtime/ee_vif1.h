@@ -114,7 +114,7 @@ public:
         busy
     };
     bool enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend = {},
-        bool detailed_profile = false);
+        bool detailed_profile = false, bool native_overlap_profile = true);
     void native_execution_begin();
     void native_execution_end();
     void write_aot_json(FILE* output) const;
@@ -320,6 +320,7 @@ private:
         uint64_t m_native_completed_at_entry = 0u;
         uint64_t m_native_completed_at_exit = 0u;
     } m_worker_profile{};
+    bool m_native_overlap_profile = true;
     bool m_native_executing = false;
     uint64_t m_native_interval_start = 0u;
     std::unique_ptr<s_ee_vu1_job> m_spare_job;
@@ -331,7 +332,7 @@ private:
 // A job submitted by guest MMIO must still see m_native_executing set.
 inline void c_ee_vif1::native_execution_begin()
 {
-    if (m_worker != nullptr)
+    if (m_native_overlap_profile && m_worker != nullptr)
     {
         m_native_executing = true;
         if (m_deferred != nullptr)
