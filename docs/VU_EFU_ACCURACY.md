@@ -115,3 +115,9 @@ of internal accumulator precision or hardware timing. The existing
 54-cycle model latency is unchanged. Add the four cancellation words to
 the VU1 pipeline regression. Independent console inputs and a matched
 retail replay remain required for broader validation.
+
+## Batch 3 verification — original transcript target achieved
+
+[PR #170](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/pull/170) head `e2870d8` verified **55/55 exact original transcripts (100%)**, zero DIFF/INCOMPLETE/NO_OUTPUT/ERROR, and **208/208 direct EFU words** in [run 45676297801](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297801). All five workflows passed; [CTest](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297753) passed 174/174 across seven shards. This is the tested PR revision, not a claim of a new main or retail baseline. Independent EFU vectors, clean guest termination and calibrated timing remain separate validation objectives.
+
+Artifacts: [combined original suite summary](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297801/artifacts/15051667296), [direct EFU report](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297801/artifacts/15052516676). All thirteen EFU operations matched 16/16 raw words. The direct probe reported zero existing-model latency differences. The seven historical discrepancies are resolved without per-input replacement. A matched retail replay on this runtime and additional independent console vectors are still outstanding.

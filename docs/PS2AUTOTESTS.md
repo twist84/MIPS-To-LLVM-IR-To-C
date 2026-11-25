@@ -1,6 +1,12 @@
 # Original ps2autotests ELF validation
 
-## Current verified baseline
+## Latest candidate validation
+
+[PR #170](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/pull/170) head `e2870d8` verified **55/55 exact original transcripts (100%)**, zero DIFF/INCOMPLETE/NO_OUTPUT/ERROR, and **208/208 direct EFU words** in [run 45676297801](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297801). All five workflows passed; [CTest](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297753) passed 174/174 across seven shards. This is the tested PR revision, not a claim of a new main or retail baseline. Independent EFU vectors, clean guest termination and calibrated timing remain separate validation objectives.
+
+See [VU EFU accuracy](VU_EFU_ACCURACY.md) for the ESIN coefficient and EATAN nanocode corrections. The direct probe matches all thirteen operations, each on the sixteen pinned vectors, with zero mismatches against existing modeled latencies; this does not independently measure hardware latency.
+
+## Historical merged PR #156 baseline
 
 [`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea) incorporates PR #156. Its final pre-merge head `8bbc80d8f6d639265ea8a9dae27ecac815584148` was tested at merge revision `0e48f9a42d1eb4696f01bc1fafaeb95e76a8ced7` ([original transcript run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559), [summary artifact 15045607944](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15045607944)). All five workflows passed; the original matrix recorded **54/55 exact (98.18%)**, 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. CTest: 174/174 in seven shards ([Build and test 45663177622](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177622)).
 
