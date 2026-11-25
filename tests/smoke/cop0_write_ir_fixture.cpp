@@ -38,6 +38,8 @@ int main(int argc, char** argv)
         make_cop0(0u, 13u, 12u), // mfc0 t5, Status
         make_cop0(4u, 14u, 9u),  // mtc0 t6, Count
         make_cop0(0u, 15u, 9u),  // mfc0 t7, Count
+        make_cop0(4u, 16u, 13u), // mtc0 s0, Cause (read-only)
+        make_cop0(0u, 17u, 13u), // mfc0 s1, Cause
     };
 
     std::map<uint32_t, ee::s_ee_instruction> instructions;

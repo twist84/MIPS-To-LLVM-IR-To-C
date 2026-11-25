@@ -112,3 +112,18 @@ because its nested trap expectation assumed BD was overwritten despite EXL.
 The fixture now covers both initial BD states, both trap locations, and both
 BEV values against the corrected architectural restart rule. No production
 code changed in this follow-up; final CI must pass independently.
+
+## Batch 7: read-only Cause and real interrupt lines
+
+EE Core User's Manual v6.0 pp. 74–75 defines the three hardware interrupt
+positions IP2/IP3/IP7 and marks all Cause fields read-only. The EE has no
+software interrupt inputs. The shared MTC0 helper now leaves Cause unchanged;
+legacy raw state with reserved IP bits cannot trigger the interrupt path.
+Request/clear APIs accept only the three implemented hardware lines. The
+legacy line enum and state layout are retained for compatibility. This does
+not normalize raw reserved bits on readback or add CpU.CE generation, and
+it does not replace device interrupt routing. Host tests cover every IP
+position, out-of-range lines, and read-only Cause. Generated LLVM fixture
+executes MTC0 Cause followed by MFC0 and checks exact readback and preserved
+upper GPR halves. No new IR helper ABI or clock changes. Live exception and
+interrupt semantics changed; a fresh retail replay is required after CI.

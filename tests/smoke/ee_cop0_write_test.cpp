@@ -61,6 +61,47 @@ int main()
           cpu.m_cop0[ee::COP0_Cause] == k_other_cause,
           "non-Compare writes retain prior register semantics");
 
+    // The R5900 Cause register is read-only and has no software
+    // interrupt lines. Exercise all eight IP positions, with genuine
+    // hardware events arriving through the host request/clear path.
+    {
+        ee::s_ee_cpu_state probe{};
+        constexpr uint32_t saved_cause = 0xf0028c34u;
+        probe.m_cop0[ee::COP0_Cause] = saved_cause;
+        ee::ee_cop0_write(&probe, ee::COP0_Cause, 0u);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "guest Cause write cannot clear saved exception or pending lines");
+        ee::ee_cop0_write(&probe, ee::COP0_Cause, 0xffffffffu);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "guest Cause write cannot manufacture exception or pending lines");
+        for (uint32_t line = 0u; line < 8u; ++line)
+        {
+            const uint32_t bit = 1u << (8u + line);
+            const bool implemented = line == 2u || line == 3u || line == 7u;
+            probe.m_cop0[ee::COP0_Status] = ee::STATUS_IE | ee::STATUS_EIE | bit;
+            probe.m_cop0[ee::COP0_Cause] = 0u;
+            ee::ee_interrupt_request(&probe, line);
+            check(probe.m_cop0[ee::COP0_Cause] == (implemented ? bit : 0u) &&
+                  ee::ee_interrupts_enabled(&probe) == implemented &&
+                  ee::ee_pending_interrupts(&probe) == (implemented ? bit : 0u),
+                  "only real EE hardware lines may be requested");
+            // A raw state image may contain legacy/reserved bits, but
+            // they must not be eligible for an architectural interrupt.
+            probe.m_cop0[ee::COP0_Cause] = bit;
+            check(ee::ee_interrupts_enabled(&probe) == implemented &&
+                  ee::ee_pending_interrupts(&probe) == (implemented ? bit : 0u),
+                  "reserved IP bits cannot dispatch an interrupt");
+            ee::ee_interrupt_clear(&probe, line);
+            check(probe.m_cop0[ee::COP0_Cause] == (implemented ? 0u : bit),
+                  "clear operates only on implemented interrupt lines");
+        }
+        probe.m_cop0[ee::COP0_Cause] = saved_cause;
+        ee::ee_interrupt_request(&probe, 32u);
+        ee::ee_interrupt_clear(&probe, 0xffffffffu);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "out of range IRQ line is ignored");
+    }
+
     // The existing explicit timer-tick helper is only a synthetic fixture:
     // no native execution cycle source or GS scheduling is installed.
     cpu.m_cop0[ee::COP0_Count] = 4u;

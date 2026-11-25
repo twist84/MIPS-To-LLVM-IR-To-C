@@ -79,10 +79,10 @@ def main():
         ir_text = path.read_text(encoding="utf-8")
 
         # This checks the emitted calls, not only an interpreter-side shim.
-        require(ir_text.count("call void @ee_cop0_write(") == 1 and
+        require(ir_text.count("call void @ee_cop0_write(") == 2 and
                 ir_text.count("call void @ee_cop0_clock_write(") == 2,
-                "MTC0 Count/Compare use clock-aware helpers; Status uses raw helper")
-        for index in (11, 12, 9):
+                "MTC0 Count/Compare use clock-aware helpers; Status/Cause use shared write helper")
+        for index in (11, 12, 9, 13):
             require((f"ptr %cpu, i32 {index}, i32 " in ir_text or
                      f"ptr %cpu, ptr %rt, i32 {index}, i32 " in ir_text),
                     f"COP0 register {index} did not use the helper ABI")
@@ -128,19 +128,22 @@ def main():
             state.gpr[8].hi = 0x1122334455667788
             state.gpr[12].lo = 0xFFFF123400010001
             state.gpr[14].lo = 0xDEADBEEFAABBCCDD
-            for register in (9, 10, 13, 15):
+            state.gpr[16].lo = 0xFFFFFFFFFFFFFFFF
+            for register in (9, 10, 13, 15, 17):
                 state.gpr[register].hi = 0xABCDEF0000000000 | register
 
             exit_reason = guest_fn(ctypes.pointer(state), None)
             cleared_cause = initial_cause & ~TIMER_IP
             require(exit_reason == 3 and state.exit_reason == 3,
                     "generated LLVM did not exit through dispatcher")
-            require(state.pc == ENTRY_PC + 7 * 4,
+            require(state.pc == ENTRY_PC + 9 * 4,
                     "generated LLVM returned an unexpected guest PC")
             require(state.cop0[11] == compare_value,
                     "Compare write did not retain the low 32 source bits")
             require(state.cop0[13] == cleared_cause,
-                    "Compare write did not clear only IP7")
+                    "Compare write did not clear only IP7 or guest Cause write modified state")
+            require(state.gpr[17].lo == sign_extend_u32(cleared_cause),
+                    "MFC0 after MTC0 Cause did not observe unchanged state")
             require(state.gpr[9].lo == sign_extend_u32(cleared_cause),
                     "subsequent MFC0 Cause observed stale timer IP7")
             require(state.gpr[10].lo == sign_extend_u32(compare_value),
@@ -151,7 +154,7 @@ def main():
             require(state.cop0[9] == 0xAABBCCDD and
                     state.gpr[15].lo == sign_extend_u32(0xAABBCCDD),
                     "Count write/read did not preserve existing semantics")
-            for register in (9, 10, 13, 15):
+            for register in (9, 10, 13, 15, 17):
                 require(
                     state.gpr[register].hi ==
                     (0xABCDEF0000000000 | register),

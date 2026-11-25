@@ -159,8 +159,9 @@ extern "C" uint32_t ee_exception_return(s_ee_cpu_state* cpu)
 // EE Core User's Manual v6.0, section 3.2, Compare (printed p.72):
 // writing Compare acknowledges the timer interrupt by clearing Cause.IP7.
 // This action is independent of a Count tick or a scheduler deadline.
-// Until individually audited, all other guest-writable COP0 registers keep
-// their prior raw assignment semantics instead of inventing bit masks.
+// Cause is read-only (manual p. 75); guest writes cannot acknowledge or
+// manufacture an interrupt or change the saved exception restart state.
+// Other unaudited COP0 registers retain their existing assignment semantics.
 extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
                               uint32_t reg,
                               uint32_t value)
@@ -170,6 +171,10 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
         return;
     }
 
+    if (reg == COP0_Cause)
+    {
+        return;
+    }
     cpu->m_cop0[reg] = value;
 
     if (reg == COP0_Compare)
@@ -413,13 +418,13 @@ extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
 
 extern "C" void ee_interrupt_request(s_ee_cpu_state* cpu, uint32_t line)
 {
-    if (!cpu || line > 7) return;
+    if (!cpu || !ee_is_hardware_interrupt_line(line)) return;
     cpu->m_cop0[COP0_Cause] |= (1u << (CAUSE_IP_SHIFT + line));
 }
 
 extern "C" void ee_interrupt_clear(s_ee_cpu_state* cpu, uint32_t line)
 {
-    if (!cpu || line > 7) return;
+    if (!cpu || !ee_is_hardware_interrupt_line(line)) return;
     cpu->m_cop0[COP0_Cause] &= ~(1u << (CAUSE_IP_SHIFT + line));
 }
 
@@ -433,7 +438,7 @@ extern "C" uint32_t ee_pending_interrupts(const s_ee_cpu_state* cpu)
     if (!cpu) return 0;
     const uint32_t status = cpu->m_cop0[COP0_Status];
     const uint32_t cause  = cpu->m_cop0[COP0_Cause];
-    return (cause & status & CAUSE_IP_MASK);
+    return (cause & status & k_ee_hardware_ip_mask);
 }
 
 extern "C" uint32_t ee_check_interrupts(s_ee_cpu_state* cpu,
