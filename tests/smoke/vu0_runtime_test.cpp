@@ -656,6 +656,37 @@ int main()
               "non-flag FMAC does not clear or alter existing flags");
     }
 
+    // OPMULA/OPMSUB always operate on XYZ, with W left untouched.
+    {
+        ee::s_ee_cpu_state outer_cpu{};
+        ee::s_ee_vu0_state outer_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        outer_vu.m_vpu_status = 1u;
+        outer_cpu.m_vu0[1] = {0x4040000040000000ull, 0x3f80000040a00000ull};
+        outer_cpu.m_vu0[2] = {0x4130000040e00000ull, 0x3f80000041500000ull};
+        outer_cpu.m_vu0[3].m_hi = 0xdeadbeef00000000ull;
+        outer_vu.m_acc.m_hi = 0x1234567800000000ull;
+        outer_vu.m_mac_flags = 1u;
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t opmula = (2u << 16u) | (1u << 11u) | (11u << 6u) | 0x3eu;
+        const uint32_t opmsub = (1u << 16u) | (2u << 11u) | (3u << 6u) | 0x2eu;
+        install_vu0_pair(&outer_vu, 0, nop, opmula);
+        install_vu0_pair(&outer_vu, 1, nop, opmsub | 0x40000000u);
+        install_vu0_pair(&outer_vu, 2, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &outer_cpu,
+            &outer_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              outer_vu.m_cycle == 6u && outer_vu.m_running == 0u,
+              "outer product pair executes with ACC forwarding");
+        check(outer_vu.m_acc.m_lo == 0x420c0000421c0000ull &&
+              outer_vu.m_acc.m_hi == 0x1234567841b00000ull &&
+              outer_cpu.m_vu0[3].m_lo == 0x41100000c1800000ull &&
+              outer_cpu.m_vu0[3].m_hi == 0xdeadbeef3f800000ull,
+              "OPMULA and OPMSUB rotated XYZ operands and preserved W");
+        check(outer_vu.m_mac_flags == 0x81u,
+              "outer product preserves W MAC bits");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {

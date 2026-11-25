@@ -344,3 +344,11 @@ not the secondary opcode field Fd. Their VF reservations still mature
 after four cycles but do not publish a MAC/status update. Test chains
 cover masked destinations, exact arithmetic and delayed dependencies.
 No new original transcript pass claimed.
+
+## VU0 outer product
+
+OPMULA and OPMSUB use rotated XYZ operands, ACC forwarding, and the
+existing bit-level MUL/MSUB primitives. Preserve W data and W MAC bits,
+including the newest pending flag result. XYZ reservations are independent
+of the raw destination mask. Regression covers the cross-product sequence
+and E flush. Original transcript progress remains unverified.
