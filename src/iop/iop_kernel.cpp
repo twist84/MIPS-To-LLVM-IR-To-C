@@ -879,6 +879,31 @@ uint64_t c_kernel::idle_event_cycles_remaining() const
     return std::min(software, m_hardware.idle_event_cycles_remaining());
 }
 
+bool c_kernel::try_advance_quiet_cycles(uint32_t cycles)
+{
+    constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
+    if (cycles == 0u || m_restart_current_thread ||
+        cycles >= none - m_cycles)
+    {
+        return false;
+    }
+    const uint64_t interval = idle_event_cycles_remaining();
+    const auto& spu2 = m_hardware.spu2();
+    if (interval == none || cycles >= interval ||
+        (spu2.clock_active() && cycles >= none - spu2.clock_cycles()))
+    {
+        return false;
+    }
+
+    // The normal run() would find no runnable thread, interrupt or
+    // software/device event and advance exactly these cycles. The
+    // hardware call is identical, including fractional timer/sample
+    // phase. At equality or an unknown horizon use the normal runner.
+    m_hardware.advance_cycles(cycles);
+    m_cycles += cycles;
+    return true;
+}
+
 bool c_kernel::has_guest_work() const
 {
     if (m_rom0_boot_active)
