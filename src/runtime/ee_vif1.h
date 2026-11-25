@@ -261,6 +261,11 @@ private:
     std::unique_ptr<s_ee_vu1_job> take_worker_job(bool wait);
     void record_worker_job(const s_ee_vu1_job& job, bool discarded);
 
+    // FIFO capacity bounds retained words when command decoding stalls.
+    static size_t stalled_fifo_words(const s_machine& machine)
+    {
+        return machine.m_vif0 ? 32u : 64u;
+    }
     static uint32_t command_data_words(const s_machine& machine,
                                        uint32_t code);
     static void unpack(s_machine& machine, uint32_t code,

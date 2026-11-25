@@ -221,6 +221,93 @@ int main()
         }
     }
 
+    // A short DMA burst fits in the VIF FIFO even if its I-bit command
+    // stops decoding. DMA owns no further words once the burst is accepted.
+    for (uint32_t i = 0u; i < 2u; ++i)
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 vif{};
+        ee::c_ee_hw_bus bus;
+        ee::ee_memory memory(0x1000u);
+        bus.bind_memory(&memory);
+        if (i == 0u)
+        {
+            vif.bind_vu0(&vu0);
+            bus.bind_vif0(&vif);
+        }
+        else
+        {
+            bus.bind_vif1(&vif);
+        }
+        bus.bind_device_transfer(&vif, ee::c_ee_vif1::dma_transfer);
+        ee::s_ee_runtime rt{};
+        rt.m_user = &memory;
+        rt.m_mmio_user = &bus;
+        rt.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        rt.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        const uint32_t dma = i == 0u ? ee::c_ee_dmac::k_vif0_base :
+                                      ee::c_ee_dmac::k_vif1_base;
+        const uint32_t irq = 1u << (4u + i);
+        const std::vector<uint32_t> words{
+            0x20000000u, 0xaaaaaaaau, 0x80000000u, 0xa0000000u,
+            0xbbbbbbbbu, 0x20000000u, 0xccccccccu, 0u};
+        for (uint32_t n = 0u; n < words.size(); ++n)
+        {
+            ee::ee_mem_write32(&rt, 0x100u + n * 4u, words[n]);
+        }
+        ee::ee_mem_write32(&rt, 0x1000e000u, 1u);
+        ee::ee_mem_write32(&rt, dma + 0x10u, 0x100u);
+        ee::ee_mem_write32(&rt, dma + 0x20u, 2u);
+        ee::ee_mem_write32(&rt, dma, 0x101u);
+        if (!check(vif.read_register(0x70u) == 0xaaaaaaaau &&
+                   vif.read_register(0x00u) == 0xc02u &&
+                   vif.read_register(0x80u) == 0x80000000u &&
+                   (bus.intc().status() & irq) != 0u &&
+                   ee::ee_mem_read32(&rt, dma + 0x10u) == 0x120u &&
+                   ee::ee_mem_read32(&rt, dma + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&rt, dma) & 0x100u) == 0u &&
+                   (bus.dmac().status() & (1u << i)) != 0u,
+                   "VIF stalled prefix or bounded DMA acceptance"))
+        {
+            return 1;
+        }
+        const ee::s_ee_u128 ack{irq, 0u};
+        if (!check(ee::c_ee_intc::mmio_write(&bus.intc(),
+                       ee::c_ee_intc::k_stat_address, 4u, &ack) &&
+                   vif.write_register(0x10u, 8u) &&
+                   vif.read_register(0x70u) == 0xbbbbbbbbu &&
+                   vif.read_register(0x00u) == 0xc02u &&
+                   (bus.intc().status() & irq) != 0u &&
+                   vif.write_register(0x10u, 8u) &&
+                   vif.read_register(0x70u) == 0xccccccccu &&
+                   vif.read_register(0x00u) == 0u &&
+                   vif.diagnostic().m_pending_words == 0u,
+                   "VIF STC did not resume through successive interrupts"))
+        {
+            return 1;
+        }
+        if (!check(vif.write_register(0x10u, 1u) &&
+                   vif.write_register(0x20u, 1u) &&
+                   send(vif, words) &&
+                   vif.read_register(0x70u) == 0xccccccccu &&
+                   vif.read_register(0x00u) == 0u,
+                   "VIF ERR.MII did not suppress stalls"))
+        {
+            return 1;
+        }
+        std::vector<uint32_t> oversized((i == 0u ? 9u : 17u) * 4u, 0u);
+        oversized[0] = 0x80000000u;
+        if (!check(vif.write_register(0x10u, 1u) &&
+                   !send(vif, oversized) &&
+                   vif.read_register(0x00u) == 0u &&
+                   vif.diagnostic().m_reason ==
+                       ee::c_ee_vif1::e_reject::irq_requires_resume,
+                   "VIF oversized stalled suffix was falsely accepted"))
+        {
+            return 1;
+        }
+    }
+
     // VIF1 MSKPATH3 must change GIF_STAT.M3P and gate actual DMA.
     {
         ee::c_ee_vif1 mask_vif{};
@@ -640,7 +727,7 @@ int main()
         }
     }
 
-    // Unknown commands and IRQ stalls fail closed without altering
+    // Unknown commands and unsupported VU launch IRQs fail closed without altering
     // the accepted VIF state or delivering a second PATH2 batch.
     const uint32_t calls_before = capture.m_calls;
     const uint32_t accepted_before = vif1.diagnostic().m_commands;
@@ -653,7 +740,7 @@ int main()
         !check(capture.m_calls == calls_before &&
                vif1.read_register(0x80u) == 0u,
                "rejected opcode partially committed") ||
-        !check(!send(vif1, {0x80000000u, 0u, 0u, 0u}) &&
+        !check(!send(vif1, {0x94000000u, 0u, 0u, 0u}) &&
                vif1.diagnostic().m_reason ==
                    ee::c_ee_vif1::e_reject::irq_requires_resume,
                "VIF IRQ fabricated completion") ||

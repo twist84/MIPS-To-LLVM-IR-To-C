@@ -312,10 +312,10 @@ bool c_ee_vif1::execute(
         return false;
     }
 
-    // MARK raises INT without stopping command decoding. Other unmasked
-    // I-bit commands still require a resumable stall/DMA transport.
-    if (op != 0x07u && (code & 0x80000000u) != 0u &&
-        (machine.m_err & 1u) == 0u)
+    // Launch IRQs need VU completion/worker ordering not yet modeled.
+    // Other supported commands can retire before a FIFO decoding stall.
+    if ((op == 0x14u || op == 0x15u || op == 0x17u) &&
+        (code & 0x80000000u) != 0u && (machine.m_err & 1u) == 0u)
     {
         *reject = e_reject::irq_requires_resume;
         accepted = false;
@@ -577,6 +577,12 @@ bool c_ee_vif1::prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc)
         return false;
     }
     const size_t previous = next.m_pending.size();
+    if ((next.m_stat & 0x400u) != 0u &&
+        previous + static_cast<size_t>(qwc) * 4u > stalled_fifo_words(next))
+    {
+        reject_packet(e_reject::irq_requires_resume, next.m_code);
+        return false;
+    }
     next.m_pending.resize(previous + static_cast<size_t>(qwc) * 4u);
     if (qwc != 0u && host_little_endian())
     {
@@ -624,12 +630,26 @@ bool c_ee_vif1::record_command(s_transaction& tx, uint32_t code, uint32_t words)
         tx.m_rejected_code = code;
         return false;
     }
-    if (((code >> 24u) & 0xffu) == 0x87u &&
-        (tx.m_next.m_err & 1u) == 0u)
+    tx.m_index += 1u + words;
+    if ((code & 0x80000000u) != 0u && (tx.m_next.m_err & 1u) == 0u)
     {
+        auto& next = tx.m_next;
+        const uint32_t opcode = (code >> 24u) & 0x7fu;
+        if (opcode != 0x07u) // MARK is explicitly non-stalling.
+        {
+            // The boolean DMA sink can accept a complete burst only.
+            // Never claim an oversized suffix fit in the device FIFO.
+            if (next.m_pending.size() - tx.m_index > stalled_fifo_words(next))
+            {
+                tx.m_rejection = e_reject::irq_requires_resume;
+                tx.m_rejected_code = code;
+                return false;
+            }
+            next.m_stat |= 0x400u; // VIS
+        }
+        next.m_stat |= 0x800u; // INT
         tx.m_interrupt = true;
     }
-    tx.m_index += 1u + words;
     return true;
 }
 
@@ -639,6 +659,7 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
 {
     auto& next = tx.m_next;
     while (tx.m_rejection == e_reject::none &&
+           (next.m_stat & 0x400u) == 0u &&
            tx.m_index < next.m_pending.size())
     {
         const uint32_t code = next.m_pending[tx.m_index];
@@ -672,8 +693,8 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
         tx.m_before1 = tx.m_path1.size();
         tx.m_before2 = tx.m_path2.size();
 
-        // IRQ and uninitialized MSCNT retain the synchronous rejection
-        // path. Following MPG, UNPACK, FLUSH and MSCNT cannot run until
+        // Unmasked launch IRQ and uninitialized MSCNT retain the
+        // synchronous rejection path. MPG, UNPACK, FLUSH and MSCNT cannot run until
         // the preceding worker result has been collected.
         if (worker != nullptr && vu_start && !next.m_vu_debug_stopped &&
             ((code & 0x80000000u) == 0u || (next.m_err & 1u) != 0u) &&
@@ -1157,7 +1178,8 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
     switch (offset)
     {
     case 0x00u: return (m_machine.m_stat & ~3u) |
-        (!m_machine.m_pending.empty() ? 1u : 0u) | // VPS: waiting for data
+        (!m_machine.m_pending.empty() ?
+            ((m_machine.m_stat & 0x400u) != 0u ? 2u : 1u) : 0u) | // VPS
         (m_machine.m_dbf ? 0x80u : 0u) |
         (deferred_busy() ? 0x4u : 0u); // VEW: outstanding VU execution
     case 0x20u: return m_machine.m_err;
@@ -1168,7 +1190,8 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
         // No vectors retire until this transactional UNPACK has all its
         // required data. Hardware VIF0 exposes eight bits of NUM, while
         // VIF1 exposes the expanded nine-bit count (256 for NUM=0).
-        if (!m_machine.m_pending.empty() &&
+        if ((m_machine.m_stat & 0x400u) == 0u &&
+            !m_machine.m_pending.empty() &&
             (m_machine.m_pending.front() & 0x60000000u) == 0x60000000u)
         {
             const uint32_t count = (m_machine.m_pending.front() >> 16u) & 0xffu;
@@ -1176,7 +1199,8 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
         }
         return m_machine.m_num & (m_vu0 != nullptr ? 0xffu : 0x1ffu);
     case 0x70u: return m_machine.m_mask;
-    case 0x80u: return !m_machine.m_pending.empty() ?
+    case 0x80u: return (m_machine.m_stat & 0x400u) == 0u &&
+        !m_machine.m_pending.empty() ?
         m_machine.m_pending.front() : m_machine.m_code;
     case 0x90u: return m_machine.m_itops;
     case 0xa0u: return m_machine.m_base;
@@ -1231,7 +1255,14 @@ bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
         }
         if ((value & 8u) != 0u)
         {
+            const bool was_stalled = (m_machine.m_stat & 0x400u) != 0u;
             m_machine.m_stat &= ~0x3f00u;
+            if (was_stalled && !m_machine.m_pending.empty())
+            {
+                // Re-enter the ordinary parser with the already accepted
+                // FIFO words, without fetching or completing DMA again.
+                return consume(nullptr, 0u);
+            }
         }
         return true;
     case 0x20u: m_machine.m_err = value; return true;

@@ -906,3 +906,25 @@ writing MARK clears MRK. Regressions cover both units, subsequent command
 execution, masking, acknowledgement and rollback. NOP/STMASK IRQ stalls
 still require resumable command processing and DMA transport; no full
 original intstall match is claimed before CI.
+
+### Confirmed 48/55 and bounded VIF IRQ stalls
+
+PR head `1d21236e8ebf184b1c3dbd948d7657e876434e76`, tested merge
+`2e89e15e1d0bb5ab038fdc2e8b59376f099131eb`, [run 45651844058](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45651844058),
+[summary artifact 15040602145](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45651844058/artifacts/15040602145).
+All five workflows passed. **48/55 exact (87.27%)**: PASS 48, DIFF 4,
+INCOMPLETE 3, NO_OUTPUT 0, ERROR 0. Newly passing cpu/ee_fpu/muldiv
+with the uniform two-million-dispatch budget; no previous passes lost.
+
+For supported non-launch I-bit commands, retire the command and prefix,
+raise INTC, set VIS/INT, retain the unconsumed suffix, and resume it on
+FBRST.STC without fetching DMA again. MARK remains non-stalling; MII
+suppresses interrupts. Bound the retained stalled FIFO to 8 QWC for
+VIF0 and 16 QWC for VIF1, consistent with the pinned PCSX2 DMA source.
+The existing boolean DMA consumer can complete a whole burst only if
+its suffix fits; oversized stalled bursts still fail closed and do not
+advance DMA or publish the prefix. General partial DMA/chain progress,
+FQC timing, progressive UNPACK and I-bit VU launch handling remain open.
+Regression checks actual small DMA acceptance, NOP/STMASK stalls,
+resume across successive interrupts, masking and oversized rejection.
+No new original match is claimed until execution.
