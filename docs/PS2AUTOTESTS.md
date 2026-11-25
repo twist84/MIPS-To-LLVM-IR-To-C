@@ -679,3 +679,27 @@ threads. The synthetic sleep/wakeup program now obtains a real credit
 from a second guest thread instead of expecting an invalid self wakeup
 to succeed. The self-suspend rescheduling discrepancy remains open;
 no scheduler timing or original ELF/expected output changes are made.
+
+### Confirmed 35/55 and process-wide heap boundary
+
+PR head `d324bb029e3e180760569663d13e6a2987399f26`, tested merge
+`0a571bd18be1c17dbc15c1608fbf34ac3ad1dccb`: [full suite run
+45642745870](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45642745870),
+[summary artifact 15037570594](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45642745870/artifacts/15037570594).
+All five workflows passed. PASS 35, DIFF 11, INCOMPLETE 9, NO_OUTPUT 0,
+ERROR 0. Thread resume and wakeup are newly exact; no previous pass lost.
+
+The memory/ee/default ELF initializes the heap from its startup thread
+(SetupHeap at 0x00100150) but its harness creates a second EE thread
+(entry 0x00100650, CreateThread call 0x001006fc, StartThread call
+0x00100708). The real libc _sbrk implementation at 0x00109f10 calls
+EndOfHeap at 0x00109f54 and rejects the requested new break if it exceeds
+that limit. The previous HLE stored the limit on the startup thread only;
+new threads saw zero. The reference OpenPS2BIOS
+(`893b9fa96678f89c8e56cde28ffda00330cf35b1`, src/ee/kernel.c) uses a single
+heap_end for SetupHeap/EndOfHeap, consistent with PS2SDK's shared libc
+allocator. Store the limit at executable scope, keep existing range and
+startup-context validation, and test an actual worker query and return to
+the root. The allocation failure is a plausible shared cause of zero DMA
+addresses and overlapping SPR chain buffers; exact effects on each test
+must be confirmed by execution. No original binaries or transcripts changed.

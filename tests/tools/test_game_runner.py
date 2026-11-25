@@ -503,7 +503,7 @@ def make_create_thread_elf(path):
 
 
 def make_heap_boundary_elf(path):
-    """EndOfHeap reads the same per-thread extent committed by SetupHeap."""
+    """EndOfHeap reads the process-wide extent committed by SetupHeap."""
     make_elf(path)
     image = bytearray(path.read_bytes())
     image.extend(bytes(max(0, 0x400 - len(image))))
@@ -548,6 +548,67 @@ def make_heap_boundary_elf(path):
     )
     for index, word in enumerate(instructions):
         struct.pack_into("<I", image, 0x108 + index * 4, word)
+    path.write_bytes(image)
+
+
+def make_shared_heap_elf(path):
+    """A real EE worker sees the main thread's configured libc heap."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    entry = (
+        0x24040000,  # gp = 0
+        0x2405ffff,  # automatic startup stack
+        0x24064000,  # stack size 16 KiB
+        0x2403003c,  # SetupThread
+        0x0000000c,
+        0x3c040064,  # heap base 0x00640000
+        0x2405ffff,  # all available memory below startup stack
+        0x2403003d,  # SetupHeap
+        0x0000000c,
+        0x00408021,  # s0 = 0x01ffb000
+        0x3c040010,
+        0x34840200,  # thread descriptor
+        0x24030020,
+        0x0000000c,
+        0x00408821,  # s1 = worker ID
+        0x24040002,
+        0x24050000,
+        0x24030022,  # StartThread
+        0x0000000c,
+        0x24030032,  # SleepThread: actually enter worker
+        0x0000000c,
+        0x3c080010,
+        0x35080240,  # t0 = worker result address
+        0x8d120000,  # lw s2,0(t0): worker result
+        0x2403003e,  # root still sees same limit
+        0x0000000c,
+        0x00409821,  # s3 = root EndOfHeap result
+        0x00000008,
+        0x00000000,
+    )
+    worker = (
+        0x2403003e,  # EndOfHeap called from thread 2
+        0x0000000c,
+        0x3c080010,
+        0x35080240,
+        0xad020000,  # save result in guest RAM
+        0x24040001,
+        0x24030033,  # WakeupThread(1)
+        0x0000000c,
+        0x24030023,
+        0x0000000c,
+        0x00000008,
+        0x00000000,
+    )
+    for index, word in enumerate(entry):
+        struct.pack_into("<I", image, 0x108 + index * 4, word)
+    for index, word in enumerate(worker):
+        struct.pack_into("<I", image, 0x1f0 + index * 4, word)
+    struct.pack_into("<9I", image, 0x300, 0, 0x001000f0, 0x00102000,
+                     0x800, 0, 64, 0, 0, 0)
     path.write_bytes(image)
 
 
@@ -3406,6 +3467,26 @@ def main():
             assert regs[12] == 0x00642000, state # SetupHeap(size) result
             assert regs[13] == 0x00642000, state # EndOfHeap updated
             assert regs[14] == 0x00642000, state # EndOfHeap ignores A0
+
+        with tempfile.TemporaryDirectory(prefix="ee-native-shared-heap-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-shared-heap.elf"
+            make_shared_heap_elf(elf)
+            report_path = root / "shared-heap.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"),
+                "--max-dispatches=100", "--auto-expand=4",
+                "--trace", "--report", str(report_path), "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE EE thread switch: id=2 pc=0x001000f0" in combined, combined
+            assert "HLE EndOfHeap: id=2 end=0x01ffb000" in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            regs = state["gpr_lo"]
+            assert regs[16:20] == [0x01ffb000, 2, 0x01ffb000, 0x01ffb000], state
+            assert state["final_pc"] == 0, state
 
         with tempfile.TemporaryDirectory(prefix="ee-native-sleep-wakeup-") as tmp:
             root = Path(tmp)

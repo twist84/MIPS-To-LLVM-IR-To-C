@@ -3318,6 +3318,8 @@ int main(int argc, char** argv)
 
     uint32_t startup_stack_top = stack;
     uint32_t startup_stack_size = 0;
+    // EE libc's heap is shared by the executable's guest threads.
+    uint32_t startup_heap_end = 0u;
     bool startup_thread_set = false;
 
     struct s_kernel_semaphore
@@ -3371,7 +3373,6 @@ int main(int argc, char** argv)
         uint32_t m_gp = 0u;
         uint32_t m_priority = 0u;
         uint32_t m_initial_priority = 0u;
-        uint32_t m_heap_end = 0u;
         uint32_t m_attr = 0u;
         uint32_t m_option = 0u;
     };
@@ -6499,9 +6500,10 @@ int main(int argc, char** argv)
                         std::fprintf(stderr, "SetupHeap HLE refused overlapping heap/stack\n");
                         break;
                     }
-                    // SetupHeap records the current thread's heap boundary
-                    // and returns it. EndOfHeap must query this same value;
-                    // it must not infer the boundary from the caller's A0.
+                    // SetupHeap records the process-wide EE heap boundary.
+                    // PS2SDK libc shares its allocator between EE threads;
+                    // OpenPS2BIOS likewise stores one heap_end in ee/kernel.c.
+                    // EndOfHeap must not depend on the caller's thread or A0.
                     // This does not implement malloc/sbrk.
                     if (current_thread_id == 0u ||
                         current_thread_id >= 256u ||
@@ -6512,7 +6514,7 @@ int main(int argc, char** argv)
                         break;
                     }
                     const uint32_t heap_end32 = static_cast<uint32_t>(heap_end);
-                    threads[current_thread_id].m_heap_end = heap_end32;
+                    startup_heap_end = heap_end32;
                     cpu.m_gpr[2].m_lo = heap_end32;
                     cpu.m_gpr[2].m_hi = 0u;
                     if (trace)
@@ -6536,8 +6538,7 @@ int main(int argc, char** argv)
                             "EndOfHeap HLE refused invalid running thread\n");
                         break;
                     }
-                    const uint32_t heap_end =
-                        threads[current_thread_id].m_heap_end;
+                    const uint32_t heap_end = startup_heap_end;
                     cpu.m_gpr[2].m_lo = heap_end;
                     cpu.m_gpr[2].m_hi = 0u;
                     if (trace)
