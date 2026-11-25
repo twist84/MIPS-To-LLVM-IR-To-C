@@ -41,6 +41,30 @@ int main()
     assert(zero.untracked_pc_samples() == 1u);
     assert(zero.untracked_edge_samples() == 1u);
 
+    // A cold zero-key slot must miss even when capacity is zero.
+    // Cached rejections update the correct independent untracked counter.
+    ee::c_ee_dispatch_hotspots no_pc(0u, 1u);
+    no_pc.record(1u, 0u, 0u, {});
+    no_pc.record(2u, 0u, 0u, {});
+    no_pc.record(3u, 0u, 1u, {});
+    no_pc.record(4u, 0u, 1u, {});
+    no_pc.record(5u, 0u, 0u, {});
+    const auto no_pc_json = serialize(no_pc);
+    assert(no_pc.untracked_pc_samples() == 5u);
+    assert(no_pc.untracked_edge_samples() == 2u);
+    assert(no_pc_json.find("\"pc_cache_misses\": 1") != std::string::npos);
+    assert(no_pc_json.find("\"edge_cache_misses\": 3") != std::string::npos);
+    assert(no_pc_json.find("\"from_pc\": 0, \"to_pc\": 0, \"visits\": 3") != std::string::npos);
+
+    ee::c_ee_dispatch_hotspots no_edge(1u, 0u);
+    no_edge.record(1u, 0u, 0u, {});
+    no_edge.record(2u, 0u, 0u, {});
+    assert(no_edge.untracked_pc_samples() == 0u);
+    assert(no_edge.untracked_edge_samples() == 2u);
+    const auto no_edge_json = serialize(no_edge);
+    assert(no_edge_json.find("\"pc\": 0, \"visits\": 2") != std::string::npos);
+    assert(no_edge_json.find("\"edge_cache_misses\": 1") != std::string::npos);
+
     // Ties must serialize in key order independent of insertion order.
     ee::c_ee_dispatch_hotspots ties;
     ties.record(1u, 16u, 24u, {});

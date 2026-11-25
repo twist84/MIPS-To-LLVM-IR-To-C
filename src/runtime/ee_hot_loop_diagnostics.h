@@ -267,7 +267,6 @@ private:
     {
         t_key m_key{};
         uint64_t* m_counter = nullptr;
-        bool m_valid = false;
     };
 
     template <typename t_key, typename t_hash>
@@ -276,7 +275,7 @@ private:
                              const t_key& key, size_t capacity,
                              uint64_t& untracked)
     {
-        const bool miss = !slot.m_valid || slot.m_key != key;
+        const bool miss = slot.m_counter == nullptr || slot.m_key != key;
         if (miss)
         {
             auto found = counts.find(key);
@@ -284,21 +283,15 @@ private:
             {
                 found = counts.emplace(key, 0u).first;
             }
-            // unordered_map references survive rehash. We never erase.
-            // A null counter is cached only after the map is full;
-            // capacity never changes, so the rejection remains valid.
+            // Map references survive rehash; we never erase. Rejected
+            // keys point to the owning object's untracked counter once
+            // the fixed capacity fills. The object cannot move or copy,
+            // so both kinds of counter pointers remain valid. Null now
+            // denotes only a cold slot, including for the zero key.
             slot.m_key = key;
-            slot.m_counter = found != counts.end() ? &found->second : nullptr;
-            slot.m_valid = true;
+            slot.m_counter = found != counts.end() ? &found->second : &untracked;
         }
-        if (slot.m_counter != nullptr)
-        {
-            ++*slot.m_counter;
-        }
-        else
-        {
-            ++untracked;
-        }
+        ++*slot.m_counter;
         return miss;
     }
 
