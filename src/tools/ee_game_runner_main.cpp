@@ -8751,6 +8751,11 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(spu2.input_frames_written()),
             static_cast<unsigned long long>(spu2.input_frames_consumed()),
             spu2.input_frames(0u), spu2.input_frames(1u));
+        std::printf(
+            "IOP SPU2 PCM: frames=%llu nonzero=%llu peak=%u rate=%u channels=2 bits=16\n",
+            static_cast<unsigned long long>(spu2.mixed_frames()),
+            static_cast<unsigned long long>(spu2.nonzero_frames()),
+            spu2.pcm_peak(), iop::c_spu2::k_sample_rate);
     }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,

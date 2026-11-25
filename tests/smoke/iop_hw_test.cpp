@@ -551,6 +551,97 @@ bool test_authentic_spu2_dma()
     return true;
 }
 
+bool test_spu2_pcm_mixer()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    std::vector<int16_t> pcm;
+    hw.bind_spu2_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    // Constant positive ADPCM sample (nibble 4, shift 0), zero pitch,
+    // fast attack, left-only fixed volume and ordinary master gain.
+    if (!hw.write(base + 0x1aau, 2u, 0x5000u) ||
+        !hw.write(base + 0x1acu, 2u, 0u) ||
+        !hw.write(base + 0x1acu, 2u, 0x4444u) ||
+        !hw.write(base + 0x1c2u, 2u, 0x5000u) ||
+        !hw.write(base + 0u, 2u, 0x3fffu) ||
+        !hw.write(base + 2u, 2u, 0u) ||
+        !hw.write(base + 6u, 2u, 0x000fu) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(31u * period);
+    if (!pcm.empty() || hw.spu2().mixed_frames() != 31u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (pcm.size() != 64u || pcm[0] != 7166 || pcm[1] != 0 ||
+        pcm[2] != 14334 || pcm[3] != 0 ||
+        hw.spu2().nonzero_frames() != 32u ||
+        hw.spu2().pcm_peak() == 0u)
+    {
+        return false;
+    }
+    // Host sink binding does not affect guest state. Reset clears the
+    // mixer counters and pending host batch but retains the binding.
+    hw.reset();
+    pcm.clear();
+    uint32_t ignored = 0u;
+    if (!hw.read(base + 0x760u, 2u, &ignored))
+    {
+        return false;
+    }
+    hw.advance_cycles(32u * period);
+    if (pcm.size() != 64u || hw.spu2().mixed_frames() != 32u ||
+        hw.spu2().nonzero_frames() != 0u || hw.spu2().pcm_peak() != 0u)
+    {
+        return false;
+    }
+    for (const int16_t sample : pcm)
+    {
+        if (sample != 0)
+        {
+            return false;
+        }
+    }
+
+    // Independent AutoDMA planar PCM through the same mixer.
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& input_hw = kernel.hardware();
+    pcm.clear();
+    input_hw.bind_spu2_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    constexpr uint32_t source = 0x60030u;
+    constexpr uint32_t dma = iop::c_hw::k_spu2_dma4_base;
+    if (!kernel.cpu().write32(source, 0xc0004000u) ||
+        !input_hw.write(base + 0x1b0u, 2u, 1u) ||
+        !input_hw.write(dma, 4u, source) ||
+        !input_hw.write(dma + 4u, 4u, 0x00010001u) ||
+        !input_hw.write(dma + 8u, 4u, 0x01000201u))
+    {
+        return false;
+    }
+    (void)kernel.run(32u * period);
+    return pcm.size() == 64u && pcm[0] == 16382 && pcm[1] == -16383 &&
+        pcm[2] == 0 && pcm[3] == 0 &&
+        input_hw.spu2().mixed_frames() == 32u &&
+        input_hw.spu2().nonzero_frames() == 1u &&
+        input_hw.spu2().input_frames_consumed() == 1u;
+}
+
 bool test_spu2_auto_dma()
 {
     iop::c_kernel kernel;
@@ -1444,6 +1535,10 @@ int main()
     if (!test_guest_sio2_controller())
     {
         return fail("guest SIO2 PIO/DMA11/12 transport or IRQ17 fidelity");
+    }
+    if (!test_spu2_pcm_mixer())
+    {
+        return fail("SPU2 stereo PCM mixing, input gain or host sink");
     }
     if (!test_spu2_auto_dma())
     {

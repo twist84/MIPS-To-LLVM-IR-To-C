@@ -20,6 +20,10 @@ void c_spu2::reset()
     m_playback_irq_events = 0u;
     m_input_frames_written = 0u;
     m_input_frames_consumed = 0u;
+    m_mixed_frames = 0u;
+    m_nonzero_frames = 0u;
+    m_pcm_peak = 0u;
+    m_pcm_pending = 0u;
     for (s_core& core : m_cores)
     {
         core = s_core{};
@@ -43,6 +47,26 @@ namespace
 int32_t floor_shift(int32_t value, uint32_t shift)
 {
     return value >= 0 ? value >> shift : -1 - ((-1 - value) >> shift);
+}
+
+int32_t signed_halfword(uint32_t value)
+{
+    value &= 0xffffu;
+    return static_cast<int32_t>(value) - (value >= 0x8000u ? 0x10000 : 0);
+}
+
+int32_t master_gain(uint16_t value)
+{
+    // Same fixed master gain rule as the SDBZ reference. Master sweep
+    // mode still uses its reference full-scale fallback.
+    return (value & 0x8000u) != 0u ? 0x7fff : signed_halfword(value * 2u);
+}
+
+int32_t scale_mix(int32_t value, int32_t gain)
+{
+    const int64_t product = static_cast<int64_t>(value) * gain;
+    return static_cast<int32_t>(product >= 0 ? product >> 15u :
+        -1 - ((-1 - product) >> 15u));
 }
 }
 
@@ -192,11 +216,12 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
     check_voice_irq(voice.m_block[0]);
 }
 
-void c_spu2::advance_voices(uint64_t samples)
+void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2])
 {
     constexpr uint32_t block_length = 28u << 12u;
-    for (s_core& core : m_cores)
+    for (uint32_t core_index = 0u; core_index < 2u; ++core_index)
     {
+        s_core& core = m_cores[core_index];
         if (core.m_key_mask == 0u)
         {
             continue;
@@ -218,8 +243,16 @@ void c_spu2::advance_voices(uint64_t samples)
             // Envelope release may stop on any sample, so retire the
             // cursor and ADSR in reference order, not an aggregate pitch
             // advance followed by a delayed envelope update.
-            for (uint64_t sample = 0u; sample < samples; ++sample)
+            for (uint32_t sample = 0u; sample < samples; ++sample)
             {
+                const uint32_t index_in_block = voice.m_position >> 12u;
+                const uint32_t fraction = voice.m_position & 0xfffu;
+                const int32_t first = voice.m_samples[0][index_in_block];
+                const int32_t second = index_in_block == 27u ?
+                    voice.m_samples[1][0] : voice.m_samples[0][index_in_block + 1u];
+                const int32_t interpolated = floor_shift(
+                    first * static_cast<int32_t>(0x1000u - fraction) +
+                    second * static_cast<int32_t>(fraction), 12u);
                 voice.m_position += pitch;
                 if (voice.m_position >= block_length)
                 {
@@ -260,6 +293,14 @@ void c_spu2::advance_voices(uint64_t samples)
                 {
                     core.m_key_mask &= ~bit;
                     break;
+                }
+                const int32_t enveloped = floor_shift(
+                    interpolated * voice.m_envelope.m_level, 15u);
+                for (uint32_t channel = 0u; channel < 2u; ++channel)
+                {
+                    const int32_t gain = voice.m_volume[channel].m_level;
+                    sum[core_index][sample][channel] += floor_shift(
+                        enveloped * gain, 15u);
                 }
             }
         }
@@ -332,13 +373,12 @@ void c_spu2::check_input_irq(uint32_t address, uint32_t words)
     }
 }
 
-void c_spu2::advance_input(uint64_t samples)
+void c_spu2::advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2])
 {
     for (uint32_t core = 0u; core < 2u; ++core)
     {
         s_core& state = m_cores[core];
-        const uint32_t count = static_cast<uint32_t>(
-            std::min<uint64_t>(samples, state.m_input_count));
+        const uint32_t count = std::min(samples, state.m_input_count);
         if (count == 0u)
         {
             continue;
@@ -351,9 +391,80 @@ void c_spu2::advance_input(uint64_t samples)
         {
             check_input_irq(base, count - first);
         }
+        for (uint32_t sample = 0u; sample < count; ++sample)
+        {
+            const uint32_t slot = (state.m_input_read + sample) % k_input_frames;
+            for (uint32_t channel = 0u; channel < 2u; ++channel)
+            {
+                // B-volume is the signed AutoDMA input gain.
+                sum[core][sample][channel] += floor_shift(
+                    static_cast<int32_t>(state.m_input[slot][channel]) *
+                    signed_halfword(state.m_master[6u + channel]), 15u);
+            }
+        }
         state.m_input_read = (state.m_input_read + count) % k_input_frames;
         state.m_input_count -= count;
         m_input_frames_consumed += count;
+    }
+}
+
+void c_spu2::emit_pcm(int16_t left, int16_t right)
+{
+    ++m_mixed_frames;
+    if (left != 0 || right != 0)
+    {
+        ++m_nonzero_frames;
+    }
+    const int32_t l = left;
+    const int32_t r = right;
+    m_pcm_peak = std::max(m_pcm_peak, static_cast<uint32_t>(
+        std::max(l < 0 ? -l : l, r < 0 ? -r : r)));
+    if (m_pcm_sink != nullptr)
+    {
+        m_pcm_batch[m_pcm_pending * 2u] = left;
+        m_pcm_batch[m_pcm_pending * 2u + 1u] = right;
+        if (++m_pcm_pending == k_input_batch)
+        {
+            m_pcm_sink(m_pcm_user, m_pcm_batch, k_input_batch);
+            m_pcm_pending = 0u;
+        }
+    }
+}
+
+void c_spu2::mix_frames(uint64_t samples)
+{
+    while (samples != 0u)
+    {
+        if (m_pcm_sink == nullptr &&
+            (m_cores[0].m_key_mask | m_cores[1].m_key_mask |
+             m_cores[0].m_input_count | m_cores[1].m_input_count) == 0u)
+        {
+            // Headless silence is still real elapsed PCM frames. Avoid
+            // a per-frame loop when no active source can change state.
+            m_mixed_frames += samples;
+            return;
+        }
+        const uint32_t count = static_cast<uint32_t>(
+            std::min<uint64_t>(samples, k_input_batch));
+        int32_t sum[2][k_input_batch][2]{};
+        advance_voices(count, sum);
+        advance_input(count, sum);
+        for (uint32_t sample = 0u; sample < count; ++sample)
+        {
+            int16_t pcm[2]{};
+            for (uint32_t channel = 0u; channel < 2u; ++channel)
+            {
+                int32_t mixed = 0;
+                for (uint32_t core = 0u; core < 2u; ++core)
+                {
+                    mixed += scale_mix(sum[core][sample][channel],
+                        master_gain(m_cores[core].m_master[channel]));
+                }
+                pcm[channel] = static_cast<int16_t>(std::clamp(mixed, -32768, 32767));
+            }
+            emit_pcm(pcm[0], pcm[1]);
+        }
+        samples -= count;
     }
 }
 
@@ -441,17 +552,12 @@ uint32_t c_spu2::advance_cycles(uint32_t cycles)
     {
         const uint64_t before = m_clock_cycles;
         m_clock_cycles += cycles;
-        if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask |
-             m_cores[0].m_input_count | m_cores[1].m_input_count) != 0u)
+        const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
+        if (samples != 0u)
         {
-            const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
-            if (samples != 0u)
-            {
-                const uint32_t prior = irq_latches();
-                advance_voices(samples);
-                advance_input(samples);
-                raised = irq_latches() & ~prior;
-            }
+            const uint32_t prior = irq_latches();
+            mix_frames(samples);
+            raised = irq_latches() & ~prior;
         }
     }
     return raised;

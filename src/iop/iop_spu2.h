@@ -7,7 +7,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// No voice mixer or mixer-ring IRQ yet.
+// Stereo PCM mixer; mixer-ring writeback/IRQ and reverb remain separate.
 class c_spu2
 {
 public:
@@ -62,6 +62,20 @@ public:
     static constexpr uint32_t k_input_frames = 512u;
     static constexpr uint32_t k_input_chunk_bytes = 1024u;
     static constexpr uint32_t k_input_batch = 32u;
+    static constexpr uint32_t k_sample_rate = 48000u;
+    // The sink is an optional nonblocking host consumer. It must copy
+    // the interleaved samples before returning. No guest state depends
+    // on its presence or on a host audio device.
+    using t_pcm_sink = void (*)(void* user, const int16_t* pcm, uint32_t frames);
+    void bind_pcm_sink(void* user, t_pcm_sink sink)
+    {
+        m_pcm_user = user;
+        m_pcm_sink = sink;
+        m_pcm_pending = 0u;
+    }
+    uint64_t mixed_frames() const { return m_mixed_frames; }
+    uint64_t nonzero_frames() const { return m_nonzero_frames; }
+    uint32_t pcm_peak() const { return m_pcm_peak; }
     uint32_t input_frames(uint32_t core) const;
     uint32_t input_refill_cycles(uint32_t core) const;
     bool push_input(uint32_t core, const uint8_t* data, uint32_t bytes);
@@ -128,10 +142,12 @@ private:
     void decode_voice_block(s_voice& voice, uint32_t slot);
     void check_voice_irq(uint32_t address);
     void check_input_irq(uint32_t address, uint32_t words);
-    void advance_input(uint64_t samples);
+    void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
+    void mix_frames(uint64_t samples);
+    void emit_pcm(int16_t left, int16_t right);
     void start_voice(s_core& core, uint32_t index);
     static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
-    void advance_voices(uint64_t samples);
+    void advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     static uint32_t set_hi(uint32_t address, uint32_t value);
     static uint32_t set_lo(uint32_t address, uint32_t value);
 
@@ -148,6 +164,13 @@ private:
     uint64_t m_playback_irq_events = 0u;
     uint64_t m_input_frames_written = 0u;
     uint64_t m_input_frames_consumed = 0u;
+    uint64_t m_mixed_frames = 0u;
+    uint64_t m_nonzero_frames = 0u;
+    uint32_t m_pcm_peak = 0u;
+    void* m_pcm_user = nullptr;
+    t_pcm_sink m_pcm_sink = nullptr;
+    int16_t m_pcm_batch[k_input_batch * 2u]{};
+    uint32_t m_pcm_pending = 0u;
     s_core m_cores[2]{};
     // 2 MiB of SPU2 sound RAM, allocated on the heap (not the IOP stack).
     std::vector<uint16_t> m_ram;
