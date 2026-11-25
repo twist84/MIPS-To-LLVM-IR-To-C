@@ -441,6 +441,7 @@ void c_ee_dmac::reset()
 {
     cancel_deferred_vif1();
     m_status = 0u;
+    m_pcr = 0u;
     m_sqwc = 0u;
     m_gif_trace_count = 0u;
     m_gif_last_reject = e_gif_dma_reject::none;
@@ -1958,6 +1959,10 @@ bool c_ee_dmac::mmio_read(void* user, uint32_t address,
     {
         word = controller->m_status;
     }
+    else if (address == k_pcr_address)
+    {
+        word = controller->m_pcr;
+    }
     else if (address == k_sqwc_address)
     {
         word = controller->m_sqwc;
@@ -1981,6 +1986,12 @@ bool c_ee_dmac::mmio_write(void* user, uint32_t address,
 
     c_ee_dmac* controller = static_cast<c_ee_dmac*>(user);
     const uint32_t word = static_cast<uint32_t>(value->m_lo);
+    if (address == k_pcr_address)
+    {
+        // CPC[9:0], CDE[25:16] and PCE[31]. Reserved bits read zero.
+        controller->m_pcr = word & 0x83ff03ffu;
+        return true;
+    }
     if (address == k_sqwc_address)
     {
         controller->m_sqwc = word;

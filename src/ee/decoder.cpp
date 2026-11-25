@@ -795,15 +795,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             }
             break;
         case e_ee_opcode::COP0_BC0:
-            // BC0F/T/FL/TL is recognised but not modelled by the current
-            // backend. Preserve the real edge shape and fail closed in IR.
+            // BC0F/T/FL/TL samples the DMAC condition before the delay slot.
             if (insn.rt > 3)
             {
                 insn.valid = e_ee_valid::INVALID;
                 set_mnemonic(insn, "cop0_reserved");
                 break;
             }
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            insn.valid = e_ee_valid::VALID;
             insn.flow = (insn.rt & 2) ? e_ee_flow::FLOW_BRANCH_LIKELY
                                       : e_ee_flow::FLOW_BRANCH;
             insn.branch_likely = (insn.rt & 2) != 0;

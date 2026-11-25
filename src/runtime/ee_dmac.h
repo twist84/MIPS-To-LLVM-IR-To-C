@@ -30,6 +30,7 @@ public:
     static constexpr uint32_t k_sif0_base = 0x1000c000u; // channel 5, IOP -> EE
     static constexpr uint32_t k_sif1_base = 0x1000c400u; // channel 6, EE -> IOP
     static constexpr uint32_t k_stat_address = 0x1000e010u;
+    static constexpr uint32_t k_pcr_address = 0x1000e020u;
     static constexpr uint32_t k_sqwc_address = 0x1000e030u;
     static constexpr uint32_t k_channel_count = 10u;
     static constexpr uint32_t k_to_spr_base = 0x1000d400u; // channel 9
@@ -255,6 +256,7 @@ private:
     void* m_download_user = nullptr;
     t_device_download_callback m_device_download = nullptr;
     uint32_t m_status = 0;
+    uint32_t m_pcr = 0;
     uint32_t m_sqwc = 0;
     s_gif_dma_write m_gif_trace[k_gif_trace_capacity]{};
     uint64_t m_gif_trace_count = 0u;

@@ -122,7 +122,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include: ${{ fromJSON(inputs.autotests_full && '[{"group":"ee","patterns":"cpu/ee/* cpu/ee_cop0/*"},{"group":"fpu","patterns":"cpu/ee_fpu/*"},{"group":"simd","patterns":"cpu/ee_simd/*"},{"group":"dma","patterns":"dma/*"},{"group":"kernel","patterns":"kernel/* gs/* memory/*"},{"group":"vu","patterns":"cpu/vu0_macro/* vu/*"}]' || '[{"group":"ee","patterns":"cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr cpu/ee_simd/funnel cpu/ee_simd/shuffle"},{"group":"vu","patterns":"cpu/vu0_macro/transfer vu/lower/integer vu/lower/efu"}]') }}
+        include: ${{ fromJSON(inputs.autotests_full && '[{"group":"ee","patterns":"cpu/ee/* cpu/ee_cop0/*"},{"group":"fpu","patterns":"cpu/ee_fpu/*"},{"group":"simd","patterns":"cpu/ee_simd/*"},{"group":"dma","patterns":"dma/*"},{"group":"kernel","patterns":"kernel/* gs/* memory/*"},{"group":"vu","patterns":"cpu/vu0_macro/* vu/*"}]' || '[{"group":"ee","patterns":"cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr cpu/ee_simd/funnel cpu/ee_simd/shuffle dma/dmac/cpcond"},{"group":"vu","patterns":"cpu/vu0_macro/transfer vu/lower/integer vu/lower/efu"}]') }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4

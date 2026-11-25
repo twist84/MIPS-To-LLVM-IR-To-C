@@ -100,6 +100,7 @@ void module_builder::declare_memory_helpers()
     m_out += "declare i32 @ee_vu0_macro_scalar(ptr, ptr, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_macro_indexed_memory(ptr, ptr, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_get_branch_condition(ptr)\n";
+    m_out += "declare i32 @ee_cop0_get_branch_condition(ptr)\n";
     m_out += "\n";
 
     // Keep disabled diagnostic calls on the translated fast path. The
@@ -2118,11 +2119,13 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_BC0))
         {
-            // BC0F/BC0T: condition from Cause / simple always-false stub.
-            // Without a live COP0 condition bit, branch not-taken (conservative).
-            if (is_last_in_block) {
-                m_out += "  br label %" + block_label(fallthrough_pc) + "\n";
-            }
+            // Branches are lowered by the control-flow block emitter, never
+            // as a straight-line instruction with a guessed predicate.
+            const std::string pc_ptr = state_field(6);
+            const std::string exit_ptr = state_field(7);
+            m_out += "  store i32 " + std::to_string(ins.pc) + ", ptr " + pc_ptr + "\n";
+            m_out += "  store i32 4, ptr " + exit_ptr + "\n";
+            m_out += "  ret i32 4\n";
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_CO))
         {
@@ -3143,18 +3146,21 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             m_out += "  " + fcc + " = and i32 " + fcsr + ", 8388608\n";
             m_out += "  " + cmp + " = icmp " + std::string((ctrl.rt & 1) ? "ne" : "eq") +
                      " i32 " + fcc + ", 0\n";
-        } else if (ctrl.opcode == e_ee_opcode::OP_COP2 &&
-                   ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)) {
-            // PCSX2's BC2 predicate is VPU_STAT bit 8. Read it before the
-            // delay slot; missing VU0 state is an execution failure, not a
-            // guessed branch outcome.
+        } else if ((ctrl.opcode == e_ee_opcode::OP_COP2 &&
+                    ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)) ||
+                   (ctrl.opcode == e_ee_opcode::OP_COP0 &&
+                    ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP0_BC0))) {
+            // BC2 reads VPU_STAT bit 8; BC0 reads DMAC CIS/CPC. Sample the
+            // live condition before the delay slot and fail closed if absent.
+            const bool cop0 = ctrl.opcode == e_ee_opcode::OP_COP0;
             const std::string condition = newtemp();
             const std::string unavailable = newtemp();
             const std::string suffix = std::to_string(m_temp_counter++);
-            const std::string fail_label = "bc2_fail_" + suffix;
-            const std::string ready_label = "bc2_ready_" + suffix;
-            m_out += "  " + condition +
-                     " = call i32 @ee_vu0_get_branch_condition(ptr %rt)\n";
+            const std::string fail_label = "cop_branch_fail_" + suffix;
+            const std::string ready_label = "cop_branch_ready_" + suffix;
+            m_out += "  " + condition + " = call i32 @" +
+                     (cop0 ? "ee_cop0_get_branch_condition" : "ee_vu0_get_branch_condition") +
+                     "(ptr %rt)\n";
             m_out += "  " + unavailable + " = icmp eq i32 " + condition + ", 2\n";
             m_out += "  br i1 " + unavailable + ", label %" + fail_label +
                      ", label %" + ready_label + "\n";
@@ -3274,6 +3280,8 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                  ctrl.opcode == e_ee_opcode::OP_BGTZ ||
                  ctrl.opcode == e_ee_opcode::OP_REGIMM ||
                  (ctrl.opcode == e_ee_opcode::OP_COP1 && ctrl.rs == 0x08) ||
+                 (ctrl.opcode == e_ee_opcode::OP_COP0 &&
+                  ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP0_BC0)) ||
                  (ctrl.opcode == e_ee_opcode::OP_COP2 &&
                   ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)));
             if (supported_conditional)

@@ -117,7 +117,7 @@ class AutotestsHarness(unittest.TestCase):
         workflow = (at.ROOT / ".github/workflows/ci.yml").read_text()
         full, pilot = re.search(r"fromJSON\(inputs\.autotests_full && '([^']+)' \|\| '([^']+)'\)", workflow).groups()
         tests = json.loads(at.MANIFEST.read_text())["tests"]
-        for selection, expected in ((full, 55), (pilot, 8)):
+        for selection, expected in ((full, 55), (pilot, 9)):
             groups = json.loads(selection)
             names = [case["name"] for group in groups
                      for case in at.select_tests(tests, group["patterns"].split())]

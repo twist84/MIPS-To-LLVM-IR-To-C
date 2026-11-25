@@ -51,7 +51,7 @@ and result.json. Default exit is nonzero unless every selected output
 matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
 pilot uses separate EE and VU matrix runners with two tests and one emit
-worker per test; it includes the original six ELFs plus funnel and shuffle.
+worker per test; it includes the original six ELFs plus funnel, shuffle and cpcond.
 Manually dispatch Build and test with autotests_full enabled to run all
 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
 with transcripts and a summary; these are observational artifacts,
@@ -240,3 +240,26 @@ Implement MFSA/MTSA while retaining the existing internal bit-count SA
 field (no ABI or QFSRV representation change), and MMI3 PEXCH/PEXCW
 with exact unary lane permutations. Rerun original funnel/shuffle; no
 new passing transcript is claimed by this implementation.
+
+## Confirmed original EE pilot (53392cf, 2026-11-25)
+
+[CI](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45624237736):
+all four workflows and seven CTest shards passed. Original funnel and
+shuffle now match exactly; EE pilot 5/5, VU pilot 0/3. Combined evidence
+with the b698e1c full baseline is 22 distinct matches, not a fresh full
+22/55 measurement. EE pilot execution wall 18.017 seconds vs 32.414
+summed test seconds (2 workers, 1 emit worker each).
+
+## DMAC COP0 condition branches
+
+The original cpcond test stopped on BC0T (0x41010003). Model the D_PCR
+register and its low ten channel condition selectors. The R5900 COP0
+predicate is (D_STAT.CIS & D_PCR.CPC) == D_PCR.CPC, independent of CIM
+and interrupt enable; no selected channels means true. This agrees with
+PCSX2 COP0.cpp and the pinned console cpcond transcript. Lower BC0F/T
+and BC0FL/TL through the common pre-delay predicate and annulment CFG.
+The helper returns unavailable if either live MMIO read fails. DMA
+completion is sourced from the existing device, never manufactured by
+the branch. D_PCR arbitration/enabling behavior is not added here.
+Test the original cpcond ELF in the observational pilot; no new PASS
+claimed before that run.

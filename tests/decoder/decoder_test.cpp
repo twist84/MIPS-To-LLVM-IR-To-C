@@ -850,7 +850,15 @@ int main()
     expect("mtc0", R(0x10,0x04,4,12,0,0), "mtc0", V);
     expect("tlbwi", R(0x10,0x10,0,0,0,0x02), "tlb", U);
     expect("bad cop0 co", R(0x10,0x10,0,0,0,0x3f), "cop0_reserved", X);
-    expect("bc0", R(0x10,0x08,0,0,0,0x00), "bc0", U);
+    for (uint32_t rt = 0; rt < 4; ++rt)
+    {
+        const auto ins = decode(0x00100000u, R(0x10,0x08,rt,0,0,0x03));
+        const bool ok = ins.valid == V && ins.has_delay_slot &&
+            ins.branch_likely == ((rt & 2u) != 0u) &&
+            ins.branch_target == 0x00100010u && lift(ins).kind == LOP_BC0;
+        ok ? ++g_pass : ++g_fail;
+    }
+    expect("bc0 reserved rt", R(0x10,0x08,4,0,0,0x00), "cop0_reserved", X);
     {
         const auto eret = decode(0x100000, R(0x10,0x10,0,0,0,0x18));
         const bool ok = eret.valid == V && eret.flow == e_ee_flow::FLOW_RETURN &&

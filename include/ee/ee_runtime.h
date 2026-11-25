@@ -583,6 +583,7 @@ uint32_t ee_vu0_macro_indexed_memory(
 // BC2 reads VPU_STAT bit 8 directly, as the interpreter branch handlers do.
 // Returns 0/1 for false/true, or 2 when VU0 state is unavailable.
 uint32_t ee_vu0_get_branch_condition(const s_ee_runtime* rt);
+uint32_t ee_cop0_get_branch_condition(const s_ee_runtime* rt);
 
 // COP0 guest writes: centralize documented side effects. Writing Compare
 // acknowledges Cause.IP7; this does not advance Count or produce EE cycles.

@@ -281,7 +281,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
         {
         case e_ee_opcode::COP0_MFC0: op.kind = LOP_MFC0; break;
         case e_ee_opcode::COP0_MTC0: op.kind = LOP_MTC0; break;
-        case e_ee_opcode::COP0_BC0:  op.kind = LOP_BEQ; break;
+        case e_ee_opcode::COP0_BC0:  op.kind = LOP_BC0; break;
         case e_ee_opcode::COP0_CO:
             switch (static_cast<e_ee_opcode>(insn.funct))
             {
