@@ -107,6 +107,10 @@ public:
     };
     e_vif1_chain_reject vif1_chain_last_reject() const;
 
+    // VIF1 MSKPATH3 gates new synchronous GIF DMA transactions.
+    void set_gif_path3_mask(bool masked);
+    bool gif_path3_masked() const { return m_gif_path3_masked; }
+
     void bind_cpu(s_ee_cpu_state* cpu);
     void bind_memory(ee_memory* memory);
 
@@ -261,6 +265,8 @@ private:
     s_gif_dma_write m_gif_trace[k_gif_trace_capacity]{};
     uint64_t m_gif_trace_count = 0u;
     e_gif_dma_reject m_gif_last_reject = e_gif_dma_reject::none;
+    bool m_gif_path3_masked = false;
+    bool m_gif_waiting_for_unmask = false;
     e_vif1_chain_reject m_vif1_chain_last_reject =
         e_vif1_chain_reject::none;
     s_spr_channel m_device_channels[3]{}; // VIF0, VIF1, GIF PATH3

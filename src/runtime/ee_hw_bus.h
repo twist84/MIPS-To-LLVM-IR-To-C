@@ -53,6 +53,13 @@ public:
     void bind_vif1(c_ee_vif1* vif1)
     {
         m_vif1 = vif1;
+        if (m_vif1 != nullptr)
+        {
+            m_vif1->bind_path3_mask(&m_dmac, [](void* user, bool masked)
+            {
+                static_cast<c_ee_dmac*>(user)->set_gif_path3_mask(masked);
+            });
+        }
     }
 
     void bind_gs(c_ee_gs_state* gs)
@@ -313,6 +320,12 @@ public:
                 static_cast<uint32_t>(display_index));
             value->m_lo = (address & 4u) != 0u ? data >> 32u : data;
             value->m_hi = 0u;
+            return true;
+        }
+        if (address == 0x10003020u && width == 4u && value != nullptr)
+        {
+            // Other GIF_STAT arbitration fields are not yet modeled.
+            *value = {bus->m_dmac.gif_path3_masked() ? 2u : 0u, 0u};
             return true;
         }
         if (bus->m_gs != nullptr && value != nullptr &&

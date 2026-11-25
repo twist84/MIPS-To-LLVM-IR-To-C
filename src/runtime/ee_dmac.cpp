@@ -437,6 +437,27 @@ void c_ee_dmac::bind_device_download(
     m_device_download = callback;
 }
 
+void c_ee_dmac::set_gif_path3_mask(bool masked)
+{
+    m_gif_path3_masked = masked;
+    if (!masked && m_gif_waiting_for_unmask)
+    {
+        m_gif_waiting_for_unmask = false;
+        const auto& channel = m_device_channels[2u];
+        if ((channel.m_chcr & k_chcr_str) != 0u)
+        {
+            if (((channel.m_chcr >> 2u) & 3u) == 1u)
+            {
+                (void)transfer_gif_source_chain();
+            }
+            else
+            {
+                (void)transfer_device_normal(2u);
+            }
+        }
+    }
+}
+
 void c_ee_dmac::reset()
 {
     cancel_deferred_vif1();
@@ -445,6 +466,8 @@ void c_ee_dmac::reset()
     m_sqwc = 0u;
     m_gif_trace_count = 0u;
     m_gif_last_reject = e_gif_dma_reject::none;
+    m_gif_path3_masked = false;
+    m_gif_waiting_for_unmask = false;
     m_vif1_chain_last_reject = e_vif1_chain_reject::none;
     for (s_gif_dma_write& event : m_gif_trace)
     {
@@ -1820,6 +1843,10 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
             m_gif_last_reject = e_gif_dma_reject::none;
         }
         channel->m_chcr = value;
+        if (channel_index == 2u && (value & k_chcr_str) == 0u)
+        {
+            m_gif_waiting_for_unmask = false;
+        }
         if (!was_running && (value & k_chcr_str) != 0u)
         {
             const uint32_t mode = (channel->m_chcr >> 2u) & 3u;
@@ -1868,7 +1895,12 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
             }
             else if (device_channel)
             {
-                if (channel_index == 2u && mode == 1u)
+                if (channel_index == 2u && m_gif_path3_masked)
+                {
+                    // Keep STR/MADR/QWC until unmask or explicit stop.
+                    m_gif_waiting_for_unmask = true;
+                }
+                else if (channel_index == 2u && mode == 1u)
                 {
                     (void)transfer_gif_source_chain();
                 }

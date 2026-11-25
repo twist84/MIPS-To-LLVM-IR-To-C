@@ -80,7 +80,12 @@ void c_ee_vif1::bind_path3(const c_ee_gif_path3* path3)
 void c_ee_vif1::reset()
 {
     cancel_deferred();
+    const bool was_masked = m_machine.m_path3_masked;
     m_machine = {};
+    if (was_masked && m_mask_callback != nullptr)
+    {
+        m_mask_callback(m_mask_user, false);
+    }
     m_pending_scratch.clear();
     m_path1_scratch.clear();
     m_path2_scratch.clear();
@@ -372,9 +377,8 @@ bool c_ee_vif1::execute(
             machine.m_direct_qwc += qwc;
             break;
         }
-        case 0x06u: // MSKPATH3 needs actual GIF arbitration state.
-            *reject = e_reject::unsupported_command;
-            accepted = false;
+        case 0x06u: // MSKPATH3, VIF1 only; published after acceptance.
+            machine.m_path3_masked = (imm & 0x8000u) != 0u;
             break;
         case 0x14u: // MSCAL
         case 0x15u: // MSCALF (PATH3 idle checked before execution)
@@ -619,6 +623,12 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
             break;
         }
         const uint32_t opcode = (code >> 24u) & 0x7fu;
+        if (opcode == 0x06u && m_mask_callback == nullptr)
+        {
+            tx.m_rejection = e_reject::unsupported_command;
+            tx.m_rejected_code = code;
+            break;
+        }
         const bool vu_start =
             opcode == 0x14u || opcode == 0x15u || opcode == 0x17u;
         if (vu_start)
@@ -812,6 +822,7 @@ bool c_ee_vif1::publish(s_transaction& tx)
     // Preserve the old pending allocation as the next spare. The
     // staged vector becomes committed, including an incomplete command.
     m_machine.m_pending.swap(m_pending_scratch);
+    const bool mask_changed = m_machine.m_path3_masked != next.m_path3_masked;
     m_machine = std::move(next);
     if (m_vu0 != nullptr)
     {
@@ -835,6 +846,10 @@ bool c_ee_vif1::publish(s_transaction& tx)
     m_diagnostic.m_mpg_uploads = m_machine.m_mpg_uploads;
     m_diagnostic.m_unpack_commands = m_machine.m_unpack_commands;
     m_diagnostic.m_direct_qwc = m_machine.m_direct_qwc;
+    if (mask_changed && m_mask_callback != nullptr)
+    {
+        m_mask_callback(m_mask_user, m_machine.m_path3_masked);
+    }
     return true;
 }
 
@@ -1168,6 +1183,7 @@ bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
             std::memcpy(next.m_row, m_machine.m_row, sizeof(next.m_row));
             std::memcpy(next.m_col, m_machine.m_col, sizeof(next.m_col));
             next.m_vu1 = m_machine.m_vu1;
+            next.m_path3_masked = m_machine.m_path3_masked;
             m_machine = std::move(next);
             m_diagnostic = {};
         }

@@ -171,6 +171,56 @@ int main()
         }
     }
 
+    // VIF1 MSKPATH3 must change GIF_STAT.M3P and gate actual DMA.
+    {
+        ee::c_ee_vif1 mask_vif{};
+        ee::c_ee_gif_path3 path3{};
+        s_capture events{};
+        path3.bind_event_sink(&events, capture_gif);
+        ee::ee_memory memory(0x1000u);
+        ee::c_ee_hw_bus bus;
+        bus.bind_memory(&memory);
+        bus.bind_vif1(&mask_vif);
+        bus.bind_device_transfer(&path3, ee::c_ee_gif_path3::dma_transfer);
+        ee::s_ee_runtime rt{};
+        rt.m_user = &memory;
+        rt.m_mmio_user = &bus;
+        rt.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        rt.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        constexpr uint32_t gif_stat = 0x10003020u;
+        constexpr uint32_t d2 = ee::c_ee_dmac::k_gif_base;
+        const ee::s_ee_u128 tag{0x1000000000008000ull, 0xeu};
+        ee::ee_mem_write128(&rt, 0x100u, &tag);
+        if (!check(send(mask_vif, {0x06008000u, 0u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 2u,
+                   "VIF1 MSKPATH3 set"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&rt, d2 + 0x10u, 0x100u);
+        ee::ee_mem_write32(&rt, d2 + 0x20u, 1u);
+        ee::ee_mem_write32(&rt, d2, 0x101u);
+        if (!check(events.m_calls == 0u && bus.dmac().status() == 0u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x10u) == 0x100u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x20u) == 1u &&
+                   (ee::ee_mem_read32(&rt, d2) & 0x100u) != 0u,
+                   "masked GIF DMA retired prematurely") ||
+            !check(!send(mask_vif, {0x06000000u, 0x09000000u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 2u && events.m_calls == 0u,
+                   "rejected VIF transaction leaked mask change") ||
+            !check(send(mask_vif, {0x06000000u, 0u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 0u &&
+                   events.m_calls == 1u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x10u) == 0x110u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&rt, d2) & 0x100u) == 0u &&
+                   (bus.dmac().status() & 4u) != 0u,
+                   "unmask did not resume real GIF DMA"))
+        {
+            return 1;
+        }
+    }
+
     // End-to-end aggregate PATH2 transaction: two DIRECT commands,
     // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
     // unrelated texture/VRAM side effects while exercising all limits.

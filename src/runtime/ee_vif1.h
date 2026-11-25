@@ -84,6 +84,12 @@ public:
     void bind_path2(c_ee_gif_path3* path2);
     void bind_path1(c_ee_gif_path3* path1);
     void bind_path3(const c_ee_gif_path3* path3);
+    using t_path3_mask = void (*)(void*, bool);
+    void bind_path3_mask(void* user, t_path3_mask callback)
+    {
+        m_mask_user = user;
+        m_mask_callback = callback;
+    }
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
     const s_diagnostic& diagnostic() const
@@ -152,6 +158,7 @@ private:
     struct s_machine
     {
         bool m_vif0 = false;
+        bool m_path3_masked = false;
         uint32_t m_stat = 0u;
         uint32_t m_err = 0u;
         uint32_t m_mark = 0u;
@@ -268,6 +275,8 @@ private:
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
     const c_ee_gif_path3* m_path3 = nullptr;
+    void* m_mask_user = nullptr;
+    t_path3_mask m_mask_callback = nullptr;
     // Host timing only. Neither timestamps nor overlap advance guest cycles.
     struct s_worker_profile
     {

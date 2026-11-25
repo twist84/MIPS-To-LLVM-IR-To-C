@@ -802,3 +802,29 @@ stalls, partial command readback and other UNPACK edge semantics remain
 incomplete; unsupported commands still fail closed, and the shared
 walker retains its existing TTE packing limitation. Regression checks
 FIFO, normal DMA, REFE, VU0 wrap, MPG, reset and transaction rollback.
+
+### VIF1 MSKPATH3 and GIF DMA mask
+
+PCSX2 `82cac38` (Vif_Codes.cpp, vifCode_MskPath3) sets GIF_STAT.M3P
+from immediate bit 15 and triggers GIF DMA when clearing it. Publish
+this mask only after VIF transaction acceptance, and gate new PATH3 DMA
+starts while masked. A genuine unmask retries only a transfer blocked
+by that mask; explicit CHCR stop cancels the wait. GIF_STAT.M3P is now
+observable via EE MMIO. This is a synchronous transfer-boundary model,
+not cycle-accurate mid-packet GIF arbitration. FBRST preserves the mask
+pending a full controller reset or another MSKPATH3; its detailed reset
+semantics and other GIF_STAT bits require additional hardware validation.
+Regression covers mask readback, preserved STR/MADR/QWC, transactional
+rollback and real resumed GIF consumption/DMAC IRQ.
+
+### Confirmed VIF0 transport result (72180fb)
+
+Tested merge `fc04d5fa034c4a6dace720e45f35c7fed6cdc5f1`,
+[run 45648797577](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45648797577),
+[summary artifact 15039601757](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45648797577/artifacts/15039601757).
+43/55 exact (78.18%): PASS 43, DIFF 8, INCOMPLETE 4, NO_OUTPUT 0,
+ERROR 0. Newly passing dma/vif/basic; both VIF units now match FIFO,
+normal DMA and source-chain uploads. No previous passes lost. The DMA
+artifact 15036939897 shows stmod differs only in mode 3 ROW updates,
+and unpack differs only in WL=0 and incomplete-command readback for
+both units.
