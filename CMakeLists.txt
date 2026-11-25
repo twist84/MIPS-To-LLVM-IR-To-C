@@ -1,5 +1,7 @@
 cmake_minimum_required(VERSION 3.18)
-project(ps2_recompiler C CXX ASM)
+project(ps2_recompiler C CXX)
+
+option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -1071,3 +1073,21 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 $<TARGET_FILE:ee_mmi1_ir_fixture>)
 endif()
 set_tests_properties(multi_function smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Apply the project's warning policy only to targets declared here. In
+# particular, FetchContent raylib/GLFW targets keep their upstream flags.
+# Use the actual Microsoft compiler, not clang++ or clang-cl.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    get_property(EE_PROJECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS EE_PROJECT_TARGETS)
+        get_target_property(target_type ${target} TYPE)
+        if(target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
+            target_compile_options(${target} PRIVATE
+                "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
+            if(EE_MSVC_WARNINGS_AS_ERRORS)
+                target_compile_options(${target} PRIVATE
+                    "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
+            endif()
+        endif()
+    endforeach()
+endif()
