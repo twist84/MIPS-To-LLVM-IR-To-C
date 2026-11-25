@@ -10,7 +10,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
     op.rt = insn.rt;
     op.rs = insn.rs;
     op.rd = insn.rd;
-    op.sa = insn.sa;
+    op.sa = static_cast<uint8_t>(insn.sa);
     op.immediate = insn.immediate;
     op.uimmediate = insn.uimmediate;
     op.branch_target = insn.branch_target;

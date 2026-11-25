@@ -11,6 +11,7 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import run_known_replays as known
+import recover_translation_cache as recovery
 
 
 def digest(data):
@@ -168,6 +169,92 @@ def test_reconstruction_is_batched_and_linked_once():
                 raise AssertionError("overwrote prior guest IR")
 
 
+def test_real_append_reserves_future_missing_entries():
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp)
+        ir = work / "ir"
+        ir.mkdir()
+        metadata_path = ir / "ee_functions.json"
+        first, second, third = 0x100008, 0x100010, 0x100020
+        metadata_path.write_text(json.dumps({
+            "function_count": 1,
+            "functions": [{"vaddr": hex(first), "block_pcs": [hex(first)],
+                           "ir_path": "first.ll"}],
+        }))
+
+        def fake_recompiler(command):
+            output = Path(command[2])
+            output.mkdir(parents=True)
+            entry = int(command[3].split("=")[1], 0)
+            path = output / f"sub_{entry:x}.ll"
+            path.write_text("; synthetic test IR")
+            blocks = [hex(entry), hex(third)] if entry == second else [hex(entry)]
+            (output / "ee_functions.json").write_text(json.dumps({
+                "functions": [{"vaddr": hex(entry), "block_pcs": blocks,
+                               "ir_path": str(path)}],
+            }))
+
+        with patch.object(known.run_game, "run", side_effect=fake_recompiler):
+            known.run_game.batch_append_functions(
+                "recomp", work / "elf", work, metadata_path, [second],
+                reserved_entries={second, third})
+            partial = json.loads(metadata_path.read_text())
+            assert third not in known.run_game.covered_pcs(partial)
+            known.run_game.batch_append_functions(
+                "recomp", work / "elf", work, metadata_path, [third],
+                reserved_entries={second, third})
+        final = json.loads(metadata_path.read_text())
+        assert final["function_count"] == 3
+        assert known.run_game.covered_pcs(final) == {first, second, third}
+
+
+def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp)
+        metadata_path = work / "ee_functions.json"
+        entries = [0x100008, 0x100010, 0x100020, 0x100030]
+        first, second, third, fourth = entries
+        original = {
+            "functions": [
+                {"vaddr": hex(first), "block_pcs": [hex(first), hex(second), "0x100014"]},
+                {"vaddr": hex(third), "block_pcs": [hex(third), "0x100024"]},
+            ],
+            "function_count": 2,
+        }
+        metadata_path.write_text(json.dumps(original))
+        try:
+            known.restore_missing_entries("recomp", work / "elf", work,
+                                          metadata_path, entries, False)
+        except ValueError as exc:
+            assert "0x00100010" in str(exc) and "0x00100030" in str(exc)
+        else:
+            raise AssertionError("strict recovery accepted missing entries")
+        assert json.loads(metadata_path.read_text()) == original
+        calls = []
+
+        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries):
+            assert reserved_entries == {second, fourth}
+            pc = addresses[0]
+            calls.append(pc)
+            metadata = json.loads(path.read_text())
+            assert pc not in known.run_game.covered_pcs(metadata)
+            metadata["functions"].append({
+                "vaddr": hex(pc), "block_pcs": [hex(pc), hex(pc + 8)]})
+            metadata["function_count"] = len(metadata["functions"])
+            path.write_text(json.dumps(metadata))
+
+        with patch.object(known.run_game, "batch_append_functions", side_effect=append):
+            known.restore_missing_entries("recomp", work / "elf", work,
+                                          metadata_path, entries, True)
+        restored = json.loads(metadata_path.read_text())
+        assert calls == [second, fourth]
+        assert [int(fn["vaddr"], 0) for fn in restored["functions"]] == entries
+        assert restored["function_count"] == len(entries)
+        assert known.run_game.covered_pcs(original).issubset(
+            known.run_game.covered_pcs(restored))
+        assert restored["functions"][0]["block_pcs"] == [hex(first), "0x100014"]
+
+
 def test_reconstruction_hash_mismatch_fails_closed():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -293,17 +380,72 @@ def test_matched_launcher_never_falls_back_to_guest_rebuild():
     assert 'exit /b 1' in section
     assert 'exit /b\n)' in section
     assert 'exit /b %ERRORLEVEL%' not in section
-    assert '--max-dispatches=%MAX_DISPATCHES%' in section
+    assert '--max-dispatches=%MAX_REPLAY_DISPATCHES%' in section
+    assert 'if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"' in section
+    assert section.index('if not defined MAX_REPLAY_DISPATCHES') < section.index(
+        'if /I "%REQUESTED_SESSION_MODE%"=="matched" ('
+    )
     assert '--timeout-seconds=%BOOT_TIMEOUT_SECONDS%' in section
     assert '--auto-expand' not in section
     assert 'run_boot_session.py' not in section
 
 
+def test_recovery_includes_native_profile_inventory():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        base = root / "ps2-game-hle"
+        current_sources = {"lowering": "new"}
+        old_sources = {"lowering": "old"}
+
+        def save(work, entries, profile, sources, pipeline=None, elf_bytes=b"fixture-elf"):
+            work.mkdir(exist_ok=True)
+            manifest = sample_manifest(entries, elf_bytes)
+            manifest.update(emit_opt=profile, ir_sources=sources, ir_pipeline=pipeline)
+            path = work / "translation-cache.json"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            return path
+
+        base_path = save(base, [0x100008], 0, current_sources)
+        optimized = base.with_name(base.name + "-O2-native")
+        optimized_path = save(optimized, [0x180000, 0x100008], 5, old_sources)
+        assert recovery.select_manifest(base, elf, current_sources)[0] == base_path
+        chosen = recovery.select_manifest(base, elf, current_sources, True)
+        assert chosen[0] == optimized_path
+        assert chosen[2] == [0x180000, 0x100008]
+        assert chosen[3] is False
+
+        # Source-change consent never relaxes the ELF guard or accepts
+        # an unknown IR pipeline.
+        save(base.with_name(base.name + "-O2"), [4, 8, 12], 2,
+             current_sources, elf_bytes=b"different-elf")
+        save(base.with_name(base.name + "-O3"), [4, 8, 12], 3,
+             current_sources, pipeline="unknown")
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == optimized_path
+        assert optimized_path.is_file() and base_path.is_file()
+
+        # Profile 4 records the same raw guest IR despite its O2 pipeline.
+        ir_o2 = save(base.with_name(base.name + "-IR-O2"), [4, 8, 12],
+                     4, old_sources, pipeline="llvm-default-O2-v1")
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == ir_o2
+        retired = base.with_name(base.name + "-recovery-20261124-O2-native")
+        retired_path = save(retired, [4, 8, 12, 16], 5, old_sources)
+        retired.with_name(base.name + "-recovery-20261124").mkdir()
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == retired_path
+        nested = base / "O2-native"
+        nested_path = save(nested, [4, 8, 12, 16, 20], 5, old_sources)
+        assert recovery.select_manifest(base, elf, current_sources, True)[0] == nested_path
+
+
 def main():
+    test_recovery_includes_native_profile_inventory()
     test_matched_launcher_never_falls_back_to_guest_rebuild()
     test_read_manifest()
     test_hash_comparison()
     test_reconstruction_is_batched_and_linked_once()
+    test_real_append_reserves_future_missing_entries()
+    test_explicit_entry_restoration_keeps_all_entries_and_blocks()
     test_reconstruction_hash_mismatch_fails_closed()
     test_replay_pair_is_cpu_only_and_uses_one_library()
     test_incomplete_branch_trace_is_not_evidence()

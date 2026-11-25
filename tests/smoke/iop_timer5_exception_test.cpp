@@ -138,6 +138,42 @@ int main()
         return fail("Timer 5 prescaled compare or unsupported MMIO safety");
     }
 
+    // Compare all four divider modes against quotient/remainder
+    // boundaries, including a large advance that needs 64-bit addition.
+    constexpr uint32_t dividers[] = {1u, 8u, 16u, 256u};
+    for (uint32_t mode = 0u; mode < 4u; ++mode)
+    {
+        hardware.reset();
+        const uint32_t div = dividers[mode];
+        if (!hardware.write(iop::c_hw::k_timer5_mode, 4u,
+                0x58u | (mode << 13u)) ||
+            !hardware.write(iop::c_hw::k_timer5_target, 4u, 0u))
+        {
+            return fail("Timer 5 divider setup");
+        }
+        hardware.advance_cycles(div - 1u);
+        hardware.advance_cycles(0xffffffffu);
+        const uint64_t expected = (uint64_t{div - 1u} + 0xffffffffu) / div;
+        if (!hardware.read(iop::c_hw::k_timer5_count, 4u, &readback) ||
+            readback != static_cast<uint32_t>(expected))
+        {
+            return fail("Timer 5 shift/remainder parity");
+        }
+    }
+
+    hardware.reset();
+    if (hardware.next_pending_interrupt() != -1 ||
+        !hardware.write(iop::c_hw::k_i_mask, 4u, (1u << 2u) | (1u << 31u)) ||
+        !hardware.raise_interrupt(31u) || !hardware.raise_interrupt(2u) ||
+        hardware.next_pending_interrupt() != 2 ||
+        !hardware.acknowledge_interrupt(2u) ||
+        hardware.next_pending_interrupt() != 31 ||
+        !hardware.acknowledge_interrupt(31u) ||
+        hardware.next_pending_interrupt() != -1)
+    {
+        return fail("ordinary interrupt selection or empty fast path");
+    }
+
     std::vector<uint8_t> rom(iop::c_cpu::k_rom0_size, 0u);
     put32(rom, 0u, 0x24080401u); // addiu t0,zero,0x401 (IM2,IEc)
     put32(rom, 4u, 0x40886000u); // mtc0 t0,Status

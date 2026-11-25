@@ -32,7 +32,8 @@ int main()
     intc.bind_cpu(&cpu);
 
     check(!clock.advance_to(0u, &intc, &flags, &memory) &&
-          !clock.enabled() && intc.status() == 0u,
+          !clock.enabled() && intc.status() == 0u &&
+          clock.next_event_cycle() == std::numeric_limits<uint64_t>::max(),
           "unconfigured scanout never emits an event");
     check(!clock.configure(1u, 0x1au, 0u, 0u),
           "unsupported VESA timing has no invented clock");
@@ -42,6 +43,7 @@ int main()
     const uint64_t start = 1000u;
     check(clock.configure(1u, 2u, 0u, start) &&
           clock.next_field_cycle() == start + 4920115ull &&
+          clock.next_event_cycle() == clock.next_field_cycle() &&
           clock.fields_started() == 0u,
           "guest NTSC mode 2 schedules precise first 60000/1001 field");
 
@@ -84,14 +86,26 @@ int main()
         first_field + (4920115ull * 44u / 525u);
     check(clock.advance_to(first_end - 1u, &intc, &flags, &memory) &&
           clock.fields_ended() == 0u &&
+          clock.next_event_cycle() == first_end &&
+          clock.last_ee_cycle() == first_end - 1u &&
           clock.delivered_vblank_edges().empty(),
           "VBlank end never fires before its guest deadline");
     check(clock.advance_to(first_end, &intc, &flags, &memory) &&
           clock.fields_ended() == 1u &&
           clock.delivered_vblank_edges().size() == 1u &&
           clock.delivered_vblank_edges()[0] == 0u &&
-          clock.fields_started() == 1u,
+          clock.fields_started() == 1u &&
+          clock.next_event_cycle() == clock.next_field_cycle(),
           "VBlank end fires from the actual field-start clock");
+    // An invalid call must not clear the previous edge; an equal-cycle
+    // valid call consumes the edge list without redelivering anything.
+    check(!clock.advance_to(first_end, nullptr, &flags, &memory) &&
+          clock.delivered_vblank_edges().size() == 1u &&
+          clock.advance_to(first_end, &intc, &flags, &memory) &&
+          clock.delivered_vblank_edges().empty() &&
+          clock.fields_ended() == 1u &&
+          clock.last_ee_cycle() == first_end,
+          "same-cycle no-event advance clears edges, invalid call does not");
     const uint64_t second_field = clock.next_field_cycle();
     clock.acknowledge_csr(ee::c_ee_scanout_clock::k_csr_vsint);
     check((clock.csr() & ee::c_ee_scanout_clock::k_csr_vsint) == 0u &&

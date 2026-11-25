@@ -1708,6 +1708,31 @@ def main():
             assert report["history"][-1]["dispatch"] == report["dispatches"], report
             assert len(report["gpr_lo"]) == 32, report
             assert (root / "out" / "ir" / "ee_functions.json").is_file()
+            # Buffered trace must retain dispatch lines and terminal guest
+            # state, including on the incomplete guest-return exit path.
+            buffered_report = root / "buffered_boot.json"
+            trace_env = dict(os.environ, SDBZ_TRACE_BUFFERED="1")
+            buffered = subprocess.run(
+                [
+                    sys.executable, str(source / "tools" / "run_game.py"),
+                    str(elf), "--build-dir", str(build),
+                    "--work-dir", str(root / "out"), "--max-dispatches=8",
+                    "--trace", "--kseg-ram", "--no-recompile",
+                    "--report", str(buffered_report),
+                ],
+                env=trace_env, capture_output=True, text=True, check=False,
+            )
+            assert buffered.returncode == result.returncode, buffered
+            assert "EE trace output: buffered" in buffered.stdout, buffered.stdout
+            assert [line for line in buffered.stdout.splitlines()
+                    if line.startswith("dispatch=")] == [
+                        line for line in result.stdout.splitlines()
+                        if line.startswith("dispatch=")]
+            buffered_state = json.loads(buffered_report.read_text(encoding="utf-8"))
+            for field in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
+                          "guest_instruction_attempts", "gpr_lo", "history"):
+                assert buffered_state[field] == report[field], field
+
             # Cycle-model prerequisite: an ordered trace of native-executed
             # instruction PCs, without pretending attempt numbers are EE cycles.
             # BEQL is NOT taken: its delay slot at 0x00100010 is annulled.
@@ -1933,6 +1958,66 @@ def main():
                 "--relink-existing", "--link-only",
             ]
             repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # The previous dispatch diagnostics header was fingerprinted in
+            # include/ee, despite never participating in guest lowering.
+            old_key = "include/ee/ee_hot_loop_diagnostics.h"
+            new_key = "src/runtime/ee_hot_loop_diagnostics.h"
+            old_digest = "d5c9345285e8a93958113d7d24d16c9d8131ced874765bb2a06c8761423017ad"
+            assert old_key not in repaired_snapshot["ir_sources"]
+            assert new_key not in repaired_snapshot["ir_sources"]
+            assert new_key in repaired_snapshot["inputs"]
+            old_diagnostics = dict(repaired_snapshot)
+            old_diagnostics["ir_sources"] = dict(repaired_snapshot["ir_sources"])
+            old_diagnostics["inputs"] = dict(repaired_snapshot["inputs"])
+            old_diagnostics["inputs"].pop(new_key)
+            old_diagnostics["inputs"][old_key] = old_digest
+            old_diagnostics["ir_sources"][old_key] = old_digest
+            cache_path.write_text(
+                json.dumps(old_diagnostics) + "\n", encoding="utf-8"
+            )
+            migrated = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False,
+            )
+            assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+            assert "migrated host-only dispatch diagnostics" in migrated.stdout
+            assert "reused 1/1 cached object(s)" in migrated.stdout
+            assert (root / "out" / "ir" / "ee_functions.json").read_bytes() == preserved_metadata
+            assert {
+                item.name: item.read_bytes()
+                for item in (root / "out" / "ir").glob("*.ll")
+            } == preserved_ir
+            repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # Modern provenance allows a direct relink without repeating
+            # the emitter's IR/object scan. The linker must still reject
+            # damaged objects and the incremental fallback repairs them.
+            direct = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False)
+            assert direct.returncode == 0, direct.stdout + direct.stderr
+            assert "skipping redundant emission scan" in direct.stdout
+            assert "verify_ir: reused" not in direct.stdout
+            object_path = next((root / "out" / "objects").glob("*.o"))
+            object_path.write_bytes(object_path.read_bytes() + b"damaged")
+            repaired_object = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False)
+            assert repaired_object.returncode == 0, repaired_object.stdout + repaired_object.stderr
+            assert "direct relink failed; verifying and repairing objects" in repaired_object.stdout
+            assert "reused 0/1 cached object(s)" in repaired_object.stdout
+            repaired_snapshot = json.loads(cache_path.read_text(encoding="utf-8"))
+
+            # Unknown historical header content cannot be silently accepted.
+            old_diagnostics["inputs"][old_key] = "0" * 64
+            old_diagnostics["ir_sources"][old_key] = "0" * 64
+            cache_path.write_text(
+                json.dumps(old_diagnostics) + "\n", encoding="utf-8"
+            )
+            rejected_diagnostics = subprocess.run(
+                repair_command, capture_output=True, text=True, check=False,
+            )
+            assert rejected_diagnostics.returncode != 0
+            assert "guest IR generation input changed:" in rejected_diagnostics.stderr
+
             altered_sources = dict(repaired_snapshot)
             altered_sources["ir_sources"] = dict(repaired_snapshot["ir_sources"])
             altered_sources["ir_sources"]["ELF"] = "f" * 64
@@ -2186,13 +2271,40 @@ def main():
             metadata_path = root / "out" / "ir" / "ee_functions.json"
             assert json.loads(metadata_path.read_text(encoding="utf-8"))["function_count"] == 1
 
+            # Prepare one shared profile and one pre-sharing legacy
+            # profile while the base still owns just the entry function.
+            early = root / "early-optimized"
+            legacy = root / "legacy-optimized"
+            prepare_early = [
+                sys.executable, str(source / "tools" / "build_optimized_cache.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--source-work-dir", str(root / "out"),
+                "--work-dir", str(early),
+            ]
+            result = subprocess.run(prepare_early, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert not (early / "ir").exists()
+            legacy_build = [
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--work-dir", str(legacy), "--link-only",
+            ]
+            result = subprocess.run(legacy_build, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert (legacy / "ir" / "ee_functions.json").is_file()
+
             resumed = subprocess.run(
                 base + ["--no-recompile", "--auto-expand=1",
                         "--trace-entry=0x00100008"],
                 capture_output=True,
                 text=True,
                 check=False,
+                env=dict(os.environ, SDBZ_EE_DIRECT_DISPATCH="1"),
             )
+            assert "EE direct dispatch: enabled" in resumed.stdout, resumed.stdout
+            # run_hot_expand merges child stderr into stdout. Keep the
+            # three-dispatch assertion, but inspect the merged stream.
+            assert "EE direct dispatch: executed=3 " in resumed.stdout, resumed.stdout
             assert "auto-expand: compiling reachable PC 0x00100030" in resumed.stdout, (
                 resumed.stdout + resumed.stderr
             )
@@ -2215,6 +2327,114 @@ def main():
             )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             assert metadata["function_count"] == 2, metadata
+
+            # A new discovery in the base must be visible to an existing
+            # shared profile without re-lifting either guest function.
+            result = subprocess.run(prepare_early, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "synchronizing native profile to shared EE IR" in result.stdout
+            assert "reused 1/2" in result.stdout, result.stdout
+            assert "ee_recomp: loading" not in result.stdout
+            assert not (early / "ir").exists()
+            early_cache = json.loads((early / "translation-cache.json").read_text())
+            assert len(early_cache["ir_hashes"]) == 2
+
+            # Migrate the legacy profile with the shorter verified prefix.
+            # Its existing O2 object must be rekeyed, not recompiled.
+            prepare_legacy = [*prepare_early[:-1], str(legacy)]
+            result = subprocess.run(prepare_legacy, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
+            assert "reused 1/2" in result.stdout, result.stdout
+            assert "removed 1 verified duplicate modules" in result.stdout
+            assert not list((legacy / "ir").glob("*.ll"))
+            assert not (legacy / "ir" / "ee_functions.json").exists()
+            legacy_cache = json.loads((legacy / "translation-cache.json").read_text())
+            assert legacy_cache["ir_hashes"] == early_cache["ir_hashes"]
+
+            # Verify a separate native O2 variant from live-expanded IR.
+            original_cache = root / "out" / "translation-cache.json"
+            original_bytes = original_cache.read_bytes()
+            original_map = metadata_path.read_bytes()
+            variant = root / "optimized"
+            prepare = [
+                sys.executable, str(source / "tools" / "build_optimized_cache.py"),
+                str(elf), "--build-dir", str(build), "--emit-opt=2",
+                "--source-work-dir", str(root / "out"),
+                "--work-dir", str(variant),
+            ]
+            # A source DLL may be stale or completely absent; native
+            # profiles depend on verified IR, not another profile's DLL.
+            # Select the actual native library, not a cache directory.
+            base_library = next(p for p in (root / "out").iterdir()
+                if p.is_file() and p.name in ("game-translated.dll",
+                    "libgame-translated.so", "libgame-translated.dylib"))
+            saved_library = base_library.with_name(base_library.name + ".saved")
+            base_library.rename(saved_library)
+            try:
+                for expected_message in ("Built O2 EE variant", "Reusing verified O2 EE cache"):
+                    result = subprocess.run(prepare, capture_output=True, text=True, check=False)
+                    assert result.returncode == 0, result.stdout + result.stderr
+                    assert expected_message in result.stdout, result.stdout
+                    assert "no source DLL relink" in result.stdout
+                    if expected_message.startswith("Reusing"):
+                        assert "ir_scan=already-verified" in result.stdout, result.stdout
+                    assert not base_library.exists()
+                    assert original_cache.read_bytes() == original_bytes
+                    assert metadata_path.read_bytes() == original_map
+            finally:
+                saved_library.rename(base_library)
+            variant_cache = json.loads((variant / "translation-cache.json").read_text(encoding="utf-8"))
+            assert variant_cache["emit_opt"] == 2
+            assert variant_cache["ir_hashes"] == json.loads(original_bytes)["ir_hashes"]
+            shared_marker = json.loads((variant / "shared-ir.json").read_text(encoding="utf-8"))
+            assert not Path(shared_marker["ir_dir"]).is_absolute()
+            assert (variant / shared_marker["ir_dir"]).resolve() == metadata_path.parent
+            assert not (variant / "ir").exists()
+            variant_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            assert len(variant_metadata["functions"]) == 2
+            assert all(Path(fn["ir_path"]).parent == Path(".")
+                       for fn in variant_metadata["functions"])
+            states = []
+            for work_dir, opt in ((root / "out", 0), (variant, 2)):
+                report = work_dir / "comparison.json"
+                result = subprocess.run([
+                    sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                    "--build-dir", str(build), "--work-dir", str(work_dir),
+                    f"--emit-opt={opt}", "--max-dispatches=8", "--no-recompile",
+                    f"--report={report}",
+                ], capture_output=True, text=True, check=False)
+                assert report.is_file(), result.stdout + result.stderr
+                states.append(json.loads(report.read_text(encoding="utf-8")))
+            for key in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert states[0][key] == states[1][key], (key, states)
+            warm = subprocess.run([*prepare, "--defer-warm-validation"],
+                                  capture_output=True, text=True, check=False)
+            assert warm.returncode == 0, warm.stdout + warm.stderr
+            assert "full IR verification deferred to runner" in warm.stdout
+            assert "Shared EE IR: verified" not in warm.stdout
+            module = metadata_path.parent / variant_metadata["functions"][0]["ir_path"]
+            module.write_bytes(module.read_bytes() + b"\n; modified\n")
+            # Preflight does not claim to authenticate the IR. The actual
+            # driver must fail before native execution when IR is damaged.
+            warm = subprocess.run([*prepare, "--defer-warm-validation"],
+                                  capture_output=True, text=True, check=False)
+            assert warm.returncode == 0, warm.stdout + warm.stderr
+            assert "full IR verification deferred to runner" in warm.stdout
+            rejected_report = variant / "rejected.json"
+            rejected_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(variant),
+                "--emit-opt=2", "--max-dispatches=8", "--no-recompile",
+                f"--report={rejected_report}",
+            ], capture_output=True, text=True, check=False)
+            assert rejected_run.returncode != 0
+            assert not rejected_report.exists()
+            assert "shared EE IR provenance is stale or incompatible" in rejected_run.stderr
+            refused = subprocess.run(prepare, capture_output=True, text=True, check=False)
+            assert refused.returncode != 0, refused.stdout + refused.stderr
+            assert "verified IR hashes do not match" in refused.stderr
+            assert original_cache.read_bytes() == original_bytes
 
         # Signed word ALU ops consume the low words. A delay-slot overflow
         # commits preceding writes, preserves rd, and reports the branch EPC.
@@ -3035,6 +3255,17 @@ def main():
             assert ("EE watch pair: addr=0x001001fc "
                     "word0=0x00000000 word1=0x00000007") in result.stdout, result.stdout
 
+            # The same compiled module must skip both trace helpers when
+            # disabled, while preserving the guest word and register result.
+            untraced = subprocess.run(
+                args[:-2] + ["--no-recompile"],
+                capture_output=True, text=True, check=False,
+            )
+            assert untraced.returncode == 3, untraced.stdout + untraced.stderr
+            assert "EE guest-store:" not in untraced.stdout, untraced.stdout
+            assert "EE guest-v0-write:" not in untraced.stdout, untraced.stdout
+            assert "addr=0x00100200 old=0x00000000 new=0x00000007" in untraced.stdout, untraced.stdout
+
             rejected = subprocess.run(
                 args[:-2] + ["--watch-word=0x02000000", "--no-recompile"],
                 capture_output=True, text=True, check=False,
@@ -3609,13 +3840,17 @@ def main():
                     "--work-dir", str(root / "out"),
                     "--max-dispatches=64",
                     "--auto-expand=2",
+                    "--live-full-relink",
                     "--hle-startup",
                     "--trace",
                     "--report", str(report_path),
                 ],
                 capture_output=True, text=True, check=False,
+                env=dict(os.environ, SDBZ_EE_DIRECT_DISPATCH="1"),
             )
             assert result.returncode != 0, result.stdout + result.stderr
+            assert "EE direct dispatch: enabled" in result.stdout, result.stdout
+            assert "with replacement=" in result.stdout, result.stdout
             assert "auto-expand: compiling reachable PC 0x00100050" in result.stdout, (
                 result.stdout + result.stderr
             )
@@ -3923,6 +4158,72 @@ def main():
             assert "native_ms=" in result.stderr, result.stderr
             assert "report_ms=" in result.stderr, result.stderr
             assert "slowest_native_pc=" in result.stderr, result.stderr
+
+            # Throttle host progress text only. The runner's final state,
+            # instruction counts and terminal timing must be identical.
+            env = dict(os.environ, SDBZ_REPORT_PROGRESS_EVERY="1024")
+            sampled_report = root / "sampled.json"
+            sampled = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(sampled_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=env)
+            assert sampled.returncode == 4, sampled.stdout + sampled.stderr
+            assert "EE progress: dispatched=" not in sampled.stderr, sampled.stderr
+            assert "EE timing: dispatched=300" in sampled.stderr, sampled.stderr
+            sampled_state = json.loads(sampled_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert sampled_state[key] == snapshot[key], key
+            direct_report = root / "direct.json"
+            direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1",
+                              SDBZ_PROFILE_PCS="1", SDBZ_RUNTIME_PROFILE="1")
+            direct_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(direct_report),
+            ], capture_output=True, text=True, check=False, timeout=60,
+                env=direct_env)
+            assert direct_run.returncode == 4, direct_run.stdout + direct_run.stderr
+            assert "EE direct dispatch: enabled" in direct_run.stdout, direct_run.stdout
+            assert "EE direct dispatch: executed=300" in direct_run.stderr, direct_run.stderr
+            direct_state = json.loads(direct_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert direct_state[key] == snapshot[key], key
+            profile_lines = [line for line in direct_run.stderr.splitlines()
+                             if line.startswith("EE profile: ")]
+            assert profile_lines and "compilation excluded" in profile_lines[0], profile_lines
+            total_native_ns = int(profile_lines[0].split("native_ns=")[1])
+            assert total_native_ns == direct_state["runtime_profile"]["subsystems"]["ee_native_boundary"]["inclusive_ns"]
+            assert "idle_charged=0" in profile_lines[0], profile_lines
+            profile_entries = [line for line in profile_lines if line.startswith("EE profile: pc=")]
+            assert profile_entries, profile_lines
+            times = [int(line.split("native_ns=")[1]) for line in profile_entries]
+            assert times == sorted(times, reverse=True), profile_entries
+            assert sum(times) == total_native_ns, profile_entries
+            attempts = sum(int(line.split("non_skipped=")[1].split()[0]) for line in profile_entries)
+            assert attempts == direct_state["guest_instruction_attempts"], profile_entries
+            assert sampled_state["vu1_worker"]["enabled"] is False
+            worker_report = root / "worker.json"
+            worker_env = dict(env, SDBZ_VU1_ASYNC="1")
+            worker_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(worker_report),
+            ], capture_output=True, text=True, check=False, timeout=60,
+                env=worker_env)
+            assert worker_run.returncode == 4, worker_run.stdout + worker_run.stderr
+            worker_state = json.loads(worker_report.read_text(encoding="utf-8"))
+            assert worker_state["vu1_worker"]["enabled"] is True
+            assert worker_state["vu1_worker"]["pending"] is False
+            assert worker_state["vu1_worker"]["submitted_jobs"] == 0
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo"):
+                assert worker_state[key] == snapshot[key], key
 
         with tempfile.TemporaryDirectory(prefix="ee-native-loop-budget-") as tmp:
             root = Path(tmp)

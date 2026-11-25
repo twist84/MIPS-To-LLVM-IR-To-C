@@ -25,6 +25,7 @@ public:
         // Match the reference's reset configuration for EE Timer 3.
         m_timers[3].m_mode = 0x183u;
         schedule(3u, now());
+        refresh_deadline();
     }
 
     static bool mmio_read(void* user, uint32_t address,
@@ -104,6 +105,7 @@ public:
             return false;
         }
         timers->schedule(index, cycle);
+        timers->refresh_deadline();
         return true;
     }
 
@@ -119,15 +121,7 @@ public:
 
     uint64_t next_event() const
     {
-        uint64_t next = std::numeric_limits<uint64_t>::max();
-        for (const s_timer& timer : m_timers)
-        {
-            if (timer.m_next_event < next)
-            {
-                next = timer.m_next_event;
-            }
-        }
-        return next;
+        return m_next_event;
     }
 
     uint32_t current_count(uint32_t index) const
@@ -262,12 +256,33 @@ private:
         }
     }
 
+    void refresh_deadline()
+    {
+        m_next_event = std::numeric_limits<uint64_t>::max();
+        for (const s_timer& timer : m_timers)
+        {
+            if (timer.m_next_event < m_next_event)
+            {
+                m_next_event = timer.m_next_event;
+            }
+        }
+    }
+
     void service(uint64_t cycle)
     {
+        // Guest register writes and actual timer events are the only
+        // producers of new deadlines. The ordinary EE boundary needs
+        // no four-timer scan while all events remain in the future.
+        if (m_next_event == std::numeric_limits<uint64_t>::max() ||
+            cycle < m_next_event)
+        {
+            return;
+        }
         for (uint32_t index = 0u; index < 4u; ++index)
         {
             s_timer& timer = m_timers[index];
-            while (timer.m_next_event <= cycle)
+            while (timer.m_next_event != std::numeric_limits<uint64_t>::max() &&
+                   timer.m_next_event <= cycle)
             {
                 const uint64_t event_cycle = timer.m_next_event;
                 const uint32_t value = count(index, event_cycle);
@@ -306,11 +321,13 @@ private:
                 }
             }
         }
+        refresh_deadline();
     }
 
     s_ee_runtime* m_runtime = nullptr;
     c_ee_hw_bus* m_hardware = nullptr;
     s_timer m_timers[4]{};
     uint64_t m_idle_cycles = 0u;
+    uint64_t m_next_event = std::numeric_limits<uint64_t>::max();
 };
 } // namespace ee

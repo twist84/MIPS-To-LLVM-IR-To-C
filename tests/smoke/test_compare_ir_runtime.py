@@ -32,6 +32,7 @@ class EEState(ctypes.Structure):
         ("vu0", U128 * 32),
         ("fcsr", ctypes.c_uint32),
         ("fpu_acc", ctypes.c_uint32),
+        ("fpu_acc_overflow", ctypes.c_uint32),
     ]
 
 

@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.18)
-project(ps2_recompiler C CXX ASM)
+project(ps2_recompiler C CXX)
+
+option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
+option(EE_CLANG_WARNINGS_AS_ERRORS "Treat project Clang compiler warnings as errors" ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -44,6 +47,9 @@ add_library(ee_core STATIC
     src/runtime/ee_vif1.cpp
     src/runtime/ipu/ee_ipu.cpp
     src/runtime/ee_vu1.cpp
+    src/runtime/ee_vu1_worker.cpp
+    src/runtime/ee_vu1_ir.cpp
+    src/runtime/ee_vu1_aot.cpp
     src/runtime/ee_gs.cpp
     src/runtime/ee_gs_display.cpp
     src/runtime/ee_exceptions.cpp
@@ -52,6 +58,11 @@ add_library(ee_core STATIC
     src/runtime/ee_scanout_clock.cpp
     src/runtime/ee_cycle_scheduler.cpp
 )
+find_package(Threads REQUIRED)
+target_link_libraries(ee_core PUBLIC Threads::Threads)
+if(CMAKE_DL_LIBS)
+    target_link_libraries(ee_core PUBLIC ${CMAKE_DL_LIBS})
+endif()
 
 # Standalone IOP R3000A interpreter, initially isolated from the EE
 # runner until module loading, timing and SIF transport are integrated.
@@ -129,6 +140,8 @@ add_executable(iop_sysclib_ctype_test tests/smoke/iop_sysclib_ctype_test.cpp)
 target_link_libraries(iop_sysclib_ctype_test PRIVATE iop_cpu)
 add_executable(iop_kernel_hle_bridge_test tests/smoke/iop_kernel_hle_bridge_test.cpp)
 target_link_libraries(iop_kernel_hle_bridge_test PRIVATE iop_cpu)
+add_executable(iop_scheduler_cache_test tests/smoke/iop_scheduler_cache_test.cpp)
+target_link_libraries(iop_scheduler_cache_test PRIVATE iop_cpu)
 add_executable(iop_kernel_test tests/smoke/iop_kernel_test.cpp)
 target_link_libraries(iop_kernel_test PRIVATE iop_cpu)
 add_executable(iop_sifman_bridge_test tests/smoke/iop_sifman_bridge_test.cpp)
@@ -213,10 +226,15 @@ target_link_libraries(ee_vsync_flag_test PRIVATE ee_core)
 # Cycle-driven GS field events, without a synthetic runtime VBlank producer.
 add_executable(ee_scanout_clock_test tests/smoke/ee_scanout_clock_test.cpp)
 target_link_libraries(ee_scanout_clock_test PRIVATE ee_core)
+add_executable(ee_host_timer_deadline_test tests/smoke/ee_host_timer_deadline_test.cpp)
+target_include_directories(ee_host_timer_deadline_test PRIVATE ${CMAKE_SOURCE_DIR}/src/tools)
+target_link_libraries(ee_host_timer_deadline_test PRIVATE ee_core)
 
 # Isolated, uncalibrated R5900 issue-timing probe; never drives GS events.
 add_executable(ee_issue_timing_probe_test tests/smoke/ee_issue_timing_probe_test.cpp)
 target_link_libraries(ee_issue_timing_probe_test PRIVATE ee_core)
+add_executable(ee_runtime_profile_test tests/smoke/ee_runtime_profile_test.cpp)
+target_link_libraries(ee_runtime_profile_test PRIVATE ee_core)
 
 add_executable(ee_cycle_scheduler_test tests/smoke/ee_cycle_scheduler_test.cpp)
 target_link_libraries(ee_cycle_scheduler_test PRIVATE ee_core)
@@ -264,6 +282,10 @@ add_executable(ee_recomp
 )
 target_link_libraries(ee_recomp PRIVATE ee_core)
 
+# Standalone captured VU1 microprogram LLVM translator.
+add_executable(vu1_recomp src/tools/vu1_recomp_main.cpp)
+target_link_libraries(vu1_recomp PRIVATE ee_core)
+
 # Ahead-of-time IRX (IOP R3000A) to LLVM IR translator.
 add_executable(iop_recomp
     src/tools/iop_recomp_main.cpp
@@ -279,8 +301,12 @@ add_test(NAME iop_aot COMMAND iop_aot_test ${CMAKE_BINARY_DIR}/iop-aot-test)
 
 # Standalone host for translated EE functions and optional, explicit
 # IOP IRX execution at SIF polling rendezvous points.
+add_executable(ee_gs_worker_test tests/smoke/ee_gs_worker_test.cpp)
+target_link_libraries(ee_gs_worker_test PRIVATE ee_core)
+
 add_executable(ee_hot_loop_diagnostics_test tests/smoke/ee_hot_loop_diagnostics_test.cpp)
 add_test(NAME ee_hot_loop_diagnostics COMMAND ee_hot_loop_diagnostics_test)
+add_test(NAME ee_gs_worker COMMAND ee_gs_worker_test)
 
 # Pure host watchdog gate: no guest IR, EE runtime or GPU dependency.
 add_executable(ee_host_loop_yield_budget_test
@@ -332,6 +358,46 @@ add_test(NAME ee_reached_isa_inventory COMMAND ee_reached_isa_inventory_test)
 
 add_executable(ee_game_runner src/tools/ee_game_runner_main.cpp)
 target_link_libraries(ee_game_runner PRIVATE ee_core iop_cpu ${CMAKE_DL_LIBS})
+
+# Fetch raylib once, also for headless builds. SOURCE_SUBDIR prevents
+# configuring its graphics/GLFW dependencies until the window is requested.
+include(FetchContent)
+FetchContent_Declare(raylib
+    GIT_REPOSITORY https://github.com/raysan5/raylib.git
+    GIT_TAG c1ab645ca298a2801097931d1079b10ff7eb9df8
+    GIT_CONFIG core.autocrlf=false
+    SOURCE_SUBDIR ee_source_only)
+FetchContent_MakeAvailable(raylib)
+include(cmake/prepare_raudio.cmake)
+set(EE_RAUDIO_DIR "${raylib_BINARY_DIR}/ee_raudio")
+ee_prepare_raudio("${raylib_SOURCE_DIR}" "${EE_RAUDIO_DIR}" EE_RAUDIO_SOURCE)
+add_library(ee_raudio STATIC "${EE_RAUDIO_SOURCE}")
+set_target_properties(ee_raudio PROPERTIES C_EXTENSIONS ON)
+target_compile_definitions(ee_raudio PRIVATE RAUDIO_STANDALONE
+    SUPPORT_MODULE_RAUDIO AUDIO_DEVICE_SAMPLE_RATE=48000)
+target_include_directories(ee_raudio PUBLIC "${EE_RAUDIO_DIR}"
+    PRIVATE "${raylib_SOURCE_DIR}/src")
+target_link_libraries(ee_raudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_compile_definitions(ee_raudio PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(ee_raudio PUBLIC winmm ole32 uuid)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(ee_raudio PUBLIC m)
+elseif(APPLE)
+    target_link_libraries(ee_raudio PUBLIC "-framework CoreAudio"
+        "-framework AudioToolbox" "-framework CoreFoundation")
+endif()
+target_sources(ee_game_runner PRIVATE src/runtime/ee_host_audio.cpp)
+target_link_libraries(ee_game_runner PRIVATE ee_raudio)
+
+add_executable(ee_pcm_queue_test tests/smoke/ee_pcm_queue_test.cpp)
+target_link_libraries(ee_pcm_queue_test PRIVATE Threads::Threads)
+add_test(NAME ee_pcm_queue COMMAND ee_pcm_queue_test)
+
+add_executable(ee_frame_pacer_test tests/smoke/ee_frame_pacer_test.cpp)
+target_include_directories(ee_frame_pacer_test PRIVATE ${CMAKE_SOURCE_DIR}/src/tools)
+target_link_libraries(ee_frame_pacer_test PRIVATE Threads::Threads)
+add_test(NAME ee_frame_pacer COMMAND ee_frame_pacer_test)
 
 # Original native WebGPU compute renderer, extracted from ps2-web-recomp:SDBZ.
 # No Emscripten, browser host, game code, or SDL; headless builds unchanged.
@@ -415,7 +481,7 @@ if(EE_ENABLE_WEBGPU)
         "${EE_WEBGPU_INCLUDE_DIR}"
         "${EE_WGPU_EXTRAS_INCLUDE_DIR}"
         "${CMAKE_SOURCE_DIR}/src/runtime")
-    target_link_libraries(ee_webgpu_native PUBLIC "${EE_WGPU_NATIVE_LIBRARY}")
+    target_link_libraries(ee_webgpu_native PUBLIC "${EE_WGPU_NATIVE_LIBRARY}" Threads::Threads)
     if(WIN32)
         # The pinned MSVC wgpu-native SDK includes Rust std objects in
         # wgpu_native.lib. clang++/lld-link does not infer their Windows
@@ -432,13 +498,13 @@ if(EE_ENABLE_WEBGPU)
     target_compile_definitions(ee_game_runner PRIVATE EE_ENABLE_WEBGPU=1)
     target_link_libraries(ee_game_runner PRIVATE ee_webgpu_native)
     if(EE_ENABLE_RAYLIB_WINDOW)
-        include(FetchContent)
-        # Pin raylib 5.5 to a specific commit under build/_deps.
+        # The separately compiled raudio from this same checkout is
+        # the sole audio implementation; only configure graphics here.
         set(BUILD_EXAMPLES OFF CACHE BOOL "Build raylib examples" FORCE)
-        FetchContent_Declare(raylib
-            GIT_REPOSITORY https://github.com/raysan5/raylib.git
-            GIT_TAG c1ab645ca298a2801097931d1079b10ff7eb9df8)
-        FetchContent_MakeAvailable(raylib)
+        set(CUSTOMIZE_BUILD ON CACHE BOOL "Customize raylib modules" FORCE)
+        set(USE_AUDIO OFF CACHE BOOL "Disable duplicate raylib audio" FORCE)
+        set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "Disable duplicate raudio" FORCE)
+        add_subdirectory("${raylib_SOURCE_DIR}" "${raylib_BINARY_DIR}")
         target_sources(ee_game_runner PRIVATE
             src/runtime/ee_raylib_window.cpp
             src/runtime/ee_raylib_win32.cpp)
@@ -518,6 +584,17 @@ add_test(NAME ee_vif1_device COMMAND ee_vif1_device_test)
 add_executable(ee_vu1_pipeline_test tests/smoke/ee_vu1_pipeline_test.cpp)
 target_link_libraries(ee_vu1_pipeline_test PRIVATE ee_core)
 add_test(NAME ee_vu1_pipeline COMMAND ee_vu1_pipeline_test)
+
+add_executable(ee_vu1_worker_test tests/smoke/ee_vu1_worker_test.cpp)
+target_link_libraries(ee_vu1_worker_test PRIVATE ee_core)
+add_test(NAME ee_vu1_worker COMMAND ee_vu1_worker_test)
+
+add_executable(ee_vu1_ir_fixture tests/smoke/ee_vu1_ir_fixture.cpp)
+target_link_libraries(ee_vu1_ir_fixture PRIVATE ee_core)
+add_test(NAME ee_vu1_ir_rejection COMMAND ee_vu1_ir_fixture)
+
+add_executable(ee_vu1_aot_fixture tests/smoke/ee_vu1_aot_fixture.cpp)
+target_link_libraries(ee_vu1_aot_fixture PRIVATE ee_core)
 
 add_executable(ee_sdbz_dma_wait_probe_test tests/smoke/ee_sdbz_dma_wait_probe_test.cpp)
 target_link_libraries(ee_sdbz_dma_wait_probe_test PRIVATE ee_core)
@@ -683,7 +760,7 @@ endif()
 if(EE_ENABLE_WEBGPU)
     add_executable(ee_webgpu_native_smoke
         tests/smoke/ee_webgpu_native_smoke.cpp)
-    target_link_libraries(ee_webgpu_native_smoke PRIVATE ee_webgpu_native)
+    target_link_libraries(ee_webgpu_native_smoke PRIVATE ee_webgpu_native ee_core)
     add_test(NAME ee_webgpu_native_smoke COMMAND ee_webgpu_native_smoke)
     set_tests_properties(ee_webgpu_native_smoke
         PROPERTIES SKIP_RETURN_CODE 77)
@@ -799,6 +876,7 @@ add_test(NAME iop_sysclib_string COMMAND iop_sysclib_string_test)
 add_test(NAME iop_sysclib_ctype COMMAND iop_sysclib_ctype_test)
 add_test(NAME iop_kernel COMMAND iop_kernel_test)
 add_test(NAME iop_kernel_hle_bridge COMMAND iop_kernel_hle_bridge_test)
+add_test(NAME iop_scheduler_cache COMMAND iop_scheduler_cache_test)
 add_test(NAME iop_sifman_bridge COMMAND iop_sifman_bridge_test)
 add_test(NAME iop_sif_dma COMMAND iop_sif_dma_test)
 add_test(NAME iop_sif1_bridge COMMAND iop_sif1_bridge_test)
@@ -850,7 +928,9 @@ add_test(NAME vu0_macro_fmac COMMAND ee_vu0_macro_fmac_test)
 add_test(NAME ee_vu0_indexed_macro COMMAND ee_vu0_indexed_macro_test)
 add_test(NAME ee_vsync_flag COMMAND ee_vsync_flag_test)
 add_test(NAME ee_scanout_clock COMMAND ee_scanout_clock_test)
+add_test(NAME ee_host_timer_deadline COMMAND ee_host_timer_deadline_test)
 add_test(NAME ee_issue_timing_probe COMMAND ee_issue_timing_probe_test)
+add_test(NAME ee_runtime_profile COMMAND ee_runtime_profile_test)
 add_test(NAME ee_cycle_scheduler COMMAND ee_cycle_scheduler_test)
 add_test(NAME ee_issue_trace_replay COMMAND ee_issue_trace_replay_test)
 add_test(NAME ee_issue_trace_candidate COMMAND ee_issue_trace_candidate ${CMAKE_SOURCE_DIR}/tests/fixtures/ee_issue_trace_candidate.csv 1 3)
@@ -859,7 +939,20 @@ add_test(NAME multi_function COMMAND ee_multi_test)
 add_test(NAME function_discovery COMMAND ee_function_discovery_test)
 add_test(NAME smoke COMMAND ee_smoke_test)
 add_test(NAME mmi_ops COMMAND ee_mmi_ops_test)
+if(Python3_EXECUTABLE)
+    add_test(NAME ee_vu1_aot_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_vu1_aot_runtime.py
+                $<TARGET_FILE:ee_vu1_aot_fixture>
+                $<TARGET_FILE:vu1_recomp>
+                ${CMAKE_SOURCE_DIR}/tools/build_vu1_aot.py)
+    set_tests_properties(ee_vu1_aot_runtime PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 if(EE_HAVE_LLVM_JIT_TEST)
+    add_test(NAME ee_vu1_integer_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_vu1_integer_ir_runtime.py
+                $<TARGET_FILE:ee_vu1_ir_fixture>)
     add_test(NAME fpu_compare_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_fpu_compare_ir_runtime.py
@@ -1021,3 +1114,34 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 $<TARGET_FILE:ee_mmi1_ir_fixture>)
 endif()
 set_tests_properties(multi_function smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Apply warning policy only to project targets, not FetchContent raylib/GLFW.
+get_property(EE_PROJECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS EE_PROJECT_TARGETS)
+    if(target STREQUAL "ee_raudio")
+        continue()
+    endif()
+    get_target_property(target_type ${target} TYPE)
+    if(NOT target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
+        continue()
+    endif()
+    # Standard C/C++ CRT APIs are intentionally portable. The Windows UCRT
+    # annotates them as deprecated in favor of Microsoft-specific variants.
+    # This opts into standard CRT usage, not general deprecation suppression.
+    if(WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
+        if(EE_MSVC_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
+        endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" AND EE_CLANG_WARNINGS_AS_ERRORS)
+        # clang-cl requires the MSVC driver spelling; clang++ uses -Werror.
+        if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
+        else()
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror>")
+        endif()
+    endif()
+endforeach()

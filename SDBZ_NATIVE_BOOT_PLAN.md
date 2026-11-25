@@ -1,5 +1,7 @@
 # Super Dragon Ball Z (US) — Native Boot Development Plan
 
+> **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](docs/SDBZ_RUNTIME_VALIDATION_20261125.md) supersedes the historical November 18 status below. Bounded training gameplay, native graphics and audible audio have been observed; full-game and hardware parity are not established.
+
 **Repository:** [twist84/MIPS-To-LLVM-IR-To-C](https://github.com/twist84/MIPS-To-LLVM-IR-To-C)  
 **Status date:** 2026-11-18  
 **Current merged baseline:** `main` at `b3584825e115a6a1072c2fc7a0a960344f26c044` (squash-merged [PR #141](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/pull/141), 95/95 CTests).  

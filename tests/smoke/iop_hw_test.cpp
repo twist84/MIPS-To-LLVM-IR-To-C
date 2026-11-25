@@ -26,6 +26,308 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
     }
 }
 
+bool test_spu2_sample_clock()
+{
+    constexpr uint32_t spu = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    hw.advance_cycles(1000u);
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u ||
+        hw.read(spu, 1u, &value) || hw.spu2().clock_active())
+    {
+        return false;
+    }
+    if (!hw.write(spu + 0x760u, 2u, 1u) || !hw.spu2().clock_active())
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (hw.spu2().elapsed_samples() != 0u ||
+        hw.spu2().sample_phase() != period - 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    hw.advance_cycles(3u * period + 17u);
+    if (hw.spu2().elapsed_samples() != 4u ||
+        hw.spu2().sample_phase() != 17u ||
+        hw.spu2().clock_cycles() != 4u * period + 17u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    // Large advance must retain the fractional phase without u32 overflow.
+    hw.advance_cycles(0xffffffffu);
+    const uint64_t total = uint64_t{4u * period + 17u} + 0xffffffffu;
+    if (hw.spu2().elapsed_samples() != total / period ||
+        hw.spu2().sample_phase() != total % period)
+    {
+        return false;
+    }
+    hw.reset();
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u)
+    {
+        return false;
+    }
+
+    // The attached CPU and kernel share the same hardware. A running
+    // thread's retired instructions must advance it exactly once.
+    iop::c_kernel kernel;
+    constexpr uint32_t program = 0x00018000u;
+    if (!kernel.attach_hle_hardware() ||
+        !kernel.hardware().read(spu + 0x760u, 2u, &value) ||
+        !kernel.cpu().write32(program, 0x1000ffffu) || // beq zero,zero,-1
+        !kernel.cpu().write32(program + 4u, 0u) ||
+        kernel.create_thread(program, 0u, 10u) != 1u ||
+        !kernel.start_thread(1u))
+    {
+        return false;
+    }
+    const auto result = kernel.run(period + 5u, 128u);
+    if (result.m_executed != period + 5u ||
+        kernel.cycles() != period + 5u ||
+        kernel.hardware().spu2().clock_cycles() != kernel.cycles() ||
+        kernel.hardware().spu2().elapsed_samples() != 1u ||
+        kernel.hardware().spu2().sample_phase() != 5u)
+    {
+        return false;
+    }
+
+    // Idle time is owned by the kernel rather than the R3000 CPU.
+    iop::c_kernel idle;
+    if (!idle.attach_hle_hardware() ||
+        !idle.hardware().read(spu + 0x760u, 2u, &value))
+    {
+        return false;
+    }
+    (void)idle.run(period + 3u);
+    return idle.cycles() == period + 3u &&
+        idle.hardware().spu2().clock_cycles() == idle.cycles() &&
+        idle.hardware().spu2().elapsed_samples() == 1u &&
+        idle.hardware().spu2().sample_phase() == 3u &&
+        idle.cpu().cycles() == 0u;
+}
+
+bool test_spu2_adpcm_voice_progression()
+{
+    // Low nibble first, signed nibble expansion, predictor history,
+    // saturation and negative rounding. Independent known vectors.
+    uint16_t words[8] = {0x0000u, 0x87f1u};
+    int16_t decoded[28]{};
+    int32_t history1 = 0;
+    int32_t history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != 4096 || decoded[1] != -4096 ||
+        decoded[2] != 28672 || decoded[3] != -32768 ||
+        history1 != 0 || history2 != 0)
+    {
+        return false;
+    }
+    for (uint16_t& word : words)
+    {
+        word = 0u;
+    }
+    words[0] = 0x0010u;
+    history1 = 1024;
+    history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != 960 || decoded[1] != 900 || decoded[2] != 844)
+    {
+        return false;
+    }
+    words[0] = 0x000du;
+    words[1] = 0x000fu;
+    history1 = history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != -1 || decoded[1] != 0)
+    {
+        return false;
+    }
+
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    const auto put_block = [&](uint32_t address, uint16_t header)
+    {
+        if (!hw.write(base + 0x1a8u, 2u, address >> 16u) ||
+            !hw.write(base + 0x1aau, 2u, address & 0xffffu) ||
+            !hw.write(base + 0x1acu, 2u, header))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 7u; ++i)
+        {
+            if (!hw.write(base + 0x1acu, 2u, 0x1234u))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto reg = [&](uint32_t offset, uint32_t expected)
+    {
+        return hw.read(base + offset, 2u, &value) && value == expected;
+    };
+    // Cross sound-RAM wrap with a two-block stream. First block marks
+    // loop start, second block ends without repeat.
+    if (!put_block(0xffff8u, 0x0400u) || !put_block(0u, 0x0100u) ||
+        !hw.write(base + 0x1c0u, 2u, 15u) ||
+        !hw.write(base + 0x1c2u, 2u, 0xfff8u) ||
+        !hw.write(base + 4u, 2u, 0x1000u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u) ||
+        !reg(0x1cau, 0xfff9u) || hw.spu2().decoded_blocks() != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (hw.spu2().voice_starts() != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (hw.spu2().voice_starts() != 1u || hw.spu2().decoded_blocks() != 2u ||
+        !reg(0x1c6u, 0xfff8u) || !reg(0x340u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(3u * period);
+    if (!reg(0x1cau, 0xfffau) || !reg(0x1c8u, 15u))
+    {
+        return false;
+    }
+    hw.advance_cycles(24u * period);
+    if (!reg(0x1c8u, 0u) || !reg(0x1cau, 1u) || !reg(0x340u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(28u * period);
+    if (!reg(0x340u, 1u) || hw.spu2().active_voice_mask(0u) != 0u ||
+        hw.spu2().voice_end_events() != 1u || !reg(0x1cau, 0xfff9u))
+    {
+        return false;
+    }
+    // Core 1, voice 23, looping stream at half pitch. ENDX is retired
+    // only at consumption; the repeat bit keeps the voice running.
+    constexpr uint32_t voice23 = 0x400u + 0x1c0u + 23u * 12u;
+    if (!put_block(0x100u, 0x0700u) ||
+        !hw.write(base + voice23 + 2u, 2u, 0x100u) ||
+        !hw.write(base + 0x400u + 23u * 16u + 4u, 2u, 0x800u) ||
+        !hw.write(base + 0x5a2u, 2u, 0x8000u | 0x80u) ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u))
+    {
+        return false;
+    }
+    hw.advance_cycles(55u * period);
+    if (!reg(0x742u, 0u) || !reg(voice23 + 10u, 0x107u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!reg(0x742u, 0x80u) || !reg(voice23 + 10u, 0x101u) ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u) ||
+        !hw.write(base + 0x5a6u, 2u, 0x80u) ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u * period);
+    if (hw.spu2().active_voice_mask(1u) != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool test_spu2_envelopes()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    const auto write = [&](uint32_t offset, uint32_t data)
+    {
+        return hw.write(base + offset, 2u, data);
+    };
+    const auto read = [&](uint32_t offset, uint32_t expected)
+    {
+        return hw.read(base + offset, 2u, &value) && value == expected;
+    };
+    // Zero pitch isolates envelope progression. Fast linear attack,
+    // maximum sustain target, positive/negative fixed stereo volumes.
+    if (!write(4u, 0u) || !write(6u, 0x000fu) ||
+        !write(8u, 0u) || !write(0u, 0x1000u) ||
+        !write(2u, 0x4000u) || !read(0xcu, 0x2000u) ||
+        !read(0xeu, 0x8000u) || !write(0x1a0u, 1u) ||
+        !read(0xau, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (!read(0xau, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!read(0xau, 14336u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 28672u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 32767u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period); // exponential decay: -16384 at full scale
+    if (!read(0xau, 16383u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period); // sustain increases
+    if (!read(0xau, 30719u) || !write(0xau, 32767u) ||
+        !write(0x1a4u, 1u) || hw.spu2().active_voice_mask(0u) != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 16383u) || hw.spu2().active_voice_mask(0u) != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 0u) || hw.spu2().active_voice_mask(0u) != 0u ||
+        !read(0x340u, 0u))
+    {
+        return false;
+    }
+    // Sweep timing and cancellation before the first sample.
+    if (!write(0u, 0u) || !write(0u, 0x8000u) ||
+        !write(0x1a0u, 1u) || !write(0x1a4u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (hw.spu2().voice_starts() != 1u || !read(0xcu, 0u) ||
+        !write(0x1a0u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xcu, 14336u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u * period);
+    return read(0xcu, 32767u) && read(0xau, 32767u);
+}
+
 bool test_authentic_spu2_dma()
 {
     iop::c_kernel kernel;
@@ -184,8 +486,8 @@ bool test_authentic_spu2_dma()
         return false;
     }
 
-    // AutoDMA is a separate streaming-ring protocol in the primary
-    // reference, not ordinary TSA memcpy. Fail closed until it exists.
+    // Small AutoDMA fits in the input ring immediately, and completes
+    // after 32 cycles, without changing TSA.
     hw.reset();
     if (!kernel.attach_hle_hardware() ||
         !hw.write(spu2 + 0x1b0u, 2u, 1u) ||
@@ -195,13 +497,19 @@ bool test_authentic_spu2_dma()
     {
         return false;
     }
-    hw.advance_cycles(1000u);
+    hw.advance_cycles(31u);
     if (!hw.read(dma4 + 8u, 4u, &actual) ||
         (actual & iop::c_hw::k_spu2_dma_str_bit) == 0u ||
-        !hw.read(iop::c_hw::k_i_stat, 4u, &actual) ||
-        actual != 0u ||
-        !hw.read(spu2 + 0x1aau, 2u, &actual) ||
-        actual != 0u)
+        hw.spu2().input_frames(0u) != 4u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &actual) || actual != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        hw.spu2_auto_dma_completed() != 1u ||
+        !hw.read(spu2 + 0x1aau, 2u, &actual) || actual != 0u)
     {
         return false;
     }
@@ -241,6 +549,1223 @@ bool test_authentic_spu2_dma()
         return false;
     }
     return true;
+}
+
+bool test_spu2_mixer_rings()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    uint32_t value = 0u;
+    uint16_t word = 0u;
+    // Program a real voice-1 sample, outside reserved mixer RAM.
+    // IRQA targets its enveloped (pre-volume) tap, not its ADPCM data.
+    if (!hw.write(base + 0x1aau, 2u, 0x5000u) ||
+        !hw.write(base + 0x1acu, 2u, 0u) ||
+        !hw.write(base + 0x1acu, 2u, 0x4444u) ||
+        !hw.write(base + 0x1ceu, 2u, 0x5000u) ||
+        !hw.write(base + 0x10u, 2u, 0x3fffu) ||
+        !hw.write(base + 0x16u, 2u, 0x000fu) ||
+        !hw.write(base + 0x19eu, 2u, 0x420u) ||
+        !hw.write(base + 0x19au, 2u, 0x40u) ||
+        !hw.write(base + 0x1a0u, 2u, 2u))
+    {
+        return false;
+    }
+    (void)kernel.run(31u * period);
+    if (hw.spu2().mixer_ring_batches() != 0u ||
+        hw.spu2().mixer_irq_events() != 0u ||
+        !hw.spu2_ram_word(0x420u, &word) || word != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period);
+    if (hw.spu2().mixer_ring_batches() != 1u ||
+        hw.spu2().mixer_irq_events() != 1u ||
+        !hw.spu2_ram_word(0x420u, &word) || word != 6087u ||
+        !hw.spu2_ram_word(0x1020u, &word) || word != 6086u ||
+        !hw.spu2_ram_word(0x820u, &word) || word != 6085u ||
+        !hw.spu2_ram_word(0x1420u, &word) || word != 6086u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
+    {
+        return false;
+    }
+
+    // No active voice is necessary for a mixer-ring write/IRQ.
+    // Sound RAM advances even in a headless idle kernel.
+    kernel.reset();
+    if (!kernel.attach_hle_hardware() ||
+        !hw.write(base + 0x1aau, 2u, 0x400u) ||
+        !hw.write(base + 0x1acu, 2u, 0x1234u) ||
+        !hw.write(base + 0x59eu, 2u, 0x400u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        hw.spu2().voice_irq_cycles_remaining() != 512u * period ||
+        !kernel.has_guest_work())
+    {
+        return false;
+    }
+    (void)kernel.run(512u * period - 1u);
+    if (!hw.spu2_ram_word(0x400u, &word) || word != 0x1234u ||
+        hw.spu2().mixer_irq_events() != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (!hw.spu2_ram_word(0x400u, &word) || word != 0u ||
+        hw.spu2().mixer_ring_batches() != 16u ||
+        hw.spu2().mixer_irq_events() != 1u ||
+        hw.spu2().irq_latches() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool test_spu2_voice_routing()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    uint32_t mask = 0u;
+    uint16_t word = 0u;
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t registers = base + core * 0x400u;
+        for (uint32_t offset = 0x188u; offset <= 0x194u; offset += 4u)
+        {
+            if (!spu.read(registers + offset, 4u, &mask) || mask != 0xffffffu)
+            {
+                return false;
+            }
+        }
+        const uint32_t voice = core == 0u ? 1u : 23u;
+        const uint32_t bit = 1u << voice;
+        const uint32_t parameters = registers + voice * 16u;
+        const uint32_t address = registers + 0x1c0u + voice * 12u;
+        // Core 0: voice 1 dry L / wet R. Core 1: voice 23 dry R / wet L.
+        if (!spu.write(registers + 0x188u, 4u, core == 0u ? bit : 0u) ||
+            !spu.write(registers + 0x18cu, 4u, core == 1u ? bit : 0u) ||
+            !spu.write(registers + 0x190u, 4u, core == 1u ? bit : 0u) ||
+            !spu.write(registers + 0x194u, 4u, core == 0u ? bit : 0u) ||
+            !spu.write(registers + 0x1aau, 2u, 0x5000u) ||
+            !spu.write(registers + 0x1acu, 2u, 0u) ||
+            !spu.write(registers + 0x1acu, 2u, 0x4444u) ||
+            !spu.write(address + 2u, 2u, 0x5000u) ||
+            !spu.write(parameters, 2u, 0x3fffu) ||
+            !spu.write(parameters + 2u, 2u, 0x3fffu) ||
+            !spu.write(parameters + 6u, 2u, 0x000fu) ||
+            !spu.write(registers + 0x1a0u, 4u, bit))
+        {
+            return false;
+        }
+    }
+    (void)spu.advance_cycles(32u * period);
+    const uint32_t addresses[] =
+    {
+        0x1020u, 0x1220u, 0x1420u, 0x1620u,
+        0x1820u, 0x1a20u, 0x1c20u, 0x1e20u
+    };
+    const uint16_t expected[] =
+    {
+        6086u, 0u, 0u, 6086u, 0u, 6086u, 6086u, 0u
+    };
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (!spu.ram_word(addresses[i], &word) || word != expected[i])
+        {
+            return false;
+        }
+    }
+    return spu.active_voice_mask(0u) == 2u &&
+        spu.active_voice_mask(1u) == (1u << 23u);
+}
+
+bool test_spu2_effect_ram()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    // Both logical work areas alias the same physical 8-word tail.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t reg = base + core * 0x400u;
+        if (!spu.write(reg + 0x2e0u, 2u, 0x10u) ||
+            !spu.write(reg + 0x2e2u, 2u, 0xfff8u) ||
+            !spu.write(reg + 0x33cu, 2u, 0x10u))
+        {
+            return false;
+        }
+    }
+    // Seed through the real DMA path before enabling IRQs.
+    std::vector<uint8_t> data{0x00u, 0x80u};
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xffffu) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t reg = base + core * 0x400u;
+        if (!spu.write(reg + 0x19cu, 2u, 0u) ||
+            !spu.write(reg + 0x19eu, 2u, 0xffffu) ||
+            !spu.write(reg + 0x19au, 2u, 0x40u))
+        {
+            return false;
+        }
+    }
+    int16_t sample = 0;
+    uint16_t word = 0u;
+    // Disabled effects can read but may neither write nor latch an IRQ.
+    if (!spu.read_effect_sample(0u, 0u, -1, &sample) || sample != -32768 ||
+        spu.write_effect_sample(0u, 0u, -1, 123) ||
+        !spu.ram_word(0xffffu, &word) || word != 0x8000u ||
+        spu.irq_latches() != 0u || spu.effect_irq_events() != 0u)
+    {
+        return false;
+    }
+    // Core 0's actual enabled read compares both IRQ addresses.
+    if (!spu.write(base + 0x19au, 2u, 0xc0u) ||
+        spu.irq_latches() != 0u ||
+        !spu.read_effect_sample(0u, 8u, -1, &sample) ||
+        sample != -32768 || spu.irq_latches() != 3u ||
+        spu.effect_irq_events() != 2u || spu.playback_irq_events() != 2u)
+    {
+        return false;
+    }
+    // Repeated accesses do not raise another edge until acknowledged.
+    if (!spu.write_effect_sample(0u, 7u, 0, 100000) ||
+        !spu.read_effect_sample(1u, 0u, -1, &sample) || sample != 32767 ||
+        spu.effect_irq_events() != 2u ||
+        !spu.write(base + 0x59au, 2u, 0u) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write_effect_sample(0u, 0u, -1, -100000) ||
+        spu.irq_latches() != 3u || spu.effect_irq_events() != 3u ||
+        !spu.ram_word(0xffffu, &word) || word != 0x8000u)
+    {
+        return false;
+    }
+    // Invalid addresses must not mutate RAM or latches.
+    if (spu.read_effect_sample(2u, 0u, 0, &sample) ||
+        spu.read_effect_sample(0u, 0u, 0, nullptr) ||
+        spu.write_effect_sample(2u, 0u, 0, 123) ||
+        !spu.write(base + 0x33cu, 2u, 0x0fu) ||
+        spu.read_effect_sample(0u, 0u, 0, &sample) ||
+        spu.write_effect_sample(0u, 0u, 0, 123) ||
+        spu.effect_irq_events() != 3u)
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_irq_events() == 0u && spu.playback_irq_events() == 0u &&
+        spu.irq_latches() == 0u && spu.ram_word(0xffffu, &word) && word == 0u;
+}
+
+bool test_spu2_effect_reflections()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    // Sixteen-word work area: the left same-path predecessor wraps.
+    if (!spu.write(base + 0x2e0u, 2u, 0u) ||
+        !spu.write(base + 0x2e2u, 2u, 0xfff0u) ||
+        !spu.write(base + 0x33cu, 2u, 0u))
+    {
+        return false;
+    }
+    const int16_t words[16] = {0, 0, 2000, 400, 0, 0, 4000, -200,
+        0, 0, 3000, -400, 0, 0, -1000, 200};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    const uint32_t regs[8] = {0x2ecu, 0x2f0u, 0x304u, 0x308u,
+        0x30cu, 0x310u, 0x324u, 0x328u};
+    const uint16_t offsets[8] = {0u, 4u, 2u, 6u, 8u, 12u, 10u, 14u};
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, offsets[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x774u, 2u, 0x4000u) ||
+        !spu.write(base + 0x77eu, 2u, 0x4000u) ||
+        !spu.write(base + 0x784u, 2u, 0x4000u) ||
+        !spu.write(base + 0x786u, 2u, 0x4000u))
+    {
+        return false;
+    }
+    iop::c_spu2::s_effect_reflections left{}, right{};
+    uint16_t word = 0u;
+    // At half gains: left SAME=850, DIFF=-100; right SAME=950, DIFF=300.
+    if (!spu.calculate_effect_reflections(0u, 0u, 16u, 1000, &left) ||
+        !spu.calculate_effect_reflections(0u, 1u, 0u, -1000, &right) ||
+        left.m_offset[0] != 0 || left.m_offset[1] != 8 ||
+        right.m_offset[0] != 4 || right.m_offset[1] != 12 ||
+        left.m_sample[0] != 850 || left.m_sample[1] != -100 ||
+        right.m_sample[0] != 950 || right.m_sample[1] != 300 ||
+        !spu.commit_effect_reflections(0u, 0u, left) ||
+        !spu.ram_word(0xfff0u, &word) || word != 0u)
+    {
+        return false;
+    }
+    // Real reflection reads and writes compare cross-core IRQ addresses.
+    if (!spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xfffeu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write(base + 0x19au, 2u, 0x80u) ||
+        !spu.calculate_effect_reflections(0u, 0u, 0u, 1000, &left) ||
+        spu.irq_latches() != 2u || spu.effect_irq_events() != 1u ||
+        !spu.ram_word(0xfff0u, &word) || word != 0u ||
+        !spu.commit_effect_reflections(0u, 0u, left) ||
+        !spu.commit_effect_reflections(0u, 0u, right) ||
+        !spu.ram_word(0xfff0u, &word) || word != 850u ||
+        !spu.ram_word(0xfff8u, &word) || word != static_cast<uint16_t>(-100) ||
+        !spu.ram_word(0xfff4u, &word) || word != 950u ||
+        !spu.ram_word(0xfffcu, &word) || word != 300u)
+    {
+        return false;
+    }
+    // Negative coefficient and signed 32-bit tap offset; -1 wraps.
+    if (!spu.write(base + 0x774u, 2u, 0x8000u) ||
+        !spu.write(base + 0x304u, 2u, 0xffffu) ||
+        !spu.write(base + 0x306u, 2u, 0xffffu) ||
+        !spu.calculate_effect_reflections(0u, 0u, 0u, 1000, &left) ||
+        left.m_sample[0] != -200 ||
+        spu.calculate_effect_reflections(2u, 0u, 0u, 0, &left) ||
+        spu.calculate_effect_reflections(0u, 2u, 0u, 0, &left) ||
+        spu.calculate_effect_reflections(0u, 0u, 0u, 0, nullptr))
+    {
+        return false;
+    }
+    return true;
+}
+
+bool test_spu2_effect_comb()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    const int16_t words[16] = {1001, -1001, -1001, 1001, 7, -7, -9, 9,
+        -32768, 0, 0, 0, 0, 0, 0, -9};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    constexpr uint32_t regs[4] = {0x2f4u, 0x2fcu, 0x314u, 0x31cu};
+    constexpr uint16_t gains[4] = {0x4000u, 0xc000u, 0x2000u, 0x8000u};
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t bank = base + core * 0x400u;
+        if (!spu.write(bank + 0x2e0u, 2u, 0u) ||
+            !spu.write(bank + 0x2e2u, 2u, 0xfff0u) ||
+            !spu.write(bank + 0x33cu, 2u, 0u))
+        {
+            return false;
+        }
+        for (uint32_t tap = 0u; tap < 4u; ++tap)
+        {
+            if (!spu.write(base + 0x776u + core * 0x28u + tap * 2u, 2u,
+                    core == 0u ? gains[tap] : 0x8000u) ||
+                !spu.write(bank + regs[tap], 2u, 0u) ||
+                !spu.write(bank + regs[tap] + 2u, 2u,
+                    core == 0u ? tap * 2u : 8u) ||
+                !spu.write(bank + regs[tap] + 4u, 2u, 0u) ||
+                !spu.write(bank + regs[tap] + 6u, 2u, tap * 2u + 1u))
+            {
+                return false;
+            }
+        }
+    }
+    int32_t sum = 0;
+    // Independently floor each Q15 product (including negative fractions).
+    if (!spu.calculate_effect_comb(0u, 0u, 16u, &sum) || sum != 1010 ||
+        !spu.calculate_effect_comb(0u, 1u, 0u, &sum) || sum != -1013 ||
+        !spu.calculate_effect_comb(1u, 0u, 0u, &sum) || sum != 131072 ||
+        spu.irq_latches() != 0u)
+    {
+        return false;
+    }
+    // Negative offset wraps to the end of the same work area.
+    if (!spu.write(base + 0x31cu, 2u, 0xffffu) ||
+        !spu.write(base + 0x31eu, 2u, 0xffffu) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1010)
+    {
+        return false;
+    }
+    // Zero gain still reads the programmed tap. Only an enabled effect
+    // can latch the other core's IRQ; no data is written by comb filters.
+    uint16_t word = 0u;
+    if (!spu.write(base + 0x77cu, 2u, 0u) ||
+        !spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xffffu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1001 ||
+        spu.irq_latches() != 0u ||
+        !spu.write(base + 0x19au, 2u, 0x80u) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1001 ||
+        spu.irq_latches() != 2u || spu.effect_irq_events() != 1u ||
+        !spu.ram_word(0xffffu, &word) || word != static_cast<uint16_t>(-9))
+    {
+        return false;
+    }
+    // Invalid requests leave the output and IRQ counters unchanged.
+    if (spu.calculate_effect_comb(2u, 0u, 0u, &sum) ||
+        spu.calculate_effect_comb(0u, 2u, 0u, &sum) ||
+        spu.calculate_effect_comb(0u, 0u, 0u, nullptr) ||
+        !spu.write(base + 0x2e0u, 2u, 1u) ||
+        spu.calculate_effect_comb(0u, 0u, 0u, &sum))
+    {
+        return false;
+    }
+    return sum == 1001 && spu.effect_irq_events() == 1u;
+}
+
+bool test_spu2_effect_allpass()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    const int16_t words[16] = {2000, 0, 345, -401, -2001, 234, -200, 0,
+        0, 456, 201, 0, 0, 0, 123, 400};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true) ||
+        !spu.write(base + 0x2e0u, 2u, 0u) ||
+        !spu.write(base + 0x2e2u, 2u, 0xfff0u) ||
+        !spu.write(base + 0x33cu, 2u, 0u))
+    {
+        return false;
+    }
+    // Both reflection destinations deliberately alias APF source taps.
+    const uint32_t regs[] = {0x2e4u, 0x2e8u, 0x2ecu, 0x2f0u,
+        0x2f4u, 0x2f8u, 0x30cu, 0x310u, 0x32cu, 0x330u, 0x334u, 0x338u};
+    const uint16_t offsets[] = {1u, 2u, 15u, 3u, 0u, 4u, 6u, 10u,
+        0u, 4u, 8u, 12u};
+    for (uint32_t i = 0u; i < 12u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, offsets[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x776u, 2u, 0x4000u) ||
+        !spu.write(base + 0x780u, 2u, 0x4000u) ||
+        !spu.write(base + 0x782u, 2u, 0xc000u))
+    {
+        return false;
+    }
+    iop::c_spu2::s_effect_allpass apf{};
+    // APF1 source wraps to word 15, APF2 source is word 6.
+    if (!spu.calculate_effect_allpass(0u, 0u, 16u, 1000, &apf) ||
+        apf.m_offset[0] != 0 || apf.m_offset[1] != 8 ||
+        apf.m_sample[0] != 800 || apf.m_sample[1] != 700 ||
+        apf.m_output != -550 ||
+        !spu.calculate_effect_allpass(0u, 1u, 0u, -1001, &apf) ||
+        apf.m_offset[0] != 4 || apf.m_offset[1] != 12 ||
+        apf.m_sample[0] != -800 || apf.m_sample[1] != -700 ||
+        apf.m_output != 551)
+    {
+        return false;
+    }
+    // The cascade uses the full internal state, not clipped writeback.
+    if (!spu.calculate_effect_allpass(0u, 0u, 0u, 131072, &apf) ||
+        apf.m_sample[0] != 130872 || apf.m_sample[1] != 65736 ||
+        apf.m_output != -32768)
+    {
+        return false;
+    }
+    int16_t output = 0;
+    uint16_t word = 0;
+    // Disabled reverb computes its output but leaves all RAM unchanged.
+    if (!spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -550 || !spu.ram_word(0xffffu, &word) || word != 400u ||
+        !spu.ram_word(0xfff0u, &word) || word != 2000u ||
+        spu.effect_irq_events() != 0u)
+    {
+        return false;
+    }
+    // One core targets a real APF source, the other a destination.
+    if (!spu.write(base + 0x19cu, 2u, 0u) ||
+        !spu.write(base + 0x19eu, 2u, 0xfff8u) ||
+        !spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xffffu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write(base + 0x19au, 2u, 0xc0u) ||
+        !spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -550 || spu.irq_latches() != 3u ||
+        spu.effect_irq_events() != 2u ||
+        !spu.ram_word(0xffffu, &word) || word != 123u ||
+        !spu.ram_word(0xfff6u, &word) || word != 234u ||
+        !spu.ram_word(0xfff0u, &word) || word != 800u ||
+        !spu.ram_word(0xfff8u, &word) || word != 700u)
+    {
+        return false;
+    }
+    if (!spu.process_effect_channel(0u, 1u, 0u, 0, &output) ||
+        output != 551 ||
+        !spu.ram_word(0xfff3u, &word) || word != 345u ||
+        !spu.ram_word(0xfffau, &word) || word != 456u ||
+        !spu.ram_word(0xfff4u, &word) || word != static_cast<uint16_t>(-800) ||
+        !spu.ram_word(0xfffcu, &word) || word != static_cast<uint16_t>(-700) ||
+        spu.effect_irq_events() != 2u)
+    {
+        return false;
+    }
+    // Saturation is applied at real APF writeback, not in the cascade.
+    // Restore the APF history used by the wide calculation above, since
+    // the aliasing test deliberately replaced these two source words.
+    // A single -32768 tap with -1 gain yields +32768; four yield 131072.
+    if (!spu.write_effect_sample(0u, 0u, 15, 400) ||
+        !spu.write_effect_sample(0u, 0u, 6, -200) ||
+        !spu.write_effect_sample(0u, 0u, 13, -32768))
+    {
+        return false;
+    }
+    constexpr uint32_t comb_regs[] = {0x2f4u, 0x2fcu, 0x314u, 0x31cu};
+    for (uint32_t tap = 0u; tap < 4u; ++tap)
+    {
+        if (!spu.write(base + comb_regs[tap] + 2u, 2u, 13u) ||
+            !spu.write(base + 0x776u + tap * 2u, 2u, 0x8000u))
+        {
+            return false;
+        }
+    }
+    if (!spu.process_effect_channel(0u, 0u, 0u, 0, &output) ||
+        output != -32768 ||
+        !spu.ram_word(0xfff0u, &word) || word != 32767u ||
+        !spu.ram_word(0xfff8u, &word) || word != 32767u)
+    {
+        return false;
+    }
+    // Invalid requests leave the result and latches untouched.
+    return !spu.calculate_effect_allpass(2u, 0u, 0u, 0, &apf) &&
+        !spu.calculate_effect_allpass(0u, 2u, 0u, 0, &apf) &&
+        !spu.calculate_effect_allpass(0u, 0u, 0u, 131073, &apf) &&
+        !spu.calculate_effect_allpass(0u, 0u, 0u, 0, nullptr) &&
+        !spu.process_effect_channel(0u, 0u, 0u, 0, nullptr) &&
+        spu.write(base + 0x2e0u, 2u, 1u) &&
+        !spu.process_effect_channel(0u, 0u, 0u, 0, &output) &&
+        output == -32768 && spu.effect_irq_events() == 2u;
+}
+
+bool test_spu2_effect_clock()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    // Core 0's logical work area aliases physical RAM at 0xffff8.
+    // Both channels have zero offsets: the first access to ffffb is
+    // step 3, left tick 6 (seven elapsed samples).
+    if (!hw.write(base + 0x2e0u, 2u, 0x1fu) ||
+        !hw.write(base + 0x2e2u, 2u, 0xfff8u) ||
+        !hw.write(base + 0x33cu, 2u, 0x1fu) ||
+        !hw.write(base + 0x59cu, 2u, 0x0fu) ||
+        !hw.write(base + 0x59eu, 2u, 0xfffbu) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x19au, 2u, 0x80u) ||
+        hw.spu2().voice_irq_cycles_remaining() != 7u * period ||
+        !kernel.has_guest_work())
+    {
+        return false;
+    }
+    (void)kernel.run(7u * period - 1u);
+    if (hw.spu2().effect_ticks(0u) != 6u ||
+        hw.spu2().effect_irq_events() != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    uint32_t status = 0u;
+    if (hw.spu2().effect_ticks(0u) != 7u ||
+        hw.spu2().effect_irq_events() != 1u ||
+        hw.spu2().irq_latches() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &status) || (status & irq) == 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 0u)
+    {
+        return false;
+    }
+    // Re-arm core 1; the right channel accesses the same step next.
+    if (!hw.write(iop::c_hw::k_i_stat, 4u, ~irq) ||
+        !hw.write(base + 0x59au, 2u, 0u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period);
+    return hw.spu2().effect_ticks(0u) == 8u &&
+        hw.spu2().effect_irq_events() == 2u &&
+        hw.read(iop::c_hw::k_i_stat, 4u, &status) && (status & irq) != 0u;
+}
+
+bool test_spu2_effect_return()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    std::vector<int16_t> pcm;
+    spu.bind_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    // Seed two independent APF2 delay histories, with no dry sources.
+    // The left and right impulses are returned on alternating ticks.
+    std::vector<uint8_t> data(128u, 0u);
+    data[1] = 0x20u;
+    data[17] = 0x20u;
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xffc0u) ||
+        !spu.copy_dma(0u, data, true) ||
+        !spu.write(base + 0x6e0u, 2u, 0u) ||
+        !spu.write(base + 0x6e2u, 2u, 0xffc0u) ||
+        !spu.write(base + 0x73cu, 2u, 0u) ||
+        !spu.write(base + 0x598u, 2u, 0u) ||
+        !spu.write(base + 0x78cu, 2u, 0x4000u) ||
+        !spu.write(base + 0x78eu, 2u, 0xc000u))
+    {
+        return false;
+    }
+    const uint32_t regs[] = {0x6e8u, 0x6ecu, 0x6f0u, 0x70cu, 0x710u,
+        0x72cu, 0x730u, 0x734u, 0x738u};
+    const uint16_t taps[] = {32u, 16u, 20u, 24u, 28u, 48u, 52u, 32u, 40u};
+    for (uint32_t i = 0u; i < 9u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, taps[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x59au, 2u, 0x80u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(19u * period);
+    (void)spu.advance_cycles(13u * period);
+    // The FIR center (32767) is 19 ticks after each impulse. The
+    // positive and negative signed EVOLs are applied before master gain.
+    if (pcm.size() != 64u || pcm[19u * 2u] != 4094 ||
+        pcm[20u * 2u + 1u] != -4096 ||
+        spu.effect_input_frames(1u) != 0u || spu.effect_ticks(1u) != 32u ||
+        spu.effect_return_frames(1u) == 0u || spu.nonzero_frames() == 0u)
+    {
+        return false;
+    }
+    const uint64_t ticks = spu.effect_ticks(1u);
+    spu.bind_pcm_sink(nullptr, nullptr);
+    (void)spu.advance_cycles(512u * period);
+    if (spu.effect_ticks(1u) != ticks + 512u ||
+        spu.mixed_frames() != 544u || spu.effect_input_frames(1u) != 0u)
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_ticks(1u) == 0u && spu.effect_return_frames(1u) == 0u &&
+        spu.effect_irq_events() == 0u;
+}
+
+bool test_spu2_voice_modulation_and_noise()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 fixed;
+    iop::c_spu2 modulated;
+    for (iop::c_spu2* spu : {&fixed, &modulated})
+    {
+        // Two looping positive ADPCM blocks; voice 0's post-ADSR output
+        // remains positive even though its stereo volumes are zero.
+        std::vector<uint8_t> data(32u, 0x44u);
+        data[0] = 0u;
+        data[1] = 4u;
+        data[16] = 0u;
+        data[17] = 3u;
+        if (!spu->write(base + 0x1a8u, 2u, 0u) ||
+            !spu->write(base + 0x1aau, 2u, 0x5000u) ||
+            !spu->copy_dma(0u, data, true) ||
+            !spu->write(base + 0x1c2u, 2u, 0x5000u) ||
+            !spu->write(base + 0x1ceu, 2u, 0x5000u) ||
+            !spu->write(base + 6u, 2u, 0x000fu) ||
+            !spu->write(base + 0x14u, 2u, 0x1000u) ||
+            !spu->write(base + 0x16u, 2u, 0x000fu) ||
+            !spu->write(base + 0x180u, 2u, spu == &modulated ? 3u : 1u) ||
+            !spu->write(base + 0x19au, 2u, 0x40u) ||
+            !spu->write(base + 0x19eu, 2u, 0x6000u) ||
+            !spu->write(base + 0x1a0u, 2u, 3u))
+        {
+            return false;
+        }
+        (void)spu->advance_cycles(16u * period);
+    }
+    uint32_t fixed_nax = 0u;
+    uint32_t modulated_nax = 0u;
+    uint32_t voice0_nax = 0u;
+    if (!fixed.read(base + 0x1d6u, 2u, &fixed_nax) ||
+        !modulated.read(base + 0x1d6u, 2u, &modulated_nax) ||
+        modulated_nax <= fixed_nax ||
+        !fixed.read(base + 0x1cau, 2u, &voice0_nax) ||
+        voice0_nax != 0x5001u ||
+        !modulated.read(base + 0x1cau, 2u, &voice0_nax) ||
+        voice0_nax != 0x5001u ||
+        modulated.voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    // NON selects a shared source even when the decoded sample is zero.
+    // Voices 1 and 3 have the same envelope and zero pitch.
+    fixed.reset();
+    if (!fixed.write(base + 0x184u, 2u, 0xau) ||
+        !fixed.write(base + 0x16u, 2u, 0x000fu) ||
+        !fixed.write(base + 0x36u, 2u, 0x000fu) ||
+        !fixed.write(base + 0x19au, 2u, 0x3c00u) ||
+        !fixed.write(base + 0x1a0u, 2u, 0xau))
+    {
+        return false;
+    }
+    (void)fixed.advance_cycles(32u * period);
+    uint16_t first = 0u;
+    uint16_t second = 0u;
+    return fixed.ram_word(0x421u, &first) && first == 2u &&
+        fixed.ram_word(0x621u, &second) && second == first &&
+        fixed.noise_sample(1u) == 0;
+}
+
+bool test_spu2_voice_output_controls()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    uint32_t value = 0u;
+    const int16_t constant[4] = {16384, 16384, 16384, 16384};
+    const int16_t startup[4] = {0, 16384, 16384, 16384};
+    // Exact measured ROM endpoint, including independently rounded products.
+    if (iop::c_spu2::gaussian_sample(constant, 0u) != 16318 ||
+        iop::c_spu2::gaussian_sample(startup, 0u) != 13915 ||
+        iop::c_spu2::modulated_pitch(0x1000u, -32768) != 0u ||
+        iop::c_spu2::modulated_pitch(0x1000u, 16384) != 0x1800u ||
+        iop::c_spu2::modulated_pitch(0x3fffu, 32767) != 0x3fffu)
+    {
+        return false;
+    }
+    // MVOLX is read-only and independent per channel and core.
+    if (!spu.write(base + 0x760u, 2u, 0u) ||
+        !spu.write(base + 0x762u, 2u, 0u) ||
+        !spu.write(base + 0x770u, 2u, 0x1234u) ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 0u ||
+        !spu.write(base + 0x760u, 2u, 0x8000u) ||
+        !spu.write(base + 0x762u, 2u, 0x9000u) ||
+        !spu.write(base + 0x19au, 2u, 0x3c00u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period - 1u);
+    if (spu.noise_sample(0u) != 0 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 0u)
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(1u);
+    if (spu.noise_sample(0u) != 1 || spu.noise_sample(1u) != 0 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 14336u ||
+        !spu.read(base + 0x772u, 2u, &value) || value != static_cast<uint16_t>(-14336) ||
+        !spu.read(base + 0x798u, 2u, &value) || value != 0x7ffeu)
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(2u * period);
+    if (spu.noise_sample(0u) != 7 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 32767u ||
+        !spu.read(base + 0x772u, 2u, &value) || value != 0x8000u)
+    {
+        return false;
+    }
+    // PS2SDK initializes with bit 14 set. Match both compatibility
+    // references: the latch must not mute an otherwise audible stream.
+    spu.reset();
+    const uint8_t input[] = {0u, 0x40u, 0u, 0x40u};
+    if (!spu.write(base + 0x59au, 2u, 0x4000u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period);
+    if (spu.nonzero_frames() != 1u || spu.input_frames_consumed() != 1u ||
+        !spu.read(base + 0x59au, 2u, &value) || value != 0x4000u)
+    {
+        return false;
+    }
+    if (!spu.write(base + 0x59au, 2u, 0u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period);
+    return spu.nonzero_frames() == 2u && spu.input_frames_consumed() == 2u;
+}
+
+bool test_spu2_effect_registers()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    iop::c_spu2 spu;
+    uint32_t value = 0u;
+    uint32_t address = 0u;
+    if (spu.effect_start(0u) != 0xefff8u ||
+        spu.effect_end(0u) != 0xeffffu ||
+        spu.effect_start(1u) != 0xffff8u ||
+        spu.effect_end(1u) != 0xfffffu ||
+        spu.effect_enabled(0u) || spu.effect_enabled(1u))
+    {
+        return false;
+    }
+    if (!spu.effect_address(0u, 0u, -1, &address) || address != 0xeffffu ||
+        !spu.effect_address(0u, 8u, 1, &address) || address != 0xefff9u ||
+        spu.effect_address(2u, 0u, 0, &address) ||
+        spu.effect_address(0u, 0u, 0, nullptr))
+    {
+        return false;
+    }
+
+    // Effect addresses are high-halfword first; EEA low is read-only.
+    if (!spu.write(base + 0x2e0u, 4u, 0xfff80010u) ||
+        !spu.write(base + 0x33cu, 4u, 0x12340010u) ||
+        !spu.read(base + 0x33cu, 4u, &value) || value != 0xffff0010u ||
+        spu.effect_start(0u) != 0x10fff8u ||
+        spu.effect_end(0u) != 0x10ffffu ||
+        !spu.effect_address(0u, 0u, -1, &address) || address != 0x0ffffu ||
+        !spu.effect_address(0u, 0xffffffffffffffffull, 2, &address) ||
+        address != 0x0fff9u ||
+        !spu.write(base + 0x33cu, 2u, 0x000fu) ||
+        spu.effect_address(0u, 0u, 0, &address))
+    {
+        return false;
+    }
+
+    // Address parameters and signed coefficient bit patterns are
+    // independent between cores and remain accessible while disabled.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        for (uint32_t reg = 0x2e4u; reg <= 0x338u; reg += 4u)
+        {
+            const uint32_t expected = 0x34560000u | (reg + core);
+            if (!spu.write(base + core * 0x400u + reg, 4u, expected) ||
+                !spu.read(base + core * 0x400u + reg, 4u, &value) ||
+                value != expected)
+            {
+                return false;
+            }
+        }
+        for (uint32_t reg = 0u; reg < 10u; ++reg)
+        {
+            const uint32_t expected = 0x8000u + reg + core * 16u;
+            const uint32_t mmio = base + 0x774u + core * 0x28u + reg * 2u;
+            if (!spu.write(mmio, 2u, expected) ||
+                !spu.read(mmio, 2u, &value) || value != expected)
+            {
+                return false;
+            }
+        }
+    }
+    if (!spu.read(base + 0x774u, 2u, &value) || value != 0x8000u ||
+        !spu.read(base + 0x2e4u, 4u, &value) || value != 0x345602e4u ||
+        !spu.write(base + 0x59au, 2u, 0x80u) ||
+        !spu.effect_enabled(1u) || spu.effect_enabled(0u) ||
+        spu.effect_enable_writes(1u) != 1u ||
+        !spu.write(base + 0x59au, 2u, 0u) || spu.effect_enabled(1u))
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_enable_writes(1u) == 0u &&
+        spu.effect_start(0u) == 0xefff8u &&
+        spu.read(base + 0x774u, 2u, &value) && value == 0u;
+}
+
+bool test_spu2_mmix()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    std::vector<int16_t> pcm;
+    spu.bind_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    uint32_t value = 0u;
+    if (!spu.read(base + 0x198u, 2u, &value) || value != 0xff0u ||
+        !spu.read(base + 0x598u, 2u, &value) || value != 0xffcu)
+    {
+        return false;
+    }
+    const uint8_t input[] = {0x00u, 0x40u, 0x00u, 0x40u};
+    // Core 0 input dry L / wet R; core 1 external dry L.
+    // Other gates are closed. Core 1 AVOL is a signed Q15 gain.
+    if (!spu.write(base + 0x198u, 2u, 0x090u) ||
+        !spu.write(base + 0x598u, 2u, 0x008u) ||
+        !spu.write(base + 0x790u, 2u, 0x4000u) ||
+        !spu.push_input(0u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    uint16_t word = 0u;
+    if (pcm.size() != 64u || pcm[0] != 8190 || pcm[1] != 0 ||
+        !spu.ram_word(0x820u, &word) || word != 16382u ||
+        spu.effect_input_frames(0u) != 1u || spu.effect_input_frames(1u) != 0u)
+    {
+        return false;
+    }
+
+    // Route the core 0 output into core 1's effect input only.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x002u) ||
+        !spu.push_input(0u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    if (pcm.size() != 64u || pcm[0] != 0 || pcm[1] != 0 ||
+        spu.effect_input_frames(1u) != 1u)
+    {
+        return false;
+    }
+
+    // Core 1's own input bypasses AVOL. Closing the dry gate must
+    // not stop AutoDMA consumption or the pre-effect signal.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x060u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    if (pcm.size() != 64u || pcm[0] != 0 || pcm[1] != 16382 ||
+        spu.effect_input_frames(1u) != 2u ||
+        spu.input_frames_consumed() != 3u)
+    {
+        return false;
+    }
+
+    // Voice gates are independent of per-voice VMIX and tap writeback.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x200u) ||
+        !spu.write(base + 0x5aau, 2u, 0x5000u) ||
+        !spu.write(base + 0x5acu, 2u, 0u) ||
+        !spu.write(base + 0x5acu, 2u, 0x4444u) ||
+        !spu.write(base + 0x5c2u, 2u, 0x5000u) ||
+        !spu.write(base + 0x400u, 2u, 0x3fffu) ||
+        !spu.write(base + 0x406u, 2u, 0x000fu) ||
+        !spu.write(base + 0x5a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    return pcm.size() == 64u && pcm[0] == 0 && pcm[1] == 0 &&
+        spu.effect_input_frames(1u) == 34u &&
+        spu.ram_word(0x1880u, &word) && word == 6086u &&
+        spu.ram_word(0x1c80u, &word) && word == 6086u;
+}
+
+bool test_spu2_pcm_mixer()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    std::vector<int16_t> pcm;
+    hw.bind_spu2_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    // Constant positive ADPCM sample (nibble 4, shift 0), zero pitch,
+    // fast attack, left-only fixed volume and ordinary master gain.
+    if (!hw.write(base + 0x1aau, 2u, 0x5000u) ||
+        !hw.write(base + 0x1acu, 2u, 0u) ||
+        !hw.write(base + 0x1acu, 2u, 0x4444u) ||
+        !hw.write(base + 0x1c2u, 2u, 0x5000u) ||
+        !hw.write(base + 0u, 2u, 0x3fffu) ||
+        !hw.write(base + 2u, 2u, 0u) ||
+        !hw.write(base + 6u, 2u, 0x000fu) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(31u * period);
+    if (!pcm.empty() || hw.spu2().mixed_frames() != 31u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (pcm.size() != 64u || pcm[0] != 6083 || pcm[1] != 0 ||
+        pcm[2] != 12171 || pcm[3] != 0 ||
+        hw.spu2().nonzero_frames() != 32u ||
+        hw.spu2().pcm_peak() == 0u)
+    {
+        return false;
+    }
+    // Host sink binding does not affect guest state. Reset clears the
+    // mixer counters and pending host batch but retains the binding.
+    hw.reset();
+    pcm.clear();
+    uint32_t ignored = 0u;
+    if (!hw.read(base + 0x760u, 2u, &ignored))
+    {
+        return false;
+    }
+    hw.advance_cycles(32u * period);
+    if (pcm.size() != 64u || hw.spu2().mixed_frames() != 32u ||
+        hw.spu2().nonzero_frames() != 0u || hw.spu2().pcm_peak() != 0u)
+    {
+        return false;
+    }
+    for (const int16_t sample : pcm)
+    {
+        if (sample != 0)
+        {
+            return false;
+        }
+    }
+
+    // Independent AutoDMA planar PCM through the same mixer.
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& input_hw = kernel.hardware();
+    pcm.clear();
+    input_hw.bind_spu2_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    constexpr uint32_t source = 0x60030u;
+    constexpr uint32_t dma = iop::c_hw::k_spu2_dma4_base;
+    if (!kernel.cpu().write32(source, 0xc0004000u) ||
+        !input_hw.write(base + 0x1b0u, 2u, 1u) ||
+        !input_hw.write(dma, 4u, source) ||
+        !input_hw.write(dma + 4u, 4u, 0x00010001u) ||
+        !input_hw.write(dma + 8u, 4u, 0x01000201u))
+    {
+        return false;
+    }
+    (void)kernel.run(32u * period);
+    return pcm.size() == 64u && pcm[0] == 16380 && pcm[1] == -16383 &&
+        pcm[2] == 0 && pcm[3] == 0 &&
+        input_hw.spu2().mixed_frames() == 32u &&
+        input_hw.spu2().nonzero_frames() == 1u &&
+        input_hw.spu2().input_frames_consumed() == 1u;
+}
+
+bool test_spu2_auto_dma()
+{
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    auto& cpu = kernel.cpu();
+    constexpr uint32_t spu = iop::c_spu2::k_base;
+    constexpr uint32_t dma = iop::c_hw::k_spu2_dma4_base;
+    constexpr uint32_t source = 0x60030u;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    uint32_t value = 0u;
+    uint16_t word = 0u;
+    for (uint32_t chunk = 0u; chunk < 3u; ++chunk)
+    {
+        for (uint32_t i = 0u; i < 256u; ++i)
+        {
+            const uint32_t address = source + chunk * 1024u + i * 2u;
+            const uint16_t left = static_cast<uint16_t>(0x1000u + chunk * 0x100u + i);
+            const uint16_t right = static_cast<uint16_t>(0x8000u + chunk * 0x100u + i);
+            if (!cpu.write8(address, static_cast<uint8_t>(left)) ||
+                !cpu.write8(address + 1u, static_cast<uint8_t>(left >> 8u)) ||
+                !cpu.write8(address + 512u, static_cast<uint8_t>(right)) ||
+                !cpu.write8(address + 513u, static_cast<uint8_t>(right >> 8u)))
+            {
+                return false;
+            }
+        }
+    }
+    if (!hw.write(spu + 0x1b0u, 2u, 1u) ||
+        !hw.write(dma, 4u, source) ||
+        !hw.write(dma + 4u, 4u, 0x00010300u) ||
+        !hw.write(dma + 8u, 4u, 0x01000201u) ||
+        hw.spu2().input_frames(0u) != 512u ||
+        hw.spu2_auto_dma_bytes() != 2048u ||
+        !hw.spu2_ram_word(0x2000u, &word) || word != 0x1000u ||
+        !hw.spu2_ram_word(0x2200u, &word) || word != 0x8000u ||
+        !hw.spu2_ram_word(0x2100u, &word) || word != 0x1100u ||
+        hw.spu2_dma_cycles_remaining() != 256u * period)
+    {
+        return false;
+    }
+    // Later chunk reads live IOP RAM, not a snapshot at DMA start.
+    if (!cpu.write8(source + 2048u, 0x55u))
+    {
+        return false;
+    }
+    (void)kernel.run(256u * period - 1u);
+    if (hw.spu2_auto_dma_bytes() != 2048u ||
+        hw.spu2().input_frames(0u) != 257u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (hw.spu2_auto_dma_bytes() != 3072u ||
+        hw.spu2().input_frames(0u) != 512u ||
+        !hw.spu2_ram_word(0x2000u, &word) || word != 0x1255u ||
+        !hw.spu2_ram_word(0x2200u, &word) || word != 0x8200u ||
+        hw.spu2_dma_cycles_remaining() != 32u)
+    {
+        return false;
+    }
+    (void)kernel.run(31u);
+    if (!hw.read(dma + 8u, 4u, &value) ||
+        (value & iop::c_hw::k_spu2_dma_str_bit) == 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (!hw.read(dma + 8u, 4u, &value) ||
+        (value & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        hw.spu2_auto_dma_completed() != 1u ||
+        hw.spu2().input_frames_consumed() != 256u ||
+        !hw.read(spu + 0x1aau, 2u, &value) || value != 0u)
+    {
+        return false;
+    }
+    // Cancel a new transfer before refill and verify no DMA completion.
+    if (!hw.write(dma + 8u, 4u, 0x01000201u) ||
+        !hw.write(dma + 8u, 4u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(1024u * period);
+    return hw.spu2_auto_dma_started() == 2u &&
+        hw.spu2_auto_dma_completed() == 1u &&
+        hw.spu2_auto_dma_bytes() == 3072u &&
+        hw.spu2().input_frames(0u) == 0u;
+}
+
+bool test_spu2_playback_irq()
+{
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    uint32_t value = 0u;
+    // Default sound RAM is zero-filled (valid unfiltered ADPCM blocks).
+    // First block ends at RAM wrap; lookahead starts at word zero.
+    if (!hw.write(base + 0x19cu, 2u, 15u) ||
+        !hw.write(base + 0x19eu, 2u, 0xffffu) ||
+        !hw.write(base + 0x59cu, 2u, 0u) ||
+        !hw.write(base + 0x59eu, 2u, 2u) ||
+        !hw.write(base + 0x19au, 2u, 0x40u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x1c0u, 2u, 15u) ||
+        !hw.write(base + 0x1c2u, 2u, 0xfff8u) ||
+        !hw.write(base + 4u, 2u, 0x1000u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u) ||
+        !kernel.has_guest_work() ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period - 1u);
+    if (hw.spu2().irq_latches() != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 1u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (hw.spu2().irq_latches() != 1u ||
+        hw.spu2().playback_irq_events() != 1u ||
+        hw.spu2().decoded_blocks() != 2u ||
+        hw.spu2().voice_irq_cycles_remaining() != 27u * period ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u ||
+        !hw.write(iop::c_hw::k_i_stat, 4u, ~irq))
+    {
+        return false;
+    }
+    (void)kernel.run(27u * period - 1u);
+    if (hw.spu2().irq_latches() != 1u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    // The core-one edge reasserts shared IRQ9 even though core zero
+    // remained latched. No speculative read of lookahead raised it.
+    if (hw.spu2().irq_latches() != 3u ||
+        hw.spu2().playback_irq_events() != 2u ||
+        hw.spu2().voice_irq_cycles_remaining() != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u ||
+        !hw.write(iop::c_hw::k_i_stat, 4u, ~irq) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)kernel.run(28u * period);
+    if (hw.spu2().playback_irq_events() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) != 0u ||
+        !hw.write(base + 0x59au, 2u, 0u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)kernel.run(28u * period);
+    return hw.spu2().playback_irq_events() == 3u &&
+        hw.spu2().irq_latches() == 3u &&
+        hw.read(iop::c_hw::k_i_stat, 4u, &value) && (value & irq) != 0u;
 }
 
 bool test_spu2_irq_edges_and_spdif()
@@ -966,9 +2491,81 @@ int main()
     {
         return fail("guest SIO2 PIO/DMA11/12 transport or IRQ17 fidelity");
     }
+    if (!test_spu2_mixer_rings())
+    {
+        return fail("SPU2 mixer-ring taps, silent IRQ or ring wrap");
+    }
+    if (!test_spu2_voice_routing())
+    {
+        return fail("SPU2 independent dry/wet voice routing");
+    }
+    if (!test_spu2_effect_ram())
+    {
+        return fail("SPU2 shared effect RAM, saturation and cross-core IRQ latches");
+    }
+    if (!test_spu2_effect_reflections())
+    {
+        return fail("SPU2 IIR same/cross reflections, feedback and staged writeback");
+    }
+    if (!test_spu2_effect_comb())
+    {
+        return fail("SPU2 four-tap comb accumulator, rounding and read IRQs");
+    }
+    if (!test_spu2_effect_allpass())
+    {
+        return fail("SPU2 all-pass cascade, staged aliasing and saturated writeback");
+    }
+    if (!test_spu2_effect_clock())
+    {
+        return fail("SPU2 alternating effect clock, physical alias and idle IRQ9 deadline");
+    }
+    if (!test_spu2_effect_return())
+    {
+        return fail("SPU2 reverb FIR return, signed EVOL and silent headless advancement");
+    }
+    if (!test_spu2_voice_modulation_and_noise())
+    {
+        return fail("SPU2 PMON cursor/deadline and shared NON voice source");
+    }
+    if (!test_spu2_voice_output_controls())
+    {
+        return fail("SPU2 Gaussian ROM, PMON arithmetic, noise, master sweep and ATTR readback");
+    }
+    if (!test_spu2_effect_registers())
+    {
+        return fail("SPU2 effect registers and work-area address wrapping");
+    }
+    if (!test_spu2_mmix())
+    {
+        return fail("SPU2 MMIX source gates and core cascade");
+    }
+    if (!test_spu2_pcm_mixer())
+    {
+        return fail("SPU2 stereo PCM mixing, input gain or host sink");
+    }
+    if (!test_spu2_auto_dma())
+    {
+        return fail("SPU2 AutoDMA planar ring, refill, completion or cancellation");
+    }
+    if (!test_spu2_playback_irq())
+    {
+        return fail("SPU2 playback IRQ timing, cross-core latch or idle deadline");
+    }
     if (!test_spu2_irq_edges_and_spdif())
     {
         return fail("per-core SPU2 IRQ9 and SPDIF word parity");
+    }
+    if (!test_spu2_envelopes())
+    {
+        return fail("SPU2 ADSR, fixed/swept volumes or release timing");
+    }
+    if (!test_spu2_adpcm_voice_progression())
+    {
+        return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
+    if (!test_spu2_sample_clock())
+    {
+        return fail("SPU2 guest sample clock or IOP cycle ownership");
     }
     if (!test_authentic_spu2_dma())
     {
@@ -1374,15 +2971,13 @@ int main()
         return fail("SPU2 STATX, TSA, explicit data-port IRQ or reset");
     }
 
-    // Voice parameter writes are real register state, but playback
-    // envelopes require the currently missing audio clock. Do not
-    // synthesize a voice position or an IRQ just because it was keyed.
+    // Key-on before a sample boundary must not decode or raise an IRQ.
     if (!hardware.write(spu2 + 0x4u, 2u, 0x1010u) ||
         !hardware.read(spu2 + 0x4u, 2u, &actual) ||
         actual != 0x1010u ||
         !hardware.write(spu2 + 0x1a0u, 2u, 1u) ||
-        hardware.read(spu2 + 0x0au, 2u, &actual) ||
-        hardware.read(spu2 + 0x1c8u, 2u, &actual) ||
+        !hardware.read(spu2 + 0x0au, 2u, &actual) || actual != 0u ||
+        !hardware.read(spu2 + 0x1c8u, 2u, &actual) || actual != 0u ||
         !hardware.write(spu2 + 0x1a4u, 2u, 1u) ||
         !hardware.read(spu2 + 0x0au, 2u, &actual) ||
         actual != 0u)

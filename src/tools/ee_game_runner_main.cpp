@@ -1,5 +1,10 @@
 #include "ee_scanout_clock.h"
 #include "ee_runtime.h"
+#include "ee_dispatch_index.h"
+#include "ee_native_target_cache.h"
+#include "ee_runtime_profile.h"
+#include "ee_host_audio.h"
+#include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
 #include "ee_memory.h"
 #include "ee_ram_interpreter.h"
@@ -16,15 +21,19 @@
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
 #include "ee_sdbz_pad_return_probe.h"
+#include "ee_sdbz_spawn_probe.h"
 #include "ee_gif.h"
 #include "ee_gs.h"
 #include "ee_gs_display.h"
 #include "ee_gs_presentation_probe.h"
 #ifdef EE_ENABLE_WEBGPU
 #include "ee_webgpu_bridge.h"
+#include "ps2_webgpu/gs/gpu/gpu.hpp"
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
 #include "ee_raylib_window.h"
+#include "ee_window_pump_gate.h"
+#include "ee_frame_pacer.h"
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
@@ -57,6 +66,7 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -419,6 +429,8 @@ using t_game_run = uint32_t (*)(
     uint32_t*
 );
 
+using t_game_resolve_entry = ee::t_ee_translated_entry (*)(uint32_t);
+
 struct c_native_module
 {
 #if defined(_WIN32)
@@ -465,6 +477,17 @@ struct c_native_module
         );
 #else
         return reinterpret_cast<t_game_run>(dlsym(m_handle, "ee_game_run"));
+#endif
+    }
+
+    t_game_resolve_entry resolver() const
+    {
+#if defined(_WIN32)
+        return reinterpret_cast<t_game_resolve_entry>(
+            GetProcAddress(m_handle, "ee_game_resolve_entry"));
+#else
+        return reinterpret_cast<t_game_resolve_entry>(
+            dlsym(m_handle, "ee_game_resolve_entry"));
 #endif
     }
 
@@ -1072,6 +1095,7 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
     std::fprintf(output,
         "{\n    \"schema\": \"ee-m2-gif-gs-v1\","
         "\n    \"scope\": \"committed_gif_paths_1_2_and_3\","
+        "\n    \"gpu_vram_authoritative\": %s,"
         "\n    \"accepted_batches\": %llu,"
         "\n    \"accepted_tags\": %llu,"
         "\n    \"prim_writes_total\": %llu,"
@@ -1087,6 +1111,7 @@ void write_gs_diagnostics_json(FILE* output, const ee::s_ee_gs_state& gs)
         "\n    \"image_qwc_current_transfer\": %u,"
         "\n    \"pixels_current_transfer\": %u,"
         "\n    \"tag_formats\": [",
+        gs.m_gpu_vram_authoritative ? "true" : "false",
         static_cast<unsigned long long>(gs.m_committed_gif_batches),
         static_cast<unsigned long long>(gs.m_tag_count),
         static_cast<unsigned long long>(gs.m_total_prim_writes),
@@ -1177,8 +1202,8 @@ void write_gif_path_counters_json(
         "\"committed_reglist_events\": %llu, "
         "\"committed_image_events\": %llu, "
         "\"committed_image_qwc\": %llu, "
-        "\"committed_image_nonzero_bytes\": %llu, "
-        "\"committed_image_payload_fnv1a64\": %llu}",
+        "\"image_payload_digest_enabled\": %s, "
+        "\"committed_image_nonzero_bytes\": ",
         comma ? "," : "", name,
         static_cast<unsigned long long>(counters.m_accepted_batches),
         static_cast<unsigned long long>(counters.m_rejected_batches),
@@ -1189,8 +1214,17 @@ void write_gif_path_counters_json(
         static_cast<unsigned long long>(counters.m_reglist_events),
         static_cast<unsigned long long>(counters.m_image_events),
         static_cast<unsigned long long>(counters.m_image_qwc),
-        static_cast<unsigned long long>(counters.m_image_nonzero_bytes),
-        static_cast<unsigned long long>(counters.m_image_payload_fnv1a64));
+        counters.m_image_payload_digest_enabled ? "true" : "false");
+    if (counters.m_image_payload_digest_enabled)
+    {
+        std::fprintf(output, "%llu, \"committed_image_payload_fnv1a64\": %llu}",
+            static_cast<unsigned long long>(counters.m_image_nonzero_bytes),
+            static_cast<unsigned long long>(counters.m_image_payload_fnv1a64));
+    }
+    else
+    {
+        std::fputs("null, \"committed_image_payload_fnv1a64\": null}", output);
+    }
 }
 
 void write_gif_paths_json(
@@ -1248,6 +1282,15 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         " \"last_rejected_vu_pc\": %u,"
         " \"last_rejected_vu_lower\": %u,"
         " \"last_rejected_vu_upper\": %u,"
+        " \"last_rejected_vu_steps\": %u,"
+        " \"last_kick_reject\": %u,"
+        " \"last_kick_address\": %u,"
+        " \"last_kick_tag_address\": %u,"
+        " \"last_kick_packet_qwc\": %u,"
+        " \"last_kick_staged_qwc\": %u,"
+        " \"last_kick_tag\": \"0x%016llx\","
+        " \"last_rejected_staged_mpg\": %u,"
+        " \"last_rejected_staged_unpack\": %u,"
         "\n    \"rejected_dma_attempts\": %llu,"
         " \"first_rejection\": %u,"
         " \"first_rejected_command\": %u,"
@@ -1271,7 +1314,14 @@ void write_vif1_producer_json(FILE* output, const ee::c_ee_vif1& vif1)
         static_cast<unsigned long long>(detail.m_vu_start_rejections),
         detail.m_last_vu_start_code, detail.m_last_rejected_vu_start_code,
         detail.m_last_rejected_vu_pc, detail.m_last_rejected_vu_lower,
-        detail.m_last_rejected_vu_upper,
+        detail.m_last_rejected_vu_upper, detail.m_last_rejected_vu_steps,
+        static_cast<uint32_t>(detail.m_last_rejected_vu_issue.m_kick_reject),
+        detail.m_last_rejected_vu_issue.m_kick_address,
+        detail.m_last_rejected_vu_issue.m_kick_tag_address,
+        detail.m_last_rejected_vu_issue.m_kick_packet_qwc,
+        detail.m_last_rejected_vu_issue.m_kick_staged_qwc,
+        static_cast<unsigned long long>(detail.m_last_rejected_vu_issue.m_kick_tag),
+        detail.m_last_rejected_staged_mpg, detail.m_last_rejected_staged_unpack,
         static_cast<unsigned long long>(detail.m_rejected_batches),
         static_cast<uint32_t>(detail.m_first_rejection),
         detail.m_first_rejected_code,
@@ -1291,7 +1341,7 @@ bool write_report(
     const ee::c_ee_vsync_flags& vsync_flags,
     uint32_t reason,
     uint32_t status,
-    const std::vector<s_dispatch_sample>& history,
+    const ee::c_bounded_diagnostic_history<s_dispatch_sample, k_report_history_limit>& history,
     const std::vector<s_syscall_sample>& syscall_history,
     const ee::s_ee_gs_state& gs,
     const ee::c_ee_gif_path3& gif_path1,
@@ -1303,10 +1353,12 @@ bool write_report(
     const iop::c_kernel* guest_iop_kernel,
     const ee::c_ee_sdbz_dma_wait_probe& dma_wait_probe,
     const ee::c_ee_sdbz_pad_return_probe& pad_return_probe,
+    const ee::c_ee_sdbz_spawn_probe& spawn_probe,
     const ee::c_ee_dispatch_hotspots& hotspots,
     bool in_progress
 )
 {
+    ee::c_runtime_profile_scope report_profile_scope(ee::e_runtime_profile_id::report_snapshot_body);
     FILE* output = open_host_file(path, "wb");
     if (output == nullptr)
     {
@@ -1516,6 +1568,34 @@ bool write_report(
     dma_wait_probe.write_json(output);
     std::fputs(",\n  \"m2_sdbz_ee_pad_return\": ", output);
     pad_return_probe.write_json(output);
+    std::fputs(",\n  \"sdbz_spawn_boundaries\": ", output);
+    spawn_probe.write_json(output);
+    // Finish the report-body scope before serializing the profile so
+    // completed child counters and covered time remain consistent.
+    // Profile serialization and final stream close remain uninstrumented.
+    report_profile_scope.stop();
+    std::fputs(",\n  \"vu1_aot\": ", output);
+    vif1.write_aot_json(output);
+    std::fputs(",\n  \"vu1_worker\": ", output);
+    vif1.write_worker_json(output);
+    std::fputs(",\n  \"runtime_profile\": ", output);
+    ee::s_gpu_timestamp_profile gpu_timestamps{};
+#ifdef EE_ENABLE_WEBGPU
+    // Snapshot the last published counters without touching the device
+    // or joining an active GS worker at periodic report boundaries.
+    gpu_timestamps = ps2::gs::gpu::timestamp_profile();
+#endif
+    ee::write_runtime_profile_json(output, dispatched, hardware.scanout().fields_started(),
+        graphics_probe.present_succeeded(), gpu_timestamps);
+    if (ee::g_runtime_profile.m_enabled)
+    {
+        // Retain phase deltas in the archived replay log, even though
+        // the periodic JSON report itself is overwritten.
+        ee::write_runtime_profile_interval(stderr, dispatched,
+            runtime.m_ee_cycle_scheduler.current_cycle(),
+            hardware.scanout().fields_started(), graphics_probe.present_succeeded(),
+            !in_progress, ee::t_runtime_profile_clock::now(), gpu_timestamps);
+    }
     std::fputs("\n}\n", output);
     const bool no_write_error = std::ferror(output) == 0;
     const bool closed = std::fclose(output) == 0;
@@ -2104,6 +2184,27 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+    // Preserve device-free uncapped benchmarks and headless runs by default.
+    bool host_audio_enabled = gs_webgpu_window && speed_percent != 0u;
+    std::string host_audio_environment;
+    const char* host_audio_setting = read_host_environment(
+        "SDBZ_HOST_AUDIO", &host_audio_environment);
+    if (host_audio_setting != nullptr)
+    {
+        if (std::strcmp(host_audio_setting, "0") == 0)
+        {
+            host_audio_enabled = false;
+        }
+        else if (std::strcmp(host_audio_setting, "1") == 0)
+        {
+            host_audio_enabled = true;
+        }
+        else
+        {
+            std::fprintf(stderr, "invalid SDBZ_HOST_AUDIO (expected 0 or 1)\n");
+            return 2;
+        }
+    }
     uint32_t dispatch_trace_every = 1u;
     std::string dispatch_trace_environment;
     const char* dispatch_trace_setting = read_host_environment(
@@ -2116,6 +2217,40 @@ int main(int argc, char** argv)
             "invalid SDBZ_DISPATCH_TRACE_EVERY "
             "(expected a positive integer)\n");
         return 2;
+    }
+    uint32_t report_progress_interval = static_cast<uint32_t>(k_report_progress_interval);
+    std::string progress_environment;
+    const char* progress_setting = read_host_environment(
+        "SDBZ_REPORT_PROGRESS_EVERY", &progress_environment);
+    if (progress_setting != nullptr &&
+        (!parse_u32(progress_setting, &report_progress_interval) ||
+         report_progress_interval == 0u))
+    {
+        std::fprintf(stderr,
+            "invalid SDBZ_REPORT_PROGRESS_EVERY (expected a positive integer)\n");
+        return 2;
+    }
+    if (report_path != nullptr && report_progress_interval != k_report_progress_interval)
+    {
+        std::printf("EE progress reporting stride: %u (snapshots and history unchanged)\n",
+            report_progress_interval);
+    }
+    bool trace_buffered = false;
+    std::string trace_buffer_environment;
+    const char* trace_buffer_setting = read_host_environment(
+        "SDBZ_TRACE_BUFFERED", &trace_buffer_environment);
+    if (trace_buffer_setting != nullptr)
+    {
+        if (std::strcmp(trace_buffer_setting, "1") == 0)
+        {
+            trace_buffered = true;
+        }
+        else if (std::strcmp(trace_buffer_setting, "0") != 0)
+        {
+            std::fprintf(stderr,
+                "invalid SDBZ_TRACE_BUFFERED (expected 0 or 1)\n");
+            return 2;
+        }
     }
     // Reproducible, explicitly requested controller response to a real
     // guest SIO2 pad poll. Never press Cross by default.
@@ -2168,9 +2303,25 @@ int main(int argc, char** argv)
     }
     if (trace)
     {
-        // Preserve recent trace lines when the Python host kills a timed-out
-        // process: redirected stdout is normally fully buffered on Windows.
-        std::setvbuf(stdout, nullptr, _IONBF, 0);
+        // Keep the historical immediate trace by default. The optional
+        // buffered mode coalesces CRT writes without dropping any events.
+        // The buffer must outlive stdout, including process-exit flushing.
+        if (trace_buffered)
+        {
+            static char trace_buffer[64u * 1024u];
+            if (std::setvbuf(stdout, trace_buffer, _IOFBF,
+                    sizeof(trace_buffer)) != 0)
+            {
+                std::fprintf(stderr, "failed to configure buffered EE trace\n");
+                return 2;
+            }
+            std::printf("EE trace output: buffered (64 KiB; flushed at progress checkpoints)\n");
+        }
+        else
+        {
+            // Preserve recent lines if the Python host kills a timeout.
+            std::setvbuf(stdout, nullptr, _IONBF, 0);
+        }
         if (dispatch_trace_every > 1u)
         {
             std::printf(
@@ -2237,6 +2388,27 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    std::string direct_dispatch_environment;
+    const char* direct_dispatch_setting = read_host_environment(
+        "SDBZ_EE_DIRECT_DISPATCH", &direct_dispatch_environment);
+    if (direct_dispatch_setting != nullptr && *direct_dispatch_setting != '\0' &&
+        std::strcmp(direct_dispatch_setting, "0") != 0 &&
+        std::strcmp(direct_dispatch_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_EE_DIRECT_DISPATCH (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool direct_dispatch = direct_dispatch_setting != nullptr &&
+        std::strcmp(direct_dispatch_setting, "1") == 0;
+    t_game_resolve_entry native_resolve = direct_dispatch ? module.resolver() : nullptr;
+    ee::c_native_target_cache native_targets(direct_dispatch);
+    uint64_t direct_dispatches = 0u;
+    if (direct_dispatch)
+    {
+        std::printf("EE direct dispatch: %s (one architectural boundary per entry)\n",
+            native_resolve != nullptr ? "enabled" : "legacy library fallback");
+    }
+
     // Host models INTC/D_STAT and synchronous normal-mode SPR DMA only.
     // There is no general hardware scheduler, BIOS, chain DMA, MFIFO,
     // or complete exception lifecycle.
@@ -2251,6 +2423,16 @@ int main(int argc, char** argv)
     ee::c_ee_gif_path3 gif_path3{};
     ee::c_ee_gif_path3 gif_path2{};
     ee::c_ee_gif_path3 gif_path1{};
+    std::string gif_digest_environment;
+    const char* gif_digest = read_host_environment(
+        "SDBZ_GIF_IMAGE_DIGEST", &gif_digest_environment);
+    if (gif_digest != nullptr && std::strcmp(gif_digest, "0") == 0)
+    {
+        gif_path1.set_image_payload_digest(false);
+        gif_path2.set_image_payload_digest(false);
+        gif_path3.set_image_payload_digest(false);
+        std::puts("GIF image payload digest: disabled (event and QWC counters retained)");
+    }
     ee::c_ee_vif1 vif1{};
     ee::c_ee_gs_state gs_state{};
     gif_path3.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
@@ -2258,6 +2440,7 @@ int main(int argc, char** argv)
     gif_path1.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     vif1.bind_path2(&gif_path2);
     vif1.bind_path1(&gif_path1);
+    vif1.bind_path3(&gif_path3);
     hardware.bind_vif1(&vif1);
 
     struct s_graphics_dma_routes
@@ -2283,11 +2466,22 @@ int main(int argc, char** argv)
                     const auto& diagnostic = routes->m_vif1->diagnostic();
                     std::fprintf(stderr,
                         "VIF1 native reject: reason=%u code=0x%08x "
-                        "pending_words=%u vu_pc=%04x vu_lo=%08x vu_hi=%08x\n",
+                        "pending_words=%u vu_pc=%04x vu_lo=%08x vu_hi=%08x "
+                        "vu_steps=%u staged_mpg=%u staged_unpack=%u "
+                        "kick_reject=%u kick_addr=%03x kick_tag_addr=%03x "
+                        "kick_packet_qwc=%u kick_staged_qwc=%u kick_tag=%016llx\n",
                         static_cast<uint32_t>(diagnostic.m_reason),
                         diagnostic.m_code, diagnostic.m_pending_words,
                         diagnostic.m_vu_pc, diagnostic.m_vu_lower,
-                        diagnostic.m_vu_upper);
+                        diagnostic.m_vu_upper, diagnostic.m_last_rejected_vu_steps,
+                        diagnostic.m_last_rejected_staged_mpg,
+                        diagnostic.m_last_rejected_staged_unpack,
+                        static_cast<uint32_t>(diagnostic.m_last_rejected_vu_issue.m_kick_reject),
+                        diagnostic.m_last_rejected_vu_issue.m_kick_address,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_tag_address,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_packet_qwc,
+                        diagnostic.m_last_rejected_vu_issue.m_kick_staged_qwc,
+                        static_cast<unsigned long long>(diagnostic.m_last_rejected_vu_issue.m_kick_tag));
                     routes->m_rejection_logged = true;
                 }
             }
@@ -2356,6 +2550,9 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+#ifdef EE_ENABLE_RAYLIB_WINDOW
+    ee::c_ee_raylib_window raylib_window{};
+#endif
     ee::c_ee_webgpu_bridge webgpu_bridge{};
     if (gs_webgpu_snapshot_path != nullptr || gs_webgpu_window ||
         gs_field_probe.m_file != nullptr)
@@ -2369,10 +2566,31 @@ int main(int argc, char** argv)
         gs_state.bind_committed_event_observer(
             &webgpu_bridge, &ee::c_ee_webgpu_bridge::committed_gif_events);
         std::printf("GS native WebGPU: enabled, committed GS event mirror\n");
+        std::string gpu_readback_environment;
+        const char* gpu_readback = read_host_environment(
+            "SDBZ_GS_GPU_READBACK", &gpu_readback_environment);
+        std::string gpu_authority_environment;
+        const char* gpu_authority = read_host_environment(
+            "SDBZ_GS_GPU_VRAM", &gpu_authority_environment);
+        if (gpu_authority != nullptr && std::strcmp(gpu_authority, "1") == 0)
+        {
+            if (!gs_state.enable_gpu_authority(&webgpu_bridge,
+                    &ee::c_ee_webgpu_bridge::read_vram, &ee::c_ee_webgpu_bridge::read_clut))
+            {
+                std::fprintf(stderr, "cannot enable experimental GPU GS VRAM authority\n");
+                return 2;
+            }
+            std::printf("GS native WebGPU: GPU-authoritative VRAM/CLUT (experimental)\n");
+        }
+        else if (gpu_readback != nullptr && std::strcmp(gpu_readback, "1") == 0)
+        {
+            gs_state.bind_vram_readback(
+                &webgpu_bridge, &ee::c_ee_webgpu_bridge::read_vram);
+            std::printf("GS reverse DMA: GPU VRAM readback enabled (CPU reference retained)\n");
+        }
     }
 #endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
-    ee::c_ee_raylib_window raylib_window{};
     if (gs_webgpu_window && !raylib_window.initialize())
     {
         std::fprintf(stderr, "native raylib window initialization failed\n");
@@ -2403,6 +2621,7 @@ int main(int argc, char** argv)
     // Declared before the kernel so translated code outlives the IOP CPU.
     std::unique_ptr<iop::c_iop_aot> iop_aot;
     std::unique_ptr<iop::c_kernel> iop_kernel;
+    ee::c_ee_host_audio host_audio;
     iop::c_iop_guest_fault_probe iop_fault_probe{};
     std::unique_ptr<iop::c_sif1_dma_transport> iop_sif1_transport;
     std::unique_ptr<iop::c_sif0_dma_transport> iop_sif0_transport;
@@ -2430,7 +2649,8 @@ int main(int argc, char** argv)
         // SDBZ_IOP_AOT=LIB loads ahead-of-time translated IRX code;
         // SDBZ_IOP_AOT_CAPTURE=DIR saves each loaded module's relocated,
         // import-linked .text for tools/iop_recomp.py.
-        if (const char* aot_path = std::getenv("SDBZ_IOP_AOT"))
+        std::string aot_path_storage;
+        if (const char* aot_path = read_host_environment("SDBZ_IOP_AOT", &aot_path_storage))
         {
             // SDBZ_IOP_AOT is a directory of per-module libraries
             // (tools/build_iop_aot.py OUT/modules) or one library.
@@ -2457,14 +2677,16 @@ int main(int argc, char** argv)
             }
         }
         {
-            const char* capture_dir = std::getenv("SDBZ_IOP_AOT_CAPTURE");
+            std::string capture_storage;
+            const bool capture_enabled = read_host_environment(
+                "SDBZ_IOP_AOT_CAPTURE", &capture_storage) != nullptr;
             iop::c_kernel* kernel_for_aot = iop_kernel.get();
             iop::c_iop_aot* aot_for_kernel = iop_aot.get();
             iop_kernel->set_module_loaded_callback(
-                [capture_dir, kernel_for_aot, aot_for_kernel](
+                [capture_storage, capture_enabled, kernel_for_aot, aot_for_kernel](
                     const iop::s_irx_module& module)
             {
-                if (capture_dir != nullptr && module.m_text_size != 0u)
+                if (capture_enabled && module.m_text_size != 0u)
                 {
                     std::vector<uint8_t> text(module.m_text_size);
                     if (kernel_for_aot->cpu().dma_read(
@@ -2478,14 +2700,14 @@ int main(int argc, char** argv)
                         }
                         char stem[128];
                         std::snprintf(stem, sizeof(stem), "%s/%s@%08x",
-                                      capture_dir, name.c_str(), module.m_base);
-                        if (FILE* bin = std::fopen(
+                                      capture_storage.c_str(), name.c_str(), module.m_base);
+                        if (FILE* bin = open_host_file(
                                 (std::string(stem) + ".bin").c_str(), "wb"))
                         {
                             std::fwrite(text.data(), 1u, text.size(), bin);
                             std::fclose(bin);
                         }
-                        if (FILE* meta = std::fopen(
+                        if (FILE* meta = open_host_file(
                                 (std::string(stem) + ".json").c_str(), "w"))
                         {
                             std::fprintf(meta,
@@ -2829,6 +3051,21 @@ int main(int argc, char** argv)
         }
     }
 
+    std::string audio_profile_environment;
+    const char* audio_profile_value = read_host_environment(
+        "SDBZ_AUDIO_PROFILE", &audio_profile_environment);
+    const bool audio_profile_enabled = audio_profile_value != nullptr &&
+        std::strcmp(audio_profile_value, "1") == 0;
+    if (iop_kernel != nullptr)
+    {
+        iop_kernel->hardware().enable_spu2_audio_profile(audio_profile_enabled);
+    }
+    if (host_audio_enabled)
+    {
+        host_audio.start(iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr,
+            audio_profile_enabled);
+    }
+
     if (instruction_trace_window_seen && instruction_trace_path == nullptr)
     {
         std::fprintf(stderr,
@@ -2842,7 +3079,8 @@ int main(int argc, char** argv)
     if (instruction_trace_path != nullptr)
     {
         // SDBZ_TRACE_LIMIT=N raises the bounded entry count (diagnostic).
-        const char* limit_text = std::getenv("SDBZ_TRACE_LIMIT");
+        std::string limit_storage;
+        const char* limit_text = read_host_environment("SDBZ_TRACE_LIMIT", &limit_storage);
         const unsigned long long limit = limit_text != nullptr
             ? std::strtoull(limit_text, nullptr, 0) : 0ull;
         instruction_trace.resize(limit != 0ull && limit <= 0x10000000ull
@@ -2985,6 +3223,8 @@ int main(int argc, char** argv)
     // Original USA game pad-read return continuation at 0x00109ba0.
     // Observe guest EE stack bytes only; do not alter device responses.
     ee::c_ee_sdbz_pad_return_probe pad_return_probe{};
+    ee::c_ee_sdbz_spawn_probe spawn_probe{};
+    spawn_probe.initialize(memory.get());
 
     struct s_kernel_thread
     {
@@ -3024,6 +3264,7 @@ int main(int argc, char** argv)
     uint64_t idle_cycles = 0u;
     const auto schedule_threads = [&]() -> bool
     {
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::thread_schedule);
         uint32_t next_id = 0u;
         for (uint32_t id = 1u; id < 256u; ++id)
         {
@@ -3179,6 +3420,7 @@ int main(int argc, char** argv)
     // a few objects instead of relinking the whole translated image.
     std::vector<std::unique_ptr<c_native_module>> overlay_modules;
     std::vector<t_game_run> overlay_runs;
+    std::vector<t_game_resolve_entry> overlay_resolvers;
     std::unordered_map<uint32_t, size_t> overlay_owner_by_pc;
     // Diagnose an unready IOP SIF handshake. Real ROM0 execution advances
     // on each read; the guard never manufactures a readiness value.
@@ -3202,11 +3444,7 @@ int main(int argc, char** argv)
     bool guest_rpc_idle_diagnostic_reported = false;
     uint64_t next_iop_guest_rpc_snapshot = 50000u;
     ee::c_ee_dispatch_hotspots hotspots;
-    std::vector<s_dispatch_sample> history;
-    if (report_path != nullptr)
-    {
-        history.reserve(k_report_history_limit);
-    }
+    ee::c_bounded_diagnostic_history<s_dispatch_sample, k_report_history_limit> history;
     uint32_t status = 0;
     uint32_t reason = cpu.m_exit_reason;
     uint32_t completed_loop_yields = 0u;
@@ -3247,20 +3485,116 @@ int main(int argc, char** argv)
     }
     std::chrono::steady_clock::time_point last_snapshot_time{};
     const auto wall_start = std::chrono::steady_clock::now();
+    std::string runtime_profile_environment;
+    const char* runtime_profile_value = read_host_environment(
+        "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
+    ee::runtime_profile_begin(runtime_profile_value != nullptr &&
+        std::strcmp(runtime_profile_value, "1") == 0);
+    std::string gs_async_environment;
+    const char* gs_async_setting = read_host_environment(
+        "SDBZ_GS_ASYNC", &gs_async_environment);
+    if (gs_async_setting != nullptr && *gs_async_setting != '\0' &&
+        std::strcmp(gs_async_setting, "0") != 0 &&
+        std::strcmp(gs_async_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_GS_ASYNC (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool async_gs = gs_async_setting != nullptr &&
+        std::strcmp(gs_async_setting, "1") == 0;
+    if (async_gs)
+    {
+#ifdef EE_ENABLE_WEBGPU
+        if (!webgpu_bridge.enable_async())
+        {
+            std::fprintf(stderr, "GS async requires an initialized WebGPU bridge\n");
+            return 2;
+        }
+        std::puts("GS async: enabled (bounded ordered worker, fenced presentation/readback)");
+#else
+        std::fprintf(stderr, "GS async requires -DEE_ENABLE_WEBGPU=ON\n");
+        return 2;
+#endif
+    }
+    std::unique_ptr<ee::c_ee_vu1_aot> vu1_aot;
+    std::string vu1_aot_environment;
+    std::string vu1_capture_environment;
+    std::string vu1_capture_misses_environment;
+    const char* vu1_path = read_host_environment(
+        "SDBZ_VU1_AOT", &vu1_aot_environment);
+    const char* vu1_capture = read_host_environment(
+        "SDBZ_VU1_AOT_CAPTURE", &vu1_capture_environment);
+    const char* vu1_capture_misses = read_host_environment(
+        "SDBZ_VU1_AOT_CAPTURE_MISSES", &vu1_capture_misses_environment);
+    const bool misses_only = (vu1_capture == nullptr || *vu1_capture == '\0') &&
+        vu1_capture_misses != nullptr && *vu1_capture_misses != '\0';
+    if (misses_only)
+    {
+        vu1_capture = vu1_capture_misses;
+    }
+    if ((vu1_path != nullptr && *vu1_path != '\0') ||
+        (vu1_capture != nullptr && *vu1_capture != '\0'))
+    {
+        vu1_aot = std::make_unique<ee::c_ee_vu1_aot>();
+        std::string error;
+        if (vu1_path != nullptr && *vu1_path != '\0')
+        {
+            const auto count = vu1_aot->open_directory(vu1_path, &error);
+            std::fprintf(stderr, "VU1 AOT: %zu native programs loaded\n", count);
+            if (!error.empty())
+            {
+                std::fprintf(stderr, "VU1 AOT: %s\n", error.c_str());
+            }
+        }
+        if (vu1_capture != nullptr && *vu1_capture != '\0')
+        {
+            error.clear();
+            if (!vu1_aot->enable_capture(vu1_capture, &error, misses_only))
+            {
+                std::fprintf(stderr, "VU1 capture disabled: %s\n", error.c_str());
+            }
+        }
+    }
+    std::string vu1_async_environment;
+    const char* vu1_async_value = read_host_environment(
+        "SDBZ_VU1_ASYNC", &vu1_async_environment);
+    if (vu1_async_value != nullptr && *vu1_async_value != '\0' &&
+        std::strcmp(vu1_async_value, "0") != 0 &&
+        std::strcmp(vu1_async_value, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_VU1_ASYNC (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool async_vu1 = vu1_async_value != nullptr &&
+        std::strcmp(vu1_async_value, "1") == 0;
+    if (async_vu1)
+    {
+        if (!vif1.enable_deferred(std::move(vu1_aot),
+                ee::g_runtime_profile.m_enabled))
+        {
+            std::fprintf(stderr, "failed to enable deferred VU1 worker\n");
+            return 1;
+        }
+        hardware.dmac().bind_deferred_vif1(&vif1);
+        std::puts("VU1 async: enabled (bounded worker; ordered EE-thread publication)");
+    }
+    ee::c_vu1_aot_binding vu1_binding(vu1_aot.get());
     double report_time_ms = 0.0;
-    double native_time_ms = 0.0;
+    uint64_t native_time_ns = 0u;
     // Host-cost breakdown for reports: IOP emulation between EE dispatches,
     // and time paused waiting for live cache-miss compilation.
-    double iop_time_ms = 0.0;
+    uint64_t iop_time_ns = 0u;
     double compile_wait_ms = 0.0;
-    // SDBZ_PROFILE_PCS=1: host-only per-entry-PC profile of guest
-    // instructions and native wall time, printed when the runner stops.
+    // SDBZ_PROFILE_PCS=1: reuse the native-boundary clock; rank by
+    // inclusive native time, excluding live compilation and outer-loop work.
+    // Accounted guest attempts include charged idle-loop instructions.
     struct s_pc_profile
     {
         uint64_t m_calls = 0u;
         uint64_t m_dispatches = 0u;
         uint64_t m_instructions = 0u;
-        double m_wall_ms = 0.0;
+        uint64_t m_idle_instructions = 0u;
+        uint64_t m_wall_ns = 0u;
     };
     std::string profile_pcs_environment;
     const char* profile_pcs_value = read_host_environment(
@@ -3280,21 +3614,96 @@ int main(int argc, char** argv)
     // at one of them may probe; the one-iteration probe validates itself.
     std::unordered_set<uint32_t> idle_yield_headers;
     std::vector<uint32_t> idle_probe_headers;  // at most four armed headers
+    uint32_t idle_probe_slots[4]{};
+    const auto refresh_idle_probe_slots = [&]()
+    {
+        std::fill(std::begin(idle_probe_slots), std::end(idle_probe_slots), 0u);
+        std::copy(idle_probe_headers.begin(), idle_probe_headers.end(),
+                  std::begin(idle_probe_slots));
+    };
     uint64_t idle_skip_slices = 0u;
     uint64_t idle_skip_instructions = 0u;
     uint64_t idle_skip_mispredictions = 0u;
-    double slowest_native_ms = 0.0;
+    uint64_t slowest_native_ns = 0u;
     uint32_t slowest_native_pc = 0u;
 #ifdef EE_ENABLE_RAYLIB_WINDOW
+    uint32_t window_pump_stride = 1u;
+    std::string window_pump_environment;
+    const char* window_pump_value = read_host_environment(
+        "SDBZ_WINDOW_PUMP_STRIDE", &window_pump_environment);
+    if (window_pump_value != nullptr &&
+        (!parse_u32(window_pump_value, &window_pump_stride) ||
+         window_pump_stride == 0u || window_pump_stride > 64u))
+    {
+        std::fprintf(stderr, "invalid SDBZ_WINDOW_PUMP_STRIDE (expected 1..64)\n");
+        return 2;
+    }
+    ee::c_ee_window_pump_gate window_pump_gate(window_pump_stride);
+    if (gs_webgpu_window)
+    {
+        std::printf("GS host window pump stride: %u (all observed field advances serviced)\n",
+            window_pump_stride);
+    }
+    ee::c_ee_frame_pacer frame_pacer(gs_webgpu_window && speed_percent != 0u);
     uint64_t paced_field = 0u;
     uint64_t pace_cycle = 0u;
     uint64_t sample_cycle = 0u;
     auto pace_time = std::chrono::steady_clock::now();
     auto sample_time = pace_time;
 #endif
+#ifdef EE_ENABLE_WEBGPU
+    // Read diagnostic configuration once, outside the device service
+    // hot path. A disabled frame dump requires no local-static guard.
+    const std::pair<std::string, uint64_t> s_frame_dump = []
+    {
+        std::string storage;
+        const char* text = read_host_environment("SDBZ_FRAME_DUMP", &storage);
+        if (text == nullptr)
+        {
+            return std::pair<std::string, uint64_t>{};
+        }
+        const std::string spec(text);
+        const size_t colon = spec.rfind(':');
+        if (colon == std::string::npos || colon == 0u)
+        {
+            return std::pair<std::string, uint64_t>{};
+        }
+        return std::pair<std::string, uint64_t>{
+            spec.substr(0u, colon),
+            std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
+    }();
+    uint64_t s_frame_dump_next = 0u;
+#endif
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
+        if (hardware.dmac().deferred_vif1_pending())
+        {
+            // Present only committed GS state at the next field boundary.
+            // Otherwise poll without blocking the independent EE/IOP path.
+            const bool field_due = hardware.scanout().enabled() &&
+                hardware.scanout().next_field_cycle() <=
+                    runtime.m_ee_cycle_scheduler.current_cycle();
+            (void)hardware.dmac().service_deferred_vif1(field_due);
+        }
+        if (async_vu1 && !graphics_dma.m_rejection_logged &&
+            vif1.diagnostic().m_rejected_batches != 0u)
+        {
+            const auto& detail = vif1.diagnostic();
+            std::fprintf(stderr,
+                "VIF1 deferred reject: reason=%u code=0x%08x vu_pc=%04x steps=%u\n",
+                static_cast<uint32_t>(detail.m_reason), detail.m_code,
+                detail.m_vu_pc, detail.m_last_rejected_vu_steps);
+            graphics_dma.m_rejection_logged = true;
+        }
+#ifdef EE_ENABLE_WEBGPU
+        if (async_gs && !webgpu_bridge.worker_healthy())
+        {
+            std::fprintf(stderr, "GS async worker failed after committed GIF batch\n");
+            return e_device_service::failed;
+        }
+#endif
         // Service guest-programmed timer compare/overflow events against
         // the same reached-instruction compatibility clock as scanout.
         // Timer COUNT reads inside a long native loop sample the live
@@ -3322,24 +3731,6 @@ int main(int argc, char** argv)
         // SDBZ_FRAME_DUMP=DIR:EVERY_FIELDS writes DIR/field-NNNNNNNN.ppm
         // from the WebGPU raster every EVERY_FIELDS fields (diagnostic).
         {
-            static const std::pair<std::string, uint64_t> s_frame_dump = []
-            {
-                const char* text = std::getenv("SDBZ_FRAME_DUMP");
-                if (text == nullptr)
-                {
-                    return std::pair<std::string, uint64_t>{};
-                }
-                const std::string spec(text);
-                const size_t colon = spec.rfind(':');
-                if (colon == std::string::npos || colon == 0u)
-                {
-                    return std::pair<std::string, uint64_t>{};
-                }
-                return std::pair<std::string, uint64_t>{
-                    spec.substr(0u, colon),
-                    std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
-            }();
-            static uint64_t s_frame_dump_next = 0u;
             if (s_frame_dump.second != 0u)
             {
                 const uint64_t field = hardware.scanout().fields_started();
@@ -3396,7 +3787,10 @@ int main(int argc, char** argv)
                             (clock_hz * speed_percent)));
                     if (target > now && target - now <= std::chrono::milliseconds(500))
                     {
-                        std::this_thread::sleep_until(target);
+                        {
+                            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::frame_pacing_sleep);
+                            frame_pacer.wait_until(target);
+                        }
                         now = t_clock::now();
                     }
                     // Re-anchor after a stall or a large guest clock jump.
@@ -3425,12 +3819,19 @@ int main(int argc, char** argv)
                 }
                 paced_field = field;
             }
-            raylib_window.pump(
-                webgpu_bridge,
-                hardware.gs_display_registers(),
-                hardware.gs_crt_mode(),
-                hardware.scanout().fields_started(), &graphics_probe,
-                iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+            // The window already throttles host input polls to 120 Hz.
+            // Avoid checking its host clock on every EE boundary, while
+            // preserving immediate service on every observed field advance.
+            if (window_pump_gate.should_pump(field))
+            {
+                ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::window_pump);
+                raylib_window.pump(
+                    webgpu_bridge,
+                    hardware.gs_display_registers(),
+                    hardware.gs_crt_mode(),
+                    hardware.scanout().fields_started(), &graphics_probe,
+                    iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
+            }
             if (raylib_window.closed())
             {
                 return e_device_service::window_closed;
@@ -3439,6 +3840,7 @@ int main(int argc, char** argv)
 #endif
 #ifdef EE_ENABLE_WEBGPU
         if (gs_field_probe.m_file != nullptr &&
+            hardware.scanout().fields_started() > gs_field_probe.m_last_field &&
             !capture_gs_field(
                 gs_field_probe, webgpu_bridge, gs_state, graphics_probe,
                 hardware.gs_display_registers(),
@@ -3456,16 +3858,23 @@ int main(int argc, char** argv)
     enum class e_intc_service { not_pending, handled, failed };
     const auto service_intc = [&](uint32_t exit_reason) -> e_intc_service
     {
+        // Normal dispatch/return boundaries cannot bridge an interrupt.
+        // Keep their rejection outside the profiler; this scope now
+        // measures exception-path INTC service only.
+        if (!hle_startup || irq_callback_active || callback_active ||
+            exit_reason != static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_EXCEPTION))
+        {
+            return e_intc_service::not_pending;
+        }
+        ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::intc_service);
         // ps2-web-recomp/kernel.cpp::run_intc acknowledges the actual
         // masked INTC cause and runs the registered guest callbacks, then
         // restores the interrupted EE thread. The ROM0 exception vector
         // is not executable in HLE-first mode, so bridge only an observed,
         // architecturally taken INTC exception; all other exceptions
         // remain unsupported. Never manufacture a VBlank or interrupt.
-        if (hle_startup && !irq_callback_active && !callback_active &&
-            exit_reason == static_cast<uint32_t>(
-                ee::e_ee_exit_reason::EE_EXIT_EXCEPTION) &&
-            ((cpu.m_cop0[13] >> 2u) & 31u) == ee::EX_Int &&
+        if (((cpu.m_cop0[13] >> 2u) & 31u) == ee::EX_Int &&
             cpu.m_pc == ee::ee_exception_vector(
                 cpu.m_cop0[12] & ~ee::STATUS_EXL, ee::EX_Int) &&
             (cpu.m_cop0[12] & (ee::STATUS_EXL | ee::STATUS_IE |
@@ -3504,7 +3913,7 @@ int main(int argc, char** argv)
                 return e_intc_service::failed;
             }
 
-            const ee::s_ee_u128 acknowledge{1u << cause, 0u};
+            const ee::s_ee_u128 acknowledge{uint64_t{1} << cause, 0u};
             if (!ee::c_ee_intc::mmio_write(
                     &hardware.intc(), ee::c_ee_intc::k_stat_address,
                     4u, &acknowledge))
@@ -3592,6 +4001,10 @@ int main(int argc, char** argv)
 
     while (remaining != 0)
     {
+        if (hardware.dmac().deferred_vif1_pending())
+        {
+            (void)hardware.dmac().service_deferred_vif1();
+        }
         if (pad0_cross_poll_count != 0u && iop_kernel != nullptr)
         {
             iop_kernel->hardware().set_pad_trace_dispatch(dispatched);
@@ -3610,9 +4023,8 @@ int main(int argc, char** argv)
         // elapsed EE cycle, including polling, timer, and idle periods.
         // Dividing by eight is reference compatibility timing, not an
         // assertion of verified R5900 cycle accuracy.
-        const auto iop_start = report_path != nullptr
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        ee::c_runtime_profile_scope iop_profile_scope(
+            ee::e_runtime_profile_id::iop_service, 0u, nullptr, report_path != nullptr);
         if (hle_startup && iop_rom0_path == nullptr &&
             iop_kernel != nullptr)
         {
@@ -3695,10 +4107,11 @@ int main(int argc, char** argv)
             {
                 break;
             }
-            if (iop_rpc != nullptr &&
-                iop_rpc->pending_guest_calls() != 0u &&
-                !iop_kernel->has_guest_work() &&
-                !guest_rpc_idle_diagnostic_reported)
+            const bool rpc_pending =
+                iop_rpc != nullptr && iop_rpc->pending_guest_calls() != 0u;
+            if (rpc_pending &&
+                !guest_rpc_idle_diagnostic_reported &&
+                !iop_kernel->has_guest_work())
             {
                 guest_rpc_idle_diagnostic_reported = true;
                 uint32_t dma4_chcr = 0u;
@@ -3736,16 +4149,15 @@ int main(int argc, char** argv)
                             thread.m_wake_cycle));
                 }
             }
-            if (iop_rpc == nullptr ||
-                iop_rpc->pending_guest_calls() == 0u)
+            if (!rpc_pending)
             {
                 guest_rpc_idle_diagnostic_reported = false;
             }
         }
+        const uint64_t iop_duration_ns = iop_profile_scope.stop();
         if (report_path != nullptr)
         {
-            iop_time_ms += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - iop_start).count();
+            iop_time_ns += iop_duration_ns;
         }
 
         // Kernel HLE services completed device interrupts before handing
@@ -3756,7 +4168,7 @@ int main(int argc, char** argv)
         // enter the registered DMA callback that supplies iSignalSema.
         const bool external_iop_wait = iop_semaphore_wait_turns != 0u;
         if (hle_startup && !irq_callback_active && !callback_active &&
-            (ee::ee_interrupts_enabled(&cpu) || external_iop_wait) &&
+            (ee::ee_interrupts_enabled_inline(&cpu) || external_iop_wait) &&
             hardware.dmac().pending() != 0u)
         {
             const uint32_t pending = hardware.dmac().pending();
@@ -3827,6 +4239,10 @@ int main(int argc, char** argv)
             // avoid repeated JSON I/O in fast guest paths, without using host
             // time to advance any EE, IOP, DMA, scanout or interrupt state.
             const auto report_start = std::chrono::steady_clock::now();
+            if (trace && trace_buffered)
+            {
+                std::fflush(stdout);
+            }
 #ifdef EE_ENABLE_WEBGPU
             graphics_probe.set_gpu_progress(
                 webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
@@ -3838,7 +4254,7 @@ int main(int argc, char** argv)
                 reason, status, history, syscall_history, gs_state.state(),
                 gif_path1, gif_path2, gif_path3, vif1,
                 graphics_probe, iop_fault_probe, iop_kernel.get(),
-                dma_wait_probe, pad_return_probe, hotspots, true
+                dma_wait_probe, pad_return_probe, spawn_probe, hotspots, true
             );
             report_time_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - report_start
@@ -3989,6 +4405,7 @@ int main(int argc, char** argv)
         const uint32_t from_pc = cpu.m_pc;
         if (report_path != nullptr)
         {
+            spawn_probe.observe(from_pc, dispatched + 1u, cpu, memory.get());
             const bool sampled = pad_return_probe.observe(
                 from_pc, dispatched + 1u,
                 cpu.m_gpr[29u].m_lo, cpu.m_gpr[2u].m_lo,
@@ -4128,31 +4545,34 @@ int main(int argc, char** argv)
         // Retrying here (rather than restarting the outer guest loop)
         // preserves the exact scheduler boundary: no second IOP quantum,
         // controller poll, VBlank, DMA, or GS presentation is delivered.
-        const ee::s_ee_cpu_state cpu_before_dispatch = cpu;
+        // The history needs only three pre-entry registers. A full
+        // snapshot is required solely for a possible live cache miss.
+        const uint32_t before_s0 = static_cast<uint32_t>(cpu.m_gpr[16].m_lo);
+        const uint32_t before_s1 = static_cast<uint32_t>(cpu.m_gpr[17].m_lo);
+        const uint32_t before_s2 = static_cast<uint32_t>(cpu.m_gpr[18].m_lo);
+        std::optional<ee::s_ee_cpu_state> cpu_before_dispatch;
         const uint64_t instructions_before_dispatch =
             runtime.m_guest_instruction_attempts;
-        const auto profile_start = profile_pcs
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        const uint64_t idle_before_dispatch = idle_skip_instructions;
+        uint64_t pc_native_ns = 0u;
         bool hot_expand_budget_reached = false;
         for (;;)
         {
             // Arm the translated loop-header idle probe with known pure,
             // idempotent poll loops (see ee_idle_loop_skip.h).
             bool idle_armed = false;
-            if (idle_skip && !idle_probe_headers.empty() && slice == 1u &&
+            if (idle_skip && !hardware.dmac().deferred_vif1_pending() &&
+                !idle_probe_headers.empty() && slice == 1u &&
                 runtime.m_loop_safepoint_limit > 1u &&
                 runtime.m_loop_safepoint_yield_enabled != 0u &&
                 runtime.m_instruction_trace == nullptr &&
                 runtime.m_guest_v0_trace_remaining == 0u &&
                 runtime.m_timing_observer == nullptr)
             {
-                for (uint32_t slot = 0u; slot < 4u; ++slot)
-                {
-                    runtime.m_idle_probe_pcs[slot] =
-                        slot < idle_probe_headers.size()
-                            ? idle_probe_headers[slot] : 0u;
-                }
+                static_assert(sizeof(runtime.m_idle_probe_pcs) ==
+                    sizeof(idle_probe_slots), "idle probe slot count changed");
+                std::memcpy(runtime.m_idle_probe_pcs, idle_probe_slots,
+                            sizeof(idle_probe_slots));
                 runtime.m_idle_probe_state = 0u;
                 runtime.m_idle_probe_hit_pc = 0u;
                 runtime.m_idle_probe_remaining = 0u;
@@ -4162,46 +4582,100 @@ int main(int argc, char** argv)
 
             // One translated function invocation per native guest boundary.
             runtime.m_loop_safepoint_remaining = safepoint_budget;
-            const auto native_start = std::chrono::steady_clock::now();
+            ee::c_runtime_profile_scope native_profile_scope(
+                ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
+                report_path != nullptr || profile_pcs);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
-            reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
-            // A module that does not own the PC returns EXITED with zero
-            // dispatches and leaves the CPU, PC and exit reason untouched.
-            // Only then consult the live cache-miss overlays (each owns
-            // disjoint, newly translated block PCs). A resolved overlay PC
-            // is cached so hot overlay code costs one map lookup, not a scan.
-            const auto unowned = [&]()
-            {
-                return count == 0u && status == 0u &&
-                       reason == exit_reason_before &&
-                       out_pc == from_pc && cpu.m_pc == from_pc &&
-                       runtime.m_guest_instruction_attempts ==
-                           instructions_before_dispatch;
-            };
-            if (!overlay_runs.empty() && unowned())
-            {
-                const auto cached = overlay_owner_by_pc.find(from_pc);
-                if (cached != overlay_owner_by_pc.end())
+            const auto resolved = slice == 1u && native_resolve != nullptr ?
+                native_targets.resolve(from_pc, [&](uint32_t pc)
                 {
-                    runtime.m_loop_safepoint_remaining = safepoint_budget;
-                    reason = overlay_runs[cached->second](
-                        &cpu, &runtime, slice, &count, &out_pc, &status);
-                }
-                else
+                    auto target = native_resolve(pc);
+                    for (const auto resolve : overlay_resolvers)
+                    {
+                        if (target != nullptr)
+                        {
+                            break;
+                        }
+                        // An older overlay without the optional export
+                        // may own this PC. Preserve first-owner ordering
+                        // by falling back to the ordinary dispatcher.
+                        if (resolve == nullptr)
+                        {
+                            break;
+                        }
+                        target = resolve(pc);
+                    }
+                    return target;
+                }) : nullptr;
+            if (resolved == nullptr && hot_expand_dir != nullptr &&
+                !cpu_before_dispatch.has_value())
+            {
+                cpu_before_dispatch.emplace(cpu);
+            }
+            if (async_vu1)
+            {
+                vif1.native_execution_begin();
+            }
+            if (resolved != nullptr)
+            {
+                // The runner's lookup is for from_pc, and neither
+                // lookup nor the host-only VU1 timing guard changes PC.
+                // Retain the checked failure path if that invariant breaks.
+                const auto result = cpu.m_pc == from_pc ?
+                    ee::ee_dispatch_run_owned_inline(cpu, &runtime, resolved) :
+                    ee::ee_dispatch_run_resolved_inline(
+                        &cpu, &runtime, from_pc, resolved);
+                reason = result.exit_reason;
+                count = result.dispatch_count;
+                out_pc = result.guest_pc;
+                status = static_cast<uint32_t>(result.status);
+                direct_dispatches += count;
+            }
+            else
+            {
+                reason = native_run(&cpu, &runtime, slice, &count, &out_pc, &status);
+                // A module that does not own the PC returns EXITED with zero
+                // dispatches and leaves the CPU, PC and exit reason untouched.
+                // Only then consult the live cache-miss overlays (each owns
+                // disjoint, newly translated block PCs). A resolved overlay PC
+                // is cached so hot overlay code costs one map lookup, not a scan.
+                const auto unowned = [&]()
                 {
-                    for (size_t overlay = 0;
-                         overlay < overlay_runs.size() && unowned();
-                         ++overlay)
+                    return count == 0u && status == 0u &&
+                           reason == exit_reason_before &&
+                           out_pc == from_pc && cpu.m_pc == from_pc &&
+                           runtime.m_guest_instruction_attempts ==
+                               instructions_before_dispatch;
+                };
+                if (!overlay_runs.empty() && unowned())
+                {
+                    const auto cached = overlay_owner_by_pc.find(from_pc);
+                    if (cached != overlay_owner_by_pc.end())
                     {
                         runtime.m_loop_safepoint_remaining = safepoint_budget;
-                        reason = overlay_runs[overlay](
+                        reason = overlay_runs[cached->second](
                             &cpu, &runtime, slice, &count, &out_pc, &status);
-                        if (!unowned())
+                    }
+                    else
+                    {
+                        for (size_t overlay = 0;
+                             overlay < overlay_runs.size() && unowned();
+                             ++overlay)
                         {
-                            overlay_owner_by_pc.emplace(from_pc, overlay);
+                            runtime.m_loop_safepoint_remaining = safepoint_budget;
+                            reason = overlay_runs[overlay](
+                                &cpu, &runtime, slice, &count, &out_pc, &status);
+                            if (!unowned())
+                            {
+                                overlay_owner_by_pc.emplace(from_pc, overlay);
+                            }
                         }
                     }
                 }
+            }
+            if (async_vu1)
+            {
+                vif1.native_execution_end();
             }
             if (idle_armed)
             {
@@ -4240,12 +4714,11 @@ int main(int argc, char** argv)
                             std::remove(idle_probe_headers.begin(),
                                         idle_probe_headers.end(), hit),
                             idle_probe_headers.end());
+                        refresh_idle_probe_slots();
                     }
                 }
-                for (uint32_t slot = 0u; slot < 4u; ++slot)
-                {
-                    runtime.m_idle_probe_pcs[slot] = 0u;
-                }
+                std::memset(runtime.m_idle_probe_pcs, 0,
+                            sizeof(runtime.m_idle_probe_pcs));
                 runtime.m_idle_probe_state = 0u;
             }
             if (runtime.m_timing_observer_failed != 0u)
@@ -4255,16 +4728,17 @@ int main(int argc, char** argv)
                     "(no hardware event published)\n");
                 return 1;
             }
+            const uint64_t native_duration_ns = native_profile_scope.stop();
+            if (profile_pcs)
+            {
+                pc_native_ns += native_duration_ns;
+            }
             if (report_path != nullptr)
             {
-                const double duration_ms =
-                    std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - native_start
-                    ).count();
-                native_time_ms += duration_ms;
-                if (duration_ms > slowest_native_ms)
+                native_time_ns += native_duration_ns;
+                if (native_duration_ns > slowest_native_ns)
                 {
-                    slowest_native_ms = duration_ms;
+                    slowest_native_ns = native_duration_ns;
                     slowest_native_pc = from_pc;
                 }
             }
@@ -4297,9 +4771,13 @@ int main(int argc, char** argv)
             bool replacement_is_overlay = false;
             std::string failure;
             const auto compile_start = std::chrono::steady_clock::now();
+            ee::c_runtime_profile_scope compile_profile_scope(ee::e_runtime_profile_id::compile_wait);
+            host_audio.pause();
             const bool expanded = request_hot_expand(
                 hot_expand_dir, ++hot_expand_sequence, from_pc,
                 &replacement, &replacement_is_overlay, &failure);
+            host_audio.resume();
+            compile_profile_scope.stop();
             compile_wait_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - compile_start).count();
             if (!expanded)
@@ -4329,21 +4807,34 @@ int main(int argc, char** argv)
                     "EE hot-expand replacement lacks ee_game_run\n");
                 return 1;
             }
+            const auto replacement_resolver =
+                direct_dispatch ? candidate->resolver() : nullptr;
             if (replacement_is_overlay)
             {
                 overlay_modules.push_back(std::move(candidate));
                 overlay_runs.push_back(replacement_entry);
+                overlay_resolvers.push_back(replacement_resolver);
             }
             else
             {
                 // A full replacement already contains every overlay.
+                // Native pointers must be invalidated before unloading
+                // any owning library, not after a stale cache hit.
+                native_targets.clear();
                 overlay_owner_by_pc.clear();
                 overlay_runs.clear();
+                overlay_resolvers.clear();
                 overlay_modules.clear();
                 module.swap(*candidate);
                 native_run = replacement_entry;
+                native_resolve = replacement_resolver;
             }
-            cpu = cpu_before_dispatch;
+            if (!cpu_before_dispatch.has_value())
+            {
+                std::fprintf(stderr, "EE hot-expand missing rollback state\n");
+                return 1;
+            }
+            cpu = *cpu_before_dispatch;
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             std::printf(
@@ -4360,16 +4851,16 @@ int main(int argc, char** argv)
 
         if (profile_pcs)
         {
-            // Host-only attribution of guest instructions and native wall
-            // time to the guest PC each native call was entered at.
+            // Attribute measured boundary durations across retries, not
+            // the time spent compiling, opening libraries or updating reports.
             s_pc_profile& entry = pc_profile[from_pc];
             entry.m_calls += 1u;
             entry.m_dispatches += count;
             entry.m_instructions +=
                 runtime.m_guest_instruction_attempts -
                 instructions_before_dispatch;
-            entry.m_wall_ms += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - profile_start).count();
+            entry.m_idle_instructions += idle_skip_instructions - idle_before_dispatch;
+            entry.m_wall_ns += pc_native_ns;
         }
 
         dispatched += count;
@@ -4468,17 +4959,14 @@ int main(int argc, char** argv)
         }
         if (report_path != nullptr && count != 0)
         {
-            if (history.size() == k_report_history_limit)
-            {
-                history.erase(history.begin());
-            }
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_diagnostics);
             history.push_back({
                 dispatched, from_pc, out_pc, reason, status,
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[16].m_lo),
+                before_s0,
                 static_cast<uint32_t>(cpu.m_gpr[16].m_lo),
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[17].m_lo),
+                before_s1,
                 static_cast<uint32_t>(cpu.m_gpr[17].m_lo),
-                static_cast<uint32_t>(cpu_before_dispatch.m_gpr[18].m_lo),
+                before_s2,
                 static_cast<uint32_t>(cpu.m_gpr[18].m_lo)
             });
             // Host read-only observations, not synthetic guest events.
@@ -4499,8 +4987,15 @@ int main(int argc, char** argv)
         }
 
         if (report_path != nullptr &&
-            dispatched - last_progress_dispatch >= k_report_progress_interval)
+            dispatched - last_progress_dispatch >= report_progress_interval)
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::progress_log);
+            // Keep stdout traces ahead of the progress line in a merged
+            // stdout/stderr capture; report-less traces remain size-bounded.
+            if (trace && trace_buffered)
+            {
+                std::fflush(stdout);
+            }
             const double elapsed_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - wall_start
             ).count();
@@ -4511,9 +5006,9 @@ int main(int argc, char** argv)
                 "slowest_native_pc=0x%08x slowest_native_ms=%.3f "
                 "iop_ms=%.1f compile_wait_ms=%.1f\n",
                 static_cast<unsigned long long>(dispatched),
-                cpu.m_pc, elapsed_ms, native_time_ms, report_time_ms,
-                slowest_native_pc, slowest_native_ms,
-                iop_time_ms, compile_wait_ms
+                cpu.m_pc, elapsed_ms, static_cast<double>(native_time_ns) / 1e6, report_time_ms,
+                slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
+                static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
             );
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
@@ -4532,6 +5027,7 @@ int main(int argc, char** argv)
             dispatched % dispatch_trace_every == 0u ||
             !ordinary_transition || status != 1u))
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_trace_log);
             std::printf("dispatch=%llu pc=0x%08x -> 0x%08x reason=%s(%u) status=%u\n",
                         static_cast<unsigned long long>(dispatched), from_pc,
                         out_pc, exit_name(reason), reason, status);
@@ -4597,6 +5093,7 @@ int main(int argc, char** argv)
                 if (shape->second.eligible && idle_probe_headers.size() < 4u)
                 {
                     idle_probe_headers.push_back(header);
+                    refresh_idle_probe_slots();
                 }
             }
             continue;
@@ -4745,6 +5242,7 @@ int main(int argc, char** argv)
                 ee::e_ee_exit_reason::EE_EXIT_EXCEPTION) &&
             ((cpu.m_cop0[13] >> 2) & 0x1fu) == 8u)
         {
+            ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::ee_hle_syscall);
             const int32_t signed_service =
                 static_cast<int32_t>(cpu.m_gpr[3].m_lo);
             // Reject all unknown negative syscall encodings. An
@@ -6674,6 +7172,7 @@ int main(int argc, char** argv)
                             {
                                 cdvd->m_transport.reset();
                             }
+                            host_audio.pause();
                             iop_kernel->reset();
                             if (!iop_kernel->attach_hle_hardware())
                             {
@@ -6681,6 +7180,7 @@ int main(int argc, char** argv)
                                     "[iop] HLE MMIO reattachment failed\n");
                                 break;
                             }
+                            host_audio.resume();
                             if (pad0_cross_poll_count != 0u)
                             {
                                 iop_kernel->hardware()
@@ -7652,12 +8152,13 @@ int main(int argc, char** argv)
             "report_ms=%.1f slowest_native_pc=0x%08x "
             "slowest_native_ms=%.3f iop_ms=%.1f compile_wait_ms=%.1f\n",
             static_cast<unsigned long long>(dispatched), elapsed_ms,
-            native_time_ms, report_time_ms,
-            slowest_native_pc, slowest_native_ms,
-            iop_time_ms, compile_wait_ms
+            static_cast<double>(native_time_ns) / 1e6, report_time_ms,
+            slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
+            static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
         );
     }
-    if (std::getenv("SDBZ_TRACE_IOP_THREADS") != nullptr && iop_kernel != nullptr)
+    std::string trace_iop_storage;
+    if (read_host_environment("SDBZ_TRACE_IOP_THREADS", &trace_iop_storage) != nullptr && iop_kernel != nullptr)
     {
         for (const auto& item : iop_kernel->threads())
         {
@@ -7675,7 +8176,8 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(thread.m_guest_instructions));
         }
     }
-    if (std::getenv("SDBZ_TRACE_IPU") != nullptr)
+    std::string trace_ipu_storage;
+    if (read_host_environment("SDBZ_TRACE_IPU", &trace_ipu_storage) != nullptr)
     {
         const auto& observed = hardware.ipu_observation();
         std::fprintf(stderr, "EE IPU MMIO: reads=%llu writes=%llu\n",
@@ -7700,9 +8202,10 @@ int main(int argc, char** argv)
             iop_aot->milliseconds(), iop_aot->refresh_milliseconds());
     }
     // SDBZ_DUMP_RAM=FILE writes the 32 MiB EE RAM image at exit (diagnostic).
-    if (const char* dump_path = std::getenv("SDBZ_DUMP_RAM"))
+    std::string dump_path_storage;
+    if (const char* dump_path = read_host_environment("SDBZ_DUMP_RAM", &dump_path_storage))
     {
-        if (FILE* dump = std::fopen(dump_path, "wb"))
+        if (FILE* dump = open_host_file(dump_path, "wb"))
         {
             std::vector<uint8_t> image(32u * 1024u * 1024u);
             for (uint32_t address = 0u; address < image.size(); address += 4u)
@@ -7794,23 +8297,36 @@ int main(int argc, char** argv)
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b)
                   {
-                      return a.second.m_instructions > b.second.m_instructions;
+                      if (a.second.m_wall_ns != b.second.m_wall_ns)
+                      {
+                          return a.second.m_wall_ns > b.second.m_wall_ns;
+                      }
+                      return a.first < b.first;
                   });
         uint64_t total_instructions = 0u;
+        uint64_t total_idle_instructions = 0u;
+        uint64_t total_wall_ns = 0u;
         for (const auto& item : ranked)
         {
             total_instructions += item.second.m_instructions;
+            total_idle_instructions += item.second.m_idle_instructions;
+            total_wall_ns += item.second.m_wall_ns;
         }
         std::fprintf(stderr,
             "EE profile: %zu entry PCs, %llu guest instructions "
-            "(host-only attribution to the native entry PC)\n",
-            ranked.size(), static_cast<unsigned long long>(total_instructions));
+            "(ranked by inclusive native boundary time; compilation excluded) "
+            "idle_charged=%llu native_ns=%llu\n",
+            ranked.size(), static_cast<unsigned long long>(total_instructions),
+            static_cast<unsigned long long>(total_idle_instructions),
+            static_cast<unsigned long long>(total_wall_ns));
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
             const s_pc_profile& item = ranked[i].second;
+            const uint64_t non_skipped = item.m_instructions - item.m_idle_instructions;
             std::fprintf(stderr,
                 "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
-                "instructions=%llu (%.1f%%) wall_ms=%.1f ns_per_instruction=%.2f\n",
+                "instructions=%llu (%.1f%%) wall_ms=%.3f ns_per_instruction=%.2f "
+                "idle_charged=%llu non_skipped=%llu ns_per_non_skipped=%.2f native_ns=%llu\n",
                 ranked[i].first,
                 static_cast<unsigned long long>(item.m_calls),
                 static_cast<unsigned long long>(item.m_dispatches),
@@ -7819,12 +8335,28 @@ int main(int argc, char** argv)
                     ? 100.0 * static_cast<double>(item.m_instructions) /
                           static_cast<double>(total_instructions)
                     : 0.0,
-                item.m_wall_ms,
+                static_cast<double>(item.m_wall_ns) / 1.0e6,
                 item.m_instructions != 0u
-                    ? 1.0e6 * item.m_wall_ms /
+                    ? static_cast<double>(item.m_wall_ns) /
                           static_cast<double>(item.m_instructions)
-                    : 0.0);
+                    : 0.0,
+                static_cast<unsigned long long>(item.m_idle_instructions),
+                static_cast<unsigned long long>(non_skipped),
+                non_skipped != 0u
+                    ? static_cast<double>(item.m_wall_ns) /
+                          static_cast<double>(non_skipped)
+                    : 0.0,
+                static_cast<unsigned long long>(item.m_wall_ns));
         }
+    }
+
+    if (direct_dispatch)
+    {
+        std::fprintf(stderr,
+            "EE direct dispatch: executed=%llu cache_hits=%llu cache_misses=%llu\n",
+            static_cast<unsigned long long>(direct_dispatches),
+            static_cast<unsigned long long>(native_targets.hits()),
+            static_cast<unsigned long long>(native_targets.misses()));
     }
 
     if (callback_active)
@@ -7833,6 +8365,19 @@ int main(int argc, char** argv)
             "registered syscall handler did not return: pc=0x%08x resume=0x%08x\n",
             cpu.m_pc, callback_resume_pc);
     }
+
+#ifdef EE_ENABLE_WEBGPU
+    if (async_gs)
+    {
+        const bool drained = webgpu_bridge.flush_committed();
+        webgpu_bridge.write_worker_statistics(stderr);
+        if (!drained)
+        {
+            std::fprintf(stderr, "GS async worker failed before final snapshot\n");
+            return 1;
+        }
+    }
+#endif
 
     // Only accepted GIF PATH2/PATH3 batches contribute to these counters.
     // This does not imply scanout or rasterized presentation.
@@ -8210,9 +8755,92 @@ int main(int argc, char** argv)
         }
     }
 #ifdef EE_ENABLE_WEBGPU
+    if (webgpu_bridge.active())
+    {
+        // All committed GS batches are already drained. Retire any
+        // ready timestamp without waiting for a new GPU submission.
+        ps2::gs::gpu::collect_timestamp_profile();
+    }
     graphics_probe.set_gpu_progress(
         webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
 #endif
+#ifdef EE_ENABLE_RAYLIB_WINDOW
+    if (gs_webgpu_window && speed_percent != 0u)
+    {
+        std::printf("EE frame pacer: calls=%llu high_res_calls=%llu fallback_calls=%llu "
+            "timer_failures=%llu requested_ns=%llu waited_ns=%llu "
+            "overshoot_ns=%llu max_overshoot_ns=%llu\n",
+            static_cast<unsigned long long>(frame_pacer.calls()),
+            static_cast<unsigned long long>(frame_pacer.high_res_calls()),
+            static_cast<unsigned long long>(frame_pacer.fallback_calls()),
+            static_cast<unsigned long long>(frame_pacer.timer_failures()),
+            static_cast<unsigned long long>(frame_pacer.requested_ns()),
+            static_cast<unsigned long long>(frame_pacer.waited_ns()),
+            static_cast<unsigned long long>(frame_pacer.overshoot_ns()),
+            static_cast<unsigned long long>(frame_pacer.max_overshoot_ns()));
+    }
+#endif
+    host_audio.shutdown();
+    host_audio.report();
+    if (iop_kernel != nullptr)
+    {
+        const auto& spu2 = iop_kernel->hardware().spu2();
+        spu2.report_audio_profile();
+        std::printf(
+            "IOP SPU2 clock: active=%u iop_cycles=%llu spu_cycles=%llu "
+            "elapsed_samples=%llu sample_phase=%u cycles_per_sample=%u\n",
+            spu2.clock_active() ? 1u : 0u,
+            static_cast<unsigned long long>(iop_kernel->cycles()),
+            static_cast<unsigned long long>(spu2.clock_cycles()),
+            static_cast<unsigned long long>(spu2.elapsed_samples()),
+            spu2.sample_phase(), iop::c_spu2::k_cycles_per_sample);
+        std::printf(
+            "IOP SPU2 voices: starts=%llu decoded_blocks=%llu end_events=%llu "
+            "active0=0x%06x active1=0x%06x\n",
+            static_cast<unsigned long long>(spu2.voice_starts()),
+            static_cast<unsigned long long>(spu2.decoded_blocks()),
+            static_cast<unsigned long long>(spu2.voice_end_events()),
+            spu2.active_voice_mask(0u), spu2.active_voice_mask(1u));
+        std::printf(
+            "IOP SPU2 playback IRQ: events=%llu latches=0x%x next_fetch_cycles=%u\n",
+            static_cast<unsigned long long>(spu2.playback_irq_events()),
+            spu2.irq_latches(), spu2.voice_irq_cycles_remaining());
+        std::printf(
+            "IOP SPU2 AutoDMA: starts=%llu completed=%llu bytes=%llu "
+            "input_written=%llu input_consumed=%llu buffered0=%u buffered1=%u\n",
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_started()),
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_completed()),
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_bytes()),
+            static_cast<unsigned long long>(spu2.input_frames_written()),
+            static_cast<unsigned long long>(spu2.input_frames_consumed()),
+            spu2.input_frames(0u), spu2.input_frames(1u));
+        std::printf(
+            "IOP SPU2 PCM: frames=%llu nonzero=%llu peak=%u rate=%u channels=2 bits=16\n",
+            static_cast<unsigned long long>(spu2.mixed_frames()),
+            static_cast<unsigned long long>(spu2.nonzero_frames()),
+            spu2.pcm_peak(), iop::c_spu2::k_sample_rate);
+        std::printf(
+            "IOP SPU2 mixer rings: batches=%llu irq_events=%llu clipped_samples=%llu\n",
+            static_cast<unsigned long long>(spu2.mixer_ring_batches()),
+            static_cast<unsigned long long>(spu2.mixer_irq_events()),
+            static_cast<unsigned long long>(spu2.clipped_samples()));
+        spu2.report_signal_path();
+        std::printf("IOP SPU2 effect IRQs: events=%llu\n",
+            static_cast<unsigned long long>(spu2.effect_irq_events()));
+        std::printf("IOP SPU2 effect input: nonzero_core0=%llu nonzero_core1=%llu\n",
+            static_cast<unsigned long long>(spu2.effect_input_frames(0u)),
+            static_cast<unsigned long long>(spu2.effect_input_frames(1u)));
+        for (uint32_t core = 0u; core < 2u; ++core)
+        {
+            std::printf("IOP SPU2 effect area: core=%u enabled=%u enable_writes=%llu "
+                "start=0x%06x end=0x%06x ticks=%llu return_frames=%llu\n",
+                core, spu2.effect_enabled(core) ? 1u : 0u,
+                static_cast<unsigned long long>(spu2.effect_enable_writes(core)),
+                spu2.effect_start(core), spu2.effect_end(core),
+                static_cast<unsigned long long>(spu2.effect_ticks(core)),
+                static_cast<unsigned long long>(spu2.effect_return_frames(core)));
+        }
+    }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,
                       runtime.m_guest_instruction_attempts,
@@ -8220,7 +8848,7 @@ int main(int argc, char** argv)
                       reason, status, history, syscall_history, gs_state.state(),
                       gif_path1, gif_path2, gif_path3, vif1,
                       graphics_probe, iop_fault_probe, iop_kernel.get(),
-                      dma_wait_probe, pad_return_probe, hotspots, false))
+                      dma_wait_probe, pad_return_probe, spawn_probe, hotspots, false))
     {
         return 1;
     }

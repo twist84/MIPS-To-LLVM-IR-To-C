@@ -1,9 +1,11 @@
 #include "ee_webgpu_bridge.h"
+#include "ee_runtime_profile.h"
 #include "ee_gs_presentation_probe.h"
 
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 
@@ -70,7 +72,8 @@ bool make_display_source(
 
     src = ps2::gs::gpu::DisplaySource{
         base, fbw, psm, dbx, dby, w, h,
-        (registers.m_smode2 & 3u) == 3u
+        (registers.m_smode2 & 3u) == 3u,
+        (registers.m_smode2 & 1u) != 0u
     };
     return true;
 }
@@ -89,6 +92,7 @@ bool c_ee_webgpu_bridge::init()
     {
         m_state = {};
         m_state.q = 1.0f;
+        m_clut_cbp0 = m_clut_cbp1 = 0xffffffffu;
         ++ps2::gs::g_setup_generation;
     }
     return m_ready;
@@ -101,7 +105,86 @@ bool c_ee_webgpu_bridge::active() const
 
 uint64_t c_ee_webgpu_bridge::rendered_primitives() const
 {
-    return m_draw_count;
+    return m_published_draw_count.load(std::memory_order_acquire);
+}
+
+bool c_ee_webgpu_bridge::enable_async()
+{
+    if (!m_ready || m_worker != nullptr)
+    {
+        return false;
+    }
+    try
+    {
+        m_worker = std::make_unique<c_ee_gs_worker>(this,
+            [](void* user, const s_ee_gif_event* events, size_t count,
+                const uint8_t* data, uint32_t qwc)
+            {
+                static_cast<c_ee_webgpu_bridge*>(user)->consume_now(
+                    events, count, data, qwc);
+            });
+    }
+    catch (...)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool c_ee_webgpu_bridge::worker_healthy() const
+{
+    return !m_host_failed && (m_worker == nullptr || m_worker->healthy());
+}
+
+bool c_ee_webgpu_bridge::flush_committed()
+{
+    // The EE is the sole producer. No new work can be submitted between
+    // this fence and the caller's readback/present/resize operation.
+    const bool drained = m_worker == nullptr || m_worker->drain();
+    return drained && !m_host_failed;
+}
+
+bool c_ee_webgpu_bridge::resize_surface(uint32_t width, uint32_t height)
+{
+    if (m_surface_width == width && m_surface_height == height)
+    {
+        return worker_healthy();
+    }
+    if (!flush_committed())
+    {
+        return false;
+    }
+    ps2::gs::gpu::resize_surface(width, height);
+    m_surface_width = width;
+    m_surface_height = height;
+    return true;
+}
+
+void c_ee_webgpu_bridge::write_worker_statistics(FILE* output) const
+{
+    if (output != nullptr && m_worker != nullptr)
+    {
+        const auto stats = m_worker->statistics();
+        std::fprintf(output,
+            "GS async worker: submitted=%llu completed=%llu oversized=%llu "
+            "execution_ns=%llu copy_ns=%llu fence_ns=%llu fence_calls=%llu "
+            "backpressure_ns=%llu backpressure_waits=%llu "
+            "peak_bytes=%llu peak_jobs=%llu event_bytes=%llu image_bytes=%llu healthy=%u\n",
+            static_cast<unsigned long long>(stats.m_submitted),
+            static_cast<unsigned long long>(stats.m_completed),
+            static_cast<unsigned long long>(m_oversized_batches),
+            static_cast<unsigned long long>(stats.m_execution_ns),
+            static_cast<unsigned long long>(stats.m_submit_copy_ns),
+            static_cast<unsigned long long>(stats.m_fence_wait_ns),
+            static_cast<unsigned long long>(stats.m_fence_calls),
+            static_cast<unsigned long long>(stats.m_backpressure_ns),
+            static_cast<unsigned long long>(stats.m_backpressure_waits),
+            static_cast<unsigned long long>(stats.m_peak_bytes),
+            static_cast<unsigned long long>(stats.m_peak_jobs),
+            static_cast<unsigned long long>(stats.m_event_bytes),
+            static_cast<unsigned long long>(stats.m_image_bytes),
+            worker_healthy() ? 1u : 0u);
+    }
 }
 
 void c_ee_webgpu_bridge::kick(bool draw)
@@ -168,6 +251,27 @@ void c_ee_webgpu_bridge::vertex(
     kick(draw);
 }
 
+void c_ee_webgpu_bridge::refresh_clut(uint64_t tex0)
+{
+    const uint32_t cld = static_cast<uint32_t>((tex0 >> 61u) & 7u);
+    const uint32_t cbp = static_cast<uint32_t>((tex0 >> 37u) & 0x3fffu);
+    if (cld == 0u || cld >= 6u ||
+        (cld == 4u && m_clut_cbp0 == cbp) ||
+        (cld == 5u && m_clut_cbp1 == cbp))
+    {
+        return;
+    }
+    ps2::gs::gpu::load_clut(tex0, m_state.texclut);
+    if (cld == 2u || cld == 4u)
+    {
+        m_clut_cbp0 = cbp;
+    }
+    else if (cld == 3u || cld == 5u)
+    {
+        m_clut_cbp1 = cbp;
+    }
+}
+
 void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
 {
     auto& s = m_state;
@@ -211,10 +315,7 @@ void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
         break;
     case 0x06u: case 0x07u:
         s.ctx[reg - 0x06u].tex0 = value;
-        if (((value >> 61u) & 7u) != 0u)
-        {
-            ps2::gs::gpu::load_clut(value, s.texclut);
-        }
+        refresh_clut(value);
         break;
     case 0x08u: case 0x09u:
         s.ctx[reg - 0x08u].clamp = value;
@@ -228,10 +329,7 @@ void c_ee_webgpu_bridge::register_write(uint32_t reg, uint64_t value)
         auto& c = s.ctx[reg - 0x16u];
         constexpr uint64_t k_mask = 0xffffffe003f00000ull;
         c.tex0 = (c.tex0 & ~k_mask) | (value & k_mask);
-        if (((c.tex0 >> 61u) & 7u) != 0u)
-        {
-            ps2::gs::gpu::load_clut(c.tex0, s.texclut);
-        }
+        refresh_clut(c.tex0);
         break;
     }
     case 0x18u: case 0x19u:
@@ -363,6 +461,46 @@ void c_ee_webgpu_bridge::consume(
     const s_ee_gif_event* events, size_t count,
     const uint8_t* data, uint32_t qwc)
 {
+    if (m_worker == nullptr)
+    {
+        consume_now(events, count, data, qwc);
+        return;
+    }
+    if (!worker_healthy() || count == 0u)
+    {
+        return;
+    }
+
+    using result = c_ee_gs_worker::e_submit;
+    const auto submitted = m_worker->submit(events, count, data, qwc);
+    if (submitted == result::accepted)
+    {
+        return;
+    }
+    if (submitted == result::too_large && flush_committed())
+    {
+        // The borrowed source remains valid for this callback. Never
+        // exceed queue storage just to preserve asynchronous execution.
+        ++m_oversized_batches;
+        try
+        {
+            consume_now(events, count, data, qwc);
+            return;
+        }
+        catch (...)
+        {
+            // Observer failure is a host runtime failure, not a new
+            // guest DMA outcome. Report it at the next boundary.
+        }
+    }
+    m_host_failed = true;
+}
+
+void c_ee_webgpu_bridge::consume_now(
+    const s_ee_gif_event* events, size_t count,
+    const uint8_t* data, uint32_t qwc)
+{
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_bridge, count);
     if (!m_ready || (events == nullptr && count != 0u) ||
         (data == nullptr && qwc != 0u))
     {
@@ -400,6 +538,7 @@ void c_ee_webgpu_bridge::consume(
             break;
         }
     }
+    m_published_draw_count.store(m_draw_count, std::memory_order_release);
 }
 
 void c_ee_webgpu_bridge::committed_gif_events(
@@ -413,6 +552,22 @@ void c_ee_webgpu_bridge::committed_gif_events(
     }
 }
 
+bool c_ee_webgpu_bridge::read_vram(void* user, uint8_t* memory, size_t bytes)
+{
+    auto* bridge = static_cast<c_ee_webgpu_bridge*>(user);
+    return bridge != nullptr && bridge->active() &&
+        bytes == ps2::gs::kMemorySize && bridge->flush_committed() &&
+        ps2::gs::gpu::download_checked(memory);
+}
+
+bool c_ee_webgpu_bridge::read_clut(void* user, uint32_t* entries, size_t count)
+{
+    auto* bridge = static_cast<c_ee_webgpu_bridge*>(user);
+    return bridge != nullptr && bridge->active() &&
+        bridge->flush_committed() &&
+        ps2::gs::gpu::read_clut_checked(entries, count);
+}
+
 bool c_ee_webgpu_bridge::supports_display(
     const s_ee_gs_display_registers& registers, uint32_t crt_mode) const
 {
@@ -421,11 +576,16 @@ bool c_ee_webgpu_bridge::supports_display(
 }
 
 bool c_ee_webgpu_bridge::present(
-    const s_ee_gs_display_registers& registers, uint32_t crt_mode)
+    const s_ee_gs_display_registers& registers, uint32_t crt_mode,
+    uint64_t guest_field)
 {
     ps2::gs::gpu::DisplaySource src{};
-    return m_ready && make_display_source(registers, crt_mode, src)
-        && ps2::gs::gpu::present(src);
+    if (!m_ready || !make_display_source(registers, crt_mode, src))
+    {
+        return false;
+    }
+    src.guest_field = guest_field;
+    return flush_committed() && ps2::gs::gpu::present(src);
 }
 
 bool c_ee_webgpu_bridge::readback(
@@ -434,7 +594,7 @@ bool c_ee_webgpu_bridge::readback(
 {
     ps2::gs::gpu::DisplaySource src{};
     return m_ready && make_display_source(registers, crt_mode, src)
-        && ps2::gs::gpu::display(src, pixels, width, height);
+        && flush_committed() && ps2::gs::gpu::display(src, pixels, width, height);
 }
 
 bool c_ee_webgpu_bridge::readback_frame(
@@ -452,6 +612,6 @@ bool c_ee_webgpu_bridge::readback_frame(
     src.fbp = target.m_base;
     src.fbw = target.m_fbw;
     src.psm = target.m_psm;
-    return ps2::gs::gpu::display(src, pixels, width, height);
+    return flush_committed() && ps2::gs::gpu::display(src, pixels, width, height);
 }
 } // namespace ee

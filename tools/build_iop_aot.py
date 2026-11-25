@@ -20,6 +20,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -31,19 +32,46 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--opt", default="2", choices=["0", "1", "2", "3"])
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
+    parser.add_argument("--bootstrap", action="store_true",
+                        help="Build missing libraries without clearing existing output files")
     args = parser.parse_args()
 
+    if args.bootstrap:
+        # Generate into a private directory, then publish only completed
+        # artifacts. Never delete unrelated files in the user's destination.
+        args.out = args.out.resolve()
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="iop-aot-", dir=args.out.parent) as temporary:
+            staging = Path(temporary)
+            build(args, staging)
+            for subdir in ("ir", "obj", "modules"):
+                destination = args.out / subdir
+                destination.mkdir(parents=True, exist_ok=True)
+                for source in (staging / subdir).iterdir():
+                    source.replace(destination / source.name)
+        print(f"build_iop_aot: libraries published to {args.out / 'modules'}")
+        return 0
+    return build(args, args.out)
+
+
+def build(args, out):
     exe = ".exe" if os.name == "nt" else ""
     recomp = args.build_dir / f"iop_recomp{exe}"
     if not recomp.is_file():
         recomp = args.build_dir / "Release" / f"iop_recomp{exe}"
     clang = shutil.which("clang")
+    if clang is None and os.name == "nt":
+        candidate = Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "LLVM" / "bin" / "clang.exe"
+        if candidate.is_file():
+            clang = str(candidate)
     if clang is None:
         sys.exit("build_iop_aot: clang not found on PATH")
+    if not recomp.is_file():
+        sys.exit("build_iop_aot: iop_recomp has not been built")
 
-    ir_dir = args.out / "ir"
-    obj_dir = args.out / "obj"
-    lib_dir = args.out / "modules"
+    ir_dir = out / "ir"
+    obj_dir = out / "obj"
+    lib_dir = out / "modules"
     for folder in (ir_dir, obj_dir, lib_dir):
         folder.mkdir(parents=True, exist_ok=True)
         for stale in folder.iterdir():
@@ -52,6 +80,8 @@ def main():
     started = time.monotonic()
     subprocess.run([str(recomp), str(args.capture), str(ir_dir)], check=True)
     stems = sorted(p.name[:-len(".table.ll")] for p in ir_dir.glob("*.table.ll"))
+    if not stems:
+        sys.exit("build_iop_aot: no translated IRX modules")
     suffix = ".dll" if os.name == "nt" else ".so"
 
     def build_one(stem):

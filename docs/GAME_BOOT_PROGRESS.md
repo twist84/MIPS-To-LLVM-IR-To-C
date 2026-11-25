@@ -1,9 +1,10 @@
 # Native game boot research — Super Dragon Ball Z (USA)
 
+> **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](SDBZ_RUNTIME_VALIDATION_20261125.md). The earlier boot milestones below are historical; the HLE-first runner now reaches bounded interactive training gameplay with audible audio. Full compatibility and hardware accuracy remain open.
+
 > **Current M2 implementation plan:** [SDBZ runtime progression, GS/VIF/VU and EE ISA coverage](M2_SDBZ_NATIVE_RUNTIME_AND_ISA_PLAN.md). This plan supersedes earlier static-gap priority assumptions where the 2026-11-19 07:27 boot provides newer runtime evidence.
 
-This is a **bounded, experimental EE native-code runner**, not a PS2
-emulator and not yet a playable game. No copyrighted game ELF is stored here.
+This is a **bounded, experimental EE native-code runner**, not a general-purpose PS2 emulator. No copyrighted game ELF is stored here.
 
 ## Getting started
 

@@ -96,6 +96,11 @@ void c_hw::reset()
     }
     m_spu2_dma_remaining[0] = 0u;
     m_spu2_dma_remaining[1] = 0u;
+    m_spu2_auto[0] = {};
+    m_spu2_auto[1] = {};
+    m_spu2_auto_started = 0u;
+    m_spu2_auto_completed = 0u;
+    m_spu2_auto_bytes = 0u;
     m_dma_cpu = nullptr;
     m_dma_pcr = 0u;
     m_dma_pcr2 = 0u;
@@ -668,25 +673,10 @@ bool c_hw::spu2_ram_word(uint32_t address, uint16_t* value) const
     return m_spu2.ram_word(address, value);
 }
 
-uint32_t c_hw::spu2_dma_cycles_remaining() const
-{
-    const uint32_t first = m_spu2_dma_remaining[0u];
-    const uint32_t second = m_spu2_dma_remaining[1u];
-    if (first == 0u)
-    {
-        return second;
-    }
-    if (second == 0u)
-    {
-        return first;
-    }
-    return std::min(first, second);
-}
-
 void c_hw::start_spu2_dma(uint32_t core)
 {
     if (core >= 2u || m_dma_cpu == nullptr ||
-        m_spu2_dma_remaining[core] != 0u)
+        m_spu2_dma_remaining[core] != 0u || m_spu2_auto[core].m_active)
     {
         return;
     }
@@ -701,12 +691,10 @@ void c_hw::start_spu2_dma(uint32_t core)
     const bool to_spu = (chcr & 1u) != 0u;
     const uint32_t channel = core == 0u ? 4u : 7u;
 
-    // Reject invalid lengths, unbacked RAM and separate AutoDMA
-    // streaming rather than inventing sample bytes or a completion.
+    // Preflight the complete guest range for either transfer mode.
     if (words == 0u || bytes > c_cpu::k_ram_size ||
         physical > c_cpu::k_ram_size ||
-        bytes > c_cpu::k_ram_size - physical ||
-        (to_spu && m_spu2.auto_dma_enabled(core)))
+        bytes > c_cpu::k_ram_size - physical)
     {
         std::printf(
             "IOP SPU2 DMA deferred: channel=%u madr=0x%08x "
@@ -714,6 +702,16 @@ void c_hw::start_spu2_dma(uint32_t core)
             "(no data or completion fabricated)\n",
             channel, madr, bcr, chcr,
             (to_spu && m_spu2.auto_dma_enabled(core)) ? 1u : 0u);
+        return;
+    }
+
+    if (to_spu && m_spu2.auto_dma_enabled(core))
+    {
+        m_spu2_auto[core] = {madr, static_cast<uint32_t>(bytes), true};
+        ++m_spu2_auto_started;
+        std::printf("IOP SPU2 AutoDMA started: channel=%u madr=0x%08x bytes=%u\n",
+            channel, madr, static_cast<uint32_t>(bytes));
+        feed_spu2_input(core);
         return;
     }
 
@@ -751,6 +749,78 @@ void c_hw::start_spu2_dma(uint32_t core)
         m_spu2_dma_remaining[core]);
 }
 
+uint32_t c_hw::spu2_dma_cycles_remaining() const
+{
+    uint32_t earliest = 0u;
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        uint32_t left = m_spu2_dma_remaining[core];
+        if (m_spu2_auto[core].m_active && m_spu2_auto[core].m_bytes != 0u)
+        {
+            left = m_spu2.input_refill_cycles(core);
+        }
+        if (left != 0u && (earliest == 0u || left < earliest))
+        {
+            earliest = left;
+        }
+    }
+    return earliest;
+}
+
+void c_hw::feed_spu2_input(uint32_t core)
+{
+    s_spu2_auto_transfer& transfer = m_spu2_auto[core];
+    if (!transfer.m_active || transfer.m_bytes == 0u)
+    {
+        return;
+    }
+    while (transfer.m_bytes != 0u && m_spu2.input_frames(core) <= 256u)
+    {
+        uint8_t data[c_spu2::k_input_chunk_bytes];
+        const uint32_t bytes = std::min(transfer.m_bytes, c_spu2::k_input_chunk_bytes);
+        if (m_dma_cpu == nullptr || !m_dma_cpu->dma_read(transfer.m_address, data, bytes) ||
+            !m_spu2.push_input(core, data, bytes))
+        {
+            // No fabricated completion if a real source read fails.
+            transfer = {};
+            return;
+        }
+        transfer.m_address += bytes;
+        transfer.m_bytes -= bytes;
+        m_spu2_auto_bytes += bytes;
+    }
+    if (transfer.m_bytes == 0u)
+    {
+        // The reference schedules DMA completion 32 IOP cycles after
+        // the final input chunk is copied, not after playback drains.
+        m_spu2_dma_remaining[core] = 32u;
+    }
+}
+
+void c_hw::advance_spu2_devices(uint32_t cycles)
+{
+    // Split only while a real DMA/refill deadline exists. New
+    // completions must not be charged cycles before the final refill.
+    while (cycles != 0u)
+    {
+        const uint32_t deadline = spu2_dma_cycles_remaining();
+        const uint32_t step = deadline != 0u ? std::min(cycles, deadline) : cycles;
+        const uint64_t before = m_spu2.elapsed_samples();
+        advance_spu2_dma(step);
+        if (m_spu2.advance_cycles(step) != 0u)
+        {
+            (void)raise_interrupt(c_spu2::k_irq_line);
+        }
+        cycles -= step;
+        if (m_spu2.elapsed_samples() / c_spu2::k_input_batch !=
+            before / c_spu2::k_input_batch)
+        {
+            feed_spu2_input(0u);
+            feed_spu2_input(1u);
+        }
+    }
+}
+
 void c_hw::advance_spu2_dma(uint32_t cycles)
 {
     for (uint32_t core = 0u; core < 2u; ++core)
@@ -776,6 +846,11 @@ void c_hw::advance_spu2_dma(uint32_t cycles)
         // Only now may the guest see STR fall and the matching
         // DICR/DICR2 channel completion flag with shared IOP IRQ3.
         m_spu2_dma[core][2u] &= ~k_spu2_dma_str_bit;
+        if (m_spu2_auto[core].m_active)
+        {
+            ++m_spu2_auto_completed;
+            m_spu2_auto[core] = {};
+        }
         const uint32_t channel = core == 0u ? 4u : 7u;
         const uint32_t index = core == 0u ? 4u : 0u;
         uint32_t& control = core == 0u ? m_dma_icr : m_dma_icr2;
@@ -1251,6 +1326,7 @@ bool c_hw::write(
                 // Driver cancellation must never complete a stopped
                 // DMA or set a phantom DICR interrupt flag.
                 m_spu2_dma_remaining[spu2_core] = 0u;
+                m_spu2_auto[spu2_core] = {};
             }
             else if ((previous & k_spu2_dma_str_bit) == 0u)
             {
@@ -1623,14 +1699,8 @@ bool c_hw::set_interrupt_mask(uint32_t line, bool enabled)
     return true;
 }
 
-uint32_t c_hw::pending_interrupts() const
+int32_t c_hw::resolve_pending_interrupt(uint32_t pending) const
 {
-    return m_i_ctrl != 0u ? (m_i_stat & m_i_mask) : 0u;
-}
-
-int32_t c_hw::next_pending_interrupt() const
-{
-    const uint32_t pending = pending_interrupts();
     if ((pending & (1u << k_dma_irq)) != 0u)
     {
         const uint32_t primary =
@@ -1653,6 +1723,10 @@ int32_t c_hw::next_pending_interrupt() const
         }
     }
     const uint32_t ordinary = pending & ~(1u << k_dma_irq);
+    if (ordinary == 0u)
+    {
+        return -1;
+    }
     for (uint32_t line = 0u; line < 32u; ++line)
     {
         if ((ordinary & (1u << line)) != 0u)
@@ -1697,15 +1771,30 @@ void c_hw::advance_cycles(uint32_t cycles)
     {
         return;
     }
-    advance_spu2_dma(cycles);
-    // Timer 5 clock division, per IOP counter MODE[14:13].
-    // The initial kernel tick uses /1, mode 0x58.
-    const uint32_t shifts[4] = {1u, 8u, 16u, 256u};
-    const uint32_t divider = shifts[(m_timer5_mode >> 13u) & 3u];
+    if (m_spu2_auto[0u].m_active || m_spu2_auto[1u].m_active)
+    {
+        advance_spu2_devices(cycles);
+    }
+    else
+    {
+        if ((m_spu2_dma_remaining[0u] | m_spu2_dma_remaining[1u]) != 0u)
+        {
+            advance_spu2_dma(cycles);
+        }
+        if (m_spu2.advance_cycles(cycles) != 0u)
+        {
+            (void)raise_interrupt(c_spu2::k_irq_line);
+        }
+    }
+    // All Timer 5 divisors are powers of two. Keep the exact quotient
+    // and fractional remainder without a variable 64-bit division.
+    constexpr uint32_t shifts[4] = {0u, 3u, 4u, 8u};
+    const uint32_t shift = shifts[(m_timer5_mode >> 13u) & 3u];
     const uint64_t accumulated =
         static_cast<uint64_t>(m_timer5_remainder) + cycles;
-    const uint64_t elapsed = accumulated / divider;
-    m_timer5_remainder = static_cast<uint32_t>(accumulated % divider);
+    const uint64_t elapsed = accumulated >> shift;
+    m_timer5_remainder = static_cast<uint32_t>(
+        accumulated & ((uint64_t{1u} << shift) - 1u));
     if (elapsed == 0u)
     {
         return;

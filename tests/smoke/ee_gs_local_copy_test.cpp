@@ -205,6 +205,95 @@ bool test_formats()
     return true;
 }
 
+bool test_host_upload_page_tables()
+{
+    // The local-copy destination still uses the original scalar
+    // pixel_write path. Compare entire VRAM images after equivalent
+    // host uploads for all formats, including split payloads,
+    // odd row widths, page edges, coordinate and physical VRAM wrap.
+    constexpr uint32_t formats[] = {
+        0x00u, 0x01u, 0x02u, 0x0au, 0x13u, 0x14u, 0x1bu,
+        0x24u, 0x2cu, 0x30u, 0x31u, 0x32u, 0x3au
+    };
+    constexpr uint32_t k_width = 137u;
+    constexpr uint32_t k_height = 135u;
+    constexpr uint32_t k_pixels = k_width * k_height;
+    constexpr uint32_t k_src = 0x1000u;
+    constexpr uint32_t k_dst = 0x3fffu;
+    std::vector<uint8_t> source((k_pixels * 4u + 15u) & ~15u);
+    for (uint32_t i = 0u; i < k_pixels; ++i)
+    {
+        set32(source.data(), i, i * 0x9e3779b9u + 0x12345678u);
+    }
+    ee::c_ee_gs_state actual;
+    ee::c_ee_gs_state reference;
+    for (uint32_t psm : formats)
+    {
+        const uint32_t bits = (psm == 0x14u || psm == 0x24u || psm == 0x2cu) ? 4u :
+            (psm == 0x13u || psm == 0x1bu) ? 8u :
+            (psm == 0x02u || psm == 0x0au || psm == 0x32u || psm == 0x3au) ? 16u :
+            (psm == 0x01u || psm == 0x31u) ? 24u : 32u;
+        std::vector<uint8_t> payload(((k_pixels * bits + 7u) / 8u + 15u) & ~15u);
+        for (uint32_t i = 0u; i < k_pixels; ++i)
+        {
+            if (bits == 4u)
+            {
+                payload[i / 2u] |= static_cast<uint8_t>(
+                    (source[i * 4u] & 15u) << ((i & 1u) * 4u));
+            }
+            else
+            {
+                for (uint32_t b = 0u; b < bits / 8u; ++b)
+                {
+                    payload[i * (bits / 8u) + b] = source[i * 4u + b];
+                }
+            }
+        }
+        actual.reset();
+        reference.reset();
+        for (auto* gs : {&actual, &reference})
+        {
+            if (!upload(*gs, k_src, 3u, 0u, 0u, 0u, k_width, k_height,
+                    source.data(), static_cast<uint32_t>(source.size() / 16u)))
+            {
+                return false;
+            }
+        }
+        if (!copy(reference, k_src, 3u, 0u, k_dst, 5u, psm,
+                0u, 0u, 2041u, 2043u, k_width, k_height) ||
+            !reg(actual, 0x50u, bitblt(0u, 0u, 0u, k_dst, 5u, psm)) ||
+            !reg(actual, 0x51u, trxpos(0u, 0u, 2041u, 2043u)) ||
+            !reg(actual, 0x52u, trxreg(k_width, k_height)) ||
+            !reg(actual, 0x53u, 0u))
+        {
+            return false;
+        }
+        const uint32_t qwc = static_cast<uint32_t>(payload.size() / 16u);
+        // Exercise both small continuations and large runs, moving
+        // the next chunk's starting position relative to row/page edges.
+        constexpr uint32_t chunks[] = {1u, 17u, 3u, 129u, 2u, 33u};
+        uint32_t chunk_index = 0u;
+        for (uint32_t at = 0u; at < qwc;)
+        {
+            const uint32_t limit = chunks[chunk_index++ % 6u];
+            const uint32_t chunk = (qwc - at < limit) ? qwc - at : limit;
+            if (!image(actual, payload.data() + at * 16u, chunk))
+            {
+                return false;
+            }
+            at += chunk;
+        }
+        if (actual.state().m_transfer_pixels_written != k_pixels ||
+            actual.state().m_transfer_pending_size != 0u ||
+            actual.vram() != reference.vram())
+        {
+            std::fprintf(stderr, "upload page-table mismatch PSM 0x%x\n", psm);
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_directions_and_overlap()
 {
     ee::c_ee_gs_state gs;
@@ -418,15 +507,38 @@ bool test_ordering_and_rollback()
         return false;
     }
 
+    // A second transaction with different data must not see the
+    // rejected transaction's journal or its populated shadow.
+    set32(data.data(), 0u, 0x12345678u);
     if (!gs.consume(events, 5u, data.data(), 5u) ||
-        !read32(gs, k_bp * 256u + 0u, 0xdeadbeefu) ||
-        !read32(gs, k_bp * 256u + 4u, 0xdeadbeefu) ||
-        !read32(gs, k_bp * 256u + 16u, 0xdeadbeefu) ||
+        !read32(gs, k_bp * 256u + 0u, 0x12345678u) ||
+        !read32(gs, k_bp * 256u + 4u, 0x12345678u) ||
+        !read32(gs, k_bp * 256u + 16u, 0x12345678u) ||
         gs.state().m_image_qwc != 1u ||
         gs.state().m_local_copy_count != 2u ||
         gs.state().m_local_copy_pixels != 2u ||
         gs.state().m_transfer_started ||
         image(gs, data.data(), 1u))
+    {
+        return false;
+    }
+
+    // Reuse the same allocations after reset. Both the old source
+    // and its shadow must be replaced by the new committed VRAM.
+    gs.reset();
+    if (!reg(gs, 0x50u, bitblt(k_bp, 1u, 0u, k_bp, 1u, 0u)) ||
+        !reg(gs, 0x51u, trxpos(0u, 0u, 0u, 0u)) ||
+        !reg(gs, 0x52u, trxreg(1u, 1u)) ||
+        !reg(gs, 0x53u, 0u))
+    {
+        return false;
+    }
+    set32(data.data(), 0u, 0x89abcdefu);
+    if (!gs.consume(events, 5u, data.data(), 5u) ||
+        !read32(gs, k_bp * 256u + 0u, 0x89abcdefu) ||
+        !read32(gs, k_bp * 256u + 4u, 0x89abcdefu) ||
+        !read32(gs, k_bp * 256u + 16u, 0x89abcdefu) ||
+        gs.state().m_local_copy_count != 2u)
     {
         return false;
     }
@@ -528,6 +640,10 @@ int main()
     if (!test_formats())
     {
         return fail("13 pixel formats: raw source reads and destination writes");
+    }
+    if (!test_host_upload_page_tables())
+    {
+        return fail("host upload page-table differential across all 13 PSMs");
     }
     if (!test_directions_and_overlap())
     {

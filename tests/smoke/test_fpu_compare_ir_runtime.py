@@ -4,6 +4,8 @@
 import ctypes
 import math
 import pathlib
+import random
+import re
 import struct
 import subprocess
 import sys
@@ -32,6 +34,7 @@ class EEState(ctypes.Structure):
         ("vu0", (ctypes.c_uint64 * 2) * 32),
         ("fcsr", ctypes.c_uint32),
         ("fpu_acc", ctypes.c_uint32),
+        ("fpu_acc_overflow", ctypes.c_uint32),
     ]
 
 
@@ -51,13 +54,13 @@ def f32_bits(value):
     return struct.unpack("<I", struct.pack("<f", value))[0]
 
 
-def compile_jit(fixture, temp_dir, mode, target):
+def compile_jit(fixture, temp_dir, mode, target, opt=0):
     ir_path = temp_dir / f"{mode}.ll"
     subprocess.run([str(fixture), str(ir_path), mode], check=True)
 
     module = llvm.parse_assembly(ir_path.read_text(encoding="utf-8"))
     module.verify()
-    target_machine = target.create_target_machine(opt=0)
+    target_machine = target.create_target_machine(opt=opt)
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
     module.verify()
@@ -74,9 +77,9 @@ def compile_jit(fixture, temp_dir, mode, target):
     return function_type(address), engine, module, target_machine
 
 
-def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc):
+def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     backing, state = aligned_state()
     _ = (backing, engine, module, target_machine)
@@ -85,11 +88,11 @@ def run_case(fixture, temp_dir, target, mode, lhs, rhs, expected_fcc):
     # FCSR bits must be preserved by the compare's read/modify/write sequence.
     initial_fcsr = 0xA5923456
     state.fcsr = initial_fcsr
-    state.fpr[1] = f32_bits(lhs)
-    state.fpr[2] = f32_bits(rhs)
+    state.fpr[1] = lhs
+    state.fpr[2] = rhs
 
     result = guest_fn(ctypes.pointer(state), None)
-    prefix = f"{mode}({lhs!r}, {rhs!r}): "
+    prefix = f"{mode}(0x{lhs:08x}, 0x{rhs:08x}, O{opt}): "
     require(result == 3, prefix + f"expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.exit_reason == 3,
             prefix + f"state exit reason was {state.exit_reason}")
@@ -131,9 +134,9 @@ def run_cvt_w_case(fixture, temp_dir, target, source_bits, expected_bits, label)
             prefix + f"CVT.W.S unexpectedly modified FCSR: 0x{state.fcsr:08x}")
 
 
-def run_cvt_s_w_case(fixture, temp_dir, target, source_value, label):
+def run_cvt_s_w_case(fixture, temp_dir, target, source_value, expected_bits, label, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "cvt_s_w", target
+        fixture, temp_dir, "cvt_s_w", target, opt
     )
     backing, state = aligned_state()
     _ = (backing, engine, module, target_machine)
@@ -145,8 +148,7 @@ def run_cvt_s_w_case(fixture, temp_dir, target, source_value, label):
     state.fcsr = initial_fcsr
 
     result = guest_fn(ctypes.pointer(state), None)
-    expected_bits = f32_bits(float(source_value))
-    prefix = f"cvt_s_w({label}, {source_value}): "
+    prefix = f"cvt_s_w({label}, {source_value}, O{opt}): "
     require(result == 3, prefix + f"expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.exit_reason == 3,
             prefix + f"state exit reason was {state.exit_reason}")
@@ -248,9 +250,9 @@ def run_sign_operation_cases(fixture, temp_dir, target, mode, source_words):
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_arithmetic_cases(fixture, temp_dir, target, mode, cases):
+def run_arithmetic_cases(fixture, temp_dir, target, mode, cases, opt=0):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     retained = (engine, module, target_machine)
 
@@ -282,16 +284,92 @@ def run_arithmetic_cases(fixture, temp_dir, target, mode, cases):
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_accumulator_cases(fixture, temp_dir, target, mode, cases):
+def verify_mul_correction_fast_path(fixture, temp_dir, target):
+    """Compare every result bit and O/U flag against unconditional correction."""
+    path = temp_dir / "mul_fast_path.ll"
+    subprocess.run([str(fixture), str(path), "mul_s"], check=True)
+    ir = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"define internal \{ i32, i1, i1 \} @ee_cop1_mul_bits\([^\n]*\) \{\n.*?\n\}",
+        ir, re.S)
+    require(match is not None, "missing shared multiplication helper")
+    reference = match.group(0).replace("@ee_cop1_mul_bits(", "@test_mul_reference(", 1)
+    guard = "br i1 %needs_correction, label %correct, label %normalize"
+    require(guard in reference, "missing Booth correction guard")
+    # The original behavior always evaluates the unchanged correction tree.
+    reference = reference.replace(guard, "br i1 true, label %correct, label %normalize")
+    ir += "\n" + reference + "\n"
+    for name, callee in (("test_mul_fast", "ee_cop1_mul_bits"),
+                         ("test_mul_slow", "test_mul_reference")):
+        ir += f"""
+define i64 @{name}(i32 %a, i32 %b) {{
+entry:
+  %r = call {{ i32, i1, i1 }} @{callee}(i32 %a, i32 %b)
+  %bits = extractvalue {{ i32, i1, i1 }} %r, 0
+  %o = extractvalue {{ i32, i1, i1 }} %r, 1
+  %u = extractvalue {{ i32, i1, i1 }} %r, 2
+  %bits64 = zext i32 %bits to i64
+  %o64 = zext i1 %o to i64
+  %u64 = zext i1 %u to i64
+  %o_shift = shl i64 %o64, 32
+  %u_shift = shl i64 %u64, 33
+  %flags = or i64 %o_shift, %u_shift
+  %out = or i64 %bits64, %flags
+  ret i64 %out
+}}
+"""
+    # Directed residues 0, 32767, 32768 and 8388607, in both orders:
+    # (2^23 + 1) * (2^23 + n) has residue n modulo 2^23.
+    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x00800001,
+             0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000, 0x3fffffff,
+             0x7f800000, 0x7fffffff, 0xffffffff]
+    pairs = [(a, b) for a in edges for b in edges]
+    rng = random.Random(0x5900)
+    pairs.extend((rng.getrandbits(32), rng.getrandbits(32)) for _ in range(100000))
+    # Exercise thousands of values exactly around the guard threshold.
+    for _ in range(2048):
+        a = rng.randrange(1, 1 << 23, 2)
+        residue = rng.choice((0, 1, 32767, 32768, 32769, 8388607))
+        b = (pow(a, -1, 1 << 23) * residue) & 0x7fffff
+        lhs, rhs = 0x3f800000 | a, 0x3f800000 | b
+        pairs.extend(((lhs, rhs), (rhs, lhs)))
+
+    signature = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32)
+    for opt in (0, 3):
+        module = llvm.parse_assembly(ir)
+        module.verify()
+        machine = target.create_target_machine(opt=opt)
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(machine.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+        engine.add_module(module)
+        engine.finalize_object()
+        addresses = [engine.get_function_address(name)
+                     for name in ("test_mul_fast", "test_mul_slow")]
+        require(all(addresses), "missing multiplication comparison entry")
+        fast, slow = map(signature, addresses)
+        for a, b in pairs:
+            got, expected = fast(a, b), slow(a, b)
+            if got != expected:
+                raise AssertionError((opt, hex(a), hex(b), hex(got), hex(expected)))
+        # Physical console asymmetry: a nonzero correction really matters.
+        require(fast(0x3f800000, 0x3fffffff) == 0x3ffffffe,
+                "Booth correction lost at exact truncation boundary")
+        require(fast(0x3fffffff, 0x3f800000) == 0x3fffffff,
+                "operand order lost")
+    print(f"MUL fast path: {len(pairs)} pairs at O0/O3 match unconditional correction")
+
+
+def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, opt
     )
     retained = (engine, module, target_machine)
     writes_fpr = mode in ("madd_s", "msub_s")
     fpr_sentinel = 0xAABBCCDD11223344
 
     for (fs_bits, ft_bits, acc_bits, expected_bits,
-         initial_fcsr, expected_fcsr, label) in cases:
+         initial_fcsr, expected_fcsr, label, *latch_case) in cases:
         backing, state = aligned_state()
         _ = (backing, retained)
         state.fpr[1] = fs_bits
@@ -299,6 +377,8 @@ def run_accumulator_cases(fixture, temp_dir, target, mode, cases):
         state.fpr[6] = fpr_sentinel
         state.fpu_acc = acc_bits
         state.fcsr = initial_fcsr
+        initial_latch = latch_case[0] if latch_case else 0
+        state.fpu_acc_overflow = initial_latch
 
         result = guest_fn(ctypes.pointer(state), None)
         prefix = (
@@ -326,9 +406,18 @@ def run_accumulator_cases(fixture, temp_dir, target, mode, cases):
             require(state.fpr[6] == fpr_sentinel,
                     prefix + "accumulator-only operation modified FPR[6]")
 
-        require(state.fcsr == expected_fcsr,
-                prefix + f"FCSR got 0x{state.fcsr:08x}, "
-                         f"expected 0x{expected_fcsr:08x}")
+        if expected_fcsr is not None:
+            require(state.fcsr == expected_fcsr,
+                    prefix + f"FCSR got 0x{state.fcsr:08x}, "
+                             f"expected 0x{expected_fcsr:08x}")
+        if writes_fpr:
+            require(state.fpu_acc_overflow == initial_latch,
+                    prefix + "FPR destination changed ACC overflow latch")
+        elif latch_case or expected_fcsr is not None:
+            expected_latch = (latch_case[1] if latch_case
+                              else int(bool(expected_fcsr & 0x8000)))
+            require(state.fpu_acc_overflow == expected_latch,
+                    prefix + f"wrong ACC overflow latch {state.fpu_acc_overflow}")
 
 
 def run_cop1_transfer_cases(fixture, temp_dir, target):
@@ -379,8 +468,7 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
     state.gpr[6][1] = gpr_hi_sentinel
 
     result = guest_fn(ctypes.pointer(state), None)
-    expected_fcsr = initial_fcsr
-    expected_gpr = ctypes.c_int32(expected_fcsr).value & 0xFFFFFFFFFFFFFFFF
+    expected_gpr = 0x0182C051 # reserved bits masked; hardwired bits set
     require(result == 3, f"CFC1: expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.gpr[6][0] == expected_gpr,
             f"CFC1 failed to sign-extend FCSR: 0x{state.gpr[6][0]:016x}")
@@ -399,11 +487,52 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
 
     result = guest_fn(ctypes.pointer(state), None)
     require(result == 3, f"CTC1: expected EE_EXIT_DISPATCH (3), got {result}")
-    require(state.fcsr == 0xABCDEF01,
-            f"CTC1 failed to write the low GPR word to FCSR: 0x{state.fcsr:08x}")
+    require(state.fcsr == 0x0181C001,
+            f"CTC1 failed to mask FCSR: 0x{state.fcsr:08x}")
     require(state.gpr[8][0] == 0x12345678ABCDEF01 and
             state.gpr[8][1] == gpr_hi_sentinel,
             "CTC1 modified its source GPR")
+
+    # Hardware observations in ps2autotests ee_fpu/fcr.expected.
+    for mode, expected in [
+        ("cfc1_fcr0", 0x00002e30),
+        ("cfc1_alias15", 0x00002e30),
+        ("cfc1_alias16", 0x0183c079),
+        ("cfc1", 0x0183c079),
+    ]:
+        guest_fn, engine, module, target_machine = compile_jit(
+            fixture, temp_dir, mode, target
+        )
+        backing, state = aligned_state()
+        _ = (backing, engine, module, target_machine)
+        state.fcsr = 0xffffffff
+        state.gpr[6][1] = gpr_hi_sentinel
+        require(guest_fn(ctypes.pointer(state), None) == 3 and
+                state.gpr[6][0] == expected and
+                state.gpr[6][1] == gpr_hi_sentinel and
+                state.fcsr == 0xffffffff,
+                f"{mode}: FCR read alias or read-only state mismatch")
+
+    guest_fn, engine, module, target_machine = compile_jit(
+        fixture, temp_dir, "ctc1_fcr0", target
+    )
+    backing, state = aligned_state()
+    _ = (backing, engine, module, target_machine)
+    state.fcsr = 0x01000079
+    state.gpr[8][0] = 0xffffffff
+    require(guest_fn(ctypes.pointer(state), None) == 3 and
+            state.fcsr == 0x01000079 and state.gpr[8][0] == 0xffffffff,
+            "CTC1 FCR0 must not modify FCR31 or the source GPR")
+
+    guest_fn, engine, module, target_machine = compile_jit(
+        fixture, temp_dir, "ctc1", target
+    )
+    backing, state = aligned_state()
+    _ = (backing, engine, module, target_machine)
+    state.gpr[8][0] = 0xffffffff
+    require(guest_fn(ctypes.pointer(state), None) == 3 and
+            state.fcsr == 0x0183c079,
+            "CTC1 FCR31 all-one write must preserve only architectural bits")
 
     guest_fn, engine, module, target_machine = compile_jit(
         fixture, temp_dir, "ctc1_after_branch", target
@@ -419,7 +548,7 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
             f"CTC1 after branch: expected EE_EXIT_DISPATCH (3), got {result}")
     require(state.pc == ENTRY_PC + 16,
             f"CTC1 after branch: unexpected exit PC 0x{state.pc:08x}")
-    require(state.fcsr == 0x2345,
+    require(state.fcsr == 0x01000041,
             f"CTC1 successor read stale GPR state: FCSR=0x{state.fcsr:08x}")
     require(state.gpr[8][0] == 0x2345,
             f"ADDIU predecessor write was lost: GPR8=0x{state.gpr[8][0]:016x}")
@@ -442,7 +571,7 @@ def run_bc1_delay_cases(fixture, temp_dir, target):
     result = guest_fn(ctypes.pointer(state), None)
     require(result == 0,
             f"BC1T delay-slot: expected return exit (0), got {result}")
-    require(state.fcsr == 0,
+    require(state.fcsr == 0x01000001,
             f"BC1T delay-slot CTC1 did not execute: FCSR=0x{state.fcsr:08x}")
     require(state.gpr[10][0] == 0x2222,
             "BC1T was evaluated after its delay slot instead of before it")
@@ -502,38 +631,19 @@ def ee_fpu_clamp_result_bits(bits):
     return bits
 
 
-def expected_sqrt_bits(source_bits):
-    if (source_bits & 0x7F800000) == 0:
-        return source_bits & 0x80000000
-    normalised = ee_fpu_normalise_bits(source_bits)
-    absolute = normalised & 0x7FFFFFFF
-    return ieee_f32_bits(math.sqrt(f32_value(absolute)))
-
-
-def expected_rsqrt_bits(numerator_bits, denominator_bits):
-    if (denominator_bits & 0x7F800000) == 0:
-        return (denominator_bits & 0x80000000) | 0x7F7FFFFF
-
-    numerator = f32_value(ee_fpu_normalise_bits(numerator_bits))
-    denominator = ee_fpu_normalise_bits(denominator_bits) & 0x7FFFFFFF
-    root_bits = ieee_f32_bits(math.sqrt(f32_value(denominator)))
-    root_bits = ee_fpu_normalise_bits(root_bits)
-    quotient_bits = ieee_f32_bits(numerator / f32_value(root_bits))
-    return ee_fpu_clamp_result_bits(quotient_bits)
-
-
-def run_sqrt_cases(fixture, temp_dir, target, source_words):
+def run_sqrt_cases(fixture, temp_dir, target, source_words, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "sqrt_s", target
+        fixture, temp_dir, "sqrt_s", target, opt
     )
     retained = (engine, module, target_machine)
-    initial_fcsr = 0xA593F47E
+    initial_fcsr = 0xA593F43E
     cleared_fcsr = initial_fcsr & ~0x00030000
 
     for source_bits, label in source_words:
         backing, state = aligned_state()
         _ = (backing, retained)
-        state.fpr[1] = source_bits
+        state.fpr[0] = 0x41800000  # fs is not an operand (sqrt(16) = 4)
+        state.fpr[2] = source_bits
         state.fpr[6] = 0xAABBCCDD11223344
         state.fcsr = initial_fcsr
 
@@ -545,29 +655,48 @@ def run_sqrt_cases(fixture, temp_dir, target, source_words):
         require(state.pc == ENTRY_PC + 4,
                 prefix + f"wrong sequential PC 0x{state.pc:08x}")
 
-        expected = expected_sqrt_bits(source_bits)
+        # Literal real-console output words, independent of the float oracle.
+        hardware = {
+            0x00000000: 0x00000000, 0x80000000: 0x00000000,
+            0x3F800000: 0x3F800000, 0x40000000: 0x3FB504F3,
+            0x40400000: 0x3FDDB3D7, 0x41C80000: 0x40A00000,
+            0x7FFFFFFF: 0x5FB504F3, 0xFFFFFFFF: 0x5FB504F3,
+            0x7F800000: 0x5F800000, 0xFF800000: 0x5F800000,
+            0x3FFFFFFF: 0x3FB504F3, 0xDEADBEEF: 0x4F152108,
+            0x3FC00000: 0x3F9CC471, 0x7FC00000: 0x5F9CC471,
+        }
+        # Additional model controls: not claimed as physical-console captures.
+        model = {
+            0x40800000: 0x40000000, 0xC0800000: 0x40000000,
+            0x00000001: 0x00000000, 0x80000001: 0x00000000,
+            0x7FC12345: 0x5F9D3B2D, 0xFFC12345: 0x5F9D3B2D,
+            0x0080EFD3: 0x200077B1, 0x3F80EFD3: 0x3F8077B1,
+            0x4000EFD3: 0x3FB5AE39, 0x7F80EFD3: 0x5F8077B1,
+            0xBF80EFD3: 0x3F8077B1,
+        }
+        expected = {**hardware, **model}[source_bits]
         expected_fcsr = cleared_fcsr
-        if (source_bits & 0x7F800000) != 0 and (source_bits & 0x80000000):
+        if source_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
         require(state.fpr[6] == expected,
                 prefix + f"FPR[6] got 0x{state.fpr[6]:016x}, "
                          f"expected 0x{expected:08x}")
-        require(state.fpr[1] == source_bits,
+        require(state.fpr[2] == source_bits and state.fpr[0] == 0x41800000,
                 prefix + "source FPR was modified")
         require(state.fcsr == expected_fcsr,
                 prefix + f"FCSR got 0x{state.fcsr:08x}, "
                          f"expected 0x{expected_fcsr:08x}")
 
 
-def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs):
+def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs, opt):
     guest_fn, engine, module, target_machine = compile_jit(
-        fixture, temp_dir, "rsqrt_s", target
+        fixture, temp_dir, "rsqrt_s", target, opt
     )
     retained = (engine, module, target_machine)
     initial_fcsr = 0xA593F47E
     cleared_fcsr = initial_fcsr & ~0x00030000
 
-    for numerator_bits, denominator_bits, label in operand_pairs:
+    for numerator_bits, denominator_bits, expected, label in operand_pairs:
         backing, state = aligned_state()
         _ = (backing, retained)
         state.fpr[1] = numerator_bits
@@ -586,12 +715,14 @@ def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs):
         require(state.pc == ENTRY_PC + 4,
                 prefix + f"wrong sequential PC 0x{state.pc:08x}")
 
-        expected = expected_rsqrt_bits(numerator_bits, denominator_bits)
         expected_fcsr = cleared_fcsr
-        if (denominator_bits & 0x7F800000) == 0:
-            expected_fcsr |= 0x00010020  # D|SD
-        elif denominator_bits & 0x80000000:
+        if denominator_bits & 0x80000000:
             expected_fcsr |= 0x00020040  # I|SI
+        if (denominator_bits & 0x7F800000) == 0:
+            if (numerator_bits & 0x7F800000) == 0:
+                expected_fcsr |= 0x00020040  # zero/zero: I|SI
+            else:
+                expected_fcsr |= 0x00010020  # nonzero/zero: D|SD
 
         require(state.fpr[6] == expected,
                 prefix + f"FPR[6] got 0x{state.fpr[6]:016x}, "
@@ -614,29 +745,43 @@ def main():
     llvm.initialize_native_asmprinter()
     target = llvm.Target.from_default_triple()
 
-    qnan = struct.unpack("<f", struct.pack("<I", 0x7FC00000))[0]
+    # Raw-word expectations from ps2autotests ee_fpu/compare.expected
+    # (97469ffbed8631277b94e28d01dabd702aa97ef3), plus negative ordering
+    # and boundary cases. Never route exponent-255 payloads through Python
+    # floats, which can quiet signaling NaNs or lose their raw mantissas.
     cases = [
-        ("c_f", 1.0, 1.0, False),
-        ("c_f", qnan, qnan, False),
-        ("c_eq", 1.5, 1.5, True),
-        ("c_eq", 1.5, 2.5, False),
-        ("c_eq", 0.0, -0.0, True),
-        # The EE comparison path first normalises exponents: denormals become
-        # signed zero, while Inf/NaN become signed FMAX. Therefore equal positive
-        # NaNs compare equal after normalisation, rather than using host IEEE
-        # unordered-comparison behaviour directly.
-        ("c_eq", qnan, qnan, True),
-        ("c_eq", float("inf"), qnan, True),
-        ("c_eq", 1.0e-45, 0.0, True),  # denormal flushes to +0
-        ("c_lt", -1.0, 0.0, True),
-        ("c_lt", 0.0, 0.0, False),
-        ("c_lt", qnan, -1.0, False),  # +FMAX is not less than -1
-        ("c_lt", -1.0, qnan, True),   # -1 is less than +FMAX
-        ("c_le", 0.0, 0.0, True),
-        ("c_le", -2.0, -1.0, True),
-        ("c_le", 2.0, 1.0, False),
-        ("c_le", qnan, 1.0, False),
-        ("c_le", -1.0, qnan, True),
+        ("c_f", 0x3f800000, 0x3f800000, False),
+        ("c_f", 0x7fffffff, 0x7fffffff, False),
+        ("c_eq", 0x3fc00000, 0x3fc00000, True),
+        ("c_eq", 0x3fc00000, 0x40200000, False),
+        ("c_eq", 0x00000000, 0x80000000, True),
+        ("c_eq", 0x7fffffff, 0x7fffffff, True),
+        ("c_eq", 0x7f800000, 0x7f800001, False),
+        ("c_eq", 0x7f800001, 0x7f800000, False),
+        ("c_eq", 0x7f7fffff, 0x7f800000, False),
+        ("c_eq", 0x00000001, 0x00000000, True),
+        ("c_eq", 0x80000001, 0x00000000, True),
+        ("c_eq", 0xffffffff, 0xffffffff, True),
+        ("c_eq", 0x7fffffff, 0xffffffff, False),
+        ("c_lt", 0xbf800000, 0x00000000, True),
+        ("c_lt", 0x80000000, 0x00000000, False),
+        ("c_lt", 0x7fffffff, 0xbf800000, False),
+        ("c_lt", 0xbf800000, 0x7fffffff, True),
+        ("c_lt", 0x7f800000, 0x7f800001, True),
+        ("c_lt", 0x7f800001, 0x7f800000, False),
+        ("c_lt", 0xff800001, 0xff800000, True),
+        ("c_lt", 0xff800000, 0xff800001, False),
+        ("c_lt", 0x80000001, 0x00000001, False),
+        ("c_le", 0x00000000, 0x00000000, True),
+        ("c_le", 0xc0000000, 0xbf800000, True),
+        ("c_le", 0x40000000, 0x3f800000, False),
+        ("c_le", 0x7fffffff, 0x3f800000, False),
+        ("c_le", 0xbf800000, 0x7fffffff, True),
+        ("c_le", 0x7f800000, 0x7f800001, True),
+        ("c_le", 0x7f800001, 0x7f800000, False),
+        ("c_le", 0xff800001, 0xff800000, True),
+        ("c_le", 0xff800000, 0xff800001, False),
+        ("c_le", 0x80000001, 0x00000001, True),
     ]
 
     # CVT.W.S uses the EE's truncating conversion and saturates values whose
@@ -662,9 +807,7 @@ def main():
         (0xFFC00000, 0x0000000080000000, "negative quiet NaN saturates"),
     ]
 
-    # Accumulator operations use distinct EE arithmetic paths:
-    # MADD/MSUB normalise the accumulator and rounded product; MADDA/MSUBA
-    # keep both raw after multiplying normalised source operands.
+    # MAC instructions share arithmetic but differ in destination and latch writes.
     accumulator_normal_flags = 0xA592F45E
     accumulator_no_exception = accumulator_normal_flags & ~0xC000
     adda_cases = [
@@ -679,61 +822,398 @@ def main():
         (0x3FC00000, 0x40000000, 0x3F800000, 0x40400000,
          accumulator_normal_flags, accumulator_no_exception, "1.5 * 2.0"),
     ]
-    madd_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0x40800000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 + 1.5 * 2.0"),
-        # The rounded product is subnormal, then fpuDouble flushes it to zero.
-        (0x00800000, 0x3F000000, 0x00000000, 0x00000000,
-         accumulator_normal_flags, accumulator_no_exception, "rounded product denormal normalises before accumulation"),
-        # An Inf product is saturated to FMAX before the accumulator add.
-        (0x7F7FFFFF, 0x40000000, 0x00000000, 0x7F7FFFFF,
-         accumulator_normal_flags, accumulator_no_exception, "product infinity normalises to FMAX"),
-        # A denormal ACC is normalised to zero before accumulation.
-        (0x00000000, 0x00000000, 0x00000001, 0x00000000,
-         accumulator_normal_flags, accumulator_no_exception, "denormal ACC normalises to zero"),
-    ]
-    msub_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0xC0000000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 - 1.5 * 2.0"),
-    ]
-    madda_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0x40800000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 + 1.5 * 2.0"),
-        # Unlike MADD.S, the denormal product is not normalised before the
-        # accumulator add, so the final result is flushed and U|SU is set.
-        (0x00800000, 0x3F000000, 0x00000000, 0x00000000,
-         0xA592B456, 0xA592745E, "raw subnormal product flushes after accumulation"),
-        # MADDA.S keeps the infinity product raw, so the final operation
-        # overflows, saturates, and returns before clearing the U cause bit.
-        (0x7F7FFFFF, 0x40000000, 0x00000000, 0x7F7FFFFF,
-         0xA592744E, 0xA592F45E, "raw infinity product overflows"),
-        # The raw denormal accumulator participates in the final sum.
-        (0x00000000, 0x00000000, 0x00000001, 0x00000000,
-         0xA592B456, 0xA592745E, "raw denormal ACC flushes after accumulation"),
-    ]
-    msuba_cases = [
-        (0x3FC00000, 0x40000000, 0x3F800000, 0xC0000000,
-         accumulator_normal_flags, accumulator_no_exception, "1.0 - 1.5 * 2.0"),
-    ]
+    # Literal console results from muldiv.expected. ACC initialization
+    # uses ADDA with -0, so exponent-zero payloads are flushed.
+    # That fixture does not record FCSR or the internal ACC overflow latch.
+    mac_hardware_words = {
+        "madd_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0x3f800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x40000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0x40c00000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x40c00000),
+            (0x40400000, 0x40400000, 0x00000000, 0x41100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0xffffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x00000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0x7fffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0xbf800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0x3fffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0x7f800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0x3ffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0x7f800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0x407ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0x7ffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0xfffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "msub_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0xbf800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x00000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0xc0000000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x00000000),
+            (0x40400000, 0x40400000, 0x00000000, 0xc1100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x80000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0xffffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0x3f800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0xbfffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0xff800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0xbffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0xff800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0xc07ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0xfffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0x7ffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "madda_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0x3f800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x40000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0x40c00000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x40c00000),
+            (0x40400000, 0x40400000, 0x00000000, 0x41100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0xffffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x00000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0x7fffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0xbf800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0x3fffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0x7f800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0x3ffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0x7f800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0x407ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0x7ffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0xfffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+        "msuba_s": [
+            (0x00000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x80000000, 0x80000000, 0x00000000),
+            (0x80000000, 0x00000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x00000000, 0x00000000),
+            (0x80000000, 0x80000000, 0x80000000, 0x80000000),
+            (0x00000000, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x00000000, 0xbf800000),
+            (0x3f800000, 0x3f800000, 0x3f800000, 0x00000000),
+            (0x3f800000, 0x00000000, 0x3f800000, 0x3f800000),
+            (0x40000000, 0x40000000, 0x40000000, 0xc0000000),
+            (0x40400000, 0x3f800000, 0x40400000, 0x00000000),
+            (0x40400000, 0x40400000, 0x00000000, 0xc1100000),
+            (0x7fffffff, 0x7fffffff, 0x00000000, 0xffffffff),
+            (0x00000000, 0x00000000, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0x7fffffff, 0x7fffffff, 0xffffffff),
+            (0x7fffffff, 0x7fffffff, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0xffffffff, 0x00000000, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0x7fffffff, 0x7fffffff),
+            (0x7fffffff, 0xffffffff, 0xffffffff, 0x7fffffff),
+            (0xffffffff, 0x7fffffff, 0x00000000, 0x7fffffff),
+            (0xffffffff, 0xffffffff, 0x00000000, 0xffffffff),
+            (0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff),
+            (0x00000000, 0x00000000, 0xffffffff, 0xffffffff),
+            (0x7fffffff, 0x00000000, 0x00000000, 0x00000000),
+            (0x00000000, 0x7fffffff, 0x00000000, 0x00000000),
+            (0x00000000, 0x7f800000, 0x00000000, 0x00000000),
+            (0x7f800000, 0x7f800000, 0x00000000, 0xffffffff),
+            (0x7f800000, 0x7f800000, 0x7f800000, 0xffffffff),
+            (0xff800000, 0x7f800000, 0x00000000, 0x7fffffff),
+            (0xff800000, 0x7f800000, 0xff800000, 0x7fffffff),
+            (0x00000000, 0x00000000, 0xff800000, 0xff800000),
+            (0x00000000, 0x00000000, 0x80000000, 0x80000000),
+            (0x00000001, 0x00000001, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3f800000, 0x7f800001, 0x7f800001),
+            (0x7f800001, 0x7f800001, 0x7f800001, 0xffffffff),
+            (0x3f800000, 0xbf800000, 0x00000000, 0x3f800000),
+            (0x3fffffff, 0x3f800000, 0x00000000, 0xbfffffff),
+            (0x7f800001, 0x3f800000, 0x00000000, 0xff800001),
+            (0x00000001, 0x3f800000, 0x00000000, 0x00000000),
+            (0x3f800000, 0x3fffffff, 0x00000000, 0xbffffffe),
+            (0x3f800000, 0x7f800001, 0x00000000, 0xff800001),
+            (0x3f800000, 0x00000001, 0x00000000, 0x00000000),
+            (0x3fffffff, 0x3fffffff, 0x00000000, 0xc07ffffe),
+            (0x7f800001, 0x7f800001, 0x00000000, 0xffffffff),
+            (0x7fffffff, 0x3f800000, 0x00000000, 0xffffffff),
+            (0xffffffff, 0x3f800000, 0x00000000, 0x7fffffff),
+            (0x3f800000, 0x7fffffff, 0x00000000, 0xfffffffe),
+            (0x3f800000, 0xffffffff, 0x00000000, 0x7ffffffe),
+            (0x00001337, 0xdeadbeef, 0x00000000, 0x00000000),
+        ],
+    }
+    mac_cases = {}
+    for mode, words in mac_hardware_words.items():
+        mac_cases[mode] = [
+            (*values, initial, None, "hardware result")
+            for values in words
+            for initial in (0, accumulator_normal_flags)
+        ]
+        subtract = mode in ("msub_s", "msuba_s")
+        writes_acc = mode in ("madda_s", "msuba_s")
+        opposite_max = 0x7fffffff if subtract else 0xffffffff
+        product_max = 0xffffffff if subtract else 0x7fffffff
+        mac_cases[mode].extend([
+            (0x7fffffff, 0x3f800000, opposite_max, 0,
+             0, 0, "finite exponent-255 cancellation", 0, 0),
+            (0x7fffffff, 0x3f800000, opposite_max, opposite_max,
+             0, 0x8010, "previous ACC overflow dominates finite product", 1, 1),
+            (0x7fffffff, 0x40000000, opposite_max, product_max,
+             0, 0x8010, "product overflow dominates opposite ACC", 0, int(writes_acc)),
+            (0x7fffffff, 0x40000000, opposite_max, product_max,
+             0x4008, 0x8018, "product overflow dominates latched ACC", 1, 1),
+            (0x00800000, 0x3f000000, 0x3f800000, 0x3f800000,
+             0, 8, "product underflow sets sticky only", 0, 0),
+            (0x00800000 if subtract else 0x80800000, 0x3f800000,
+             0x00800001, 0, 0, 0x4008, "final sum underflow", 0, 0),
+            (0x3fc00000, 0x40000000, 0x3f800000,
+             0xc0000000 if subtract else 0x40800000,
+             accumulator_normal_flags, accumulator_no_exception,
+             "ordinary MAC clears previous O/U cause", 0, 0),
+        ])
 
     # PCSX2 EE reference semantics:
     # - ADD/SUB/MUL normalise zero/denormal and Inf/NaN operands first.
     # - Arithmetic overflow clamps to signed FMAX and sets O|SO.
-    # - Arithmetic underflow flushes to signed zero and sets U|SU.
-    # - DIV zero checks the raw divisor exponent and ORs D|SD or I|SI.
+    # - Multiplier underflow flushes to signed zero; adder cancellation
+    #   retains the normalized fraction. Both set U|SU.
+    # - DIV checks the raw divisor exponent and replaces the I/D causes.
     fpu_normal_flags = 0xA592F45E
     add_cases = [
         (0x3FC00000, 0x40100000, 0x40700000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal addition"),
-        (0x7F7FFFFF, 0x7F7FFFFF, 0x7F7FFFFF,
-         0xA592744E, 0xA592F45E, "positive overflow and early return"),
+        (0x7F7FFFFF, 0x7F7FFFFF, 0x7FFFFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF,
+         0xA592744E, 0xA592B45E, "overflow replaces prior underflow cause"),
+        (0x3F800000, 0x33800000, 0x3F800000,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "half-ULP truncation"),
+        (0x3F800001, 0x33800000, 0x3F800001,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "odd significand truncation"),
         (0x00000001, 0x80000001, 0x00000000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "denormal operands flush to signed zero"),
     ]
     sub_cases = [
         (0x3FC00000, 0x40100000, 0xBF400000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal subtraction"),
+        (0x3F800000, 0x33000000, 0x3F800000,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exponent delta 25 discards operand"),
+        (0x3F800000, 0x33800000, 0x3F7FFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exponent delta 24 retains guard"),
+        (0x00800001, 0x00800000, 0x00000000,
+         0xA592B456, 0xA592745E, "cancellation underflow"),
+        (0x00800000, 0x00800001, 0x80000000,
+         0xA592B456, 0xA592745E, "negative cancellation underflow"),
     ]
+    # Literal console result words; ADD/ADDA and SUB/SUBA have identical
+    # corresponding fixtures in ps2autotests ee_fpu/arithmetic.expected.
+    add_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x00000000),
+        (0x80000000, 0x00000000, 0x00000000),
+        (0x80000000, 0x80000000, 0x80000000),
+        (0x00000000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x3F800000, 0x40000000),
+        (0x3F800000, 0x00000000, 0x3F800000),
+        (0x40000000, 0x40000000, 0x40800000),
+        (0x40400000, 0x3F800000, 0x40800000),
+        (0x40400000, 0x40400000, 0x40C00000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x00000000),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0x00000000),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x00000000, 0x7F800000, 0x7F800000),
+        (0x7F800000, 0x7F800000, 0x7FFFFFFF),
+        (0xFF800000, 0x7F800000, 0x00000000),
+        (0x3F800000, 0xBF800000, 0x00000000),
+        (0x3FFFFFFF, 0x3F800000, 0x403FFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x3FFFFFFF, 0x403FFFFF),
+        (0x3F800000, 0x7F800001, 0x7F800001),
+        (0x3F800000, 0x00000001, 0x3F800000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x3F800000, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0x00001337, 0xDEADBEEF, 0xDEADBEEF),
+    ]
+    sub_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x00000000),
+        (0x80000000, 0x00000000, 0x80000000),
+        (0x80000000, 0x80000000, 0x00000000),
+        (0x00000000, 0x3F800000, 0xBF800000),
+        (0x3F800000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x00000000, 0x3F800000),
+        (0x40000000, 0x40000000, 0x00000000),
+        (0x40400000, 0x3F800000, 0x40000000),
+        (0x40400000, 0x40400000, 0x00000000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x00000000),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x00000000),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0x00000000, 0x7F800000, 0xFF800000),
+        (0x7F800000, 0x7F800000, 0x00000000),
+        (0xFF800000, 0x7F800000, 0xFFFFFFFF),
+        (0x3F800000, 0xBF800000, 0x40000000),
+        (0x3FFFFFFF, 0x3F800000, 0x3F7FFFFE),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0xBF800000),
+        (0x3F800000, 0x3FFFFFFF, 0xBF7FFFFE),
+        (0x3F800000, 0x7F800001, 0xFF800001),
+        (0x3F800000, 0x00000001, 0x3F800000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0x3F800000, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0x00001337, 0xDEADBEEF, 0x5EADBEEF),
+    ]
+    for operation, words, scalar_cases, accumulator_cases in (
+        ("ADD", add_hardware_words, add_cases, adda_cases),
+        ("SUB", sub_hardware_words, sub_cases, suba_cases),
+    ):
+        for lhs, rhs, expected in words:
+            # The recorded overflow cases are same-sign exponent-255
+            # sums after applying SUB's sign inversion; exact maximum plus
+            # a tiny operand is not an overflow.
+            effective_rhs = rhs ^ (0x80000000 if operation == "SUB" else 0)
+            overflow = ((lhs & 0x7F800000) == 0x7F800000
+                        and (effective_rhs & 0x7F800000) == 0x7F800000
+                        and ((lhs ^ effective_rhs) & 0x80000000) == 0)
+            for initial in (0xA5903456, fpu_normal_flags):
+                flags = (initial & ~0xC000) | (0x8010 if overflow else 0)
+                scalar_cases.append((lhs, rhs, expected, initial, flags,
+                                     "hardware " + operation))
+                accumulator_cases.append((lhs, rhs, 0xAABBCCDD, expected,
+                                          initial, flags, "hardware " + operation + "A"))
+
+    # Physical SCPH-900xx cancellation traces from PCSX2 PR #12001.
+    # The adder retains its normalized fraction on exponent underflow,
+    # unlike the multiplier. The flag trace reports U|SU.
+    for scalar_cases, accumulator_cases, words in (
+        (add_cases, adda_cases, [
+            (0x8080002C, 0x008000EC, 0x00400000),
+            (0x80800036, 0x00829F6A, 0x0027CD00),
+            (0x80C1AA65, 0x01200000, 0x007CAB36),
+        ]),
+        (sub_cases, suba_cases, [
+            (0x0080008B, 0x008000EA, 0x803E0000),
+        ]),
+    ):
+        for lhs, rhs, expected in words:
+            scalar_cases.append((lhs, rhs, expected, 0x01000001,
+                                 0x01004009, "hardware cancellation fraction"))
+            accumulator_cases.append((lhs, rhs, 0, expected, 0x01000001,
+                                      0x01004009, "adder fraction model for ACC"))
+
+    # The same adder is used for the final MAC stage.
+    mac_cases["madd_s"].extend([
+        (0x00800000, 0x3F000000, 0x01000000, 0x01000000,
+         0x01000001, 0x01000009, "hardware product underflow sticky only", 0, 0),
+        (0x7FFFFFFF, 0xBF800000, 0x7FFFFFFF, 0x7FFFFFFF,
+         0x01000001, 0x01008011, "hardware latched overflow result", 1, 1),
+        (0x008000EC, 0x3F800000, 0x8080002C, 0x00400000,
+         0x01000001, 0x01004009, "MAC cancellation fraction model", 0, 0),
+    ])
+
     mul_cases = [
         (0x3FC00000, 0x40000000, 0x40400000,
          fpu_normal_flags, fpu_normal_flags & ~0xC000, "normal multiplication"),
@@ -741,12 +1221,61 @@ def main():
          0xA592B456, 0xA592745E, "positive subnormal result flushes and sets U|SU"),
         (0x80800000, 0x3F000000, 0x80000000,
          0xA592B456, 0xA592745E, "negative subnormal result flushes and sets U|SU"),
-        (0x7F7FFFFF, 0x40000000, 0x7F7FFFFF,
-         0xA592744E, 0xA592F45E, "multiplication overflow clamps to FMAX"),
+        (0x7F7FFFFF, 0x40000000, 0x7FFFFFFF,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "exact extended maximum"),
+        (0x7FFFFFFF, 0x40000000, 0x7FFFFFFF,
+         0xA592744E, 0xA592B45E, "multiplication overflow replaces prior underflow cause"),
+        (0x3FFFFFFF, 0x3FFFFFFF, 0x407FFFFE,
+         fpu_normal_flags, fpu_normal_flags & ~0xC000, "truncated full significand product"),
     ]
+    # Distinct physical-console MUL/MULA result words from muldiv.expected.
+    mul_hardware_words = [
+        (0x00000000, 0x00000000, 0x00000000),
+        (0x00000000, 0x80000000, 0x80000000),
+        (0x80000000, 0x00000000, 0x80000000),
+        (0x80000000, 0x80000000, 0x00000000),
+        (0x00000000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x00000000, 0x00000000),
+        (0x40000000, 0x40000000, 0x40800000),
+        (0x40400000, 0x3F800000, 0x40400000),
+        (0x40400000, 0x40400000, 0x41100000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xFFFFFFFF),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0x00000000, 0x00000000),
+        (0x00000000, 0x7FFFFFFF, 0x00000000),
+        (0x00000000, 0x7F800000, 0x00000000),
+        (0x7F800000, 0x7F800000, 0x7FFFFFFF),
+        (0xFF800000, 0x7F800000, 0xFFFFFFFF),
+        (0x3F800000, 0xBF800000, 0xBF800000),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3FFFFFFF, 0x3FFFFFFE),
+        (0x3F800000, 0x7F800001, 0x7F800001),
+        (0x3F800000, 0x00000001, 0x00000000),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x7FFFFFFE),
+        (0x3F800000, 0xFFFFFFFF, 0xFFFFFFFE),
+        (0x00001337, 0xDEADBEEF, 0x80000000),
+    ]
+    for lhs, rhs, expected in mul_hardware_words:
+        overflow = ((lhs & 0x7F800000) == 0x7F800000
+                    and (rhs & 0x7F800000) == 0x7F800000)
+        for initial in (0xA5903456, fpu_normal_flags):
+            flags = (initial & ~0xC000) | (0x8010 if overflow else 0)
+            mul_cases.append((lhs, rhs, expected, initial, flags, "hardware MUL"))
+            mula_cases.append((lhs, rhs, 0xAABBCCDD, expected, initial, flags,
+                               "hardware MULA"))
+    for lhs, rhs, expected, initial, flags, label in mul_cases[:6]:
+        mula_cases.append((lhs, rhs, 0xAABBCCDD, expected, initial, flags,
+                           "accumulator " + label))
     div_cases = [
         (0x40400000, 0x40000000, 0x3FC00000,
-         0xA592F45E, 0xA592F45E, "normal division leaves FCSR untouched"),
+         0xA592F45E, 0xA590F45E, "normal division clears I/D causes"),
         (0x3F800000, 0x00000000, 0x7FFFFFFF,
          0xA5903456, 0xA5913476, "positive divide by zero sets D|SD"),
         (0x00000000, 0x00000000, 0x7FFFFFFF,
@@ -760,10 +1289,73 @@ def main():
         (0x00000000, 0x80000000, 0xFFFFFFFF,
          0xA5903456, 0xA5923456, "positive zero over negative zero retains sign"),
         (0x00800000, 0x40000000, 0x00000000,
-         0xA592F45E, 0xA592F45E, "division subnormal result flushes without flags"),
-        (0x7F7FFFFF, 0x00800000, 0x7F7FFFFF,
-         0xA592F45E, 0xA592F45E, "division overflow clamps without flags"),
+         0xA592F45E, 0xA590F45E, "division underflow clears I/D, preserves O/U"),
+        (0x7F7FFFFF, 0x00800000, 0x7FFFFFFF,
+         0xA592F45E, 0xA590F45E, "division overflow clears I/D, preserves O/U"),
+        (0x7F800000, 0x40000000, 0x7F000000,
+         0xA592F45E, 0xA590F45E, "extended operand divided by two"),
     ]
+
+    # SCPH-900xx console flags: range errors from the divide unit
+    # saturate/flush the result without setting the FMAC O/U flags.
+    div_cases.extend([
+        (0x3F800000, 0, 0x7FFFFFFF,
+         0x01020041, 0x01010061, "D replaces I while SI survives"),
+        (0, 0, 0x7FFFFFFF,
+         0x01010021, 0x01020061, "I replaces D while SD survives"),
+        (0x3F800000, 0x3F800000, 0x3F800000,
+         0x01030061, 0x01000061, "successful divide clears both causes"),
+        (0x00800000, 0x40000000, 0x00000000,
+         0x01000001, 0x01000001, "hardware division underflow flag"),
+        (0x5AE20690, 0x00800044, 0x7FFFFFFF,
+         0x01000001, 0x01000001, "hardware division overflow flag"),
+    ])
+
+    # Unique physical-console results from ps2autotests
+    # tests/cpu/ee_fpu/muldiv.expected (expanded CF_* operands).
+    div_hardware_words = [
+        (0x00000000, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x80000000, 0xFFFFFFFF),
+        (0x80000000, 0x00000000, 0xFFFFFFFF),
+        (0x80000000, 0x80000000, 0x7FFFFFFF),
+        (0x00000000, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3F800000, 0x3F800000),
+        (0x3F800000, 0x00000000, 0x7FFFFFFF),
+        (0x40000000, 0x40000000, 0x3F800000),
+        (0x40400000, 0x3F800000, 0x40400000),
+        (0x40400000, 0x40400000, 0x3F800000),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x3F800000),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0xBF800000),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xBF800000),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0x3F800000),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF),
+        (0x00000000, 0x7FFFFFFF, 0x00000000),
+        (0x00000000, 0x7F800000, 0x00000000),
+        (0x7F800000, 0x7F800000, 0x3F800000),
+        (0xFF800000, 0x7F800000, 0xBF800000),
+        (0x3F800000, 0xBF800000, 0xBF800000),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF),
+        (0x7F800001, 0x3F800000, 0x7F800001),
+        (0x00000001, 0x3F800000, 0x00000000),
+        (0x3F800000, 0x3FFFFFFF, 0x3F000001),
+        (0x3F800000, 0x7F800001, 0x00000000),
+        (0x3F800000, 0x00000001, 0x7FFFFFFF),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF),
+        (0x3F800000, 0x7FFFFFFF, 0x00000000),
+        (0x3F800000, 0xFFFFFFFF, 0x80000000),
+        (0x00001337, 0xDEADBEEF, 0x80000000),
+    ]
+    # Check both clear and previously populated causes/stickies. The
+    # result words are from hardware; I/D clearing follows the EE manual.
+    for lhs, rhs, expected in div_hardware_words:
+        for initial in (0xA5903456, 0xA593F47E):
+            flags = initial & ~0x30000
+            if (rhs & 0x7F800000) == 0:
+                flags |= (0x00020040 if (lhs & 0x7F800000) == 0
+                          else 0x00010020)
+            div_cases.append((lhs, rhs, expected, initial, flags,
+                              "hardware DIV.S result"))
 
     sqrt_words = [
         (0x40800000, "positive four"),
@@ -771,22 +1363,67 @@ def main():
         (0x80000000, "negative zero"),
         (0x00000001, "positive denormal"),
         (0x80000001, "negative denormal"),
-        (0x7F800000, "positive infinity saturates to FMAX"),
+        (0x7F800000, "positive extended exponent"),
         (0xFF800000, "negative infinity is invalid"),
-        (0x7FC12345, "positive NaN normalises to FMAX"),
+        (0x7FC12345, "positive extended mantissa"),
         (0xFFC12345, "negative NaN is invalid"),
+        (0x0080EFD3, "minimum exponent root model"),
+        (0x3F80EFD3, "non-nearest root model"),
+        (0x4000EFD3, "even exponent root model"),
+        (0x7F80EFD3, "extended exponent non-nearest root model"),
+        (0xBF80EFD3, "negative non-nearest root model"),
     ]
+    # Literal result words from the physical-console ps2autotests
+    # tests/cpu/ee_fpu/sqrt.expected, including expanded CF_* constants.
     rsqrt_pairs = [
-        (0x40C00000, 0x40800000, "six divided by sqrt four"),
-        (0x40C00000, 0xC0800000, "negative divisor is made positive and invalid"),
-        (0x40C00000, 0x00000000, "positive zero divisor returns FMAX"),
-        (0x40C00000, 0x80000000, "negative zero divisor returns negative FMAX"),
-        (0x40C00000, 0x00000001, "positive denormal divisor counts as zero"),
-        (0x40C00000, 0x80000001, "negative denormal divisor counts as zero"),
-        (0x7F7FFFFF, 0x00800000, "overflow clamps without flags"),
-        (0x00800000, 0x7F7FFFFF, "underflow flushes without flags"),
-        (0xC0C00000, 0x40800000, "negative numerator"),
-        (0x40C00000, 0xFF800000, "negative infinity divisor normalises to negative FMAX"),
+        (0x00000000, 0x00000000, 0x7FFFFFFF, "positive zero / zero"),
+        (0x00000000, 0x80000000, 0x7FFFFFFF, "positive zero / negative zero"),
+        (0x80000000, 0x00000000, 0xFFFFFFFF, "negative zero / zero"),
+        (0x80000000, 0x80000000, 0xFFFFFFFF, "negative zero / negative zero"),
+        (0x00000000, 0x3F800000, 0x00000000, "zero / one"),
+        (0x3F800000, 0x3F800000, 0x3F800000, "one / one"),
+        (0x3F800000, 0x00000000, 0x7FFFFFFF, "one / zero"),
+        (0x40000000, 0x40000000, 0x3FB504F3, "two / sqrt two"),
+        (0x40400000, 0x3F800000, 0x40400000, "three / one"),
+        (0x40400000, 0x40400000, 0x3FDDB3D7, "three / sqrt three"),
+        (0x7FFFFFFF, 0x7FFFFFFF, 0x5FB504F2, "maximum / sqrt maximum"),
+        (0x7FFFFFFF, 0xFFFFFFFF, 0x5FB504F2, "maximum / negative maximum"),
+        (0xFFFFFFFF, 0x7FFFFFFF, 0xDFB504F2, "negative maximum / maximum"),
+        (0xFFFFFFFF, 0xFFFFFFFF, 0xDFB504F2, "negative maximum / negative maximum"),
+        (0x7FFFFFFF, 0x00000000, 0x7FFFFFFF, "maximum / zero"),
+        (0x00000000, 0x7FFFFFFF, 0x00000000, "zero / maximum"),
+        (0x00000000, 0x7F800000, 0x00000000, "zero / extended"),
+        (0x7F800000, 0x7F800000, 0x5F800000, "extended / extended"),
+        (0xFF800000, 0x7F800000, 0xDF800000, "negative extended / extended"),
+        (0x3F800000, 0x41C80000, 0x3E4CCCCD, "one / sqrt twenty-five"),
+        (0x40A00000, 0x41C80000, 0x3F800000, "five / sqrt twenty-five"),
+        (0x41C80000, 0x41C80000, 0x40A00000, "twenty-five / sqrt twenty-five"),
+        (0x3F800000, 0xBF800000, 0x3F800000, "one / negative one"),
+        (0x3FFFFFFF, 0x3F800000, 0x3FFFFFFF, "max mantissa / one"),
+        (0x7F800001, 0x3F800000, 0x7F800001, "extended mantissa / one"),
+        (0x00000001, 0x3F800000, 0x00000000, "denormal / one"),
+        (0x3F800000, 0x3FFFFFFF, 0x3F3504F3, "one / max mantissa"),
+        (0x3F800000, 0x7F800001, 0x1F800000, "one / extended mantissa"),
+        (0x3F800000, 0x00000001, 0x7FFFFFFF, "one / denormal"),
+        (0x7FFFFFFF, 0x3F800000, 0x7FFFFFFF, "maximum / one"),
+        (0xFFFFFFFF, 0x3F800000, 0xFFFFFFFF, "negative maximum / one"),
+        (0x3F800000, 0x7FFFFFFF, 0x1F3504F3, "one / maximum"),
+        (0x3F800000, 0xFFFFFFFF, 0x1F3504F3, "one / negative maximum"),
+        (0x00001337, 0xDEADBEEF, 0x00000000, "garbage words"),
+        # Additional architectural controls; no new hardware trace claimed.
+        (0x40C00000, 0x40800000, 0x40400000, "six / sqrt four"),
+        (0x40C00000, 0xC0800000, 0x40400000, "negative radicand"),
+        (0x40C00000, 0x00000000, 0x7FFFFFFF, "positive zero divisor"),
+        (0x40C00000, 0x80000000, 0x7FFFFFFF, "negative zero divisor"),
+        (0xC0C00000, 0x00000000, 0xFFFFFFFF, "negative numerator / zero"),
+        (0xC0C00000, 0x80000000, 0xFFFFFFFF, "negative numerator / negative zero"),
+        (0x80000001, 0x00000001, 0xFFFFFFFF, "denormal / denormal"),
+        (0x40C00000, 0x00000001, 0x7FFFFFFF, "positive denormal divisor"),
+        (0x40C00000, 0x80000001, 0x7FFFFFFF, "negative denormal divisor"),
+        (0x7F7FFFFF, 0x00800000, 0x7FFFFFFF, "overflow saturates to R5900 max"),
+        (0x00800000, 0x7F7FFFFF, 0x00000000, "underflow flushes"),
+        (0xC0C00000, 0x40800000, 0xC0400000, "negative numerator"),
+        (0x40C00000, 0xFF800000, 0x20C00000, "negative extended radicand"),
     ]
 
     sign_operation_words = [
@@ -817,38 +1454,62 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-fpu-compare-") as directory:
         temp_dir = pathlib.Path(directory)
-        for mode, lhs, rhs, expected in cases:
-            run_case(fixture, temp_dir, target, mode, lhs, rhs, expected)
+        for opt in (0, 3):
+            for mode, lhs, rhs, expected in cases:
+                run_case(fixture, temp_dir, target, mode, lhs, rhs, expected, opt)
         for source_bits, expected_bits, label in cvt_cases:
             run_cvt_w_case(
                 fixture, temp_dir, target, source_bits, expected_bits, label
             )
-        for source_value, label in [
-            (0, "zero"),
-            (1, "positive one"),
-            (-1, "negative one"),
-            (16777217, "round-to-nearest-even tie"),
-            (2147483647, "signed maximum"),
-            (-2147483648, "signed minimum"),
-        ]:
-            run_cvt_s_w_case(
-                fixture, temp_dir, target, source_value, label
-            )
-        run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases)
-        run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases)
-        run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases)
-        run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases)
+        # Explicit raw results rather than a host float cast oracle.
+        # Signed maximum and the positive/negative non-exact conversions
+        # distinguish truncation from nearest-even.
+        for opt in (0, 3):
+            for source_value, expected_bits, label in [
+                (0, 0x00000000, "zero"),
+                (1, 0x3f800000, "positive one"),
+                (-1, 0xbf800000, "negative one"),
+                (16777217, 0x4b800000, "positive truncation tie"),
+                (16777219, 0x4b800001, "positive round-up tie"),
+                (-16777219, 0xcb800001, "negative round-away tie"),
+                (2147483647, 0x4effffff, "signed maximum"),
+                (-2147483647, 0xceffffff, "near signed minimum"),
+                (-2147483648, 0xcf000000, "signed minimum"),
+                (0x3fbeb852, 0x4e7efae1, "hardware conversion vector"),
+            ]:
+                run_cvt_s_w_case(
+                    fixture, temp_dir, target, source_value, expected_bits, label, opt
+                )
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases, opt)
+            run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases, opt)
+        verify_mul_correction_fast_path(fixture, temp_dir, target)
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases, opt)
+        for opt in (0, 3):
+            run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases, opt)
         run_cop1_transfer_cases(fixture, temp_dir, target)
         run_bc1_delay_cases(fixture, temp_dir, target)
-        run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "madd_s", madd_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "msub_s", msub_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "madda_s", madda_cases)
-        run_accumulator_cases(fixture, temp_dir, target, "msuba_s", msuba_cases)
-        run_sqrt_cases(fixture, temp_dir, target, sqrt_words)
-        run_rsqrt_cases(fixture, temp_dir, target, rsqrt_pairs)
+        for opt in (0, 3):
+            run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases, opt)
+            run_accumulator_cases(fixture, temp_dir, target, "suba_s", suba_cases, opt)
+        for opt in (0, 3):
+            run_accumulator_cases(fixture, temp_dir, target, "mula_s", mula_cases, opt)
+        for opt in (0, 3):
+            for mode, cases in mac_cases.items():
+                run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt)
+        sqrt_hardware_words = [
+            (word, "hardware SQRT.S vector")
+            for word in (0x00000000, 0x80000000, 0x3F800000, 0x40000000,
+                         0x40400000, 0x41C80000, 0x7FFFFFFF, 0xFFFFFFFF,
+                         0x7F800000, 0xFF800000, 0x3FFFFFFF, 0xDEADBEEF,
+                         0x3FC00000, 0x7FC00000)
+        ]
+        for opt in (0, 3):
+            run_sqrt_cases(fixture, temp_dir, target,
+                           sqrt_words + sqrt_hardware_words, opt)
+        for opt in (0, 3):
+            run_rsqrt_cases(fixture, temp_dir, target, rsqrt_pairs, opt)
         run_max_min_cases(fixture, temp_dir, target, "max_s", extreme_pairs)
         run_max_min_cases(fixture, temp_dir, target, "min_s", extreme_pairs)
         run_sign_operation_cases(
@@ -867,7 +1528,7 @@ def main():
         "MAX.S/MIN.S bitwise ordering; ABS.S/NEG.S raw-bit sign operations; "
         "EE NaN/Inf normalisation, integer "
         "saturation, truncation, FCSR cause-bit clearing and sticky-bit "
-        "preservation; O0 JIT)"
+        "preservation; O0 JIT, comparisons/CVT.S.W also O3 codegen)"
     )
 
 

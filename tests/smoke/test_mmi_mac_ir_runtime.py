@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Independent O0/O3 R5900 packed-word multiply-accumulate JIT regression.
 
-64-bit modular arithmetic matches PCSX2's x86 recompiler. The interpreter
-has signed correction heuristics; hardware-exact results are not claimed.
+64-bit modular arithmetic matches PCSX2's x86 recompiler and the
+published hardware vectors. Randomized software-reference cases remain
+separate from direct hardware comparisons.
 """
 
 import ctypes
@@ -14,6 +15,7 @@ import tempfile
 import llvmlite.binding as llvm
 
 from ee_diagnostic_stubs import register_ee_diagnostic_stubs
+from mmi_hardware_vectors import run_hardware_vectors
 from test_mmi_ir_runtime import U128, make_aligned_state, require
 from test_mmi_word_ir_runtime import compile_guest
 
@@ -58,7 +60,7 @@ def reference(opcode, a, b, banks, repeat):
     return updated, dest
 
 
-def run_case(fn, mode, pattern):
+def run_case(fn, mode, pattern, hardware=None):
     lo0, hi0, lo1, hi1, lhs, rhs = pattern
     backing, cpu = make_aligned_state()
     cpu.gpr[4] = U128(lhs & MASK64, lhs >> 64)
@@ -80,6 +82,8 @@ def run_case(fn, mode, pattern):
     banks, dest = reference(opcode, 0 if zero_rs else effective_lhs,
                             0 if zero_rt else rhs,
                             (lo0, hi0, lo1, hi1), repeat)
+    if hardware is not None:
+        dest, banks = hardware
     expected_rs, expected_rt, expected_rd = effective_lhs, rhs, DEST
     if not zero_dest:
         if alias_rs:
@@ -149,6 +153,7 @@ def main():
                 for pattern in patterns:
                     run_case(fn, mode, pattern)
                     count += 1
+                count += run_hardware_vectors(fn, mode, run_case)
                 _ = engine, module, machine
     print("mmi_mac_ir_runtime: PASS (" + str(count) +
           " O0/O3 native executions, signed/unsigned, carry/borrow/wrap, " +

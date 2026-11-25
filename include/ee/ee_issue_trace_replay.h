@@ -887,10 +887,10 @@ private:
             }
 
             const bool only_fs =
-                function == 0x04u || function == 0x05u ||
-                function == 0x06u || function == 0x07u ||
-                function == 0x24u;
-            instruction->m_fpr_read_mask = only_fs ? fs : fs | ft;
+                function == 0x05u || function == 0x06u ||
+                function == 0x07u || function == 0x24u;
+            instruction->m_fpr_read_mask = fpu_sqrt ? ft :
+                only_fs ? fs : fs | ft;
             const bool writes_acc =
                 function == 0x18u || function == 0x19u ||
                 function == 0x1au || function == 0x1eu || function == 0x1fu;

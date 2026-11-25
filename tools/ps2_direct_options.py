@@ -99,7 +99,11 @@ TOOL_OPTIONS = {
             Option("--iop-auto-irx", "Resolve disc IRX names in provider-first order. Enter one per line.", "repeat"),
             IRX_LIST,
         ),
-        "Runtime": LIMITS + (TIMEOUT,),
+        "Runtime": LIMITS + (
+            Option("--max-expansion-dispatches", "Override the headless expansion dispatch limit."),
+            Option("--max-replay-dispatches", "Override the final traced replay dispatch limit."),
+            TIMEOUT,
+        ),
         "Translation": tuple(option for option in BUILD_OPTIONS if option.name not in
                              ("--auto-expand", "--no-recompile", "--link-only",
                               "--replay-after-expand", "--live-full-relink")),

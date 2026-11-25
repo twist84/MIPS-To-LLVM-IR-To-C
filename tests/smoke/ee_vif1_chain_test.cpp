@@ -271,6 +271,174 @@ int main()
         return 1;
     }
 
+    // Two individually legal REF payloads exceed the old 16-bit
+    // aggregate cap. Keep the exact TTE byte order and retire once.
+    ee::ee_memory large_memory(2u * 1024u * 1024u);
+    ee::c_ee_dmac large_dmac{};
+    large_dmac.bind_memory(&large_memory);
+    large_dmac.bind_device_transfer(&sink, &accept);
+    sink = {};
+    write_tag(large_memory, 0x100u, 0x8000u, 3u, 0u, 0x1000u,
+              0x1122334400000000ull);
+    write_tag(large_memory, 0x110u, 0x8000u, 0u, 0u, 0x81000u,
+              0x5566778800000000ull);
+    large_memory.write128(0x1000u, &first_data);
+    large_memory.write128(0x100ff0u, &last_data);
+    if (!check(begin(large_dmac, 0x100u), "large chain start refused") ||
+        !check(sink.m_calls == 1u && sink.m_packet.size() == 0x10002u * 16u &&
+               sink.m_packet[12u] == 0x44u &&
+               sink.m_packet[16u] == 0x17u &&
+               sink.m_packet[0x8001u * 16u + 12u] == 0x88u &&
+               sink.m_packet.back() == 0x28u &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.vif1_channel_state().m_tadr == 0x120u &&
+               large_dmac.vif1_channel_state().m_madr == 0x101000u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x100u) == 0u &&
+               large_dmac.status() == 2u, "large chain did not commit atomically"))
+    {
+        return 1;
+    }
+
+    large_dmac.reset();
+    sink = {};
+    // Repeated NEXT with nonzero payload must be rejected before the
+    // host accumulates a large cyclic transaction.
+    write_tag(large_memory, 0x200u, 1u, 2u, 0u, 0x200u, 0u);
+    if (!check(begin(large_dmac, 0x200u), "cyclic chain start refused") ||
+        !check(large_dmac.vif1_chain_last_reject() == reject::cyclic_chain &&
+               sink.m_calls == 0u && large_dmac.status() == 0u &&
+               large_dmac.vif1_channel_state().m_tadr == 0x200u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x100u) != 0u,
+               "cycle did not fail closed"))
+    {
+        return 1;
+    }
+
+    // Many small tags can form a legal chain well below the payload
+    // limit. Reuse a RET subroutine with distinct CALL return addresses.
+    // Each CALL and RET also sends a TTE quadword.
+    large_dmac.reset();
+    sink = {};
+    constexpr uint32_t k_calls = 2048u;
+    constexpr uint32_t k_start = 0x100u;
+    constexpr uint32_t k_subroutine = 0x10000u;
+    for (uint32_t i = 0u; i < k_calls; ++i)
+    {
+        write_tag(large_memory, k_start + i * 16u, 0u, 5u, 0u,
+                  k_subroutine, static_cast<uint64_t>(i) << 32u);
+    }
+    write_tag(large_memory, k_start + k_calls * 16u, 0u, 7u, 0u, 0u,
+              0x5566778800000000ull);
+    write_tag(large_memory, k_subroutine, 0u, 6u, 0u, 0u,
+              0x1122334400000000ull);
+    if (!check(begin(large_dmac, k_start), "long CALL/RET chain start refused") ||
+        !check(sink.m_calls == 1u &&
+               sink.m_packet.size() == (2u * k_calls + 1u) * 16u &&
+               sink.m_packet[28u] == 0x44u &&
+               sink.m_packet[44u] == 1u &&
+               sink.m_packet[sink.m_packet.size() - 4u] == 0x88u &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.vif1_channel_state().m_tadr ==
+                   k_start + (k_calls + 1u) * 16u &&
+               (large_dmac.vif1_channel_state().m_chcr & 0x130u) == 0u &&
+               large_dmac.status() == 2u,
+               "long chain or repeated CALL/RET did not commit"))
+    {
+        return 1;
+    }
+
+    // A new preflight must not see previous-generation visit keys or
+    // stale payload bytes even when it walks exactly the same addresses.
+    const auto first_packet = sink.m_packet;
+    large_dmac.reset();
+    sink = {};
+    if (!check(begin(large_dmac, k_start) && sink.m_calls == 1u &&
+               sink.m_packet == first_packet &&
+               large_dmac.vif1_chain_last_reject() == reject::none,
+               "reused preflight leaked visit keys or payload"))
+    {
+        return 1;
+    }
+
+    // Even a tag-only chain is bounded. Reject the full batch if its
+    // terminal tag is beyond the host budget.
+    large_dmac.reset();
+    sink = {};
+    constexpr uint32_t k_budget = 65536u;
+    for (uint32_t i = 0u; i < k_budget; ++i)
+    {
+        write_tag(large_memory, k_start + i * 16u, 0u, 1u, 0u, 0u, 0u);
+    }
+    write_tag(large_memory, k_start + k_budget * 16u, 0u, 7u, 0u, 0u, 0u);
+    if (!check(begin(large_dmac, k_start, 0x185u), "over-budget chain start refused") ||
+        !check(large_dmac.vif1_chain_last_reject() == reject::chain_tag_limit &&
+               sink.m_calls == 0u && large_dmac.status() == 0u &&
+               large_dmac.vif1_channel_state().m_tadr == k_start &&
+               large_dmac.vif1_channel_state().m_chcr == 0x185u,
+               "over-budget chain did not fail closed"))
+    {
+        return 1;
+    }
+
+    // The same table can admit exactly the full tag budget after a
+    // failed over-budget walk. No stale visited entry can reject it.
+    large_dmac.reset();
+    sink = {};
+    write_tag(large_memory, k_start + (k_budget - 1u) * 16u,
+              0u, 7u, 0u, 0u, 0u);
+    if (!check(begin(large_dmac, k_start, 0x185u) &&
+               large_dmac.vif1_chain_last_reject() == reject::none &&
+               large_dmac.status() == 2u && sink.m_calls == 0u,
+               "exact-budget tag-only retry failed"))
+    {
+        return 1;
+    }
+
+    // SPR payload wraps from the final quadword to offset zero.
+    // Validate all bytes, rather than only the first and last lanes.
+    dmac.reset();
+    sink = {};
+    constexpr uint32_t k_spr = ee::ee_memory::k_scratchpad_base;
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        memory.write8(k_spr + 0x3ff0u + i, static_cast<uint8_t>(i + 1u));
+        memory.write8(k_spr + i, static_cast<uint8_t>(i + 17u));
+    }
+    write_tag(memory, 0x300u, 2u, 0u, 0u, 0x80003ff0u, 0u);
+    if (!check(begin(dmac, 0x300u, 0x185u), "SPR wrapping start refused") ||
+        !check(sink.m_calls == 1u && sink.m_packet.size() == 32u &&
+               dmac.status() == 2u &&
+               dmac.vif1_channel_state().m_madr == 0x80004010u,
+               "SPR wrap did not commit"))
+    {
+        return 1;
+    }
+    for (uint32_t i = 0u; i < 32u; ++i)
+    {
+        if (!check(sink.m_packet[i] == i + 1u, "SPR wrapped byte mismatch"))
+        {
+            return 1;
+        }
+    }
+
+    // An address overflow or partially mapped RAM payload must reject
+    // the whole transfer, even when its first quadword is valid.
+    for (uint32_t external : {0xfffffff0u, 0x00000ff0u})
+    {
+        dmac.reset();
+        sink = {};
+        write_tag(memory, 0x300u, 2u, 0u, 0u, external, 0u);
+        if (!check(begin(dmac, 0x300u), "partial span start refused") ||
+            !check(dmac.vif1_chain_last_reject() == reject::invalid_payload_span &&
+                   sink.m_calls == 0u && dmac.status() == 0u &&
+                   dmac.vif1_channel_state().m_tadr == 0x300u &&
+                   (dmac.vif1_channel_state().m_chcr & 0x100u) != 0u,
+                   "partial span committed DMA"))
+        {
+            return 1;
+        }
+    }
+
     std::puts("EE VIF1 source chain TTE/TIE/rollback: PASS");
     return 0;
 }

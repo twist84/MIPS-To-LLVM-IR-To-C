@@ -60,22 +60,11 @@ bool c_ee_scanout_clock::configure(
     return true;
 }
 
-bool c_ee_scanout_clock::advance_to(
+bool c_ee_scanout_clock::deliver_due_edges(
     uint64_t ee_cycle, c_ee_intc* intc,
     c_ee_vsync_flags* flags, ee_memory* memory
 )
 {
-    // Keep enough headroom to queue the field *after* every delivered
-    // boundary. Otherwise an UINT64_MAX-adjacent timestamp could wrap the
-    // rational next-field accumulator and repeatedly fire a past event.
-    if (!m_enabled || ee_cycle < m_last_ee_cycle ||
-        ee_cycle > std::numeric_limits<uint64_t>::max() -
-            2u * k_ee_clock_hz ||
-        intc == nullptr || flags == nullptr || memory == nullptr)
-    {
-        return false;
-    }
-
     // Reject impractically huge jumps without producing a partial series
     // of VBlank events. This protects against malformed cycle timestamps.
     constexpr uint64_t k_max_fields_per_advance = 1024ull;
@@ -131,14 +120,14 @@ void c_ee_scanout_clock::acknowledge_csr(uint64_t write_one_to_clear)
     m_csr &= ~(write_one_to_clear & 0x1full);
 }
 
-bool c_ee_scanout_clock::enabled() const
+uint64_t c_ee_scanout_clock::next_event_cycle() const
 {
-    return m_enabled;
-}
-
-uint64_t c_ee_scanout_clock::next_field_cycle() const
-{
-    return m_next_field_cycle;
+    if (!m_enabled)
+    {
+        return std::numeric_limits<uint64_t>::max();
+    }
+    return m_next_end_cycle != 0u && m_next_end_cycle < m_next_field_cycle
+        ? m_next_end_cycle : m_next_field_cycle;
 }
 
 uint64_t c_ee_scanout_clock::last_ee_cycle() const
@@ -146,24 +135,4 @@ uint64_t c_ee_scanout_clock::last_ee_cycle() const
     return m_last_ee_cycle;
 }
 
-uint64_t c_ee_scanout_clock::csr() const
-{
-    return m_csr;
-}
-
-uint64_t c_ee_scanout_clock::fields_started() const
-{
-    return m_fields_started;
-}
-
-uint64_t c_ee_scanout_clock::fields_ended() const
-{
-    return m_fields_ended;
-}
-
-const std::vector<uint8_t>&
-c_ee_scanout_clock::delivered_vblank_edges() const
-{
-    return m_delivered_edges;
-}
 } // namespace ee

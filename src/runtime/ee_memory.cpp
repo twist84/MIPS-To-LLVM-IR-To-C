@@ -206,8 +206,7 @@ bool ee_memory::in_ram_range(uint32_t addr, size_t len) const
 
 uint32_t ee_memory::direct_read32(uint32_t addr)
 {
-    return (uint32_t)(m_data[addr] | (m_data[addr + 1] << 8) |
-                      (m_data[addr + 2] << 16) | (m_data[addr + 3] << 24));
+    return static_cast<uint32_t>(load_le(m_data + addr, 4u));
 }
 
 void ee_memory::direct_write32(uint32_t addr, uint32_t v)
@@ -296,14 +295,6 @@ constexpr uint32_t k_vu0_code_base = 0x11000000u;
 constexpr uint32_t k_vu0_data_base = 0x11004000u;
 constexpr uint32_t k_vu0_window_size = 0x1000u;
 
-uint32_t bus_address(s_ee_runtime* runtime, uint32_t address)
-{
-    const ee_memory* memory = static_cast<const ee_memory*>(
-        runtime != nullptr ? runtime->m_user : nullptr
-    );
-    return memory != nullptr ? memory->translate_direct_address(address) : address;
-}
-
 uint8_t* map_vu0_memory(s_ee_runtime* runtime, uint32_t physical, size_t width)
 {
     if (runtime == nullptr || runtime->m_vu0_state == nullptr)
@@ -358,9 +349,8 @@ ee_memory* runtime_memory(s_ee_runtime* runtime)
 
 // True means the address belongs to an EE hardware bus window, even if no
 // device implements it. Unknown MMIO reads return zero without touching RAM.
-bool read_bus(s_ee_runtime* runtime, uint32_t guest, uint32_t width, s_ee_u128* out)
+bool read_bus(s_ee_runtime* runtime, uint32_t physical, uint32_t width, s_ee_u128* out)
 {
-    const uint32_t physical = bus_address(runtime, guest);
     if (const uint8_t* bytes = map_vu0_memory(runtime, physical, width))
     {
         out->m_lo = load_le(bytes, width > 8 ? 8 : width);
@@ -392,10 +382,9 @@ bool read_bus(s_ee_runtime* runtime, uint32_t guest, uint32_t width, s_ee_u128* 
     return true;
 }
 
-bool write_bus(s_ee_runtime* runtime, uint32_t guest, uint32_t width,
+bool write_bus(s_ee_runtime* runtime, uint32_t physical, uint32_t width,
                const s_ee_u128* value)
 {
-    const uint32_t physical = bus_address(runtime, guest);
     if (uint8_t* bytes = map_vu0_memory(runtime, physical, width))
     {
         store_le(bytes, width > 8 ? 8 : width, value->m_lo);
@@ -422,50 +411,114 @@ bool write_bus(s_ee_runtime* runtime, uint32_t guest, uint32_t width,
     }
     return true;
 }
+
+// Main RAM is below the EE device aperture. The common case needs no
+// VU0/MMIO checks, second alias translation or configured-range checks.
+// Only a wholly backed physical span may take this path. Unusual maps,
+// scratchpad, devices, and partial/out-of-bounds accesses keep the exact
+// original checked bus/memory fallback.
+uint8_t* fast_ram_span(ee_memory* memory, uint32_t physical, size_t width)
+{
+    return memory != nullptr && physical < k_mmio_first
+        ? memory->physical_ram_span(physical, width) : nullptr;
+}
+
+// Aligned quadwords cannot straddle a direct-alias or device-aperture
+// boundary. Deliberately reject unaligned input even when backed by RAM:
+// the paired fallback must preserve independent address translation.
+uint8_t* fast_quadword_span(s_ee_runtime* runtime, uint32_t address)
+{
+    if ((address & 15u) != 0u)
+    {
+        return nullptr;
+    }
+    ee_memory* memory = runtime_memory(runtime);
+    if (memory == nullptr)
+    {
+        return nullptr;
+    }
+    return fast_ram_span(memory, memory->translate_direct_address(address), 16u);
+}
+
+// memcpy is alignment-safe and lowers to native-width loads/stores on
+// little-endian hosts. Retain byte-wise LE semantics on other hosts.
+template<typename T>
+T read_ram(const uint8_t* bytes)
+{
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    T value{};
+    std::memcpy(&value, bytes, sizeof(value));
+    return value;
+#else
+    return static_cast<T>(load_le(bytes, sizeof(T)));
+#endif
+}
+
+template<typename T>
+void write_ram(uint8_t* bytes, T value)
+{
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+    std::memcpy(bytes, &value, sizeof(value));
+#else
+    store_le(bytes, sizeof(T), static_cast<uint64_t>(value));
+#endif
+}
+
+template<typename T, T (ee_memory::*Read)(uint32_t)>
+T read_scalar(s_ee_runtime* runtime, uint32_t address)
+{
+    ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    if (const uint8_t* bytes = fast_ram_span(memory, physical, sizeof(T)))
+    {
+        return read_ram<T>(bytes);
+    }
+    s_ee_u128 result{};
+    if (read_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &result))
+    {
+        return static_cast<T>(result.m_lo);
+    }
+    return memory != nullptr ? (memory->*Read)(address) : T{};
+}
+
+template<typename T, void (ee_memory::*Write)(uint32_t, T)>
+void write_scalar(s_ee_runtime* runtime, uint32_t address, T value)
+{
+    ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    if (uint8_t* bytes = fast_ram_span(memory, physical, sizeof(T)))
+    {
+        write_ram(bytes, value);
+        return;
+    }
+    const s_ee_u128 data{value, 0};
+    if (!write_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &data) && memory != nullptr)
+    {
+        (memory->*Write)(address, value);
+    }
+}
 } // namespace
 
 uint8_t ee_mem_read8(s_ee_runtime* runtime, uint32_t address)
 {
-    s_ee_u128 result{};
-    if (read_bus(runtime, address, 1, &result))
-    {
-        return static_cast<uint8_t>(result.m_lo);
-    }
-    ee_memory* memory = runtime_memory(runtime);
-    return memory != nullptr ? memory->read8(address) : 0;
+    return read_scalar<uint8_t, &ee_memory::read8>(runtime, address);
 }
 
 uint16_t ee_mem_read16(s_ee_runtime* runtime, uint32_t address)
 {
-    s_ee_u128 result{};
-    if (read_bus(runtime, address, 2, &result))
-    {
-        return static_cast<uint16_t>(result.m_lo);
-    }
-    ee_memory* memory = runtime_memory(runtime);
-    return memory != nullptr ? memory->read16(address) : 0;
+    return read_scalar<uint16_t, &ee_memory::read16>(runtime, address);
 }
 
 uint32_t ee_mem_read32(s_ee_runtime* runtime, uint32_t address)
 {
-    s_ee_u128 result{};
-    if (read_bus(runtime, address, 4, &result))
-    {
-        return static_cast<uint32_t>(result.m_lo);
-    }
-    ee_memory* memory = runtime_memory(runtime);
-    return memory != nullptr ? memory->read32(address) : 0;
+    return read_scalar<uint32_t, &ee_memory::read32>(runtime, address);
 }
 
 uint64_t ee_mem_read64(s_ee_runtime* runtime, uint32_t address)
 {
-    s_ee_u128 result{};
-    if (read_bus(runtime, address, 8, &result))
-    {
-        return result.m_lo;
-    }
-    ee_memory* memory = runtime_memory(runtime);
-    return memory != nullptr ? memory->read64(address) : 0;
+    return read_scalar<uint64_t, &ee_memory::read64>(runtime, address);
 }
 
 void ee_mem_read128(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
@@ -475,12 +528,22 @@ void ee_mem_read128(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
         return;
     }
 
-    *out = {};
-    if (read_bus(runtime, address, 16, out))
+    ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    if (const uint8_t* bytes = fast_ram_span(memory, physical, 16u))
     {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        std::memcpy(out, bytes, 16u);
+#else
+        out->m_lo = read_ram<uint64_t>(bytes);
+        out->m_hi = read_ram<uint64_t>(bytes + 8u);
+#endif
         return;
     }
-    if (ee_memory* memory = runtime_memory(runtime))
+    *out = {};
+    if (!read_bus(runtime, physical, 16u, out) && memory != nullptr)
     {
         memory->read128(address, out);
     }
@@ -488,50 +551,22 @@ void ee_mem_read128(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
 
 void ee_mem_write8(s_ee_runtime* runtime, uint32_t address, uint8_t value)
 {
-    const s_ee_u128 data{value, 0};
-    if (!write_bus(runtime, address, 1, &data))
-    {
-        if (ee_memory* memory = runtime_memory(runtime))
-        {
-            memory->write8(address, value);
-        }
-    }
+    write_scalar<uint8_t, &ee_memory::write8>(runtime, address, value);
 }
 
 void ee_mem_write16(s_ee_runtime* runtime, uint32_t address, uint16_t value)
 {
-    const s_ee_u128 data{value, 0};
-    if (!write_bus(runtime, address, 2, &data))
-    {
-        if (ee_memory* memory = runtime_memory(runtime))
-        {
-            memory->write16(address, value);
-        }
-    }
+    write_scalar<uint16_t, &ee_memory::write16>(runtime, address, value);
 }
 
 void ee_mem_write32(s_ee_runtime* runtime, uint32_t address, uint32_t value)
 {
-    const s_ee_u128 data{value, 0};
-    if (!write_bus(runtime, address, 4, &data))
-    {
-        if (ee_memory* memory = runtime_memory(runtime))
-        {
-            memory->write32(address, value);
-        }
-    }
+    write_scalar<uint32_t, &ee_memory::write32>(runtime, address, value);
 }
 
 void ee_mem_write64(s_ee_runtime* runtime, uint32_t address, uint64_t value)
 {
-    const s_ee_u128 data{value, 0};
-    if (!write_bus(runtime, address, 8, &data))
-    {
-        if (ee_memory* memory = runtime_memory(runtime))
-        {
-            memory->write64(address, value);
-        }
-    }
+    write_scalar<uint64_t, &ee_memory::write64>(runtime, address, value);
 }
 
 void ee_mem_write128(s_ee_runtime* runtime, uint32_t address, const s_ee_u128* value)
@@ -541,15 +576,88 @@ void ee_mem_write128(s_ee_runtime* runtime, uint32_t address, const s_ee_u128* v
         return;
     }
 
-    if (!write_bus(runtime, address, 16, value))
+    ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    if (uint8_t* bytes = fast_ram_span(memory, physical, 16u))
     {
-        if (ee_memory* memory = runtime_memory(runtime))
-        {
-            memory->write128(address, value);
-        }
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        std::memcpy(bytes, value, 16u);
+#else
+        write_ram(bytes, value->m_lo);
+        write_ram(bytes + 8u, value->m_hi);
+#endif
+        return;
+    }
+    if (!write_bus(runtime, physical, 16u, value) && memory != nullptr)
+    {
+        memory->write128(address, value);
     }
 }
 
+
+void ee_mem_read128_pair(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
+{
+    if (out == nullptr)
+    {
+        return;
+    }
+
+    if (const uint8_t* bytes = fast_quadword_span(runtime, address))
+    {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        std::memcpy(out, bytes, 16u);
+#else
+        out->m_lo = read_ram<uint64_t>(bytes);
+        out->m_hi = read_ram<uint64_t>(bytes + 8u);
+#endif
+        return;
+    }
+
+    // Finish both reads before publishing the result, just as the IR did.
+    const uint64_t lo = ee_mem_read64(runtime, address);
+    const uint64_t hi = ee_mem_read64(runtime, address + 8u);
+    *out = {lo, hi};
+}
+
+static bool try_write128_ram(s_ee_runtime* runtime, uint32_t address,
+                             uint64_t lo, uint64_t hi)
+{
+    if (uint8_t* bytes = fast_quadword_span(runtime, address))
+    {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        const s_ee_u128 value{lo, hi};
+        std::memcpy(bytes, &value, 16u);
+#else
+        write_ram(bytes, lo);
+        write_ram(bytes + 8u, hi);
+#endif
+        return true;
+    }
+    return false;
+}
+
+void ee_mem_write128_pair(s_ee_runtime* runtime, uint32_t address,
+                          uint64_t lo, uint64_t hi)
+{
+    if (!try_write128_ram(runtime, address, lo, hi))
+    {
+        ee_mem_write64(runtime, address, lo);
+        ee_mem_write64(runtime, address + 8u, hi);
+    }
+}
+
+uint32_t ee_mem_try_write128_ram(s_ee_runtime* runtime, uint32_t address,
+                                uint64_t lo, uint64_t hi)
+{
+    // Even a currently exhausted trace budget can retain ring history.
+    // Keep all traced stores on the original per-lane path.
+    return runtime != nullptr && !runtime->m_guest_store_trace_enabled &&
+        try_write128_ram(runtime, address, lo, hi) ? 1u : 0u;
+}
 
 void ee_trace_guest_store(
     s_ee_runtime* runtime, uint32_t pc, uint32_t opcode,

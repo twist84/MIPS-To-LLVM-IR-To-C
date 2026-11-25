@@ -78,6 +78,10 @@ public:
     c_cpu();
     void reset(uint32_t entry = 0u);
     void bind_hardware(c_hw* hardware);
+    bool hardware_bound_to(const c_hw* hardware) const
+    {
+        return m_hardware == hardware;
+    }
 
     // The 4 MiB primary PS2 BIOS ROM is read-only at physical
     // 0x1fc00000, KSEG0 and KSEG1. No firmware is provided by the

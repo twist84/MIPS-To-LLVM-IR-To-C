@@ -5,6 +5,7 @@ Examples:
   python3 tools/verify_ir.py 'out/*.ll'
   python3 tools/verify_ir.py 'out/*.ll' --emit
   python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects --emit-opt=0
+  python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects-ir-o2 --emit-opt=4
   python3 tools/verify_ir.py 'out/*.ll' --emit-dir=out/objects --emit-opt=0 --incremental --jobs=4
   python3 tools/verify_ir.py out/NEW1.ll out/NEW2.ll --emit-dir=out/objects --emit-opt=0 --incremental --append-only
 
@@ -20,9 +21,12 @@ provide safe concurrent LLVM emission.
 """
 import collections
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from contextlib import nullcontext
 import glob
 import hashlib
 import json
+import multiprocessing
+import os
 import re
 import sys
 import time
@@ -32,6 +36,45 @@ import llvmlite.binding as llvm
 
 
 _worker_machines = {}
+
+# Profile 4 is not a backend O4 level: it is the LLVM default O2
+# middle-end pipeline followed by O2 machine code generation.
+IR_PIPELINE_PROFILE = 4
+HOST_NATIVE_PROFILE = 5
+IR_PIPELINE_ID = "llvm-default-O2-v1"
+# Bound process-local LLVM/allocator retention during whole-image builds.
+IR_PIPELINE_WORKER_MODULES = 128
+
+
+def ir_pipeline_id(profile):
+    return IR_PIPELINE_ID if profile == IR_PIPELINE_PROFILE else None
+
+
+def backend_opt(profile):
+    return 2 if profile in (IR_PIPELINE_PROFILE, HOST_NATIVE_PROFILE) else profile
+
+
+def native_target_identity(profile):
+    """Exact host CPU feature provenance for nonportable guest objects."""
+    if profile != HOST_NATIVE_PROFILE:
+        return None
+    return {
+        "cpu": llvm.get_host_cpu_name(),
+        "features": llvm.get_host_cpu_features().flatten(),
+        "triple": llvm.get_default_triple(),
+        "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+    }
+
+
+def optimize_guest_ir(module, target_machine):
+    """Optimize a parsed, host-targeted module, never its source .ll file."""
+    # LLVM bindings have used different names for the size tuning
+    # argument. O2 with the default size level (zero) needs only speed.
+    with llvm.create_pipeline_tuning_options(2) as tuning:
+        with llvm.create_pass_builder(target_machine, tuning) as builder:
+            with builder.getModulePassManager() as passes:
+                passes.run(module, builder)
+    module.verify()
 
 
 def write_atomic(path, data):
@@ -50,42 +93,75 @@ def get_target_machine(emit_opt, target_triple):
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
         target = llvm.Target.from_triple(target_triple)
+        identity = native_target_identity(emit_opt)
+        tuning = ({"cpu": identity["cpu"], "features": identity["features"]}
+                  if identity is not None else {})
         _worker_machines[key] = target.create_target_machine(
-            opt=emit_opt, reloc="pic", codemodel="default"
+            opt=backend_opt(emit_opt), reloc="pic", codemodel="default", **tuning
         )
     return _worker_machines[key]
+
+
+def preflight_ir_pipeline(target_triple):
+    """Check the installed LLVM pipeline before creating objects or workers."""
+    machine = get_target_machine(IR_PIPELINE_PROFILE, target_triple)
+    with llvm.create_context() as context, llvm.parse_assembly("""
+define i32 @ee_pipeline_probe(i32 %x) {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+""", context=context) as module:
+        module.triple = target_triple
+        module.data_layout = str(machine.target_data)
+        module.verify()
+        optimize_guest_ir(module, machine)
+        if "alloca" in str(module):
+            raise RuntimeError("LLVM O2 pipeline did not promote the probe stack slot")
+        if not machine.emit_object(module):
+            raise RuntimeError("LLVM O2 pipeline probe emitted no object")
 
 
 def compile_module(filename, emit_opt, emit_dir, target_triple):
     started = time.monotonic()
     try:
         ir_bytes = Path(filename).read_bytes()
-        module = llvm.parse_assembly(ir_bytes.decode("utf-8"))
-        module.verify()
-        entry = None
-        object_size = 0
-        if emit_opt is not None:
-            target_machine = get_target_machine(emit_opt, target_triple)
-            # The MIPS/Windows-targeted guest IR must be emitted for the
-            # current host, not the ELF's guest address-space layout.
-            module.triple = target_triple
-            module.data_layout = str(target_machine.target_data)
+        # The global LLVM context may retain uniqued types/metadata across
+        # thousands of modules. Release each optimized module and its
+        # private context before processing the next input.
+        context_scope = (llvm.create_context() if emit_opt == IR_PIPELINE_PROFILE
+                         else nullcontext(None))
+        with context_scope as context, llvm.parse_assembly(
+                ir_bytes.decode("utf-8"), context=context) as module:
             module.verify()
-            object_data = target_machine.emit_object(module)
-            object_size = len(object_data)
-            if emit_dir is not None:
-                object_name = Path(filename).stem + ".o"
-                write_atomic(Path(emit_dir) / object_name, object_data)
-                entry = {
-                    "input": str(Path(filename)),
-                    "object": object_name,
-                    "size_bytes": object_size,
-                    "sha256": hashlib.sha256(object_data).hexdigest(),
-                    "ir_sha256": hashlib.sha256(ir_bytes).hexdigest(),
-                    "defined_symbols": [
-                        fn.name for fn in module.functions if not fn.is_declaration
-                    ],
-                }
+            entry = None
+            object_size = 0
+            if emit_opt is not None:
+                target_machine = get_target_machine(emit_opt, target_triple)
+                # The MIPS/Windows-targeted guest IR must be emitted for the
+                # current host, not the ELF's guest address-space layout.
+                module.triple = target_triple
+                module.data_layout = str(target_machine.target_data)
+                module.verify()
+                if emit_opt == IR_PIPELINE_PROFILE:
+                    optimize_guest_ir(module, target_machine)
+                object_data = target_machine.emit_object(module)
+                object_size = len(object_data)
+                if emit_dir is not None:
+                    object_name = Path(filename).stem + ".o"
+                    write_atomic(Path(emit_dir) / object_name, object_data)
+                    entry = {
+                        "input": str(Path(filename)),
+                        "object": object_name,
+                        "size_bytes": object_size,
+                        "sha256": hashlib.sha256(object_data).hexdigest(),
+                        "ir_sha256": hashlib.sha256(ir_bytes).hexdigest(),
+                        "defined_symbols": [
+                            fn.name for fn in module.functions if not fn.is_declaration
+                        ],
+                    }
         return {
             "valid": True, "entry": entry, "object_size": object_size,
             "elapsed": time.monotonic() - started, "filename": filename,
@@ -97,6 +173,24 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
         }
 
 
+def compile_module_job(args):
+    return compile_module(*args)
+
+
+def input_path(value, emit_dir, manifest):
+    path = Path(value)
+    if manifest.get("path_format") == "manifest-relative-v1":
+        return str((emit_dir / path).resolve())
+    return str(path.resolve())
+
+
+def relative_input(filename, emit_dir):
+    try:
+        return Path(os.path.relpath(Path(filename).resolve(), emit_dir.resolve())).as_posix()
+    except ValueError:
+        return str(Path(filename).resolve())
+
+
 def cached_objects(emit_dir, emit_opt, target_triple, filenames):
     manifest_path = emit_dir / "objects.json"
     if not manifest_path.is_file():
@@ -106,6 +200,8 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
         if (
             not manifest.get("complete")
             or manifest.get("optimization_level") != emit_opt
+            or manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)
+            or manifest.get("native_target") != native_target_identity(emit_opt)
             or manifest.get("target_triple") != target_triple
             or manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))
         ):
@@ -115,7 +211,9 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
             item.get("input") for item in entries if isinstance(item, dict)
         }):
             return {}
-        by_input = {item["input"]: item for item in entries}
+        by_input = {input_path(item["input"], emit_dir, manifest): item for item in entries}
+        if len(by_input) != len(entries):
+            return {}
         reused = {}
         for filename in filenames:
             item = by_input.get(filename)
@@ -156,6 +254,8 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (manifest.get("complete") is not True or
         manifest.get("optimization_level") != emit_opt or
+        manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
+        manifest.get("native_target") != native_target_identity(emit_opt) or
         manifest.get("target_triple") != target_triple or
         manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info))):
         raise ValueError("append-only object manifest is stale or incompatible")
@@ -172,6 +272,8 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
         if not isinstance(item, dict):
             raise ValueError("invalid cached object entry")
         filename = item.get("input")
+        if isinstance(filename, str) and filename:
+            filename = input_path(filename, emit_dir, manifest)
         obj = item.get("object")
         size = item.get("size_bytes")
         symbols = item.get("defined_symbols")
@@ -216,8 +318,8 @@ def main():
             emit_opt = 2
         elif arg.startswith("--emit-opt="):
             emit_opt = int(arg.split("=", 1)[1])
-            if not 0 <= emit_opt <= 3:
-                raise SystemExit("--emit-opt must be between 0 and 3")
+            if not 0 <= emit_opt <= HOST_NATIVE_PROFILE:
+                raise SystemExit("--emit-opt must be 0..3 (backend only), 4 (O2 IR + O2 backend), or 5 (host-native O2 backend)")
         elif arg.startswith("--emit-dir="):
             emit_dir = Path(arg.split("=", 1)[1])
             if emit_opt is None:
@@ -239,12 +341,28 @@ def main():
     if append_only and (not incremental or emit_dir is None):
         raise SystemExit("--append-only requires --incremental and --emit-dir")
 
-    files = sorted({str(Path(name)) for pattern in patterns for name in glob.glob(pattern)})
+    files = sorted({str(Path(name).resolve()) for pattern in patterns for name in glob.glob(pattern)})
     if not files:
         print("No LLVM IR files matched the supplied pattern(s).")
         return 2
 
     target_triple = llvm.get_default_triple() if emit_opt is not None else None
+    if emit_opt == HOST_NATIVE_PROFILE:
+        try:
+            identity = native_target_identity(emit_opt)
+            get_target_machine(emit_opt, target_triple)
+            print(f"verify_ir: host-native O2 CPU={identity['cpu']} "
+                  f"features={identity['features']}", flush=True)
+        except Exception as exc:
+            print(f"verify_ir: host-native target setup failed: {exc}", file=sys.stderr)
+            return 1
+    if emit_opt == IR_PIPELINE_PROFILE:
+        try:
+            preflight_ir_pipeline(target_triple)
+        except Exception as exc:
+            print(f"verify_ir: O2 IR pipeline preflight failed (LLVM "
+                  f"{llvm.llvm_version_info}): {exc}", file=sys.stderr)
+            return 1
     if emit_dir is not None:
         emit_dir.mkdir(parents=True, exist_ok=True)
         object_names = [Path(filename).stem + ".o" for filename in files]
@@ -319,7 +437,20 @@ def main():
     # worker per ~6 modules measured fastest (25 modules: 1.51 s with one
     # worker, 0.87 s with four, 1.14 s with sixteen).
     workers = min(jobs, len(pending), max(1, len(pending) // 6))
-    if workers > 1:
+    if emit_opt == IR_PIPELINE_PROFILE and (
+            workers > 1 or len(pending) > IR_PIPELINE_WORKER_MODULES):
+        # Pool.maxtasksperchild reclaims native allocations even when
+        # LLVM or the process allocator retains them after context teardown.
+        # Spawn rather than fork a process that has initialized LLVM in
+        # preflight. One input per task keeps the recycle limit meaningful.
+        print(f"verify_ir: recycling IR pipeline workers every "
+              f"{IR_PIPELINE_WORKER_MODULES} modules", flush=True)
+        tasks = ((name, emit_opt, emit_dir, target_triple) for name in pending)
+        with multiprocessing.get_context("spawn").Pool(
+                processes=workers, maxtasksperchild=IR_PIPELINE_WORKER_MODULES) as pool:
+            for result in pool.imap_unordered(compile_module_job, tasks, chunksize=1):
+                record(result)
+    elif workers > 1:
         with ProcessPoolExecutor(max_workers=workers) as executor:
             futures = [
                 executor.submit(compile_module, filename, emit_opt, emit_dir, target_triple)
@@ -338,14 +469,19 @@ def main():
     if emit_dir is not None and (not append_only or bad == 0):
         manifest_order = sorted(emitted) if append_only else files
         manifest = {
+            "path_format": "manifest-relative-v1",
             "complete": bad == 0 and len(emitted) == len(manifest_order),
             "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
             "target_triple": target_triple,
             "optimization_level": emit_opt,
+            "ir_pipeline": ir_pipeline_id(emit_opt),
+            "native_target": native_target_identity(emit_opt),
+            "backend_optimization_level": backend_opt(emit_opt),
             "input_module_count": len(manifest_order),
             "object_count": len(emitted),
             "object_bytes": sum(item["size_bytes"] for item in emitted.values()),
-            "objects": [emitted[name] for name in manifest_order if name in emitted],
+            "objects": [dict(emitted[name], input=relative_input(name, emit_dir))
+                        for name in manifest_order if name in emitted],
         }
         write_atomic(
             emit_dir / "objects.json",

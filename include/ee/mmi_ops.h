@@ -65,7 +65,7 @@ static inline s_ee_u128 mmi_sar128(const s_ee_u128& v, int n)
 // Apply one MMI packed op. a = rs operand, b = rt operand, sa = shift amount.
 inline s_ee_u128 mmi_apply(e_lift_op_kind kind, const s_ee_u128& a, const s_ee_u128& b, uint8_t sa)
 {
-    s_ee_u128 r;
+    s_ee_u128 r{};
     switch (kind)
     {
     case LOP_MMI_ADD_B:

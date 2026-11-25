@@ -321,7 +321,7 @@ int main()
     // The EE Core manual lists DIV.S, SQRT.S and RSQRT.S separately.
     // No one class may inherit another's configured candidate latency.
     const uint32_t sqrt_s = (0x11u << 26u) | (0x10u << 21u) |
-                            (2u << 11u) | (4u << 6u) | 0x04u;
+                            (2u << 16u) | (4u << 6u) | 0x04u;
     const uint32_t rsqrt_s = (0x11u << 26u) | (0x10u << 21u) |
                              (3u << 16u) | (2u << 11u) |
                              (5u << 6u) | 0x16u;

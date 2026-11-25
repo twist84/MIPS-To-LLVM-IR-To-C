@@ -2,6 +2,7 @@
 
 #include "ee_runtime.h"
 #include "ee_memory.h"
+#include "ee_vif1.h"
 
 #include <cstdint>
 
@@ -72,13 +73,23 @@ public:
     };
 
     // Physical GIF-channel state for host diagnostics (read only).
-    s_gif_channel_state gif_channel_state() const;
+    s_gif_channel_state gif_channel_state() const
+    {
+        const s_spr_channel& channel = m_device_channels[2u];
+        return {channel.m_chcr, channel.m_madr, channel.m_qwc, channel.m_tadr};
+    }
     // The same read-only CHCR/MADR/QWC/TADR view for physical VIF1.
     // This does not advance the DMA engine or read guest MMIO.
     s_gif_channel_state vif1_channel_state() const;
-    uint64_t gif_trace_count() const;
+    uint64_t gif_trace_count() const
+    {
+        return m_gif_trace_count;
+    }
     bool gif_trace_newest(uint32_t offset, s_gif_dma_write* result) const;
-    e_gif_dma_reject gif_last_reject() const;
+    e_gif_dma_reject gif_last_reject() const
+    {
+        return m_gif_last_reject;
+    }
 
     enum class e_vif1_chain_reject : uint32_t
     {
@@ -90,7 +101,8 @@ public:
         invalid_payload_span,
         chain_qwc_limit,
         chain_tag_limit,
-        rejected_by_sink
+        rejected_by_sink,
+        cyclic_chain
     };
     e_vif1_chain_reject vif1_chain_last_reject() const;
 
@@ -137,6 +149,35 @@ public:
     );
     void bind_device_transfer(void* user, t_device_transfer_callback callback);
 
+    // Optional deferred channel-1 forward transfers. The bound VIF
+    // must own a worker, and the controller must service it on the EE
+    // thread. STR, MADR/QWC/TADR and D_STAT remain uncommitted until
+    // the whole VIF transaction (including GIF publication) succeeds.
+    enum class e_deferred_vif1
+    {
+        idle,
+        pending,
+        completed,
+        rejected
+    };
+    void bind_deferred_vif1(c_ee_vif1* vif1);
+    bool deferred_vif1_pending() const { return m_vif1_pending; }
+    e_deferred_vif1 service_deferred_vif1(bool wait = false)
+    {
+        if (!m_vif1_pending)
+        {
+            return e_deferred_vif1::idle;
+        }
+        const auto accepted = wait ? m_deferred_vif1->wait_deferred() :
+            m_deferred_vif1->poll_deferred();
+        if (accepted == c_ee_vif1::e_deferred_result::pending)
+        {
+            return e_deferred_vif1::pending;
+        }
+        return finish_deferred_vif1(accepted);
+    }
+    void cancel_deferred_vif1();
+
     // VIF1 channel 1, CHCR.DIR=0: device-to-EE-RAM DMA.
     // The producer fills all 16*qwc bytes or rejects the entire
     // transfer without changing its internal state. On rejection,
@@ -152,8 +193,16 @@ public:
     bool raise(uint32_t channel);
     bool acknowledge(uint32_t channel);
 
-    uint32_t status() const;
-    uint32_t pending() const;
+    uint32_t status() const
+    {
+        return m_status;
+    }
+    uint32_t pending() const
+    {
+        // Physical DMA channels 0..9: low status bits and high mask bits.
+        // This is the same CIS & CIM expression used in ps2-web-recomp.
+        return (m_status & 0x03ffu) & ((m_status >> 16u) & 0x03ffu);
+    }
 
     static bool mmio_read(void* user, uint32_t address,
                           uint32_t width, s_ee_u128* value);
@@ -161,6 +210,7 @@ public:
                            uint32_t width, const s_ee_u128* value);
 
 private:
+    e_deferred_vif1 finish_deferred_vif1(c_ee_vif1::e_deferred_result accepted);
     struct s_spr_channel
     {
         uint32_t m_chcr = 0;
@@ -171,6 +221,8 @@ private:
         uint32_t m_asr[2]{};
     };
 
+    e_deferred_vif1 submit_deferred_vif1(const uint8_t* data, uint32_t qwc,
+        const s_spr_channel& next, bool chain);
     void sync_interrupt_line();
     void trace_gif_write(uint32_t offset, uint32_t value,
                          uint32_t previous);
@@ -196,6 +248,10 @@ private:
     ee_memory* m_memory = nullptr;
     void* m_device_user = nullptr;
     t_device_transfer_callback m_device_transfer = nullptr;
+    c_ee_vif1* m_deferred_vif1 = nullptr;
+    bool m_vif1_pending = false;
+    bool m_vif1_pending_chain = false;
+    s_spr_channel m_vif1_pending_next{};
     void* m_download_user = nullptr;
     t_device_download_callback m_device_download = nullptr;
     uint32_t m_status = 0;

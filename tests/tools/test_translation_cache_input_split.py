@@ -35,6 +35,11 @@ def verify_real_probe_location():
         key = "src/runtime/" + probe_name
         assert key in host, "host relink must fingerprint the native diagnostic"
         assert key not in guest, "host-only diagnostic must not fingerprint guest IR"
+        shared_fmac_key = "src/runtime/ee_vu_fmac4_ir.h"
+        assert shared_fmac_key in host, "shared SIMD source must fingerprint the native host"
+        assert shared_fmac_key in guest, "VU0 consumes the shared SIMD lowering template"
+        assert guest[shared_fmac_key] == host[shared_fmac_key]
+        assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
 
 
 def verify_preservation_when_host_only_inputs_change():
@@ -48,6 +53,7 @@ def verify_preservation_when_host_only_inputs_change():
         paths = {
             "tools/run_game.py": b"runner",
             "tools/verify_ir.py": b"verify",
+            "tools/shared_ee_ir.py": b"shared source store",
             "tools/link_native_objects.py": b"link",
             "src/ee/ee_dispatcher.cpp": b"dispatch",
             "src/ee/recompiled_functions.cpp": b"dispatch map",
@@ -55,6 +61,7 @@ def verify_preservation_when_host_only_inputs_change():
             "src/tools/ee_recomp_main.cpp": b"recomp front-end",
             "include/ee/guest_lifter_input.h": b"guest header",
             "src/runtime/ee_sdbz_pad_return_probe.h": b"first host probe",
+            "src/runtime/ee_vu_fmac4_ir.h": b"shared FMAC lowering",
         }
         for name, content in paths.items():
             path = source_root / name
@@ -135,6 +142,23 @@ def verify_preservation_when_host_only_inputs_change():
         )
         assert ir.read_text(encoding="utf-8") == "; synthetic verified IR\n"
 
+        # A shared runtime header actually consumed by the EE emitter
+        # must invalidate guest IR, unlike an unrelated host-only probe.
+        shared_fmac = source_root / "src/runtime/ee_vu_fmac4_ir.h"
+        shared_fmac.write_bytes(b"changed shared FMAC lowering")
+        changed_fmac = run_game.ir_generation_inputs(elf, source_root)
+        assert changed_fmac != initial_guest
+        try:
+            run_game.validate_preserved_translation(
+                cache, next_host, changed_fmac, 0, metadata_path, object_dir
+            )
+        except ValueError as error:
+            assert "guest IR generation input changed:" in str(error)
+            assert "ee_vu_fmac4_ir.h" in str(error)
+        else:
+            raise AssertionError("changed shared FMAC template unexpectedly reused")
+        shared_fmac.write_bytes(paths["src/runtime/ee_vu_fmac4_ir.h"])
+
         # A genuinely changed guest lowering header must still fail closed.
         (source_root / "include/ee/guest_lifter_input.h").write_bytes(
             b"changed guest IR source"
@@ -151,7 +175,63 @@ def verify_preservation_when_host_only_inputs_change():
             raise AssertionError("changed guest IR source unexpectedly reused")
 
 
+def verify_ir_directory_scan():
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory(prefix="ee-ir-scan-") as directory:
+        root = Path(directory).resolve()
+        ir = root / "ir"
+        ir.mkdir()
+        functions = []
+        for i in range(128):
+            path = ir / f"fn_{i:04d}.ll"
+            path.write_bytes(f"; module {i}\n".encode())
+            functions.append({"ir_path": str(path)})
+        expected = {Path(fn["ir_path"]).name:
+                    run_game.sha256_path(Path(fn["ir_path"])) for fn in functions}
+        original_resolve = Path.resolve
+        calls = []
+
+        def counted_resolve(self, *args, **kwargs):
+            calls.append(self)
+            return original_resolve(self, *args, **kwargs)
+
+        with patch.object(Path, "resolve", counted_resolve):
+            assert run_game.hash_ir_modules(
+                ir, functions, require_owned_directory=True) == expected
+        assert calls == [ir], calls
+        first = Path(functions[0]["ir_path"])
+        first.write_bytes(b"changed IR")
+        assert run_game.hash_ir_modules(
+            ir, functions, require_owned_directory=True) != expected
+
+        def rejected(entries):
+            try:
+                run_game.hash_ir_modules(ir, entries, require_owned_directory=True)
+            except (ValueError, OSError):
+                return
+            raise AssertionError("invalid IR ownership accepted")
+
+        rejected(functions + [functions[0]])
+        extra = ir / "extra.ll"
+        extra.write_bytes(b"unowned")
+        rejected(functions)
+        extra.unlink()
+        outside = root / first.name
+        outside.write_bytes(first.read_bytes())
+        rejected([{"ir_path": str(outside)}, *functions[1:]])
+        first.unlink()
+        rejected(functions)
+        try:
+            first.symlink_to(outside)
+        except (OSError, NotImplementedError):
+            pass
+        else:
+            rejected(functions)
+
+
 if __name__ == "__main__":
+    verify_ir_directory_scan()
     verify_real_probe_location()
     verify_preservation_when_host_only_inputs_change()
     print("PASS: host-only probes relink without invalidating guest translation")

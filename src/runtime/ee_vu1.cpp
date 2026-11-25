@@ -3,6 +3,9 @@
 // This first batch intentionally rejects unported instructions and timing
 // dependencies instead of silently treating them as NOPs.
 #include "ee_vu1.h"
+#include "ee_vu1_aot.h"
+#include "ee_runtime_profile.h"
+#include "ee_graphics_batch.h"
 #include "ee_vu1_fp.h"
 #include "ee_vu1_dependency.h"
 
@@ -77,15 +80,32 @@ uint32_t qword_offset(uint32_t address)
 // XGKICK walks actual GIFtags from VU1 RAM until an EOP tag. A missing EOP
 // or oversized chain is an error, never a fabricated empty PATH1 transfer.
 bool xgkick(const std::array<uint8_t, 16384>& data,
-            uint32_t address, std::vector<uint8_t>& output)
+            uint32_t address, std::vector<uint8_t>& output,
+            s_ee_vu1_issue& issue)
 {
-    std::vector<uint8_t> packet;
-    uint32_t qword = address & 0x3ffu;
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::vu1_xgkick);
+    const uint32_t start = qword_offset(address);
+    uint32_t count = 0u;
     bool finished = false;
-    for (uint32_t count = 0u; count < 1024u && !finished;)
+    const auto reject = [&](e_ee_vu1_kick_reject reason, uint32_t at,
+                            uint64_t tag, uint32_t packet_qwc)
     {
-        const uint32_t at = qword_offset(qword++);
+        issue.m_kick_reject = reason;
+        issue.m_kick_address = address & 0x3ffu;
+        issue.m_kick_tag_address = at / 16u;
+        issue.m_kick_tag = tag;
+        issue.m_kick_packet_qwc = packet_qwc;
+        issue.m_kick_staged_qwc = static_cast<uint32_t>(output.size() / 16u);
+        return false;
+    };
+    uint32_t last_at = 0u;
+    uint64_t last_tag = 0u;
+    for (; count < 1024u && !finished;)
+    {
+        const uint32_t at = qword_offset(address + count);
         const uint64_t tag = read64(data.data() + at);
+        last_at = at;
+        last_tag = tag;
         const uint32_t nloop = static_cast<uint32_t>(tag & 0x7fffu);
         const uint32_t flg = static_cast<uint32_t>((tag >> 58u) & 3u);
         uint32_t nreg = static_cast<uint32_t>((tag >> 60u) & 15u);
@@ -97,30 +117,49 @@ bool xgkick(const std::array<uint8_t, 16384>& data,
             flg == 1u ? (nloop * nreg + 1u) / 2u : nloop;
         if (body + 1u > 1024u - count)
         {
-            return false;
+            return reject(e_ee_vu1_kick_reject::packet_qwc_limit,
+                          at, tag, count + body + 1u);
         }
-        packet.insert(packet.end(), data.data() + at, data.data() + at + 16u);
-        ++count;
-        for (uint32_t i = 0u; i < body; ++i)
-        {
-            const uint32_t body_at = qword_offset(qword++);
-            packet.insert(packet.end(),
-                          data.data() + body_at, data.data() + body_at + 16u);
-            ++count;
-        }
+        // Only tags need inspection. Every body is a consecutive
+        // range of qwords in the same circular VU RAM.
+        count += body + 1u;
         finished = (tag & 0x8000u) != 0u;
     }
-    if (!finished || output.size() + packet.size() > 0x100000u)
+    if (!finished)
     {
-        return false;
+        return reject(e_ee_vu1_kick_reject::missing_eop, last_at, last_tag,
+                      count);
     }
-    output.insert(output.end(), packet.begin(), packet.end());
+    // PATH1 accumulates output from many independent kicks and MSCNT
+    // continuations in the same staged VIF transaction. Its aggregate
+    // budget must agree with the GIF/GS consumer, not VU1 memory size.
+    constexpr size_t k_max_batch_bytes =
+        static_cast<size_t>(k_max_graphics_batch_qwc) * 16u;
+    const size_t bytes = static_cast<size_t>(count) * 16u;
+    if (output.size() > k_max_batch_bytes ||
+        bytes > k_max_batch_bytes - output.size())
+    {
+        return reject(e_ee_vu1_kick_reject::batch_qwc_limit, last_at, last_tag,
+                      count);
+    }
+    // After complete validation, append the packet directly from RAM.
+    // At most one wrap is possible under the single-kick qword limit.
+    const size_t first = std::min(bytes, data.size() - start);
+    output.insert(output.end(), data.data() + start,
+                  data.data() + start + first);
+    if (bytes != first)
+    {
+        output.insert(output.end(), data.data(), data.data() + bytes - first);
+    }
     return true;
 }
 
 struct s_upper_write
 {
     std::array<uint32_t, 4> m_values{};
+    uint32_t m_overflow = 0u;
+    uint32_t m_underflow = 0u;
+    uint32_t m_product_sticky = 0u;
     uint32_t m_target = 0u;
     uint32_t m_mask = 0u;
     uint32_t m_clip = 0u;
@@ -132,7 +171,8 @@ struct s_upper_write
 
 // VU FMAC and status calculations ported from vu_micro.cpp::set_flags.
 void set_mac_flags(s_ee_vu1_state& state,
-                   const std::array<uint32_t, 4>& value, uint32_t mask)
+                   const std::array<uint32_t, 4>& value, uint32_t mask,
+                   uint32_t overflow, uint32_t underflow, uint32_t product_sticky)
 {
     uint32_t mac = 0u;
     for (uint32_t lane = 0u; lane < 4u; ++lane)
@@ -151,13 +191,17 @@ void set_mac_flags(s_ee_vu1_state& state,
         {
             mac |= 1u << (bit + 4u);
         }
-        if ((x & 0x7fffffffu) == 0x7fffffffu)
+        if ((underflow & (1u << bit)) != 0u)
+        {
+            mac |= 1u << (bit + 8u);
+        }
+        if ((overflow & (1u << bit)) != 0u)
         {
             mac |= 1u << (bit + 12u);
         }
     }
     state.m_mac = mac;
-    uint32_t status = state.m_status & 0xff0u;
+    uint32_t status = (state.m_status & 0xff0u) | product_sticky;
     if ((mac & 0x000fu) != 0u) { status |= 1u; }
     if ((mac & 0x00f0u) != 0u) { status |= 2u; }
     if ((mac & 0x0f00u) != 0u) { status |= 4u; }
@@ -247,6 +291,9 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
             uses_i ? state.m_i : state.m_vf[ft][lane];
         const uint32_t acc = state.m_acc[lane];
         uint32_t result = 0u;
+        vu_fmac_fp::s_fmac_result arithmetic{};
+        const uint32_t lane_bit = 8u >> lane;
+        const bool latched = (state.m_acc_overflow_mask & lane_bit) != 0u;
 
         if (conversion)
         {
@@ -266,28 +313,40 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
         }
         else if (cross)
         {
-            const uint32_t product = fp::mul(lhs, rhs_cross);
-            result = special ? product : fp::sub(acc, product);
+            if (special)
+            {
+                arithmetic = vu_fmac_fp::mul(lhs, rhs_cross);
+            }
+            else
+            {
+                const auto mac = vu_fmac_fp::mac(acc, lhs, rhs_cross, true, latched);
+                arithmetic = mac.m_final;
+                write.m_product_sticky |= mac.m_sticky;
+            }
         }
         else if (op <= 0x03u || op == 0x20u ||
                  op == 0x22u || op == 0x28u)
         {
-            result = fp::add(lhs, rhs);
+            arithmetic = vu_fmac_fp::add(lhs, rhs, false);
         }
         else if ((op >= 0x04u && op <= 0x07u) ||
                  op == 0x24u || op == 0x26u || op == 0x2cu)
         {
-            result = fp::sub(lhs, rhs);
+            arithmetic = vu_fmac_fp::add(lhs, rhs, true);
         }
         else if ((op >= 0x08u && op <= 0x0bu) ||
                  op == 0x21u || op == 0x23u || op == 0x29u)
         {
-            result = fp::add(acc, fp::mul(lhs, rhs));
+            const auto mac = vu_fmac_fp::mac(acc, lhs, rhs, false, latched);
+            arithmetic = mac.m_final;
+            write.m_product_sticky |= mac.m_sticky;
         }
         else if ((op >= 0x0cu && op <= 0x0fu) ||
                  op == 0x25u || op == 0x27u || op == 0x2du)
         {
-            result = fp::sub(acc, fp::mul(lhs, rhs));
+            const auto mac = vu_fmac_fp::mac(acc, lhs, rhs, true, latched);
+            arithmetic = mac.m_final;
+            write.m_product_sticky |= mac.m_sticky;
         }
         else if ((op >= 0x10u && op <= 0x13u) ||
                  op == 0x1du || op == 0x2bu)
@@ -302,11 +361,17 @@ bool upper(const s_ee_vu1_state& state, uint32_t hi,
         else if ((op >= 0x18u && op <= 0x1cu) ||
                  op == 0x1eu || op == 0x2au)
         {
-            result = fp::mul(lhs, rhs);
+            arithmetic = vu_fmac_fp::mul(lhs, rhs);
         }
         else
         {
             return false;
+        }
+        if (is_arithmetic)
+        {
+            result = arithmetic.m_bits;
+            if (arithmetic.m_overflow) { write.m_overflow |= lane_bit; }
+            if (arithmetic.m_underflow) { write.m_underflow |= lane_bit; }
         }
         write.m_values[lane] = result;
     }
@@ -321,6 +386,7 @@ struct s_flag_pipe
     uint32_t m_stalls = 0u;
     uint32_t m_q_value = 0u;
     uint32_t m_q_ready = 0u;
+    uint32_t m_q_flags = 0u;
     uint32_t m_p_value = 0u;
     uint32_t m_p_ready = 0u;
     bool m_q_pending = false;
@@ -336,6 +402,7 @@ struct s_flag_pipe
         if (m_q_pending && now() >= m_q_ready)
         {
             state.m_q = m_q_value;
+            state.m_status = vu_scalar_fp::update_status(state.m_status, m_q_flags);
             m_q_pending = false;
         }
     }
@@ -352,10 +419,12 @@ struct s_flag_pipe
         }
     }
 
-    void schedule_q(s_ee_vu1_state& state, uint32_t value, uint32_t latency)
+    void schedule_q(s_ee_vu1_state& state, uint32_t value, uint32_t latency,
+                    uint32_t flags)
     {
         wait_q(state);
         m_q_value = value;
+        m_q_flags = flags;
         m_q_ready = now() + latency;
         m_q_pending = true;
     }
@@ -445,9 +514,10 @@ struct s_flag_pipe
         return m_mac_values[mac_slot()];
     }
 
-    uint32_t status() const
+    uint32_t status(const s_ee_vu1_state& state) const
     {
-        return m_status_values[mac_slot()];
+        // The FMAC delay does not hide already retired FDIV flags.
+        return (m_status_values[mac_slot()] & 0x3cfu) | (state.m_status & 0xc30u);
     }
 
     uint32_t clip() const
@@ -479,11 +549,9 @@ bool branch_delay_exempt(uint32_t lower)
 
 // Reference EFU arithmetic from vu_ops.hpp::efu; pipeline latencies from
 // the VU manual. P retains its previous value until the producer retires.
-bool efu_result(const s_ee_vu1_state& state, uint32_t index,
-                uint32_t fs, uint32_t fsf,
-                uint32_t& value, uint32_t& latency)
+bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
+                uint32_t fsf, uint32_t& value, uint32_t& latency)
 {
-    const auto& source = state.m_vf[fs];
     const float x = to_float(source[0]);
     const float y = to_float(source[1]);
     const float z = to_float(source[2]);
@@ -535,7 +603,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
            const std::array<uint16_t, 16>& branch_vi,
            std::vector<uint8_t>& path1_bytes,
            uint32_t& branch_target, bool& branched,
-           s_flag_pipe& pipe, int32_t& fsset)
+           s_flag_pipe& pipe, int32_t& fsset, s_ee_vu1_issue& issue)
 {
     const uint32_t major = lo >> 25u;
     const uint32_t dest = (lo >> 21u) & 15u;
@@ -636,16 +704,15 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const uint32_t ftf = (lo >> 23u) & 3u;
             const auto result = vu1_fp::div(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
-            pipe.schedule_q(state, result.value, 7u);
-            state.m_status = (state.m_status & ~0x30u) |
-                (result.invalid ? 0x20u : 0u);
+            pipe.schedule_q(state, result.value, 7u, result.current_flags);
             return true;
         }
         case 0x39u: // SQRT
         {
             const uint32_t ftf = (lo >> 23u) & 3u;
-            pipe.schedule_q(state,
-                vu1_fp::sqrt(state.m_vf[ft][ftf]), 7u);
+            const uint32_t raw = state.m_vf[ft][ftf];
+            pipe.schedule_q(state, vu1_fp::sqrt(raw), 7u,
+                vu_scalar_fp::current_flags(0u, raw, true, false));
             return true;
         }
         case 0x3au: // RSQRT
@@ -654,9 +721,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const uint32_t ftf = (lo >> 23u) & 3u;
             const auto result = vu1_fp::rsqrt(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
-            pipe.schedule_q(state, result.value, 13u);
-            state.m_status = (state.m_status & ~0x30u) |
-                (result.invalid ? 0x20u : 0u);
+            pipe.schedule_q(state, result.value, 13u, result.current_flags);
             return true;
         }
         case 0x3bu: pipe.wait_q(state); return true; // WAITQ
@@ -746,7 +811,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         {
             uint32_t value = 0u;
             uint32_t latency = 0u;
-            if (!efu_result(state, index, fs, (lo >> 21u) & 3u,
+            if (!efu_result(state.m_vf[fs], index, (lo >> 21u) & 3u,
                             value, latency))
             {
                 return false;
@@ -756,7 +821,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         }
         case 0x68u: store_vi(state, it, top); return true;
         case 0x69u: store_vi(state, it, itop); return true;
-        case 0x6cu: return xgkick(data, state.m_vi[is], path1_bytes);
+        case 0x6cu: return xgkick(data, state.m_vi[is], path1_bytes, issue);
         }
     }
 
@@ -792,6 +857,32 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         return true;
     }
 
+    // ILW/ISW use signed 11-bit quadword offsets, unlike the unsigned
+    // immediate arithmetic below. VU1 memory wraps at 1024 quadwords.
+    // VI values are 16-bit; ISW zero-extends each selected 32-bit lane.
+    if (major == 0x04u || major == 0x05u)
+    {
+        uint8_t* bytes = data.data() + qword_offset(
+            state.m_vi[is] + static_cast<uint32_t>(imm11));
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((dest & (8u >> lane)) != 0u)
+            {
+                if (major == 0x04u)
+                {
+                    // Selected lanes are processed in XYZW order.
+                    store_vi(state, it, read32(bytes + lane * 4u) & 0xffffu);
+                }
+                else
+                {
+                    const uint32_t value = state.m_vi[it];
+                    std::memcpy(bytes + lane * 4u, &value, sizeof(value));
+                }
+            }
+        }
+        return true;
+    }
+
     switch (major)
     {
     case 0x08u:
@@ -819,7 +910,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         return true;
     case 0x14u: // FSEQ
         store_vi(state, it,
-            (pipe.status() & 0xfffu) ==
+            (pipe.status(state) & 0xfffu) ==
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)) ? 1u : 0u);
         return true;
     case 0x15u: // FSSET sticky flags update after same-cycle upper
@@ -827,11 +918,11 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)) & 0xfc0u);
         return true;
     case 0x16u: // FSAND
-        store_vi(state, it, pipe.status() &
+        store_vi(state, it, pipe.status(state) &
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)));
         return true;
     case 0x17u: // FSOR
-        store_vi(state, it, (pipe.status() & 0xfffu) |
+        store_vi(state, it, (pipe.status(state) & 0xfffu) |
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)));
         return true;
     case 0x18u: // FMEQ
@@ -876,6 +967,18 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
 }
 } // namespace
 
+bool c_ee_vu1::kick(const std::array<uint8_t, k_memory_size>& data,
+    uint32_t address, std::vector<uint8_t>& output, s_ee_vu1_issue& issue)
+{
+    return xgkick(data, address, output, issue);
+}
+
+bool c_ee_vu1::efu(const std::array<uint32_t, 4>& source, uint32_t index,
+    uint32_t component, uint32_t& value, uint32_t& latency)
+{
+    return component < 4u && efu_result(source, index, component, value, latency);
+}
+
 bool c_ee_vu1::run(
     s_ee_vu1_state& state,
     std::array<uint8_t, k_memory_size>& code,
@@ -888,6 +991,7 @@ bool c_ee_vu1::run(
         return false;
     }
     *issue = {};
+    c_runtime_profile_scope profile_scope(e_runtime_profile_id::vu1_run, 0u, &issue->m_steps);
     if (!state.m_initialized)
     {
         state = {};
@@ -895,6 +999,14 @@ bool c_ee_vu1::run(
         state.m_initialized = true;
     }
 
+    if (g_vu1_aot != nullptr)
+    {
+        g_vu1_aot->capture_on_entry(code, address);
+        if (g_vu1_aot->try_run(state, code, data, address, top, itop, path1_bytes, *issue))
+        {
+            return true;
+        }
+    }
     uint32_t pc = address & 0x3ff8u;
     uint32_t npc = (pc + 8u) & 0x3fffu;
     std::array<uint16_t, 16> previous_vi = state.m_vi;
@@ -903,6 +1015,9 @@ bool c_ee_vu1::run(
     int32_t fsset = -1;
     s_flag_pipe pipe{};
     s_ee_vu1_dependency dependencies{};
+    // This bounded host-only cache survives MSCAL/MSCNT calls. Each
+    // lookup checks the current staged microinstruction's exact bits.
+    static thread_local c_ee_vu1_decode_cache decode_cache;
     pipe.start(state);
 
     for (uint32_t step = 0u; step < k_max_steps; ++step)
@@ -921,7 +1036,7 @@ bool c_ee_vu1::run(
         }
 
         ++pipe.m_t;
-        const s_ee_vu1_use use = dependencies.decode(lo, hi);
+        const s_ee_vu1_use& use = decode_cache.lookup(pc, lo, hi);
         const uint32_t issued = dependencies.issue(use, pipe.now());
         if (issued > pipe.now())
         {
@@ -950,7 +1065,7 @@ bool c_ee_vu1::run(
             bool branched = false;
             if (!lower(state, lo, current, data, top, itop,
                        previous_lower ? previous_vi : state.m_vi,
-                       path1_bytes, target, branched, pipe, fsset))
+                       path1_bytes, target, branched, pipe, fsset, *issue))
             {
                 return false;
             }
@@ -977,7 +1092,13 @@ bool c_ee_vu1::run(
             }
             if (pending.m_flags)
             {
-                set_mac_flags(state, pending.m_values, pending.m_mask);
+                if (pending.m_acc)
+                {
+                    state.m_acc_overflow_mask = (state.m_acc_overflow_mask & ~pending.m_mask) |
+                        pending.m_overflow;
+                }
+                set_mac_flags(state, pending.m_values, pending.m_mask,
+                    pending.m_overflow, pending.m_underflow, pending.m_product_sticky);
                 pipe.set_mac(state.m_mac, state.m_status);
             }
         }

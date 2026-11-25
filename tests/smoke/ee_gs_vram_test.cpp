@@ -205,6 +205,67 @@ int main()
         return fail("local-to-host source setup or IMAGE rejection");
     }
 
+    // Optional authoritative guest readback: reject a failed GPU map
+    // without changing output bytes or the transfer cursor. Reuse the
+    // successful snapshot for consecutive reads until a committed event.
+    {
+        struct s_readback
+        {
+            std::vector<uint8_t> m_vram;
+            uint32_t m_calls = 0u;
+            bool m_fail = true;
+        } source{gs.vram()};
+        // First physical pixel at wrapped transfer base differs from CPU.
+        source.m_vram[0x3fffu * 256u] = 0x42u;
+        gs.bind_vram_readback(&source,
+            [](void* user, uint8_t* bytes, size_t size)
+            {
+                auto& source = *static_cast<s_readback*>(user);
+                ++source.m_calls;
+                // Model a backend which partially writes then fails.
+                for (size_t i = 0u; i < size; ++i)
+                {
+                    bytes[i] = source.m_vram[i];
+                }
+                return !source.m_fail;
+            });
+        std::array<uint8_t, 16> result{};
+        result.fill(0xa5u);
+        const auto before = result;
+        if (gs.read_image(result.data(), 1u) || result != before ||
+            gs.state().m_download_bytes_read != 0u || source.m_calls != 1u)
+        {
+            return fail("failed GPU readback published bytes or cursor");
+        }
+        source.m_fail = false;
+        if (!gs.read_image(result.data(), 1u) || result[0] != 0x42u ||
+            source.m_calls != 2u ||
+            !gs.read_image(result.data(), 1u) || source.m_calls != 2u)
+        {
+            return fail("GPU readback source or split transfer cache");
+        }
+        // A rejected register write must not invalidate committed data.
+        if (write_register(gs, 0x60u, 0u) ||
+            !gs.read_image(result.data(), 1u) || source.m_calls != 2u)
+        {
+            return fail("rejected GS event invalidated GPU readback");
+        }
+        // A new accepted transfer setup invalidates the cache.
+        source.m_vram[0x3fffu * 256u] = 0x55u;
+        if (!write_register(gs, 0x53u, 1u) ||
+            !gs.read_image(result.data(), 1u) || result[0] != 0x55u ||
+            source.m_calls != 3u)
+        {
+            return fail("accepted GS event did not refresh GPU readback");
+        }
+        if (!gs.read_vram32(0x3fffu * 256u, source.m_calls) ||
+            source.m_calls != 0xb0000000u)
+        {
+            return fail("GPU readback modified CPU reference VRAM");
+        }
+        gs.bind_vram_readback(nullptr, nullptr);
+    }
+
     uint32_t unused = 0u;
     if (gs.read_vram32(
             static_cast<uint32_t>(ee::c_ee_gs_state::k_vram_bytes - 3u),

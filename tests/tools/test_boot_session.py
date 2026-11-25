@@ -3,6 +3,8 @@
 import importlib.util
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import sys
@@ -21,7 +23,8 @@ SPEC.loader.exec_module(SESSION)
 
 def run_case(passes, initial_reuse=False, diagnostics=False,
              initial_function_count=None, expansion_per_pass=2,
-             snapshots=False, quick_probe=False, graphics=None, legacy=False):
+             snapshots=False, quick_probe=False, graphics=None, legacy=False,
+             dispatch_limits=()):
     with tempfile.TemporaryDirectory(prefix="ee-boot-session-") as temp:
         work = Path(temp) / "work"
         report = work / "first-boot.json"
@@ -89,6 +92,7 @@ def run_case(passes, initial_reuse=False, diagnostics=False,
             "--driver", str(ROOT / "tools" / "run_game.py"),
             "--hle-startup", "--kseg-ram", "--max-dispatches=1000",
         ]
+        argv.extend(dispatch_limits)
         if initial_reuse:
             argv.append("--no-recompile")
         if legacy:
@@ -119,6 +123,17 @@ def run_case(passes, initial_reuse=False, diagnostics=False,
         with patch.object(SESSION.subprocess, "run", side_effect=fake_run):
             code = SESSION.main(argv)
         assert len(calls) == len(passes), calls
+        expansion = next((arg.split("=")[1] for arg in dispatch_limits
+                          if arg.startswith("--max-expansion-dispatches=")), "1000")
+        replay = next((arg.split("=")[1] for arg in dispatch_limits
+                       if arg.startswith("--max-replay-dispatches=")), "1000")
+        for call in calls:
+            expected = replay if "--trace" in call else expansion
+            assert [arg for arg in call if arg.startswith("--max-dispatches=")] == [
+                f"--max-dispatches={expected}"
+            ], calls
+            assert not any(arg.startswith(("--max-expansion-dispatches=", "--max-replay-dispatches="))
+                           for arg in call), calls
         assert all(("--replay-after-expand" in call) == legacy for call in calls), calls
         assert all("--trace" not in call for call in calls[:-1]), calls
         if quick_probe:
@@ -278,7 +293,28 @@ def test_windows_launcher_preserves_guest_cache():
     )[0]
     assert cache_probes.count('--emit-opt=0') == 2, "both probes use boot optimization"
     assert cache_probes.count('--work-dir "%WORK_DIR%"') == 2, "same guest cache"
-    assert cache_probes.count('set "CACHE_FLAG=--no-recompile"') == 2
+    # Optimized full replays defer source validation to the shared IR
+    # builder. Only profile 0 enters the native-library probes below.
+    optimized = cache_probes.index(
+        'if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\\translation-cache.json" (')
+    baseline = cache_probes.index(
+        'if not defined CACHE_FLAG if exist "%WORK_DIR%\\translation-cache.json" (')
+    assert optimized < baseline
+    assert 'set "CACHE_FLAG=--no-recompile"' in cache_probes[optimized:baseline]
+    assert '--link-only' not in cache_probes[optimized:baseline]
+    assert cache_probes[baseline:].count('set "CACHE_FLAG=--no-recompile"') == 2
+
+    # All optimization profiles now use the canonical IR directly.
+    variants = probe.split("rem Build only the selected profile", 1)[1]
+    assert variants.count('python tools\\build_optimized_cache.py') == 3
+    assert variants.count('--source-work-dir "%WORK_DIR%"') == 3
+    assert '--source-opt=2' not in variants
+    assert '--work-dir "%WORK_DIR%\\IR-O2" --emit-opt=4' in variants
+    assert '--work-dir "%WORK_DIR%\\O2-native" --emit-opt=5' in variants
+    assert '--work-dir "%WORK_DIR%-O2" --emit-opt=2' not in variants
+    assert 'set "DIRECT_REPLAY_ARG=--skip-headless-expansion"' in variants
+    assert 'set "WARM_VALIDATION_ARG=--defer-warm-validation"' in variants
+    assert variants.count('%WARM_VALIDATION_ARG%') == 3
     assert "if not errorlevel 1 (" in probe, "failed relink must not reuse"
     assert "full IR rebuild required" in probe
 
@@ -526,6 +562,28 @@ def test_guest_rpc_snapshots_in_cached_probe():
 
 
 def main():
+    # Independent phase limits, legacy fallback, and quick probe routing.
+    for limits in (
+        ("--max-expansion-dispatches=2000", "--max-replay-dispatches=4000"),
+        ("--max-replay-dispatches=4000",),
+        ("--max-expansion-dispatches=2000",),
+    ):
+        run_case([{"trace": False, "exit_reason": 5},
+                  {"trace": True, "exit_reason": 5}],
+                 initial_reuse=True, graphics="window", dispatch_limits=limits)
+        run_case([{"trace": False, "exit_reason": 5}],
+                 initial_reuse=True, quick_probe=True, dispatch_limits=limits)
+
+    code, calls, expansion, boot = run_case([
+        {"trace": True, "live": True, "dispatch_status": 1, "code": 4},
+    ], initial_reuse=True, graphics="window", expansion_per_pass=7,
+       dispatch_limits=("--skip-headless-expansion", "--max-replay-dispatches=4000"))
+    assert code == 4 and len(calls) == 1
+    assert "--trace" in calls[0] and "--auto-expand=7" in calls[0]
+    assert "--skip-headless-expansion" not in calls[0]
+    assert "Headless expansion skipped" in expansion
+    assert "Executing translated EE code" in boot
+
     test_clean_ctrl_c_cancellation()
     test_guest_rpc_snapshots_in_cached_probe()
     test_windows_launcher_preserves_guest_cache()
@@ -695,6 +753,66 @@ def main():
             summary = log.read_text()
             assert "compilation failed" in summary
             assert "dispatches=? stop=unknown" in summary
+
+    # Keep the reproducible P40 retail profiling preset identical to the
+    # manually validated replay environment, and propagate launcher failure.
+    preset = (ROOT / "run_sdbz_p40.bat").read_text(encoding="utf-8")
+    assert 'cd /d "%~dp0"' in preset
+    assert "git pull --ff-only\nif errorlevel 1 exit /b 1" in preset
+    assert preset.index("git pull --ff-only") < preset.index('set "SDBZ_EE_OPT=5"')
+    assert [line for line in preset.splitlines() if line.startswith('set "')] == [
+        "set \"SDBZ_EE_OPT=5\"",
+        "set \"SDBZ_SKIP_HEADLESS_EXPANSION=1\"",
+        "set \"SDBZ_SPEED_PERCENT=0\"",
+        "set \"MAX_DISPATCHES=40000000\"",
+        "set \"MAX_EXPANSION_DISPATCHES=40000000\"",
+        "set \"MAX_REPLAY_DISPATCHES=40000000\"",
+        "set \"BOOT_TIMEOUT_SECONDS=600\"",
+        "set \"SDBZ_TRACE_BUFFERED=1\"",
+        "set \"SDBZ_REPORT_SNAPSHOT_MS=2000\"",
+        "set \"SDBZ_REPORT_PROGRESS_EVERY=8192\"",
+        "set \"SDBZ_DISPATCH_TRACE_EVERY=1024\"",
+        "set \"SDBZ_WINDOW_PUMP_STRIDE=64\"",
+        "set \"SDBZ_EE_DIRECT_DISPATCH=1\"",
+        "set \"SDBZ_VU1_ASYNC=1\"",
+        "set \"SDBZ_GS_ASYNC=1\"",
+        "set \"SDBZ_GS_GPU_VRAM=1\"",
+        "set \"SDBZ_GIF_IMAGE_DIGEST=0\"",
+        "set \"SDBZ_VU1_AOT=%CD%\\build\\vu1-native-v20\"",
+        "set \"SDBZ_VU1_AOT_CAPTURE=\"",
+        "set \"SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\\build\\vu1-misses\"",
+        "set \"EE_WEBGPU_SNAPSHOT=1\"",
+        "set \"EE_WEBGPU_WINDOW=1\"",
+    ]
+    assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
+    assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
+            '    set "SDBZ_SPEED_PERCENT=100"\n'
+            '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
+            ')\n'
+            'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
+    assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
+
+    # Exercise real CMD backward jumps through all three launcher options.
+    # Resolve-only uses a synthetic disc and stops before configuring tools,
+    # modifying caches, emitting IR or launching a game.
+    if os.name == "nt":
+        for filename in ("run_ps2_game.bat", "run_sdbz_p40.bat"):
+            data = (ROOT / filename).read_bytes()
+            assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), filename
+        with tempfile.TemporaryDirectory(prefix="ee-cmd-launcher-") as directory:
+            disc = Path(directory)
+            (disc / "SYSTEM.CNF").write_text(
+                "BOOT2 = cdrom0:\\FIXTURE.ELF;1\n", encoding="ascii"
+            )
+            (disc / "FIXTURE.ELF").write_bytes(b"synthetic boot target")
+            env = dict(os.environ, SDBZ_DISC_ROOT=str(disc),
+                       PS2_GAME_RESOLVE_ONLY="1", SDBZ_EE_OPT="5")
+            resolved = subprocess.run(
+                ["cmd.exe", "/d", "/c", "call run_ps2_game.bat --full --neutral --overwrite-ir"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
+            )
+            assert resolved.returncode == 0, resolved.stdout + resolved.stderr
+            assert "Boot ELF:" in resolved.stdout and "FIXTURE.ELF" in resolved.stdout, resolved.stdout
 
     print("boot session orchestration: PASS")
 

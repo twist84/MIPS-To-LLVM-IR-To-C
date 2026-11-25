@@ -18,6 +18,10 @@ TRACE_DEFINITIONS = (
     "  %trace_ptr = load ptr, ptr %trace_ptr_field",
     "  %trace_enabled = icmp ne ptr %trace_ptr, null",
     "  br i1 %trace_enabled, label %trace_window, label %done",
+    "define internal void @ee_guard_guest_store_trace(",
+    "  %enabled = load i8, ptr %enabled_ptr",
+    "define internal void @ee_guard_guest_v0_trace(",
+    "  %remaining = load i32, ptr %remaining_ptr",
 )
 
 

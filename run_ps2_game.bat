@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+rem Keep Windows CRLF checkout endings for cmd.exe backward GOTO labels.
 
 rem Boot the repo's extracted PS2_GAME disc through the BIOS-free HLE path.
 rem BOOT2 in SYSTEM.CNF chooses the executable; no region/ELF is hardcoded.
@@ -11,6 +12,8 @@ rem Usage: run_ps2_game.bat [--full^|--quick^|--matched^|--recover-cache] [--cro
 rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
+rem --overwrite-ir explicitly replaces shared EE IR using the saved entry
+rem inventory, builds only the selected native profile, and continues --full.
 rem --replay-after-expand opts out of in-process live cache-miss resume.
 rem --live-full-relink disables PR #152's fast overlay DLLs for live misses.
 rem PRECOMPILE_ALL=0 disables cold whole-image precompilation.
@@ -23,6 +26,7 @@ rem Without either switch, retain explicitly configured pad variables.
 set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
+set "OVERWRITE_IR="
 set "CACHE_MISS_ARGS="
 set "LIVE_RELINK_ARG="
 :parse_launcher_options
@@ -44,6 +48,11 @@ if /I "%~1"=="--matched" (
 )
 if /I "%~1"=="--recover-cache" (
     set "REQUESTED_SESSION_MODE=recover"
+    shift
+    goto :parse_launcher_options
+)
+if /I "%~1"=="--overwrite-ir" (
+    set "OVERWRITE_IR=1"
     shift
     goto :parse_launcher_options
 )
@@ -73,10 +82,24 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
+rem Optimized native object variants never replace the O0 baseline.
+if not defined SDBZ_EE_OPT set "SDBZ_EE_OPT=0"
+if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" if not "%SDBZ_EE_OPT%"=="4" if not "%SDBZ_EE_OPT%"=="5" (
+    echo ERROR: SDBZ_EE_OPT must be 0..5 ^(4=O2 IR + O2 backend, 5=host-native O2 backend^).
+    exit /b 2
+)
+if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+    echo ERROR: Optimized EE cache experiments require --full.
+    exit /b 2
+)
+if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+    echo ERROR: --overwrite-ir requires --full and an existing canonical cache.
+    exit /b 2
+)
 if defined ACCEPT_NEW_IR if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
     echo ERROR: --accept-new-ir requires --recover-cache.
     exit /b 2
@@ -110,17 +133,21 @@ if defined LIVE_RELINK_ARG if defined CACHE_MISS_ARGS (
     exit /b 2
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="cross" (
+    set "SDBZ_PAD0_SCRIPT="
     set "SDBZ_PAD0_CROSS_FIRST_POLL=200"
     set "SDBZ_PAD0_CROSS_POLL_COUNT=8"
 )
 if /I "%REQUESTED_PAD_PROFILE%"=="neutral" (
+    set "SDBZ_PAD0_SCRIPT="
     set "SDBZ_PAD0_CROSS_FIRST_POLL="
     set "SDBZ_PAD0_CROSS_POLL_COUNT="
 )
+if /I "%REQUESTED_SESSION_MODE%"=="matched" set "SDBZ_PAD0_SCRIPT="
 set "CAPTURE_PROFILE=neutral"
 if defined SDBZ_PAD0_CROSS_FIRST_POLL set "CAPTURE_PROFILE=pad-custom"
 if defined SDBZ_PAD0_CROSS_POLL_COUNT set "CAPTURE_PROFILE=pad-custom"
 if "%SDBZ_PAD0_CROSS_FIRST_POLL%"=="200" if "%SDBZ_PAD0_CROSS_POLL_COUNT%"=="8" set "CAPTURE_PROFILE=cross"
+if defined SDBZ_PAD0_SCRIPT set "CAPTURE_PROFILE=pad-script"
 
 set "DISC_ROOT=%CD%\PS2_GAME"
 if defined SDBZ_DISC_ROOT set "DISC_ROOT=%SDBZ_DISC_ROOT%"
@@ -152,8 +179,7 @@ if errorlevel 1 (
     echo ERROR: Python was not found in PATH.
     exit /b 1
 )
-rem A recovered cache is selected by an atomically written pointer, checked
-rem against the safe sibling namespace. Never trust the raw pointer file.
+rem Read a legacy active pointer only until the next canonical recovery.
 for /f "usebackq delims=" %%I in (`python "tools\recover_translation_cache.py" --base-work-dir "%CD%\%BASE_WORK_DIR%" --print-active`) do set "WORK_DIR=%%I"
 set "GAME_ELF="
 for /f "usebackq delims=" %%I in (`python "tools\resolve_ps2_boot.py" "%DISC_ROOT%"`) do set "GAME_ELF=%%I"
@@ -255,8 +281,12 @@ if exist "build\CMakeCache.txt" (
 if errorlevel 1 exit /b 1
 
 echo === Building native EE runner and recompiler ===
-cmake --build build --config Release --parallel 8 --target ee_recomp ee_game_runner
+cmake --build build --config Release --parallel 8 --target ee_recomp ee_game_runner vu1_recomp
 if errorlevel 1 exit /b 1
+if defined SDBZ_IOP_AOT_CAPTURE (
+    cmake --build build --config Release --parallel 8 --target iop_recomp
+    if errorlevel 1 exit /b 1
+)
 
 if not exist "%WORK_DIR%" mkdir "%WORK_DIR%"
 if errorlevel 1 exit /b 1
@@ -267,7 +297,30 @@ rem --quick forces the non-traced probe even if no guest cache survives.
 rem Without --quick, WebGPU requests still require full replay snapshots.
 rem Only rebuild guest IR when preserved provenance cannot be verified.
 set "CACHE_FLAG="
-if exist "%WORK_DIR%\translation-cache.json" (
+if defined OVERWRITE_IR (
+    echo === Re-emitting existing EE function inventory for selected native profile ===
+    python tools\refresh_known_ir.py --elf "%GAME_ELF%" ^
+        --build-dir build --config Release ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" ^
+        --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
+    if errorlevel 1 exit /b 1
+    set "CACHE_FLAG=--no-recompile"
+)
+rem Optimized full replay validates the shared source IR in the profile
+rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
+if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
+    echo === Validating shared EE IR for selected optimization profile ===
+    python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
+    if errorlevel 1 (
+        echo ERROR: Shared source is not current. Existing caches retained.
+        echo Run with SDBZ_EE_OPT=0 and --recover-cache --accept-new-ir
+        echo only when changed lowering is intentional, or use --full --overwrite-ir.
+        exit /b 1
+    )
+    set "CACHE_FLAG=--no-recompile"
+)
+if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating saved EE translation ===
     python tools\run_game.py "%GAME_ELF%" ^
         --build-dir build --config Release ^
@@ -292,6 +345,12 @@ if exist "%WORK_DIR%\translation-cache.json" (
 )
 
 rem Cache recovery is reconstruction-only: no guest replay or discovery.
+rem Recovery also migrates valid legacy caches to the canonical directory.
+if /I "%REQUESTED_SESSION_MODE%"=="recover" if defined CACHE_FLAG (
+    python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
+    if errorlevel 1 set "CACHE_FLAG="
+)
 rem Do not enter the interactive destructive rebuild path on failure.
 if /I "%REQUESTED_SESSION_MODE%"=="recover" (
     if defined CACHE_FLAG (
@@ -331,6 +390,10 @@ if not defined CACHE_FLAG (
 
 rem A paired experiment MUST use the existing guest IR, never prompt for
 rem a destructive rebuild or replay to discover additional functions.
+rem Resolve defaults before the parenthesized command expands variables.
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined MAX_DISPATCHES set "MAX_DISPATCHES=6000000"
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"
+if /I "%REQUESTED_SESSION_MODE%"=="matched" if not defined BOOT_TIMEOUT_SECONDS set "BOOT_TIMEOUT_SECONDS=600"
 if /I "%REQUESTED_SESSION_MODE%"=="matched" (
     if not defined CACHE_FLAG (
         echo ERROR: Known-function replay requires a valid guest translation cache.
@@ -338,15 +401,13 @@ if /I "%REQUESTED_SESSION_MODE%"=="matched" (
         echo in a separate work directory if you need to rebuild from a manifest.
         exit /b 1
     )
-    if not defined MAX_DISPATCHES set "MAX_DISPATCHES=6000000"
-    if not defined BOOT_TIMEOUT_SECONDS set "BOOT_TIMEOUT_SECONDS=600"
     echo === Running matched CPU-only known-IR neutral/Cross replays ===
     python tools\run_known_replays.py ^
         --disc-root "%DISC_ROOT%" ^
         --build-dir build --config Release ^
         --work-dir "%WORK_DIR%" ^
         --emit-jobs=%EMIT_JOBS% ^
-        --max-dispatches=%MAX_DISPATCHES% ^
+        --max-dispatches=%MAX_REPLAY_DISPATCHES% ^
         --timeout-seconds=%BOOT_TIMEOUT_SECONDS%
     rem EXIT /B without a number preserves Python's actual ERRORLEVEL.
     rem Percent-expanded %%ERRORLEVEL%% inside this block would be stale.
@@ -358,6 +419,66 @@ rem host-only relinking and strict non-destructive recovery all fail.
 rem --matched and --recover-cache already take their separate paths above.
 if not defined CACHE_FLAG (
     echo Guest translation cache is not reusable; regenerating IR automatically.
+)
+
+rem Build only the selected profile from the canonical shared IR.
+set "DIRECT_REPLAY_ARG="
+set "WARM_VALIDATION_ARG="
+if "%SDBZ_SKIP_HEADLESS_EXPANSION%"=="1" (
+    if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+        echo ERROR: SDBZ_SKIP_HEADLESS_EXPANSION requires --full.
+        exit /b 1
+    )
+    if not defined CACHE_FLAG (
+        echo ERROR: Direct replay requires an existing translation cache.
+        exit /b 1
+    )
+    if defined CACHE_MISS_ARGS (
+        echo ERROR: Direct replay requires live cache misses.
+        exit /b 1
+    )
+    if not "%EE_WEBGPU_WINDOW%"=="1" if not "%EE_WEBGPU_SNAPSHOT%"=="1" (
+        echo ERROR: Direct replay requires native WebGPU window or snapshot.
+        exit /b 1
+    )
+    set "DIRECT_REPLAY_ARG=--skip-headless-expansion"
+    set "WARM_VALIDATION_ARG=--defer-warm-validation"
+)
+if not "%SDBZ_EE_OPT%"=="0" (
+    if not defined CACHE_FLAG (
+        echo ERROR: Optimized EE replay requires a verified shared IR cache.
+        exit /b 1
+    )
+    if "%SDBZ_EE_OPT%"=="4" (
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" ^
+            --work-dir "%WORK_DIR%\IR-O2" --emit-opt=4 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%\IR-O2"
+    ) else if "%SDBZ_EE_OPT%"=="5" (
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" ^
+            --work-dir "%WORK_DIR%\O2-native" --emit-opt=5 --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%\O2-native"
+    ) else (
+        python tools\build_optimized_cache.py "%GAME_ELF%" ^
+            --build-dir build --config Release ^
+            --source-work-dir "%WORK_DIR%" --work-dir "%WORK_DIR%\O%SDBZ_EE_OPT%" ^
+            --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS% %WARM_VALIDATION_ARG%
+        if errorlevel 1 exit /b 1
+        set "WORK_DIR=%WORK_DIR%\O%SDBZ_EE_OPT%"
+    )
+)
+if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%WORK_DIR%\gs-webgpu.ppm"
+if "%SDBZ_EE_OPT%"=="4" (
+    echo EE native object optimization: O2 IR pipeline + O2 backend
+) else if "%SDBZ_EE_OPT%"=="5" (
+    echo EE native object optimization: host-native O2 backend
+) else (
+    echo EE native object optimization: O%SDBZ_EE_OPT%
 )
 
 echo === Starting extracted-disc HLE boot session ===
@@ -391,6 +512,8 @@ if /I "%REPORT_NAME%"=="first-boot.json" echo Verbose dispatch trace: first 64, 
 rem Quick probes retain their short limits. Full retail diagnostics use
 rem the observed 6M dispatch / 600s budget unless explicitly overridden.
 if not defined MAX_DISPATCHES set "MAX_DISPATCHES=%DEFAULT_MAX_DISPATCHES%"
+if not defined MAX_EXPANSION_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%MAX_DISPATCHES%"
+if not defined MAX_REPLAY_DISPATCHES set "MAX_REPLAY_DISPATCHES=%MAX_DISPATCHES%"
 if not defined BOOT_TIMEOUT_SECONDS (
     if /I "%REPORT_NAME%"=="first-boot.json" (
         set "BOOT_TIMEOUT_SECONDS=600"
@@ -405,7 +528,7 @@ rem Use LOOP_YIELD_RESUMES=0 to stop on the first native loop watchdog.
 if not defined LOOP_YIELD_RESUMES set "LOOP_YIELD_RESUMES=16"
 echo Native loop watchdog: 1000000 instructions per native slice, %LOOP_YIELD_RESUMES% resumes between real GS/GIF/IOP progress
 echo Expansion budget: %EXPANSION_PASSES% passes, %EXPANSION_PER_PASS% new functions per pass
-echo Dispatch budget: %MAX_DISPATCHES% per pass; timeout: %BOOT_TIMEOUT_SECONDS% seconds
+echo Dispatch budgets: %MAX_EXPANSION_DISPATCHES% per expansion pass, %MAX_REPLAY_DISPATCHES% final replay; timeout: %BOOT_TIMEOUT_SECONDS% seconds
 echo Report: "%WORK_DIR%\%REPORT_NAME%"
 echo Controller profile: %CAPTURE_PROFILE%
 if defined SDBZ_PAD0_CROSS_FIRST_POLL echo Injected Cross: first poll %SDBZ_PAD0_CROSS_FIRST_POLL%, count %SDBZ_PAD0_CROSS_POLL_COUNT%
@@ -450,13 +573,27 @@ python tools\run_boot_session.py "%GAME_ELF%" ^
     --hle-startup ^
     --kseg-ram ^
     --emit-jobs=%EMIT_JOBS% ^
-    --emit-opt=0 ^
+    --emit-opt=%SDBZ_EE_OPT% ^
     --max-dispatches=%MAX_DISPATCHES% ^
+    --max-expansion-dispatches=%MAX_EXPANSION_DISPATCHES% ^
+    --max-replay-dispatches=%MAX_REPLAY_DISPATCHES% ^
     --loop-budget=1000000 ^
     --loop-yield-resumes=%LOOP_YIELD_RESUMES% ^
     --sif-poll-limit=%SIF_POLL_LIMIT% ^
-    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
+    --timeout-seconds=%BOOT_TIMEOUT_SECONDS% %CACHE_FLAG% %FUNCTIONS_ARG% %SESSION_ARGS% %CACHE_MISS_ARGS% %LIVE_RELINK_ARG% %DIRECT_REPLAY_ARG% %GUEST_TRACE_ARGS% %EE_WEBGPU_RUN_ARG% %EE_WEBGPU_WINDOW_ARG%
 set "EXIT_CODE=%ERRORLEVEL%"
+rem First-run GUI AOT bootstrap: the interpreter has now captured linked IRX.
+rem Build only after the runner exits (no loaded DLLs to replace). Preserve
+rem the session result even if optional AOT compilation fails.
+if defined SDBZ_IOP_AOT_BUILD_OUT if defined SDBZ_IOP_AOT_CAPTURE (
+    echo === Building captured IOP IRX module libraries ===
+    python tools\build_iop_aot.py --build-dir build --capture "%SDBZ_IOP_AOT_CAPTURE%" --out "%SDBZ_IOP_AOT_BUILD_OUT%" --bootstrap
+    if errorlevel 1 (
+        echo WARNING: IOP AOT build failed; captures retained for retry.
+    ) else (
+        echo IOP AOT libraries ready for the next launch.
+    )
+)
 rem Save a unique upload-ready archive after every full replay, even
 rem when the guest exits at its dispatch budget or is cancelled.
 rem Keep the original native exit code; archive failure is non-fatal.

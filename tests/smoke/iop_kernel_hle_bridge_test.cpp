@@ -1239,6 +1239,42 @@ int main()
         return fail("CancelAlarm did not disarm the scheduled callback");
     }
 
+    // An earlier alarm may be inserted after an existing later alarm,
+    // including from a due HLE callback. Preserve the exact deadlines
+    // and cancellation semantics while avoiding future alarm scans.
+    kernel.cpu().write32(0x2a28u, 0u);
+    const uint64_t alarm_start = kernel.cycles();
+    bool inserted = false;
+    if (!kernel.set_alarm(100u, 0x3000u, 0u, 0u) ||
+        !kernel.schedule_hle_event(10u, [&]()
+        {
+            inserted = kernel.set_alarm(5u, 0x3000u, 1u, 0u);
+        }) ||
+        kernel.run(15u, 1u).m_executed != 0u ||
+        !inserted || kernel.cycles() != alarm_start + 15u ||
+        !kernel.cpu().read32(0x2a28u, &low) || low != 0u)
+    {
+        return fail("future alarm hint changed event timing");
+    }
+    // The later alarm is still pending, so advancing to the end of
+    // this slice exhausts its budget rather than reporting idle.
+    if (kernel.run(20u, 1u).m_stop != iop::e_kernel_stop::budget_exhausted ||
+        kernel.cycles() != alarm_start + 35u ||
+        !kernel.cpu().read32(0x2a28u, &low) || low != 1u ||
+        !kernel.has_guest_work() ||
+        !kernel.cancel_alarm(0x3000u, 0u) ||
+        kernel.has_guest_work())
+    {
+        return fail("earlier alarm insertion or cancellation changed idle timing");
+    }
+    const iop::s_kernel_run_result cancelled_run = kernel.run(100u, 1u);
+    if (cancelled_run.m_stop != iop::e_kernel_stop::idle ||
+        cancelled_run.m_executed != 0u ||
+        kernel.cycles() != alarm_start + 135u || kernel.has_guest_work())
+    {
+        return fail("earlier alarm insertion or cancellation changed idle timing");
+    }
+
     // Bounded guest-memory strncmp, lookup_ctype and strtol operate
     // through actual R3000 import stubs, not direct host-only calls.
     const std::string lhs = "ABC";

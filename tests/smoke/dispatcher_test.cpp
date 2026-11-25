@@ -1,5 +1,7 @@
 #include "ee_dispatcher.h"
 #include "ee_dispatch_index.h"
+#include "ee_native_target_cache.h"
+#include "ee_exceptions.h"
 
 #include <cstdio>
 #include <initializer_list>
@@ -420,6 +422,238 @@ int main()
               result.guest_pc == 0xDEAD0000u,
               "indexed dispatch table runs caller, callee and continuation");
     }
+
+    // A dense window must be exact for overlaps, holes, unaligned
+    // metadata and the zero sentinel, even adjacent to UINT32_MAX.
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.entry_point = 0xfffff000u;
+        compiled.functions.push_back(make_function("first", 0xfffff000u,
+            {0xfffff000u, 0xfffff004u, 0xfffff009u, 0xfffff010u,
+             0xfffff014u, 0xfffff018u, 0xfffff01cu}));
+        compiled.functions.push_back(make_function("overlap", 0xfffff004u,
+            {0xfffff004u, 0xfffff008u, 0xfffff00cu, 0xfffff020u}));
+        // Fill a compact range up to the last representable aligned PC.
+        for (uint32_t offset = 0x100u; offset < 0x1000u; offset += 16u)
+        {
+            compiled.functions[1].block_pcs.push_back(0xfffff000u + offset);
+        }
+        compiled.functions[1].block_pcs.push_back(0xfffffffcu);
+        const auto index = ee::ee_build_dispatch_index(compiled);
+        bool same = index.m_dense_base == 0xfffff000u &&
+            index.m_dense_owners.size() == 1024u;
+        for (uint32_t offset = 0u; offset < 0x1000u; ++offset)
+        {
+            const uint32_t pc = 0xfffff000u + offset;
+            same = same && ee::ee_find_dispatch_owner(compiled, index, pc) ==
+                ee::find_recompiled_function(compiled, pc);
+        }
+        for (uint32_t pc : {0u, 4u, 0xffffeffcu})
+        {
+            same = same && ee::ee_find_dispatch_owner(compiled, index, pc) ==
+                ee::find_recompiled_function(compiled, pc);
+        }
+        check(same, "dense dispatch index matches reference including holes and high PCs");
+
+        compiled.functions.push_back(make_function("far", 0x1000u,
+            {0x1000u}));
+        const auto sparse = ee::ee_build_dispatch_index(compiled);
+        check(sparse.m_dense_owners.empty() &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0x1000u) ==
+                &compiled.functions[2] &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0xfffffffcu) ==
+                &compiled.functions[1] &&
+            ee::ee_find_dispatch_owner(compiled, sparse, 0xfffff002u) == nullptr,
+            "sparse address span retains bounded sorted dispatch lookup");
+    }
+
+    // The HLE runner normally executes exactly one translated function
+    // per boundary. Compare indexed and linear behavior across terminal
+    // exits, the budget, sparse/dense holes, zero and continuation PCs.
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.entry_point = 0x00100000u;
+        compiled.functions.push_back(make_function("caller", 0x00100000u,
+            {0x00100000u, 0x00100008u}));
+        compiled.functions.push_back(make_function("callee", 0x00100010u,
+            {0x00100010u}));
+        compiled.functions.push_back(make_function("null", 0x00100020u,
+            {0x00100020u}));
+        compiled.functions.push_back(make_function("yield", 0x00100030u,
+            {0x00100030u}));
+        compiled.functions.push_back(make_function("external", 0x00100040u,
+            {0x00100040u}));
+        compiled.functions.push_back(make_function("missing_native", 0x00100050u,
+            {0x00100050u}));
+        const ee::t_ee_translated_entry entries[] =
+        {
+            caller_entry, callee_entry, null_return_entry, host_yield_entry,
+            external_return_entry, nullptr
+        };
+        const ee::s_ee_dispatch_table table{&compiled, entries, 6u};
+        const auto index = ee::ee_build_dispatch_index(compiled);
+        bool same = !index.m_dense_owners.empty();
+        for (uint32_t pc : {0u, 0x00100000u, 0x00100004u, 0x00100008u,
+                            0x00100010u, 0x00100020u, 0x00100030u,
+                            0x00100040u, 0x00100050u, 0xdead0000u})
+        {
+            ee::s_ee_cpu_state linear{};
+            linear.m_pc = pc;
+            linear.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+            linear.m_gpr[31].m_lo = 0x00100008u;
+            ee::s_ee_cpu_state indexed = linear;
+            const auto a = ee::ee_dispatch_run(&linear, nullptr, table, 1u);
+            const auto b = ee::ee_dispatch_run_indexed(&indexed, nullptr, table, index, 1u);
+            same = same && a.status == b.status &&
+                a.dispatch_count == b.dispatch_count &&
+                a.guest_pc == b.guest_pc && a.exit_reason == b.exit_reason &&
+                linear.m_pc == indexed.m_pc &&
+                linear.m_exit_reason == indexed.m_exit_reason &&
+                linear.m_gpr[2].m_lo == indexed.m_gpr[2].m_lo &&
+                linear.m_gpr[8].m_lo == indexed.m_gpr[8].m_lo &&
+                linear.m_gpr[31].m_lo == indexed.m_gpr[31].m_lo;
+        }
+        ee::s_ee_cpu_state cpu{};
+        cpu.m_pc = 0x00100000u;
+        const auto result = ee::ee_dispatch_run_indexed(&cpu, nullptr, table, index, 1u);
+        check(same && result.dispatch_count == 1u &&
+              result.status == e_ee_dispatch_status::DISPATCH_LIMIT &&
+              result.guest_pc == 0x00102000u,
+              "single-slice dispatch preserves budget, terminal exits and exact ownership");
+
+        bool direct_same = true;
+        for (uint32_t pc : {0u, 0x00100000u, 0x00100008u, 0x00100010u,
+                            0x00100020u, 0x00100030u, 0x00100040u})
+        {
+            for (bool interrupt : {false, true})
+            {
+                ee::s_ee_cpu_state normal{};
+                normal.m_pc = pc;
+                normal.m_gpr[31].m_lo = 0x00100008u;
+                if (interrupt)
+                {
+                    normal.m_cop0[12] = 0x00010401u;
+                    normal.m_cop0[13] = 0x00000400u;
+                }
+                ee::s_ee_cpu_state direct = normal;
+                ee::s_ee_cpu_state owned = normal;
+                const auto target = ee::ee_resolve_dispatch_entry(table, index, pc);
+                const auto a = ee::ee_dispatch_run_indexed(&normal, nullptr,
+                    table, index, 1u);
+                const auto b = ee::ee_dispatch_run_resolved(&direct, nullptr,
+                    pc, target);
+                const auto fast = ee::ee_dispatch_run_owned_inline(
+                    owned, nullptr, target);
+                direct_same = direct_same && target != nullptr &&
+                    b.status == fast.status && b.exit_reason == fast.exit_reason &&
+                    b.dispatch_count == fast.dispatch_count && b.guest_pc == fast.guest_pc &&
+                    direct.m_pc == owned.m_pc &&
+                    direct.m_exit_reason == owned.m_exit_reason &&
+                    direct.m_cop0[12] == owned.m_cop0[12] &&
+                    direct.m_cop0[13] == owned.m_cop0[13] &&
+                    direct.m_cop0[14] == owned.m_cop0[14] &&
+                    direct.m_gpr[2].m_lo == owned.m_gpr[2].m_lo &&
+                    direct.m_gpr[8].m_lo == owned.m_gpr[8].m_lo &&
+                    direct.m_gpr[31].m_lo == owned.m_gpr[31].m_lo &&
+                    a.status == b.status && a.exit_reason == b.exit_reason &&
+                    a.dispatch_count == b.dispatch_count && a.guest_pc == b.guest_pc &&
+                    normal.m_pc == direct.m_pc &&
+                    normal.m_exit_reason == direct.m_exit_reason &&
+                    normal.m_cop0[12] == direct.m_cop0[12] &&
+                    normal.m_cop0[13] == direct.m_cop0[13] &&
+                    normal.m_cop0[14] == direct.m_cop0[14] &&
+                    normal.m_gpr[2].m_lo == direct.m_gpr[2].m_lo &&
+                    normal.m_gpr[8].m_lo == direct.m_gpr[8].m_lo &&
+                    normal.m_gpr[31].m_lo == direct.m_gpr[31].m_lo;
+            }
+        }
+        const auto missing = ee::ee_resolve_dispatch_entry(table, index, 0x00100050u);
+        const auto hole = ee::ee_resolve_dispatch_entry(table, index, 0x00100004u);
+        const auto wrong = ee::ee_dispatch_run_resolved(&cpu, nullptr,
+            0x00100000u, caller_entry);
+        const auto null_cpu = ee::ee_dispatch_run_resolved_inline(
+            nullptr, nullptr, 0u, caller_entry);
+        const auto null_entry = ee::ee_dispatch_run_resolved_inline(
+            &cpu, nullptr, cpu.m_pc, nullptr);
+        check(direct_same && missing == nullptr && hole == nullptr &&
+              null_cpu.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              null_cpu.dispatch_count == 0u &&
+              null_entry.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              null_entry.dispatch_count == 0u &&
+              null_entry.guest_pc == cpu.m_pc &&
+              null_entry.exit_reason == cpu.m_exit_reason &&
+              wrong.status == e_ee_dispatch_status::INVALID_ARGUMENT &&
+              wrong.dispatch_count == 0u && cpu.m_pc == 0x00102000u,
+              "resolved single-entry execution matches indexed dispatch including interrupts");
+    }
+
+    // The host target cache must never return a colliding PC, cache a
+    // null target, or retain a pointer across module replacement.
+    {
+        ee::c_native_target_cache cache(true);
+        ee::c_native_target_cache disabled(false);
+        constexpr uint32_t a = 0x00100000u;
+        constexpr uint32_t b = a + 65536u * 4u;
+        uint32_t lookups = 0u;
+        const auto resolve = [&](uint32_t pc) -> ee::t_ee_translated_entry
+        {
+            ++lookups;
+            if (pc == a)
+            {
+                return caller_entry;
+            }
+            if (pc == b)
+            {
+                return callee_entry;
+            }
+            return nullptr;
+        };
+        const bool ok =
+            cache.resolve(0u, resolve) == nullptr &&
+            disabled.resolve(a, resolve) == nullptr &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(b, resolve) == callee_entry &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.resolve(a + 1u, resolve) == nullptr &&
+            cache.resolve(a + 1u, resolve) == nullptr &&
+            cache.resolve(a, resolve) == caller_entry &&
+            cache.hits() == 2u && cache.misses() == 5u && lookups == 5u;
+        cache.clear();
+        check(ok && cache.resolve(a, resolve) == caller_entry &&
+              cache.hits() == 2u && cache.misses() == 6u && lookups == 6u,
+              "native target cache preserves exact keys, misses and invalidation");
+    }
+
+    // Exhaust all control-bit combinations and individual interrupt lines,
+    // with the pending line either masked or unmasked.
+    bool eligibility_same = !ee::ee_interrupts_enabled_inline(nullptr);
+    for (uint32_t bits = 0u; bits < 16u; ++bits)
+    {
+        const uint32_t control =
+            ((bits & 1u) ? ee::STATUS_IE : 0u) |
+            ((bits & 2u) ? ee::STATUS_EIE : 0u) |
+            ((bits & 4u) ? ee::STATUS_EXL : 0u) |
+            ((bits & 8u) ? ee::STATUS_ERL : 0u);
+        for (uint32_t line = 0u; line < 8u; ++line)
+        {
+            const uint32_t mask = 1u << (ee::CAUSE_IP_SHIFT + line);
+            for (bool unmasked : {false, true})
+            {
+                for (bool pending : {false, true})
+                {
+                    ee::s_ee_cpu_state cpu{};
+                    cpu.m_cop0[ee::COP0_Status] = control | (unmasked ? mask : 0u);
+                    cpu.m_cop0[ee::COP0_Cause] = pending ? mask : 0u;
+                    const bool expected = bits == 3u && unmasked && pending;
+                    eligibility_same = eligibility_same &&
+                        ee::ee_interrupts_enabled_inline(&cpu) == expected &&
+                        ee::ee_interrupts_enabled(&cpu) == expected;
+                }
+            }
+        }
+    }
+    check(eligibility_same, "inline interrupt eligibility matches architectural control and mask bits");
 
     std::printf("dispatcher_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

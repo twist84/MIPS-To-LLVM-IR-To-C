@@ -76,7 +76,10 @@ void c_kernel::reset()
     m_heap_allocations.clear();
     m_libraries.clear();
     m_modules.clear();
+    m_ready_cache_dirty = true;
     m_threads.clear();
+    m_ready_cache.clear();
+    m_ready_cache_wake = std::numeric_limits<uint64_t>::max();
     m_alarms.clear();
     m_hle_events.clear();
     m_syscall = {};
@@ -86,6 +89,8 @@ void c_kernel::reset()
     m_critical_thread_id = 0u;
     m_interrupts_suspended = false;
     m_cycles = 0u;
+    m_next_thread_wake = std::numeric_limits<uint64_t>::max();
+    m_next_alarm_wake = std::numeric_limits<uint64_t>::max();
     m_next_module_id = 1u;
     m_next_thread_id = 1u;
     m_next_alarm_id = 1u;
@@ -801,6 +806,7 @@ uint32_t c_kernel::create_thread(
     thread.m_cpu.m_gpr[4] = a0;
     thread.m_cpu.m_gpr[5] = a1;
     const uint32_t id = thread.m_id;
+    m_ready_cache_dirty = true;
     m_threads.emplace(id, std::move(thread));
     return id;
 }
@@ -860,6 +866,7 @@ bool c_kernel::has_guest_work() const
     }
     return !m_alarms.empty() || !m_hle_events.empty() ||
            m_hardware.spu2_dma_cycles_remaining() != 0u ||
+           m_hardware.spu2().voice_irq_cycles_remaining() != 0u ||
            (m_irq_lookup && m_interrupt_thread_id == 0u &&
             m_hardware.next_pending_interrupt() >= 0);
 }
@@ -985,6 +992,7 @@ bool c_kernel::set_alarm(
     m_alarms.emplace(alarm_id, s_kernel_alarm{
         alarm_id, id, callback, argument, gp, m_cycles + ticks, false
     });
+    m_next_alarm_wake = std::min(m_next_alarm_wake, m_cycles + ticks);
     return true;
 }
 
@@ -1011,6 +1019,7 @@ bool c_kernel::cancel_alarm(uint32_t callback, uint32_t argument)
         else
         {
             m_allocations.erase(thread->second.m_stack_base);
+            m_ready_cache_dirty = true;
             m_threads.erase(thread);
             m_alarms.erase(it);
         }
@@ -1041,6 +1050,7 @@ bool c_kernel::start_thread(uint32_t id)
     thread.m_module_entry_returned = false;
     thread.m_module_entry_result = 0u;
     thread.m_interrupts_suspended = false;
+    m_ready_cache_dirty = true;
     thread.m_status = e_thread_status::ready;
     return true;
 }
@@ -1075,6 +1085,7 @@ bool c_kernel::start_thread_with_arguments(
         {
             return false;
         }
+        m_ready_cache_dirty = true;
         found->second.m_status = e_thread_status::ready;
         found->second.m_module_entry_returned = false;
         found->second.m_module_entry_result = 0u;
@@ -1098,6 +1109,7 @@ bool c_kernel::start_thread_with_arguments(
         thread.m_module_entry ? k_module_return_pc :
                                 k_thread_return_pc;
     thread.m_cpu = initial;
+    m_ready_cache_dirty = true;
     thread.m_priority = thread.m_initial_priority;
     thread.m_wakeup_count = 0u;
     thread.m_wait_type = 0u;
@@ -1203,7 +1215,9 @@ bool c_kernel::wake_thread(uint32_t id)
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_status = e_thread_status::ready;
+    m_ready_cache_dirty = true;
     found->second.m_wake_cycle = 0u;
     found->second.m_wait_type = 0u;
     return true;
@@ -1227,6 +1241,7 @@ bool c_kernel::stop_thread(uint32_t id)
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_status = e_thread_status::dormant;
     found->second.m_interrupts_suspended = false;
     if (id == m_critical_thread_id)
@@ -1234,6 +1249,7 @@ bool c_kernel::stop_thread(uint32_t id)
         m_critical_thread_id = 0u;
         m_interrupts_suspended = false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_wake_cycle = 0u;
     found->second.m_wait_type = 0u;
     found->second.m_wakeup_count = 0u;
@@ -1253,6 +1269,7 @@ bool c_kernel::delete_thread(uint32_t id)
         return false;
     }
     m_allocations.erase(found->second.m_stack_base);
+    m_ready_cache_dirty = true;
     m_threads.erase(found);
     return true;
 }
@@ -1265,6 +1282,7 @@ bool c_kernel::exit_current_thread(bool delete_on_exit)
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_status = e_thread_status::dormant;
     found->second.m_interrupts_suspended = false;
     if (m_current_thread_id == m_critical_thread_id)
@@ -1272,6 +1290,7 @@ bool c_kernel::exit_current_thread(bool delete_on_exit)
         m_critical_thread_id = 0u;
         m_interrupts_suspended = false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_wake_cycle = 0u;
     found->second.m_wait_type = 0u;
     found->second.m_delete_on_exit = delete_on_exit;
@@ -1297,6 +1316,7 @@ bool c_kernel::change_thread_priority(
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_priority = new_priority;
     return true;
 }
@@ -1360,7 +1380,9 @@ bool c_kernel::block_current(uint32_t wait_type)
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_status = e_thread_status::blocked;
+    m_ready_cache_dirty = true;
     found->second.m_wake_cycle = 0u;
     found->second.m_wait_type = wait_type;
     return true;
@@ -1377,8 +1399,11 @@ bool c_kernel::sleep_current(uint64_t delay_cycles)
     {
         return false;
     }
+    m_ready_cache_dirty = true;
     found->second.m_status = e_thread_status::blocked;
+    m_ready_cache_dirty = true;
     found->second.m_wake_cycle = m_cycles + delay_cycles;
+    m_next_thread_wake = std::min(m_next_thread_wake, found->second.m_wake_cycle);
     found->second.m_wait_type = 2u;
     return true;
 }
@@ -1425,6 +1450,7 @@ bool c_kernel::start_guest_interrupt(
     if (!start_thread(id))
     {
         m_allocations.erase(thread.m_stack_base);
+        m_ready_cache_dirty = true;
         m_threads.erase(id);
         return false;
     }
@@ -1436,7 +1462,7 @@ bool c_kernel::start_guest_interrupt(
     return true;
 }
 
-uint32_t c_kernel::next_ready() const
+uint32_t c_kernel::next_ready(uint64_t& next_wake) const
 {
     if (m_interrupts_suspended && m_critical_thread_id != 0u)
     {
@@ -1456,13 +1482,39 @@ uint32_t c_kernel::next_ready() const
             return m_interrupt_thread_id;
         }
     }
-    uint32_t priority = std::numeric_limits<uint32_t>::max();
-    uint32_t candidate = 0u;
-    uint32_t wrapped = 0u;
+    if (m_ready_cache_dirty || m_ready_cache_wake <= m_cycles)
+    {
+        rebuild_ready_cache();
+    }
+    next_wake = std::min(next_wake, m_ready_cache_wake);
+    if (m_ready_cache.empty())
+    {
+        return 0u;
+    }
+    // With one highest-priority thread, the round-robin search
+    // necessarily selects that thread, including after wraparound.
+    if (m_ready_cache.size() == 1u)
+    {
+        return m_ready_cache.front();
+    }
+    const auto candidate = std::upper_bound(
+        m_ready_cache.begin(), m_ready_cache.end(), m_last_scheduled_id);
+    return candidate != m_ready_cache.end() ? *candidate : m_ready_cache.front();
+}
 
+void c_kernel::rebuild_ready_cache() const
+{
+    m_ready_cache.clear();
+    m_ready_cache_wake = std::numeric_limits<uint64_t>::max();
+    uint32_t priority = std::numeric_limits<uint32_t>::max();
     for (const auto& item : m_threads)
     {
         const s_kernel_thread& thread = item.second;
+        if (thread.m_status == e_thread_status::blocked &&
+            thread.m_wake_cycle > m_cycles)
+        {
+            m_ready_cache_wake = std::min(m_ready_cache_wake, thread.m_wake_cycle);
+        }
         if (thread.m_status != e_thread_status::ready)
         {
             continue;
@@ -1470,23 +1522,14 @@ uint32_t c_kernel::next_ready() const
         if (thread.m_priority < priority)
         {
             priority = thread.m_priority;
-            candidate = 0u;
-            wrapped = 0u;
+            m_ready_cache.clear();
         }
         if (thread.m_priority == priority)
         {
-            if (wrapped == 0u)
-            {
-                wrapped = thread.m_id;
-            }
-            if (thread.m_id > m_last_scheduled_id &&
-                candidate == 0u)
-            {
-                candidate = thread.m_id;
-            }
+            m_ready_cache.push_back(thread.m_id);
         }
     }
-    return candidate == 0u ? wrapped : candidate;
+    m_ready_cache_dirty = false;
 }
 
 void c_kernel::wake_due()
@@ -1513,41 +1556,70 @@ void c_kernel::wake_due()
         m_hle_events.erase(m_hle_events.begin());
         callback();
     }
-    for (auto& item : m_alarms)
+    // HLE callbacks above may add earlier alarms. Only skip a scan
+    // when every live deadline is still in the future. Preserve the
+    // original alarm-ID order, critical sections and exact idle scan.
+    if (m_cycles >= m_next_alarm_wake)
     {
-        s_kernel_alarm& alarm = item.second;
-        if (alarm.m_cancelled || alarm.m_deadline > m_cycles)
+        m_next_alarm_wake = std::numeric_limits<uint64_t>::max();
+        for (auto& item : m_alarms)
         {
-            continue;
+            s_kernel_alarm& alarm = item.second;
+            if (alarm.m_cancelled)
+            {
+                continue;
+            }
+            // Keep due but active alarms in the conservative hint: their
+            // thread may become dormant without changing the deadline.
+            m_next_alarm_wake = std::min(m_next_alarm_wake, alarm.m_deadline);
+            if (alarm.m_deadline > m_cycles)
+            {
+                continue;
+            }
+            auto found = m_threads.find(alarm.m_thread_id);
+            if (found == m_threads.end() ||
+                found->second.m_status != e_thread_status::dormant)
+            {
+                continue;
+            }
+            s_kernel_thread& thread = found->second;
+            s_cpu_state state{};
+            state.m_pc = alarm.m_callback;
+            state.m_next_pc = alarm.m_callback + 4u;
+            state.m_gpr[4] = alarm.m_argument;
+            state.m_gpr[28] = alarm.m_gp;
+            state.m_gpr[29] =
+                thread.m_stack_base + thread.m_stack_size - 16u;
+            state.m_gpr[31] = k_alarm_return_pc;
+            thread.m_cpu = state;
+            start_thread(alarm.m_thread_id);
         }
-        auto found = m_threads.find(alarm.m_thread_id);
-        if (found == m_threads.end() ||
-            found->second.m_status != e_thread_status::dormant)
-        {
-            continue;
-        }
-        s_kernel_thread& thread = found->second;
-        s_cpu_state state{};
-        state.m_pc = alarm.m_callback;
-        state.m_next_pc = alarm.m_callback + 4u;
-        state.m_gpr[4] = alarm.m_argument;
-        state.m_gpr[28] = alarm.m_gp;
-        state.m_gpr[29] =
-            thread.m_stack_base + thread.m_stack_size - 16u;
-        state.m_gpr[31] = k_alarm_return_pc;
-        thread.m_cpu = state;
-        start_thread(alarm.m_thread_id);
     }
-    for (auto& item : m_threads)
+    // HLE callbacks, alarms and timed threads retain their original
+    // ordering. Skip the timed-thread scan when no sleep is due.
+    if (m_cycles >= m_next_thread_wake)
     {
-        s_kernel_thread& thread = item.second;
-        if (thread.m_status == e_thread_status::blocked &&
-            thread.m_wake_cycle != 0u &&
-            thread.m_wake_cycle <= m_cycles)
+        m_next_thread_wake = std::numeric_limits<uint64_t>::max();
+        for (auto& item : m_threads)
         {
-            thread.m_status = e_thread_status::ready;
-            thread.m_wake_cycle = 0u;
-            thread.m_wait_type = 0u;
+            s_kernel_thread& thread = item.second;
+            if (thread.m_status == e_thread_status::blocked &&
+                thread.m_wake_cycle != 0u)
+            {
+                if (thread.m_wake_cycle <= m_cycles)
+                {
+                    m_ready_cache_dirty = true;
+                    thread.m_status = e_thread_status::ready;
+                    m_ready_cache_dirty = true;
+                    thread.m_wake_cycle = 0u;
+                    thread.m_wait_type = 0u;
+                }
+                else
+                {
+                    m_next_thread_wake = std::min(
+                        m_next_thread_wake, thread.m_wake_cycle);
+                }
+            }
         }
     }
 }
@@ -1602,7 +1674,16 @@ s_kernel_run_result c_kernel::run(
     uint64_t remaining = cycle_budget;
     while (remaining != 0u)
     {
-        wake_due();
+        // No software event can wake a thread while all three
+        // conservative deadlines remain in the future. Keep the actual
+        // wake ordering and interrupt-suspension checks in wake_due().
+        if (m_cycles >= m_next_alarm_wake ||
+            m_cycles >= m_next_thread_wake ||
+            (!m_hle_events.empty() &&
+             m_hle_events.begin()->first <= m_cycles))
+        {
+            wake_due();
+        }
         // ps2-web-recomp/SDBZ saves interrupt state with each thread.
         // A suspended thread owns the CPU only while runnable. Once it
         // blocks or exits, a real DMA interrupt may wake it.
@@ -1662,22 +1743,10 @@ s_kernel_run_result c_kernel::run(
                 }
             }
         }
-        const uint32_t id = next_ready();
+        uint64_t next_wake = std::numeric_limits<uint64_t>::max();
+        const uint32_t id = next_ready(next_wake);
         if (id == 0u)
         {
-            uint64_t next_wake =
-                std::numeric_limits<uint64_t>::max();
-            for (const auto& item : m_threads)
-            {
-                const s_kernel_thread& thread = item.second;
-                if (thread.m_status == e_thread_status::blocked &&
-                    thread.m_wake_cycle > m_cycles)
-                {
-                    next_wake = std::min(
-                        next_wake, thread.m_wake_cycle
-                    );
-                }
-            }
             for (const auto& item : m_alarms)
             {
                 if (!item.second.m_cancelled &&
@@ -1699,16 +1768,21 @@ s_kernel_run_result c_kernel::run(
             // actual transfer-completion event after the copied
             // guest data has entered sound/IOP RAM. A blocked guest
             // thread must not freeze that device deadline.
-            const uint32_t dma_left =
-                m_hardware.spu2_dma_cycles_remaining();
-            if (dma_left != 0u)
+            const uint32_t device_deadlines[] =
             {
-                const uint64_t deadline =
-                    dma_left <=
-                        std::numeric_limits<uint64_t>::max() - m_cycles
-                        ? m_cycles + dma_left
-                        : std::numeric_limits<uint64_t>::max();
-                next_wake = std::min(next_wake, deadline);
+                m_hardware.spu2_dma_cycles_remaining(),
+                m_hardware.spu2().voice_irq_cycles_remaining()
+            };
+            for (const uint32_t left : device_deadlines)
+            {
+                if (left != 0u)
+                {
+                    const uint64_t deadline =
+                        left <= std::numeric_limits<uint64_t>::max() - m_cycles
+                            ? m_cycles + left
+                            : std::numeric_limits<uint64_t>::max();
+                    next_wake = std::min(next_wake, deadline);
+                }
             }
             if (next_wake ==
                 std::numeric_limits<uint64_t>::max())
@@ -1770,7 +1844,13 @@ s_kernel_run_result c_kernel::run(
         ++thread.m_guest_slices;
         thread.m_guest_instructions += step_result.m_instructions;
         m_cycles += step_result.m_instructions;
-        m_hardware.advance_cycles(step_result.m_instructions);
+        // The attached CPU already advances devices for interpreter and
+        // AOT retirement. Only detached kernel fixtures need this fallback.
+        // Idle cycles and handled HLE syscalls remain kernel-owned below.
+        if (!m_cpu.hardware_bound_to(&m_hardware))
+        {
+            m_hardware.advance_cycles(step_result.m_instructions);
+        }
         result.m_executed += step_result.m_instructions;
         // Translated IRX code may retire a few instructions past the slice;
         // never let the unsigned budget wrap.
@@ -1787,6 +1867,7 @@ s_kernel_run_result c_kernel::run(
             const uint32_t line = thread.m_interrupt_line;
             const uint32_t guest_result = m_cpu.state().m_gpr[2];
             m_allocations.erase(thread.m_stack_base);
+            m_ready_cache_dirty = true;
             m_threads.erase(id);
             m_interrupt_thread_id = 0u;
             m_current_thread_id = 0u;
@@ -1810,6 +1891,7 @@ s_kernel_run_result c_kernel::run(
             !thread.m_module_entry)
         {
             thread.m_cpu = m_cpu.state();
+            m_ready_cache_dirty = true;
             thread.m_status = e_thread_status::dormant;
             m_current_thread_id = 0u;
             continue;
@@ -1826,6 +1908,7 @@ s_kernel_run_result c_kernel::run(
             thread.m_cpu = m_cpu.state();
             thread.m_module_entry_result = m_cpu.state().m_gpr[2];
             thread.m_module_entry_returned = true;
+            m_ready_cache_dirty = true;
             thread.m_status = e_thread_status::dormant;
             std::printf(
                 "IOP guest module entry returned: module=%u thread=%u "
@@ -1844,6 +1927,7 @@ s_kernel_run_result c_kernel::run(
             thread.m_hle_guest_callback)
         {
             m_allocations.erase(thread.m_stack_base);
+            m_ready_cache_dirty = true;
             m_threads.erase(id);
             m_current_thread_id = 0u;
             continue;
@@ -1861,6 +1945,7 @@ s_kernel_run_result c_kernel::run(
                  repeat_ticks >
                      std::numeric_limits<uint64_t>::max() - m_cycles))
             {
+                m_ready_cache_dirty = true;
                 thread.m_status = e_thread_status::faulted;
                 thread.m_cpu = m_cpu.state();
                 result.m_stop = e_kernel_stop::arithmetic_overflow;
@@ -1873,12 +1958,15 @@ s_kernel_run_result c_kernel::run(
             if (repeat_ticks == 0u || alarm->second.m_cancelled)
             {
                 m_allocations.erase(thread.m_stack_base);
+                m_ready_cache_dirty = true;
                 m_threads.erase(id);
                 m_alarms.erase(alarm);
             }
             else
             {
                 alarm->second.m_deadline = m_cycles + repeat_ticks;
+                m_next_alarm_wake = std::min(m_next_alarm_wake, alarm->second.m_deadline);
+                m_ready_cache_dirty = true;
                 thread.m_status = e_thread_status::dormant;
                 thread.m_cpu = m_cpu.state();
             }
@@ -1896,14 +1984,19 @@ s_kernel_run_result c_kernel::run(
             thread.m_last_syscall_pc = step_result.m_pc;
             thread.m_last_syscall_ra = m_cpu.state().m_gpr[31];
             thread.m_last_syscall_a0 = m_cpu.state().m_gpr[4];
+            // HLE may alter other thread states or invoke a scheduler
+            // observation while this thread is temporarily RUNNING.
+            m_ready_cache_dirty = true;
             const bool handled =
                 m_syscall && m_syscall(*this, number);
+            m_ready_cache_dirty = true;
             if (handled)
             {
                 ++thread.m_handled_syscalls;
             }
             if (!handled)
             {
+                m_ready_cache_dirty = true;
                 thread.m_status = e_thread_status::faulted;
                 result.m_stop =
                     e_kernel_stop::unhandled_syscall;
@@ -1934,6 +2027,7 @@ s_kernel_run_result c_kernel::run(
         else if (step_result.m_result !=
                  e_step_result::budget_exhausted)
         {
+            m_ready_cache_dirty = true;
             thread.m_status = e_thread_status::faulted;
             result.m_stop = stop_for_guest(
                 step_result.m_result
@@ -1951,6 +2045,7 @@ s_kernel_run_result c_kernel::run(
             thread.m_delete_on_exit)
         {
             m_allocations.erase(thread.m_stack_base);
+            m_ready_cache_dirty = true;
             m_threads.erase(id);
         }
         else if (thread.m_status == e_thread_status::running)

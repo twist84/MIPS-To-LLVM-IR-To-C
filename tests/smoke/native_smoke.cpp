@@ -29,7 +29,11 @@ static inline uint32_t sat32u(uint64_t v){ return v>0xffffffffULL?0xffffffffu:(u
 static inline ee::s_ee_u128 shr128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     if (n < 64) { r.m_hi = v.m_hi >> n; r.m_lo = (v.m_lo >> n) | (v.m_hi << (64 - n)); }
     else { int m = n - 64; r.m_hi = 0; r.m_lo = (m < 64) ? (v.m_hi >> m) : 0; }
     return r;
@@ -38,7 +42,11 @@ static inline ee::s_ee_u128 shr128(const ee::s_ee_u128& v, int n)
 static inline ee::s_ee_u128 shl128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     if (n < 64) { r.m_lo = v.m_lo << n; r.m_hi = (v.m_hi << n) | (v.m_lo >> (64 - n)); }
     else { int m = n - 64; r.m_lo = 0; r.m_hi = (m < 64) ? (v.m_lo << m) : 0; }
     return r;
@@ -47,7 +55,11 @@ static inline ee::s_ee_u128 shl128(const ee::s_ee_u128& v, int n)
 static inline ee::s_ee_u128 sar128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     uint64_t sign = (uint64_t)(int64_t)v.m_hi >> 63;
     if (n < 64) { r.m_hi = (uint64_t)(int64_t)v.m_hi >> n; r.m_lo = (v.m_lo >> n) | ((uint64_t)(int64_t)v.m_hi << (64 - n)); }
     else { int m = n - 64; r.m_hi = sign ? ~0ULL : 0; r.m_lo = (m < 64) ? (uint64_t)(int64_t)v.m_hi >> m : (sign ? ~0ULL : 0); }
@@ -437,7 +449,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     // ---- MMI (128-bit packed) ----
     case LOP_MMI_ADD_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, (uint8_t)((uint32_t)get8(a, i) + get8(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -445,7 +457,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADD_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, (uint16_t)((uint32_t)get16(a, i) + get16(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -453,7 +465,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADD_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, get32(a, i) + get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -461,7 +473,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADD_D:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         r = put64(r, 0, get64(a, 0) + get64(b, 0));
         r = put64(r, 1, get64(a, 1) + get64(b, 1));
         cpu.m_gpr[op.rd] = r;
@@ -469,7 +481,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_SUB_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, (uint8_t)((uint32_t)get8(a, i) - get8(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -477,7 +489,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_SUB_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, (uint16_t)((uint32_t)get16(a, i) - get16(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -485,7 +497,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_SUB_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, get32(a, i) - get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -493,7 +505,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_SUB_D:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         r = put64(r, 0, get64(a, 0) - get64(b, 0));
         r = put64(r, 1, get64(a, 1) - get64(b, 1));
         cpu.m_gpr[op.rd] = r;
@@ -501,7 +513,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADDU_SAT_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, sat8u((uint32_t)get8(a, i) + get8(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -509,7 +521,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADDU_SAT_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, sat16u((uint32_t)get16(a, i) + get16(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -517,7 +529,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_ADDU_SAT_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, sat32u((uint64_t)get32(a, i) + get32(b, i)));
         cpu.m_gpr[op.rd] = r;
@@ -550,7 +562,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
         break;
     case LOP_MMI_MAXU_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, get8(a, i) > get8(b, i) ? get8(a, i) : get8(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -558,7 +570,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MAXU_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, get16(a, i) > get16(b, i) ? get16(a, i) : get16(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -566,7 +578,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MAXU_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, get32(a, i) > get32(b, i) ? get32(a, i) : get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -574,7 +586,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MAXS_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, (int8_t)get8(a, i) > (int8_t)get8(b, i) ? get8(a, i) : get8(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -582,7 +594,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MAXS_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, (int16_t)get16(a, i) > (int16_t)get16(b, i) ? get16(a, i) : get16(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -590,7 +602,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MAXS_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, (int32_t)get32(a, i) > (int32_t)get32(b, i) ? get32(a, i) : get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -598,7 +610,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINU_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, get8(a, i) < get8(b, i) ? get8(a, i) : get8(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -606,7 +618,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINU_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, get16(a, i) < get16(b, i) ? get16(a, i) : get16(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -614,7 +626,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINU_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, get32(a, i) < get32(b, i) ? get32(a, i) : get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -622,7 +634,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINS_B:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, (int8_t)get8(a, i) < (int8_t)get8(b, i) ? get8(a, i) : get8(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -630,7 +642,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINS_H:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i)
             r = put16(r, i, (int16_t)get16(a, i) < (int16_t)get16(b, i) ? get16(a, i) : get16(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -638,7 +650,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_MINS_W:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 4; ++i)
             r = put32(r, i, (int32_t)get32(a, i) < (int32_t)get32(b, i) ? get32(a, i) : get32(b, i));
         cpu.m_gpr[op.rd] = r;
@@ -649,7 +661,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
         break;
     case LOP_MMI_SHUFFLE:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 16; ++i)
             r = put8(r, i, get8(b, get8(a, i) & 0xF));
         cpu.m_gpr[op.rd] = r;
@@ -657,7 +669,7 @@ void exec_op(const s_lifted_op& op, s_ee_cpu_state& cpu,
     }
     case LOP_MMI_PACK:
     {
-        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r;
+        ee::s_ee_u128 a = cpu.m_gpr[op.rs], b = cpu.m_gpr[op.rt], r{};
         for (int i = 0; i < 8; ++i) {
             r = put8(r, i, sat8u(get16(b, i)));
             r = put8(r, 8 + i, sat8u(get16(a, i)));

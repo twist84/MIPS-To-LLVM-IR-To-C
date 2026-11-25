@@ -17,8 +17,11 @@ import llvmlite.binding as llvm
 from ee_diagnostic_stubs import register_ee_diagnostic_stubs
 from test_control_flow_ir_runtime import EEState, make_aligned_state
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+from verify_ir import optimize_guest_ir
 
-def run_case(fixture, temp_path, target, mode, initial_v0, expected):
+
+def run_case(fixture, temp_path, target, mode, initial_v0, expected, pipeline=False):
     path = temp_path / (mode + ".ll")
     subprocess.run([str(fixture), mode, str(path)], check=True)
     source = path.read_text(encoding="utf-8")
@@ -36,9 +39,11 @@ def run_case(fixture, temp_path, target, mode, initial_v0, expected):
 
     module = llvm.parse_assembly(source)
     module.verify()
-    target_machine = target.create_target_machine(opt=0)
+    target_machine = target.create_target_machine(opt=2 if pipeline else 0)
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
+    if pipeline:
+        optimize_guest_ir(module, target_machine)
     engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), target_machine)
     engine.add_module(module)
     engine.finalize_object()
@@ -111,11 +116,12 @@ def main():
             ("bgezall", 1, 2),             # taken: slot executed
             ("jal", 0, 2),                 # call and executed delay slot
         ):
-            retained.extend(run_case(
-                Path(sys.argv[1]).resolve(), temp_path, target,
-                mode, value, expected
-            ))
-    print("guest_instruction_attempts_ir_runtime: 8 cases passed")
+            for pipeline in (False, True):
+                retained.extend(run_case(
+                    Path(sys.argv[1]).resolve(), temp_path, target,
+                    mode, value, expected, pipeline
+                ))
+    print("guest_instruction_attempts_ir_runtime: 16 cases passed")
 
 
 if __name__ == "__main__":

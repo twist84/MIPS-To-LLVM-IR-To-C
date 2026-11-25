@@ -96,6 +96,15 @@ int main(int argc, char** argv)
         is_branch_liveness = true;
         function_name = "guest_branch_likely_kill_test";
     }
+    else if (mode == "gpr_high_liveness")
+    {
+        // The packed delay-slot result crosses a CFG edge. A subsequent
+        // scalar write kills only lo; hi must still reach architectural state.
+        control_word = make_i(0x04, 0, 0, 1);
+        delay_word = (0x1cu << 26) | make_r(8, 0, 19, 0x12, 0x29); // por s3,t0,zero
+        is_cross_block_special = true;
+        function_name = "guest_gpr_high_liveness_test";
+    }
     else if (mode == "movz_liveness" || mode == "movn_liveness" ||
              mode == "srav_liveness")
     {
@@ -294,6 +303,7 @@ int main(int argc, char** argv)
     if (is_cross_block_special)
     {
         const uint32_t special =
+            mode == "gpr_high_liveness" ? make_i(0x09, 0, 19, 0x1234) :
             mode == "movz_liveness" ? make_r(19, 9, 2, 0, 0x0a) :
             mode == "movn_liveness" ? make_r(19, 9, 2, 0, 0x0b) :
             make_r(19, 17, 2, 0, 0x07);

@@ -32,6 +32,42 @@ emulated machine. The GPU bridge is a **one-way render mirror**, fed only
 after the CPU GS transaction has committed. A failure to initialise the GPU
 does not change the semantics of a normal HLE boot.
 
+### Experimental GPU-backed guest readback
+
+Set `SDBZ_GS_GPU_READBACK=1` when running with the native WebGPU renderer.
+Reverse GS DMA then reads a checked GPU VRAM snapshot, including rasterized
+pixels missing from the CPU reference. A failed map rejects the transfer
+without advancing its cursor. Split reads reuse a snapshot until the next
+committed GIF batch. Headless CPU-only runs remain unchanged. This does not
+yet remove CPU-side swizzling, local copies or palette processing.
+
+### Experimental GPU-authoritative VRAM
+
+`SDBZ_GS_GPU_VRAM=1` selects GPU-only materialization when the renderer
+is active. CPU GS validates the entire transaction, tracks upload cursors,
+CLD/CBP controls and local-copy bounds, but does not produce pixel journals
+or CPU palette words. Checked diagnostic and guest reads retrieve GPU
+snapshots. Raw CLUT values in the control-state struct are not authoritative
+in this mode; use the checked palette accessor. The existing CPU mode
+remains the default. This experimental path rejects aliased/wrapped-coordinate
+destination rectangles, layout mutation during upload and copies exceeding
+the compute scratch capacity. It does not support switching back to stale
+CPU VRAM mid-run.
+
+For performance-only replays, `SDBZ_GIF_IMAGE_DIGEST=0` skips the
+per-byte diagnostic FNV-1a digest and nonzero-byte count of accepted IMAGE
+payloads. Event/QWC counters, parsing, committed payload bytes and DMA
+semantics remain unchanged. Reports mark the digest disabled and emit null
+for unavailable byte-level statistics. The default retains full provenance.
+
+For profiling, `SDBZ_WINDOW_PUMP_STRIDE=64` reduces host window clock
+checks to one every 64 device-service calls while still calling the window
+pump immediately on every observed guest field change. The existing 120 Hz
+host input polling rule inside the pump is retained. The default stride is
+1; valid values are 1 through 64. A larger stride can delay host input or
+close-event detection between guest fields, especially during slow guest
+execution. It does not change guest scanout or device-service timing.
+
 ## Windows (MSVC / LLVM)
 
 From a Windows command prompt in the repository root:

@@ -5,6 +5,7 @@ import ctypes
 import faulthandler
 import pathlib
 import re
+import random
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ class EEState(ctypes.Structure):
         ("vu0", U128 * 32),
         ("fcsr", ctypes.c_uint32),
         ("fpu_acc", ctypes.c_uint32),
+        ("fpu_acc_overflow", ctypes.c_uint32),
     ]
 
 
@@ -87,7 +89,14 @@ class VU0State(ctypes.Structure):
         ("vi_backup_cycles", ctypes.c_uint32),
         ("vi_backup_register", ctypes.c_uint32),
         ("vi_backup_old_value", ctypes.c_uint32),
-        ("_padding_after_backup", ctypes.c_uint32 * 2),
+        ("vf_memory_ready_cycle", ctypes.c_uint64),
+        ("vf_memory_issues", ctypes.c_uint64 * 8),
+        ("vf_memory_issue_index", ctypes.c_uint32),
+        ("acc_overflow_mask", ctypes.c_uint32),
+        ("q_ready_cycle", ctypes.c_uint64),
+        ("q_pending_bits", ctypes.c_uint32),
+        ("q_pending", ctypes.c_uint32),
+        ("_tail_padding", ctypes.c_uint64),
     ]
 
 
@@ -104,7 +113,9 @@ assert VU0State.take_delay_branch.offset == 8520
 assert VU0State.vi_backup_cycles.offset == 8524
 assert VU0State.vi_backup_register.offset == 8528
 assert VU0State.vi_backup_old_value.offset == 8532
-assert ctypes.sizeof(VU0State) == 8544
+assert VU0State.acc_overflow_mask.offset == 8612
+assert VU0State.q_ready_cycle.offset == 8616
+assert ctypes.sizeof(VU0State) == 8640
 
 
 class Runtime(ctypes.Structure):
@@ -148,10 +159,64 @@ def aligned_instance(struct_type):
     address = ctypes.addressof(backing)
     aligned = (address + 15) & ~15
     value = ctypes.cast(aligned, ctypes.POINTER(struct_type)).contents
+    # Casting an integer address does not retain the allocation. Callers
+    # commonly return the CPU view after the local backing leaves scope.
+    # Keep the buffer alive for as long as the typed view is reachable.
+    value._aligned_backing = backing
     return backing, value
 
 
+# All generated modules now contain the two guarded trace definitions.
+# MCJIT must resolve their external targets even when no guest instruction
+# can reach the invoke block. Retain callbacks for the whole JIT lifetime.
+TRACE_STORE_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint64,
+    ctypes.c_uint32, ctypes.c_uint64, ctypes.c_uint64,
+    ctypes.c_uint64, ctypes.c_uint64,
+)
+TRACE_V0_CALLBACK = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+    ctypes.c_uint64, ctypes.c_uint64,
+)
+UNEXPECTED_TRACES = []
+
+
+@TRACE_STORE_CALLBACK
+def unexpected_store_trace(*args):
+    UNEXPECTED_TRACES.append("store")
+
+
+@TRACE_V0_CALLBACK
+def unexpected_v0_trace(*args):
+    UNEXPECTED_TRACES.append("v0")
+
+
+def register_trace_symbols(store_callback=unexpected_store_trace):
+    for name, callback in (
+        ("ee_trace_guest_store", store_callback),
+        ("ee_trace_guest_v0_write", unexpected_v0_trace),
+    ):
+        llvm.add_symbol(name, ctypes.cast(callback, ctypes.c_void_p).value)
+
+
+RUNTIME_BACKING_BYTES = 0x4000
+
+
+def set_store_trace_enabled(backing, module, enabled):
+    # The generated guard is the source of truth for the C++ ABI offset.
+    match = re.search(
+        r"%enabled_ptr = getelementptr i8, ptr %rt, i64 ([0-9]+)",
+        str(module),
+    )
+    require(match is not None, "missing store trace enable flag offset")
+    offset = int(match.group(1))
+    require(offset < ctypes.sizeof(backing), "store trace flag outside runtime")
+    ctypes.c_uint8.from_buffer(backing, offset).value = int(enabled)
+
+
 def register_runtime_symbols(library_path):
+    register_trace_symbols()
     library = ctypes.CDLL(str(library_path))
     for name in (
         "ee_vu0_qmfc2",
@@ -173,6 +238,14 @@ def compile_jit(fixture, temp_dir, mode, target):
     subprocess.run([str(fixture), str(ir_path), mode], check=True)
 
     ir_text = ir_path.read_text(encoding="utf-8")
+    if mode.startswith("ir_v"):
+        require("call i32 @ee_vu0_ir_" in ir_text, "missing direct VU0 IR lowering")
+        if mode in ("ir_vmul", "ir_vadd", "ir_vmula_madd"):
+            require("call i32 @ee_vu0_ir_fmac_s" in ir_text,
+                    "guest FMAC did not select an opcode-shape helper")
+        require("call i32 @ee_vu0_macro_fmac(" not in ir_text and
+                "call i32 @ee_vu0_macro_scalar(" not in ir_text,
+                "translated arithmetic escaped to a runtime opcode helper")
     # The fixture previously modeled only the ABI's first six pointer
     # fields. Native instruction counting appends a counter after later
     # host-owned fields; a 48-byte runtime allocation would cause JIT code
@@ -192,6 +265,16 @@ def compile_jit(fixture, temp_dir, mode, target):
     counter_offset = max(counter_offset, int(reference_match.group(1)))
     require(counter_offset >= ctypes.sizeof(Runtime),
             "instrumentation counter overlaps VU0 callback ABI")
+    # Other diagnostics access fields beyond both accounting counters,
+    # including the optional timing observer and idle-loop probe.
+    runtime_offsets = [
+        int(offset) for offset in re.findall(
+            r"getelementptr i8, ptr %rt, i64 ([0-9]+)", ir_text
+        )
+    ]
+    require(all(offset + 16 <= RUNTIME_BACKING_BYTES
+                for offset in runtime_offsets),
+            "generated runtime field outside JIT backing")
 
     module = llvm.parse_assembly(ir_text)
     module.verify()
@@ -249,11 +332,10 @@ def run_guest(fixture, temp_dir, target, mode, setup=None,
     runtime, sync_ref, control_ref, sync_state, control_state = make_runtime(
         vu0, sync_result=sync_result, control_result=control_result
     )
-    # Allocate every byte accessed by the JIT, including the appended
-    # diagnostic counter. Keep ABI-prefix fields exactly as before.
-    runtime_backing = ctypes.create_string_buffer(
-        max(ctypes.sizeof(Runtime), counter_offset + ctypes.sizeof(ctypes.c_uint64))
-    )
+    # Zero-initialize the entire runtime backing, not merely the prefix
+    # ending at the reference-slot counter. Optional diagnostics must see
+    # null callbacks and disabled flags even when a fixture never uses them.
+    runtime_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
     # Pointer.contents assignment would *retarget* the ctypes pointer to
     # the original 48-byte Runtime object, rather than copy into the
     # extended allocation. Copy the ABI prefix into the owned backing.
@@ -274,7 +356,9 @@ def run_guest(fixture, temp_dir, target, mode, setup=None,
 
     print("VU0 JIT: call", mode, "counter_offset", counter_offset,
           "runtime_backing_bytes", ctypes.sizeof(runtime_backing), flush=True)
+    UNEXPECTED_TRACES.clear()
     result = guest_fn(ctypes.pointer(cpu), ctypes.byref(runtime_ptr.contents))
+    require(not UNEXPECTED_TRACES, f"disabled trace called: {UNEXPECTED_TRACES}")
     print("VU0 JIT: returned", mode, "exit", result, flush=True)
     retained = (
         cpu_backing, vu0_backing, runtime_backing, engine, module, target_machine,
@@ -287,6 +371,177 @@ def check_sync(sync_state, mode, pc, label):
     require(sync_state["calls"] == [(mode, pc)],
             f"{label}: expected one sync call {(mode, pc)}, "
             f"got {sync_state['calls']}")
+
+
+def check_vector_fmac_differential(fixture, temp_dir, target, library):
+    ir_path = temp_dir / "vector-fmac-diff.ll"
+    subprocess.run([str(fixture), str(ir_path), "ir_vmul"], check=True)
+    ir = ir_path.read_text(encoding="utf-8")
+    require("call { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } @vu_fmac4" in ir,
+            "missing four-lane FMAC lowering")
+    ir += """
+define i32 @test_vector_fmac(ptr %cpu, ptr %rt, i32 %pc, i32 %fs,
+                            i32 %ft, i32 %fd, i32 %mask, i32 %kind,
+                            i32 %source, i32 %bc, i32 %acc) {
+entry:
+  %to_acc = icmp ne i32 %acc, 0
+  %status = call i32 @ee_vu0_ir_fmac(ptr %cpu, ptr %rt, i32 %pc,
+      i32 %fs, i32 %ft, i32 %fd, i32 %mask, i32 %kind,
+      i32 %source, i32 %bc, i1 %to_acc)
+  ret i32 %status
+}
+define void @test_fixed4(ptr %out, ptr %input, i32 %fraction, i32 %to_float) {
+entry:
+  %x = load <4 x i32>, ptr %input, align 4
+  %itof = icmp ne i32 %to_float, 0
+  br i1 %itof, label %from, label %to
+from:
+  %f = call <4 x i32> @ee_vu0_ir_from_fixed4(<4 x i32> %x, i32 %fraction)
+  br label %done
+to:
+  %t = call <4 x i32> @ee_vu0_ir_to_fixed4(<4 x i32> %x, i32 %fraction)
+  br label %done
+done:
+  %result = phi <4 x i32> [%f, %from], [%t, %to]
+  store <4 x i32> %result, ptr %out, align 4
+  ret void
+}
+define i32 @test_fixed_scalar(i32 %x, i32 %fraction, i32 %to_float) {
+entry:
+  %itof = icmp ne i32 %to_float, 0
+  br i1 %itof, label %from, label %to
+from:
+  %f = call i32 @vu_from_fixed(i32 %x, i32 %fraction)
+  ret i32 %f
+to:
+  %t = call i32 @vu_to_fixed(i32 %x, i32 %fraction)
+  ret i32 %t
+}
+"""
+    machine = target.create_target_machine(opt=2)
+    module = llvm.parse_assembly(ir)
+    module.triple = llvm.get_default_triple()
+    module.data_layout = str(machine.target_data)
+    module.verify()
+    engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+    engine.add_module(module)
+    engine.finalize_object()
+    address = engine.get_function_address("test_vector_fmac")
+    require(address != 0, "vector FMAC test wrapper missing")
+    vector = ctypes.CFUNCTYPE(
+        ctypes.c_uint32, ctypes.POINTER(EEState), ctypes.c_void_p,
+        *([ctypes.c_uint32] * 9)
+    )(address)
+    scalar = library.ee_vu0_macro_fmac
+    scalar.argtypes = [ctypes.POINTER(EEState), ctypes.c_void_p,
+                       ctypes.c_uint32, ctypes.c_uint32]
+    scalar.restype = ctypes.c_uint32
+
+    rng = random.Random(0x565530)
+    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x8080002c,
+             0x3f800000, 0x3fffffff, 0xbf800000, 0x40000000,
+             0x7f800000, 0x7fffffff, 0xffffffff, 0x16a08bd5, 0x03f4fe21]
+
+    def bits():
+        return rng.choice(edges) if rng.randrange(3) else rng.getrandbits(32)
+
+    def quad():
+        return U128(bits() | (bits() << 32), bits() | (bits() << 32))
+
+    # (opcode, kind, source, broadcast, to_acc)
+    modes = []
+    for kind, op in enumerate([0x28, 0x2c, 0x2a, 0x29, 0x2d, 0x2b, 0x2f]):
+        modes.append((op, kind, 0, 0, False))
+        if kind < 5:
+            modes.append((op, kind, 0, 0, True))
+    for kind, base in enumerate([0, 4, 0x18, 8, 0xc, 0x10, 0x14]):
+        for bc in range(4):
+            modes.append((base + bc, kind, 1, bc, False))
+            if kind < 5:
+                modes.append((base + bc, kind, 1, bc, True))
+    for kind, q_op, i_op in [(0, 0x20, 0x22), (1, 0x24, 0x26),
+                             (2, 0x1c, 0x1e), (3, 0x21, 0x23),
+                             (4, 0x25, 0x27), (5, None, 0x1d),
+                             (6, None, 0x1f)]:
+        for source, op in [(2, q_op), (3, i_op)]:
+            if op is not None:
+                modes.append((op, kind, source, 0, False))
+                if kind < 5:
+                    modes.append((op, kind, source, 0, True))
+    modes += [(0x2e, 2, 4, 0, True), (0x2e, 4, 4, 0, False)]
+
+    count = 0
+    for op, kind, source, bc, acc in modes:
+        for mask in range(16):
+            # Exercise VF0, source/destination aliasing and mixed flags.
+            fs = rng.choice([0, 1, 2, 3])
+            ft = rng.choice([0, 1, 2, 3])
+            fd = rng.choice([0, fs, ft, 3])
+            encoded_fd = op >> 2 if acc else fd
+            funct = (0x3c | (op & 3)) if acc else op
+            word = (0x4a000000 | (mask << 21) | (ft << 16) |
+                    (fs << 11) | (encoded_fd << 6) | funct)
+            cb, cpu = aligned_instance(EEState)
+            vb, vu = aligned_instance(VU0State)
+            rb, ref_cpu = aligned_instance(EEState)
+            rvb, ref_vu = aligned_instance(VU0State)
+            for i in range(4):
+                cpu.vu0[i] = quad()
+            vu.acc = quad()
+            vu.q = quad()
+            vu.vi[21] = bits()
+            vu.mac_flags = rng.randrange(0x10000)
+            vu.status_flags = rng.randrange(0x1000)
+            vu.acc_overflow_mask = rng.randrange(16)
+            vu.vi[16] = vu.status_flags
+            vu.vi[17] = vu.mac_flags
+            ctypes.memmove(ctypes.addressof(ref_cpu), ctypes.addressof(cpu),
+                           ctypes.sizeof(EEState))
+            ctypes.memmove(ctypes.addressof(ref_vu), ctypes.addressof(vu),
+                           ctypes.sizeof(VU0State))
+            rt, sync, control, state, _ = make_runtime(vu)
+            ref_rt, ref_sync, ref_control, ref_state, _ = make_runtime(ref_vu)
+            status = vector(ctypes.pointer(cpu), ctypes.byref(rt), ENTRY_PC,
+                            fs, ft, encoded_fd, mask, kind, source, bc, int(acc))
+            expected = scalar(ctypes.pointer(ref_cpu), ctypes.byref(ref_rt),
+                              word, ENTRY_PC)
+            label = f"opcode={word:08x} mask={mask:x} kind={kind} source={source}"
+            require(status == expected == 0, f"{label}: operation failed")
+            require(bytes(cpu.vu0) == bytes(ref_cpu.vu0),
+                    f"{label}: VF result differs")
+            require(bytes(vu.acc) == bytes(ref_vu.acc) and
+                    vu.acc_overflow_mask == ref_vu.acc_overflow_mask and
+                    vu.mac_flags == ref_vu.mac_flags and
+                    vu.status_flags == ref_vu.status_flags and
+                    vu.vi[16] == ref_vu.vi[16] and vu.vi[17] == ref_vu.vi[17],
+                    f"{label}: ACC or flag result differs")
+            require(state["calls"] == ref_state["calls"] == [(1, ENTRY_PC)],
+                    f"{label}: synchronization differs")
+            count += 1
+    print(f"VU0 SIMD FMAC scalar differential: {count} cases passed", flush=True)
+    # Compare every vector conversion lane to the prior exact scalar IR,
+    # including signed extrema, exponent 255, denormals and all scales.
+    vec_address = engine.get_function_address("test_fixed4")
+    scalar_address = engine.get_function_address("test_fixed_scalar")
+    require(vec_address and scalar_address, "fixed-point test wrappers missing")
+    vector_fixed = ctypes.CFUNCTYPE(
+        None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32
+    )(vec_address)
+    scalar_fixed = ctypes.CFUNCTYPE(
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32
+    )(scalar_address)
+    fixed_count = 0
+    for fraction in (0, 4, 12, 15):
+        for to_float in (0, 1):
+            for trial in range(256):
+                values = (ctypes.c_uint32 * 4)(*(bits() for _ in range(4)))
+                output = (ctypes.c_uint32 * 4)()
+                vector_fixed(output, values, fraction, to_float)
+                expected = [scalar_fixed(x, fraction, to_float) for x in values]
+                require(list(output) == expected,
+                        f"fixed4 mismatch frac={fraction} to_float={to_float} input={list(values)}")
+                fixed_count += 4
+    print(f"VU0 fixed-point scalar differential: {fixed_count} lanes passed", flush=True)
 
 
 def main():
@@ -305,6 +560,135 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-vu0-transfer-") as directory:
         temp_dir = pathlib.Path(directory)
+        check_vector_fmac_differential(fixture, temp_dir, target, runtime_library)
+
+        def vf_words(cpu, index):
+            v = cpu.vu0[index]
+            return (v.lo & 0xffffffff, v.lo >> 32,
+                    v.hi & 0xffffffff, v.hi >> 32)
+
+        def set_vf(cpu, index, words):
+            cpu.vu0[index].lo = words[0] | (words[1] << 32)
+            cpu.vu0[index].hi = words[2] | (words[3] << 32)
+
+        def init_mul(cpu, vu0):
+            set_vf(cpu, 1, (0x3f800000, 0x16a08bd5, 0x7fffffff, 0x7fffffff))
+            set_vf(cpu, 2, (0x3fffffff, 0x03f4fe21, 0x3f800000, 0x40000000))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmul", init_mul)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 3) == (0x3ffffffe, 0, 0x7fffffff, 0x7fffffff)
+                and vu0.mac_flags == 0x1404 and vu0.status_flags == 0x34d,
+                "direct VU0 VMUL result and true range flags")
+        check_sync(sync, 1, ENTRY_PC, "direct VMUL")
+
+        def init_add(cpu, vu0):
+            set_vf(cpu, 1, (0x8080002c, 0x80800036, 0x80c1aa65, 0x3f800000))
+            set_vf(cpu, 2, (0x008000ec, 0x00829f6a, 0x01200000, 0x3f800000))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vadd", init_add)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 1) == (0x00400000, 0x0027cd00, 0x007cab36, 0x40000000)
+                and vu0.mac_flags == 0x0e0e and vu0.status_flags == 0x145,
+                "direct VU0 aliasing VADD cancellation flags")
+
+        def init_fixed(cpu, vu0):
+            set_vf(cpu, 1, (0x7fffffff, 0x80000000, 0x01000003, 0xfefffffd))
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vitof", init_fixed)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x4effffff, 0xcf000000, 0x4b800001, 0xcb800001)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "direct VITOF truncates and leaves flags unchanged")
+
+        def init_ftoi(cpu, vu0):
+            set_vf(cpu, 1, (0x7f800000, 0xff800000, 0x3fffffff, 0xbfffffff))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vftoi", init_ftoi)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x7fffffff, 0x80000000, 1, 0xffffffff),
+                "direct VFTOI saturates and truncates without host conversion")
+
+        def init_clip(cpu, vu0):
+            set_vf(cpu, 1, (0x7f800001, 0xff800001, 0x7f800000, 0xffffffff))
+            set_vf(cpu, 2, (0, 0, 0, 0x7f800000))
+            vu0.clip_flags = 0x123456
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vclip", init_clip)
+        require(result == EE_EXIT_DISPATCH and
+                vu0.clip_flags == (((0x123456 << 6) & 0xffffff) | 9)
+                and vu0.vi[18] == vu0.clip_flags and vu0.mac_flags == 0x1234
+                and vu0.status_flags == 0x456,
+                "direct VCLIP distinguishes extended exponent mantissas")
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vabs", init_clip)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x7f800001, 0x7f800001, 0x7f800000, 0x7fffffff),
+                "direct VABS preserves raw mantissa")
+
+        def init_move(cpu, vu0):
+            set_vf(cpu, 1, (0x80000000, 0x01234567, 0xffffffff, 0x76543210))
+            set_vf(cpu, 2, (1, 2, 3, 4))
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmove_mask", init_move)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x80000000, 2, 0xffffffff, 4)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "masked VMOVE preserves disabled lanes and flags")
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmr32_alias", init_move)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 1) == (0x01234567, 0xffffffff, 0x76543210, 0x80000000)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "aliasing VMR32 uses the original four lanes")
+
+        def init_mac(cpu, vu0):
+            set_vf(cpu, 1, (0x7fffffff, 0, 0, 0))
+            set_vf(cpu, 2, (0x40000000, 0, 0, 0))
+            set_vf(cpu, 4, (0xbf800000, 0, 0, 0))
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmula_madd", init_mac)
+        require(result == EE_EXIT_DISPATCH and vf_words(cpu, 3)[0] == 0x7fffffff
+                and vu0.acc_overflow_mask == 8 and vu0.mac_flags == 0x8000
+                and vu0.status_flags == 0x288,
+                "direct VU0 ACC overflow latch and MAC sticky")
+        require(sync["calls"] == [(1, ENTRY_PC), (1, ENTRY_PC + 4)],
+                "each direct FMAC synchronizes")
+
+        for mode, numerator, denominator, expected, flags in (
+            ("ir_vdiv_wait", 0x3f800000, 0x3fffffff, 0x3f000001, 0),
+            ("ir_vdiv_wait", 0, 0, 0x7fffffff, 0x410),
+            ("ir_vsqrt_wait", 0, 0xbf800000, 0x3f800000, 0x410),
+        ):
+            def init_q(cpu, vu0):
+                set_vf(cpu, 1, (numerator, 0, 0, 0))
+                set_vf(cpu, 2, (denominator, 0, 0, 0))
+            result, cpu, vu0, sync, _, keep = run_guest(
+                fixture, temp_dir, target, mode, init_q)
+            require(result == EE_EXIT_DISPATCH and vu0.q.lo == expected
+                    and vu0.vi[22] == expected and vu0.q_pending == 0
+                    and vu0.cycle == 7 and vu0.status_flags == flags,
+                    "direct VU0 Q arithmetic and WAITQ retirement")
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmul", init_mul,
+            sync_result=VU0_SYNC_FAILED)
+        require(result == EE_EXIT_UNSUPPORTED and vf_words(cpu, 3) == (0, 0, 0, 0)
+                and vu0.mac_flags == 0, "failed VU0 sync commits no arithmetic")
 
         def init_qmfc(cpu, vu0):
             cpu.gpr[8] = U128(0, 0)

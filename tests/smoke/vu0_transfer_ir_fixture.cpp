@@ -69,13 +69,18 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
             {"lwc1", 0x31u}, {"ld", 0x37u},
             {"swc1", 0x39u}, {"sd", 0x3fu}
         };
+        const bool zero = operation == "lq_zero" || operation == "sq_zero";
+        if (zero)
+        {
+            operation = operation.substr(0u, 2u);
+        }
         const auto found = k_load_store_opcodes.find(operation);
         if (found == k_load_store_opcodes.end())
         {
             return false;
         }
         const uint32_t transfer = (found->second << 26u) |
-                                  (9u << 21u) | (8u << 16u);
+                                  (9u << 21u) | ((zero ? 0u : 8u) << 16u);
         if (delay)
         {
             words = {make_beq(0u, 0u, 1), transfer, make_jr(31u), 0u};
@@ -133,6 +138,42 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
             make_jr(31),
             0u
         };
+        return true;
+    }
+
+    const auto vu_macro = [](uint32_t op, uint32_t mask, uint32_t fs, uint32_t ft, uint32_t fd)
+    {
+        return 0x4a000000u | (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+    };
+    const auto vu_special = [&](uint32_t op, uint32_t mask, uint32_t fs, uint32_t ft)
+    {
+        return vu_macro(0x3cu | (op & 3u), mask, fs, ft, op >> 2u);
+    };
+    if (mode == "ir_vitof" || mode == "ir_vftoi" || mode == "ir_vclip" ||
+        mode == "ir_vabs" || mode == "ir_vmove_mask" || mode == "ir_vmr32_alias")
+    {
+        const uint32_t op = mode == "ir_vitof" ? 0x10u : mode == "ir_vftoi" ? 0x14u :
+                            mode == "ir_vclip" ? 0x1fu : mode == "ir_vabs" ? 0x1du :
+                            mode == "ir_vmove_mask" ? 0x30u : 0x31u;
+        const uint32_t mask = mode == "ir_vmove_mask" ? 10u : 15u;
+        const uint32_t ft = mode == "ir_vmr32_alias" ? 1u : 2u;
+        words = {vu_special(op, mask, 1u, ft)};
+        return true;
+    }
+    if (mode == "ir_vmul" || mode == "ir_vadd" || mode == "ir_vmula_madd" ||
+        mode == "ir_vdiv_wait" || mode == "ir_vsqrt_wait")
+    {
+        if (mode == "ir_vmul") { words = {vu_macro(0x2au, 15u, 1u, 2u, 3u)}; }
+        else if (mode == "ir_vadd") { words = {vu_macro(0x28u, 15u, 1u, 2u, 1u)}; }
+        else if (mode == "ir_vmula_madd")
+        {
+            words = {vu_special(0x2au, 8u, 1u, 2u), vu_macro(0x29u, 8u, 1u, 4u, 3u)};
+        }
+        else
+        {
+            words = {vu_special(mode == "ir_vdiv_wait" ? 0x38u : 0x39u, 0u, 1u, 2u),
+                     vu_special(0x3bu, 0u, 0u, 0u)};
+        }
         return true;
     }
 

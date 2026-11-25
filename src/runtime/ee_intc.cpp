@@ -53,21 +53,6 @@ bool c_ee_intc::raise(uint32_t cause)
     return true;
 }
 
-uint32_t c_ee_intc::status() const
-{
-    return m_status;
-}
-
-uint32_t c_ee_intc::mask() const
-{
-    return m_mask;
-}
-
-uint32_t c_ee_intc::pending() const
-{
-    return m_status & m_mask;
-}
-
 bool c_ee_intc::mmio_read(void* user, uint32_t physical_address,
                           uint32_t width, s_ee_u128* result)
 {

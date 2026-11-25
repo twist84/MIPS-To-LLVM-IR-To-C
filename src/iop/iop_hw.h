@@ -172,9 +172,18 @@ public:
     }
     bool pad_trace_window() const;
     bool spu2_ram_word(uint32_t address, uint16_t* value) const;
+    const c_spu2& spu2() const { return m_spu2; }
+    void enable_spu2_audio_profile(bool enabled) { m_spu2.enable_audio_profile(enabled); }
+    void bind_spu2_pcm_sink(void* user, c_spu2::t_pcm_sink sink)
+    {
+        m_spu2.bind_pcm_sink(user, sink);
+    }
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
     uint32_t spu2_dma_cycles_remaining() const;
+    uint64_t spu2_auto_dma_started() const { return m_spu2_auto_started; }
+    uint64_t spu2_auto_dma_completed() const { return m_spu2_auto_completed; }
+    uint64_t spu2_auto_dma_bytes() const { return m_spu2_auto_bytes; }
 
     // For the ordinary MMIO/scratchpad range, address is physical.
     // The cache-control register retains its privileged full address.
@@ -190,9 +199,16 @@ public:
     // These operations only program masks, not DMA completion flags.
     static bool supports_interrupt_line(uint32_t line);
     bool set_interrupt_mask(uint32_t line, bool enabled);
-    uint32_t pending_interrupts() const;
+    uint32_t pending_interrupts() const
+    {
+        return m_i_ctrl != 0u ? (m_i_stat & m_i_mask) : 0u;
+    }
     // Resolve masked DMA channels before ordinary IRQ lines, as INTRMAN does.
-    int32_t next_pending_interrupt() const;
+    int32_t next_pending_interrupt() const
+    {
+        const uint32_t pending = pending_interrupts();
+        return pending != 0u ? resolve_pending_interrupt(pending) : -1;
+    }
     bool acknowledge_interrupt(uint32_t line);
     uint32_t cache_control() const;
     // Advance IOP timer clock by completed guest execution cycles.
@@ -287,6 +303,7 @@ public:
     const char* sio2_rejection_name() const;
 
 private:
+    int32_t resolve_pending_interrupt(uint32_t pending) const;
     bool scratchpad_range(uint32_t address, uint32_t width) const;
     bool sif_dma_register(uint32_t address, uint32_t* channel,
                           uint32_t* reg) const;
@@ -297,6 +314,8 @@ private:
     void assert_dma_irq(uint32_t& control, bool sif_channel);
     void start_spu2_dma(uint32_t core);
     void advance_spu2_dma(uint32_t cycles);
+    void feed_spu2_input(uint32_t core);
+    void advance_spu2_devices(uint32_t cycles);
     bool process_sio2_packet();
     bool run_sio2_transfer();
 
@@ -381,6 +400,16 @@ private:
     // Countdown starts only after an actual IOP <-> sound-RAM copy.
     // A guest CHCR.STR clear cancels the pending completion.
     uint32_t m_spu2_dma_remaining[2]{};
+    struct s_spu2_auto_transfer
+    {
+        uint32_t m_address = 0u;
+        uint32_t m_bytes = 0u;
+        bool m_active = false;
+    };
+    s_spu2_auto_transfer m_spu2_auto[2]{};
+    uint64_t m_spu2_auto_started = 0u;
+    uint64_t m_spu2_auto_completed = 0u;
+    uint64_t m_spu2_auto_bytes = 0u;
     c_cpu* m_dma_cpu = nullptr;
     uint32_t m_dma_pcr = 0u;
     uint32_t m_dma_pcr2 = 0u;

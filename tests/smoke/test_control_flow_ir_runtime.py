@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,7 @@ class EEState(ctypes.Structure):
         ("vu0", U128 * 32),
         ("fcsr", ctypes.c_uint32),
         ("fpu_acc", ctypes.c_uint32),
+        ("fpu_acc_overflow", ctypes.c_uint32),
     ]
 
 
@@ -55,7 +57,12 @@ def run_case(fixture_exe, temp_dir, target, retained, mode, function_name, setup
     ir_path = temp_dir / f"{mode}.ll"
     subprocess.run([str(fixture_exe), mode, str(ir_path)], check=True)
 
-    module = llvm.parse_assembly(ir_path.read_text(encoding="utf-8"))
+    ir_text = ir_path.read_text(encoding="utf-8")
+    if mode in ("jr", "jrra", "jr_daddu", "beq_taken", "beq_not_taken"):
+        require(not re.search(
+            r"getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 0, i32 \d+, i32 1\b",
+            ir_text), f"{mode}: scalar-only IR accessed a GPR upper half")
+    module = llvm.parse_assembly(ir_text)
     module.verify()
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
@@ -220,6 +227,25 @@ def main():
         run_case(fixture_exe, temp_dir, target, retained, "branch_likely_kill",
                  "guest_branch_likely_kill_test", check_branch_likely_kill,
                  verify_branch_likely_kill, expected_exit=0)
+
+        def check_gpr_high_liveness(state):
+            state.gpr[31].lo = 0x00300000
+            state.gpr[8].lo = 0x1122334455667788
+            state.gpr[8].hi = 0x8877665544332211
+            state.gpr[19].lo = 0xaaaaaaaaaaaaaaaa
+            state.gpr[19].hi = 0xbbbbbbbbbbbbbbbb
+
+        def verify_gpr_high_liveness(state):
+            require(state.pc == 0x00300000, "packed/scalar CFG: wrong return PC")
+            require(state.gpr[19].lo == 0x1234,
+                    "packed/scalar CFG: scalar overwrite lost")
+            require(state.gpr[19].hi == 0x8877665544332211,
+                    "packed/scalar CFG: scalar overwrite killed live upper half")
+            require(state.gpr[18].lo == 0x55, "packed/scalar CFG: JR slot lost")
+
+        run_case(fixture_exe, temp_dir, target, retained, "gpr_high_liveness",
+                 "guest_gpr_high_liveness_test", check_gpr_high_liveness,
+                 verify_gpr_high_liveness, expected_exit=0)
 
         def check_mov_liveness(state, condition):
             state.gpr[31].lo = 0x00300000

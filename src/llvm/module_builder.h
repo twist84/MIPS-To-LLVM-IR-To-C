@@ -43,14 +43,12 @@ private:
     int m_temp_counter = 0;                           // unique temp SSA names
     int m_opt_level = 0;                              // 0..3
 
-    // Per-block register-value tracking (register-state synchronisation
-    // optimisation, Phase 7). current_lo[r]/current_hi[r] hold the SSA temp
-    // name that holds GPR r's current value within the block being emitted,
-    // or are empty if the value has not been loaded/computed yet. dirty_regs
-    // tracks which GPRs differ from the cpu_state backing store and must be
-    // written back at block exit.
+    // Track each GPR half independently. A scalar write changes only lo;
+    // hi stays in backing storage unless a packed operation reads/writes it.
+    // The existing CFG liveness is register-wide, not half-aware: use it
+    // only to prune low-half writes and conservatively publish dirty hi.
     std::map<uint8_t, std::string> m_cur_lo, m_cur_hi;
-    std::set<uint8_t> m_dirty_regs;
+    std::set<uint8_t> m_dirty_lo, m_dirty_hi;
 
     // Scope of the guest instruction currently being emitted. Only used to
     // annotate read-only, SSA-based register provenance events.
@@ -63,6 +61,13 @@ private:
                                 const std::string& affected_address,
                                 uint32_t width, const std::string& source_value,
                                 uint32_t source_lane);
+    void emit_quadword_read(const std::string& address,
+                            const std::string& lo, const std::string& hi);
+    void emit_quadword_store(const ee::s_ee_instruction& ins,
+                             const std::string& effective,
+                             const std::string& affected,
+                             const std::string& lo, const std::string& hi);
+    std::string::size_type m_quadword_entry_offset = 0;
     void emit_guest_v0_write(const std::string& old_value,
                              const std::string& new_value);
     void begin_function(const char* func_name);
@@ -88,7 +93,7 @@ private:
     void store_fpr_i32(uint8_t freg, const std::string& ival);
 
     // Register tracking helpers.
-    std::string load_gpr_temp(uint8_t reg);                    // load into SSA temp, track it
+    std::string load_gpr_temp(uint8_t reg);                    // load low half into SSA
     void    set_gpr_temp(uint8_t reg, const std::string& lo, const std::string& hi); // full 128-bit write
     // Scalar write: update only the low 64 bits; upper 64 is preserved (PCSX2 model).
     // Most R5900 integer ALU / load / link ops write UD[0] only and leave UD[1] intact.
