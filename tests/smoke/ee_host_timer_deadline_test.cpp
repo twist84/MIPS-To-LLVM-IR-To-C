@@ -39,12 +39,21 @@ int main()
             !check(clock.observe(107u) == e_result::accepted &&
                 clock.due() == 0u && clock.next_cycle() == 108u,
                 "fractional IOP deadline") ||
+            !check(clock.cycle_after_iop(1u) == 108u &&
+                clock.cycle_after_iop(10u) == 180u &&
+                clock.cycle_after_iop(t_iop_clock::k_no_deadline) ==
+                    t_iop_clock::k_no_deadline &&
+                clock.cycle_after_iop(t_iop_clock::k_no_deadline / 8u + 1u) ==
+                    t_iop_clock::k_no_deadline,
+                "IOP lookahead projection preserves fractional cycles and overflow") ||
             !check(clock.observe(106u) == e_result::nonmonotonic &&
                 clock.next_cycle() == 108u,
                 "nonmonotonic IOP timestamp changed state") ||
             !check(clock.observe(109u) == e_result::accepted &&
                 clock.due() == 1u && clock.next_cycle() == 109u,
                 "IOP debt is immediately due") ||
+            !check(clock.cycle_after_iop(10u) == 109u,
+                "IOP backlog prevents future projection") ||
             !check(!clock.consume(2u) && clock.due() == 1u &&
                 clock.consume(1u) && clock.next_cycle() == 116u,
                 "IOP debt consumption lost fractional remainder"))
