@@ -605,7 +605,7 @@ rem Clear only presentation outputs before a full replay, so that a
 rem cancelled run cannot accidentally archive old GS images as new ones.
 rem NEVER remove the guest IR, translated DLL, or object cache here.
 if /I "%REPORT_NAME%"=="first-boot.json" (
-    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm) do (
+    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json) do (
         if exist "%WORK_DIR%\%%F" del /q "%WORK_DIR%\%%F"
     )
 )
