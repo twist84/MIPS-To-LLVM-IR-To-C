@@ -114,7 +114,10 @@ int main()
         {
             return fail("IOP lookahead timer divisor/compare");
         }
-        (void)idle.run(7u);
+        if (!idle.try_advance_quiet_cycles(7u))
+        {
+            return fail("IOP quiet advance before timer compare");
+        }
         if (idle.idle_event_cycles_remaining() != 73u ||
             idle.cycles() != 7u)
         {
@@ -126,6 +129,12 @@ int main()
             callbacks != 0u)
         {
             return fail("IOP lookahead HLE event");
+        }
+        if (idle.try_advance_quiet_cycles(0u) ||
+            idle.try_advance_quiet_cycles(3u) ||
+            idle.try_advance_quiet_cycles(4u) || idle.cycles() != 7u)
+        {
+            return fail("IOP quiet advance crossed software boundary");
         }
         (void)idle.run(3u);
         if (callbacks != 0u || idle.idle_event_cycles_remaining() != 0u)
@@ -141,6 +150,7 @@ int main()
         if (thread == 0u || idle.idle_event_cycles_remaining() != 69u ||
             !idle.start_thread(thread) ||
             idle.idle_event_cycles_remaining() != 0u ||
+            idle.try_advance_quiet_cycles(1u) ||
             !idle.stop_thread(thread) ||
             idle.idle_event_cycles_remaining() != 69u)
         {
@@ -206,14 +216,18 @@ int main()
         }
         const auto first = baseline->run(256u, 128u);
         const auto second = baseline->run(256u, 128u);
-        const auto batch = combined->run(512u, 128u);
-        if (first.m_executed != 0u || second.m_executed != 0u ||
-            batch.m_executed != 0u || batch.m_stop != second.m_stop ||
+        const bool batch = combined->try_advance_quiet_cycles(512u);
+        if (first.m_executed != 0u || second.m_executed != 0u || !batch ||
             !equal() || baseline_callbacks != 0u)
         {
             return fail("IOP combined idle before HLE and SPU2 events");
         }
         (void)baseline->run(87u, 128u);
+        if (combined->try_advance_quiet_cycles(87u) ||
+            combined->cycles() != 513u)
+        {
+            return fail("IOP quiet advance accepted event equality");
+        }
         (void)combined->run(87u, 128u);
         if (!equal() || baseline_callbacks != 0u ||
             combined->idle_event_cycles_remaining() != 0u)
