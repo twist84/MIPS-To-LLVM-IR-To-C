@@ -434,6 +434,7 @@ using t_game_run = uint32_t (*)(
 );
 
 using t_game_resolve_entry = ee::t_ee_translated_entry (*)(uint32_t);
+using t_game_resolve_owner = uint32_t (*)(uint32_t, ee::t_ee_translated_entry);
 
 struct c_native_module
 {
@@ -492,6 +493,17 @@ struct c_native_module
 #else
         return reinterpret_cast<t_game_resolve_entry>(
             dlsym(m_handle, "ee_game_resolve_entry"));
+#endif
+    }
+
+    t_game_resolve_owner owner_resolver() const
+    {
+#if defined(_WIN32)
+        return reinterpret_cast<t_game_resolve_owner>(
+            GetProcAddress(m_handle, "ee_game_resolve_owner"));
+#else
+        return reinterpret_cast<t_game_resolve_owner>(
+            dlsym(m_handle, "ee_game_resolve_owner"));
 #endif
     }
 
@@ -2561,6 +2573,7 @@ int main(int argc, char** argv)
     const bool direct_dispatch = direct_dispatch_setting != nullptr &&
         std::strcmp(direct_dispatch_setting, "1") == 0;
     t_game_resolve_entry native_resolve = direct_dispatch ? module.resolver() : nullptr;
+    t_game_resolve_owner native_owner_resolve = module.owner_resolver();
     ee::c_native_target_cache native_targets(direct_dispatch);
     uint64_t direct_dispatches = 0u;
     if (direct_dispatch)
@@ -3703,6 +3716,7 @@ int main(int argc, char** argv)
     std::vector<std::unique_ptr<c_native_module>> overlay_modules;
     std::vector<t_game_run> overlay_runs;
     std::vector<t_game_resolve_entry> overlay_resolvers;
+    std::vector<t_game_resolve_owner> overlay_owner_resolvers;
     std::unordered_map<uint32_t, size_t> overlay_owner_by_pc;
     // Diagnose an unready IOP SIF handshake. Real ROM0 execution advances
     // on each read; the guard never manufactures a readiness value.
@@ -3934,6 +3948,8 @@ int main(int argc, char** argv)
     uint64_t horizon_alu_candidates = 0u;
     uint64_t horizon_alu_matched = 0u;
     uint64_t horizon_alu_mismatch = 0u;
+    uint64_t horizon_alu_owner_known = 0u;
+    uint64_t horizon_alu_owner_matched = 0u;
     uint64_t horizon_clock_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
@@ -5041,6 +5057,7 @@ int main(int argc, char** argv)
             ? ee::ee_horizon_cop0_snapshot(cpu, runtime)
             : ee::t_ee_horizon_cop0_snapshot{};
         uint32_t horizon_alu_slots = 0u;
+        uint32_t horizon_alu_owner = 0u;
         if (horizon_sample)
         {
             const bool iop_scheduled = hle_startup &&
@@ -5225,6 +5242,32 @@ int main(int argc, char** argv)
                     }
                     return target;
                 }) : nullptr;
+            if (horizon_alu_slots != 0u)
+            {
+                // Bind the observation to the actual loaded first owner.
+                // Never infer identity from an ELF function address or
+                // allow a later overlay to certify an earlier owner.
+                horizon_alu_owner = 0u;
+                if (resolved != nullptr && native_resolve != nullptr)
+                {
+                    auto target = native_resolve(from_pc);
+                    auto identify = native_owner_resolve;
+                    for (size_t i = 0u; target == nullptr &&
+                         i < overlay_resolvers.size(); ++i)
+                    {
+                        if (overlay_resolvers[i] == nullptr)
+                        {
+                            break;
+                        }
+                        target = overlay_resolvers[i](from_pc);
+                        identify = overlay_owner_resolvers[i];
+                    }
+                    if (target == resolved && identify != nullptr)
+                    {
+                        horizon_alu_owner = identify(from_pc, resolved);
+                    }
+                }
+            }
             if (resolved == nullptr && hot_expand_dir != nullptr &&
                 !cpu_before_dispatch.has_value())
             {
@@ -5439,6 +5482,7 @@ int main(int argc, char** argv)
                 overlay_modules.push_back(std::move(candidate));
                 overlay_runs.push_back(replacement_entry);
                 overlay_resolvers.push_back(replacement_resolver);
+                overlay_owner_resolvers.push_back(overlay_modules.back()->owner_resolver());
             }
             else
             {
@@ -5449,10 +5493,12 @@ int main(int argc, char** argv)
                 overlay_owner_by_pc.clear();
                 overlay_runs.clear();
                 overlay_resolvers.clear();
+                overlay_owner_resolvers.clear();
                 overlay_modules.clear();
                 module.swap(*candidate);
                 native_run = replacement_entry;
                 native_resolve = replacement_resolver;
+                native_owner_resolve = module.owner_resolver();
             }
             if (!cpu_before_dispatch.has_value())
             {
@@ -5487,6 +5533,7 @@ int main(int argc, char** argv)
         if (horizon_alu_slots != 0u)
         {
             ++horizon_alu_candidates;
+            horizon_alu_owner_known += horizon_alu_owner != 0u;
             uint64_t reached = 0u;
             if (count == 1u &&
                 (reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -5501,6 +5548,7 @@ int main(int argc, char** argv)
                 ee::ee_horizon_cop0_snapshot(cpu, runtime) == horizon_cop0_start)
             {
                 ++horizon_alu_matched;
+                horizon_alu_owner_matched += horizon_alu_owner != 0u;
             }
             else
             {
@@ -9240,7 +9288,8 @@ int main(int argc, char** argv)
             "entry_callback=%llu entry_idle=%llu entry_irq=%llu entry_vu=%llu entry_other=%llu "
             "dmac_top_mask=0x%03x dmac_top_mask_count=%llu "
             "entry_vif1_pending=%llu entry_cmsar1=%llu entry_vu0_running=%llu "
-            "alu_bound_candidates=%llu alu_bound_matched=%llu alu_bound_mismatch=%llu\n",
+            "alu_bound_candidates=%llu alu_bound_matched=%llu alu_bound_mismatch=%llu "
+            "alu_owner_known=%llu alu_owner_matched=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -9281,7 +9330,9 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_vu_reasons[2]),
             static_cast<unsigned long long>(horizon_alu_candidates),
             static_cast<unsigned long long>(horizon_alu_matched),
-            static_cast<unsigned long long>(horizon_alu_mismatch));
+            static_cast<unsigned long long>(horizon_alu_mismatch),
+            static_cast<unsigned long long>(horizon_alu_owner_known),
+            static_cast<unsigned long long>(horizon_alu_owner_matched));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
             std::fprintf(stderr,
