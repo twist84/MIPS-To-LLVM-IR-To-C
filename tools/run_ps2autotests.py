@@ -90,6 +90,14 @@ def prepare_references(cases, args, manifest):
     return prepared
 
 
+def format_stop(result):
+    pc = result.get("final_pc")
+    pc_text = f"0x{pc:08x}" if isinstance(pc, int) else "-"
+    return (f"{result.get('exit_name') or '-'} pc={pc_text} "
+            f"dispatches={result.get('dispatches', '-')} "
+            f"lines={result.get('output_lines', '-')}")
+
+
 def run_cases(cases, args, manifest, run_dir, prepared):
     # Live completion messages; deterministic manifest-order summaries.
     results = [None] * len(cases)
@@ -97,6 +105,8 @@ def run_cases(cases, args, manifest, run_dir, prepared):
     def publish(index, result):
         results[index] = result
         print(f"{result['status']:12} {result['name']} ({result['seconds']}s)", flush=True)
+        if result["status"] != "PASS":
+            print(f"  stop: {format_stop(result)}", flush=True)
 
     if args.jobs == 1:
         for index, case in enumerate(cases):

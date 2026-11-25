@@ -44,6 +44,13 @@ class AutotestsHarness(unittest.TestCase):
             self.assertEqual(request.read_text.call_count, 1)
             sleep.assert_not_called()
 
+    def test_format_stop(self):
+        self.assertEqual(at.format_stop({"exit_name": "DISPATCH",
+                         "final_pc": 0x110b88, "dispatches": 1000000,
+                         "output_lines": 2}),
+                         "DISPATCH pc=0x00110b88 dispatches=1000000 lines=2")
+        self.assertEqual(at.format_stop({}), "- pc=- dispatches=- lines=-")
+
     def test_parallel_execution_keeps_manifest_order(self):
         cases = [{"name": name} for name in ("a", "b", "c", "d")]
         prepared = {case["name"]: (None, None, None) for case in cases}

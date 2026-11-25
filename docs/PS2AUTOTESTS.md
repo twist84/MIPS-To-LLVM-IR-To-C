@@ -362,3 +362,24 @@ VI backup on MTIR, low-halfword preservation and MFIR sign extension.
 MOVE to VF0 retains NOP timing; other transfers reserve four FMAC
 cycles. Upper/lower same-destination writes remain fail-closed.
 No new original transcript match claimed.
+
+### Original VU pilot stop evidence at 9462c8e
+
+Inspected the actual CI artifact 15031341955 (Build and test run
+45631621143), including unchanged ELF words and marker-delimited output:
+
+| Test | Stop | PC | Guest output |
+|---|---|---|---|
+| cpu/vu0_macro/transfer | UNSUPPORTED | 0x001004fc (0x48c8e000 CTC2 FBRST) | 28 lines; TPC test completed at 0x1f |
+| vu/lower/integer | DISPATCH | 0x00110b88 (0x40024800 MFC0 Count) | 2 lines |
+| vu/upper/clip | DISPATCH | 0x001110b8 (0x40024800 MFC0 Count) | 2 lines |
+| vu/lower/efu | HOST_YIELD | 0x001128e0 (0x00063040 SLL) | 57 lines; EEXP CVF_MIN float formatting |
+
+The integer and clip guests exhaust the one-million dispatch budget
+at the Count reader used by their polling delay. This does not prove
+unsupported VU instructions are the remaining blocker. Investigate
+Count progress and actual timing source; do not replace hardware timing
+with instruction attempts to manufacture transcript passes. FBRST needs
+reset/break semantics, and EFU requires a guest float-formatting/loop
+investigation. Publish stop PC, reason, dispatch count and output line
+count in CI for non-PASS results without changing transcript judgement.
