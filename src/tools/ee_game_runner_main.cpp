@@ -8824,6 +8824,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(spu2.mixer_ring_batches()),
             static_cast<unsigned long long>(spu2.mixer_irq_events()),
             static_cast<unsigned long long>(spu2.clipped_samples()));
+        spu2.report_signal_path();
         std::printf("IOP SPU2 effect IRQs: events=%llu\n",
             static_cast<unsigned long long>(spu2.effect_irq_events()));
         std::printf("IOP SPU2 effect input: nonzero_core0=%llu nonzero_core1=%llu\n",

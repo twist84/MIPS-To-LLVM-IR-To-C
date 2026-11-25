@@ -24,6 +24,7 @@ public:
     void reset();
     void enable_audio_profile(bool enabled) { m_audio_profile_enabled = enabled; }
     void report_audio_profile() const;
+    void report_signal_path() const;
 
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
@@ -195,6 +196,17 @@ private:
         s_envelope m_master_volume[2]{};
         uint32_t m_noise_counter = 0u;
         uint16_t m_noise = 0u;
+        // Replay diagnostics only: maxima over both channels, before
+        // and after each independent mixer gain/routing stage.
+        uint32_t m_source_peak = 0u;
+        uint32_t m_envelope_peak = 0u;
+        uint32_t m_voice_volume_peak = 0u;
+        uint32_t m_input_raw_peak = 0u;
+        uint32_t m_input_gain_peak = 0u;
+        uint32_t m_dry_peak = 0u;
+        uint32_t m_external_peak = 0u;
+        uint32_t m_output_peak = 0u;
+        uint64_t m_attr14_frames = 0u;
         // IIR, COMB1..4, WALL, APF1/2, input L/R coefficients.
         uint16_t m_effect_coefficients[10]{};
         uint64_t m_effect_enable_writes = 0u;

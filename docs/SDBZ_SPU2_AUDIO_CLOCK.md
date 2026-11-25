@@ -269,3 +269,20 @@ required for the full differential pass, in particular reverb address
 boundary semantics, disabled return/mute scope, ADPCM startup and fetch
 phase, Gaussian output alignment, noise clock timing, extreme PMON pitch
 and sweep timing. No hardware differential pass is claimed here.
+
+### Retail silence isolation (2026-11-25)
+
+The 10:44 replay produced 3,476,537 frames with zero nonzero samples and
+peak zero despite a ready host device, 269 voice starts and 223,763
+AutoDMA frames consumed. No per-stage peaks or ATTR/MMIX/volume snapshots
+were present, so the exact source of silence is not proven. PS2SDK
+initializes ATTR with bit 14 set, while PCSX2 explicitly bypasses that
+mute gate and the SDBZ ps2-web-recomp model does not use it. Revert the
+unvalidated active-high output gate from Batch 28; keep the actual
+register latch. Add core-level source/envelope/voice-volume, raw and
+scaled input, external, dry and output peaks and final mixer registers,
+plus the number of mixed frames with ATTR bit 14 set. These values are
+observational, do not alter guest state, and can isolate any remaining
+silence in the next retail run. Hardware-accurate mute behavior remains
+open. Existing PMON, NON, Gaussian, reverb and master sweep code stays
+in place; no routing bypass or fabricated PCM is introduced.

@@ -1319,7 +1319,8 @@ bool test_spu2_voice_output_controls()
     {
         return false;
     }
-    // Mute gates only the output; AutoDMA and guest sample clock advance.
+    // PS2SDK initializes with bit 14 set. Match both compatibility
+    // references: the latch must not mute an otherwise audible stream.
     spu.reset();
     const uint8_t input[] = {0u, 0x40u, 0u, 0x40u};
     if (!spu.write(base + 0x59au, 2u, 0x4000u) ||
@@ -1328,7 +1329,8 @@ bool test_spu2_voice_output_controls()
         return false;
     }
     (void)spu.advance_cycles(period);
-    if (spu.nonzero_frames() != 0u || spu.input_frames_consumed() != 1u)
+    if (spu.nonzero_frames() != 1u || spu.input_frames_consumed() != 1u ||
+        !spu.read(base + 0x59au, 2u, &value) || value != 0x4000u)
     {
         return false;
     }
@@ -1338,7 +1340,7 @@ bool test_spu2_voice_output_controls()
         return false;
     }
     (void)spu.advance_cycles(period);
-    return spu.nonzero_frames() == 1u && spu.input_frames_consumed() == 2u;
+    return spu.nonzero_frames() == 2u && spu.input_frames_consumed() == 2u;
 }
 
 bool test_spu2_effect_registers()
@@ -2527,7 +2529,7 @@ int main()
     }
     if (!test_spu2_voice_output_controls())
     {
-        return fail("SPU2 Gaussian ROM, PMON arithmetic, noise, master sweep and mute");
+        return fail("SPU2 Gaussian ROM, PMON arithmetic, noise, master sweep and ATTR readback");
     }
     if (!test_spu2_effect_registers())
     {

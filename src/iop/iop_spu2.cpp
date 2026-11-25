@@ -1,6 +1,7 @@
 #include "iop_spu2.h"
 
 #include <algorithm>
+#include <cstdio>
 
 namespace iop
 {
@@ -23,6 +24,41 @@ void c_spu2::report_audio_profile() const
         m_profile_effect.report("spu2_effect");
         m_profile_sink.report("spu2_pcm_sink");
         m_profile_silent_rings.report("spu2_silent_ring_revolutions");
+    }
+}
+
+void c_spu2::report_signal_path() const
+{
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const s_core& state = m_cores[core];
+        std::printf("IOP SPU2 signal: core=%u source_peak=%u envelope_peak=%u "
+            "voice_volume_peak=%u input_raw_peak=%u input_gain_peak=%u "
+            "external_peak=%u dry_peak=%u output_peak=%u attr14_frames=%llu\n",
+            core, state.m_source_peak, state.m_envelope_peak, state.m_voice_volume_peak,
+            state.m_input_raw_peak, state.m_input_gain_peak, state.m_external_peak,
+            state.m_dry_peak, state.m_output_peak,
+            static_cast<unsigned long long>(state.m_attr14_frames));
+        std::printf("IOP SPU2 registers: core=%u attr=0x%04x mmix=0x%04x "
+            "mvol=0x%04x/0x%04x mvolx=0x%04x/0x%04x "
+            "evol=0x%04x/0x%04x avol=0x%04x/0x%04x bvol=0x%04x/0x%04x "
+            "vmixl=0x%06x vmixr=0x%06x vmixel=0x%06x vmixer=0x%06x\n",
+            core, static_cast<unsigned>(state.m_attr),
+            static_cast<unsigned>(state.m_registers[0x198u / 2u]),
+            static_cast<unsigned>(state.m_master[0]), static_cast<unsigned>(state.m_master[1]),
+            static_cast<unsigned>(static_cast<uint16_t>(state.m_master_volume[0].m_level)),
+            static_cast<unsigned>(static_cast<uint16_t>(state.m_master_volume[1].m_level)),
+            static_cast<unsigned>(state.m_master[2]), static_cast<unsigned>(state.m_master[3]),
+            static_cast<unsigned>(state.m_master[4]), static_cast<unsigned>(state.m_master[5]),
+            static_cast<unsigned>(state.m_master[6]), static_cast<unsigned>(state.m_master[7]),
+            static_cast<uint32_t>(state.m_registers[0x188u / 2u]) |
+                (static_cast<uint32_t>(state.m_registers[0x18au / 2u] & 0xffu) << 16u),
+            static_cast<uint32_t>(state.m_registers[0x190u / 2u]) |
+                (static_cast<uint32_t>(state.m_registers[0x192u / 2u] & 0xffu) << 16u),
+            static_cast<uint32_t>(state.m_registers[0x18cu / 2u]) |
+                (static_cast<uint32_t>(state.m_registers[0x18eu / 2u] & 0xffu) << 16u),
+            static_cast<uint32_t>(state.m_registers[0x194u / 2u]) |
+                (static_cast<uint32_t>(state.m_registers[0x196u / 2u] & 0xffu) << 16u));
     }
 }
 
@@ -94,6 +130,12 @@ int32_t signed_halfword(uint32_t value)
 {
     value &= 0xffffu;
     return static_cast<int32_t>(value) - (value >= 0x8000u ? 0x10000 : 0);
+}
+
+void record_peak(uint32_t& peak, int32_t sample)
+{
+    // Inputs are bounded mixer intermediates, never INT32_MIN.
+    peak = std::max(peak, static_cast<uint32_t>(sample < 0 ? -sample : sample));
 }
 
 int16_t clamp_sample(int32_t value)
@@ -908,6 +950,8 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
                 const int32_t enveloped = floor_shift(
                     interpolated * voice.m_envelope.m_level, 15u);
                 previous[sample] = clamp_sample(enveloped);
+                record_peak(core.m_source_peak, interpolated);
+                record_peak(core.m_envelope_peak, enveloped);
                 if (index == 1u || index == 3u)
                 {
                     const uint32_t ring = index == 1u ? 2u : 3u;
@@ -919,6 +963,7 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
                 {
                     const int32_t gain = voice.m_volume[channel].m_level;
                     const int32_t contribution = floor_shift(enveloped * gain, 15u);
+                    record_peak(core.m_voice_volume_peak, contribution);
                     if ((dry_mask[channel] & bit) != 0u)
                     {
                         dry[core_index][sample][channel] += contribution;
@@ -1033,9 +1078,12 @@ void c_spu2::advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]
                     m_mixer_rings[0u][channel][ring_slot] = state.m_input[slot][channel];
                 }
                 // B-volume is the signed AutoDMA input gain.
-                sum[core][sample][channel] += floor_shift(
-                    static_cast<int32_t>(state.m_input[slot][channel]) *
+                const int32_t raw = state.m_input[slot][channel];
+                const int32_t gained = floor_shift(raw *
                     signed_halfword(state.m_master[6u + channel]), 15u);
+                record_peak(state.m_input_raw_peak, raw);
+                record_peak(state.m_input_gain_peak, gained);
+                sum[core][sample][channel] += gained;
             }
         }
         state.m_input_read = (state.m_input_read + count) % k_input_frames;
@@ -1173,6 +1221,11 @@ void c_spu2::mix_frames(uint64_t samples)
                 for (uint32_t core = 0u; core < 2u; ++core)
                 {
                     bool effect_nonzero = false;
+                    s_core& state = m_cores[core];
+                    if ((state.m_attr & 0x4000u) != 0u)
+                    {
+                        ++state.m_attr14_frames;
+                    }
                     int32_t dry_mix[2]{};
                     int32_t effect_mix[2]{};
                     int16_t effect_return[2]{};
@@ -1186,6 +1239,7 @@ void c_spu2::mix_frames(uint64_t samples)
                         };
                         const int32_t in = input[core][sample][channel];
                         const int32_t ext = external[channel];
+                        record_peak(state.m_external_peak, ext);
                         dry_mix[channel] = gate(0x040u, in) +
                             gate(0x400u, clamp_sample(sum[core][sample][channel])) +
                             gate(0x004u, ext);
@@ -1204,11 +1258,15 @@ void c_spu2::mix_frames(uint64_t samples)
                         {
                             ++m_clipped_samples;
                         }
-                        // ATTR bit 14 is the PS2SDK mute control. Keep
-                        // internal voices, effects, rings and IRQs running.
-                        const int16_t output = (m_cores[core].m_attr & 0x4000u) != 0u ? 0 :
-                            clamp_sample(scale_mix(clamp_sample(dry),
-                                m_cores[core].m_master_volume[channel].m_level));
+                        // PS2SDK sets ATTR bit 14 during initialization,
+                        // while both current compatibility references leave
+                        // its output gate inactive. Preserve the latch but
+                        // do not silence playback until hardware semantics
+                        // have been established.
+                        record_peak(state.m_dry_peak, dry);
+                        const int16_t output = clamp_sample(scale_mix(clamp_sample(dry),
+                            state.m_master_volume[channel].m_level));
+                        record_peak(state.m_output_peak, output);
                         if (core == 0u)
                         {
                             // Tap the core 0 output before core 1 AVOL.
