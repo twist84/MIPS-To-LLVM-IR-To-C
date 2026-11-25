@@ -24,6 +24,8 @@ set "SDBZ_REPORT_SNAPSHOT_MS=2000"
 rem Progress text only; retain exact dispatch counters and periodic snapshots.
 set "SDBZ_REPORT_PROGRESS_EVERY=8192"
 set "SDBZ_DISPATCH_TRACE_EVERY=1024"
+rem Host polling gate; every observed guest field advance is still serviced.
+set "SDBZ_WINDOW_PUMP_STRIDE=64"
 
 set "SDBZ_EE_DIRECT_DISPATCH=1"
 set "SDBZ_VU1_ASYNC=1"
