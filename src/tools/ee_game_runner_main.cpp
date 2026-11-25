@@ -3720,6 +3720,15 @@ int main(int argc, char** argv)
     // and a backlog after bounded native-dispatch safepoints.
     ee::c_ee_iop_clock iop_clock;
     uint64_t iop_clock_turns = 0u;
+    // Opt-in: coalesce only provably idle IOP turns within the existing
+    // EE checkpoint. Do not defer IOP time across native EE execution.
+    std::string iop_coalesce_environment;
+    const char* iop_coalesce_value = read_host_environment(
+        "SDBZ_IOP_COALESCE_IDLE_TURNS", &iop_coalesce_environment);
+    const bool iop_coalesce = iop_coalesce_value != nullptr &&
+        std::strcmp(iop_coalesce_value, "1") == 0;
+    uint64_t iop_clock_runs = 0u;
+    uint64_t iop_coalesced_batches = 0u;
     bool guest_rpc_idle_diagnostic_reported = false;
     uint64_t next_iop_guest_rpc_snapshot = 50000u;
     ee::c_ee_dispatch_hotspots hotspots;
@@ -4451,13 +4460,49 @@ int main(int argc, char** argv)
             // A large translated function may leave a bounded backlog.
             while (iop_clock.due() != 0u && turns < 64u)
             {
-                const uint32_t cycles = static_cast<uint32_t>(
-                    std::min<uint64_t>(iop_clock.due(), 256u));
+                ee::s_ee_iop_service_batch batch{
+                    static_cast<uint32_t>(std::min<uint64_t>(iop_clock.due(), 256u)),
+                    1u};
+                const uint64_t kernel_before = iop_kernel->cycles();
+                if (iop_coalesce && iop_clock.due() > 256u && turns < 63u &&
+                    runtime.m_ee_cycle_scheduler.source() ==
+                        ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
+                    runtime.m_timing_observer == nullptr &&
+                    !hle_iop_reboot_bootstrap_pending &&
+                    (iop_rpc == nullptr || !iop_rpc->scheduler_barrier()))
+                {
+                    // No runnable guest, IRQ, software wake, DMA completion,
+                    // SPU2 sample or Timer5 edge may occur in a combined batch.
+                    // With no queued RPC work, intervening pumps are no-ops.
+                    const auto candidate = ee::ee_iop_service_batch(
+                        iop_clock.due(), 64u - turns,
+                        iop_kernel->idle_event_cycles_remaining());
+                    const auto& spu2 = iop_kernel->hardware().spu2();
+                    if (candidate.m_turns > 1u &&
+                        candidate.m_cycles <= UINT64_MAX - kernel_before &&
+                        (!spu2.clock_active() ||
+                            candidate.m_cycles <= UINT64_MAX - spu2.clock_cycles()))
+                    {
+                        batch = candidate;
+                    }
+                }
+                const uint32_t cycles = batch.m_cycles;
                 uint32_t prior_smflag = 0u;
                 const bool trace_smflag = trace &&
                     hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
                 const iop::s_kernel_run_result progressed =
                     iop_kernel->run(cycles, 128u);
+                if (batch.m_turns > 1u &&
+                    (progressed.m_executed != 0u ||
+                        iop_kernel->cycles() - kernel_before != cycles ||
+                        (progressed.m_stop != iop::e_kernel_stop::idle &&
+                            progressed.m_stop != iop::e_kernel_stop::budget_exhausted)))
+                {
+                    std::fprintf(stderr, "IOP idle coalescing violated quiet interval\n");
+                    // Do not retry or claim a valid result after guest state
+                    // may have been changed by an unexpected event.
+                    return 1;
+                }
                 uint32_t current_smflag = 0u;
                 if (trace_smflag && progressed.m_executed != 0u &&
                     hardware.sif().get_reg(4u, &current_smflag) && current_smflag != 0u)
@@ -4474,8 +4519,16 @@ int main(int argc, char** argv)
                     std::fprintf(stderr, "IOP clock refused invalid cycle consumption\n");
                     return 1;
                 }
-                ++turns;
-                ++iop_clock_turns;
+                turns += batch.m_turns;
+                iop_clock_turns += batch.m_turns;
+                if (iop_coalesce)
+                {
+                    ++iop_clock_runs;
+                    if (batch.m_turns > 1u)
+                    {
+                        ++iop_coalesced_batches;
+                    }
+                }
                 if (progressed.m_stop !=
                         iop::e_kernel_stop::budget_exhausted &&
                     progressed.m_stop != iop::e_kernel_stop::idle)
@@ -9368,6 +9421,16 @@ int main(int argc, char** argv)
         }
     }
 
+    if (iop_coalesce)
+    {
+        std::printf("IOP clock coalesce: enabled=1 logical_turns=%llu physical_runs=%llu "
+            "saved_turns=%llu combined_batches=%llu debt=%llu\n",
+            static_cast<unsigned long long>(iop_clock_turns),
+            static_cast<unsigned long long>(iop_clock_runs),
+            static_cast<unsigned long long>(iop_clock_turns - iop_clock_runs),
+            static_cast<unsigned long long>(iop_coalesced_batches),
+            static_cast<unsigned long long>(iop_clock.due()));
+    }
     std::printf(
         "EE timing: source=%s current_cycles=%llu scheduler_yields=%llu next_gs_field=%llu fields=%llu\n",
         ee_cycle_source_name(runtime.m_ee_cycle_scheduler.source()),
