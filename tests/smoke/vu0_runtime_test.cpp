@@ -525,18 +525,18 @@ int main()
               pair_vu.m_data_memory[35] == 0x40u,
               "lower SQ observes the VF value before the paired ADDx");
 
-        // Conflicting simultaneous VF writes deliberately remain unavailable.
+        // A conflicting lower LQ is discarded; ADDx still executes.
         ee::s_ee_vu0_state conflict{};
         conflict.m_vpu_status = 1u;
         const auto previous = pair_cpu.m_vu0[3];
         install_vu0_pair(&conflict, 0, make_vu0_memory(0x00, 8, 3, 0, 2), addx);
         check(ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu, &conflict, 1u,
                   ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u) ==
-                  static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE) &&
-              conflict.m_cycle == 0u && conflict.m_micro_pc == 0u &&
-              pair_cpu.m_vu0[3].m_lo == previous.m_lo &&
+                  static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              conflict.m_cycle == 1u && conflict.m_micro_pc == 8u &&
+              pair_cpu.m_vu0[3].m_lo == 0x40e0000040a00000ull &&
               pair_cpu.m_vu0[3].m_hi == previous.m_hi,
-              "conflicting upper/lower VF writes fail without partial execution");
+              "conflicting upper/lower VF writes execute upper ADDx only");
     }
 
     // ACC forwarding, masked writes and multiply/accumulate flag timing.
