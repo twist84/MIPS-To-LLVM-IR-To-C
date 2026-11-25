@@ -1126,6 +1126,54 @@ bool vu0_issue_upper_fmac(s_ee_vu0_state* vu0, uint32_t reg,
     return false;
 }
 
+bool vu0_is_lower_transfer(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::MOVE || op == kind::MR32 ||
+        op == kind::MTIR || op == kind::MFIR;
+}
+
+void vu0_execute_lower_transfer(s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const auto op = fields.m_operation;
+    if (op == kind::MTIR)
+    {
+        if (fields.m_it != 0u)
+        {
+            vu0_backup_ialu_vi(vu0, fields.m_it);
+            vu0_write_ialu_vi(vu0, fields.m_it, static_cast<uint16_t>(
+                vu0_fmac_read_vf(cpu, fields.m_fs, (instruction.m_lower >> 21u) & 3u)));
+        }
+        vu0_record_lower_fmac(vu0, 0u, 0u);
+        return;
+    }
+    if (fields.m_ft != 0u)
+    {
+        s_ee_u128 output = cpu->m_vu0[fields.m_ft];
+        const uint32_t integer = static_cast<uint32_t>(static_cast<int32_t>(
+            static_cast<int16_t>(vu0_read_ialu_vi(vu0, fields.m_is))));
+        for (uint32_t lane = 0; lane < 4u; ++lane)
+        {
+            if ((fields.m_xyzw & (8u >> lane)) != 0u)
+            {
+                const uint32_t source_lane = op == kind::MR32 ? (lane + 1u) & 3u : lane;
+                vu0_fmac_set_lane(&output, lane, op == kind::MFIR ? integer :
+                    vu0_fmac_read_vf(cpu, fields.m_fs, source_lane));
+            }
+        }
+        cpu->m_vu0[fields.m_ft] = output;
+    }
+    // MOVE to VF0 is a NOP (including the canonical lower NOP).
+    // The remaining transfers occupy the lower FMAC pipe.
+    if (op != kind::MOVE || fields.m_ft != 0u)
+    {
+        vu0_record_lower_fmac(vu0, fields.m_ft, fields.m_xyzw);
+    }
+}
+
 uint32_t vu0_clip_result(const s_ee_cpu_state* cpu, uint32_t fs,
                          uint32_t ft, uint32_t previous)
 {
@@ -1816,8 +1864,8 @@ uint32_t ee_vu0_execute_ialu_callback(
         const bool lower_ialu = !immediate && vu0_is_supported_lower_ialu(instruction);
         const bool lower_branch = !immediate && vu0_is_supported_lower_branch(instruction);
         const bool lower_flag_read = !immediate && vu0_is_supported_lower_flag_read(instruction);
-        // Canonical lower NOP is MOVE to VF0 with no enabled lanes.
-        const bool lower_nop = !immediate && instruction.m_lower == 0x8000033cu;
+        const bool lower_transfer = !immediate &&
+            vu0_is_lower_transfer(instruction.m_lower_fields.m_operation);
         const bool lower_memory = !immediate && vu0_is_supported_lower_memory(instruction);
         const uint32_t memory_address = lower_memory
             ? vu0_memory_byte_address(vu0, instruction) : 0;
@@ -1837,16 +1885,18 @@ uint32_t ee_vu0_execute_ialu_callback(
             (lower_op == e_ee_vu0_micro_opcode::LQ ||
              lower_op == e_ee_vu0_micro_opcode::LQI ||
              lower_op == e_ee_vu0_micro_opcode::LQD);
+        const bool transfer_vf_write = lower_transfer &&
+            lower_op != e_ee_vu0_micro_opcode::MTIR;
         // Conflicting writes to the same VF require a separate dual-issue
         // arbitration audit. Reject the pair before either side executes.
         const bool vf_conflict = upper_arith && !arith.m_to_acc && upper_dest != 0u &&
-            lower_load && upper_dest == instruction.m_lower_fields.m_ft;
+            (lower_load || transfer_vf_write) && upper_dest == instruction.m_lower_fields.m_ft;
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
                 e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
             (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
-                !lower_flag_read && !lower_nop) ||
+                !lower_flag_read && !lower_transfer) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
@@ -1874,6 +1924,23 @@ uint32_t ee_vu0_execute_ialu_callback(
             const uint32_t source = instruction.m_lower_fields.m_fs;
             const uint32_t lanes = instruction.m_lower_fields.m_xyzw;
             vu0_stall_vf_read(vu0, source, lanes);
+        }
+        if (lower_transfer)
+        {
+            const auto& lower = instruction.m_lower_fields;
+            uint32_t lanes = lower.m_xyzw;
+            if (lower_op == e_ee_vu0_micro_opcode::MTIR)
+            {
+                lanes = 8u >> ((instruction.m_lower >> 21u) & 3u);
+            }
+            else if (lower_op == e_ee_vu0_micro_opcode::MR32)
+            {
+                lanes = (lanes >> 1u) | ((lanes << 3u) & 8u);
+            }
+            if (lower_op != e_ee_vu0_micro_opcode::MFIR)
+            {
+                vu0_stall_vf_read(vu0, lower.m_fs, lanes);
+            }
         }
         if (upper_clip)
         {
@@ -1994,6 +2061,10 @@ uint32_t ee_vu0_execute_ialu_callback(
             {
                 return schedule_result;
             }
+        }
+        else if (lower_transfer)
+        {
+            vu0_execute_lower_transfer(cpu, vu0, instruction);
         }
         else if (lower_flag_read)
         {

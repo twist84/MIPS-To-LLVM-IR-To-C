@@ -687,6 +687,42 @@ int main()
               "outer product preserves W MAC bits");
     }
 
+    // Lower MOVE/MR32/MTIR/MFIR operate on raw VF words and VI halfwords.
+    {
+        ee::s_ee_cpu_state transfer_cpu{};
+        ee::s_ee_vu0_state transfer_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        transfer_vu.m_vpu_status = 1u;
+        transfer_vu.m_vi[1] = 0x12340000u;
+        transfer_cpu.m_vu0[1] = {0x2222800133331234ull, 0x4444444455555555ull};
+        transfer_cpu.m_vu0[3].m_hi = 0xdeadbeefcafebabeull;
+        const auto lower = [](uint32_t table, uint32_t index, uint32_t ft,
+                              uint32_t fs, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (fs << 11u) | (index << 6u) | (0x3cu | table);
+        };
+        install_vu0_pair(&transfer_vu, 0, lower(0, 12, 2, 1, 15), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 1, lower(1, 12, 2, 2, 15), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 2, lower(0, 15, 1, 2, 0), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 3, lower(1, 15, 3, 1, 10), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 4, lower(0, 12, 0, 3, 15),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&transfer_vu, 5, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &transfer_cpu,
+            &transfer_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              transfer_vu.m_running == 0u && transfer_vu.m_cycle == 14u,
+              "lower transfer lane dependencies and E drain");
+        check(transfer_cpu.m_vu0[2].m_lo == 0x5555555522228001ull &&
+              transfer_cpu.m_vu0[2].m_hi == 0x3333123444444444ull &&
+              transfer_vu.m_vi[1] == 0x12348001u &&
+              transfer_cpu.m_vu0[3].m_lo == 0x00000000ffff8001ull &&
+              transfer_cpu.m_vu0[3].m_hi == 0xdeadbeefffff8001ull &&
+              transfer_cpu.m_vu0[0].m_lo == 0u && transfer_cpu.m_vu0[0].m_hi == 0u,
+              "lower MOVE/MR32 aliasing, MTIR low half and MFIR sign extension");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
@@ -2714,8 +2750,8 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, (0x40u << 25) | (15u << 6) | 0x3cu,
-                         make_vu0_upper_nop()); // MTIR remains unsupported.
+        install_vu0_pair(&state, 0, (0x40u << 25) | (14u << 6) | 0x3cu,
+                         make_vu0_upper_nop()); // DIV remains unsupported.
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 4,

@@ -352,3 +352,13 @@ existing bit-level MUL/MSUB primitives. Preserve W data and W MAC bits,
 including the newest pending flag result. XYZ reservations are independent
 of the raw destination mask. Regression covers the cross-product sequence
 and E flush. Original transcript progress remains unverified.
+
+## VU0 lower register transfers
+
+All four workflows at 9462c8e passed, with original pilot still six
+exact matches. Implement lower MOVE/MR32/MTIR/MFIR, using old VF values
+for rotated aliases and paired operations, lane-specific dependencies,
+VI backup on MTIR, low-halfword preservation and MFIR sign extension.
+MOVE to VF0 retains NOP timing; other transfers reserve four FMAC
+cycles. Upper/lower same-destination writes remain fail-closed.
+No new original transcript match claimed.
