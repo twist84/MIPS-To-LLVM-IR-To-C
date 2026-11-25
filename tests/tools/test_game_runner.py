@@ -4732,6 +4732,8 @@ def main():
                     <= int(horizon["alu_bound_matched"])), lines
             assert (0 <= int(horizon["alu_certified"]) <= int(horizon["alu_owner_known"])
                     <= int(horizon["alu_bound_candidates"])), lines
+            assert (int(horizon["alu_identity_hits"]) + int(horizon["alu_identity_misses"])
+                    <= int(horizon["alu_bound_candidates"])), lines
             for key in ("entry_callback", "entry_idle", "entry_irq", "entry_vu",
                         "entry_other", *(f"dmac_str{i}" for i in range(10))):
                 assert 0 <= int(horizon[key]) <= total_samples, lines
@@ -4821,6 +4823,9 @@ def main():
                 assert int(horizon["alu_bound_mismatch"]) == 0, horizon_line
                 assert int(horizon["alu_bound_candidates"]) == int(horizon["alu_bound_matched"]), horizon_line
                 assert int(horizon["alu_owner_known"]) == int(horizon["alu_bound_candidates"]), horizon_line
+                assert int(horizon["alu_identity_misses"]) > 0, horizon_line
+                assert (int(horizon["alu_identity_hits"]) + int(horizon["alu_identity_misses"])
+                        == int(horizon["alu_bound_candidates"])), horizon_line
                 assert int(horizon["alu_certified_matched"]) > 0, horizon_line
                 assert int(horizon["alu_certified"]) == int(horizon["alu_certified_matched"]), horizon_line
                 assert all(int(horizon[key]) == 0 for key in
