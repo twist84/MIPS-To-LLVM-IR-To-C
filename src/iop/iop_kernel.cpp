@@ -1747,16 +1747,6 @@ s_kernel_run_result c_kernel::run(
         const uint32_t id = next_ready(next_wake);
         if (id == 0u)
         {
-            for (const auto& item : m_alarms)
-            {
-                if (!item.second.m_cancelled &&
-                    item.second.m_deadline > m_cycles)
-                {
-                    next_wake = std::min(
-                        next_wake, item.second.m_deadline
-                    );
-                }
-            }
             if (!m_hle_events.empty() &&
                 m_hle_events.begin()->first > m_cycles)
             {
@@ -1782,6 +1772,25 @@ s_kernel_run_result c_kernel::run(
                             ? m_cycles + left
                             : std::numeric_limits<uint64_t>::max();
                     next_wake = std::min(next_wake, deadline);
+                }
+            }
+            // The conservative alarm hint can be earlier than the
+            // first live deadline (for example after cancellation), but
+            // never later. If another real deadline is no later than the
+            // hint, no alarm can reduce this idle horizon. Otherwise
+            // resolve the exact future deadline; do not advance to a
+            // stale or already-due hint or change the idle stop reason.
+            if (m_next_alarm_wake < next_wake)
+            {
+                for (const auto& item : m_alarms)
+                {
+                    if (!item.second.m_cancelled &&
+                        item.second.m_deadline > m_cycles)
+                    {
+                        next_wake = std::min(
+                            next_wake, item.second.m_deadline
+                        );
+                    }
                 }
             }
             if (next_wake ==

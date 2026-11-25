@@ -172,3 +172,19 @@ Do not skip a pending initializer, change the pump cadence, or combine
 IOP cycle budgets. Existing tests exercise pending starts, blocked and
 accepted DMA5 replies; add a repeated empty-pump regression. This is a
 small host call-overhead reduction, not a measured 10-second saving.
+
+## Batch 4: prune redundant IOP idle alarm deadline scans
+
+All four workflows passed for Batch 3 (`60543ee`). During idle
+scheduling, resolve the existing thread, HLE and SPU2 device deadlines
+before considering alarms. The existing conservative alarm hint is a
+lower bound: if it cannot beat the already selected deadline, the full
+alarm map scan cannot change the result. Otherwise retain the exact scan
+of noncancelled future alarms. Never advance to a stale hint. This also
+avoids the map iteration when no alarm exists. Preserve budget-exhausted
+versus idle reporting, wake ordering and all hardware cycle advancement.
+Extend the alarm cancellation test with a budget ending before the stale
+hint. Existing earlier-insertion and HLE deadline tests cover the case
+where an intervening real event changes the earliest alarm.
+No lowering or AOT cache change. No standalone retail replay required;
+performance remains to be measured with the next combined run.
