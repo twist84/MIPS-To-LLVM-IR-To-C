@@ -769,6 +769,7 @@ def main():
         "set \"SDBZ_RUNTIME_PROFILE=1\"",
         "set \"SDBZ_TRACE_BUFFERED=1\"",
         "set \"SDBZ_REPORT_SNAPSHOT_MS=2000\"",
+        "set \"SDBZ_REPORT_PROGRESS_EVERY=8192\"",
         "set \"SDBZ_DISPATCH_TRACE_EVERY=1024\"",
         "set \"SDBZ_EE_DIRECT_DISPATCH=1\"",
         "set \"SDBZ_VU1_ASYNC=1\"",
