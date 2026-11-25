@@ -234,6 +234,10 @@ public:
         stop();
     }
 
+    // Completed direct child scopes already include all descendants.
+    // Available after stop(), without another host clock read.
+    uint64_t child_ns() const { return m_children_ns; }
+
     // Return the measured inclusive duration on the first stop only.
     // The caller can reuse it for legacy progress reporting without a
     // second pair of host clock reads. Measure-only scopes never
