@@ -100,6 +100,65 @@ bool put_program(
 
 int main()
 {
+    // The lookahead is advisory: querying it must not execute a
+    // callback, retire a guest instruction or advance a device.
+    {
+        iop::c_kernel idle;
+        auto& hw = idle.hardware();
+        constexpr uint64_t rollover = uint64_t{1u} << 32u;
+        if (idle.idle_event_cycles_remaining() != rollover ||
+            !hw.write(iop::c_hw::k_timer5_mode, 4u, 0x2058u) ||
+            !hw.write(iop::c_hw::k_timer5_target, 4u, 10u) ||
+            idle.idle_event_cycles_remaining() != 80u)
+        {
+            return fail("IOP lookahead timer divisor/compare");
+        }
+        (void)idle.run(7u);
+        if (idle.idle_event_cycles_remaining() != 73u ||
+            idle.cycles() != 7u)
+        {
+            return fail("IOP lookahead timer fractional phase");
+        }
+        uint32_t callbacks = 0u;
+        if (!idle.schedule_hle_event(3u, [&]() { ++callbacks; }) ||
+            idle.idle_event_cycles_remaining() != 3u ||
+            callbacks != 0u)
+        {
+            return fail("IOP lookahead HLE event");
+        }
+        (void)idle.run(3u);
+        if (callbacks != 0u || idle.idle_event_cycles_remaining() != 0u)
+        {
+            return fail("IOP lookahead due HLE event");
+        }
+        (void)idle.run(1u);
+        if (callbacks != 1u || idle.idle_event_cycles_remaining() != 69u)
+        {
+            return fail("IOP lookahead after HLE event");
+        }
+        const uint32_t thread = idle.create_thread(0x1800u, 0u, 8u, 0x400u);
+        if (thread == 0u || idle.idle_event_cycles_remaining() != 69u ||
+            !idle.start_thread(thread) ||
+            idle.idle_event_cycles_remaining() != 0u ||
+            !idle.stop_thread(thread) ||
+            idle.idle_event_cycles_remaining() != 69u)
+        {
+            return fail("IOP lookahead ready/dormant transition");
+        }
+        if (!hw.write(iop::c_hw::k_timer5_mode, 4u, 0u) ||
+            !hw.spu2().write(iop::c_spu2::k_base + 0x19au, 2u, 0u) ||
+            idle.idle_event_cycles_remaining() != iop::c_spu2::k_cycles_per_sample)
+        {
+            return fail("IOP lookahead SPU2 sample boundary");
+        }
+        (void)idle.run(1u);
+        if (idle.idle_event_cycles_remaining() !=
+                iop::c_spu2::k_cycles_per_sample - 1u)
+        {
+            return fail("IOP lookahead SPU2 sample phase");
+        }
+    }
+
     // A real IOP thread stack is allocated from upper RAM downward,
     // in 256-byte multiples. Guest modules and IOPHEAP use lower RAM.
     // Releasing a dormant thread permits high-gap reuse without
@@ -485,6 +544,10 @@ int main()
     }
     const uint64_t late_wake = kernel.thread(late)->m_wake_cycle;
     const uint64_t early_wake = kernel.thread(early)->m_wake_cycle;
+    if (kernel.idle_event_cycles_remaining() != early_wake - kernel.cycles())
+    {
+        return fail("IOP lookahead did not select earliest timed thread");
+    }
     const uint64_t event_cycle = kernel.cycles() + 2u;
     uint64_t observed_event_cycle = 0u;
     if (event_cycle >= early_wake || early_wake >= late_wake ||
