@@ -495,7 +495,7 @@ void module_builder::emit_quadword_read(const std::string& address,
     // allocate in guest loops or write directly into a guest register before
     // both ordered fallback reads have completed.
     const std::string high_ptr = newtemp();
-    m_out += "  call void @ee_mem_read128_pair(ptr %rt, i32 " + address +
+    m_out += "  call void @ee_mem_read128_guest(ptr %rt, i32 " + address +
              ", ptr %quadword_read_slot)\n";
     m_out += "  " + lo + " = load i64, ptr %quadword_read_slot, align 16\n";
     m_out += "  " + high_ptr + " = getelementptr i8, ptr %quadword_read_slot, i64 8\n";
@@ -3445,24 +3445,38 @@ void module_builder::end_function()
 
     // Emit these only in modules that actually use them. Unrelated IR
     // retains its existing text/hash and native cache identity.
-    if (m_out.find("call void @ee_mem_read128_pair(", m_quadword_entry_offset) != std::string::npos)
+    if (m_out.find("call void @ee_mem_read128_guest(", m_quadword_entry_offset) != std::string::npos)
     {
         m_out.insert(m_quadword_entry_offset,
                      "  %quadword_read_slot = alloca { i64, i64 }, align 16\n");
-        m_out += "\ndeclare void @ee_mem_read128_pair(ptr, i32, ptr)\n";
+        m_out += "\ndeclare void @ee_mem_read128_guest(ptr, i32, ptr)\n";
     }
     if (m_out.find("call void @ee_store_quadword(", m_quadword_entry_offset) != std::string::npos)
     {
         // A failed RAM probe has no side effects. Preserve trace/write
-        // interleaving, including rechecking the trace flag after MMIO.
+        // interleaving for scalar fallback, but keep a hardware FIFO
+        // quadword indivisible (both diagnostic lanes precede its write).
         m_out += R"IR(
 declare i32 @ee_mem_try_write128_ram(ptr, i32, i64, i64)
+declare i32 @ee_mem_is_quadword_fifo(ptr, i32)
+declare void @ee_mem_write128_words(ptr, i32, i64, i64)
 define internal void @ee_store_quadword(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i64 %lo, i64 %hi, i64 %base, i64 %sp, i64 %fp, i64 %ra) alwaysinline {
 entry:
   %fused = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
   %ok = icmp ne i32 %fused, 0
   br i1 %ok, label %done, label %fallback
 fallback:
+  %fifo_flag = call i32 @ee_mem_is_quadword_fifo(ptr %rt, i32 %affected)
+  %fifo = icmp ne i32 %fifo_flag, 0
+  br i1 %fifo, label %fifo_write, label %scalar_write
+fifo_write:
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 8, i64 %lo, i32 0, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  %fifo_effective8 = add i32 %effective, 8
+  %fifo_affected8 = add i32 %affected, 8
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %fifo_effective8, i32 %fifo_affected8, i32 8, i64 %hi, i32 1, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  call void @ee_mem_write128_words(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
+  br label %done
+scalar_write:
   call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 8, i64 %lo, i32 0, i64 %base, i64 %sp, i64 %fp, i64 %ra)
   call void @ee_mem_write64(ptr %rt, i32 %affected, i64 %lo)
   %effective8 = add i32 %effective, 8

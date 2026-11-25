@@ -642,6 +642,39 @@ void ee_mem_read128_pair(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out
     *out = {lo, hi};
 }
 
+uint32_t ee_mem_is_quadword_fifo(s_ee_runtime* runtime, uint32_t address)
+{
+    const ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    // VIF0/1, GIF and IPU FIFOs consume full quadwords. In particular,
+    // two 64-bit writes to VIF FIFO are not equivalent to one SQ.
+    const bool graphics_fifo = physical >= 0x10004000u &&
+        physical < 0x10007000u;
+    const bool ipu_fifo = physical == 0x10007000u ||
+        physical == 0x10007010u;
+    return (physical & 15u) == 0u && (graphics_fifo || ipu_fifo) ? 1u : 0u;
+}
+
+void ee_mem_read128_guest(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
+{
+    if (ee_mem_is_quadword_fifo(runtime, address) != 0u)
+    {
+        ee_mem_read128(runtime, address, out);
+    }
+    else
+    {
+        ee_mem_read128_pair(runtime, address, out);
+    }
+}
+
+void ee_mem_write128_words(s_ee_runtime* runtime, uint32_t address,
+                           uint64_t lo, uint64_t hi)
+{
+    const s_ee_u128 value{lo, hi};
+    ee_mem_write128(runtime, address, &value);
+}
+
 static bool try_write128_ram(s_ee_runtime* runtime, uint32_t address,
                              uint64_t lo, uint64_t hi)
 {

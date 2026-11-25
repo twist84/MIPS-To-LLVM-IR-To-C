@@ -468,6 +468,13 @@ void     ee_mem_write128(s_ee_runtime* rt, uint32_t addr, const s_ee_u128* v);
 void ee_mem_read128_pair(s_ee_runtime* rt, uint32_t addr, s_ee_u128* out);
 void ee_mem_write128_pair(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
 
+// Guest LQ/SQ/LQC2/SQC2 are one 128-bit transaction at a hardware FIFO.
+// Preserve the paired helpers' scalar semantics elsewhere and keep their
+// existing ABI available to older translated modules.
+uint32_t ee_mem_is_quadword_fifo(s_ee_runtime* rt, uint32_t addr);
+void ee_mem_read128_guest(s_ee_runtime* rt, uint32_t addr, s_ee_u128* out);
+void ee_mem_write128_words(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
+
 // Try one untraced RAM-only store. Zero means no bytes were written and
 // the caller must execute the original per-lane trace and scalar stores.
 uint32_t ee_mem_try_write128_ram(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);

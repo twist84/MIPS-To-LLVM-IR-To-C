@@ -754,3 +754,32 @@ and resumable partial GIF stalls, FINISH timing, and general GS reset
 semantics are not implemented in this batch. Regression coverage checks
 masked lane writes, CSR, DMA, IRQ masking/unmasking, acknowledgement,
 and rollback of rejected transactions. No original transcript changed.
+
+### Native EE quadword FIFO transaction
+
+The original dma/vif/basic test (artifact 15036869035, head dbc3506)
+uses SQ to write two VIF FIFO quadwords. VIF1 ordinary and chain DMA
+both match but the FIFO output is zero. The LLVM slow SQ/SQC2 path
+split every quadword into two ee_mem_write64 calls; c_ee_vif1 accepts
+only 16-byte FIFO accesses. Preserve the hot RAM probe and paired
+scalar compatibility API, and classify physical/KSEG-alias VIF0,
+VIF1, GIF and IPU FIFO addresses on the slow path. Emit one full-width
+write, with both trace lanes recorded before that indivisible write;
+LQ/LQC2 use a guest helper with the same full-width FIFO read contract.
+All existing non-FIFO paired scalar accesses retain their order.
+New runtime helpers are additive; previously generated IR remains
+linkable but must be regenerated to use the corrected FIFO behavior.
+Regression checks the physical bus and native LLVM fixture, including
+tracing, aliases and untraced execution. VIF0 is still unimplemented;
+this change does not yet claim the entire dma/vif/basic transcript.
+
+### Confirmed GS transcript result (3c265c8)
+
+Tested merge `6a1db052493a18c7f18e4bf584ffce650bdb5eae`,
+[run 45646776251](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45646776251),
+[summary artifact 15039100663](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45646776251/artifacts/15039100663).
+42/55 exact (76.36%): PASS 42, DIFF 9, INCOMPLETE 4, NO_OUTPUT 0,
+ERROR 0. Newly passing gs/label and gs/signal. No previous exact
+transcripts lost. Native WebGPU Linux smoke exposed a remaining
+rollback fixture using SIGNAL as its invalid command; update it to
+still-unsupported FINISH without removing the rollback/retry assertions.

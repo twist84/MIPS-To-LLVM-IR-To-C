@@ -305,6 +305,32 @@ int main()
         return fail("128-bit FIFO write split or value corrupted");
     }
 
+    // Guest quadwords preserve one bus transaction, including KSEG aliases.
+    const uint32_t guest_fifo_writes = io.m_writes;
+    if (ee::ee_mem_is_quadword_fifo(&runtime, 0xb0004000u) != 1u ||
+        ee::ee_mem_is_quadword_fifo(&runtime, 0x10005000u) != 1u ||
+        ee::ee_mem_is_quadword_fifo(&runtime, 0x10007010u) != 1u ||
+        ee::ee_mem_is_quadword_fifo(&runtime, 0x10007020u) != 0u ||
+        ee::ee_mem_is_quadword_fifo(&runtime, 0x10005008u) != 0u ||
+        ee::ee_mem_is_quadword_fifo(&runtime, k_intc_mask) != 0u)
+    {
+        return fail("guest quadword FIFO address classification");
+    }
+    ee::ee_mem_write128_words(&runtime, 0xb0004000u, quad.m_lo, quad.m_hi);
+    if (io.m_writes != guest_fifo_writes + 1u || io.m_last_width != 16u ||
+        io.m_last_address != k_vif_fifo || io.m_last_value.m_lo != quad.m_lo ||
+        io.m_last_value.m_hi != quad.m_hi)
+    {
+        return fail("guest SQ FIFO transaction was split");
+    }
+    const uint32_t guest_fifo_reads = io.m_reads;
+    ee::ee_mem_read128_guest(&runtime, 0xb0004000u, &result);
+    if (io.m_reads != guest_fifo_reads + 1u || io.m_last_width != 16u ||
+        io.m_last_address != k_vif_fifo)
+    {
+        return fail("guest LQ FIFO transaction was split");
+    }
+
     // The paired helpers MUST NOT use the 16-byte FIFO transaction above.
     // The mock recognizes the first address but rejects the second one.
     const uint32_t reads_before_pair = io.m_reads;

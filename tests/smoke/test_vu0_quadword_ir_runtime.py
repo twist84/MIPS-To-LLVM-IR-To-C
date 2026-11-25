@@ -75,6 +75,19 @@ def try_write_pair(_rt, addr, lo, hi):
     return 1
 
 
+@ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32)
+def is_fifo(_rt, _addr):
+    return 0
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32,
+                  ctypes.c_uint64, ctypes.c_uint64)
+def write_quadword(_rt, addr, lo, hi):
+    # VU0 tests exercise ordinary memory, not FIFO accesses.
+    memory_write64(_rt, addr, lo)
+    memory_write64(_rt, addr + 8, hi)
+
+
 @TRACE_STORE
 def trace_guest_store(_rt, pc, word, address, aligned, size,
                       value, slot, old0, old1, old2, old3):
@@ -97,8 +110,12 @@ def register_callbacks(library_path):
         "ee_mem_write64",
         ctypes.cast(memory_write64, ctypes.c_void_p).value
     )
-    llvm.add_symbol("ee_mem_read128_pair",
+    llvm.add_symbol("ee_mem_read128_guest",
                     ctypes.cast(memory_read_pair, ctypes.c_void_p).value)
+    llvm.add_symbol("ee_mem_is_quadword_fifo",
+                    ctypes.cast(is_fifo, ctypes.c_void_p).value)
+    llvm.add_symbol("ee_mem_write128_words",
+                    ctypes.cast(write_quadword, ctypes.c_void_p).value)
     llvm.add_symbol("ee_mem_try_write128_ram",
                     ctypes.cast(try_write_pair, ctypes.c_void_p).value)
     register_trace_symbols(trace_guest_store)
