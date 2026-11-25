@@ -536,13 +536,19 @@ void c_spu2::advance_effect(uint32_t core, const int32_t (&input)[2],
 uint32_t c_spu2::effect_irq_cycles_remaining() const
 {
     uint64_t earliest = 0u;
+    const uint32_t sample_remainder = sample_phase();
+    const uint32_t next_sample = k_cycles_per_sample - sample_remainder;
     // Solve the circular tap address for each physical IRQA alias and
     // alternating channel. No RAM transaction or IRQ is generated here.
     for (uint32_t core = 0u; core < 2u; ++core)
     {
+        if (!effect_enabled(core))
+        {
+            continue;
+        }
         const uint32_t start = effect_start(core);
         const uint32_t end = effect_end(core);
-        if (!effect_enabled(core) || start >= end)
+        if (start >= end)
         {
             continue;
         }
@@ -550,6 +556,19 @@ uint32_t c_spu2::effect_irq_cycles_remaining() const
         for (const s_core& candidate : m_cores)
         {
             if ((candidate.m_attr & 0x40u) == 0u || candidate.m_irq)
+            {
+                continue;
+            }
+            // Physical sound RAM is mirrored in the logical effect area.
+            // Find the first alias in the work area before reading taps;
+            // a target outside it cannot be touched by any channel.
+            uint32_t first_alias = candidate.m_irqa;
+            if (first_alias < start)
+            {
+                first_alias += ((start - first_alias + k_ram_words - 1u) /
+                    k_ram_words) * k_ram_words;
+            }
+            if (first_alias > end)
             {
                 continue;
             }
@@ -571,23 +590,24 @@ uint32_t c_spu2::effect_irq_cycles_remaining() const
                     apf2, apf2 - effect_tap_offset(core, 0x2e8u)};
                 const uint64_t parity = (m_mixed_frames & 1u) ^ channel;
                 const uint64_t step = (m_mixed_frames + parity) >> 1u;
-                for (uint32_t alias = candidate.m_irqa; alias <= end; alias += k_ram_words)
+                const int64_t step_in_ring = static_cast<int64_t>(step % length);
+                for (uint32_t alias = first_alias; alias <= end; alias += k_ram_words)
                 {
-                    if (alias < start)
-                    {
-                        continue;
-                    }
                     for (int64_t tap : taps)
                     {
                         int64_t distance = static_cast<int64_t>(alias - start) -
-                            static_cast<int64_t>(step % length) - tap % length;
+                            step_in_ring - tap % length;
                         distance %= length;
                         if (distance < 0)
                         {
                             distance += length;
                         }
                         const uint64_t cycles = (static_cast<uint64_t>(distance) * 2u +
-                            parity + 1u) * k_cycles_per_sample - sample_phase();
+                            parity + 1u) * k_cycles_per_sample - sample_remainder;
+                        if (cycles == next_sample)
+                        {
+                            return next_sample;
+                        }
                         if (earliest == 0u || cycles < earliest)
                         {
                             earliest = cycles;
