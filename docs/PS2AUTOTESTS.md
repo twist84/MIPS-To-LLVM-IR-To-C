@@ -1012,3 +1012,18 @@ precise cycle budgets and second CMSAR1 wait remain fail-closed or
 approximate; this is not calibrated timing. New synthetic test covers
 address wrap, non-ending slices, E-bit across a boundary and FBRST.
 Original transfer transcript remains pending CI validation.
+
+### CMSAR1 progress and COP2 control readback
+
+[Run 45656662747](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45656662747), tested merge `2fc3e795e8cf7a42a1befbf56235961e71fd8daf`,
+head `71f98d09224142932e415ce41ffbfbbc63a3ef87`, [summary](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45656662747/artifacts/15043251899).
+52/55 exact, 2 DIFF, 1 INCOMPLETE, no previous passes lost; all five
+workflows succeeded. CMSAR1 now allows the transfer probe to finish
+printing all its original lines (11002 dispatches). The [VU artifact](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45656662747/artifacts/15044415421)
+shows only four readback differences: VI19, VI23, VI24, VI25.
+The independently observed control behavior in [ps2-native-recomp cop.cpp](https://github.com/exoteric33/ps2-native-recomp/blob/2a1cbfe7c355d5a3d6830810879b399868d760c1/runtime/src/cop.cpp)
+agrees: VI19 fixed 0x2e30; VI23 and VI25 read zero and ignore writes;
+VI24 stores mask 0xc0c. Apply these generic control-transfer semantics
+without changing existing FBRST strobes, CMSAR1 or VU execution.
+Synthetic tests exercise different write patterns and GPR high-half
+preservation. Original exact match remains pending validation.

@@ -1406,8 +1406,29 @@ int main()
     check(ee::ee_vu0_read_vi(&vu0, 26) == 0x00001234u,
           "CFC2 TPC reads tracked micro-PC");
 
+    // Reserved and masked control registers must not act as writable
+    // 32-bit VI storage. Test more than just the all-ones hardware probe.
+    for (const uint32_t pattern : {0xffffffffu, 0x55555555u, 0u})
+    {
+        cpu.m_gpr[8].m_lo = pattern;
+        for (const uint32_t reg : {19u, 23u, 24u, 25u})
+        {
+            vu0.m_vi[reg] = 0xdeadbeefu;
+            cpu.m_gpr[10].m_hi = 0x1122334455667788ull;
+            const uint32_t expected = reg == 19u ? 0x2e30u :
+                reg == 24u ? (pattern & 0xc0cu) : 0u;
+            check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, reg, write_mode, 0x00100048u) ==
+                      static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+                  ee::ee_vu0_cfc2(&cpu, &runtime, 10, reg, read_mode, 0x0010004cu) ==
+                      static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+                  cpu.m_gpr[10].m_lo == expected &&
+                  cpu.m_gpr[10].m_hi == 0x1122334455667788ull,
+                  "CTC2/CFC2 reserved and masked control readback");
+        }
+    }
+
     // Ordinary CTC2 writes VI, while the dedicated special cases are
-    // implemented explicitly and the three read-only registers ignore writes.
+    // implemented explicitly and read-only registers ignore writes.
     cpu.m_gpr[8].m_lo = 0x89abcdefu;
     check(
         ee::ee_vu0_ctc2(&cpu, &runtime, 8, 7, write_mode, 0x00100048u) ==

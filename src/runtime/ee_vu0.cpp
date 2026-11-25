@@ -2471,6 +2471,11 @@ extern "C" uint32_t ee_vu0_read_vi(
     case 16: return vu0->m_status_flags;
     case 17: return vu0->m_mac_flags;
     case 18: return vu0->m_clip_flags;
+    // Observed COP2 control readback, independently documented by
+    // ps2-native-recomp at 2a1cbfe (runtime/src/cop.cpp).
+    case 19: return 0x00002e30u;
+    case 23: case 25: return 0u;
+    case 24: return vu0->m_vi[24] & 0x00000c0cu;
     case 26: return vu0->m_tpc;
     case 28: return vu0->m_fbrst;
     case 29: return vu0->m_vpu_status;
@@ -2677,6 +2682,13 @@ extern "C" uint32_t ee_vu0_ctc2(
         ee_vu0_write_vi(vu0, vi_index, value & 0xffffu);
         return sync_result;
 
+    case 24: // Observed control latch, only bits 2/3/10/11 writable.
+        ee_vu0_write_vi(vu0, vi_index, value & 0x00000c0cu);
+        return sync_result;
+
+    case 19: // Fixed control-register readback.
+    case 23: // Reserved, reads zero.
+    case 25: // Reserved, reads zero.
     case 17: // MAC_FLAG is read-only.
     case 26: // TPC is read-only.
     case 29: // VPU_STAT is read-only.
