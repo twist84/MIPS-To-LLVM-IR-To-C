@@ -109,6 +109,133 @@ bool test_spu2_sample_clock()
         idle.cpu().cycles() == 0u;
 }
 
+bool test_spu2_adpcm_voice_progression()
+{
+    // Low nibble first, signed nibble expansion, predictor history,
+    // saturation and negative rounding. Independent known vectors.
+    uint16_t words[8] = {0x0000u, 0x87f1u};
+    int16_t decoded[28]{};
+    int32_t history1 = 0;
+    int32_t history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != 4096 || decoded[1] != -4096 ||
+        decoded[2] != 28672 || decoded[3] != -32768 ||
+        history1 != 0 || history2 != 0)
+    {
+        return false;
+    }
+    for (uint16_t& word : words)
+    {
+        word = 0u;
+    }
+    words[0] = 0x0010u;
+    history1 = 1024;
+    history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != 960 || decoded[1] != 900 || decoded[2] != 844)
+    {
+        return false;
+    }
+    words[0] = 0x000du;
+    words[1] = 0x000fu;
+    history1 = history2 = 0;
+    iop::c_spu2::decode_adpcm_block(words, decoded, history1, history2);
+    if (decoded[0] != -1 || decoded[1] != 0)
+    {
+        return false;
+    }
+
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    const auto put_block = [&](uint32_t address, uint16_t header)
+    {
+        if (!hw.write(base + 0x1a8u, 2u, address >> 16u) ||
+            !hw.write(base + 0x1aau, 2u, address & 0xffffu) ||
+            !hw.write(base + 0x1acu, 2u, header))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 7u; ++i)
+        {
+            if (!hw.write(base + 0x1acu, 2u, 0x1234u))
+            {
+                return false;
+            }
+        }
+        return true;
+    };
+    const auto reg = [&](uint32_t offset, uint32_t expected)
+    {
+        return hw.read(base + offset, 2u, &value) && value == expected;
+    };
+    // Cross sound-RAM wrap with a two-block stream. First block marks
+    // loop start, second block ends without repeat.
+    if (!put_block(0xffff8u, 0x0400u) || !put_block(0u, 0x0100u) ||
+        !hw.write(base + 0x1c0u, 2u, 15u) ||
+        !hw.write(base + 0x1c2u, 2u, 0xfff8u) ||
+        !hw.write(base + 4u, 2u, 0x1000u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u) ||
+        !reg(0x1cau, 0xfff9u) || hw.spu2().decoded_blocks() != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (hw.spu2().voice_starts() != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (hw.spu2().voice_starts() != 1u || hw.spu2().decoded_blocks() != 2u ||
+        !reg(0x1c6u, 0xfff8u) || !reg(0x340u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(3u * period);
+    if (!reg(0x1cau, 0xfffau) || !reg(0x1c8u, 15u))
+    {
+        return false;
+    }
+    hw.advance_cycles(24u * period);
+    if (!reg(0x1c8u, 0u) || !reg(0x1cau, 1u) || !reg(0x340u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(28u * period);
+    if (!reg(0x340u, 1u) || hw.spu2().active_voice_mask(0u) != 0u ||
+        hw.spu2().voice_end_events() != 1u || !reg(0x1cau, 0xfff9u))
+    {
+        return false;
+    }
+    // Core 1, voice 23, looping stream at half pitch. ENDX is retired
+    // only at consumption; the repeat bit keeps the voice running.
+    constexpr uint32_t voice23 = 0x400u + 0x1c0u + 23u * 12u;
+    if (!put_block(0x100u, 0x0700u) ||
+        !hw.write(base + voice23 + 2u, 2u, 0x100u) ||
+        !hw.write(base + 0x400u + 23u * 16u + 4u, 2u, 0x800u) ||
+        !hw.write(base + 0x5a2u, 2u, 0x8000u | 0x80u) ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u))
+    {
+        return false;
+    }
+    hw.advance_cycles(55u * period);
+    if (!reg(0x742u, 0u) || !reg(voice23 + 10u, 0x107u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!reg(0x742u, 0x80u) || !reg(voice23 + 10u, 0x101u) ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u) ||
+        !hw.write(base + 0x5a6u, 2u, 0x80u) ||
+        hw.spu2().active_voice_mask(1u) != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    return true;
+}
+
 bool test_authentic_spu2_dma()
 {
     iop::c_kernel kernel;
@@ -1053,6 +1180,10 @@ int main()
     {
         return fail("per-core SPU2 IRQ9 and SPDIF word parity");
     }
+    if (!test_spu2_adpcm_voice_progression())
+    {
+        return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
     if (!test_spu2_sample_clock())
     {
         return fail("SPU2 guest sample clock or IOP cycle ownership");
@@ -1461,15 +1592,14 @@ int main()
         return fail("SPU2 STATX, TSA, explicit data-port IRQ or reset");
     }
 
-    // Voice parameter writes are real register state, but playback
-    // envelopes require the currently missing audio clock. Do not
-    // synthesize a voice position or an IRQ just because it was keyed.
+    // NAX is now available, but ADSR/sweep progression remains guarded.
+    // Key-on before a sample boundary must not decode or raise an IRQ.
     if (!hardware.write(spu2 + 0x4u, 2u, 0x1010u) ||
         !hardware.read(spu2 + 0x4u, 2u, &actual) ||
         actual != 0x1010u ||
         !hardware.write(spu2 + 0x1a0u, 2u, 1u) ||
         hardware.read(spu2 + 0x0au, 2u, &actual) ||
-        hardware.read(spu2 + 0x1c8u, 2u, &actual) ||
+        !hardware.read(spu2 + 0x1c8u, 2u, &actual) || actual != 0u ||
         !hardware.write(spu2 + 0x1a4u, 2u, 1u) ||
         !hardware.read(spu2 + 0x0au, 2u, &actual) ||
         actual != 0u)

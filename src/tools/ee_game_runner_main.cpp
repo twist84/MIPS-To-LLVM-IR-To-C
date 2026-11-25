@@ -8731,6 +8731,13 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(spu2.clock_cycles()),
             static_cast<unsigned long long>(spu2.elapsed_samples()),
             spu2.sample_phase(), iop::c_spu2::k_cycles_per_sample);
+        std::printf(
+            "IOP SPU2 voices: starts=%llu decoded_blocks=%llu end_events=%llu "
+            "active0=0x%06x active1=0x%06x\n",
+            static_cast<unsigned long long>(spu2.voice_starts()),
+            static_cast<unsigned long long>(spu2.decoded_blocks()),
+            static_cast<unsigned long long>(spu2.voice_end_events()),
+            spu2.active_voice_mask(0u), spu2.active_voice_mask(1u));
     }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,

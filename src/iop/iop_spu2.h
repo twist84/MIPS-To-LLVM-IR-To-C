@@ -6,8 +6,8 @@
 namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
-// Register/transfer state and a guest-cycle sample clock. No voice mixer,
-// sampled audio, automatic DMA completion, or periodic SPU IRQ is inferred.
+// Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
+// No voice mixer, ADSR progression, AutoDMA completion or playback IRQ yet.
 class c_spu2
 {
 public:
@@ -23,12 +23,17 @@ public:
 
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
-    void advance_cycles(uint32_t cycles)
+    void advance_cycles(uint32_t cycles);
+    // Decode one PS2 16-byte ADPCM block (8 little-endian halfwords).
+    // History is shared between consecutive blocks of a voice.
+    static void decode_adpcm_block(const uint16_t* words, int16_t* samples,
+                                   int32_t& history1, int32_t& history2);
+    uint64_t decoded_blocks() const { return m_decoded_blocks; }
+    uint64_t voice_starts() const { return m_voice_starts; }
+    uint64_t voice_end_events() const { return m_voice_end_events; }
+    uint32_t active_voice_mask(uint32_t core) const
     {
-        if (m_clock_active)
-        {
-            m_clock_cycles += cycles;
-        }
+        return core < 2u ? m_cores[core].m_key_mask : 0u;
     }
     bool clock_active() const { return m_clock_active; }
     uint64_t clock_cycles() const { return m_clock_cycles; }
@@ -53,6 +58,21 @@ public:
     bool ram_word(uint32_t address, uint16_t* value) const;
 
 private:
+    struct s_voice
+    {
+        uint32_t m_block[2]{};
+        uint8_t m_flags[2]{};
+        uint32_t m_next = 0u;
+        uint32_t m_loop = 0u;
+        uint32_t m_position = 0u; // 12 fractional bits within current block
+        int32_t m_history1 = 0;
+        int32_t m_history2 = 0;
+        int16_t m_samples[2][28]{};
+        bool m_loop_written = false;
+        bool m_pending = false;
+        bool m_started = false;
+    };
+
     struct s_core
     {
         // 0x000..0x3FF for each core, including voice parameter latches.
@@ -63,11 +83,16 @@ private:
         uint32_t m_tsa = 0u;
         uint32_t m_endx = 0u;
         uint32_t m_key_mask = 0u;
+        s_voice m_voices[24]{};
         uint32_t m_statx_settling = 0u;
         uint16_t m_attr = 0u;
         bool m_irq = false;
     };
 
+    static uint32_t voice_address(const s_core& core, uint32_t voice, uint32_t field);
+    void decode_voice_block(s_voice& voice, uint32_t slot);
+    void start_voice(s_core& core, uint32_t index);
+    void advance_voices(uint64_t samples);
     static uint32_t set_hi(uint32_t address, uint32_t value);
     static uint32_t set_lo(uint32_t address, uint32_t value);
 
@@ -78,6 +103,9 @@ private:
 
     bool m_clock_active = false;
     uint64_t m_clock_cycles = 0u;
+    uint64_t m_decoded_blocks = 0u;
+    uint64_t m_voice_starts = 0u;
+    uint64_t m_voice_end_events = 0u;
     s_core m_cores[2]{};
     // 2 MiB of SPU2 sound RAM, allocated on the heap (not the IOP stack).
     std::vector<uint16_t> m_ram;

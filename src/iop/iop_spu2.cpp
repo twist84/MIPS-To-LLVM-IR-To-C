@@ -14,6 +14,9 @@ void c_spu2::reset()
 {
     m_clock_active = false;
     m_clock_cycles = 0u;
+    m_decoded_blocks = 0u;
+    m_voice_starts = 0u;
+    m_voice_end_events = 0u;
     for (s_core& core : m_cores)
     {
         core = s_core{};
@@ -28,6 +31,157 @@ void c_spu2::reset()
     m_spdif_out = 0u;
     m_spdif_mode = 0u;
     m_spdif_media = 0u;
+}
+
+namespace
+{
+// Explicit arithmetic shift also works on hosts with older signed-shift
+// language rules. All decoder intermediates fit in int32_t.
+int32_t floor_shift(int32_t value, uint32_t shift)
+{
+    return value >= 0 ? value >> shift : -1 - ((-1 - value) >> shift);
+}
+}
+
+void c_spu2::decode_adpcm_block(const uint16_t* words, int16_t* samples,
+                               int32_t& history1, int32_t& history2)
+{
+    // SDBZ reference predictor table, nibble order, rounding and saturation.
+    static constexpr int32_t filters[5][2] =
+    {
+        {0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}
+    };
+    const uint32_t shift = words[0] & 15u;
+    const uint32_t filter = std::min<uint32_t>((words[0] >> 4u) & 15u, 4u);
+    for (uint32_t i = 0u; i < 28u; ++i)
+    {
+        const uint32_t nibble = (words[1u + i / 4u] >> ((i & 3u) * 4u)) & 15u;
+        const int32_t signed_nibble = static_cast<int32_t>(nibble) -
+            (nibble >= 8u ? 16 : 0);
+        const int32_t prediction = floor_shift(
+            history1 * filters[filter][0] + history2 * filters[filter][1] + 32, 6u);
+        const int32_t sample = std::clamp(
+            floor_shift(signed_nibble * 4096, shift) + prediction, -32768, 32767);
+        history2 = history1;
+        history1 = sample;
+        samples[i] = static_cast<int16_t>(sample);
+    }
+}
+
+uint32_t c_spu2::voice_address(const s_core& core, uint32_t voice, uint32_t field)
+{
+    const uint32_t reg = (0x1c0u + voice * 12u + field) / 2u;
+    return ((core.m_registers[reg] & 15u) << 16u) | core.m_registers[reg + 1u];
+}
+
+void c_spu2::decode_voice_block(s_voice& voice, uint32_t slot)
+{
+    const uint32_t address = voice.m_next & (k_ram_words - 1u);
+    uint16_t words[8];
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        words[i] = m_ram[(address + i) & (k_ram_words - 1u)];
+    }
+    decode_adpcm_block(words, voice.m_samples[slot], voice.m_history1, voice.m_history2);
+    ++m_decoded_blocks;
+    voice.m_block[slot] = address;
+    voice.m_flags[slot] = static_cast<uint8_t>(words[0] >> 8u);
+    if ((voice.m_flags[slot] & 4u) != 0u && !voice.m_loop_written)
+    {
+        voice.m_loop = address;
+    }
+    voice.m_next = (voice.m_flags[slot] & 1u) != 0u ? voice.m_loop :
+        (address + 8u) & (k_ram_words - 1u);
+}
+
+void c_spu2::start_voice(s_core& core, uint32_t index)
+{
+    s_voice& voice = core.m_voices[index];
+    voice.m_pending = false;
+    voice.m_started = true;
+    voice.m_next = voice_address(core, index, 0u);
+    voice.m_position = 0u;
+    voice.m_history1 = 0;
+    voice.m_history2 = 0;
+    core.m_endx &= ~(1u << index);
+    ++m_voice_starts;
+    decode_voice_block(voice, 0u);
+    decode_voice_block(voice, 1u);
+}
+
+void c_spu2::advance_voices(uint64_t samples)
+{
+    constexpr uint32_t block_length = 28u << 12u;
+    for (s_core& core : m_cores)
+    {
+        // No per-sample loop or scan of all 48 voices while idle. At this
+        // stage only the pitch accumulator/block boundaries consume time.
+        if (core.m_key_mask == 0u)
+        {
+            continue;
+        }
+        for (uint32_t index = 0u; index < 24u; ++index)
+        {
+            const uint32_t bit = 1u << index;
+            if ((core.m_key_mask & bit) == 0u)
+            {
+                continue;
+            }
+            s_voice& voice = core.m_voices[index];
+            if (voice.m_pending)
+            {
+                start_voice(core, index);
+            }
+            const uint32_t pitch = std::min<uint32_t>(
+                core.m_registers[(index * 16u + 4u) / 2u], 0x3fffu);
+            uint64_t position = voice.m_position + samples * pitch;
+            while (position >= block_length)
+            {
+                position -= block_length;
+                const uint8_t flags = voice.m_flags[0];
+                voice.m_block[0] = voice.m_block[1];
+                voice.m_flags[0] = voice.m_flags[1];
+                std::copy_n(voice.m_samples[1], 28u, voice.m_samples[0]);
+                if ((flags & 1u) != 0u)
+                {
+                    core.m_endx |= bit;
+                    ++m_voice_end_events;
+                    if ((flags & 2u) == 0u)
+                    {
+                        // Stop at the output sample that consumed the end
+                        // block, not at the end of a later batched advance.
+                        // Pitch is nonzero whenever a boundary is crossed.
+                        voice.m_position = static_cast<uint32_t>(position % pitch);
+                        core.m_key_mask &= ~bit;
+                        break;
+                    }
+                }
+                decode_voice_block(voice, 1u);
+            }
+            if ((core.m_key_mask & bit) != 0u)
+            {
+                voice.m_position = static_cast<uint32_t>(position);
+            }
+        }
+    }
+}
+
+void c_spu2::advance_cycles(uint32_t cycles)
+{
+    if (!m_clock_active)
+    {
+        return;
+    }
+    const uint64_t before = m_clock_cycles;
+    m_clock_cycles += cycles;
+    if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask) != 0u)
+    {
+        const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
+        if (samples != 0u)
+        {
+            advance_voices(samples);
+        }
+    }
 }
 
 uint32_t c_spu2::set_hi(uint32_t address, uint32_t value)
@@ -177,8 +331,8 @@ bool c_spu2::read_core(
     s_core& core = m_cores[index];
     if (offset < 0x180u)
     {
-        // ENVX and current sweep volumes require an actual voice clock.
-        // Idle voices return zero; once keyed, refuse invented playback.
+        // ADSR and current sweep volumes are not implemented yet.
+        // Keep their existing fail-closed readback for active voices.
         const uint32_t voice = offset >> 4u;
         const uint32_t field = offset & 0x0fu;
         if ((core.m_key_mask & (1u << voice)) != 0u &&
@@ -191,23 +345,19 @@ bool c_spu2::read_core(
     {
         const uint32_t voice = (offset - 0x1c0u) / 12u;
         const uint32_t field = (offset - 0x1c0u) % 12u;
+        const s_voice& state = core.m_voices[voice];
+        if (field == 4u || field == 6u)
+        {
+            *value = static_cast<uint16_t>(field == 4u ?
+                state.m_loop >> 16u : state.m_loop);
+            return true;
+        }
         if (field == 8u || field == 10u)
         {
-            // NAX advances only when ADPCM playback actually consumes
-            // samples. When the voice is inactive the reference starts
-            // at SSA + 1; never invent progression for a keyed voice.
-            if ((core.m_key_mask & (1u << voice)) != 0u)
-            {
-                return false;
-            }
-            const uint32_t base = 0x1c0u + voice * 12u;
-            const uint32_t ssa =
-                ((core.m_registers[base / 2u] & 0x0fu) << 16u) |
-                core.m_registers[base / 2u + 1u];
-            const uint32_t nax = (ssa + 1u) & (k_ram_words - 1u);
-            *value = static_cast<uint16_t>(
-                field == 8u ? nax >> 16u : nax
-            );
+            const uint32_t nax = ((state.m_started && !state.m_pending ?
+                state.m_block[0] + (state.m_position >> 14u) :
+                voice_address(core, voice, 0u)) + 1u) & (k_ram_words - 1u);
+            *value = static_cast<uint16_t>(field == 8u ? nax >> 16u : nax);
             return true;
         }
     }
@@ -266,6 +416,23 @@ bool c_spu2::write_core(
     // Preserve guest programming of voice, ADSR, reverb, and core
     // registers. Dynamic voice readback is explicitly gated above.
     core.m_registers[offset / 2u] = value;
+    if (offset >= 0x1c0u && offset < 0x2e0u)
+    {
+        const uint32_t index = (offset - 0x1c0u) / 12u;
+        const uint32_t field = (offset - 0x1c0u) % 12u;
+        s_voice& voice = core.m_voices[index];
+        if (field == 4u || field == 6u)
+        {
+            voice.m_loop = field == 4u ? set_hi(voice.m_loop, value) :
+                set_lo(voice.m_loop, value);
+            voice.m_loop_written = true;
+        }
+        else if (field == 8u || field == 10u)
+        {
+            voice.m_next = field == 8u ? set_hi(voice.m_next, value) :
+                set_lo(voice.m_next, value);
+        }
+    }
 
     switch (offset)
     {
@@ -293,16 +460,34 @@ bool c_spu2::write_core(
         const uint32_t bits =
             static_cast<uint32_t>(value) <<
             (offset == 0x1a2u ? 16u : 0u);
-        core.m_key_mask |= bits;
+        core.m_key_mask |= bits & 0x00ffffffu;
         core.m_endx &= ~bits;
+        for (uint32_t index = 0u; index < 24u; ++index)
+        {
+            if ((bits & (1u << index)) != 0u)
+            {
+                core.m_voices[index].m_pending = true;
+                core.m_voices[index].m_loop_written = false;
+            }
+        }
         break;
     }
     case 0x1a4u:
     case 0x1a6u:
-        core.m_key_mask &=
-            ~(static_cast<uint32_t>(value) <<
-              (offset == 0x1a6u ? 16u : 0u));
+    {
+        // Retain immediate key-off until the ADSR release batch.
+        const uint32_t bits = static_cast<uint32_t>(value) <<
+            (offset == 0x1a6u ? 16u : 0u);
+        core.m_key_mask &= ~bits;
+        for (uint32_t index = 0u; index < 24u; ++index)
+        {
+            if ((bits & (1u << index)) != 0u)
+            {
+                core.m_voices[index].m_pending = false;
+            }
+        }
         break;
+    }
     case 0x1a8u:
         core.m_tsa = set_hi(core.m_tsa, value);
         break;
