@@ -2259,16 +2259,24 @@ bool present(const DisplaySource &src) {
         if (st.texture) wgpuTextureRelease(st.texture);
         submit();
         configure_surface();
-        return true;
+        return false;
     }
     WGPUTextureView target = wgpuTextureCreateView(st.texture, nullptr);
+    if (target == nullptr) {
+        submit();
+        wgpuTextureRelease(st.texture);
+        configure_surface();
+        return false;
+    }
     submit(target);
 #ifndef __EMSCRIPTEN__
-    wgpuSurfacePresent(g_surface);
+    const bool presented = wgpuSurfacePresent(g_surface) == WGPUStatus_Success;
+#else
+    const bool presented = true;
 #endif
     wgpuTextureViewRelease(target);
     wgpuTextureRelease(st.texture);
-    return true;
+    return presented;
 }
 
 ee::s_gpu_timestamp_profile timestamp_profile()

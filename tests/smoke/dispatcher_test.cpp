@@ -645,7 +645,8 @@ int main()
                     ee::s_ee_cpu_state cpu{};
                     cpu.m_cop0[ee::COP0_Status] = control | (unmasked ? mask : 0u);
                     cpu.m_cop0[ee::COP0_Cause] = pending ? mask : 0u;
-                    const bool expected = bits == 3u && unmasked && pending;
+                    const bool implemented = line == 2u || line == 3u || line == 7u;
+                    const bool expected = implemented && bits == 3u && unmasked && pending;
                     eligibility_same = eligibility_same &&
                         ee::ee_interrupts_enabled_inline(&cpu) == expected &&
                         ee::ee_interrupts_enabled(&cpu) == expected;

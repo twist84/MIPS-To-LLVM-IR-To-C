@@ -4378,8 +4378,18 @@ int main(int argc, char** argv)
             {
                 const uint32_t cycles = static_cast<uint32_t>(
                     std::min<uint64_t>(iop_clock_due, 256u));
+                uint32_t prior_smflag = 0u;
+                const bool trace_smflag = trace &&
+                    hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
                 const iop::s_kernel_run_result progressed =
                     iop_kernel->run(cycles, 128u);
+                uint32_t current_smflag = 0u;
+                if (trace_smflag && progressed.m_executed != 0u &&
+                    hardware.sif().get_reg(4u, &current_smflag) && current_smflag != 0u)
+                {
+                    std::printf("IOP guest published SMFLAG: value=0x%08x instructions=%llu\n",
+                        current_smflag, static_cast<unsigned long long>(progressed.m_executed));
+                }
                 if (iop_rpc != nullptr)
                 {
                     (void)iop_rpc->pump();

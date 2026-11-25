@@ -198,3 +198,17 @@ shows/hides the panel; no extra field, swap or readback is requested.
 Guest VRAM, GS captures and input state are unaffected. CPU unit tests cover
 sampling, rate conversion, glyph packing and toggle/reset. Windows visual
 validation is still required; no physical console measurement is implied.
+
+### CI and presentation-counter follow-up
+
+The clock-alignment head `f42255e` passed ROM0, SIF DMA, native WebGPU
+and the original suite, but two CTest shards failed. The dispatcher fixture
+still accepted reserved IRQ positions; its expected mask now matches the
+three defined hardware lines. The IOP rendezvous fixture observed actual
+SMFLAG readiness in guest GPR state, but the diagnostic existed only in
+the fallback polling path. Trace a genuine zero-to-nonzero transition
+around the normal scheduled IOP guest run as well; retain the original
+readiness and ordered-module assertions. No SIF flag is synthesized.
+The present routine now reports false on acquisition/view/present failure
+instead of counting a swapchain recovery as successful FPS. The guest
+field schedule and display compute submission on recovery remain intact.
