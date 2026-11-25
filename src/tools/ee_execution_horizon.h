@@ -3,6 +3,7 @@
 #include "ee_runtime.h"
 #include "ee_iop_clock.h"
 
+#include <array>
 #include <cstdint>
 #include <limits>
 
@@ -28,6 +29,32 @@ struct s_ee_execution_horizon
     uint64_t m_cycle = k_ee_no_deadline;
     e_ee_horizon_source m_source = e_ee_horizon_source::none;
 };
+
+// Endpoint observation of scheduler-relevant COP0 state. This also
+// detects an in-block Count synchronization that moves the clock anchor.
+// It cannot detect a write restored before return, an access that leaves
+// identical state, or other COP0 registers; it is not a pre-access guard.
+using t_ee_horizon_cop0_snapshot = std::array<uint64_t, 13>;
+
+inline t_ee_horizon_cop0_snapshot ee_horizon_cop0_snapshot(
+    const s_ee_cpu_state& cpu, const s_ee_runtime& runtime)
+{
+    return {{
+        cpu.m_cop0[COP0_Status],
+        cpu.m_cop0[COP0_Cause],
+        cpu.m_cop0[COP0_Count],
+        cpu.m_cop0[COP0_Compare],
+        cpu.m_cop0[COP0_EPC],
+        cpu.m_cop0[COP0_ErrorEPC],
+        runtime.m_cop0_clock_last,
+        runtime.m_cop0_clock_count,
+        runtime.m_cop0_clock_compare,
+        runtime.m_cop0_clock_initialized,
+        runtime.m_cop0_clock_ip7,
+        runtime.m_perf_control,
+        runtime.m_perf_compat_fault
+    }};
+}
 
 // Count advances modulo 2^32 in the existing compatibility model.
 // IP7 is sticky; pending delivery is handled by the barrier check.
