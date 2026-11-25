@@ -191,3 +191,11 @@ or VIF double-buffer state changed. Unsupported programs reject
 transactionally. This uses the existing synchronous VU1 model; it does
 not establish asynchronous VU1 busy-bit timing, cycle accuracy, VU0
 VCALLMS support or new exact autotest matches.
+
+VCALLMS and VCALLMSR are decoded and routed through the existing LLVM
+macro helper into the partial VU0 micro-engine. The runner starts a real
+pair and services continued execution at COP2 interlocks and dispatch
+boundaries. Instruction-attempt scheduling remains a reference-compatible
+budget, not calibrated EE timing; unsupported upper operations, flags and
+other microinstructions continue to reject. Existing EE ABI offsets and
+VU1 AOT code are unchanged. Only actual transcript runs establish passes.

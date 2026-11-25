@@ -126,6 +126,7 @@ jobs:
         run: |
           .venv/bin/python tools/run_ps2autotests.py \
             cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr \
+            cpu/vu0_macro/transfer vu/lower/integer vu/lower/efu \
             --report-only --build-dir build
       - name: Upload pilot transcripts and stop reports
         if: always()

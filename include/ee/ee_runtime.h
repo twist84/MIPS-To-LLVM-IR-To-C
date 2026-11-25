@@ -353,6 +353,11 @@ struct s_ee_runtime
     uint32_t m_idle_probe_state = 0u;      // 0 armed, 1 first visit, 2 yielded
     uint32_t m_idle_probe_hit_pc = 0u;
     uint32_t m_idle_probe_remaining = 0u;  // budget at the first visit
+
+    // Optional VCALLMS/VCALLMSR launch callback. Signature matches the
+    // synchronization callback, but its fourth argument is a slot address.
+    // Append to preserve cached EE IR offsets. Missing engine fails closed.
+    t_ee_vu0_sync_callback m_vu0_start = nullptr;
 };
 
 // Never infer cycles from these observations or implicitly install
@@ -510,6 +515,12 @@ struct s_ee_vu0_ialu_engine
 {
     uint32_t m_max_instructions_per_call = 65536;
 };
+
+// Launch one real micro pair at the selected slot, retaining the running
+// state for subsequent synchronization. user points to the IALU engine.
+uint32_t ee_vu0_start_ialu_callback(
+    void* user, s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc);
 
 uint32_t ee_vu0_execute_ialu_callback(
     void* user,

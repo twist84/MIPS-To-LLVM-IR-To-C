@@ -578,7 +578,8 @@ int main()
     expect("ctc2 bad funct", R(0x12,6,4,6,0,2), "ctc2", X);
     expect("vadd",    R(0x12,0x10,4,5,0,0x28), "vu0_macro", V);
     expect("vadda",   R(0x12,0x10,4,5,0,0x3c), "vu0_macro", V); // SPECIAL2 index 0
-    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vu0_macro", U);
+    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vcallms", V);
+    expect("vcallmsr", R(0x12,0x10,0,0,0,0x39), "vcallmsr", V);
 
     // Directly from SDBZ (US) 0x00108240..0x0010827C: a 4x4 matrix
     // multiply using the VU0 accumulator. Decode the actual 16 words
@@ -731,14 +732,13 @@ int main()
 
     // Exhaustively check the published SPECIAL1/SPECIAL2 dispatch tables.
     // Reserved encodings remain INVALID. Every defined macro executes via
-    // the VU0 macro runtime except VCALLMS/VCALLMSR (UNSUPPORTED).
+    // the VU0 macro runtime, including guarded microprogram launches.
     for (uint32_t funct = 0; funct < 64; ++funct)
     {
         const bool defined = funct <= 50 || funct == 52 || funct == 53 ||
                              funct == 56 || funct == 57 || funct >= 60;
         const auto ins = decode(0x100000, R(0x12,0x10,0,0,0,funct));
-        const bool native = funct != 0x38u && funct != 0x39u;
-        const auto want = !defined ? X : (native ? V : U);
+        const auto want = !defined ? X : V;
         const bool ok = ins.valid == want;
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL COP2 SPECIAL1 funct=%02x valid=%u want=%u\n",

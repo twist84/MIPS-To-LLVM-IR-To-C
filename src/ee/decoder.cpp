@@ -1059,6 +1059,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                 {
                     name = "vmul";
                 }
+                else if (defined && funct == 0x38u)
+                {
+                    name = "vcallms";
+                }
+                else if (defined && funct == 0x39u)
+                {
+                    name = "vcallmsr";
+                }
                 else if (defined && funct >= 0x3cu)
                 {
                     const uint32_t special2_index =
@@ -1078,10 +1086,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                     default: break;
                     }
                 }
-                // Every defined macro executes through the general VU0
-                // macro runtime helpers except VCALLMS/VCALLMSR, which need
-                // the VU0 micro-program engine and stay fail-closed.
-                if (defined && funct != 0x38u && funct != 0x39u)
+                // The general macro runtime routes VCALLMS/VCALLMSR
+                // through the installed micro-engine launch callback.
+                if (defined)
                 {
                     insn.valid = e_ee_valid::VALID;
                 }

@@ -346,6 +346,44 @@ int main()
     ee::s_ee_vu0_state vu0{};
     s_mock_scheduler scheduler{};
 
+    // VCALLMS uses a 15-bit immediate and VCALLMSR reads CMSAR0.
+    // Both launch the real micro-engine at a wrapped 9-bit VU0 slot.
+    {
+        ee::s_ee_cpu_state launch_cpu{};
+        ee::s_ee_vu0_state launch_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        ee::s_ee_runtime rt{};
+        rt.m_vu0_state = &launch_vu;
+        rt.m_vu0_user = &engine;
+        rt.m_vu0_sync = [](void*, ee::s_ee_cpu_state*, ee::s_ee_vu0_state* state,
+            uint32_t, uint32_t) -> uint32_t
+        {
+            return static_cast<uint32_t>((state->m_vpu_status & 1u) != 0u
+                ? e_ee_vu0_sync_result::UNAVAILABLE : e_ee_vu0_sync_result::COMPLETE);
+        };
+        const uint32_t call = 0x4a000038u | (0x203u << 6u);
+        const auto complete = static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        const auto unavailable = static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        install_vu0_pair(&launch_vu, 3u, make_vu0_iaddiu(1u, 0u, 7u),
+            make_vu0_upper_nop() | 0x40000000u);
+        install_vu0_pair(&launch_vu, 4u, make_vu0_iaddiu(2u, 1u, 4u),
+            make_vu0_upper_nop());
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, call, 0u) == unavailable &&
+              launch_vu.m_running == 0u, "VCALLMS without engine fails closed");
+        rt.m_vu0_start = ee::ee_vu0_start_ialu_callback;
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, call, 0u) == complete &&
+              launch_vu.m_running == 1u && launch_vu.m_micro_pc == 32u &&
+              launch_vu.m_vi[1] == 7u, "VCALLMS starts real microcode");
+        check(ee::ee_vu0_execute_ialu_callback(&engine, &launch_cpu, &launch_vu,
+              8u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u) == complete &&
+              launch_vu.m_running == 0u && launch_vu.m_vi[2] == 11u,
+              "VCALLMS E delay pair completes");
+        launch_vu.m_vi[27] = 0x203u;
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, 0x4a000039u, 0u) == complete &&
+              launch_vu.m_micro_pc == 32u && launch_vu.m_running == 1u,
+              "VCALLMSR reads CMSAR0");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {

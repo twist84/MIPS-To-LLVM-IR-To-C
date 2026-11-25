@@ -630,31 +630,113 @@ bool parse_u32(const char* value, uint32_t* out)
     return true;
 }
 
-// The native runner has no VU1 engine and begins with VU0 halted.  It may
-// therefore synchronize ordinary COP2 control traffic only while VU0 remains
-// halted; attempting to run a microprogram still fails closed rather than
-// treating an unimplemented engine as a no-op.
-uint32_t runner_vu0_sync(
-    void*, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
-    uint32_t mode, uint32_t
-)
-{
-    if (cpu == nullptr || vu0 == nullptr ||
-        mode > static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::WAIT_TO_E_OR_M))
-    {
-        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::INVALID_ARGUMENT);
-    }
-
-    return ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
-        ? static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE)
-        : static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
-}
-
 struct s_runner_vu0_control
 {
     ee::c_ee_vif1* m_vif1;
     ee::c_ee_dmac* m_dmac;
+    ee::s_ee_runtime* m_runtime;
+    ee::s_ee_vu0_ialu_engine m_engine{};
+    ee::s_ee_vu0_scheduler m_scheduler{};
+    uint64_t m_last_attempt = 0u;
+    uint64_t m_next_attempt = 0u;
 };
+
+uint32_t runner_vu0_execute(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint64_t cycles, uint32_t flags, uint32_t pc)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    return ee::ee_vu0_execute_ialu_callback(
+        &context->m_engine, cpu, vu0, cycles, flags, pc);
+}
+
+uint32_t runner_vu0_vu1_catch_up(
+    void* user, ee::s_ee_cpu_state*, ee::s_ee_vu0_state*, uint32_t)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    const auto result = context->m_dmac->service_deferred_vif1(true);
+    return static_cast<uint32_t>(
+        result == ee::c_ee_dmac::e_deferred_vif1::rejected ||
+        result == ee::c_ee_dmac::e_deferred_vif1::pending
+            ? ee::e_ee_vu0_sync_result::UNAVAILABLE
+            : ee::e_ee_vu0_sync_result::COMPLETE);
+}
+
+void runner_vu0_schedule_event(
+    void* user, ee::s_ee_cpu_state*, ee::s_ee_vu0_state*,
+    uint32_t delta, uint32_t)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    context->m_next_attempt = context->m_runtime->m_guest_instruction_attempts + delta;
+}
+
+uint32_t runner_vu0_sync(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint32_t mode, uint32_t pc)
+{
+    using result = ee::e_ee_vu0_sync_result;
+    if (cpu == nullptr || vu0 == nullptr ||
+        mode > static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::WAIT_TO_E_OR_M))
+    {
+        return static_cast<uint32_t>(result::INVALID_ARGUMENT);
+    }
+    // Preserve the hot halted macro path used by retail code.
+    if ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
+    {
+        return static_cast<uint32_t>(result::COMPLETE);
+    }
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context == nullptr)
+    {
+        return static_cast<uint32_t>(result::UNAVAILABLE);
+    }
+    // Instruction attempts are the runner's existing reference-compatible
+    // budget, not calibrated R5900 issue cycles. Do not install a hardware
+    // clock or report these as such.
+    const uint64_t now = context->m_runtime->m_guest_instruction_attempts;
+    if (now < context->m_last_attempt ||
+        now - context->m_last_attempt > UINT64_MAX - vu0->m_ee_cycle)
+    {
+        return static_cast<uint32_t>(result::FAILED);
+    }
+    vu0->m_ee_cycle += now - context->m_last_attempt;
+    context->m_last_attempt = now;
+    const uint32_t synced = ee::ee_vu0_scheduler_sync_callback(
+        &context->m_scheduler, cpu, vu0, mode, pc);
+    if (vu0->m_running != 0u && context->m_next_attempt <= now)
+    {
+        context->m_next_attempt = now + 1u;
+    }
+    return synced;
+}
+
+uint32_t runner_vu0_start(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context == nullptr || vu0 == nullptr || cpu == nullptr ||
+        context->m_runtime->m_ee_cycle_scheduler.source() !=
+            ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+    {
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+    }
+    const uint64_t now = context->m_runtime->m_guest_instruction_attempts;
+    const uint64_t prior_ee_cycle = vu0->m_ee_cycle;
+    vu0->m_ee_cycle = std::max(now, vu0->m_ee_cycle);
+    const uint32_t started = ee::ee_vu0_start_ialu_callback(
+        &context->m_engine, cpu, vu0, address, pc);
+    if (started == static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE))
+    {
+        context->m_last_attempt = now;
+        context->m_next_attempt = now + 1u;
+    }
+    else
+    {
+        vu0->m_ee_cycle = prior_ee_cycle;
+    }
+    return started;
+}
 
 // CMSAR1 uses the resident VU1 engine, but is not a VIF command.
 uint32_t runner_vu0_control(
@@ -3145,7 +3227,13 @@ int main(int argc, char** argv)
     runtime.m_user = memory.get();
     runtime.m_vu0_state = &vu0;
     runtime.m_vu0_sync = runner_vu0_sync;
-    s_runner_vu0_control vu0_control{&vif1, &hardware.dmac()};
+    s_runner_vu0_control vu0_control{&vif1, &hardware.dmac(), &runtime};
+    vu0_control.m_scheduler.m_user = &vu0_control;
+    vu0_control.m_scheduler.m_execute = runner_vu0_execute;
+    vu0_control.m_scheduler.m_vu1_catch_up = runner_vu0_vu1_catch_up;
+    vu0_control.m_scheduler.m_schedule_event = runner_vu0_schedule_event;
+    runtime.m_vu0_user = &vu0_control;
+    runtime.m_vu0_start = runner_vu0_start;
     runtime.m_vu0_control_user = &vu0_control;
     runtime.m_vu0_control = runner_vu0_control;
     // The timers share the hardware MMIO bus but own their clocked state
@@ -3716,6 +3804,20 @@ int main(int argc, char** argv)
     const auto service_devices = [&]() -> e_device_service
     {
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
+        if (vu0.m_running != 0u &&
+            reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
+            runtime.m_guest_instruction_attempts >= vu0_control.m_next_attempt)
+        {
+            const auto synced = runner_vu0_sync(&vu0_control, &cpu, &vu0,
+                static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::CATCH_UP_TO_EE_CYCLE),
+                cpu.m_pc);
+            if (synced != static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE))
+            {
+                std::fprintf(stderr, "VU0 micro execution stopped at byte PC=%04x result=%u\n",
+                    vu0.m_micro_pc, synced);
+                return e_device_service::failed;
+            }
+        }
         if (hardware.dmac().deferred_vif1_pending())
         {
             // Present only committed GS state at the next field boundary.

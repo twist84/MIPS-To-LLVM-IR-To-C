@@ -1676,6 +1676,44 @@ uint32_t ee_vu0_execute_ialu_callback(
     return static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
 }
 
+uint32_t ee_vu0_start_ialu_callback(
+    void* user, s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc)
+{
+    using result = e_ee_vu0_sync_result;
+    if (!user || !cpu || !vu0)
+    {
+        return static_cast<uint32_t>(result::INVALID_ARGUMENT);
+    }
+    if (vu0_is_running(vu0) || vu0->m_q_pending != 0u)
+    {
+        return static_cast<uint32_t>(result::UNAVAILABLE);
+    }
+    // The micro-engine currently accepts only a subset of VU0 pairs.
+    // A rejected first pair must not publish a partial launch.
+    const auto previous_vu = *vu0;
+    const auto previous_cpu = *cpu;
+    vu0->m_tpc = address & 0x1ffu;
+    vu0->m_micro_pc = vu0->m_tpc * 8u;
+    vu0->m_vpu_status = (vu0->m_vpu_status & ~0xffu) | 1u;
+    vu0->m_running = 1u;
+    vu0->m_cycle = vu0->m_ee_cycle;
+    vu0->m_e_bit = 0u;
+    vu0->m_m_bit = 0u;
+    vu0->m_branch = 0u;
+    vu0->m_take_delay_branch = 0u;
+    vu0->m_vi_backup_cycles = 0u;
+    const uint32_t started = ee_vu0_execute_ialu_callback(
+        user, cpu, vu0, 1u,
+        EE_VU0_EXECUTE_STOP_AT_E | EE_VU0_EXECUTE_EXACT_CYCLES, pc);
+    if (started != static_cast<uint32_t>(result::COMPLETE))
+    {
+        *vu0 = previous_vu;
+        *cpu = previous_cpu;
+    }
+    return started;
+}
+
 extern "C" uint32_t ee_vu0_read_vi(
     const s_ee_vu0_state* vu0,
     uint32_t index
@@ -2187,7 +2225,7 @@ bool vu0_macro_is_supported(uint32_t funct, uint32_t special2)
 } // namespace
 
 // Executes every COP2 macro-mode SPECIAL1/SPECIAL2 VU0 operation except
-// VCALLMS/VCALLMSR, LQI/SQI/LQD/SQD (ee_vu0_macro_indexed_memory) and
+// LQI/SQI/LQD/SQD (ee_vu0_macro_indexed_memory) and
 // SQRT/RSQRT/WAITQ (ee_vu0_macro_scalar). Floating-point semantics follow
 // the VU: subnormal operands flush to zero, exponent 255 is a finite max,
 // products are rounded before accumulation, and MAC/status flags update only
@@ -2207,6 +2245,24 @@ extern "C" uint32_t ee_vu0_macro_fmac(
 
     const uint32_t funct = word & 63u;
     const uint32_t special2 = (word & 3u) | ((word >> 4) & 0x7cu);
+    if (funct == 0x38u || funct == 0x39u)
+    {
+        if (!rt->m_vu0_start || !rt->m_vu0_state)
+        {
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const uint32_t synced = ee_vu0_sync(cpu, rt,
+            static_cast<uint32_t>(e_ee_vu0_sync_mode::FINISH_TO_E), pc);
+        if (synced != static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE))
+        {
+            return synced;
+        }
+        const uint32_t address = funct == 0x38u
+            ? ((word >> 6u) & 0x7fffu)
+            : (ee_vu0_read_vi(rt->m_vu0_state, 27u) & 0xffffu);
+        return validate_vu0_callback_result(
+            rt->m_vu0_start(rt->m_vu0_user, cpu, rt->m_vu0_state, address, pc));
+    }
     if (!vu0_macro_is_supported(funct, special2))
     {
         return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
