@@ -921,39 +921,53 @@ void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
                             uint32_t lane, uint32_t* flags);
 void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags);
 
-enum class e_vu0_upper_arith { none, add, sub, mul };
+uint32_t vu0_fmac_lane(const s_ee_u128& vector, uint32_t lane);
+
+enum class e_vu0_upper_arith { none, add, sub, mul, madd, msub };
 struct s_vu0_upper_arith
 {
     e_vu0_upper_arith m_kind = e_vu0_upper_arith::none;
     // -1 is a vector operand, 0..3 broadcast, 4 scalar I.
     int m_source = -1;
+    bool m_to_acc = false;
 };
 
 s_vu0_upper_arith vu0_decode_upper_arith(uint32_t word)
 {
     using kind = e_vu0_upper_arith;
-    const uint32_t op = word & 63u;
-    if (op <= 3u) return {kind::add, static_cast<int>(op & 3u)};
-    if (op >= 4u && op <= 7u) return {kind::sub, static_cast<int>(op & 3u)};
-    if (op >= 0x18u && op <= 0x1bu) return {kind::mul, static_cast<int>(op & 3u)};
+    const uint32_t primary = word & 63u;
+    const bool acc = primary >= 0x3cu;
+    const uint32_t op = acc ? ((word & 3u) | ((word >> 4u) & 0x7cu)) : primary;
+    if (op <= 3u) return {kind::add, static_cast<int>(op & 3u), acc};
+    if (op >= 4u && op <= 7u) return {kind::sub, static_cast<int>(op & 3u), acc};
+    if (op >= 8u && op <= 11u) return {kind::madd, static_cast<int>(op & 3u), acc};
+    if (op >= 12u && op <= 15u) return {kind::msub, static_cast<int>(op & 3u), acc};
+    if (op >= 0x18u && op <= 0x1bu) return {kind::mul, static_cast<int>(op & 3u), acc};
     switch (op)
     {
-    case 0x28u: return {kind::add, -1};
-    case 0x2cu: return {kind::sub, -1};
-    case 0x2au: return {kind::mul, -1};
-    case 0x22u: return {kind::add, 4};
-    case 0x26u: return {kind::sub, 4};
-    case 0x1eu: return {kind::mul, 4};
+    case 0x28u: return {kind::add, -1, acc};
+    case 0x29u: return {kind::madd, -1, acc};
+    case 0x2cu: return {kind::sub, -1, acc};
+    case 0x2du: return {kind::msub, -1, acc};
+    case 0x2au: return {kind::mul, -1, acc};
+    case 0x22u: return {kind::add, 4, acc};
+    case 0x23u: return {kind::madd, 4, acc};
+    case 0x26u: return {kind::sub, 4, acc};
+    case 0x27u: return {kind::msub, 4, acc};
+    case 0x1eu: return {kind::mul, 4, acc};
     default: return {};
     }
 }
 
 s_ee_u128 vu0_stage_upper_arith(const s_ee_cpu_state* cpu,
     const s_ee_vu0_state* vu0, const s_ee_vu0_micro_op_fields& fields,
-    const s_vu0_upper_arith& op, uint32_t* mac)
+    const s_vu0_upper_arith& op, uint32_t* mac, uint32_t* product_sticky,
+    uint32_t* acc_overflow)
 {
-    s_ee_u128 output = cpu->m_vu0[fields.m_fd];
+    s_ee_u128 output = op.m_to_acc ? vu0->m_acc : cpu->m_vu0[fields.m_fd];
     *mac = 0u;
+    *product_sticky = 0u;
+    *acc_overflow = vu0->m_acc_overflow_mask;
     for (uint32_t lane = 0; lane < 4u; ++lane)
     {
         if ((fields.m_xyzw & (8u >> lane)) == 0u)
@@ -964,9 +978,28 @@ s_ee_u128 vu0_stage_upper_arith(const s_ee_cpu_state* cpu,
         const uint32_t rhs = op.m_source == 4 ? vu0->m_vi[21] :
             vu0_fmac_read_vf(cpu, fields.m_ft,
                 op.m_source < 0 ? lane : static_cast<uint32_t>(op.m_source));
-        const auto result = op.m_kind == e_vu0_upper_arith::mul
-            ? vu_fmac_fp::mul(lhs, rhs)
-            : vu_fmac_fp::add(lhs, rhs, op.m_kind == e_vu0_upper_arith::sub);
+        const uint32_t lane_bit = 8u >> lane;
+        vu_fmac_fp::s_fmac_result result{};
+        if (op.m_kind == e_vu0_upper_arith::madd ||
+            op.m_kind == e_vu0_upper_arith::msub)
+        {
+            const auto product = vu_fmac_fp::mac(vu0_fmac_lane(vu0->m_acc, lane),
+                lhs, rhs, op.m_kind == e_vu0_upper_arith::msub,
+                (vu0->m_acc_overflow_mask & lane_bit) != 0u);
+            result = product.m_final;
+            *product_sticky |= product.m_sticky;
+        }
+        else
+        {
+            result = op.m_kind == e_vu0_upper_arith::mul
+                ? vu_fmac_fp::mul(lhs, rhs)
+                : vu_fmac_fp::add(lhs, rhs, op.m_kind == e_vu0_upper_arith::sub);
+        }
+        if (op.m_to_acc)
+        {
+            *acc_overflow = (*acc_overflow & ~lane_bit) |
+                (result.m_overflow ? lane_bit : 0u);
+        }
         vu0_fmac_set_lane(&output, lane, result.m_bits);
         vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
             result.m_underflow, lane, mac);
@@ -991,19 +1024,20 @@ void vu0_retire_upper_fmac(s_ee_vu0_state* vu0)
         {
             break;
         }
+        vu0->m_status_flags |= oldest->m_product_sticky;
         vu0_macro_update_status(vu0, oldest->m_mac);
         *oldest = {};
     }
 }
 
 bool vu0_issue_upper_fmac(s_ee_vu0_state* vu0, uint32_t reg,
-                          uint32_t lanes, uint32_t mac)
+                          uint32_t lanes, uint32_t mac, uint32_t product_sticky)
 {
     for (auto& issue : vu0->m_upper_fmac_issues)
     {
         if (issue.m_ready_cycle == 0u)
         {
-            issue = {vu0->m_cycle + 4u, reg, lanes, mac, 0u};
+            issue = {vu0->m_cycle + 4u, reg, lanes, mac, product_sticky};
             vu0->m_vf_memory_ready_cycle = issue.m_ready_cycle;
             return true;
         }
@@ -1718,7 +1752,7 @@ uint32_t ee_vu0_execute_ialu_callback(
             lower_op == e_ee_vu0_micro_opcode::LQD;
         // Conflicting writes to the same VF require a separate dual-issue
         // arbitration audit. Reject the pair before either side executes.
-        const bool vf_conflict = upper_arith && upper.m_fd != 0u &&
+        const bool vf_conflict = upper_arith && !arith.m_to_acc && upper.m_fd != 0u &&
             lower_load && upper.m_fd == instruction.m_lower_fields.m_ft;
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_I | EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
@@ -1805,8 +1839,11 @@ uint32_t ee_vu0_execute_ialu_callback(
                 instruction.m_upper_fields.m_ft, vu0_latest_clip(vu0))
             : 0u;
         uint32_t upper_mac = 0u;
+        uint32_t upper_sticky = 0u;
+        uint32_t upper_acc_overflow = vu0->m_acc_overflow_mask;
         const s_ee_u128 upper_output = upper_arith
-            ? vu0_stage_upper_arith(cpu, vu0, upper, arith, &upper_mac)
+            ? vu0_stage_upper_arith(cpu, vu0, upper, arith, &upper_mac,
+                &upper_sticky, &upper_acc_overflow)
             : s_ee_u128{};
 
         // Match _vu0Exec: VIBackupCycles is aged after lower-pipe stalls and
@@ -1907,11 +1944,19 @@ uint32_t ee_vu0_execute_ialu_callback(
         {
             // The lower half has consumed the pre-pair register values.
             // Commit the staged vector and queue the flags for later reads.
-            if (!vu0_issue_upper_fmac(vu0, upper.m_fd, upper.m_xyzw, upper_mac))
+            if (!vu0_issue_upper_fmac(vu0, arith.m_to_acc ? 0u : upper.m_fd,
+                    upper.m_xyzw, upper_mac, upper_sticky))
             {
                 return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
             }
-            if (upper.m_fd != 0u)
+            // ACC forwards between consecutive upper instructions without
+            // a VF interlock; only the flag visibility is delayed.
+            if (arith.m_to_acc)
+            {
+                vu0->m_acc = upper_output;
+                vu0->m_acc_overflow_mask = upper_acc_overflow;
+            }
+            else if (upper.m_fd != 0u)
             {
                 cpu->m_vu0[upper.m_fd] = upper_output;
             }

@@ -119,7 +119,7 @@ struct alignas(16) s_ee_vu0_state
         uint32_t m_register;
         uint32_t m_lane_mask;
         uint32_t m_mac;
-        uint32_t m_padding;
+        uint32_t m_product_sticky;
     };
     s_upper_fmac_issue m_upper_fmac_issues[4];
 };

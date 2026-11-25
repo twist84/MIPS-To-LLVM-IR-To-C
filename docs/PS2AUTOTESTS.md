@@ -314,3 +314,15 @@ upper/lower VF write conflicts fail closed pending arbitration audit;
 Q forms, accumulator forms, I-bit immediate pairs and other upper ops
 remain unsupported. This is a microengine regression slice, not a new
 original transcript pass.
+
+## VU0 upper accumulator arithmetic
+
+All four workflows at b77667b passed; original EE/DMA pilot remains 6/7
+and VU pilot 0/4. Add vector, broadcast and I-register ADDA/SUBA/MULA,
+MADD/MSUB and MADDA/MSUBA, preserving masked ACC lanes and per-lane ACC
+overflow latches. Consecutive ACC operations forward without a VF stall
+as in the pinned interpreter's FMAC dependency model. Product sticky
+flags travel with the delayed MAC result instead of becoming visible
+at issue. The upper issue structure reuses its padding word, preserving
+all offsets. Q and outer-product forms remain separate work. No new
+original ELF pass claimed.

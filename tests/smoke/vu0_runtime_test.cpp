@@ -539,6 +539,50 @@ int main()
               "conflicting upper/lower VF writes fail without partial execution");
     }
 
+    // ACC forwarding, masked writes and multiply/accumulate flag timing.
+    {
+        ee::s_ee_cpu_state acc_cpu{};
+        ee::s_ee_vu0_state acc_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        acc_vu.m_vpu_status = 1u;
+        acc_cpu.m_vu0[1].m_lo = 0x400000003f800000ull; // x=1, y=2
+        acc_cpu.m_vu0[2].m_lo = 0x4080000040400000ull; // x=3, y=4
+        acc_vu.m_acc.m_hi = 0x123456789abcdef0ull;
+        const auto upper = [](uint32_t op, uint32_t fd, uint32_t fs,
+                               uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+        };
+        const auto special = [&](uint32_t op, uint32_t fs, uint32_t ft, uint32_t mask)
+        {
+            return upper(0x3cu | (op & 3u), op >> 2u, fs, ft, mask);
+        };
+        const uint32_t nop = 0x8000033cu;
+        // ADDA: ACC=(4,6), MULA.y: ACC=(4,8),
+        // MADDA.x: ACC=(7,8), MSUBA.y: ACC=(7,0).
+        install_vu0_pair(&acc_vu, 0, nop, special(0x28, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 1, nop, special(0x2a, 1, 2, 4));
+        install_vu0_pair(&acc_vu, 2, nop, special(0x29, 1, 2, 8));
+        install_vu0_pair(&acc_vu, 3, nop, special(0x2d, 1, 2, 4));
+        install_vu0_pair(&acc_vu, 4, nop, upper(0x29, 3, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 5, nop, upper(0x2d, 4, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 6, nop, special(0x2c, 1, 2, 8) | 0x40000000u);
+        install_vu0_pair(&acc_vu, 7, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &acc_cpu,
+            &acc_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              acc_vu.m_cycle == 11u && acc_vu.m_running == 0u,
+              "ACC chain forwards without a VF dependency stall");
+        check(acc_cpu.m_vu0[3].m_lo == 0x4100000041200000ull &&
+              acc_cpu.m_vu0[4].m_lo == 0xc100000040800000ull &&
+              acc_vu.m_acc.m_lo == 0x00000000c0000000ull &&
+              acc_vu.m_acc.m_hi == 0x123456789abcdef0ull,
+              "ADDA/MULA/MADDA/MSUBA/MADD/MSUB/SUBA results");
+        check(acc_vu.m_mac_flags == 0x80u &&
+              acc_vu.m_status_flags == 0xc2u,
+              "ACC flags retire in issue order with sticky zero and sign");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
