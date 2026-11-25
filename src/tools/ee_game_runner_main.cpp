@@ -3890,6 +3890,7 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_idle_candidates = 0u;
     uint64_t horizon_iop_rpc_barriers = 0u;
     uint64_t horizon_gs_worker_barriers = 0u;
+    uint64_t horizon_dmac_started_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
@@ -4959,6 +4960,13 @@ int main(int argc, char** argv)
                 (runtime.m_perf_control & 0x80000000u) != 0u ||
                 runtime.m_perf_compat_fault ||
                 runtime.m_timing_observer != nullptr;
+            // D_STAT pending only represents enabled completion IRQs.
+            // A started channel may still need service, even without one.
+            if (!barrier && hardware.dmac().started_channels() != 0u)
+            {
+                barrier = true;
+                ++horizon_dmac_started_barriers;
+            }
 #ifdef EE_ENABLE_WEBGPU
             // The renderer has no guest event timestamp. Preserve the
             // existing worker/fault observation cadence while committed
@@ -8978,7 +8986,7 @@ int main(int argc, char** argv)
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
             "iop_idle_candidates=%llu iop_rpc_barriers=%llu "
             "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu "
-            "gs_worker_barriers=%llu unknown=%llu\n",
+            "gs_worker_barriers=%llu dmac_started_barriers=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -8987,6 +8995,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_lookahead_mmio_free),
             static_cast<unsigned long long>(horizon_lookahead_mmio_touched),
             static_cast<unsigned long long>(horizon_gs_worker_barriers),
+            static_cast<unsigned long long>(horizon_dmac_started_barriers),
             static_cast<unsigned long long>(horizon_unknown));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
