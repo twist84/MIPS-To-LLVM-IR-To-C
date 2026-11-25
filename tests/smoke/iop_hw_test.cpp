@@ -93,9 +93,27 @@ bool test_timer5_free_running_clock()
         return false;
     }
     hw.advance_cycles(1u);
-    return hw.read(count, 4u, &actual) && actual == 0u &&
-        hw.read(iop::c_hw::k_i_stat, 4u, &actual) &&
-        (actual & (1u << iop::c_hw::k_timer5_irq)) != 0u;
+    const auto first = hw.scheduler_checkpoint();
+    const auto second = hw.scheduler_checkpoint();
+    const uint32_t irq = 1u << iop::c_hw::k_timer5_irq;
+    // A masked IRQ and the read-clear Timer5 status must survive
+    // repeated diagnostics, as must the read-clear global I_CTRL.
+    if (first.m_irq_stat != irq || first.m_irq_mask != 0u ||
+        first.m_irq_ctrl != 1u || first.m_timer_count != 0u ||
+        first.m_timer_mode != 0x0858u || first.m_timer_target != 3u ||
+        first.m_timer_remainder != 0u || !first.m_timer_armed ||
+        hw.pending_interrupts() != 0u ||
+        second.m_timer_mode != first.m_timer_mode ||
+        second.m_irq_stat != first.m_irq_stat ||
+        second.m_irq_ctrl != first.m_irq_ctrl ||
+        !hw.read(mode, 4u, &actual) || actual != 0x0c58u ||
+        hw.scheduler_checkpoint().m_timer_mode != 0x0058u ||
+        !hw.read(iop::c_hw::k_i_ctrl, 4u, &actual) || actual != 1u ||
+        hw.scheduler_checkpoint().m_irq_ctrl != 0u)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool test_spu2_sample_clock()
