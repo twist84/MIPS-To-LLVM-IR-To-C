@@ -89,3 +89,26 @@ Tests cross BEV and original/nested delay-slot state, preserve BadVAddr and
 ErrorEPC, and verify ERET resumes the original restart. No Level 2 event
 producer, TLB access activation or cache execution is added. A fresh bounded
 retail replay is required because the live exception/HLE path changed.
+
+## Bounded retail validation — 2026-11-25 19:53
+
+Archive `sdbz-graphics-pr148-neutral-20261125-195345144.zip`: O5,
+16,250 cached IR modules, reference_compatibility clock, 40M dispatches,
+DISPATCH stop at 0x001a9e20, no IOP guest fault or timing observer failure.
+Native process wall 50.031 s; profiled runner 45.2860136 s, 883274.919124
+ dispatches/s. 4,989 guest fields, 3,590/3,590 successful presents,
+4,156,721 GPU draws. VU1: 84 programs, 360,944 runs, 414,570,669 pairs,
+zero fallback, captures, rejected/discarded jobs or host failures; one job
+pending at the bounded stop. Display PPMs byte-identical from the same
+source. Guest PCM 3,993,490 frames, 1,938,208 nonzero, peak 32766.
+SIO2 0 Cross-pressed polls out of 3,497; EE observer 165 Cross-bit-low
+candidates and 218 analogue samples outside deadzone. Archive lacks explicit
+Git HEAD and is not a matched performance comparison. Bounded retail evidence
+only, not proof of strict TLB operation or measured hardware timing.
+
+At code head `e70d1dc`, ROM0, SIF DMA, native WebGPU and original suite
+workflows passed. Build/test fast-2 failed the pre-existing checked-IR fixture
+because its nested trap expectation assumed BD was overwritten despite EXL.
+The fixture now covers both initial BD states, both trap locations, and both
+BEV values against the corrected architectural restart rule. No production
+code changed in this follow-up; final CI must pass independently.

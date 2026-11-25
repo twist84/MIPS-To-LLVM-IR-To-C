@@ -91,7 +91,7 @@ def compile_guest(fixture, directory, target, mode, opt_level, pipeline=False):
     return function_type(address), engine, module, machine
 
 
-def execute(function, operands, delayed=False, exl=False, bev=False):
+def execute(function, operands, delayed=False, exl=False, bev=False, initial_bd=False):
     cpu_backing, cpu = aligned_instance(EEState)
     runtime_backing = ctypes.create_string_buffer(0x10000)
     cpu.gpr[4] = U128(operands[0] & MASK64, 0xAAAAAAAABBBBBBBB)
@@ -103,7 +103,7 @@ def execute(function, operands, delayed=False, exl=False, bev=False):
     cpu.lo = 0xA5A5A5A5A5A5A5A5
     cpu.cop0[8] = INITIAL_BADVADDR
     cpu.cop0[12] = (2 if exl else 0) | (0x400000 if bev else 0)
-    cpu.cop0[13] = INITIAL_CAUSE
+    cpu.cop0[13] = INITIAL_CAUSE | (0x80000000 if initial_bd else 0)
     cpu.cop0[14] = INITIAL_EPC
     result = function(
         ctypes.pointer(cpu),
@@ -114,11 +114,12 @@ def execute(function, operands, delayed=False, exl=False, bev=False):
 
 
 def check(mode, function, operands, expected_result, exception_code,
-          delayed, fault, exl=False, bev=False):
-    result, cpu = execute(function, operands, delayed=delayed, exl=exl, bev=bev)
+          delayed, fault, exl=False, bev=False, initial_bd=False):
+    result, cpu = execute(function, operands, delayed=delayed, exl=exl, bev=bev,
+                          initial_bd=initial_bd)
     where = f"{mode} {'delay' if delayed else 'plain'} {'fault' if fault else 'pass'}"
     if exl:
-        where += " nested"
+        where += f" nested initial_bd={int(initial_bd)}"
     if bev:
         where += " bev"
 
@@ -148,8 +149,11 @@ def check(mode, function, operands, expected_result, exception_code,
         require(cpu.cop0[14] == (INITIAL_EPC if exl else
                                 branch_pc if delayed else trapping_pc),
                 where + f": wrong EPC 0x{cpu.cop0[14]:08x}")
+        # EXL preserves the BD associated with the saved EPC, not the
+        # current trapping instruction's delay-slot status.
+        expected_bd = initial_bd if exl else delayed
         require((cpu.cop0[13] & 0x80000000) ==
-                (0x80000000 if delayed else 0),
+                (0x80000000 if expected_bd else 0),
                 where + ": Cause.BD mismatch")
         require(((cpu.cop0[13] >> 2) & 31) == exception_code and
                 (cpu.cop0[13] & 0xFF00) == INITIAL_CAUSE and
@@ -161,7 +165,7 @@ def check(mode, function, operands, expected_result, exception_code,
         require(result == RETURN and cpu.exit_reason == RETURN and
                 cpu.pc == 0x00300000,
                 where + ": false condition must execute JR ra")
-        require(cpu.cop0[13] == INITIAL_CAUSE and
+        require(cpu.cop0[13] == (INITIAL_CAUSE | (0x80000000 if initial_bd else 0)) and
                 cpu.cop0[14] == INITIAL_EPC and
                 cpu.cop0[12] == ((2 if exl else 0) |
                                  (0x400000 if bev else 0)),
@@ -207,11 +211,15 @@ def main():
                     check(mode, function, true_inputs, INITIAL_RD, 13, delayed, True)
                     executed += 2
                     if mode in ("teq", "teqi"):
+                        for initial_bd in (False, True):
+                            for bev in (False, True):
+                                check(mode, function, true_inputs, INITIAL_RD, 13,
+                                      delayed, True, exl=True, bev=bev,
+                                      initial_bd=initial_bd)
+                                executed += 1
                         check(mode, function, true_inputs, INITIAL_RD, 13,
-                              delayed, True, exl=True)
-                        check(mode, function, true_inputs, INITIAL_RD, 13,
-                              delayed, True, bev=True)
-                        executed += 2
+                              delayed, True, bev=True, initial_bd=not delayed)
+                        executed += 1
                     _ = engine, module, machine
 
     _ = helper
