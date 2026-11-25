@@ -2015,8 +2015,9 @@ uint32_t ee_vu0_execute_ialu_callback(
              lower_op == e_ee_vu0_micro_opcode::LQD);
         const bool transfer_vf_write = lower_transfer &&
             lower_op != e_ee_vu0_micro_opcode::MTIR;
-        // Conflicting writes to the same VF require a separate dual-issue
-        // arbitration audit. Reject the pair before either side executes.
+        // VU manual 3.4.3: upper wins at register granularity, even for
+        // disjoint lane masks. The pinned PCSX2 interpreter skips the
+        // lower handler but still processes its original pipe metadata.
         const bool vf_conflict = upper_arith && !arith.m_to_acc && upper_dest != 0u &&
             (lower_load || transfer_vf_write ||
                 (lower_random && !vu0_random_reads_vf(lower_op))) &&
@@ -2024,12 +2025,12 @@ uint32_t ee_vu0_execute_ialu_callback(
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
-                e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
+                e_ee_vu0_micro_opcode::NOP) ||
             (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
                 !lower_flag_read && !lower_transfer && !lower_scalar && !lower_random &&
                 !lower_fcset && !lower_fsset) ||
             (lower_scalar && vu0->m_q_pending == 1u) ||
-            (lower_memory && (memory_address & 0x4000u) != 0))
+            (lower_memory && !vf_conflict && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
             return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
@@ -2173,7 +2174,14 @@ uint32_t ee_vu0_execute_ialu_callback(
         // current VI value, not the expired backup value.
         vu0_advance_vi_backup(vu0, vu0->m_cycle - cycles_before_pair);
 
-        if (lower_ialu)
+        if (vf_conflict)
+        {
+            // Keep the lower FMAC lane reservation, but do not execute
+            // its write or any VI index / random-register side effects.
+            vu0_record_lower_fmac(vu0, instruction.m_lower_fields.m_ft,
+                instruction.m_lower_fields.m_xyzw);
+        }
+        else if (lower_ialu)
         {
             uint32_t write_mask = 0;
             if (!vu0_execute_lower_ialu(vu0, instruction, &write_mask))

@@ -598,3 +598,19 @@ lifecycle account for the largest clusters of remaining failures; inspect
 actual guest diffs and stop reports before changing device behavior.
 COP1 muldiv and VIF STCYCL hit the dispatch limit and require targeted
 budget/loop investigation before attributing their failures to arithmetic.
+
+### VU0 VF destination arbitration
+
+VU User's Manual v6.0 section 3.4.3 and LQI remarks establish upper
+priority at register granularity, including disjoint masks. The pinned
+PCSX2 VU0microInterp.cpp skips the entire conflicting lower handler
+but retains both FMAC reservations (VUops.cpp). Implement this for
+supported VF-writing lower loads, transfers and RGET/RNEXT. This
+suppresses lower index/R side effects, retains both lane dependencies,
+and leaves nonconflicting old-value reads and VF0 behavior intact.
+The existing I, flag and FDIV paths are unchanged. Candidate regression
+and a mirrored PCSX2 interpreter probe cover LQI/LQD, disjoint and
+overlapping masks, RNEXT, old-value MOVE and VF0. The manual differential
+workflow now includes the focused reference probe. Physical-console
+confirmation of all side effects and wider flag/FDIV interaction remain
+outstanding. No original transcript pass is claimed before execution.

@@ -256,6 +256,59 @@ TEST_F(VU0IssueOrder, IALUWriteStartsFreshTwoCycleBackup)
     EXPECT_EQ(VU0.VIOldValue, 7u);
 }
 
+TEST_F(VU0IssueOrder, DualIssueDestinationPriority)
+{
+    VU0.VI[1].UL = 3u;
+    VU0.VI[REG_R].UL = 0x3f812345u;
+    VU0.VF[1].UL[0] = 0xc0000000u;
+    VU0.VF[2].UL[0] = 0x3f800000u;
+    VU0.VF[2].UL[1] = 0x40400000u;
+    VU0.VF[4].UL[0] = 0xc0800000u;
+    const auto abs_x = [](uint32_t ft, uint32_t fs)
+    {
+        return (8u << 21u) | (ft << 16u) | (fs << 11u) |
+            (7u << 6u) | 0x3du;
+    };
+    const auto lq_indexed = [](uint32_t secondary, uint32_t mask, uint32_t ft)
+    {
+        return 0x80000000u | (mask << 21u) | (ft << 16u) |
+            (1u << 11u) | (13u << 6u) | secondary;
+    };
+    const uint32_t sq_y = (1u << 25u) | (4u << 21u) | (2u << 11u) | 1u;
+    const uint32_t move_x = 0x80000000u | (8u << 21u) |
+        (3u << 16u) | (2u << 11u) | (12u << 6u) | 0x3cu;
+    const uint32_t rnext_x = 0x80000000u | (8u << 21u) |
+        (2u << 16u) | (16u << 6u) | 0x3cu;
+    install_pair(0, lq_indexed(0x3cu, 4u, 2u), abs_x(2, 1));
+    install_pair(8, sq_y);
+    install_pair(16, move_x, abs_x(2, 4));
+    install_pair(24, rnext_x, abs_x(2, 1));
+    install_pair(32, lq_indexed(0x3eu, 8u, 2u), abs_x(2, 4));
+    install_pair(40, lq_indexed(0x3cu, 8u, 0u), abs_x(0, 1));
+
+    execute_one_pair();
+    EXPECT_EQ(VU0.cycle, 1u);
+    EXPECT_EQ(VU0.VI[1].UL, 3u);
+    EXPECT_EQ(VU0.VF[2].UL[0], 0x40000000u);
+    EXPECT_EQ(VU0.VF[2].UL[1], 0x40400000u);
+    execute_one_pair();
+    EXPECT_EQ(VU0.cycle, 5u);
+    EXPECT_EQ(load_le32(&m_data[20]), 0x40400000u);
+    execute_one_pair();
+    EXPECT_EQ(VU0.VF[3].UL[0], 0x40000000u);
+    EXPECT_EQ(VU0.VF[2].UL[0], 0x40800000u);
+    execute_one_pair();
+    EXPECT_EQ(VU0.VI[REG_R].UL, 0x3f812345u);
+    EXPECT_EQ(VU0.VF[2].UL[0], 0x40000000u);
+    execute_one_pair();
+    EXPECT_EQ(VU0.VI[1].UL, 3u);
+    EXPECT_EQ(VU0.VF[2].UL[0], 0x40800000u);
+    execute_one_pair();
+    EXPECT_EQ(VU0.VI[1].UL, 4u);
+    EXPECT_EQ(VU0.VF[0].UL[0], 0u);
+    EXPECT_EQ(VU0.VF[0].UL[3], 0x3f800000u);
+}
+
 TEST_F(VU0IssueOrder, EmitDeterministicPerPairTrace)
 {
     const char* trace_path = std::getenv("VU0_TRACE_OUTPUT");

@@ -164,7 +164,7 @@ jobs:
           test -n "$core_test"
           VU0_TRACE_OUTPUT="$GITHUB_WORKSPACE/$PROJECT_BUILD/pcsx2-vu0.jsonl" \
             "$core_test" \
-            --gtest_filter='VU0IssueOrder.EmitDeterministicPerPairTrace'
+            --gtest_filter='VU0IssueOrder.EmitDeterministicPerPairTrace:VU0IssueOrder.DualIssueDestinationPriority'
           test -s "$PROJECT_BUILD/pcsx2-vu0.jsonl"
 
       - name: Compare interpreter and candidate traces

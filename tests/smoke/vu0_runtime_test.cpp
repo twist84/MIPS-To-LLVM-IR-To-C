@@ -723,6 +723,64 @@ int main()
               "lower MOVE/MR32 aliasing, MTIR low half and MFIR sign extension");
     }
 
+    // Register-wide dual-issue priority: mirror the focused PCSX2 probe.
+    {
+        ee::s_ee_cpu_state pair_cpu{};
+        ee::s_ee_vu0_state pair_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        pair_vu.m_vpu_status = 1u;
+        pair_vu.m_vi[1] = 3u;
+        pair_vu.m_vi[20] = 0x3f812345u;
+        pair_cpu.m_vu0[1].m_lo = 0xc0000000u;
+        pair_cpu.m_vu0[2].m_lo = 0x404000003f800000ull;
+        pair_cpu.m_vu0[4].m_lo = 0xc0800000u;
+        const auto abs_x = [](uint32_t ft, uint32_t fs)
+        {
+            return (8u << 21u) | (ft << 16u) | (fs << 11u) |
+                (7u << 6u) | 0x3du;
+        };
+        const auto lq_indexed = [](uint32_t secondary, uint32_t mask, uint32_t ft)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (1u << 11u) | (13u << 6u) | secondary;
+        };
+        const uint32_t sq_y = (1u << 25u) | (4u << 21u) | (2u << 11u) | 1u;
+        const uint32_t move_x = 0x80000000u | (8u << 21u) |
+            (3u << 16u) | (2u << 11u) | (12u << 6u) | 0x3cu;
+        const uint32_t rnext_x = 0x80000000u | (8u << 21u) |
+            (2u << 16u) | (16u << 6u) | 0x3cu;
+        install_vu0_pair(&pair_vu, 0, lq_indexed(0x3cu, 4u, 2u), abs_x(2, 1));
+        install_vu0_pair(&pair_vu, 1, sq_y, make_vu0_upper_nop());
+        install_vu0_pair(&pair_vu, 2, move_x, abs_x(2, 4));
+        install_vu0_pair(&pair_vu, 3, rnext_x, abs_x(2, 1));
+        install_vu0_pair(&pair_vu, 4, lq_indexed(0x3eu, 8u, 2u), abs_x(2, 4));
+        install_vu0_pair(&pair_vu, 5, lq_indexed(0x3cu, 8u, 0u), abs_x(0, 1));
+        const auto step = [&]()
+        {
+            return ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu,
+                &pair_vu, 1u, ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u) ==
+                static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        };
+        check(step() && pair_vu.m_cycle == 1u && pair_vu.m_vi[1] == 3u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040000000ull,
+              "disjoint LQI conflict discards load and index update");
+        check(step() && pair_vu.m_cycle == 5u &&
+              pair_vu.m_data_memory[22] == 0x40u && pair_vu.m_data_memory[23] == 0x40u,
+              "discarded lower retains its lane reservation");
+        check(step() && pair_cpu.m_vu0[3].m_lo == 0x40000000u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040800000ull,
+              "nonconflicting lower reads old upper destination");
+        check(step() && pair_vu.m_vi[20] == 0x3f812345u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040000000ull,
+              "overlapping RNEXT conflict preserves random state");
+        check(step() && pair_vu.m_vi[1] == 3u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040800000ull,
+              "overlapping LQD conflict discards pre-decrement");
+        check(step() && pair_vu.m_vi[1] == 4u &&
+              pair_cpu.m_vu0[0].m_lo == 0u && pair_cpu.m_vu0[0].m_hi == 0u,
+              "VF0 does not cause a conflict or suppress lower VI update");
+    }
+
     // Micro FDIV publishes Q and I/D together, with WAITQ and E drain.
     {
         ee::s_ee_cpu_state scalar_cpu{};
