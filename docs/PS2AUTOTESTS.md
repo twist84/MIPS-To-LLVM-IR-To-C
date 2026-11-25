@@ -431,3 +431,13 @@ and I/D/IS/DS publication, serialization and E drain. Macro timing
 remains separate. The pending flags occupy former tail padding; ABI
 size and existing offsets remain unchanged. No new pass claimed for
 this implementation before CI.
+
+### Upper Q arithmetic
+
+Added ADDq/SUBq/MULq/MADDq/MSUBq and their ACC-writing forms.
+Q is sampled after pair interlocks and matured FDIV retirement. A normal
+Q consumer does not stall on an in-flight result; a paired WAITQ does.
+No fictitious Ft dependency for scalar Q forms. Tests cover all ten
+encodings, previous-Q reads, paired WAITQ, ACC forwarding and masks.
+At c07f476 the standalone original pilot remained 8/11 exact; the
+four non-CTest workflows passed, CTest was still running when checked.

@@ -931,7 +931,7 @@ enum class e_vu0_upper_arith { none, add, sub, mul, madd, msub, max, mini, abs, 
 struct s_vu0_upper_arith
 {
     e_vu0_upper_arith m_kind = e_vu0_upper_arith::none;
-    // -1 vector, 0..3 broadcast, 4 scalar I, 5 outer product.
+    // -1 vector, 0..3 broadcast, 4 scalar I, 5 outer product, 6 scalar Q.
     int m_source = -1;
     bool m_to_acc = false;
     uint32_t m_scale = 0u;
@@ -976,6 +976,11 @@ s_vu0_upper_arith vu0_decode_upper_arith(uint32_t word)
     case 0x2cu: return {kind::sub, -1, acc};
     case 0x2du: return {kind::msub, -1, acc};
     case 0x2au: return {kind::mul, -1, acc};
+    case 0x1cu: return {kind::mul, 6, acc};
+    case 0x20u: return {kind::add, 6, acc};
+    case 0x21u: return {kind::madd, 6, acc};
+    case 0x24u: return {kind::sub, 6, acc};
+    case 0x25u: return {kind::msub, 6, acc};
     case 0x22u: return {kind::add, 4, acc};
     case 0x23u: return {kind::madd, 4, acc};
     case 0x26u: return {kind::sub, 4, acc};
@@ -1043,7 +1048,10 @@ s_ee_u128 vu0_stage_upper_arith(const s_ee_cpu_state* cpu,
             vu0_fmac_set_lane(&output, lane, bits);
             continue;
         }
+        // Q reads never wait for a pending FDIV. Use the value visible
+        // after this pair's stalls and pipe retirement, not the pending bits.
         const uint32_t rhs = op.m_source == 4 ? vu0->m_vi[21] :
+            op.m_source == 6 ? vu0->m_vi[22] :
             vu0_fmac_read_vf(cpu, fields.m_ft,
                 op.m_source == 5 ? (lane + 2u) % 3u :
                 op.m_source < 0 ? lane : static_cast<uint32_t>(op.m_source));
@@ -2001,7 +2009,8 @@ uint32_t ee_vu0_execute_ialu_callback(
         if (upper_arith)
         {
             vu0_stall_vf_read(vu0, upper.m_fs, upper_lanes);
-            if (!vu0_upper_unary(arith) && arith.m_source != 4 && upper_lanes != 0u)
+            if (!vu0_upper_unary(arith) && arith.m_source != 4 &&
+                arith.m_source != 6 && upper_lanes != 0u)
             {
                 const uint32_t lanes = arith.m_source < 0 || arith.m_source == 5
                     ? upper_lanes : 8u >> static_cast<uint32_t>(arith.m_source);

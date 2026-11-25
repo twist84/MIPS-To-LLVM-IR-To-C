@@ -774,6 +774,53 @@ int main()
               "E drains divide-by-zero Q and D/DS flags");
     }
 
+    // Upper Q consumers do not wait unless the lower half interlocks FDIV.
+    {
+        ee::s_ee_cpu_state q_cpu{};
+        ee::s_ee_vu0_state q_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        q_vu.m_vpu_status = 1u;
+        q_vu.m_vi[22] = 0x3f800000u;
+        q_vu.m_q.m_lo = 0x3f800000u;
+        q_cpu.m_vu0[1].m_lo = 0x41000000u; // 8
+        q_cpu.m_vu0[2].m_lo = 0x40800000u; // 4
+        q_cpu.m_vu0[3].m_hi = 0x12345678abcdef01ull;
+        const auto upper_q = [](uint32_t op, uint32_t fd, bool acc)
+        {
+            const uint32_t base = (8u << 21u) | (1u << 11u);
+            return acc ? base | ((op >> 2u) << 6u) | (0x3cu | (op & 3u)) :
+                base | (fd << 6u) | op;
+        };
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t div = 0x80000000u | (2u << 16u) | (1u << 11u) |
+            (14u << 6u) | 0x3cu;
+        const uint32_t waitq = 0x80000000u | (14u << 6u) | 0x3fu;
+        install_vu0_pair(&q_vu, 0, div, upper_q(0x20, 3, false)); // 8+1
+        install_vu0_pair(&q_vu, 1, nop, upper_q(0x1c, 4, false)); // 8*1
+        install_vu0_pair(&q_vu, 2, waitq, upper_q(0x24, 5, false)); // 8-2
+        install_vu0_pair(&q_vu, 3, nop, upper_q(0x20, 0, true)); // ACC=10
+        install_vu0_pair(&q_vu, 4, nop, upper_q(0x24, 0, true)); // ACC=6
+        install_vu0_pair(&q_vu, 5, nop, upper_q(0x1c, 0, true)); // ACC=16
+        install_vu0_pair(&q_vu, 6, nop, upper_q(0x21, 0, true)); // ACC=32
+        install_vu0_pair(&q_vu, 7, nop, upper_q(0x25, 0, true)); // ACC=16
+        install_vu0_pair(&q_vu, 8, nop, upper_q(0x21, 6, false)); // 32
+        install_vu0_pair(&q_vu, 9, nop, upper_q(0x25, 7, false) | 0x40000000u); // 0
+        install_vu0_pair(&q_vu, 10, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &q_cpu,
+            &q_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              q_vu.m_cycle == 19u && q_vu.m_running == 0u,
+              "Q consumers do not stall before WAITQ and E drains FMAC");
+        check(q_cpu.m_vu0[3].m_lo == 0x41100000u &&
+              q_cpu.m_vu0[3].m_hi == 0x12345678abcdef01ull &&
+              q_cpu.m_vu0[4].m_lo == 0x41000000u &&
+              q_cpu.m_vu0[5].m_lo == 0x40c00000u &&
+              q_vu.m_acc.m_lo == 0x41800000u &&
+              q_cpu.m_vu0[6].m_lo == 0x42000000u &&
+              q_cpu.m_vu0[7].m_lo == 0u,
+              "all ten upper Q variants use the visible scalar and preserve masked lanes");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
