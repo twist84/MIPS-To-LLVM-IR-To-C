@@ -6,7 +6,7 @@
 namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
-// This models register and transfer-address state only. No voice mixer,
+// Register/transfer state and a guest-cycle sample clock. No voice mixer,
 // sampled audio, automatic DMA completion, or periodic SPU IRQ is inferred.
 class c_spu2
 {
@@ -15,9 +15,28 @@ public:
     static constexpr uint32_t k_size = 0x800u;
     static constexpr uint32_t k_irq_line = 9u;
     static constexpr uint32_t k_ram_words = 1u << 20u;
+    // Nominal PS2 IOP clock 36.864 MHz / 48 kHz (reference SPU2).
+    static constexpr uint32_t k_cycles_per_sample = 768u;
 
     c_spu2();
     void reset();
+
+    // Start on the first valid-width SPU2 access, like the reference.
+    // Count elapsed guest cycles, not generated audio frames or host time.
+    void advance_cycles(uint32_t cycles)
+    {
+        if (m_clock_active)
+        {
+            m_clock_cycles += cycles;
+        }
+    }
+    bool clock_active() const { return m_clock_active; }
+    uint64_t clock_cycles() const { return m_clock_cycles; }
+    uint64_t elapsed_samples() const { return m_clock_cycles / k_cycles_per_sample; }
+    uint32_t sample_phase() const
+    {
+        return static_cast<uint32_t>(m_clock_cycles % k_cycles_per_sample);
+    }
 
     // Physical IOP bus addresses. 16- and 32-bit transfers only.
     bool read(uint32_t address, uint32_t width, uint32_t* value);
@@ -57,6 +76,8 @@ private:
     bool read_core(uint32_t index, uint32_t offset, uint16_t* value);
     bool write_core(uint32_t index, uint32_t offset, uint16_t value);
 
+    bool m_clock_active = false;
+    uint64_t m_clock_cycles = 0u;
     s_core m_cores[2]{};
     // 2 MiB of SPU2 sound RAM, allocated on the heap (not the IOP stack).
     std::vector<uint16_t> m_ram;

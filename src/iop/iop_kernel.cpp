@@ -1838,7 +1838,13 @@ s_kernel_run_result c_kernel::run(
         ++thread.m_guest_slices;
         thread.m_guest_instructions += step_result.m_instructions;
         m_cycles += step_result.m_instructions;
-        m_hardware.advance_cycles(step_result.m_instructions);
+        // The attached CPU already advances devices for interpreter and
+        // AOT retirement. Only detached kernel fixtures need this fallback.
+        // Idle cycles and handled HLE syscalls remain kernel-owned below.
+        if (!m_cpu.hardware_bound_to(&m_hardware))
+        {
+            m_hardware.advance_cycles(step_result.m_instructions);
+        }
         result.m_executed += step_result.m_instructions;
         // Translated IRX code may retire a few instructions past the slice;
         // never let the unsigned budget wrap.

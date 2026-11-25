@@ -8720,6 +8720,18 @@ int main(int argc, char** argv)
     graphics_probe.set_gpu_progress(
         webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
 #endif
+    if (iop_kernel != nullptr)
+    {
+        const auto& spu2 = iop_kernel->hardware().spu2();
+        std::printf(
+            "IOP SPU2 clock: active=%u iop_cycles=%llu spu_cycles=%llu "
+            "elapsed_samples=%llu sample_phase=%u cycles_per_sample=%u\n",
+            spu2.clock_active() ? 1u : 0u,
+            static_cast<unsigned long long>(iop_kernel->cycles()),
+            static_cast<unsigned long long>(spu2.clock_cycles()),
+            static_cast<unsigned long long>(spu2.elapsed_samples()),
+            spu2.sample_phase(), iop::c_spu2::k_cycles_per_sample);
+    }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,
                       runtime.m_guest_instruction_attempts,

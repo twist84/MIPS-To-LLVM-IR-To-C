@@ -12,6 +12,8 @@ c_spu2::c_spu2()
 
 void c_spu2::reset()
 {
+    m_clock_active = false;
+    m_clock_cycles = 0u;
     for (s_core& core : m_cores)
     {
         core = s_core{};
@@ -77,6 +79,7 @@ bool c_spu2::copy_dma(
         return false;
     }
 
+    m_clock_active = true;
     const uint32_t halfwords = static_cast<uint32_t>(data.size() / 2u);
     s_core& selected = m_cores[core];
     const uint32_t start = selected.m_tsa & (k_ram_words - 1u);
@@ -125,6 +128,7 @@ bool c_spu2::read(uint32_t address, uint32_t width, uint32_t* value)
         return false;
     }
 
+    m_clock_active = true;
     const uint32_t offset = address - k_base;
     uint16_t low = 0u;
     if (!read16(offset, &low))
@@ -152,6 +156,7 @@ bool c_spu2::write(uint32_t address, uint32_t width, uint32_t value)
         return false;
     }
 
+    m_clock_active = true;
     const uint32_t offset = address - k_base;
     if (!write16(offset, static_cast<uint16_t>(value)))
     {

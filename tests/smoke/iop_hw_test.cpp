@@ -26,6 +26,89 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
     }
 }
 
+bool test_spu2_sample_clock()
+{
+    constexpr uint32_t spu = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    hw.advance_cycles(1000u);
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u ||
+        hw.read(spu, 1u, &value) || hw.spu2().clock_active())
+    {
+        return false;
+    }
+    if (!hw.write(spu + 0x760u, 2u, 1u) || !hw.spu2().clock_active())
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (hw.spu2().elapsed_samples() != 0u ||
+        hw.spu2().sample_phase() != period - 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    hw.advance_cycles(3u * period + 17u);
+    if (hw.spu2().elapsed_samples() != 4u ||
+        hw.spu2().sample_phase() != 17u ||
+        hw.spu2().clock_cycles() != 4u * period + 17u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    // Large advance must retain the fractional phase without u32 overflow.
+    hw.advance_cycles(0xffffffffu);
+    const uint64_t total = uint64_t{4u * period + 17u} + 0xffffffffu;
+    if (hw.spu2().elapsed_samples() != total / period ||
+        hw.spu2().sample_phase() != total % period)
+    {
+        return false;
+    }
+    hw.reset();
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u)
+    {
+        return false;
+    }
+
+    // The attached CPU and kernel share the same hardware. A running
+    // thread's retired instructions must advance it exactly once.
+    iop::c_kernel kernel;
+    constexpr uint32_t program = 0x00018000u;
+    if (!kernel.attach_hle_hardware() ||
+        !kernel.hardware().read(spu + 0x760u, 2u, &value) ||
+        !kernel.cpu().write32(program, 0x1000ffffu) || // beq zero,zero,-1
+        !kernel.cpu().write32(program + 4u, 0u) ||
+        kernel.create_thread(program, 0u, 10u) != 1u ||
+        !kernel.start_thread(1u))
+    {
+        return false;
+    }
+    const auto result = kernel.run(period + 5u, 128u);
+    if (result.m_executed != period + 5u ||
+        kernel.cycles() != period + 5u ||
+        kernel.hardware().spu2().clock_cycles() != kernel.cycles() ||
+        kernel.hardware().spu2().elapsed_samples() != 1u ||
+        kernel.hardware().spu2().sample_phase() != 5u)
+    {
+        return false;
+    }
+
+    // Idle time is owned by the kernel rather than the R3000 CPU.
+    iop::c_kernel idle;
+    if (!idle.attach_hle_hardware() ||
+        !idle.hardware().read(spu + 0x760u, 2u, &value))
+    {
+        return false;
+    }
+    (void)idle.run(period + 3u);
+    return idle.cycles() == period + 3u &&
+        idle.hardware().spu2().clock_cycles() == idle.cycles() &&
+        idle.hardware().spu2().elapsed_samples() == 1u &&
+        idle.hardware().spu2().sample_phase() == 3u &&
+        idle.cpu().cycles() == 0u;
+}
+
 bool test_authentic_spu2_dma()
 {
     iop::c_kernel kernel;
@@ -969,6 +1052,10 @@ int main()
     if (!test_spu2_irq_edges_and_spdif())
     {
         return fail("per-core SPU2 IRQ9 and SPDIF word parity");
+    }
+    if (!test_spu2_sample_clock())
+    {
+        return fail("SPU2 guest sample clock or IOP cycle ownership");
     }
     if (!test_authentic_spu2_dma())
     {

@@ -172,6 +172,7 @@ public:
     }
     bool pad_trace_window() const;
     bool spu2_ram_word(uint32_t address, uint16_t* value) const;
+    const c_spu2& spu2() const { return m_spu2; }
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
     uint32_t spu2_dma_cycles_remaining() const
