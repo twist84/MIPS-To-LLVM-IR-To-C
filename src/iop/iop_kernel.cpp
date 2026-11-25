@@ -662,7 +662,8 @@ bool c_kernel::estimate_module_size(
 }
 
 s_module_load_result c_kernel::load_module(
-    const std::vector<uint8_t>& bytes
+    const std::vector<uint8_t>& bytes,
+    const std::string& source_name
 )
 {
     s_module_load_result result{};
@@ -736,6 +737,7 @@ s_module_load_result c_kernel::load_module(
             item.m_ordinal, item.m_entry
         );
     }
+    image.m_source_name = source_name;
     const uint32_t id = m_next_module_id++;
     const auto inserted =
         m_modules.emplace(id, s_kernel_module{id, std::move(image)});
