@@ -423,6 +423,23 @@ uint8_t* fast_ram_span(ee_memory* memory, uint32_t physical, size_t width)
         ? memory->physical_ram_span(physical, width) : nullptr;
 }
 
+// Aligned quadwords cannot straddle a direct-alias or device-aperture
+// boundary. Deliberately reject unaligned input even when backed by RAM:
+// the paired fallback must preserve independent address translation.
+uint8_t* fast_quadword_span(s_ee_runtime* runtime, uint32_t address)
+{
+    if ((address & 15u) != 0u)
+    {
+        return nullptr;
+    }
+    ee_memory* memory = runtime_memory(runtime);
+    if (memory == nullptr)
+    {
+        return nullptr;
+    }
+    return fast_ram_span(memory, memory->translate_direct_address(address), 16u);
+}
+
 // memcpy is alignment-safe and lowers to native-width loads/stores on
 // little-endian hosts. Retain byte-wise LE semantics on other hosts.
 template<typename T>
@@ -579,6 +596,51 @@ void ee_mem_write128(s_ee_runtime* runtime, uint32_t address, const s_ee_u128* v
     }
 }
 
+
+void ee_mem_read128_pair(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
+{
+    if (out == nullptr)
+    {
+        return;
+    }
+
+    if (const uint8_t* bytes = fast_quadword_span(runtime, address))
+    {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        std::memcpy(out, bytes, 16u);
+#else
+        out->m_lo = read_ram<uint64_t>(bytes);
+        out->m_hi = read_ram<uint64_t>(bytes + 8u);
+#endif
+        return;
+    }
+
+    // Finish both reads before publishing the result, just as the IR did.
+    const uint64_t lo = ee_mem_read64(runtime, address);
+    const uint64_t hi = ee_mem_read64(runtime, address + 8u);
+    *out = {lo, hi};
+}
+
+void ee_mem_write128_pair(s_ee_runtime* runtime, uint32_t address,
+                          uint64_t lo, uint64_t hi)
+{
+    if (uint8_t* bytes = fast_quadword_span(runtime, address))
+    {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        static_assert(sizeof(s_ee_u128) == 16u, "EE quadword ABI");
+        const s_ee_u128 value{lo, hi};
+        std::memcpy(bytes, &value, 16u);
+#else
+        write_ram(bytes, lo);
+        write_ram(bytes + 8u, hi);
+#endif
+        return;
+    }
+
+    ee_mem_write64(runtime, address, lo);
+    ee_mem_write64(runtime, address + 8u, hi);
+}
 
 void ee_trace_guest_store(
     s_ee_runtime* runtime, uint32_t pc, uint32_t opcode,

@@ -18,6 +18,10 @@ struct s_mock_io
     uint32_t m_last_address = 0;
     uint32_t m_last_width = 0;
     ee::s_ee_u128 m_last_value{};
+    uint32_t m_previous_address = 0;
+    uint32_t m_previous_width = 0;
+    ee::s_ee_u128 m_previous_attempt{};
+    ee::s_ee_u128 m_last_attempt{};
 };
 
 bool is_known_register(uint32_t address)
@@ -29,6 +33,8 @@ bool read_mmio(void* user, uint32_t address, uint32_t width, ee::s_ee_u128* valu
 {
     s_mock_io* io = static_cast<s_mock_io*>(user);
     ++io->m_reads;
+    io->m_previous_address = io->m_last_address;
+    io->m_previous_width = io->m_last_width;
     io->m_last_address = address;
     io->m_last_width = width;
     if (!is_known_register(address))
@@ -46,6 +52,10 @@ bool write_mmio(void* user, uint32_t address, uint32_t width,
 {
     s_mock_io* io = static_cast<s_mock_io*>(user);
     ++io->m_writes;
+    io->m_previous_address = io->m_last_address;
+    io->m_previous_width = io->m_last_width;
+    io->m_previous_attempt = io->m_last_attempt;
+    io->m_last_attempt = *value;
     io->m_last_address = address;
     io->m_last_width = width;
     if (!is_known_register(address))
@@ -132,6 +142,49 @@ int main()
         }
     }
 
+    // Paired instruction transfers may fuse RAM but not the device bus.
+    for (uint32_t alias : {0u, 0x20000000u, 0x30000000u, 0x80000000u, 0xa0000000u})
+    {
+        ee::s_ee_u128 loaded{};
+        ee::ee_mem_write128_pair(&runtime, alias + 0x180u, fast_quad.m_lo, fast_quad.m_hi);
+        ee::ee_mem_read128_pair(&runtime, alias + 0x180u, &loaded);
+        if (loaded.m_lo != fast_quad.m_lo || loaded.m_hi != fast_quad.m_hi ||
+            memory.read64(0x180u) != fast_quad.m_lo ||
+            memory.read64(0x188u) != fast_quad.m_hi)
+        {
+            return fail("paired RAM transfer alias or byte order");
+        }
+    }
+
+    // A partial allocation must retain the successful first scalar lane.
+    // An aligned quadword can be partially backed by a non-16-byte allocation.
+    ee::ee_memory partial_memory(0x108u);
+    ee::s_ee_runtime partial_runtime{};
+    partial_runtime.m_user = &partial_memory;
+    partial_memory.set_kseg_ram_aliases(true);
+    ee::ee_mem_write128_pair(&partial_runtime, 0x80000100u, fast_quad.m_lo, fast_quad.m_hi);
+    ee::s_ee_u128 partial{};
+    ee::ee_mem_read128_pair(&partial_runtime, 0x80000100u, &partial);
+    if (partial.m_lo != fast_quad.m_lo || partial.m_hi != 0u ||
+        partial_memory.read64(0x100u) != fast_quad.m_lo)
+    {
+        return fail("paired transfer lost first lane at RAM allocation boundary");
+    }
+
+    // Unaligned calls are not fused and the second address wraps as i32.
+    ee::ee_mem_write128_pair(&runtime, 0xfffffff8u, fast_quad.m_lo, fast_quad.m_hi);
+    ee::ee_mem_read128_pair(&runtime, 0xfffffff8u, &partial);
+    if (partial.m_lo != 0u || partial.m_hi != fast_quad.m_hi ||
+        memory.read64(0u) != fast_quad.m_hi)
+    {
+        return fail("paired transfer changed scalar address wraparound");
+    }
+    ee::ee_mem_read128_pair(nullptr, 0x100u, &partial);
+    if (partial.m_lo != 0u || partial.m_hi != 0u)
+    {
+        return fail("paired transfer with absent runtime");
+    }
+
     // Scratchpad is a separate mapping and must retain checked fallback.
     ee::ee_mem_write128(&runtime, 0x70000010u, &fast_quad);
     ee::s_ee_u128 scratch{};
@@ -140,6 +193,13 @@ int main()
         memory.read64(0x10u) != 0u)
     {
         return fail("scratchpad fast-path isolation");
+    }
+    ee::ee_mem_write128_pair(&runtime, 0x70000030u, fast_quad.m_lo, fast_quad.m_hi);
+    ee::ee_mem_read128_pair(&runtime, 0x70000030u, &scratch);
+    if (scratch.m_lo != fast_quad.m_lo || scratch.m_hi != fast_quad.m_hi ||
+        memory.read64(0x30u) != 0u)
+    {
+        return fail("paired scratchpad transfer isolation");
     }
     // Verify exact end-of-allocation access and reject partial spans.
     ee::ee_mem_write128(&runtime, 0x80000ff0u, &fast_quad);
@@ -220,6 +280,29 @@ int main()
         return fail("128-bit FIFO write split or value corrupted");
     }
 
+    // The paired helpers MUST NOT use the 16-byte FIFO transaction above.
+    // The mock recognizes the first address but rejects the second one.
+    const uint32_t reads_before_pair = io.m_reads;
+    ee::ee_mem_read128_pair(&runtime, 0xb0004000u, &result);
+    if (io.m_reads != reads_before_pair + 2u ||
+        io.m_previous_address != k_vif_fifo || io.m_previous_width != 8u ||
+        io.m_last_address != k_vif_fifo + 8u || io.m_last_width != 8u ||
+        result.m_lo != 0x8877665544332211ull || result.m_hi != 0u)
+    {
+        return fail("paired MMIO read width, order or rejected lane");
+    }
+
+    const uint32_t writes_before_pair = io.m_writes;
+    ee::ee_mem_write128_pair(&runtime, 0xb0004000u, quad.m_lo, quad.m_hi);
+    if (io.m_writes != writes_before_pair + 2u ||
+        io.m_previous_address != k_vif_fifo || io.m_previous_width != 8u ||
+        io.m_last_address != k_vif_fifo + 8u || io.m_last_width != 8u ||
+        io.m_previous_attempt.m_lo != quad.m_lo || io.m_previous_attempt.m_hi != 0u ||
+        io.m_last_attempt.m_lo != quad.m_hi || io.m_last_attempt.m_hi != 0u)
+    {
+        return fail("paired MMIO write width, order or lane data");
+    }
+
     // No MMIO callbacks must be generated for the existing VU0 apertures.
     const uint32_t writes_before_vu = io.m_writes;
     ee::ee_mem_write32(&runtime, 0xb1000000u, 0xaabbccddu);
@@ -229,6 +312,16 @@ int main()
         ee::ee_mem_read32(&runtime, 0xb1004020u) != 0x11223344u)
     {
         return fail("VU0 data/micro physical aliases or MMIO priority");
+    }
+
+    const uint32_t reads_before_vu_pair = io.m_reads;
+    ee::ee_mem_write128_pair(&runtime, 0xb1000040u, quad.m_lo, quad.m_hi);
+    ee::ee_mem_read128_pair(&runtime, 0x11000040u, &result);
+    if (result.m_lo != quad.m_lo || result.m_hi != quad.m_hi ||
+        io.m_reads != reads_before_vu_pair || io.m_writes != writes_before_vu ||
+        memory.read64(0x40u) != 0u)
+    {
+        return fail("paired VU0 aperture isolation");
     }
 
     // A transfer starting in VU0 cannot spill into an MMIO callback.
