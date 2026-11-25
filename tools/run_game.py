@@ -72,6 +72,8 @@ def translation_inputs(elf, recomp, source_root):
         ("tools/shared_ee_ir.py", source_root / "tools" / "shared_ee_ir.py"),
         ("tools/link_native_objects.py",
          source_root / "tools" / "link_native_objects.py"),
+        ("tools/native_alu_certificate.py",
+         source_root / "tools" / "native_alu_certificate.py"),
         ("src/ee/ee_dispatcher.cpp",
          source_root / "src" / "ee" / "ee_dispatcher.cpp"),
         ("src/ee/recompiled_functions.cpp",
@@ -82,7 +84,12 @@ def translation_inputs(elf, recomp, source_root):
         for path in sorted(directory.rglob("*")):
             if path.is_file() and path.suffix in (".h", ".hpp", ".cpp"):
                 paths.append((path.relative_to(source_root).as_posix(), path))
-    return {name: sha256_path(path) for name, path in paths}
+    inputs = {name: sha256_path(path) for name, path in paths}
+    # Certificate mode changes only the linked host library. Never reuse
+    # a DLL from the opposite mode as if it contained the requested table.
+    mode = b"1" if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1" else b"0"
+    inputs["native_alu_certificate_mode"] = hashlib.sha256(mode).hexdigest()
+    return inputs
 
 
 
