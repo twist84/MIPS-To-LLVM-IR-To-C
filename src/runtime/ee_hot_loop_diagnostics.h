@@ -313,7 +313,11 @@ private:
     {
         std::vector<std::pair<t_key, uint64_t>> sorted(
             counts.begin(), counts.end());
-        std::sort(sorted.begin(), sorted.end(),
+        // Only the first k_top_count entries are serialized. A partial
+        // sort retains the exact count/key ordering without sorting the
+        // thousands of entries that will be discarded.
+        const size_t selected = std::min(sorted.size(), k_top_count);
+        std::partial_sort(sorted.begin(), sorted.begin() + selected, sorted.end(),
             [](const auto& a, const auto& b)
             {
                 if (a.second != b.second)
@@ -322,10 +326,7 @@ private:
                 }
                 return a.first < b.first;
             });
-        if (sorted.size() > k_top_count)
-        {
-            sorted.resize(k_top_count);
-        }
+        sorted.resize(selected);
         return sorted;
     }
 
