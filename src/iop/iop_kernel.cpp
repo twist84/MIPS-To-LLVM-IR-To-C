@@ -850,6 +850,35 @@ const std::map<uint32_t, s_kernel_thread>& c_kernel::threads() const
     return m_threads;
 }
 
+uint64_t c_kernel::idle_event_cycles_remaining() const
+{
+    constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
+    if (m_rom0_boot_active || m_current_thread_id != 0u ||
+        m_interrupts_suspended || m_critical_thread_id != 0u ||
+        m_interrupt_thread_id != 0u)
+    {
+        return 0u;
+    }
+    if (m_next_alarm_wake <= m_cycles || m_next_thread_wake <= m_cycles)
+    {
+        return 0u;
+    }
+    uint64_t wake = none;
+    if (next_ready(wake) != 0u)
+    {
+        return 0u;
+    }
+    wake = std::min(wake, m_next_thread_wake);
+    wake = std::min(wake, m_next_alarm_wake);
+    if (!m_hle_events.empty())
+    {
+        wake = std::min(wake, m_hle_events.begin()->first);
+    }
+    const uint64_t software = wake == none ? none :
+        (wake > m_cycles ? wake - m_cycles : 0u);
+    return std::min(software, m_hardware.idle_event_cycles_remaining());
+}
+
 bool c_kernel::has_guest_work() const
 {
     if (m_rom0_boot_active)
