@@ -1253,6 +1253,7 @@ bool test_spu2_effect_fast_path()
     iop::c_spu2 reference;
     iop::c_spu2 fast;
     reference.enable_effect_fast_path(false);
+    reference.enable_irq_deadline_cache(false);
     std::vector<int16_t> pcm[2];
     iop::c_spu2* models[] = {&reference, &fast};
     for (uint32_t model = 0u; model < 2u; ++model)
@@ -1945,6 +1946,69 @@ bool test_spu2_auto_dma()
 
 bool test_spu2_playback_irq()
 {
+    // Compare cached and uncached queries at every sub-sample phase,
+    // including invalidation after guest register and input changes.
+    {
+        iop::c_spu2 reference;
+        iop::c_spu2 cached;
+        reference.enable_irq_deadline_cache(false);
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        iop::c_spu2* models[] = {&reference, &cached};
+        for (auto* model : models)
+        {
+            if (model->voice_irq_cycles_remaining() != 0u ||
+                !model->write(base + 0x19au, 2u, 0x40u) ||
+                !model->write(base + 0x19eu, 2u, 0x2000u) ||
+                model->voice_irq_cycles_remaining() != 0u)
+            {
+                return false;
+            }
+        }
+        for (uint32_t i = 0u; i < 2u * period; ++i)
+        {
+            if (i == 17u)
+            {
+                const uint8_t input[] = {0u, 0u, 0u, 0u};
+                for (auto* model : models)
+                {
+                    if (!model->push_input(0u, input, sizeof(input)) ||
+                        model->voice_irq_cycles_remaining() != period - i)
+                    {
+                        return false;
+                    }
+                }
+            }
+            if (i == period + 13u)
+            {
+                for (auto* model : models)
+                {
+                    if (!model->write(base + 0x19au, 2u, 0u) ||
+                        !model->write(base + 0x19eu, 2u, 0x7000u) ||
+                        !model->write(base + 0x19au, 2u, 0x40u) ||
+                        !model->write(base + 0x1a0u, 2u, 1u) ||
+                        model->voice_irq_cycles_remaining() != period - 13u)
+                    {
+                        return false;
+                    }
+                }
+            }
+            if (reference.voice_irq_cycles_remaining() != cached.voice_irq_cycles_remaining() ||
+                reference.advance_cycles(1u) != cached.advance_cycles(1u) ||
+                reference.irq_latches() != cached.irq_latches())
+            {
+                return false;
+            }
+        }
+        for (auto* model : models)
+        {
+            model->reset();
+            if (model->voice_irq_cycles_remaining() != 0u)
+            {
+                return false;
+            }
+        }
+    }
     // Highest legal voice index in the second core, with no lower
     // active voices. Its pending decode bounds the IRQ opportunity
     // to the next sample even with a distant IRQA and fractional phase.
