@@ -83,3 +83,52 @@ run once with `set "SDBZ_SPU2_EFFECT_FAST_PATH=0"`, preserve the archive, then
 repeat with `set "SDBZ_SPU2_EFFECT_FAST_PATH=1"`. Keep physical controller
 input neutral and compare actual input observations, dispatch and work
 counts before interpreting timings. The log prints the selected mode.
+
+### Retail results — 2026-11-25 11:09, 11:11, 11:13
+
+Code HEAD `51356c26df9989cadf2b2375f4b65ea68b528d5b`: all four CI workflows passed. Three uncapped
+40M-dispatch training replays (archives `sdbz-graphics-pr148-neutral-20261125-110912880.zip`,
+`...-111137950.zip`, `...-111333140.zip`) confirmed nonzero PCM, no IOP
+guest faults, and byte-identical CPU/GPU captures within each replay.
+Host device disabled throughout.
+
+| Metric | 11:09 fast | 11:11 reference | 11:13 fast |
+| --- | ---: | ---: | ---: |
+| Native process wall (s) | 48.734 | 92.594 | 78.531 |
+| Compilation wait (s) | 0 | 44.705 | 32.143 |
+| SPU2 mixer (ms) | 1928.025 | 2495.889 | 1582.432 |
+| Effect processing (ms) | 353.634 | 1230.512 | 274.145 |
+| Effect core ticks | 8716446 | 6288234 | 6740402 |
+| Effect ns/core tick | 40.57 | 195.68 | 40.67 |
+| Zero FIR skips | 17432892 | 0 | 13480804 |
+| PCM nonzero frames | 1880791 | 1775296 | 1907791 |
+| EE native exclusive (s) | 15.617 | 15.237 | 15.110 |
+| IOP service exclusive (s) | 9.523 | 9.692 | 8.695 |
+| Dispatch diagnostics exclusive (s) | 2.201 | 2.184 | 2.183 |
+| Cached EE IR modules | 16219 | 16232 | 16250 |
+| Native VU1 runs | 351651 | 430518 | 407260 |
+| VU1 fallbacks | 0 | 0 | 864 |
+| GS fields | 5444 | 3928 | 4211 |
+| Window presentations | 3928 | 2840 | 3031 |
+| Cross-low candidates | 192 | 119 | 122 |
+| Analog samples outside deadzone | 60 | 88 | 216 |
+
+All common IR hashes match; 13 then 18 new modules published. The two
+fast replays used the shortcut on every core tick; both effects remained
+disabled, with zero wet inputs/returns and effect IRQs. Per-tick cost
+fell approximately 79.2% (4.82x), not a controlled whole-runtime speedup.
+Inputs, cache waits, guest cycles and final combat states differ. The
+11:09 replay is the cleanest uncapped baseline (zero compilation wait).
+The 11:13 replay captured three new VU1 images (720 no-entry, 144
+code-mismatch fallbacks; PCs 0x450, 0x50, 0x170). Compile only the
+captured misses into the existing v20 AOT directory, retaining the EE
+cache. No VU1 optimisation is necessary for this batch.
+
+Next: EE native and IOP service dominate exclusive runner time. The
+command-slot polling entry 0x00102560 costs 1.369–1.515 s; the current
+idle analyzer rejects 0x001025a4 because a branch enters the loop body.
+Retain this guard until the original CFG, timer and command-slot producer
+are established. Dispatch diagnostics consume a repeatable ~2.18–2.20 s
+across all three runs and are a separate safe host-side optimisation
+candidate. Do not conflate GPU sampled compute time with exclusive
+runner CPU time or sum overlapping worker durations.
