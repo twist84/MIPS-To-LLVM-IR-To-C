@@ -43,6 +43,66 @@ int32_t floor_shift(int32_t value, uint32_t shift)
 }
 }
 
+void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
+{
+    // Reference SDBZ envelope clock. Counter is retained across phase and
+    // register changes; all signed products fit within int32_t.
+    const int32_t shift = static_cast<int32_t>(rate >> 2u);
+    uint32_t period = 1u << std::max(0, shift - 11);
+    if (exponential && !decrease && m_level > 0x6000)
+    {
+        period *= 4u;
+    }
+    if (++m_counter >= period)
+    {
+        m_counter = 0u;
+        const int32_t magnitude = decrease ?
+            -8 + static_cast<int32_t>(rate & 3u) :
+            7 - static_cast<int32_t>(rate & 3u);
+        int32_t delta = magnitude * (1 << std::max(0, 11 - shift));
+        if (exponential && decrease)
+        {
+            delta = floor_shift(delta * m_level, 15u);
+        }
+        m_level = std::clamp(m_level + delta, 0, 0x7fff);
+    }
+}
+
+void c_spu2::update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2)
+{
+    s_envelope& env = voice.m_envelope;
+    switch (voice.m_phase)
+    {
+    case e_voice_phase::attack:
+        env.step((adsr1 >> 8u) & 0x7fu, false, (adsr1 & 0x8000u) != 0u);
+        if (env.m_level >= 0x7fff)
+        {
+            voice.m_phase = e_voice_phase::decay;
+        }
+        break;
+    case e_voice_phase::decay:
+        env.step(((adsr1 >> 4u) & 15u) << 2u, true, true);
+        if (env.m_level <= static_cast<int32_t>(((adsr1 & 15u) + 1u) * 0x800u))
+        {
+            voice.m_phase = e_voice_phase::sustain;
+        }
+        break;
+    case e_voice_phase::sustain:
+        env.step((adsr2 >> 6u) & 0x7fu, (adsr2 & 0x4000u) != 0u,
+                 (adsr2 & 0x8000u) != 0u);
+        break;
+    case e_voice_phase::release:
+        env.step((adsr2 & 31u) << 2u, true, (adsr2 & 0x20u) != 0u);
+        if (env.m_level <= 0)
+        {
+            voice.m_phase = e_voice_phase::off;
+        }
+        break;
+    default:
+        break;
+    }
+}
+
 void c_spu2::decode_adpcm_block(const uint16_t* words, int16_t* samples,
                                int32_t& history1, int32_t& history2)
 {
@@ -103,6 +163,8 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
     voice.m_position = 0u;
     voice.m_history1 = 0;
     voice.m_history2 = 0;
+    voice.m_phase = e_voice_phase::attack;
+    voice.m_envelope = {};
     core.m_endx &= ~(1u << index);
     ++m_voice_starts;
     decode_voice_block(voice, 0u);
@@ -114,8 +176,6 @@ void c_spu2::advance_voices(uint64_t samples)
     constexpr uint32_t block_length = 28u << 12u;
     for (s_core& core : m_cores)
     {
-        // No per-sample loop or scan of all 48 voices while idle. At this
-        // stage only the pitch accumulator/block boundaries consume time.
         if (core.m_key_mask == 0u)
         {
             continue;
@@ -132,35 +192,51 @@ void c_spu2::advance_voices(uint64_t samples)
             {
                 start_voice(core, index);
             }
-            const uint32_t pitch = std::min<uint32_t>(
-                core.m_registers[(index * 16u + 4u) / 2u], 0x3fffu);
-            uint64_t position = voice.m_position + samples * pitch;
-            while (position >= block_length)
+            const uint16_t* regs = &core.m_registers[index * 8u];
+            const uint32_t pitch = std::min<uint32_t>(regs[2], 0x3fffu);
+            // Envelope release may stop on any sample, so retire the
+            // cursor and ADSR in reference order, not an aggregate pitch
+            // advance followed by a delayed envelope update.
+            for (uint64_t sample = 0u; sample < samples; ++sample)
             {
-                position -= block_length;
-                const uint8_t flags = voice.m_flags[0];
-                voice.m_block[0] = voice.m_block[1];
-                voice.m_flags[0] = voice.m_flags[1];
-                std::copy_n(voice.m_samples[1], 28u, voice.m_samples[0]);
-                if ((flags & 1u) != 0u)
+                voice.m_position += pitch;
+                if (voice.m_position >= block_length)
                 {
-                    core.m_endx |= bit;
-                    ++m_voice_end_events;
-                    if ((flags & 2u) == 0u)
+                    voice.m_position -= block_length;
+                    const uint8_t flags = voice.m_flags[0];
+                    voice.m_block[0] = voice.m_block[1];
+                    voice.m_flags[0] = voice.m_flags[1];
+                    std::copy_n(voice.m_samples[1], 28u, voice.m_samples[0]);
+                    if ((flags & 1u) != 0u)
                     {
-                        // Stop at the output sample that consumed the end
-                        // block, not at the end of a later batched advance.
-                        // Pitch is nonzero whenever a boundary is crossed.
-                        voice.m_position = static_cast<uint32_t>(position % pitch);
-                        core.m_key_mask &= ~bit;
-                        break;
+                        core.m_endx |= bit;
+                        ++m_voice_end_events;
+                        if ((flags & 2u) == 0u)
+                        {
+                            voice.m_phase = e_voice_phase::off;
+                            voice.m_envelope.m_level = 0;
+                        }
+                    }
+                    if (voice.m_phase != e_voice_phase::off)
+                    {
+                        decode_voice_block(voice, 1u);
                     }
                 }
-                decode_voice_block(voice, 1u);
-            }
-            if ((core.m_key_mask & bit) != 0u)
-            {
-                voice.m_position = static_cast<uint32_t>(position);
+                update_envelope(voice, regs[3], regs[4]);
+                for (uint32_t channel = 0u; channel < 2u; ++channel)
+                {
+                    const uint16_t volume = regs[channel];
+                    if ((volume & 0x8000u) != 0u)
+                    {
+                        voice.m_volume[channel].step(volume & 0x7fu,
+                            (volume & 0x2000u) != 0u, (volume & 0x4000u) != 0u);
+                    }
+                }
+                if (voice.m_phase == e_voice_phase::off)
+                {
+                    core.m_key_mask &= ~bit;
+                    break;
+                }
             }
         }
     }
@@ -331,14 +407,17 @@ bool c_spu2::read_core(
     s_core& core = m_cores[index];
     if (offset < 0x180u)
     {
-        // ADSR and current sweep volumes are not implemented yet.
-        // Keep their existing fail-closed readback for active voices.
-        const uint32_t voice = offset >> 4u;
+        const s_voice& voice = core.m_voices[offset >> 4u];
         const uint32_t field = offset & 0x0fu;
-        if ((core.m_key_mask & (1u << voice)) != 0u &&
-            (field == 0x0au || field == 0x0cu || field == 0x0eu))
+        if (field == 0x0au)
         {
-            return false;
+            *value = static_cast<uint16_t>(voice.m_envelope.m_level);
+            return true;
+        }
+        if (field == 0x0cu || field == 0x0eu)
+        {
+            *value = static_cast<uint16_t>(voice.m_volume[(field - 0x0cu) / 2u].m_level);
+            return true;
         }
     }
     else if (offset >= 0x1c0u && offset < 0x2e0u)
@@ -413,10 +492,27 @@ bool c_spu2::write_core(
 {
     s_core& core = m_cores[index];
 
-    // Preserve guest programming of voice, ADSR, reverb, and core
-    // registers. Dynamic voice readback is explicitly gated above.
+    // Preserve register latches and update dynamic voice state.
     core.m_registers[offset / 2u] = value;
-    if (offset >= 0x1c0u && offset < 0x2e0u)
+    if (offset < 0x180u)
+    {
+        s_voice& voice = core.m_voices[offset >> 4u];
+        const uint32_t field = offset & 0x0fu;
+        if ((field == 0u || field == 2u) && (value & 0x8000u) == 0u)
+        {
+            const uint32_t bits = (static_cast<uint32_t>(value) << 1u) & 0xffffu;
+            voice.m_volume[field / 2u].m_level = static_cast<int32_t>(bits) -
+                (bits >= 0x8000u ? 0x10000 : 0);
+        }
+        else if (field == 0x0au)
+        {
+            // Reference accepts a signed ENVX write. Keep the arithmetic
+            // bounded until the next envelope step clamps it.
+            voice.m_envelope.m_level = static_cast<int32_t>(value) -
+                (value >= 0x8000u ? 0x10000 : 0);
+        }
+    }
+    else if (offset >= 0x1c0u && offset < 0x2e0u)
     {
         const uint32_t index = (offset - 0x1c0u) / 12u;
         const uint32_t field = (offset - 0x1c0u) % 12u;
@@ -475,15 +571,26 @@ bool c_spu2::write_core(
     case 0x1a4u:
     case 0x1a6u:
     {
-        // Retain immediate key-off until the ADSR release batch.
         const uint32_t bits = static_cast<uint32_t>(value) <<
             (offset == 0x1a6u ? 16u : 0u);
-        core.m_key_mask &= ~bits;
         for (uint32_t index = 0u; index < 24u; ++index)
         {
-            if ((bits & (1u << index)) != 0u)
+            const uint32_t bit = 1u << index;
+            if ((bits & bit) != 0u)
             {
-                core.m_voices[index].m_pending = false;
+                s_voice& voice = core.m_voices[index];
+                if (voice.m_pending)
+                {
+                    voice.m_pending = false;
+                    if (voice.m_phase == e_voice_phase::off)
+                    {
+                        core.m_key_mask &= ~bit;
+                    }
+                }
+                else if (voice.m_phase != e_voice_phase::off)
+                {
+                    voice.m_phase = e_voice_phase::release;
+                }
             }
         }
         break;

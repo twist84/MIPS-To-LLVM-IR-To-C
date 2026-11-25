@@ -7,7 +7,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// No voice mixer, ADSR progression, AutoDMA completion or playback IRQ yet.
+// No voice mixer, AutoDMA completion or playback IRQ yet.
 class c_spu2
 {
 public:
@@ -58,6 +58,22 @@ public:
     bool ram_word(uint32_t address, uint16_t* value) const;
 
 private:
+    enum class e_voice_phase : uint8_t
+    {
+        off,
+        attack,
+        decay,
+        sustain,
+        release
+    };
+
+    struct s_envelope
+    {
+        uint32_t m_counter = 0u;
+        int32_t m_level = 0;
+        void step(uint32_t rate, bool decrease, bool exponential);
+    };
+
     struct s_voice
     {
         uint32_t m_block[2]{};
@@ -71,6 +87,9 @@ private:
         bool m_loop_written = false;
         bool m_pending = false;
         bool m_started = false;
+        e_voice_phase m_phase = e_voice_phase::off;
+        s_envelope m_envelope{};
+        s_envelope m_volume[2]{};
     };
 
     struct s_core
@@ -92,6 +111,7 @@ private:
     static uint32_t voice_address(const s_core& core, uint32_t voice, uint32_t field);
     void decode_voice_block(s_voice& voice, uint32_t slot);
     void start_voice(s_core& core, uint32_t index);
+    static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
     void advance_voices(uint64_t samples);
     static uint32_t set_hi(uint32_t address, uint32_t value);
     static uint32_t set_lo(uint32_t address, uint32_t value);

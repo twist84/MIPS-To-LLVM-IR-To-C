@@ -228,12 +228,104 @@ bool test_spu2_adpcm_voice_progression()
     if (!reg(0x742u, 0x80u) || !reg(voice23 + 10u, 0x101u) ||
         hw.spu2().active_voice_mask(1u) != (1u << 23u) ||
         !hw.write(base + 0x5a6u, 2u, 0x80u) ||
-        hw.spu2().active_voice_mask(1u) != 0u ||
+        hw.spu2().active_voice_mask(1u) != (1u << 23u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u * period);
+    if (hw.spu2().active_voice_mask(1u) != 0u ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
     {
         return false;
     }
     return true;
+}
+
+bool test_spu2_envelopes()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_hw hw{};
+    uint32_t value = 0u;
+    const auto write = [&](uint32_t offset, uint32_t data)
+    {
+        return hw.write(base + offset, 2u, data);
+    };
+    const auto read = [&](uint32_t offset, uint32_t expected)
+    {
+        return hw.read(base + offset, 2u, &value) && value == expected;
+    };
+    // Zero pitch isolates envelope progression. Fast linear attack,
+    // maximum sustain target, positive/negative fixed stereo volumes.
+    if (!write(4u, 0u) || !write(6u, 0x000fu) ||
+        !write(8u, 0u) || !write(0u, 0x1000u) ||
+        !write(2u, 0x4000u) || !read(0xcu, 0x2000u) ||
+        !read(0xeu, 0x8000u) || !write(0x1a0u, 1u) ||
+        !read(0xau, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period - 1u);
+    if (!read(0xau, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!read(0xau, 14336u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 28672u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 32767u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period); // exponential decay: -16384 at full scale
+    if (!read(0xau, 16383u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period); // sustain increases
+    if (!read(0xau, 30719u) || !write(0xau, 32767u) ||
+        !write(0x1a4u, 1u) || hw.spu2().active_voice_mask(0u) != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 16383u) || hw.spu2().active_voice_mask(0u) != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xau, 0u) || hw.spu2().active_voice_mask(0u) != 0u ||
+        !read(0x340u, 0u))
+    {
+        return false;
+    }
+    // Sweep timing and cancellation before the first sample.
+    if (!write(0u, 0u) || !write(0u, 0x8000u) ||
+        !write(0x1a0u, 1u) || !write(0x1a4u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (hw.spu2().voice_starts() != 1u || !read(0xcu, 0u) ||
+        !write(0x1a0u, 1u))
+    {
+        return false;
+    }
+    hw.advance_cycles(period);
+    if (!read(0xcu, 14336u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u * period);
+    return read(0xcu, 32767u) && read(0xau, 32767u);
 }
 
 bool test_authentic_spu2_dma()
@@ -1180,6 +1272,10 @@ int main()
     {
         return fail("per-core SPU2 IRQ9 and SPDIF word parity");
     }
+    if (!test_spu2_envelopes())
+    {
+        return fail("SPU2 ADSR, fixed/swept volumes or release timing");
+    }
     if (!test_spu2_adpcm_voice_progression())
     {
         return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
@@ -1592,13 +1688,12 @@ int main()
         return fail("SPU2 STATX, TSA, explicit data-port IRQ or reset");
     }
 
-    // NAX is now available, but ADSR/sweep progression remains guarded.
     // Key-on before a sample boundary must not decode or raise an IRQ.
     if (!hardware.write(spu2 + 0x4u, 2u, 0x1010u) ||
         !hardware.read(spu2 + 0x4u, 2u, &actual) ||
         actual != 0x1010u ||
         !hardware.write(spu2 + 0x1a0u, 2u, 1u) ||
-        hardware.read(spu2 + 0x0au, 2u, &actual) ||
+        !hardware.read(spu2 + 0x0au, 2u, &actual) || actual != 0u ||
         !hardware.read(spu2 + 0x1c8u, 2u, &actual) || actual != 0u ||
         !hardware.write(spu2 + 0x1a4u, 2u, 1u) ||
         !hardware.read(spu2 + 0x0au, 2u, &actual) ||
