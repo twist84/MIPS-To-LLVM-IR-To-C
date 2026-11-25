@@ -493,6 +493,52 @@ int main()
               "upper FMAC delayed MAC and sticky status flags");
     }
 
+    // Both halves sample the old VF value even when the upper arithmetic
+    // overwrites the vector consumed by the lower store in the same pair.
+    {
+        ee::s_ee_cpu_state pair_cpu{};
+        ee::s_ee_vu0_state pair_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        pair_vu.m_vpu_status = 1u;
+        pair_vu.m_vi[21] = 0x40000000u; // I = 2.0
+        pair_cpu.m_vu0[2].m_lo = 0x3f800000u;
+        pair_cpu.m_vu0[3].m_lo = 0x40a0000040400000ull; // y=5, x=3
+        const uint32_t addx = (12u << 21u) | (2u << 16u) |
+            (3u << 11u) | (3u << 6u);
+        const uint32_t addi = (8u << 21u) | (3u << 11u) |
+            (4u << 6u) | 0x22u;
+        install_vu0_pair(&pair_vu, 0, make_vu0_memory(0x01, 8, 0, 3, 2), addx);
+        install_vu0_pair(&pair_vu, 1, 0x8000033cu, addi);
+        install_vu0_pair(&pair_vu, 2, 0x8000033cu, make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&pair_vu, 3, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu,
+            &pair_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              pair_vu.m_cycle == 9u && pair_vu.m_running == 0u,
+              "paired ADDx/SQ and dependent ADDi retire");
+        check(pair_cpu.m_vu0[3].m_lo == 0x40c0000040800000ull &&
+              pair_cpu.m_vu0[4].m_lo == 0x40c00000u,
+              "broadcast, I register and aliased destination use original operands");
+        check(pair_vu.m_data_memory[32] == 0u &&
+              pair_vu.m_data_memory[33] == 0u &&
+              pair_vu.m_data_memory[34] == 0x40u &&
+              pair_vu.m_data_memory[35] == 0x40u,
+              "lower SQ observes the VF value before the paired ADDx");
+
+        // Conflicting simultaneous VF writes deliberately remain unavailable.
+        ee::s_ee_vu0_state conflict{};
+        conflict.m_vpu_status = 1u;
+        const auto previous = pair_cpu.m_vu0[3];
+        install_vu0_pair(&conflict, 0, make_vu0_memory(0x00, 8, 3, 0, 2), addx);
+        check(ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu, &conflict, 1u,
+                  ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u) ==
+                  static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE) &&
+              conflict.m_cycle == 0u && conflict.m_micro_pc == 0u &&
+              pair_cpu.m_vu0[3].m_lo == previous.m_lo &&
+              pair_cpu.m_vu0[3].m_hi == previous.m_hi,
+              "conflicting upper/lower VF writes fail without partial execution");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
