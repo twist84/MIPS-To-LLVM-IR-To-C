@@ -623,6 +623,51 @@ def run_hardware_fcr_control_cases(fixture, temp_dir, target, opt):
                         f"O{opt} {mode}: GPR {i} alias or preservation mismatch")
 
 
+def run_hardware_fcr_arithmetic_cases(fixture, temp_dir, target, opt):
+    # Exact FCR31 observations, not flags calculated from the emitter.
+    # ps2autotests fcr.cpp / fcr.expected, pinned at
+    # 97469ffbed8631277b94e28d01dabd702aa97ef3.
+    # The printed decimal/NaN results are not raw result words; the
+    # separate existing arithmetic vectors cover those result bits.
+    cases = {
+        "sqrt_s": [
+            (0, 0xBF800000, 0x01020041, "sqrt(-1)"),
+        ],
+        "div_s": [
+            (0, 0, 0x01020041, "Divide zero by zero"),
+            (0x3F800000, 0, 0x01010021, "Divide one by zero"),
+            (0x00800000, 0x40400000, 0x01000001, "Underflow"),
+            (0x3F800000, 0x4040FFFF, 0x01000001, "Inexact"),
+        ],
+        "add_s": [
+            (0x7F800001, 0x7F800001, 0x01008011, "NAN math"),
+        ],
+        "mul_s": [
+            (0x7F7FFFFF, 0x7F7FFFFF, 0x01008011, "Overflow"),
+        ],
+    }
+    for mode, vectors in cases.items():
+        guest_fn, engine, module, target_machine = compile_jit(
+            fixture, temp_dir, mode, target, opt
+        )
+        retained = (engine, module, target_machine)
+        for lhs, rhs, expected, label in vectors:
+            backing, state = aligned_state()
+            _ = (backing, retained)
+            state.fcsr = 0x01000001  # reference writes CTC1 zero
+            state.fpr[1] = lhs
+            state.fpr[2] = rhs
+            state.fpu_acc = 0xDEADBEEF
+            state.fpu_acc_overflow = 1
+            require(guest_fn(ctypes.pointer(state), None) == 3 and
+                    state.exit_reason == 3 and state.pc == ENTRY_PC + 4 and
+                    state.fcsr == expected and state.fpr[1] == lhs and
+                    state.fpr[2] == rhs and state.fpu_acc == 0xDEADBEEF and
+                    state.fpu_acc_overflow == 1,
+                    f"O{opt} {mode} {label}: FCSR expected {expected:08x}, "
+                    f"got {state.fcsr:08x}")
+
+
 def run_bc1_delay_cases(fixture, temp_dir, target):
     # BC1T samples FCC0 before an ordinary delay slot that clears FCSR.
     guest_fn, engine, module, target_machine = compile_jit(
@@ -1558,6 +1603,7 @@ def main():
         run_cop1_transfer_cases(fixture, temp_dir, target)
         for opt in (0, 3):
             run_hardware_fcr_control_cases(fixture, temp_dir, target, opt)
+            run_hardware_fcr_arithmetic_cases(fixture, temp_dir, target, opt)
         run_bc1_delay_cases(fixture, temp_dir, target)
         for opt in (0, 3):
             run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases, opt)

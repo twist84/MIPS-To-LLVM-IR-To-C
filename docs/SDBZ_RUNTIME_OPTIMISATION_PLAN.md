@@ -351,3 +351,16 @@ Clarification to the combined replay: GPU-authoritative VRAM mode reads
 back GPU state for display diagnostics. Matching PPM bytes are not
 independent CPU-versus-GPU rasterizer proof; the existing independent
 CPU reference and differential fixtures remain necessary.
+
+## Batch 9: literal console COP1 arithmetic flag observations
+
+Extend the same pinned fcr.cpp/fcr.expected reference with all seven
+arithmetic flag situations: negative root, zero/zero, nonzero/zero,
+extended-operand addition overflow, multiplier overflow, divide
+underflow and inexact divide. Check exact reported FCR31 words after
+real translated instructions at O0/O3, including unchanged source
+FPRs and ACC/latch. The source prints decimal values rather than raw
+result bits, so these are FCSR assertions only; the existing independent
+raw-result fixtures retain that coverage. No extrapolation to all
+flag sequences or hardware timing. Test-only; no EE/VU1 cache changes
+or standalone retail replay required.
