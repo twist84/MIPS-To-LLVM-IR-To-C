@@ -1146,13 +1146,15 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
     case 0x50u: return m_machine.m_mode;
     case 0x60u:
         // No vectors retire until this transactional UNPACK has all its
-        // required data. NUM is the original eight-bit remaining count.
+        // required data. Hardware VIF0 exposes eight bits of NUM, while
+        // VIF1 exposes the expanded nine-bit count (256 for NUM=0).
         if (!m_machine.m_pending.empty() &&
             (m_machine.m_pending.front() & 0x60000000u) == 0x60000000u)
         {
-            return (m_machine.m_pending.front() >> 16u) & 0xffu;
+            const uint32_t count = (m_machine.m_pending.front() >> 16u) & 0xffu;
+            return count == 0u && m_vu0 == nullptr ? 256u : count;
         }
-        return m_machine.m_num & 0xffu;
+        return m_machine.m_num & (m_vu0 != nullptr ? 0xffu : 0x1ffu);
     case 0x70u: return m_machine.m_mask;
     case 0x80u: return !m_machine.m_pending.empty() ?
         m_machine.m_pending.front() : m_machine.m_code;

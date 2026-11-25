@@ -311,7 +311,8 @@ int main()
                            send(vif, {0u, 0u, 0x01000404u, code}) &&
                            (vif.read_register(0x00u) & 3u) == 1u &&
                            vif.read_register(0x80u) == code &&
-                           vif.read_register(0x60u) == num,
+                           vif.read_register(0x60u) ==
+                               (unit == 1u && num == 0u ? 256u : num),
                            "header-only UNPACK VPS/CODE/NUM"))
                 {
                     return 1;

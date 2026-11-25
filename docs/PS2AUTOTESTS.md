@@ -863,3 +863,12 @@ because a worker rollback fixture used now-supported MSKPATH3 as its
 invalid command. Replace both legacy rejection triggers with reserved
 opcode 0x09, retaining the existing rollback assertions. No original
 ELFs or expected transcripts modified.
+
+### VIF0/VIF1 NUM register width distinction
+
+The original unpack transcript in artifact 15036939897 specifies
+NUM=0 for the VIF0 header-only 256-vector UNPACK but NUM=256 for VIF1.
+Retain the expanded count on VIF1 (nine bits), truncate VIF0 to eight
+bits. Correct the pending-header regression to check the distinct
+architectural readback, not a shared eight-bit result. No test output
+or input changed.
