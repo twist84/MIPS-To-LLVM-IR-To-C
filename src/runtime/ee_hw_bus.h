@@ -156,6 +156,10 @@ public:
         {
             return false;
         }
+        if (m_dmac.deferred_vif1_pending())
+        {
+            (void)m_dmac.service_deferred_vif1(true);
+        }
         // Establish the field epoch at the supplied EE cycle. An
         // unvalidated runner supplies zero and cannot advance the clock.
         // Do not partially commit CRT mode fields on timing overflow.
@@ -244,8 +248,23 @@ public:
     static bool mmio_read_device(void* user, uint32_t address,
                                  uint32_t width, s_ee_u128* value)
     {
-
         c_ee_hw_bus* bus = static_cast<c_ee_hw_bus*>(user);
+        if (bus->m_dmac.deferred_vif1_pending())
+        {
+            if (address == c_ee_vif1::k_register_base ||
+                (address >= c_ee_dmac::k_vif1_base &&
+                 address < c_ee_dmac::k_vif1_base + 0x100u) ||
+                address == c_ee_dmac::k_stat_address)
+            {
+                // Polls may observe real outstanding work; they do
+                // not force a join or invent a completed DMA.
+                (void)bus->m_dmac.service_deferred_vif1();
+            }
+            else if (is_vif1_ordered_address(address))
+            {
+                (void)bus->m_dmac.service_deferred_vif1(true);
+            }
+        }
         const int32_t display_index = display_register_index(address);
         if (display_index >= 0)
         {
@@ -295,6 +314,21 @@ public:
         }
 
         c_ee_hw_bus* bus = static_cast<c_ee_hw_bus*>(user);
+        if (bus->m_dmac.deferred_vif1_pending() &&
+            is_vif1_ordered_address(address))
+        {
+            if (address == c_ee_vif1::k_register_base + 0x10u &&
+                width == 4u && value != nullptr && (value->m_lo & 1u) != 0u)
+            {
+                // FBRST discards uncommitted VIF output, leaving DMA
+                // registers for the guest to stop/reset explicitly.
+                bus->m_dmac.cancel_deferred_vif1();
+            }
+            else
+            {
+                (void)bus->m_dmac.service_deferred_vif1(true);
+            }
+        }
         const int32_t display_index = display_register_index(address);
         if (display_index >= 0)
         {
@@ -351,6 +385,18 @@ public:
     }
 
 private:
+    static bool is_vif1_ordered_address(uint32_t address)
+    {
+        return (address >= c_ee_vif1::k_register_base &&
+                address < c_ee_vif1::k_register_base + 0x400u) ||
+               (address >= c_ee_vif1::k_fifo_base &&
+                address < c_ee_vif1::k_fifo_base + 0x1000u) ||
+               (address >= c_ee_vif1::k_vu1_code_base &&
+                address < c_ee_vif1::k_vu1_data_base +
+                    c_ee_vif1::k_vu1_memory_size) ||
+               (address >= 0x12000000u && address < 0x12002000u);
+    }
+
     c_ee_intc m_intc;
     c_ee_dmac m_dmac;
     c_ee_vif1* m_vif1 = nullptr;

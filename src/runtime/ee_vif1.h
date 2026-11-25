@@ -4,8 +4,10 @@
 
 #include "ee_gif.h"
 #include "ee_vu1.h"
+#include "ee_vu1_worker.h"
 #include "ee_runtime.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -38,7 +40,8 @@ public:
         missing_path1,
         path1_rejected,
         mixed_gif_paths,
-        pending_limit
+        pending_limit,
+        mscalf_path3_busy
     };
 
     struct s_diagnostic
@@ -66,14 +69,58 @@ public:
         uint32_t m_last_rejected_vu_pc = 0u;
         uint32_t m_last_rejected_vu_lower = 0u;
         uint32_t m_last_rejected_vu_upper = 0u;
+        uint32_t m_last_rejected_vu_steps = 0u;
+        s_ee_vu1_issue m_last_rejected_vu_issue{};
+        uint32_t m_last_rejected_staged_mpg = 0u;
+        uint32_t m_last_rejected_staged_unpack = 0u;
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
 
     void bind_path2(c_ee_gif_path3* path2);
     void bind_path1(c_ee_gif_path3* path1);
+    void bind_path3(const c_ee_gif_path3* path3);
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
-    const s_diagnostic& diagnostic() const;
+    const s_diagnostic& diagnostic() const
+    {
+        return m_diagnostic;
+    }
+
+    // Host-side opt-in staged transfer. No guest completion is implied by
+    // pending; the caller must serialize conflicting device operations.
+    enum class e_deferred_result
+    {
+        idle,
+        pending,
+        completed,
+        rejected,
+        busy
+    };
+    bool enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend = {},
+        bool detailed_profile = false);
+    void native_execution_begin();
+    void native_execution_end();
+    void write_aot_json(FILE* output) const;
+    void write_worker_json(FILE* output) const;
+    e_deferred_result begin_deferred(const uint8_t* data, uint32_t qwc);
+    e_deferred_result poll_deferred()
+    {
+        if (m_deferred == nullptr)
+        {
+            return e_deferred_result::idle;
+        }
+        ++m_worker_profile.m_poll_calls;
+        // Keep the same acquire checkpoint and exact poll accounting.
+        if (!m_worker->ready())
+        {
+            ++m_worker_profile.m_empty_polls;
+            return e_deferred_result::pending;
+        }
+        return resume_deferred(false);
+    }
+    e_deferred_result wait_deferred();
+    bool deferred_busy() const;
+    void cancel_deferred();
 
     uint32_t read_register(uint32_t offset) const;
     bool write_register(uint32_t offset, uint32_t value);
@@ -88,6 +135,10 @@ public:
                            uint32_t width, const s_ee_u128* value);
 
 private:
+    // VU1 residency has one owner: the staged or committed machine.
+    // VIF command reset preserves this entire value; a full reset clears it.
+    // Keeping the memories and execution context together permits an
+    // explicit ownership handoff without lending MMIO pointers to a worker.
     struct s_machine
     {
         uint32_t m_stat = 0u;
@@ -108,15 +159,81 @@ private:
         uint32_t m_col[4]{};
         bool m_dbf = false;
         std::vector<uint32_t> m_pending;
-        std::array<uint8_t, k_vu1_memory_size> m_vu1_data{};
-        std::array<uint8_t, k_vu1_memory_size> m_vu1_code{};
-        s_ee_vu1_state m_vu1_state{};
+        c_ee_vu1_resident_slot m_vu1{};
         uint32_t m_commands = 0u;
         uint32_t m_mpg_uploads = 0u;
         uint32_t m_unpack_commands = 0u;
         uint32_t m_direct_qwc = 0u;
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
+
+    struct s_path_range
+    {
+        uint32_t m_path;
+        size_t m_offset;
+        size_t m_size;
+    };
+
+    // Staging and publication are separate. Only the controller accesses
+    // this object; a worker receives a detached resident value and PATH1.
+    struct s_transaction
+    {
+        explicit s_transaction(c_ee_vif1& owner);
+        ~s_transaction();
+        s_transaction(const s_transaction&) = delete;
+        s_transaction& operator=(const s_transaction&) = delete;
+        void acquire();
+        void release();
+
+        c_ee_vif1& m_owner;
+        s_machine m_next{};
+        std::vector<uint8_t> m_path1;
+        std::vector<uint8_t> m_path2;
+        std::vector<s_path_range> m_ranges;
+        size_t m_index = 0u;
+        size_t m_before1 = 0u;
+        size_t m_before2 = 0u;
+        uint32_t m_waiting_words = 0u;
+        s_ee_vu1_issue m_issue{};
+        e_reject m_rejection = e_reject::none;
+        uint32_t m_rejected_code = 0u;
+        bool m_committed = false;
+        bool m_active = false;
+    };
+
+    void recycle_transaction(std::unique_ptr<s_transaction>& tx);
+    void reject_packet(e_reject reason, uint32_t code);
+    bool prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc);
+    bool advance(s_transaction& tx, c_ee_vu1_worker* worker);
+    bool record_command(s_transaction& tx, uint32_t code, uint32_t words);
+    bool publish(s_transaction& tx);
+    e_deferred_result resume_deferred(bool wait);
+    static void complete_vu_start(s_machine& machine);
+    void record_native_overlap(uint64_t end)
+    {
+        if (m_native_interval_start != 0u)
+        {
+            const auto interval = m_worker->execution_interval();
+            const uint64_t finish = interval.second == 0u ? end :
+                std::min(end, interval.second);
+            finish_native_overlap(interval.first, finish);
+        }
+    }
+
+    // Called only with timestamps for the current controller-owned job.
+    // A known finish or a taken result needs no second atomic snapshot.
+    void finish_native_overlap(uint64_t worker_start, uint64_t finish)
+    {
+        const uint64_t start = std::max(m_native_interval_start, worker_start);
+        if (m_native_interval_start != 0u && worker_start != 0u && finish > start)
+        {
+            m_worker_profile.m_native_overlap_ns += finish - start;
+            ++m_worker_profile.m_native_overlap_intervals;
+        }
+        m_native_interval_start = 0u;
+    }
+    std::unique_ptr<s_ee_vu1_job> take_worker_job(bool wait);
+    void record_worker_job(const s_ee_vu1_job& job, bool discarded);
 
     static uint32_t command_data_words(const s_machine& machine,
                                        uint32_t code);
@@ -130,8 +247,91 @@ private:
                         e_reject* reject);
 
     s_machine m_machine{};
+    // Host-only transaction storage. Never part of committed VIF state.
+    std::vector<uint32_t> m_pending_scratch;
+    std::vector<uint8_t> m_path1_scratch;
+    std::vector<uint8_t> m_path2_scratch;
     s_diagnostic m_diagnostic{};
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
+    const c_ee_gif_path3* m_path3 = nullptr;
+    // Host timing only. Neither timestamps nor overlap advance guest cycles.
+    struct s_worker_profile
+    {
+        uint64_t m_submitted = 0u;
+        uint64_t m_collected = 0u;
+        uint64_t m_rejected = 0u;
+        uint64_t m_discarded = 0u;
+        uint64_t m_host_failures = 0u;
+        uint64_t m_pairs = 0u;
+        uint64_t m_execution_ns = 0u;
+        uint64_t m_queue_ns = 0u;
+        uint64_t m_compiled_ns = 0u;
+        uint64_t m_compiled_pairs = 0u;
+        uint64_t m_xgkick_ns = 0u;
+        uint64_t m_wait_ns = 0u;
+        uint64_t m_wait_calls = 0u;
+        uint64_t m_poll_calls = 0u;
+        uint64_t m_empty_polls = 0u;
+        uint64_t m_native_overlap_ns = 0u;
+        uint64_t m_native_overlap_intervals = 0u;
+        uint64_t m_native_pending_boundaries = 0u;
+        uint64_t m_native_completed_at_entry = 0u;
+        uint64_t m_native_completed_at_exit = 0u;
+    } m_worker_profile{};
+    bool m_native_executing = false;
+    uint64_t m_native_interval_start = 0u;
+    std::unique_ptr<s_ee_vu1_job> m_spare_job;
+    std::unique_ptr<c_ee_vu1_worker> m_worker;
+    std::unique_ptr<s_transaction> m_spare_transaction;
+    std::unique_ptr<s_transaction> m_deferred;
 };
+// Keep the common no-pending-job paths visible to the runner optimizer.
+// A job submitted by guest MMIO must still see m_native_executing set.
+inline void c_ee_vif1::native_execution_begin()
+{
+    if (m_worker != nullptr)
+    {
+        m_native_executing = true;
+        if (m_deferred != nullptr)
+        {
+            ++m_worker_profile.m_native_pending_boundaries;
+            if (m_worker->finished_ns() != 0u)
+            {
+                // An outstanding transaction can hold an already finished
+                // job; no new execution-window intersection is possible.
+                ++m_worker_profile.m_native_completed_at_entry;
+            }
+            else
+            {
+                m_native_interval_start = c_ee_vu1_worker::clock_ns();
+            }
+        }
+    }
+}
+
+inline void c_ee_vif1::native_execution_end()
+{
+    if (m_native_executing)
+    {
+        if (m_native_interval_start != 0u)
+        {
+            const uint64_t finished = m_worker->finished_ns();
+            if (finished != 0u)
+            {
+                // We are already past the worker's finish. Its timestamp
+                // is the exact upper bound, so another host clock read
+                // cannot contribute to the intersection.
+                ++m_worker_profile.m_native_completed_at_exit;
+                finish_native_overlap(m_worker->started_ns(), finished);
+            }
+            else
+            {
+                record_native_overlap(c_ee_vu1_worker::clock_ns());
+            }
+        }
+        m_native_executing = false;
+    }
+}
+
 } // namespace ee

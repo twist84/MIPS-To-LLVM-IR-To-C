@@ -238,6 +238,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         if (!IsWindow(parent_handle) || !IsWindow(child_handle))
         {
             m_closed = true;
+            (void)bridge.flush_committed();
             CloseWindow();
             m_ready = false;
             return;
@@ -259,6 +260,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         }
     }
     PollInputEvents();
+    // The launcher handles F11 for embedded child windows. Standalone
+    // presentation has no Tk owner, so raylib toggles borderless fullscreen.
+    if (m_parent_window_handle == nullptr && IsKeyPressed(KEY_F11))
+    {
+        ToggleBorderlessWindowed();
+    }
     if (WindowShouldClose())
     {
         if (iop_hardware != nullptr)
@@ -266,6 +273,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
             iop_hardware->set_sio2_pad0_input(0u, 128u, 128u, 128u, 128u);
         }
         m_closed = true;
+        (void)bridge.flush_committed();
         CloseWindow();
         m_ready = false;
         return;
@@ -282,9 +290,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         return;
     }
-    ps2::gs::gpu::resize_surface(
-        static_cast<uint32_t>(width),
-        static_cast<uint32_t>(height));
+    if (!bridge.resize_surface(
+            static_cast<uint32_t>(width),
+            static_cast<uint32_t>(height)))
+    {
+        return;
+    }
 
     if (advanced)
     {
@@ -292,7 +303,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         // Count the actual window attempt separately from the guest field
         // count. A native surface/present failure is not a guest event.
         const bool supported = bridge.supports_display(registers, crt_mode);
-        const bool presented = bridge.present(registers, crt_mode);
+        const bool presented = bridge.present(registers, crt_mode, field_count);
         if (probe != nullptr)
         {
             probe->record_present(

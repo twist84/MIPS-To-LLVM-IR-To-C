@@ -20,11 +20,27 @@ struct s_ee_vu1_use
     uint16_t m_vi_reads = 0u;
     uint32_t m_vi_load = 0u;
 
+    // Expand the decoded masks once, when populating the microcode
+    // cache. Each VF lane is encoded as register * 4 + lane.
+    std::array<uint8_t, 16> m_read_lanes{};
+    std::array<uint8_t, 8> m_write_lanes{};
+    std::array<uint8_t, 15> m_vi_indices{};
+    uint8_t m_read_lane_count = 0u;
+    uint8_t m_write_lane_count = 0u;
+    uint8_t m_vi_index_count = 0u;
+
     void read_vi(uint32_t register_index)
     {
+        register_index &= 15u;
         if (register_index != 0u)
         {
-            m_vi_reads |= static_cast<uint16_t>(1u << (register_index & 15u));
+            const uint16_t bit = static_cast<uint16_t>(1u << register_index);
+            if ((m_vi_reads & bit) == 0u)
+            {
+                m_vi_indices[m_vi_index_count++] =
+                    static_cast<uint8_t>(register_index);
+                m_vi_reads |= bit;
+            }
         }
     }
 
@@ -34,6 +50,14 @@ struct s_ee_vu1_use
         {
             m_reg[m_n] = static_cast<uint8_t>(register_index);
             m_mask[m_n++] = static_cast<uint8_t>(mask);
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    m_read_lanes[m_read_lane_count++] =
+                        static_cast<uint8_t>(register_index * 4u + lane);
+                }
+            }
         }
     }
 
@@ -43,6 +67,14 @@ struct s_ee_vu1_use
         {
             m_wreg[m_wn] = static_cast<uint8_t>(register_index);
             m_wmask[m_wn++] = static_cast<uint8_t>(mask);
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    m_write_lanes[m_write_lane_count++] =
+                        static_cast<uint8_t>(register_index * 4u + lane);
+                }
+            }
         }
     }
 };
@@ -253,43 +285,62 @@ struct s_ee_vu1_dependency
     uint32_t issue(const s_ee_vu1_use& use, uint32_t next_cycle) const
     {
         uint32_t cycle = next_cycle;
-        for (uint32_t index = 0u; index < use.m_n; ++index)
+        for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
-            {
-                if ((use.m_mask[index] & (8u >> lane)) != 0u)
-                {
-                    cycle = std::max(cycle,
-                        m_vf_ready[use.m_reg[index]][lane]);
-                }
-            }
+            const uint32_t lane = use.m_read_lanes[index];
+            cycle = std::max(cycle, m_vf_ready[lane >> 2u][lane & 3u]);
         }
-        for (uint32_t register_index = 1u; register_index < 16u; ++register_index)
+        for (uint32_t index = 0u; index < use.m_vi_index_count; ++index)
         {
-            if ((use.m_vi_reads & (1u << register_index)) != 0u)
-            {
-                cycle = std::max(cycle, m_vi_ready[register_index]);
-            }
+            cycle = std::max(cycle, m_vi_ready[use.m_vi_indices[index]]);
         }
         return cycle;
     }
 
     void retire(const s_ee_vu1_use& use, uint32_t cycle)
     {
-        for (uint32_t index = 0u; index < use.m_wn; ++index)
+        for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
-            {
-                if ((use.m_wmask[index] & (8u >> lane)) != 0u)
-                {
-                    m_vf_ready[use.m_wreg[index]][lane] = cycle + 4u;
-                }
-            }
+            const uint32_t lane = use.m_write_lanes[index];
+            m_vf_ready[lane >> 2u][lane & 3u] = cycle + 4u;
         }
         if (use.m_vi_load != 0u)
         {
             m_vi_ready[use.m_vi_load] = cycle + 4u;
         }
     }
+};
+
+// One entry per aligned microinstruction address. The exact instruction
+// words, not an address or a hash alone, identify cached metadata. A
+// staged MPG upload, rollback, or different VIF instance can reuse a PC
+// with different code; comparing both words makes that reuse safe.
+// No guest state, scoreboard timestamps or execution result is cached.
+class c_ee_vu1_decode_cache
+{
+public:
+    const s_ee_vu1_use& lookup(uint32_t pc, uint32_t lo, uint32_t hi)
+    {
+        auto& entry = m_entries[(pc >> 3u) & 0x7ffu];
+        if (!entry.m_valid || entry.m_lower != lo || entry.m_upper != hi)
+        {
+            entry.m_use = s_ee_vu1_dependency::decode(lo, hi);
+            entry.m_lower = lo;
+            entry.m_upper = hi;
+            entry.m_valid = true;
+        }
+        return entry.m_use;
+    }
+
+private:
+    struct s_entry
+    {
+        s_ee_vu1_use m_use{};
+        uint32_t m_lower = 0u;
+        uint32_t m_upper = 0u;
+        bool m_valid = false;
+    };
+
+    std::array<s_entry, 2048> m_entries{};
 };
 } // namespace ee

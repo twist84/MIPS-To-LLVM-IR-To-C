@@ -31,6 +31,14 @@ public:
 
     bool contains(uint32_t addr, size_t len) const;
 
+    // Borrow a contiguous, bounds-checked backing span for a synchronous
+    // host DMA copy. No MMIO, TLB lookup or guest side effect is implied.
+    // The pointer is valid only while this memory object remains alive.
+    const uint8_t* read_span(uint32_t addr, size_t len) const
+    {
+        return map_address(addr, len);
+    }
+
     // Opt-in direct-mapped EE aliases. The original KSEG option now also
     // covers the EE's 0x2/0x3 uncached/accelerated aliases, matching
     // ps2-web-recomp's physical() mapping; the actual RAM buffer bounds
@@ -45,6 +53,16 @@ public:
     // even when the target is a device rather than RAM. Leaves all other
     // guest addresses unchanged. Used by the guest MMIO/VU dispatcher.
     uint32_t translate_direct_address(uint32_t addr) const;
+
+    // The guest bus dispatcher has already translated the address and
+    // excluded hardware apertures. Check the actual allocation once.
+    // This is intentionally not a guest-address or scratchpad mapper.
+    uint8_t* physical_ram_span(uint32_t physical, size_t len)
+    {
+        const size_t offset = static_cast<size_t>(physical);
+        return m_data != nullptr && offset <= m_size && len <= m_size - offset
+            ? m_data + offset : nullptr;
+    }
 
     // Direct-RAM fast path (Phase 7 optimisation). Marks a guest address
     // range as safe for direct host pointer access, bypassing bounds checks.

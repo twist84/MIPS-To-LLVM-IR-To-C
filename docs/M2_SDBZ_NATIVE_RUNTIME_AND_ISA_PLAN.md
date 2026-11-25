@@ -1,5 +1,7 @@
 # M2 — SDBZ native runtime progression, GS/VIF/VU and EE ISA coverage
 
+> **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](SDBZ_RUNTIME_VALIDATION_20261125.md). The earlier boot milestones below are historical; the HLE-first runner now reaches bounded interactive training gameplay with audible audio. Full compatibility and hardware accuracy remain open.
+
 **Status:** implementation plan; not a claim of successful title-screen boot or GPU presentation  
 **Date:** 2026-11-19  
 **Repository:** `twist84/MIPS-To-LLVM-IR-To-C`  

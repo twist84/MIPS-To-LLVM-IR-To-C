@@ -1,4 +1,7 @@
 #include "gpu.hpp"
+#include "../../../ee_runtime_profile.h"
+#include "native_viewport.hpp"
+#include "native_deinterlace.hpp"
 // Native-only WebGPU backend adapted from ps2-web-recomp:SDBZ (MIT).
 // No PS2 runtime, browser, frontend, resource-pack, or font dependency.
 #include <webgpu/webgpu.h>
@@ -8,12 +11,15 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -28,33 +34,6 @@ namespace ps2::gs::gpu {
 
 namespace
 {
-struct s_native_viewport
-{
-    int x = 0;
-    int y = 0;
-    int width = 1;
-    int height = 1;
-};
-
-s_native_viewport window_viewport(int window_width, int window_height,
-                                  int source_width, int source_height)
-{
-    window_width = std::max(window_width, 1);
-    window_height = std::max(window_height, 1);
-    source_width = std::max(source_width, 1);
-    source_height = std::max(source_height, 1);
-    int height = window_height;
-    int width = (source_width * window_height + source_height / 2) / source_height;
-    if (width > window_width)
-    {
-        width = window_width;
-        height = std::max(1, (source_height * window_width + source_width / 2) /
-                                source_width);
-    }
-    return {(window_width - width) / 2, (window_height - height) / 2,
-            std::max(width, 1), std::max(height, 1)};
-}
-
 std::vector<std::uint32_t> rescale_vram_samples(
     const std::vector<std::uint32_t>& source, unsigned from, unsigned to)
 {
@@ -123,15 +102,94 @@ WGPUBindGroup g_blit_group = nullptr;
 WGPUBuffer g_blit_params = nullptr;
 std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
+std::uint64_t g_last_guest_field = 0u;
+bool g_last_interlaced = false, g_last_halved = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
 
 bool g_timestamps = false;
 WGPUQuerySet g_queries = nullptr;
-WGPUBuffer g_query_resolve = nullptr, g_query_read = nullptr;
-bool g_query_pending = false, g_query_ready = false;
+// The query set is shared, but each in-flight pair has independent
+// resolve/readback storage. No mapped buffer can be reused until retired.
+constexpr uint32_t k_timestamp_slots = 8u;
+enum class e_timestamp_state : uint8_t { free, pending, ready, failed };
+struct s_timestamp_slot
+{
+    WGPUBuffer m_resolve = nullptr;
+    WGPUBuffer m_read = nullptr;
+    std::atomic<e_timestamp_state> m_state{e_timestamp_state::free};
+};
+std::array<s_timestamp_slot, k_timestamp_slots> g_timestamp_slots{};
+uint32_t g_timestamp_cursor = 0u;
 std::uint64_t g_measured_ns = 0, g_measured = 0, g_total_passes = 0;
+std::uint64_t g_query_submissions = 0, g_query_failures = 0, g_detail_passes = 0;
+std::mutex g_timestamp_mutex;
+ee::s_gpu_timestamp_profile g_published_timestamps{};
+
+void publish_timestamps()
+{
+    const ee::s_gpu_timestamp_profile snapshot{
+        g_timestamps, g_total_passes, g_query_submissions, g_measured,
+        g_query_failures, g_measured_ns, g_detail_passes,
+        g_timestamps ? k_timestamp_slots : 0u};
+    std::lock_guard<std::mutex> lock(g_timestamp_mutex);
+    g_published_timestamps = snapshot;
+}
+
+void collect_ready_timestamp()
+{
+    for (auto& slot : g_timestamp_slots)
+    {
+        const auto state = slot.m_state.load(std::memory_order_acquire);
+        if (state == e_timestamp_state::failed)
+        {
+            ++g_query_failures;
+            slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
+            continue;
+        }
+        if (state != e_timestamp_state::ready)
+        {
+            continue;
+        }
+        const void* mapped = wgpuBufferGetConstMappedRange(slot.m_read, 0, 16);
+        std::uint64_t values[2]{};
+        if (mapped != nullptr)
+        {
+            std::memcpy(values, mapped, sizeof values);
+        }
+        if (mapped != nullptr && values[1] >= values[0])
+        {
+            g_measured_ns += values[1] - values[0];
+            ++g_measured;
+        }
+        else
+        {
+            ++g_query_failures;
+        }
+        wgpuBufferUnmap(slot.m_read);
+        slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
+    }
+}
+
+uint32_t acquire_timestamp_slot()
+{
+    if (g_timestamps)
+    {
+        for (uint32_t offset = 0u; offset < k_timestamp_slots; ++offset)
+        {
+            const uint32_t index = (g_timestamp_cursor + offset) % k_timestamp_slots;
+            if (g_timestamp_slots[index].m_state.load(std::memory_order_acquire) ==
+                e_timestamp_state::free)
+            {
+                g_timestamp_cursor = (index + 1u) % k_timestamp_slots;
+                return index;
+            }
+        }
+    }
+    // Profiling must never stall renderer submission to free a slot.
+    return k_timestamp_slots;
+}
 WGPUDevice g_device = nullptr;
 WGPUQueue g_queue = nullptr;
 WGPUBuffer g_vram = nullptr, g_tables = nullptr, g_params = nullptr, g_data = nullptr, g_clut = nullptr, g_scratch = nullptr, g_readback = nullptr, g_decoded = nullptr, g_native_atlases = nullptr;
@@ -645,6 +703,7 @@ void note_raster(std::uint32_t prims, std::uint32_t tiles, std::uint32_t entries
 }
 
 void flush_batch() {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_batch_cpu);
     Batch &b = g_batch;
     if (b.prims.empty()) {
         b.key = ~0ull;
@@ -878,6 +937,7 @@ void pump() {
 }
 
 void wait_until(const bool &flag) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_wait_cpu);
     while (!flag) pump();
 }
 
@@ -1031,33 +1091,26 @@ void profile_submit() {
 
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
 void submit(WGPUTextureView present_view = nullptr) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_submit_cpu);
     if (g_commands.empty() && !present_view) return;
     if (g_profile_out && !present_view && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
+        g_detail_passes += g_commands.size();
         profile_submit();
+        collect_ready_timestamp();
+        publish_timestamps();
         return;
     }
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
-    if (g_query_ready) {
-        const void *mapped = wgpuBufferGetConstMappedRange(g_query_read, 0, 16);
-        if (mapped) {
-            std::uint64_t t[2];
-            std::memcpy(t, mapped, sizeof t);
-            if (t[1] > t[0]) {
-                g_measured_ns += t[1] - t[0];
-                ++g_measured;
-            }
-        }
-        wgpuBufferUnmap(g_query_read);
-        g_query_ready = g_query_pending = false;
-    }
-    const bool measure = g_timestamps && !g_query_pending;
+    collect_ready_timestamp();
+    const uint32_t query_index = acquire_timestamp_slot();
+    const bool measure = query_index != k_timestamp_slots;
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
     writes.querySet = g_queries;
-    writes.beginningOfPassWriteIndex = 0;
-    writes.endOfPassWriteIndex = 1;
+    writes.beginningOfPassWriteIndex = measure ? query_index * 2u : 0u;
+    writes.endOfPassWriteIndex = measure ? query_index * 2u + 1u : 1u;
     WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
     if (measure) cd.timestampWrites = &writes;
     WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
@@ -1077,8 +1130,10 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuComputePassEncoderEnd(pass);
     wgpuComputePassEncoderRelease(pass);
     if (measure) {
-        wgpuCommandEncoderResolveQuerySet(enc, g_queries, 0, 2, g_query_resolve, 0);
-        wgpuCommandEncoderCopyBufferToBuffer(enc, g_query_resolve, 0, g_query_read, 0, 16);
+        auto& slot = g_timestamp_slots[query_index];
+        wgpuCommandEncoderResolveQuerySet(enc, g_queries, query_index * 2u, 2u,
+            slot.m_resolve, 0);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, slot.m_resolve, 0, slot.m_read, 0, 16);
     }
     if (present_view) {
         WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
@@ -1103,20 +1158,27 @@ void submit(WGPUTextureView present_view = nullptr) {
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
     if (measure) {
-        g_query_pending = true;
+        auto& slot = g_timestamp_slots[query_index];
+        slot.m_state.store(e_timestamp_state::pending, std::memory_order_release);
+        ++g_query_submissions;
         WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
         cb.mode = WGPUCallbackMode_AllowProcessEvents;
-        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *, void *) {
-            if (status == WGPUMapAsyncStatus_Success) g_query_ready = true;
-            else g_query_pending = false;
+        cb.userdata1 = &slot;
+        cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* user, void*) {
+            auto& completed = *static_cast<s_timestamp_slot*>(user);
+            completed.m_state.store(status == WGPUMapAsyncStatus_Success ?
+                e_timestamp_state::ready : e_timestamp_state::failed,
+                std::memory_order_release);
         };
-        wgpuBufferMapAsync(g_query_read, WGPUMapMode_Read, 0, 16, cb);
+        wgpuBufferMapAsync(slot.m_read, WGPUMapMode_Read, 0, 16, cb);
     }
 #ifdef __EMSCRIPTEN__
     wgpuInstanceProcessEvents(g_instance);
 #else
     wgpuDevicePoll(g_device, false, nullptr);
 #endif
+    collect_ready_timestamp();
+    publish_timestamps();
     g_commands.clear();
     g_command_info.clear();
     ++g_serial;
@@ -1126,26 +1188,44 @@ void submit(WGPUTextureView present_view = nullptr) {
     g_clut_loads = 0;
 }
 
-void read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t offset = 0) {
+bool read_back(WGPUBuffer source, std::uint64_t bytes, void *out, std::uint64_t offset = 0) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_readback_cpu, bytes);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
     wgpuCommandEncoderCopyBufferToBuffer(enc, source, offset, g_readback, 0, bytes);
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuQueueSubmit(g_queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
-    bool done = false;
+    struct s_map_result
+    {
+        bool m_done = false;
+        bool m_success = false;
+    } result;
     WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
     cb.mode = WGPUCallbackMode_AllowProcessEvents;
-    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *flag, void *) {
-        if (status != WGPUMapAsyncStatus_Success) std::fprintf(stderr, "[gpu] map failed %d\n", static_cast<int>(status));
-        *static_cast<bool *>(flag) = true;
+    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void *user, void *) {
+        auto& result = *static_cast<s_map_result*>(user);
+        result.m_success = status == WGPUMapAsyncStatus_Success;
+        if (!result.m_success)
+        {
+            std::fprintf(stderr, "[gpu] map failed %d\n", static_cast<int>(status));
+        }
+        result.m_done = true;
     };
-    cb.userdata1 = &done;
+    cb.userdata1 = &result;
     wgpuBufferMapAsync(g_readback, WGPUMapMode_Read, 0, bytes, cb);
-    wait_until(done);
+    wait_until(result.m_done);
+    if (!result.m_success)
+    {
+        return false;
+    }
     const void *mapped = wgpuBufferGetConstMappedRange(g_readback, 0, bytes);
-    if (mapped) std::memcpy(out, mapped, bytes);
+    if (mapped)
+    {
+        std::memcpy(out, mapped, bytes);
+    }
     wgpuBufferUnmap(g_readback);
+    return mapped != nullptr;
 }
 
 std::uint32_t make_setup(const State &st, std::uint64_t attr, std::uint32_t *w) {
@@ -1431,11 +1511,30 @@ bool init(Mode m) {
     if (g_timestamps) {
         WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
         qd.type = WGPUQueryType_Timestamp;
-        qd.count = 2;
+        qd.count = k_timestamp_slots * 2u;
         g_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
-        g_query_resolve = make_buffer(16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
-        g_query_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        g_timestamps = g_queries != nullptr;
+        for (auto& slot : g_timestamp_slots)
+        {
+            slot.m_resolve = make_buffer(16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+            slot.m_read = make_buffer(16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+            g_timestamps = g_timestamps && slot.m_resolve != nullptr &&
+                slot.m_read != nullptr;
+        }
+        if (!g_timestamps)
+        {
+            for (auto& slot : g_timestamp_slots)
+            {
+                if (slot.m_resolve != nullptr) wgpuBufferRelease(slot.m_resolve);
+                if (slot.m_read != nullptr) wgpuBufferRelease(slot.m_read);
+                slot.m_resolve = nullptr;
+                slot.m_read = nullptr;
+            }
+            if (g_queries != nullptr) wgpuQuerySetRelease(g_queries);
+            g_queries = nullptr;
+        }
     }
+    publish_timestamps();
 
     WGPUBindGroupLayoutEntry le[9] = {};
     const WGPUBufferBindingType types[9] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
@@ -1521,6 +1620,7 @@ void invalidate_native_atlases()
 }
 
 void draw(const State &st, const Vertex *v, int count) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_draw_cpu);
     if (g_image.active && !g_image.pending.empty()) flush_image();
     bound_arena();
     std::uint64_t attr = st.prim;
@@ -1849,16 +1949,40 @@ bool finish_download(std::uint32_t serial) {
     return done;
 }
 
-void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes) {
+bool download_checked(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes)
+{
+    if (g_mode == Mode::off || memory == nullptr || bytes == 0u ||
+        (offset & 3u) != 0u || (bytes & 3u) != 0u ||
+        offset > kMemorySize || bytes > kMemorySize - offset)
+    {
+        return false;
+    }
     flush_all();
-    if (g_scale == 1) {
+    if (g_scale == 1)
+    {
         submit();
-        read_back(g_vram, bytes, memory + offset, offset);
-        return;
+        return read_back(g_vram, bytes, memory + offset, offset);
     }
     dispatch_linear(kResolve, bytes / 4, push_params({offset / 4}));
     submit();
-    read_back(g_scratch, bytes, memory + offset, offset);
+    return read_back(g_scratch, bytes, memory + offset, offset);
+}
+
+void download(std::uint8_t *memory, std::uint32_t offset, std::uint32_t bytes)
+{
+    (void)download_checked(memory, offset, bytes);
+}
+
+bool read_clut_checked(std::uint32_t *entries, std::size_t count)
+{
+    if (g_mode == Mode::off || entries == nullptr || count != kClutEntries)
+    {
+        return false;
+    }
+    flush_all();
+    submit();
+    return read_back(g_clut, kClutEntries * 4u, entries,
+        static_cast<std::uint64_t>(g_clut_slot) * kClutEntries * 4u);
 }
 
 void read_state(std::vector<std::uint32_t> &vram, std::uint32_t &scale, std::vector<std::uint32_t> &clut) {
@@ -2000,14 +2124,14 @@ bool attach_surface(const SurfaceTarget &target) {
     g_blit = wgpuDeviceCreateRenderPipeline(g_device, &rd);
     wgpuShaderModuleRelease(module);
     wgpuPipelineLayoutRelease(pipeline_layout);
-    g_blit_params = make_buffer(36, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
+    g_blit_params = make_buffer(48, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
     WGPUBindGroupEntry be[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
     be[0].binding = 0;
     be[0].buffer = g_scratch;
     be[0].size = WGPU_WHOLE_SIZE;
     be[1].binding = 1;
     be[1].buffer = g_blit_params;
-    be[1].size = 36;
+    be[1].size = 48;
     WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     bd.layout = layout;
     bd.entryCount = 2;
@@ -2027,42 +2151,80 @@ void resize_surface(std::uint32_t width, std::uint32_t height) {
 bool has_surface() { return g_surface != nullptr; }
 
 bool present(const DisplaySource &src) {
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_present_cpu);
     if (!g_surface) return false;
     apply_requested_render_scale();
     flush_all();
     const std::uint32_t current = field_base(g_field), previous = field_base(g_field + 1);
-    static const bool weave_off = std::getenv("PS2_NO_DEINTERLACE") != nullptr;
-    static const bool env_force_blend = []()
+    static const char* mode_text = std::getenv("EE_WEBGPU_DEINTERLACE");
+    static auto mode = parse_deinterlace_mode(mode_text);
+    static const char* mode_path = std::getenv("EE_WEBGPU_DEINTERLACE_FILE");
+    static auto next_mode_poll = std::chrono::steady_clock::time_point::min();
+    const auto now = std::chrono::steady_clock::now();
+    if (mode_path != nullptr && now >= next_mode_poll)
     {
-        const char *value = std::getenv("PS2_FORCE_DEINTERLACE");
-        const bool enabled = value && std::strcmp(value, "1") == 0;
-        if (enabled)
-        {
-            std::fprintf(stderr, "[gpu] forced field blending enabled\n");
-        }
-        return enabled;
-    }();
-    const bool force_blend = env_force_blend;
-    const bool blend = (src.halved || force_blend) && g_have_previous && g_last_width == src.width && g_last_height == src.height && !weave_off;
+        mode = read_deinterlace_mode(mode_path, mode);
+        next_mode_poll = now + std::chrono::milliseconds(100);
+    }
+    static const bool legacy_off = mode_text == nullptr && std::getenv("PS2_NO_DEINTERLACE") != nullptr;
+    static const char* force_text = std::getenv("PS2_FORCE_DEINTERLACE");
+    static const bool legacy_force = mode_text == nullptr && force_text != nullptr && std::strcmp(force_text, "1") == 0;
+    const bool compatible_history = g_have_previous &&
+        g_last_width == src.width && g_last_height == src.height &&
+        g_last_interlaced == src.interlaced && g_last_halved == src.halved;
+    const auto field = select_field_presentation(mode, src.interlaced, src.halved,
+        src.guest_field, g_last_guest_field, compatible_history, legacy_force, legacy_off);
+    // Off intentionally bypasses every temporal/spatial field filter.
+    // FFMD line repetition in kDisplay is GS scanout geometry, not a
+    // deinterlacer; changing it would sample outside the guest field.
+    static int reported_mode = -1;
+    if (reported_mode != static_cast<int>(mode))
+    {
+        reported_mode = static_cast<int>(mode);
+        std::fprintf(stderr, "[gpu] deinterlace mode=%d method=%u interlaced=%u halved=%u\n",
+            reported_mode, static_cast<unsigned>(field.m_method),
+            static_cast<unsigned>(src.interlaced), static_cast<unsigned>(src.halved));
+    }
     const std::uint32_t param = push_params({src.fbp, src.fbw, src.psm, src.dbx, src.dby, src.width, src.height, src.halved ? 1u : 0u, current});
     g_commands.push_back({kDisplay, (src.width * g_scale + 7) / 8, (src.height * g_scale + 7) / 8, param});
-    // PS2_FORCE_SQUARE: clamp source width to height before viewport calc so
-    // window_viewport receives square dimensions and fills the full window.
-    std::uint32_t view_width = src.width, view_height = src.height;
-    if (std::getenv("EE_WEBGPU_FORCE_SQUARE") && view_width > view_height) {
-        view_width = view_height;
+    // Correct the host display aspect without changing guest scanout/readback.
+    static const char* aspect = []()
+    {
+        const char* value = std::getenv("EE_WEBGPU_ASPECT");
+        if (value == nullptr)
+        {
+            value = std::getenv("EE_WEBGPU_FORCE_SQUARE") != nullptr ? "1:1" : "4:3";
+        }
+        return value;
+    }();
+    static const char* aspect_path = std::getenv("EE_WEBGPU_ASPECT_FILE");
+    static auto next_aspect_poll = std::chrono::steady_clock::time_point::min();
+    if (aspect_path != nullptr && now >= next_aspect_poll)
+    {
+        aspect = read_display_aspect(aspect_path, aspect);
+        next_aspect_poll = now + std::chrono::milliseconds(100);
+    }
+    static std::string reported_aspect;
+    if (reported_aspect != aspect)
+    {
+        reported_aspect = aspect;
+        std::fprintf(stderr, "[gpu] display aspect=%s\n", aspect);
     }
     g_present_viewport = window_viewport(static_cast<int>(g_surface_width), static_cast<int>(g_surface_height),
-        static_cast<int>(view_width), static_cast<int>(view_height));
-    const std::uint32_t blit[9] = {src.width * g_scale, src.height * g_scale, current, previous, blend ? 1u : 0u,
+        static_cast<int>(src.width), static_cast<int>(src.height), aspect);
+    const std::uint32_t blit[12] = {src.width * g_scale, src.height * g_scale, current, previous,
+        static_cast<std::uint32_t>(field.m_method),
         static_cast<std::uint32_t>(g_present_viewport.width), static_cast<std::uint32_t>(g_present_viewport.height),
         std::getenv("EE_WEBGPU_NEAREST") ? 1u : 0u,
-        0u};
+        0u, g_scale, field.m_parity, field.m_history ? 1u : 0u};
     wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
     ++g_field;
     g_have_previous = true;
     g_last_width = src.width;
     g_last_height = src.height;
+    g_last_guest_field = src.guest_field;
+    g_last_interlaced = src.interlaced;
+    g_last_halved = src.halved;
     WGPUSurfaceTexture st = WGPU_SURFACE_TEXTURE_INIT;
     wgpuSurfaceGetCurrentTexture(g_surface, &st);
     if (st.status != WGPUSurfaceGetCurrentTextureStatus_SuccessOptimal && st.status != WGPUSurfaceGetCurrentTextureStatus_SuccessSuboptimal) {
@@ -2081,9 +2243,32 @@ bool present(const DisplaySource &src) {
     return true;
 }
 
+ee::s_gpu_timestamp_profile timestamp_profile()
+{
+    std::lock_guard<std::mutex> lock(g_timestamp_mutex);
+    return g_published_timestamps;
+}
+
+void collect_timestamp_profile()
+{
+    if (g_device != nullptr && g_timestamps)
+    {
+#ifdef __EMSCRIPTEN__
+        wgpuInstanceProcessEvents(g_instance);
+#else
+        wgpuDevicePoll(g_device, false, nullptr);
+#endif
+        collect_ready_timestamp();
+        publish_timestamps();
+    }
+}
+
 double busy_ms() {
-    if (!g_measured) return 0.0;
-    return static_cast<double>(g_measured_ns) / static_cast<double>(g_measured) * static_cast<double>(g_total_passes) / 1e6;
+    const auto p = timestamp_profile();
+    if (!p.m_completed_queries) return 0.0;
+    return static_cast<double>(p.m_sampled_compute_ns) /
+        static_cast<double>(p.m_completed_queries) *
+        static_cast<double>(p.m_compute_passes) / 1e6;
 }
 
 double vram_mb() {
@@ -2241,7 +2426,7 @@ bool change_render_scale(std::uint32_t scale)
         entries[0].size = WGPU_WHOLE_SIZE;
         entries[1].binding = 1;
         entries[1].buffer = g_blit_params;
-        entries[1].size = 36;
+        entries[1].size = 48;
         WGPUBindGroupDescriptor descriptor = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         descriptor.layout = layout;
         descriptor.entryCount = 2;

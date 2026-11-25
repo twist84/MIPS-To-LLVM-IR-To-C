@@ -220,7 +220,10 @@ int main()
         capture.m_events[3].m_byte_offset != 0u ||
         capture.m_events[4].m_type != t_type::tag ||
         parser.state().m_active ||
-        parser.state().m_nloop != 0u)
+        parser.state().m_nloop != 0u ||
+        parser.counters().m_tags != 2u ||
+        parser.counters().m_reglist_events != 3u ||
+        parser.counters().m_packed_events != 0u)
     {
         return fail("odd REGLIST padding or zero-loop next tag");
     }
@@ -333,6 +336,42 @@ int main()
         return fail("accepted all-zero IMAGE content provenance");
     }
 
+    // Structural provenance and exact sink payload survive an opt-out
+    // of the diagnostic byte scan. No mid-stream partial digest.
+    hardware.reset();
+    parser.reset();
+    reset_capture(capture);
+    if (!parser.set_image_payload_digest(false))
+    {
+        return fail("cannot disable IMAGE byte digest before first batch");
+    }
+    program_gif(&runtime, 0x600u, 3u);
+    program_gif(&runtime, 0x630u, 3u);
+    if (parser.state().m_active ||
+        parser.counters().m_image_payload_digest_enabled ||
+        parser.counters().m_image_events != 3u ||
+        parser.counters().m_image_qwc != 4u ||
+        parser.counters().m_image_nonzero_bytes != 0u ||
+        parser.counters().m_image_payload_fnv1a64 != 0u ||
+        capture.m_image_data.size() != 64u ||
+        parser.set_image_payload_digest(true))
+    {
+        return fail("disabled IMAGE digest changed parser or structural provenance");
+    }
+    for (uint32_t i = 0u; i < 64u; ++i)
+    {
+        if (capture.m_image_data[i] != static_cast<uint8_t>(i))
+        {
+            return fail("disabled digest changed IMAGE payload bytes");
+        }
+    }
+    parser.reset();
+    if (parser.counters().m_image_payload_digest_enabled ||
+        !parser.set_image_payload_digest(true))
+    {
+        return fail("IMAGE digest configuration reset semantics");
+    }
+
     // A rejected batch cannot advance the parser or the DMA channel.
     // Retrying the same stream after STR is cleared must parse identically.
     hardware.reset();
@@ -355,7 +394,9 @@ int main()
     if (parser.counters().m_accepted_batches != 0u ||
         parser.counters().m_rejected_batches != 1u ||
         parser.counters().m_input_qwc != 0u ||
-        parser.counters().m_tags != 0u)
+        parser.counters().m_tags != 0u ||
+        parser.counters().m_packed_events != 0u ||
+        parser.counters().m_primitive_events != 0u)
     {
         return fail("rejected PATH3 packet counted as committed");
     }
@@ -400,6 +441,42 @@ int main()
         (ee::ee_mem_read32(&runtime, k_gif) & k_str) == 0u)
     {
         return fail("unbound GIF parser falsely completed DMA");
+    }
+
+    // A nested consume must not invalidate or overwrite the outer event
+    // array while its sink still owns the callback's borrowed view.
+    struct s_nested
+    {
+        ee::c_ee_gif_path3 parser;
+        uint8_t packet[16]{};
+        s_capture capture;
+    } nested;
+    nested.parser.bind_event_sink(&nested.capture, on_events);
+    ee::c_ee_gif_path3 outer;
+    outer.bind_event_sink(&nested, [](void* user,
+        const ee::s_ee_gif_event* events, size_t count,
+        const uint8_t*, uint32_t) -> bool
+    {
+        auto& inner = *static_cast<s_nested*>(user);
+        if (count != 2u || events[1].m_word0 != 0x5au)
+        {
+            return false;
+        }
+        return inner.parser.consume(inner.packet, 1u) &&
+            inner.capture.m_events.size() == 1u &&
+            events[0].m_type == t_type::tag &&
+            events[1].m_type == t_type::packed &&
+            events[1].m_word0 == 0x5au;
+    });
+    uint8_t packet[32]{};
+    packet[0] = 1u;
+    packet[7] = 0x10u;
+    packet[8] = 0xeu;
+    packet[16] = 0x5au;
+    if (!outer.consume(packet, 2u) ||
+        outer.counters().m_packed_events != 1u)
+    {
+        return fail("nested parser invalidated outer event storage");
     }
 
     std::puts("EE GIF PATH3 streaming PACKED/REGLIST/IMAGE parser: PASS");

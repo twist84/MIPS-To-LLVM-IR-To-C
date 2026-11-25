@@ -6,12 +6,47 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <map>
+#include <array>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace ee
 {
+
+// Chronological bounded history with constant-time append and no allocation.
+template <typename t_sample, size_t k_capacity>
+class c_bounded_diagnostic_history
+{
+public:
+    static_assert(k_capacity > 0u, "history capacity must be positive");
+
+    void push_back(const t_sample& sample)
+    {
+        m_samples[(m_first + m_size) % k_capacity] = sample;
+        if (m_size == k_capacity)
+        {
+            m_first = (m_first + 1u) % k_capacity;
+        }
+        else
+        {
+            ++m_size;
+        }
+    }
+
+    size_t size() const { return m_size; }
+    bool empty() const { return m_size == 0u; }
+
+    const t_sample& operator[](size_t index) const
+    {
+        return m_samples[(m_first + index) % k_capacity];
+    }
+
+private:
+    std::array<t_sample, k_capacity> m_samples{};
+    size_t m_first = 0u;
+    size_t m_size = 0u;
+};
 
 struct s_ee_hot_loop_state
 {
@@ -70,28 +105,48 @@ public:
         size_t pc_capacity = k_pc_capacity,
         size_t edge_capacity = k_edge_capacity)
         : m_pc_capacity(pc_capacity),
-          m_edge_capacity(edge_capacity)
+          m_edge_capacity(edge_capacity),
+          m_pc_cache(k_pc_cache_size),
+          m_edge_cache(k_edge_cache_size)
     {
+        m_pcs.reserve(pc_capacity);
+        m_edges.reserve(edge_capacity);
     }
+
+    // The counter caches retain stable pointers into the owning maps.
+    // This host diagnostic object is never copied or moved.
+    c_ee_dispatch_hotspots(const c_ee_dispatch_hotspots&) = delete;
+    c_ee_dispatch_hotspots& operator=(const c_ee_dispatch_hotspots&) = delete;
 
     void record(uint64_t dispatch, uint32_t from_pc, uint32_t to_pc,
                 const s_ee_hot_loop_state& state)
     {
         ++m_observations;
-        count_bounded(m_pcs, from_pc, m_pc_capacity, m_untracked_pc_samples);
-        count_bounded(m_edges, std::make_pair(from_pc, to_pc),
-                      m_edge_capacity, m_untracked_edge_samples);
-        if (m_has_state && state != m_last_state)
+        // Keep the full PC/edge keys for equality, including zero and
+        // unaligned addresses. Fold high address bits into the cache index.
+        const uint32_t from_word = from_pc >> 2u;
+        const uint32_t to_word = to_pc >> 2u;
+        const size_t pc_slot = (from_word ^ (from_word >> 12u)) &
+            (k_pc_cache_size - 1u);
+        const size_t edge_slot = (from_word ^ (from_word >> 13u) ^
+            ((to_word ^ (to_word >> 13u)) * 0x9e3779b9u)) &
+            (k_edge_cache_size - 1u);
+        m_pc_cache_misses += count_cached(m_pcs, m_pc_cache[pc_slot], from_pc,
+            m_pc_capacity, m_untracked_pc_samples) ? 1u : 0u;
+        m_edge_cache_misses += count_cached(m_edges, m_edge_cache[edge_slot],
+            std::make_pair(from_pc, to_pc), m_edge_capacity,
+            m_untracked_edge_samples) ? 1u : 0u;
+        if (!m_has_state)
         {
-            if (m_changes.size() == k_change_capacity)
-            {
-                m_changes.erase(m_changes.begin());
-            }
+            m_has_state = true;
+            m_last_state = state;
+        }
+        else if (state != m_last_state)
+        {
             m_changes.push_back({dispatch, from_pc, m_last_state, state});
             ++m_total_state_changes;
+            m_last_state = state;
         }
-        m_has_state = true;
-        m_last_state = state;
     }
 
     uint64_t observations() const
@@ -122,12 +177,17 @@ public:
             "\n    \"tracked_pcs\": %zu, \"tracked_edges\": %zu,"
             "\n    \"untracked_pc_samples\": %llu,"
             "\n    \"untracked_edge_samples\": %llu,"
-            "\n    \"total_state_changes\": %llu",
+            "\n    \"total_state_changes\": %llu,"
+            "\n    \"pc_cache_slots\": %zu, \"edge_cache_slots\": %zu,"
+            "\n    \"pc_cache_misses\": %llu, \"edge_cache_misses\": %llu",
             static_cast<unsigned long long>(m_observations),
             m_pc_capacity, m_edge_capacity, m_pcs.size(), m_edges.size(),
             static_cast<unsigned long long>(m_untracked_pc_samples),
             static_cast<unsigned long long>(m_untracked_edge_samples),
-            static_cast<unsigned long long>(m_total_state_changes));
+            static_cast<unsigned long long>(m_total_state_changes),
+            m_pc_cache.size(), m_edge_cache.size(),
+            static_cast<unsigned long long>(m_pc_cache_misses),
+            static_cast<unsigned long long>(m_edge_cache_misses));
 
         const auto pcs = top_counts(m_pcs);
         std::fputs(",\n    \"hot_pcs\": [", output);
@@ -184,29 +244,60 @@ private:
         s_ee_hot_loop_state m_after;
     };
 
-    template <typename t_key>
-    static void count_bounded(std::map<t_key, uint64_t>& counts,
-                              const t_key& key, size_t capacity,
-                              uint64_t& untracked)
+    struct s_edge_hash
     {
-        const auto found = counts.find(key);
-        if (found != counts.end())
+        size_t operator()(const std::pair<uint32_t, uint32_t>& key) const
         {
-            ++found->second;
+            // Mix both aligned guest PCs before bucket selection.
+            uint64_t value = (static_cast<uint64_t>(key.first) << 32u) | key.second;
+            value ^= value >> 33u;
+            value *= 0xff51afd7ed558ccdull;
+            value ^= value >> 33u;
+            return static_cast<size_t>(value);
         }
-        else if (counts.size() < capacity)
-        {
-            counts.emplace(key, 1u);
-        }
-        else
-        {
-            ++untracked;
-        }
-    }
+    };
+
+    // Independent of tracking capacity: negative lookups are cacheable
+    // after the bounded map fills. Heap storage avoids runner stack growth.
+    static constexpr size_t k_pc_cache_size = 8192u;
+    static constexpr size_t k_edge_cache_size = 16384u;
 
     template <typename t_key>
+    struct s_counter_cache_entry
+    {
+        t_key m_key{};
+        uint64_t* m_counter = nullptr;
+    };
+
+    template <typename t_key, typename t_hash>
+    static bool count_cached(std::unordered_map<t_key, uint64_t, t_hash>& counts,
+                             s_counter_cache_entry<t_key>& slot,
+                             const t_key& key, size_t capacity,
+                             uint64_t& untracked)
+    {
+        const bool miss = slot.m_counter == nullptr || slot.m_key != key;
+        if (miss)
+        {
+            auto found = counts.find(key);
+            if (found == counts.end() && counts.size() < capacity)
+            {
+                found = counts.emplace(key, 0u).first;
+            }
+            // Map references survive rehash; we never erase. Rejected
+            // keys point to the owning object's untracked counter once
+            // the fixed capacity fills. The object cannot move or copy,
+            // so both kinds of counter pointers remain valid. Null now
+            // denotes only a cold slot, including for the zero key.
+            slot.m_key = key;
+            slot.m_counter = found != counts.end() ? &found->second : &untracked;
+        }
+        ++*slot.m_counter;
+        return miss;
+    }
+
+    template <typename t_key, typename t_hash>
     static std::vector<std::pair<t_key, uint64_t>> top_counts(
-        const std::map<t_key, uint64_t>& counts)
+        const std::unordered_map<t_key, uint64_t, t_hash>& counts)
     {
         std::vector<std::pair<t_key, uint64_t>> sorted(
             counts.begin(), counts.end());
@@ -257,9 +348,13 @@ private:
     uint64_t m_total_state_changes = 0u;
     bool m_has_state = false;
     s_ee_hot_loop_state m_last_state{};
-    std::map<uint32_t, uint64_t> m_pcs;
-    std::map<std::pair<uint32_t, uint32_t>, uint64_t> m_edges;
-    std::vector<s_change> m_changes;
+    std::unordered_map<uint32_t, uint64_t> m_pcs;
+    std::unordered_map<std::pair<uint32_t, uint32_t>, uint64_t, s_edge_hash> m_edges;
+    std::vector<s_counter_cache_entry<uint32_t>> m_pc_cache;
+    std::vector<s_counter_cache_entry<std::pair<uint32_t, uint32_t>>> m_edge_cache;
+    uint64_t m_pc_cache_misses = 0u;
+    uint64_t m_edge_cache_misses = 0u;
+    c_bounded_diagnostic_history<s_change, k_change_capacity> m_changes;
 };
 
 } // namespace ee

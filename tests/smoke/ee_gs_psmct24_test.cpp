@@ -176,6 +176,52 @@ int main()
         return fail("rejected batch leaked pixels or partial-pixel carry");
     }
 
+    // Three odd-width rows, with the first IMAGE ending in the
+    // middle of the second row and carrying one byte of pixel 5.
+    // Compare split chunks against one contiguous IMAGE, including
+    // final padding and each independently known swizzled address.
+    ee::c_ee_gs_state split;
+    ee::c_ee_gs_state whole;
+    constexpr uint32_t k_rows_bp = 0x120u;
+    constexpr uint32_t k_rows_base = k_rows_bp * 256u;
+    constexpr uint32_t k_row_offsets[9] =
+        {0u, 4u, 16u, 8u, 12u, 24u, 64u, 68u, 80u};
+    std::array<uint8_t, 32> rows{};
+    rows.fill(0xeeu);
+    for (uint32_t i = 0u; i < 9u; ++i)
+    {
+        set24(rows.data(), i, 0x00abc000u | (i + 1u));
+    }
+    for (auto* target : {&split, &whole})
+    {
+        if (!reg(*target, 0x50u, bitblt(k_rows_bp, 1u, 1u)) ||
+            !reg(*target, 0x51u, 0u) ||
+            !reg(*target, 0x52u, trxreg(3u, 3u)) ||
+            !reg(*target, 0x53u, 0u))
+        {
+            return fail("unable to configure odd-width RGB24 rows");
+        }
+    }
+    if (!image(split, rows.data(), 1u) ||
+        split.state().m_transfer_pixels_written != 5u ||
+        split.state().m_transfer_pending_size != 1u ||
+        !image(split, rows.data() + 16u, 1u) ||
+        !image(whole, rows.data(), 2u) ||
+        split.state().m_transfer_pixels_written != 9u ||
+        split.state().m_transfer_pending_size != 0u ||
+        split.vram() != whole.vram())
+    {
+        return fail("split odd-width RGB24 upload diverged from whole IMAGE");
+    }
+    for (uint32_t i = 0u; i < 9u; ++i)
+    {
+        if (!read(split, k_rows_base + k_row_offsets[i],
+                0x00abc000u | (i + 1u)))
+        {
+            return fail("odd-width RGB24 row cursor or swizzle");
+        }
+    }
+
     gs.reset();
     if (gs.state().m_transfer_pending_size != 0u ||
         gs.state().m_transfer_pixels_written != 0u ||

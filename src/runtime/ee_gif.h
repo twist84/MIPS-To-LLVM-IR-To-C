@@ -42,6 +42,8 @@ struct s_ee_gif_path_counters
     uint64_t m_image_qwc = 0u;
     // Read-only provenance of accepted GIF IMAGE/IMAGE2 payload bytes.
     // These bytes are not necessarily visible texture/framebuffer pixels.
+    // Disabled only by an explicit host diagnostic configuration.
+    bool m_image_payload_digest_enabled = true;
     uint64_t m_image_nonzero_bytes = 0u;
     uint64_t m_image_payload_fnv1a64 = 0u;
 };
@@ -58,6 +60,13 @@ struct s_ee_gif_path3_state
     bool m_eop = false;
 };
 
+struct s_ee_gif_segment
+{
+    uint32_t m_path = 0u;
+    const uint8_t* m_data = nullptr;
+    uint32_t m_qwc = 0u;
+};
+
 // Stateful PATH3 parser based on ps2-web-recomp/runtime/src/gs/gif.cpp::walk.
 // The caller owns the event sink and must commit or reject a whole batch
 // atomically. A rejected chunk preserves parser state and (when used through
@@ -72,10 +81,18 @@ public:
 
     void bind_event_sink(void* user, t_event_callback callback);
     void reset();
+    // Select before the first accepted batch; never mix partial digests.
+    bool set_image_payload_digest(bool enabled);
     const s_ee_gif_path3_state& state() const;
     const s_ee_gif_path_counters& counters() const;
 
     bool consume(const uint8_t* data, uint32_t qwc);
+
+    // Mixed PATH1/PATH2 input uses a shared transactional sink. Each
+    // segment is parsed with its own path state, but GS sees one ordered
+    // event stream. No parser or GS state commits on rejection.
+    static bool consume_ordered(c_ee_gif_path3& path1, c_ee_gif_path3& path2,
+                                const s_ee_gif_segment* segments, size_t count);
 
     // Compatible with c_ee_dmac::t_device_transfer_callback.
     // Only channel 2 (GIF PATH3) is accepted.

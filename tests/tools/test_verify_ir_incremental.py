@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "tools" / "verify_ir.py"
@@ -140,6 +141,265 @@ def test_append_only_emission():
         print("PASS: append-only LLVM emission, manifest safety and no old rehash")
 
 
+def test_ir_pipeline_profile():
+    with tempfile.TemporaryDirectory(prefix="ee-ir-pipeline-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        first = ir_dir / "guest_fn.ll"
+        first.write_text("""define i32 @guest_fn(i32 %x) {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+""", encoding="utf-8")
+        original = first.read_bytes()
+        objects = root / "objects"
+        _, baseline = run_emitter(ir_dir, objects, opt=2)
+        out, optimized = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 0/1" in out, out
+        assert optimized["optimization_level"] == 4
+        assert optimized["backend_optimization_level"] == 2
+        assert optimized["ir_pipeline"] == "llvm-default-O2-v1"
+        assert optimized["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
+        assert first.read_bytes() == original
+        out, _ = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 1/1" in out, out
+        next_ir = ir_dir / "next_guest.ll"
+        write_ir(next_ir, 2)
+        manifest_path = objects / "objects.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["ir_pipeline"] = "different-pipeline"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        before = manifest_path.read_bytes()
+        command = [sys.executable, str(SCRIPT), str(next_ir),
+                   f"--emit-dir={objects}", "--emit-opt=4",
+                   "--incremental", "--append-only"]
+        refused = subprocess.run(command, capture_output=True, text=True)
+        assert refused.returncode != 0 and "stale or incompatible" in refused.stderr
+        assert manifest_path.read_bytes() == before
+        out, fixed = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 0/2" in out and fixed["object_count"] == 2
+        assert first.read_bytes() == original
+        print("PASS: O2 IR pipeline cache provenance and immutable source IR")
+
+
+def test_pipeline_binding_preflight():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import verify_ir
+    llvm = verify_ir.llvm
+    factory = llvm.create_pipeline_tuning_options
+
+    # Model LLVM 22's one-argument factory, also delegating to older
+    # bindings using only the speed level and their default size tuning.
+    def speed_only_factory(speed_level=2):
+        return factory(speed_level)
+
+    with patch.object(llvm, "create_pipeline_tuning_options", speed_only_factory):
+        verify_ir.preflight_ir_pipeline(llvm.get_default_triple())
+
+    with tempfile.TemporaryDirectory(prefix="ee-pipeline-preflight-") as temp:
+        root = Path(temp)
+        source = root / "guest_fn.ll"
+        write_ir(source, 1)
+        objects = root / "objects"
+        args = [str(SCRIPT), str(source), f"--emit-dir={objects}", "--emit-opt=4"]
+        with patch.object(sys, "argv", args), patch.object(
+                llvm, "create_pipeline_tuning_options",
+                side_effect=TypeError("incompatible pipeline binding")):
+            assert verify_ir.main() == 1
+        assert not objects.exists(), "failed preflight must not start object emission"
+    print("PASS: renamed LLVM tuning argument and fail-fast pipeline setup")
+
+
+def test_pipeline_worker_recycling():
+    with tempfile.TemporaryDirectory(prefix="ee-ir-recycle-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        objects = root / "objects"
+        # More inputs than two workers can emit without a recycle.
+        for i in range(260):
+            write_ir(ir_dir / f"guest_{i:04d}.ll", i)
+        original = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                    for p in ir_dir.glob("*.ll")}
+        out, manifest = run_emitter(ir_dir, objects, opt=4)
+        assert "recycling IR pipeline workers every 128 modules" in out, out
+        assert manifest["complete"] and manifest["object_count"] == 260
+        assert {Path(e["input"]).name: e["ir_sha256"]
+                for e in manifest["objects"]} == original
+        assert {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in ir_dir.glob("*.ll")} == original
+        out, _ = run_emitter(ir_dir, objects, opt=4)
+        assert "reused 260/260" in out, out
+        print("PASS: recycled workers preserve all object and IR provenance")
+
+
+def test_native_target_profile():
+    with tempfile.TemporaryDirectory(prefix="ee-native-target-") as temp:
+        root = Path(temp)
+        ir_dir = root / "ir"
+        ir_dir.mkdir()
+        obj_dir = root / "objects"
+        first = ir_dir / "first.ll"
+        write_ir(first, 1)
+        original = first.read_bytes()
+        _, baseline = run_emitter(ir_dir, obj_dir, opt=2)
+        out, native = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 0/1" in out and "host-native O2 CPU=" in out
+        assert native["optimization_level"] == 5
+        assert native["backend_optimization_level"] == 2
+        assert native["ir_pipeline"] is None
+        assert native["native_target"]["cpu"]
+        assert native["native_target"]["features"] is not None
+        assert native["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
+        assert first.read_bytes() == original
+        out, _ = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 1/1" in out
+        manifest_path = obj_dir / "objects.json"
+        native["native_target"]["cpu"] = "wrong-host"
+        manifest_path.write_text(json.dumps(native), encoding="utf-8")
+        previous = manifest_path.read_bytes()
+        second = ir_dir / "second.ll"
+        write_ir(second, 2)
+        result = subprocess.run([
+            sys.executable, str(SCRIPT), str(second), f"--emit-dir={obj_dir}",
+            "--emit-opt=5", "--incremental", "--append-only"
+        ], capture_output=True, text=True)
+        assert result.returncode != 0 and "stale or incompatible" in result.stderr
+        assert manifest_path.read_bytes() == previous
+        out, fixed = run_emitter(ir_dir, obj_dir, opt=5)
+        assert "reused 0/2" in out and fixed["object_count"] == 2
+        assert first.read_bytes() == original
+        print("PASS: host-native O2 profile, CPU provenance and immutable IR")
+
+
+def test_relocated_object_manifest():
+    with tempfile.TemporaryDirectory(prefix="ee-relocation-") as temp:
+        root = Path(temp)
+        stage = root / "stage"
+        ir_dir = stage / "ir"
+        objects = stage / "objects"
+        ir_dir.mkdir(parents=True)
+        write_ir(ir_dir / "guest.ll", 1)
+        _, first = run_emitter(ir_dir, objects)
+        assert first["path_format"] == "manifest-relative-v1"
+        assert first["objects"][0]["input"] == "../ir/guest.ll"
+        canonical = root / "canonical"
+        stage.rename(canonical)
+        out, second = run_emitter(canonical / "ir", canonical / "objects")
+        assert "reused 1/1" in out, out
+        assert first == second
+
+
+def test_nested_profile_reuses_matching_backup_objects():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_optimized_cache as optimized
+    import shared_ee_ir as shared
+
+    with tempfile.TemporaryDirectory(prefix="ee-backup-objects-") as temp:
+        base = Path(temp) / "ps2-game-hle"
+        backup = base / "backup-123"
+        old_ir = backup / "ir"
+        old_objects = backup / "legacy-O2" / "objects"
+        old_ir.mkdir(parents=True)
+        for name, value in (("same", 1), ("changed", 2)):
+            write_ir(old_ir / (name + ".ll"), value)
+        _, before = run_emitter(old_ir, old_objects, opt=2)
+        ir = base / "ir"
+        ir.mkdir()
+        write_ir(ir / "same.ll", 1)
+        write_ir(ir / "changed.ll", 3)
+        hashes = {path.name: shared.digest(path) for path in ir.glob("*.ll")}
+        work = base / "O2"
+        work.mkdir()
+        assert optimized.seed_backup_objects(base, work, ir / "ee_functions.json",
+                                            hashes, 2) == 1
+        out, after = run_emitter(ir, work / "objects", opt=2)
+        assert "reused 1/2" in out, out
+        assert after["object_count"] == 2
+        assert json.loads((old_objects / "objects.json").read_text()) == before
+        assert {item["input"] for item in after["objects"]} == {
+            "../../ir/same.ll", "../../ir/changed.ll"}
+
+
+def test_shared_ir_provenance():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import shared_ee_ir as shared
+
+    with tempfile.TemporaryDirectory(prefix="ee-shared-provenance-") as temp:
+        root = Path(temp)
+        base = root / "base"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        profile = root / "profile"
+        profile.mkdir()
+        metadata_path = ir / "ee_functions.json"
+        sources = {"ELF": "synthetic"}
+        metadata = {"function_count": 0, "functions": []}
+        hashes = {}
+
+        def append(i):
+            path = ir / f"fn_{i}.ll"
+            write_ir(path, i)
+            metadata["functions"].append({
+                "ir_path": str(path), "vaddr": hex(0x100000 + i * 4),
+                "host_symbol": path.stem, "block_pcs": [hex(0x100000 + i * 4)]
+            })
+            hashes[path.name] = shared.digest(path)
+            metadata["function_count"] = len(metadata["functions"])
+
+        append(0)
+        shared.write_json(metadata_path, metadata)
+        shared.publish(metadata_path, sources, hashes)
+        shared.attach(profile, ir)
+        original = {"ir_sources": sources,
+                    "metadata_sha256": shared.digest(metadata_path),
+                    "ir_hashes": dict(hashes)}
+        assert shared.ir_directory(profile) == ir
+        assert not (profile / "ir").exists()
+        # More than one 128-function recovery batch may have elapsed.
+        for i in range(1, 260):
+            append(i)
+        shared.write_json(metadata_path, metadata)
+        shared.publish(metadata_path, sources, hashes)
+        assert shared.verified_extension(original, metadata_path, sources, hashes)
+        changed = dict(hashes)
+        changed["fn_0.ll"] = "modified"
+        assert not shared.verified_extension(original, metadata_path, sources, changed)
+        metadata["functions"][0]["block_pcs"] = ["0x200000"]
+        shared.write_json(metadata_path, metadata)
+        assert not shared.verified_extension(original, metadata_path, sources, hashes)
+        try:
+            shared.publish(metadata_path, sources, hashes)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("changed original block ownership was accepted")
+
+        # Locks must serialize distinct profiles, but allow reentrant use
+        # by the builder and run_game in one process.
+        with shared.ir_lock(base), shared.ir_lock(profile):
+            script = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                      "from shared_ee_ir import ir_lock; "
+                      "with_lock = ir_lock(sys.argv[2]); with_lock.__enter__()")
+            other = subprocess.run([sys.executable, "-c", script, str(SCRIPT.parent),
+                                    str(profile)], capture_output=True, text=True)
+            assert other.returncode != 0 and "shared EE IR is in use" in other.stderr
+        with shared.ir_lock(profile):
+            pass
+        print("PASS: shared IR append history, tamper rejection and cross-profile locking")
+
+
 if __name__ == "__main__":
+    test_relocated_object_manifest()
+    test_nested_profile_reuses_matching_backup_objects()
+    test_shared_ir_provenance()
+    test_native_target_profile()
+    test_pipeline_worker_recycling()
+    test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
     test_append_only_emission()
+    test_ir_pipeline_profile()

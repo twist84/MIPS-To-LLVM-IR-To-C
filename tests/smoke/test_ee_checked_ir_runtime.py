@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -51,15 +52,34 @@ TRAPS = [
 ]
 
 
-def compile_guest(fixture, directory, target, mode, opt_level):
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
+from verify_ir import optimize_guest_ir
+
+
+def compile_guest(fixture, directory, target, mode, opt_level, pipeline=False):
     path = directory / f"{mode}_o{opt_level}.ll"
     subprocess.run([str(fixture), str(path), mode, str(opt_level)], check=True)
-    module = llvm.parse_assembly(path.read_text(encoding="utf-8"))
+    ir_text = path.read_text(encoding="utf-8")
+    if not mode.endswith("_delay"):
+        guest_ir = ir_text.split("define i32 @guest_checked_exception_test(", 1)[1]
+        fault = re.search(
+            r"(?ms)^checked_fault_\d+:\n(.*?)^checked_continue_\d+:",
+            guest_ir,
+        )
+        require(fault is not None, f"{mode}: missing checked exception edge")
+        require("store i64 " not in guest_ir[:fault.start()],
+                f"{mode}: successful checked path prematurely spills GPR state")
+        require("store i64 " in fault.group(1) and
+                "@ee_raise_exception" in fault.group(1),
+                f"{mode}: fault edge must commit prior GPR state")
+    module = llvm.parse_assembly(ir_text)
     module.verify()
-    machine = target.create_target_machine(opt=0)
+    machine = target.create_target_machine(opt=2 if pipeline else 0)
     module.triple = llvm.get_default_triple()
     module.data_layout = str(machine.target_data)
     module.verify()
+    if pipeline:
+        optimize_guest_ir(module, machine)
     engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
     engine.add_module(module)
     engine.finalize_object()
@@ -167,12 +187,12 @@ def main():
     executed = 0
     with tempfile.TemporaryDirectory(prefix="ee-checked-exception-") as tmp:
         directory = pathlib.Path(tmp)
-        for opt_level in (0, 3):
+        for opt_level, pipeline in ((0, False), (3, False), (0, True)):
             for delayed in (False, True):
                 suffix = "_delay" if delayed else ""
                 for mode, normal, wanted, overflow in ARITHMETIC:
                     function, engine, module, machine = compile_guest(
-                        fixture, directory, target, mode + suffix, opt_level
+                        fixture, directory, target, mode + suffix, opt_level, pipeline
                     )
                     check(mode, function, normal, wanted, 12, delayed, False)
                     check(mode, function, overflow, INITIAL_RD, 12, delayed, True)
@@ -181,7 +201,7 @@ def main():
 
                 for mode, false_inputs, true_inputs in TRAPS:
                     function, engine, module, machine = compile_guest(
-                        fixture, directory, target, mode + suffix, opt_level
+                        fixture, directory, target, mode + suffix, opt_level, pipeline
                     )
                     check(mode, function, false_inputs, INITIAL_RD, 13, delayed, False)
                     check(mode, function, true_inputs, INITIAL_RD, 13, delayed, True)
@@ -196,7 +216,7 @@ def main():
 
     _ = helper
     print(f"ee_checked_ir_runtime: PASS ({executed} JIT executions; "
-          "O0/O3, EX_Ov/EX_Tr, register/immediate, BD/EPC, EXL/BEV)")
+          "O0/O3/O2-pipeline, EX_Ov/EX_Tr, register/immediate, BD/EPC, EXL/BEV)")
 
 
 if __name__ == "__main__":

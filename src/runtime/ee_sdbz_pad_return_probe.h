@@ -25,6 +25,8 @@ public:
         uint32_t m_buffer_address = 0u;
         uint32_t m_return_value = 0u;
         uint8_t m_bytes[4]{};
+        bool m_analog_valid = false;
+        uint8_t m_analog[4]{};
         uint16_t m_raw_buttons = 0u;
         uint16_t m_pressed_mask = 0u;
     };
@@ -80,6 +82,30 @@ public:
         if (sample.m_return_value >= 4u && sample.m_bytes[0u] == 0u)
         {
             ++m_caller_candidate_samples;
+            // Original 0x00109c50..0x00109cf0 consumes reply bytes
+            // +6,+7,+4,+5 after subtracting 0x80 and applying ±36.
+            if (sample.m_return_value >= 8u &&
+                (sample.m_bytes[1] & 0xf0u) == 0x70u &&
+                address <= 0xfffffff8u && memory->contains(address, 8u))
+            {
+                sample.m_analog_valid = true;
+                bool outside = false;
+                for (uint32_t index = 0u; index < 4u; ++index)
+                {
+                    sample.m_analog[index] = memory->read8(address + 4u + index);
+                    const int axis = static_cast<int>(sample.m_analog[index]) - 128;
+                    outside = outside || axis < -36 || axis > 36;
+                }
+                ++m_analog_samples;
+                if (outside)
+                {
+                    ++m_analog_outside_deadzone;
+                    if (!m_first_analog_outside.m_valid)
+                    {
+                        m_first_analog_outside = sample;
+                    }
+                }
+            }
             // SIO2 sends Cross in bit 6 of the second button byte.
             // PADMAN preserves byte order. SLUS_214.42 shifts the
             // first byte left eight, so Cross is 0x0040 in its word.
@@ -116,17 +142,22 @@ public:
             "\"site_pc\":%u,\"return_entries\":%llu,"
             "\"ram_samples\":%llu,\"caller_candidate_samples\":%llu,"
             "\"cross_bit_low_candidates\":%llu,"
+            "\"analog_samples\":%llu,\"analog_outside_deadzone\":%llu,"
             "\"first\":",
             k_return_pc,
             static_cast<unsigned long long>(m_return_entries),
             static_cast<unsigned long long>(m_ram_samples),
             static_cast<unsigned long long>(m_caller_candidate_samples),
-            static_cast<unsigned long long>(m_cross_bit_low_candidates));
+            static_cast<unsigned long long>(m_cross_bit_low_candidates),
+            static_cast<unsigned long long>(m_analog_samples),
+            static_cast<unsigned long long>(m_analog_outside_deadzone));
         write_sample(output, m_first);
         std::fputs(",\"first_cross_candidate\":", output);
         write_sample(output, m_first_cross);
         std::fputs(",\"last\":", output);
         write_sample(output, m_last);
+        std::fputs(",\"first_analog_outside_deadzone\":", output);
+        write_sample(output, m_first_analog_outside);
         std::fputs(",\"limitations\":["
             "\"return_site_only_not_full_guest_instruction_trace\","
             "\"candidate_mask_does_not_prove_input_branch\","
@@ -145,18 +176,25 @@ private:
         std::fprintf(output,
             "{\"dispatch\":%llu,\"buffer_address\":%u,"
             "\"return_value\":%u,\"bytes\":[%u,%u,%u,%u],"
-            "\"raw_buttons\":%u,\"pressed_mask\":%u}",
+            "\"raw_buttons\":%u,\"pressed_mask\":%u,"
+            "\"analog_valid\":%s,\"analog_bytes\":[%u,%u,%u,%u]}",
             static_cast<unsigned long long>(sample.m_dispatch),
             sample.m_buffer_address, sample.m_return_value,
             sample.m_bytes[0u], sample.m_bytes[1u],
             sample.m_bytes[2u], sample.m_bytes[3u],
-            sample.m_raw_buttons, sample.m_pressed_mask);
+            sample.m_raw_buttons, sample.m_pressed_mask,
+            sample.m_analog_valid ? "true" : "false",
+            sample.m_analog[0], sample.m_analog[1],
+            sample.m_analog[2], sample.m_analog[3]);
     }
 
     uint64_t m_return_entries = 0u;
     uint64_t m_ram_samples = 0u;
     uint64_t m_caller_candidate_samples = 0u;
     uint64_t m_cross_bit_low_candidates = 0u;
+    uint64_t m_analog_samples = 0u;
+    uint64_t m_analog_outside_deadzone = 0u;
+    s_sample m_first_analog_outside{};
     s_sample m_first{};
     s_sample m_first_cross{};
     s_sample m_last{};

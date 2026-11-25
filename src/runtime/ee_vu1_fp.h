@@ -2,6 +2,9 @@
 // Samir Nuri (2026), MIT. License: ps2_webgpu/gs/LICENSE.upstream.
 #pragma once
 
+#include "ee_vu_scalar_fp.h"
+#include "ee_vu_fmac_fp.h"
+
 #include <cstring>
 #include <cmath>
 #include <cstdint>
@@ -43,51 +46,19 @@ inline std::uint32_t pack(std::uint32_t sign, int e, std::uint32_t m) {
     return sign | (static_cast<std::uint32_t>(e) << 23) | (m & 0x7FFFFFu);
 }
 
-inline std::uint32_t add(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b);
-    std::uint32_t aa = a & kAbs, ba = b & kAbs;
-    if (!ba) return aa ? a : (a & b);
-    if (!aa) return b;
-    if (ba > aa) {
-        std::swap(a, b);
-        std::swap(aa, ba);
-    }
-    int e = static_cast<int>(aa >> 23);
-    const int diff = e - static_cast<int>(ba >> 23);
-    std::uint32_t ma = mantissa(aa) << 1;
-    const std::uint32_t mb = diff > 25 ? 0u : (mantissa(ba) << 1) >> diff;
-    if ((a ^ b) & kSign) {
-        ma -= mb;
-        if (!ma) return 0;
-        const int shift = leading_zeroes(ma) - 7;
-        ma <<= shift;
-        e -= shift;
-    } else {
-        ma += mb;
-        if (ma & 0x2000000u) {
-            ma >>= 1;
-            ++e;
-        }
-    }
-    return pack(a & kSign, e, ma >> 1);
+inline std::uint32_t add(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::add(a, b, false).m_bits;
 }
 
-inline std::uint32_t sub(std::uint32_t a, std::uint32_t b) { return add(a, b ^ kSign); }
+inline std::uint32_t sub(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::add(a, b, true).m_bits;
+}
 
-inline std::uint32_t mul(std::uint32_t a, std::uint32_t b) {
-    const std::uint32_t sign = (a ^ b) & kSign;
-    const int ea = static_cast<int>(exponent(a)), eb = static_cast<int>(exponent(b));
-    if (!ea || !eb) return sign;
-    std::uint64_t m = static_cast<std::uint64_t>(mantissa(a)) * mantissa(b);
-    int e = ea + eb - 127;
-    if (m >> 47) {
-        m >>= 24;
-        ++e;
-    } else {
-        m >>= 23;
-    }
-    return pack(sign, e, static_cast<std::uint32_t>(m));
+inline std::uint32_t mul(std::uint32_t a, std::uint32_t b)
+{
+    return vu_fmac_fp::mul(a, b).m_bits;
 }
 
 inline double to_double(std::uint32_t x) {
@@ -108,30 +79,24 @@ inline std::uint32_t from_double(double d) {
 
 struct s_result {
     std::uint32_t value;
-    bool invalid;
+    std::uint32_t current_flags;
 };
 
-inline s_result div(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b);
-    const std::uint32_t sign = (a ^ b) & kSign;
-    if (!(b & kAbs)) return {sign | kAbs, true};
-    if (!(a & kAbs)) return {sign, false};
-    return {from_double(to_double(a) / to_double(b)), false};
+inline s_result div(std::uint32_t a, std::uint32_t b)
+{
+    return {vu_scalar_fp::quotient(a, b),
+            vu_scalar_fp::current_flags(a, b, false, false)};
 }
 
-inline std::uint32_t sqrt(std::uint32_t a) {
-    a = flush(a) & kAbs;
-    if (!a) return 0;
-    return from_double(std::sqrt(to_double(a)));
+inline std::uint32_t sqrt(std::uint32_t a)
+{
+    return vu_scalar_fp::root(a);
 }
 
-inline s_result rsqrt(std::uint32_t a, std::uint32_t b) {
-    a = flush(a);
-    b = flush(b) & kAbs;
-    if (!b) return {(a & kSign) | kAbs, true};
-    if (!(a & kAbs)) return {a & kSign, false};
-    return {from_double(to_double(a) / std::sqrt(to_double(b))), false};
+inline s_result rsqrt(std::uint32_t a, std::uint32_t b)
+{
+    return {vu_scalar_fp::quotient(a, vu_scalar_fp::root(b)),
+            vu_scalar_fp::current_flags(a, b, false, true)};
 }
 
 inline std::int32_t key(std::uint32_t x) {
@@ -140,8 +105,15 @@ inline std::int32_t key(std::uint32_t x) {
     return (x & kSign) ? -magnitude : magnitude;
 }
 
-inline std::uint32_t max(std::uint32_t a, std::uint32_t b) { return key(a) >= key(b) ? a : b; }
-inline std::uint32_t min(std::uint32_t a, std::uint32_t b) { return key(a) <= key(b) ? a : b; }
+// MAX/MINI select raw words. Unlike CLIP's numerical key, do not
+// flush denormals or collapse signed zero (PCSX2 VUops.cpp fp_max/min).
+inline std::uint32_t raw_order_key(std::uint32_t x)
+{
+    return (x & kSign) ? ~x : (x ^ kSign);
+}
+
+inline std::uint32_t max(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) >= raw_order_key(b) ? a : b; }
+inline std::uint32_t min(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) <= raw_order_key(b) ? a : b; }
 
 inline std::uint32_t to_fixed(std::uint32_t x, int fraction) {
     const int e = static_cast<int>(exponent(x)) + fraction;

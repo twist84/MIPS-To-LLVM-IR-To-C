@@ -1,4 +1,6 @@
 #include "ee_runtime.h"
+#include "ee_vu_scalar_fp.h"
+#include "ee_vu_fmac_fp.h"
 #include <cmath>
 #include <cstring>
 
@@ -1974,33 +1976,29 @@ float vu0_fmac_operand(uint32_t bits)
     return value;
 }
 
-uint32_t vu0_fmac_result_bits(float value, uint32_t lane, uint32_t* flags)
+void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
+                            uint32_t lane, uint32_t* flags)
 {
-    uint32_t bits = 0;
-    std::memcpy(&bits, &value, sizeof(bits));
     const uint32_t shift = 3u - lane;
-    const uint32_t exponent = bits & 0x7f800000u;
     *flags &= ~(0x1111u << shift);
-    if (bits & 0x80000000u)
+    if ((bits & 0x80000000u) != 0u)
     {
         *flags |= 0x10u << shift;
     }
-    if ((bits & 0x7fffffffu) == 0)
+    if ((bits & 0x7f800000u) == 0u)
     {
         *flags |= 1u << shift;
     }
-    else if (exponent == 0)
+    if (underflow)
     {
-        *flags |= 0x0101u << shift;
-        bits &= 0x80000000u;
+        *flags |= 0x100u << shift;
     }
-    else if (exponent == 0x7f800000u)
+    if (overflow)
     {
         *flags |= 0x1000u << shift;
-        bits = (bits & 0x80000000u) | 0x7f7fffffu;
     }
-    return bits;
 }
+
 } // namespace
 
 namespace
@@ -2106,6 +2104,15 @@ uint32_t vu0_macro_bits(float value)
     uint32_t bits = 0u;
     std::memcpy(&bits, &value, sizeof(bits));
     return bits;
+}
+
+// MAX/MINI compare the original VU words, not normalized host floats.
+// The sign-magnitude ordering distinguishes signed zeros, denormals and
+// exponent-255 payloads. Reference: PCSX2 VUops.cpp fp_max/fp_min,
+// 4e56d430595164106eab9606cb46c94c902802cd.
+uint32_t vu0_macro_order_key(uint32_t bits)
+{
+    return (bits & 0x80000000u) != 0u ? ~bits : bits ^ 0x80000000u;
 }
 
 uint32_t vu0_macro_ftoi(uint32_t bits, double scale)
@@ -2253,6 +2260,8 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         // Stage a separate result: fs==ft==fd must read original lanes.
         s_ee_u128 output = op.m_to_acc ? vu0->m_acc : lanes_of(fd);
         uint32_t mac_flags = vu0->m_mac_flags;
+        uint32_t product_sticky = 0u;
+        uint32_t acc_overflow_mask = vu0->m_acc_overflow_mask;
         for (uint32_t lane = 0; lane < 4; ++lane)
         {
             if (!(mask & (8u >> lane)))
@@ -2278,36 +2287,52 @@ extern "C" uint32_t ee_vu0_macro_fmac(
             {
                 ft_lane = op.m_broadcast;
             }
-            const float a = vu0_fmac_operand(vu0_fmac_read_vf(cpu, fs, fs_lane));
-            const float b = vu0_fmac_operand(
-                op.m_source == e_vu0_macro_source::q ||
+            const uint32_t a_bits = vu0_fmac_read_vf(cpu, fs, fs_lane);
+            const uint32_t b_bits = op.m_source == e_vu0_macro_source::q ||
                 op.m_source == e_vu0_macro_source::i
-                    ? scalar_bits : vu0_fmac_read_vf(cpu, ft, ft_lane));
+                    ? scalar_bits : vu0_fmac_read_vf(cpu, ft, ft_lane);
             if (!flags)
             {
+                const uint32_t a_key = vu0_macro_order_key(a_bits);
+                const uint32_t b_key = vu0_macro_order_key(b_bits);
                 const bool take_a = op.m_arith == e_vu0_macro_arith::max
-                    ? a >= b : a <= b;
-                vu0_fmac_set_lane(&output, lane, vu0_macro_bits(take_a ? a : b));
+                    ? a_key >= b_key : a_key <= b_key;
+                vu0_fmac_set_lane(&output, lane, take_a ? a_bits : b_bits);
                 continue;
             }
-            volatile float product = a * b; // rounded before accumulation
-            const float acc = vu0_fmac_operand(vu0_fmac_lane(vu0->m_acc, lane));
-            float answer = 0.0f;
-            switch (op.m_arith)
+            vu_fmac_fp::s_fmac_result result{};
+            const uint32_t lane_bit = 8u >> lane;
+            if (op.m_arith == e_vu0_macro_arith::add ||
+                op.m_arith == e_vu0_macro_arith::sub)
             {
-            case e_vu0_macro_arith::add: answer = a + b; break;
-            case e_vu0_macro_arith::sub: answer = a - b; break;
-            case e_vu0_macro_arith::mul: answer = product; break;
-            case e_vu0_macro_arith::madd: answer = acc + product; break;
-            case e_vu0_macro_arith::msub: answer = acc - product; break;
-            default: break;
+                result = vu_fmac_fp::add(a_bits, b_bits,
+                    op.m_arith == e_vu0_macro_arith::sub);
             }
-            vu0_fmac_set_lane(&output, lane,
-                vu0_fmac_result_bits(answer, lane, &mac_flags));
+            else if (op.m_arith == e_vu0_macro_arith::mul)
+            {
+                result = vu_fmac_fp::mul(a_bits, b_bits);
+            }
+            else
+            {
+                const auto mac = vu_fmac_fp::mac(vu0_fmac_lane(vu0->m_acc, lane),
+                    a_bits, b_bits, op.m_arith == e_vu0_macro_arith::msub,
+                    (vu0->m_acc_overflow_mask & lane_bit) != 0u);
+                result = mac.m_final;
+                product_sticky |= mac.m_sticky;
+            }
+            if (op.m_to_acc)
+            {
+                acc_overflow_mask = (acc_overflow_mask & ~lane_bit) |
+                    (result.m_overflow ? lane_bit : 0u);
+            }
+            vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
+                result.m_underflow, lane, &mac_flags);
+            vu0_fmac_set_lane(&output, lane, result.m_bits);
         }
         if (op.m_to_acc)
         {
             vu0->m_acc = output;
+            vu0->m_acc_overflow_mask = acc_overflow_mask;
         }
         else
         {
@@ -2315,6 +2340,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         }
         if (flags)
         {
+            vu0->m_status_flags |= product_sticky;
             vu0_macro_update_status(vu0, mac_flags);
         }
         return complete;
@@ -2382,7 +2408,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
                 source, special2 == 0x31u ? (lane + 1u) & 3u : lane);
             if (special2 == 0x1du)
             {
-                bits = vu0_macro_bits(std::fabs(vu0_fmac_operand(bits)));
+                bits &= 0x7fffffffu; // VABS clears only the raw sign bit.
             }
             vu0_fmac_set_lane(&output, lane, bits);
         }
@@ -2413,29 +2439,9 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         }
         const uint32_t fs_bits = vu0_fmac_lane(source, fsf);
         const uint32_t ft_bits = vu0_fmac_read_vf(cpu, ft, ftf);
-        const float numerator = vu0_fmac_operand(fs_bits);
-        const float denominator = vu0_fmac_operand(ft_bits);
-        uint32_t current_flags = 0u;
-        uint32_t result_bits = 0u;
-        if (denominator == 0.0f)
-        {
-            // PCSX2 _vuDIV: 0/0 sets I, x/0 sets D; signed max result.
-            current_flags = numerator == 0.0f ? 0x10u : 0x20u;
-            result_bits = ((fs_bits ^ ft_bits) & 0x80000000u) | 0x7f7fffffu;
-        }
-        else
-        {
-            result_bits = vu0_macro_bits(numerator / denominator);
-            const uint32_t exponent = result_bits & 0x7f800000u;
-            if (exponent == 0u)
-            {
-                result_bits &= 0x80000000u;
-            }
-            else if (exponent == 0x7f800000u)
-            {
-                result_bits = (result_bits & 0x80000000u) | 0x7f7fffffu;
-            }
-        }
+        const uint32_t current_flags =
+            vu_scalar_fp::current_flags(fs_bits, ft_bits, false, false);
+        const uint32_t result_bits = vu_scalar_fp::quotient(fs_bits, ft_bits);
         vu0->m_q_pending_bits = result_bits;
         vu0->m_q_ready_cycle = vu0->m_cycle + 7u;
         vu0->m_q_pending = 1u;
@@ -2589,49 +2595,13 @@ extern "C" uint32_t ee_vu0_macro_scalar(
     const uint32_t fs_lane = (word >> 21u) & 3u;
     const uint32_t ft_bits = vu0_fmac_read_vf(cpu, ft, ft_lane);
     const uint32_t fs_bits = vu0_fmac_read_vf(cpu, fs, fs_lane);
-    const float denominator = vu0_fmac_operand(ft_bits);
-    const float numerator = vu0_fmac_operand(fs_bits);
-
-    uint32_t current_flags = 0u;
-    uint32_t result_bits = 0u;
-    if (reciprocal && denominator == 0.0f)
-    {
-        // PCSX2 _vuRSQRT: division by zero sets D; zero over zero
-        // additionally sets I. The sign uses the ORIGINAL raw VF
-        // operands, preserving negative-zero behavior.
-        const uint32_t sign = (ft_bits ^ fs_bits) & 0x80000000u;
-        current_flags = 0x20u;
-        if (numerator == 0.0f)
-        {
-            current_flags |= 0x10u;
-            result_bits = sign;
-        }
-        else
-        {
-            result_bits = sign | 0x7f7fffffu;
-        }
-    }
-    else
-    {
-        if (denominator < 0.0f)
-        {
-            current_flags |= 0x10u;
-        }
-        const float root = std::sqrt(std::fabs(denominator));
-        const float value = reciprocal ? numerator / root : root;
-        std::memcpy(&result_bits, &value, sizeof(result_bits));
-        const uint32_t exponent = result_bits & 0x7f800000u;
-        // Normalize scalar Q like VU floating-point operands:
-        // subnormal -> signed zero, exponent 255 -> finite max.
-        if (exponent == 0u)
-        {
-            result_bits &= 0x80000000u;
-        }
-        else if (exponent == 0x7f800000u)
-        {
-            result_bits = (result_bits & 0x80000000u) | 0x7f7fffffu;
-        }
-    }
+    // Raw denominator sign raises I even when exponent zero; RSQRT
+    // divides by the absolute root and can raise I and D together.
+    const uint32_t current_flags =
+        vu_scalar_fp::current_flags(fs_bits, ft_bits, !reciprocal, reciprocal);
+    const uint32_t root = vu_scalar_fp::root(ft_bits);
+    const uint32_t result_bits = reciprocal ?
+        vu_scalar_fp::quotient(fs_bits, root) : root;
 
     vu0->m_q_pending_bits = result_bits;
     vu0->m_q_ready_cycle = vu0->m_cycle + latency;

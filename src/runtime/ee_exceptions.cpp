@@ -1,4 +1,4 @@
-#include "ee_exceptions.h"
+#include "ee_interrupt_fast.h"
 
 namespace ee {
 
@@ -169,14 +169,7 @@ extern "C" void ee_interrupt_clear(s_ee_cpu_state* cpu, uint32_t line)
 
 extern "C" bool ee_interrupts_enabled(const s_ee_cpu_state* cpu)
 {
-    if (!cpu) return false;
-    const uint32_t status = cpu->m_cop0[COP0_Status];
-    // R5900: need global IE, EE EIE, and not in exception/error level.
-    if ((status & STATUS_IE) == 0) return false;
-    if ((status & STATUS_EIE) == 0) return false;
-    if ((status & STATUS_EXL) != 0) return false;
-    if ((status & STATUS_ERL) != 0) return false;
-    return ee_pending_interrupts(cpu) != 0;
+    return ee_interrupts_enabled_inline(cpu);
 }
 
 extern "C" uint32_t ee_pending_interrupts(const s_ee_cpu_state* cpu)
@@ -192,9 +185,7 @@ extern "C" uint32_t ee_check_interrupts(s_ee_cpu_state* cpu,
                                         uint32_t pc,
                                         uint32_t in_bd_slot)
 {
-    if (!ee_interrupts_enabled(cpu))
-        return 0;
-    return ee_raise_exception(cpu, rt, EX_Int, pc, in_bd_slot, 0);
+    return ee_check_interrupts_inline(cpu, rt, pc, in_bd_slot);
 }
 
 extern "C" void ee_timer_tick(s_ee_cpu_state* cpu, uint32_t cycles)

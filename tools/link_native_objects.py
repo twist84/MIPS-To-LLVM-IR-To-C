@@ -158,6 +158,12 @@ def build_dispatch_source(metadata, functions):
         "#else",
         "#define EE_GAME_EXPORT",
         "#endif",
+        'extern "C" EE_GAME_EXPORT ee::t_ee_translated_entry ee_game_resolve_entry(',
+        "    std::uint32_t guest_pc)",
+        "{",
+        "    return ee::ee_resolve_dispatch_entry(g_dispatch_table, g_index, guest_pc);",
+        "}",
+        "",
         'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(',
         "    ee::s_ee_cpu_state* cpu,",
         "    ee::s_ee_runtime* runtime,",
@@ -325,6 +331,12 @@ def build_chunked_dispatch_source(metadata, functions, chunk_count):
         '#else',
         '#define EE_GAME_EXPORT',
         '#endif',
+        'extern "C" EE_GAME_EXPORT ee::t_ee_translated_entry ee_game_resolve_entry(',
+        '    std::uint32_t guest_pc)',
+        '{',
+        '    return ee::ee_resolve_dispatch_entry(g_dispatch_table, g_dispatch.index, guest_pc);',
+        '}',
+        '',
         'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(',
         '    ee::s_ee_cpu_state* cpu,',
         '    ee::s_ee_runtime* runtime,',
@@ -362,6 +374,12 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
     dependency_key = runtime_cache_key(
         [], source_root, compiler_info, compile_flags + include_args
     )
+    wrapper_flags = [
+        "-O2" if flag in ("-O0", "-O1") else flag for flag in compile_flags
+    ]
+    wrapper_key = runtime_cache_key(
+        [], source_root, compiler_info, wrapper_flags + include_args
+    )
     cache_dir = output.parent / (output.name + '.dispatch-cache')
     cache_dir.mkdir(parents=True, exist_ok=True)
     chunk_count = (len(functions) + DISPATCH_CHUNK_SIZE - 1) // DISPATCH_CHUNK_SIZE
@@ -379,10 +397,15 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
         ))
     object_paths = []
     reused = 0
-    for source, obj, generated in units:
+    for unit_index, (source, obj, generated) in enumerate(units):
+        # The first unit exports ee_game_run, called at every EE boundary.
+        # Optimize just that wrapper; leave large metadata chunks at the
+        # selected cheap construction optimization level.
+        flags = wrapper_flags if unit_index == 0 else compile_flags
+        unit_key = wrapper_key if unit_index == 0 else dependency_key
         encoded = generated.encode('utf-8')
         key = hashlib.sha256(
-            dependency_key.encode('ascii') + b'\0' + encoded
+            unit_key.encode('ascii') + b'\0' + encoded
         ).hexdigest()
         record_path = obj.with_suffix(obj.suffix + '.json')
         try:
@@ -398,7 +421,7 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
             temporary = obj.with_suffix(obj.suffix + '.tmp')
             try:
                 subprocess.run([
-                    cxx, *compile_flags, *include_args,
+                    cxx, *flags, *include_args,
                     '-c', str(source), '-o', str(temporary)
                 ], check=True)
                 os.replace(temporary, obj)
@@ -427,6 +450,12 @@ def load_inputs(metadata_path, object_dir):
         raise ValueError(f"object manifest not found: {object_manifest_path}")
 
     object_manifest = json.loads(object_manifest_path.read_text(encoding="utf-8"))
+    if (object_manifest.get("optimization_level") == 5 or
+            object_manifest.get("native_target") is not None):
+        from verify_ir import native_target_identity
+        if (object_manifest.get("optimization_level") != 5 or
+                object_manifest.get("native_target") != native_target_identity(5)):
+            raise ValueError("host-native object manifest CPU target mismatch")
     if not object_manifest.get("complete"):
         raise ValueError("objects.json does not report a complete emission")
     if object_manifest.get("target_triple") != object_manifest.get("target_triple", "").strip():
@@ -660,7 +689,7 @@ def main():
         type=int,
         choices=range(0, 4),
         default=0,
-        help="optimisation level for the generated dispatcher metadata glue (default: 0)",
+        help="metadata chunk optimisation level (default: 0); entry wrapper at least O2",
     )
     args = parser.parse_args()
 
@@ -821,6 +850,7 @@ def main():
             "dispatch_object": dispatch_object.name,
             "dispatch_chunk_objects": [path.name for path in dispatch_objects[1:]],
             "dispatcher_optimization_level": args.dispatcher_opt,
+            "dispatcher_entry_optimization_level": 2 if args.data_dispatch else max(2, args.dispatcher_opt),
             "pdb": pdb_path.name if pdb_path is not None else None,
             "pdb_size_bytes": pdb_path.stat().st_size if pdb_path is not None else None,
             "pdb_sha256": hashlib.sha256(pdb_path.read_bytes()).hexdigest()

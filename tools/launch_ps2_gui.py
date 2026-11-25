@@ -15,9 +15,18 @@ from resolve_ps2_boot import resolve_boot_elf
 ROOT = Path(__file__).resolve().parents[1]
 LOG_PATH = ROOT / "build" / "ps2-launcher.log"
 SETTINGS_PATH = ROOT / "build" / "ps2-launcher-settings.json"
+FORCE_CLOSE_HOLD_MS = 2000
 
 
 SPEEDS = {"50%": 50, "100%": 100, "150%": 150, "200%": 200, "Unlimited": 0}
+DISPLAY_ASPECTS = {"4:3 (PS2)": "4:3", "16:9": "16:9", "Native pixels": "native", "1:1": "1:1"}
+DEINTERLACE_MODES = {
+    "Automatic": "0", "Off": "1",
+    "Weave (TFF)": "2", "Weave (BFF)": "3",
+    "Bob (TFF)": "4", "Bob (BFF)": "5",
+    "Blend (TFF)": "6", "Blend (BFF)": "7",
+    "Adaptive (TFF)": "8", "Adaptive (BFF)": "9",
+}
 
 SESSION_MODES = {
     "Full replay": "--full",
@@ -26,11 +35,12 @@ SESSION_MODES = {
     "Matched neutral/Cross": "--matched",
     "Recover translation cache": "--recover-cache",
 }
-PAD_PROFILES = {"Neutral": "--neutral", "Cross replay": "--cross", "Custom": None}
+PAD_PROFILES = {"Neutral": "--neutral", "Cross replay": "--cross", "Custom": None, "Scripted": None}
 NUMERIC_SETTINGS = {
     "Cross first poll": ("SDBZ_PAD0_CROSS_FIRST_POLL", 1, 0xFFFFFFFF),
-    "Cross poll count": ("SDBZ_PAD0_CROSS_POLL_COUNT", 1, 0xFFFFFFFF),
-    "Max dispatches": ("MAX_DISPATCHES", 1, None),
+    "Cross poll count": ("SDBZ_PAD0_CROSS_POLL_COUNT", 1, 120),
+    "Expansion dispatch limit": ("MAX_EXPANSION_DISPATCHES", 1, 0xFFFFFFFF),
+    "Replay dispatch limit": ("MAX_REPLAY_DISPATCHES", 1, 0xFFFFFFFF),
     "Timeout (seconds)": ("BOOT_TIMEOUT_SECONDS", 1, None),
     "Expansion passes": ("EXPANSION_PASSES", 1, 64),
     "Functions per expansion": ("EXPANSION_PER_PASS", 1, 1024),
@@ -47,6 +57,151 @@ DIAGNOSTIC_SETTINGS = {
     "Trace guest stores": ("SDBZ_TRACE_STORE", "word"),
     "Trace V0 writes": ("SDBZ_TRACE_V0", "range"),
 }
+
+ 
+RUNTIME_SETTINGS = {
+    "idle_skip": ("SDBZ_IDLE_SKIP", True, "Accelerate idle polling loops"),
+    "pad_script": ("SDBZ_PAD0_SCRIPT", "200:8:cross", "Pad script"),
+    "iop_aot": ("SDBZ_IOP_AOT", str(ROOT / "build" / "iop-aot" / "modules"), "IOP AOT library or directory"),
+    "iop_capture": ("SDBZ_IOP_AOT_CAPTURE", str(ROOT / "build" / "iop-capture"), "Capture linked IRX modules"),
+    "iop_verify": ("SDBZ_IOP_AOT_VERIFY", False, "Verify IOP AOT (diagnostic only)"),
+    "trace_ipu": ("SDBZ_TRACE_IPU", False, "Trace IPU"),
+    "trace_cdvd": ("SDBZ_TRACE_CDVD", False, "Trace CDVD"),
+    "trace_rpc_reject": ("SDBZ_TRACE_RPC_REJECT", False, "Trace rejected RPC commands"),
+    "trace_iop_threads": ("SDBZ_TRACE_IOP_THREADS", False, "Dump IOP threads at exit"),
+    "trace_iop_sema": ("SDBZ_TRACE_IOP_SEMA", "128", "IOP semaphore trace limit"),
+    "trace_rpc_args": ("SDBZ_TRACE_RPC_ARGS", "0x80000593", "Trace RPC server ID"),
+    "frame_dir": ("SDBZ_FRAME_DUMP", str(ROOT / "build" / "ps2-game-hle" / "frames"), "Frame dump directory"),
+    "frame_interval": (None, "60", "Frame dump interval (fields)"),
+    "dump_ram": ("SDBZ_DUMP_RAM", str(ROOT / "build" / "ps2-game-hle" / "ee-ram.bin"), "EE RAM dump file"),
+}
+
+# A populated value is not an opt-in. These switches are persisted separately
+# from the parameters so a fresh install never starts tracing or writing files.
+RUNTIME_GATED_FIELDS = (
+    "iop_aot", "iop_capture", "trace_iop_sema", "trace_rpc_args",
+    "frame_dir", "dump_ram",
+)
+RUNTIME_SETTINGS.update({
+    f"{key}_enabled": (None, False, RUNTIME_SETTINGS[key][2])
+    for key in RUNTIME_GATED_FIELDS
+})
+
+PAD_BUTTONS = frozenset(
+    "select l3 r3 start up right down left l2 r2 l1 r1 triangle circle cross square".split()
+)
+
+
+def validate_pad_script(raw):
+    steps = [step for step in raw.replace(";", ",").split(",") if step]
+    if not 1 <= len(steps) <= 256:
+        raise ValueError("Pad script requires 1–256 steps.")
+    for step in steps:
+        parts = step.split(":")
+        if len(parts) != 3:
+            raise ValueError("Pad script: expected FIRST:HOLD:BUTTON[+BUTTON].")
+        first, hold, buttons = parts
+        if (not first.isascii() or not first.isdecimal() or len(first) > 9 or
+                not hold.isascii() or not hold.isdecimal() or len(hold) > 9 or
+                int(first) < 1 or not 1 <= int(hold) <= 600 or
+                any(button.lower() not in PAD_BUTTONS for button in buttons.split("+"))):
+            raise ValueError(f"Invalid pad script step: {step}")
+    return ",".join(steps)
+
+
+def runtime_overrides(mode, pad, window, snapshot, values):
+    """Translate persisted runtime controls into explicit, per-launch environment."""
+    if mode == "Recover translation cache":
+        return {}
+    values = {**{key: default for key, (_, default, _) in RUNTIME_SETTINGS.items()}, **values}
+    env = {"SDBZ_IDLE_SKIP": str(int(values["idle_skip"]))}
+    if mode != "Matched neutral/Cross" and pad == "Scripted":
+        env["SDBZ_PAD0_SCRIPT"] = validate_pad_script(values["pad_script"].strip())
+    for key in ("trace_ipu", "trace_cdvd", "trace_rpc_reject", "trace_iop_threads"):
+        if values[key]:
+            env[RUNTIME_SETTINGS[key][0]] = "1"
+    for key, minimum, maximum in (("trace_iop_sema", 0, 0xffffffff),
+                                   ("trace_rpc_args", 0, 0xffffffff)):
+        if not values[f"{key}_enabled"]:
+            continue
+        raw = values[key].strip()
+        if not raw:
+            raise ValueError(f"Enter a value for {RUNTIME_SETTINGS[key][2]}.")
+        if raw:
+            try:
+                number = int(raw, 16 if raw.lower().startswith("0x") else 10)
+                if not minimum <= number <= maximum:
+                    raise ValueError
+            except ValueError:
+                raise ValueError(f"{RUNTIME_SETTINGS[key][2]} must be a 32-bit unsigned integer.") from None
+            env[RUNTIME_SETTINGS[key][0]] = str(number)
+    aot = values["iop_aot"].strip() if values["iop_aot_enabled"] else ""
+    if values["iop_aot_enabled"]:
+        if not aot:
+            raise ValueError("Choose an IOP AOT library or directory.")
+        path = Path(aot).expanduser().resolve()
+        suffix = ".dll" if os.name == "nt" else ".so"
+        capture_enabled = values["iop_capture_enabled"] and mode != "Matched neutral/Cross"
+        # Both boxes enabled is the normal first-run workflow. No DLL can
+        # exist until the game has captured and linked its IRX modules.
+        has_libraries = path.is_file() or (
+            path.is_dir() and any(p.is_file() for p in path.glob(f"*{suffix}"))
+        )
+        if has_libraries:
+            env["SDBZ_IOP_AOT"] = str(path)
+        elif capture_enabled and path.name == "modules" and (not path.exists() or path.is_dir()):
+            if values["iop_verify"]:
+                raise ValueError("Disable IOP AOT verification until the first capture has been compiled.")
+            env["SDBZ_IOP_AOT_BUILD_OUT"] = str(path.parent)
+        else:
+            raise ValueError("No IOP AOT libraries found. Enable IRX capture and use an OUT/modules directory for the first build.")
+    if values["iop_verify"]:
+        if "SDBZ_IOP_AOT" not in env:
+            raise ValueError("IOP AOT verification requires an existing AOT library.")
+        env["SDBZ_IOP_AOT_VERIFY"] = "1"
+    # Output-producing probes are excluded from matched runs to avoid one
+    # replay overwriting the other. Capture is supported in ordinary sessions.
+    if mode != "Matched neutral/Cross":
+        for key in ("iop_capture", "dump_ram"):
+            if not values[f"{key}_enabled"]:
+                continue
+            raw = values[key].strip()
+            if not raw:
+                raise ValueError(f"Choose a destination for {RUNTIME_SETTINGS[key][2]}.")
+            if raw:
+                path = Path(raw).expanduser().resolve()
+                if key == "iop_capture":
+                    if path.exists() and not path.is_dir():
+                        raise ValueError("IRX capture destination must be a directory.")
+                elif path.is_dir():
+                    raise ValueError("RAM dump requires a file, not a directory.")
+                env[RUNTIME_SETTINGS[key][0]] = str(path)
+        raw = values["frame_dir"].strip()
+        if values["frame_dir_enabled"] and mode in ("Full replay", "Automatic") and (window or snapshot):
+            if not raw:
+                raise ValueError("Choose a frame dump directory.")
+            path = Path(raw).expanduser().resolve()
+            if path.exists() and not path.is_dir():
+                raise ValueError("Frame dump destination must be a directory.")
+            interval = values["frame_interval"].strip()
+            if not interval.isascii() or not interval.isdecimal() or not 1 <= int(interval) <= 0xffffffff:
+                raise ValueError("Frame dump interval must be 1–4294967295 fields.")
+            env["SDBZ_FRAME_DUMP"] = f"{path}:{int(interval)}"
+    return env
+
+
+def prepare_runtime_outputs(env):
+    """Create only the directories requested by enabled output probes."""
+    for key in ("SDBZ_IOP_AOT_CAPTURE", "SDBZ_FRAME_DUMP", "SDBZ_DUMP_RAM"):
+        if key not in env:
+            continue
+        path = env[key]
+        if key == "SDBZ_FRAME_DUMP":
+            path = path.rsplit(":", 1)[0]
+        directory = Path(path)
+        if key == "SDBZ_DUMP_RAM":
+            directory = directory.parent
+        directory.mkdir(parents=True, exist_ok=True)
 
 
 def diagnostic_overrides(values):
@@ -90,9 +245,11 @@ OPTION_HELP = {
     ),
     "Controller profile": (
         "Neutral leaves the controller free of scripted presses. Cross replay injects "
-        "eight polls starting at poll 200. Custom uses the values under Limits and diagnostics."
+        "eight polls starting at poll 200. Custom uses Limits and diagnostics; Scripted uses the Runtime tab."
     ),
     "WebGPU window": "Open the raylib game window with live controller input. Available for Full replay and Automatic.",
+    "Deinterlacing": "Reconstruct interlaced fields at presentation: weave, bob, blend or motion-adaptive. TFF/BFF selects top/bottom field first. Changes apply during gameplay; raw captures are unchanged.",
+    "Display aspect": "Host presentation aspect ratio. 4:3 corrects PS2 non-square pixels; Native pixels preserves raw GS dimensions. Changes apply during gameplay; captures are unaffected.",
     "Speed": "Target emulation speed for the game window. Headless expansion remains unpaced.",
     "WebGPU snapshot": "Save a WebGPU-rendered display snapshot. Available for Full replay and Automatic.",
     "Show game in launcher tab": (
@@ -121,7 +278,8 @@ OPTION_HELP = {
     "Accept changed IR hashes": "Allow cache recovery to accept IR hashes that differ from the saved manifest.",
     "Cross first poll": "The first port 1 controller poll that receives scripted Cross. Select the Custom profile to use it.",
     "Cross poll count": "How many consecutive polls hold Cross. Select the Custom profile to use it.",
-    "Max dispatches": "Maximum translated EE dispatches per pass.",
+    "Expansion dispatch limit": "Maximum translated EE dispatches in each headless expansion pass or quick probe.",
+    "Replay dispatch limit": "Maximum translated EE dispatches in the final traced replay (including the game window), or each matched replay.",
     "Timeout (seconds)": "Wall-clock timeout for a replay or probe, in seconds.",
     "Expansion passes": "Maximum auto-expansion passes. Range 1–64.",
     "Functions per expansion": (
@@ -136,11 +294,26 @@ OPTION_HELP = {
     "Watch guest word": "Track changes between native dispatches. Example: 0x0044081c (sound-object handle).",
     "Trace guest stores": "Capture the exact guest STORE PCs and operands modifying this word (first 64 events). Example: 0x0044081c.",
     "Trace V0 writes": "Trace low-64-bit V0 assignments within an aligned guest PC range START:END (first 64 events). Example: 0x00137970:0x00137d18.",
+    "Accelerate idle polling loops": "Enable the runtime idle-loop accelerator. Uncheck for baseline comparisons.",
+    "Pad script": "Select Scripted on the Game tab. Example: 740:8:cross,2900:8:cross,3500:4:start. Combine buttons with +.",
+    "IOP AOT library or directory": "Load an IRX library or OUT/modules directory. With capture enabled, missing libraries are built after the first replay.",
+    "Capture linked IRX modules": "Capture relocated and linked IRX bytes for tools/build_iop_aot.py. Directory created when enabled.",
+    "Verify IOP AOT (diagnostic only)": "Replay translated calls on the interpreter; expensive and may repeat MMIO side effects. Do not use for normal play.",
+    "Trace IPU": "Log IPU commands and MMIO activity.",
+    "Trace CDVD": "Log disc searches and reads.",
+    "Trace rejected RPC commands": "Dump refused SIF RPC command words.",
+    "Dump IOP threads at exit": "Print IOP thread state when the runner exits.",
+    "IOP semaphore trace limit": "Tick to override the bounded semaphore event count (runtime default: 128).",
+    "Trace RPC server ID": "Dump requests for this server ID (decimal or 0x hexadecimal).",
+    "Frame dump directory": "Directory for periodic WebGPU PPM output; created when enabled. Only used in graphical replay modes.",
+    "Frame dump interval (fields)": "Number of GS fields between frame dumps.",
+    "EE RAM dump file": "Write the 32 MiB EE RAM image at exit. Existing files may be overwritten.",
     "Tool": "Choose the boot session orchestrator, Python game runner, or native executable for a direct command.",
     "Native executable": "Path to ee_game_runner.exe for the Native runner tool.",
     "Arguments": "Enter one argument per line. Keep paths containing spaces on one line without surrounding quotes.",
     "Show --help": "Print the selected tool’s command-line help in the output pane.",
-    "Launch": "Run the command configured in the selected tab.",
+    "Launch": "Launch or close the running session. Hold Force close for two seconds only if normal shutdown is stuck.",
+    "Fullscreen": "Show only the embedded game on the entire screen. Press F11 to enter or exit fullscreen.",
 }
 
 
@@ -207,9 +380,12 @@ def default_settings():
         "embed_game_window": True,
         "snapshot": True,
         "speed": "100%",
+        "display_aspect": "4:3 (PS2)",
+        "deinterlace": "Automatic",
         "cache_miss_resume": True,
         "precompile_all": True,
         "fast_overlays": True,
+        **{key: default for key, (_, default, _) in RUNTIME_SETTINGS.items()},
         "diagnostics": {label: "" for label in DIAGNOSTIC_SETTINGS},
         "tool": COMMAND_TOOLS[0],
         "executable": str(runner),
@@ -218,7 +394,8 @@ def default_settings():
         "numeric": {
             "SDBZ_PAD0_CROSS_FIRST_POLL": "200",
             "SDBZ_PAD0_CROSS_POLL_COUNT": "8",
-            "MAX_DISPATCHES": dispatches,
+            "MAX_EXPANSION_DISPATCHES": dispatches,
+            "MAX_REPLAY_DISPATCHES": dispatches,
             "BOOT_TIMEOUT_SECONDS": timeout,
             "EXPANSION_PASSES": "8",
             "EXPANSION_PER_PASS": "128",
@@ -243,7 +420,7 @@ def batch_tool_defaults(disc):
         "--gs-upload-snapshot": str(work / "gs-upload.ppm"),
         "--gs-webgpu-snapshot": str(work / "gs-webgpu.ppm"),
         "--gs-webgpu-window": True,
-        "--max-dispatches": numeric["MAX_DISPATCHES"],
+        "--max-dispatches": numeric["MAX_REPLAY_DISPATCHES"],
         "--loop-budget": "1000000",
         "--loop-yield-resumes": numeric["LOOP_YIELD_RESUMES"],
         "--sif-poll-limit": numeric["SIF_POLL_LIMIT"],
@@ -308,7 +485,19 @@ def load_settings(path):
         value = saved.get(key)
         if type(value) is type(default) and key not in ("numeric", "tool_options", "diagnostics"):
             settings[key] = value
-    for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS)):
+    # Older versions used a nonempty field as the opt-in. Preserve those
+    # choices while filling previously blank fields with the new defaults.
+    for key in RUNTIME_GATED_FIELDS:
+        enabled = f"{key}_enabled"
+        if enabled not in saved:
+            settings[enabled] = isinstance(saved.get(key), str) and bool(saved[key].strip())
+        if not settings[key].strip():
+            settings[key] = RUNTIME_SETTINGS[key][1]
+    if not settings["pad_script"].strip():
+        settings["pad_script"] = RUNTIME_SETTINGS["pad_script"][1]
+    if not settings["frame_interval"].strip():
+        settings["frame_interval"] = RUNTIME_SETTINGS["frame_interval"][1]
+    for key, choices in (("mode", SESSION_MODES), ("pad", PAD_PROFILES), ("tool", COMMAND_TOOLS), ("speed", SPEEDS), ("display_aspect", DISPLAY_ASPECTS), ("deinterlace", DEINTERLACE_MODES)):
         if settings[key] not in choices:
             settings[key] = default_settings()[key]
     saved_diagnostics = saved.get("diagnostics")
@@ -318,8 +507,15 @@ def load_settings(path):
                 settings["diagnostics"][label] = saved_diagnostics[label]
     saved_numeric = saved.get("numeric")
     numeric = settings["numeric"]
-    numeric["MAX_DISPATCHES"], numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
+    dispatches, numeric["BOOT_TIMEOUT_SECONDS"] = replay_limits(settings["mode"])
+    numeric["MAX_EXPANSION_DISPATCHES"] = dispatches
+    numeric["MAX_REPLAY_DISPATCHES"] = dispatches
     if isinstance(saved_numeric, dict):
+        # Preserve the previous shared setting when migrating old settings.
+        legacy_limit = saved_numeric.get("MAX_DISPATCHES")
+        if isinstance(legacy_limit, str):
+            numeric["MAX_EXPANSION_DISPATCHES"] = legacy_limit
+            numeric["MAX_REPLAY_DISPATCHES"] = legacy_limit
         for key in numeric:
             if isinstance(saved_numeric.get(key), str):
                 numeric[key] = saved_numeric[key]
@@ -366,7 +562,7 @@ def save_settings(path, settings):
 
 def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
                      resume_on_cache_miss=True, precompile_all=True,
-                     fast_overlays=True, diagnostics=None):
+                     fast_overlays=True, diagnostics=None, runtime=None):
     args = []
     mode_flag = SESSION_MODES[mode]
     if mode_flag:
@@ -407,6 +603,7 @@ def launcher_options(mode, pad, accept_new_ir, window, snapshot, values,
     if uses_pad_profile and pad == "Custom":
         if not all(key in env for key in ("SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT")):
             raise ValueError("Set both values for the custom Cross pulse.")
+    env.update(runtime_overrides(mode, pad, window, snapshot, runtime or {}))
     return args, env
 
 
@@ -436,6 +633,129 @@ def direct_command(tool, executable, arguments, help_only=False):
         return command + ["--help"]
     # One argument per line keeps Windows paths and whitespace literal.
     return command + arguments
+
+
+def write_presentation_setting(path, value):
+    """Publish one complete presentation setting to the current native session."""
+    temporary = None
+    try:
+        with NamedTemporaryFile(mode="w", encoding="ascii", dir=path.parent,
+                                delete=False) as output:
+            temporary = Path(output.name)
+            output.write(value)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def write_deinterlace_mode(path, selection):
+    write_presentation_setting(path, DEINTERLACE_MODES[selection])
+
+
+def write_display_aspect(path, selection):
+    write_presentation_setting(path, DISPLAY_ASPECTS[selection])
+
+
+def fullscreen_key_reader(window):
+    """Read F11 only while the launcher or its native child owns foreground focus."""
+    if os.name != "nt":
+        return lambda: False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    foreground = user32.GetForegroundWindow
+    foreground.argtypes = ()
+    foreground.restype = wintypes.HWND
+    ancestor = user32.GetAncestor
+    ancestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    ancestor.restype = wintypes.HWND
+    key_state = user32.GetAsyncKeyState
+    key_state.argtypes = (ctypes.c_int,)
+    key_state.restype = ctypes.c_short
+
+    def pressed():
+        active = foreground()
+        # GA_ROOT includes the Tk Win32 wrapper and the embedded raylib HWND.
+        if not active or ancestor(active, 2) != ancestor(window.winfo_id(), 2):
+            return False
+        return bool(key_state(0x7A) & 0x8000)  # VK_F11
+
+    return pressed
+
+
+def game_context_input_reader(window, host):
+    """Observe right-clicks over the native child HWND, not the whole desktop."""
+    if os.name != "nt":
+        return lambda: (False, None)
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    foreground = user32.GetForegroundWindow
+    foreground.argtypes = ()
+    foreground.restype = wintypes.HWND
+    ancestor = user32.GetAncestor
+    ancestor.argtypes = (wintypes.HWND, wintypes.UINT)
+    ancestor.restype = wintypes.HWND
+    key_state = user32.GetAsyncKeyState
+    key_state.argtypes = (ctypes.c_int,)
+    key_state.restype = ctypes.c_short
+    get_cursor = user32.GetCursorPos
+    get_cursor.argtypes = (ctypes.POINTER(wintypes.POINT),)
+    get_cursor.restype = wintypes.BOOL
+    window_from_point = user32.WindowFromPoint
+    window_from_point.argtypes = (wintypes.POINT,)
+    window_from_point.restype = wintypes.HWND
+    is_child = user32.IsChild
+    is_child.argtypes = (wintypes.HWND, wintypes.HWND)
+    is_child.restype = wintypes.BOOL
+
+    def read():
+        active = foreground()
+        if not active or ancestor(active, 2) != ancestor(window.winfo_id(), 2):
+            return False, None
+        down = bool(key_state(0x02) & 0x8000)  # VK_RBUTTON
+        point = wintypes.POINT()
+        if not host.winfo_ismapped() or not get_cursor(ctypes.byref(point)):
+            return down, None
+        target = window_from_point(point)
+        parent_handle = host.winfo_id()
+        if target and (target == parent_handle or is_child(parent_handle, target)):
+            return down, (point.x, point.y)
+        return down, None
+
+    return read
+
+
+def request_embedded_close(parent_handle):
+    """Request a normal close of the native child so the runner can finalize."""
+    if os.name != "nt" or not parent_handle:
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    find_window = user32.FindWindowExW
+    find_window.argtypes = (wintypes.HWND, wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR)
+    find_window.restype = wintypes.HWND
+    post_message = user32.PostMessageW
+    post_message.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+    post_message.restype = wintypes.BOOL
+    child = find_window(parent_handle, None, None, "Super Dragon Ball Z - native WebGPU")
+    return bool(child and post_message(child, 0x0010, 0, 0))  # WM_CLOSE
+
+
+def stop_process_tree(process):
+    """Stop the batch/Python/native/compile tree, not just its cmd.exe root."""
+    if process.poll() is not None:
+        return None
+    return subprocess.Popen(
+        ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW,
+    )
 
 
 class Launcher(ttk.Frame):
@@ -472,8 +792,17 @@ class Launcher(ttk.Frame):
         self.executable = self.fields["executable"]
         self.status = tk.StringVar(value=warning)
         self.process = None
+        self.stop_process = None
+        self.close_requested = False
+        self.force_close_timer = None
+        self.force_close_press = False
+        self.deinterlace_file = None
+        self.aspect_file = None
         self.log = None
         self.embedded_running = False
+        self.fullscreen_active = False
+        self.fullscreen_key_down = False
+        self.read_fullscreen_key = fullscreen_key_reader(window)
         self.previous_mode = self.mode.get()
         self.numeric = {
             label: tk.StringVar(value=settings["numeric"][key])
@@ -485,12 +814,13 @@ class Launcher(ttk.Frame):
         self.game_view = ttk.Frame(self.tabs, padding=6)
         self.performance = ttk.Frame(self.tabs, padding=10)
         self.limits = ttk.Frame(self.tabs, padding=10)
+        self.runtime = ttk.Frame(self.tabs, padding=10)
         self.direct = ttk.Frame(self.tabs, padding=10)
         for tab, title in (
             (self.setup, "Game"), (self.game_view, "Game window"),
             (self.performance, "Performance"),
             (self.limits, "Limits and diagnostics"),
-            (self.direct, "Direct command"),
+            (self.runtime, "Runtime"), (self.direct, "Direct command"),
         ):
             tab.columnconfigure(1, weight=1)
             self.tabs.add(tab, text=title)
@@ -502,18 +832,27 @@ class Launcher(ttk.Frame):
         # A real Win32 child HWND is parented to this black Tk viewport.
         # tk.Frame, rather than a canvas image, keeps controller input and
         # native WebGPU presentation in the game's own process.
+        # Parent to the launcher itself so geometry can move between the
+        # notebook page and the full client area without replacing the HWND.
         self.game_host = tk.Frame(
-            self.game_view, background="black", width=800, height=450,
+            self, background="black", width=800, height=450,
             highlightthickness=0, borderwidth=0,
         )
-        self.game_host.grid(row=0, column=0, sticky="nsew")
-        ttk.Label(
+        self.game_host.grid(in_=self.game_view, row=0, column=0, sticky="nsew")
+        self.game_host.tkraise()
+        self.context_pressed = False
+        self.context_armed = False
+        self.context_open = False
+        self.read_context_input = game_context_input_reader(window, self.game_host)
+        self.create_game_context_menu()
+        self.game_hint = ttk.Label(
             self.game_view,
             text="The native game will appear here after Launch. "
-                 "The log remains visible below.",
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
-
-        ttk.Label(self.game_view, textvariable=self.speed_status).grid(row=2, column=0, sticky="w")
+                 "Right-click for display settings. F11 toggles fullscreen.",
+        )
+        self.game_hint.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.game_speed = ttk.Label(self.game_view, textvariable=self.speed_status)
+        self.game_speed.grid(row=2, column=0, sticky="w")
 
         self.path_row(self.setup, 0, "Extracted disc", self.disc, filedialog.askdirectory)
         self.path_row(self.setup, 1, "Memory card", self.card, filedialog.askopenfilename)
@@ -543,7 +882,9 @@ class Launcher(ttk.Frame):
         self.ir_picker.grid(row=9, column=1, sticky="w")
         Tooltip(self.ir_picker, OPTION_HELP["Accept changed IR hashes"])
         self.speed_picker = self.choice_row(self.setup, 10, "Speed", self.speed, SPEEDS)
-        ttk.Label(self.setup, textvariable=self.speed_status).grid(row=11, column=1, sticky="w")
+        self.aspect_picker = self.choice_row(self.setup, 11, "Display aspect", self.fields["display_aspect"], DISPLAY_ASPECTS)
+        self.deinterlace_picker = self.choice_row(self.setup, 12, "Deinterlacing", self.fields["deinterlace"], DEINTERLACE_MODES)
+        ttk.Label(self.setup, textvariable=self.speed_status).grid(row=13, column=1, sticky="w")
         ttk.Label(
             self.performance,
             text="Native dispatch uses the indexed guest-PC lookup from PR #152.",
@@ -610,6 +951,40 @@ class Launcher(ttk.Frame):
         ttk.Label(self.limits, text="Blank fields use the batch launcher defaults.").grid(
             row=len(self.numeric), column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
+        ttk.Label(
+            self.runtime, text="Runtime options for Game launches. Tick a parameter to enable it.",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        visible_runtime = [(key, spec) for key, spec in RUNTIME_SETTINGS.items()
+                           if not key.endswith("_enabled")]
+        for row, (key, (_, default, label)) in enumerate(visible_runtime, 1):
+            variable = self.fields[key]
+            enabled = self.fields[f"{key}_enabled"] if key in RUNTIME_GATED_FIELDS else None
+            if isinstance(default, bool):
+                widget = ttk.Checkbutton(self.runtime, text=label, variable=variable)
+                widget.grid(row=row, column=0, columnspan=3, sticky="w", pady=2)
+                Tooltip(widget, OPTION_HELP[label])
+            elif key in ("iop_aot", "iop_capture", "frame_dir", "dump_ram"):
+                picker = filedialog.asksaveasfilename if key == "dump_ram" else filedialog.askdirectory
+                self.path_row(self.runtime, row, label, variable, picker, enabled=enabled)
+                if key == "iop_aot":
+                    button = ttk.Button(
+                        self.runtime, text="File…",
+                        command=lambda: self.browse_aot_file(),
+                    )
+                    button.grid(row=row, column=3, padx=(4, 0))
+            else:
+                caption = (ttk.Checkbutton(self.runtime, text=label, variable=enabled)
+                           if enabled is not None else ttk.Label(self.runtime, text=label))
+                caption.grid(row=row, column=0, sticky="w", padx=(0, 12))
+                entry = ttk.Entry(self.runtime, textvariable=variable)
+                entry.grid(row=row, column=1, columnspan=2, sticky="ew", pady=2)
+                Tooltip(caption, OPTION_HELP[label])
+                Tooltip(entry, OPTION_HELP[label])
+        ttk.Label(
+            self.runtime, text="AOT: enable loading and capture together to build missing DLLs after the first replay. Next launch loads them. "
+            "Matched runs suppress scripted input and output dumps. Cache recovery ignores runtime options.",
+            wraplength=670,
+        ).grid(row=len(visible_runtime) + 1, column=0, columnspan=4, sticky="w", pady=(8, 0))
         self.choice_row(self.direct, 0, "Tool", self.tool, COMMAND_TOOLS)
         self.path_row(self.direct, 1, "Native executable", self.executable, filedialog.askopenfilename)
         self.tool_forms = {}
@@ -660,23 +1035,151 @@ class Launcher(ttk.Frame):
         self.fast_overlays.trace_add("write", self.update_fields)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.pad.trace_add("write", self.update_fields)
+        self.fields["deinterlace"].trace_add("write", self.change_deinterlace)
+        self.fields["display_aspect"].trace_add("write", self.change_display_aspect)
         self.update_fields()
-        self.play = ttk.Button(self, text="Launch", command=self.launch)
-        self.play.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        self.action_bar = ttk.Frame(self)
+        self.action_bar.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        self.play = ttk.Button(self.action_bar, text="Launch", command=self.toggle_launch)
+        self.play.pack(side="left")
         Tooltip(self.play, OPTION_HELP["Launch"])
-        ttk.Label(self, textvariable=self.status).grid(
-            row=3, column=1, columnspan=2, sticky="w"
+        self.play.bind("<ButtonPress-1>", self.begin_force_close_hold, add="+")
+        self.play.bind("<ButtonRelease-1>", self.end_force_close_hold, add="+")
+        for event in ("<Leave>", "<FocusOut>", "<Unmap>", "<Destroy>"):
+            self.play.bind(event, self.cancel_force_close_hold, add="+")
+        self.fullscreen_button = ttk.Button(
+            self.action_bar, text="Fullscreen", command=self.toggle_fullscreen
         )
+        Tooltip(self.fullscreen_button, OPTION_HELP["Fullscreen"])
+        self.status_label = ttk.Label(self, textvariable=self.status)
+        self.status_label.grid(row=3, column=1, columnspan=2, sticky="w")
         self.output = tk.Text(self, height=16, width=80, wrap="word", state="disabled")
         self.output.grid(row=4, column=0, columnspan=2, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self, command=self.output.yview)
-        scrollbar.grid(row=4, column=2, sticky="ns")
-        self.output.configure(yscrollcommand=scrollbar.set)
+        self.scrollbar = ttk.Scrollbar(self, command=self.output.yview)
+        self.scrollbar.grid(row=4, column=2, sticky="ns")
+        self.output.configure(yscrollcommand=self.scrollbar.set)
+        self.tabs.bind("<<NotebookTabChanged>>", self.update_fullscreen_button)
+        self.update_fullscreen_button()
+        if os.name == "nt":
+            self.after(25, self.poll_fullscreen_hotkey)
+            self.after(15, self.poll_game_context_input)
         if os.name != "nt":
             self.play.state(["disabled"])
             self.help_button.state(["disabled"])
             if not warning:
                 self.status.set("The native raylib window is available on Windows.")
+
+    def create_game_context_menu(self):
+        # Bind the radio entries to the exact variables used by the Game tab.
+        # Their existing traces publish changes to the running renderer.
+        self.game_context_menu = tk.Menu(self, tearoff=False)
+        for label, key, options in (
+            ("Display aspect", "display_aspect", DISPLAY_ASPECTS),
+            ("Deinterlacing", "deinterlace", DEINTERLACE_MODES),
+        ):
+            submenu = tk.Menu(self.game_context_menu, tearoff=False)
+            for option in options:
+                submenu.add_radiobutton(
+                    label=option, value=option, variable=self.fields[key]
+                )
+            self.game_context_menu.add_cascade(label=label, menu=submenu)
+        self.game_context_menu.add_separator()
+        self.game_context_menu.add_command(
+            label="Fullscreen", accelerator="F11", command=self.toggle_fullscreen
+        )
+        self.game_context_menu.add_separator()
+        self.game_context_menu.add_command(label="Close game", command=self.close_session)
+
+    def poll_game_context_input(self):
+        # Tk cannot receive mouse events sent to the separate native process.
+        # Open on release only if both ends of the click are in the viewport.
+        down, position = self.read_context_input()
+        available = self.embedded_running and self.tabs.select() == str(self.game_view)
+        show = False
+        if not available or self.context_open:
+            self.context_armed = False
+        elif down and not self.context_pressed:
+            self.context_armed = position is not None
+        elif not down and self.context_pressed:
+            show = self.context_armed and position is not None
+            self.context_armed = False
+        self.context_pressed = down
+        if show:
+            self.show_game_context_menu(*position)
+        self.after(15, self.poll_game_context_input)
+
+    def show_game_context_menu(self, x, y):
+        if self.context_open or not self.embedded_running or self.tabs.select() != str(self.game_view):
+            return
+        self.game_context_menu.entryconfigure(
+            3, label="Exit fullscreen" if self.fullscreen_active else "Fullscreen"
+        )
+        self.game_context_menu.entryconfigure(
+            5, label="Force close… (hold in launcher)" if self.close_requested else "Close game",
+            state="disabled" if self.stop_process is not None else "normal",
+        )
+        self.context_open = True
+        try:
+            self.game_host.focus_force()
+            self.game_context_menu.tk_popup(x, y)
+        finally:
+            self.game_context_menu.grab_release()
+            self.context_open = False
+
+    def update_fullscreen_button(self, *_):
+        visible = self.tabs.select() == str(self.game_view)
+        if visible:
+            if not self.fullscreen_button.winfo_manager():
+                self.fullscreen_button.pack(side="left", padx=(8, 0))
+            self.fullscreen_button.state(
+                ["!disabled"] if self.embedded_running else ["disabled"]
+            )
+        else:
+            self.fullscreen_button.pack_forget()
+
+    def poll_fullscreen_hotkey(self):
+        # The game is a child HWND in another process, so Tk's ordinary key
+        # bindings cannot see keyboard events while raylib owns focus.
+        pressed = self.read_fullscreen_key()
+        if pressed and not self.fullscreen_key_down:
+            self.toggle_fullscreen()
+        self.fullscreen_key_down = pressed
+        self.after(25, self.poll_fullscreen_hotkey)
+
+    def toggle_fullscreen(self):
+        if self.fullscreen_active:
+            self.set_fullscreen(False)
+        elif self.embedded_running and self.tabs.select() == str(self.game_view):
+            self.set_fullscreen(True)
+
+    def set_fullscreen(self, enabled):
+        if self.fullscreen_active == enabled:
+            return
+        window = self.winfo_toplevel()
+        if enabled:
+            self.game_host.grid_remove()
+            # Hiding the entire notebook eliminates its native theme border,
+            # not merely the tab headers. Keep the renderer's HWND alive.
+            self.tabs.grid_remove()
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar):
+                widget.grid_remove()
+            self.configure(padding=0)
+            self.rowconfigure(4, weight=0)
+            self.game_host.grid(in_=self, row=0, column=0, columnspan=3, sticky="nsew")
+        else:
+            self.game_host.grid_remove()
+            self.tabs.grid()
+            for widget in (self.action_bar, self.status_label, self.output, self.scrollbar):
+                widget.grid()
+            self.configure(padding=18)
+            self.rowconfigure(4, weight=1)
+            self.game_host.grid(in_=self.game_view, row=0, column=0, columnspan=1, sticky="nsew")
+        self.game_host.tkraise()
+        window.attributes("-fullscreen", enabled)
+        self.fullscreen_active = enabled
+        self.update_fullscreen_button()
+        # Keep the original game_host HWND: the native child automatically
+        # follows its size, without recreating a WebGPU surface or guest state.
 
     def show_tool(self, *_):
         for tool, form in self.tool_forms.items():
@@ -741,14 +1244,47 @@ class Launcher(ttk.Frame):
 
     def change_mode(self, *_):
         mode = self.mode.get()
-        for label, previous, current in zip(
-            ("Max dispatches", "Timeout (seconds)"),
-            replay_limits(self.previous_mode), replay_limits(mode),
+        previous_dispatches, previous_timeout = replay_limits(self.previous_mode)
+        current_dispatches, current_timeout = replay_limits(mode)
+        for label, previous, current in (
+            ("Expansion dispatch limit", previous_dispatches, current_dispatches),
+            ("Replay dispatch limit", previous_dispatches, current_dispatches),
+            ("Timeout (seconds)", previous_timeout, current_timeout),
         ):
             if self.numeric[label].get() == previous:
                 self.numeric[label].set(current)
         self.previous_mode = mode
         self.update_fields()
+
+    def change_deinterlace(self, *_):
+        if self.deinterlace_file is not None:
+            try:
+                write_deinterlace_mode(self.deinterlace_file, self.fields["deinterlace"].get())
+            except OSError as error:
+                self.status.set(f"Could not update deinterlacing: {error}")
+
+    def clear_deinterlace_file(self):
+        if self.deinterlace_file is not None:
+            try:
+                self.deinterlace_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.deinterlace_file = None
+
+    def change_display_aspect(self, *_):
+        if self.aspect_file is not None:
+            try:
+                write_display_aspect(self.aspect_file, self.fields["display_aspect"].get())
+            except OSError as error:
+                self.status.set(f"Could not update display aspect: {error}")
+
+    def clear_aspect_file(self):
+        if self.aspect_file is not None:
+            try:
+                self.aspect_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.aspect_file = None
 
     def persist_settings(self):
         settings = {key: variable.get() for key, variable in self.fields.items()}
@@ -777,6 +1313,9 @@ class Launcher(ttk.Frame):
             self.persist_settings()
         except OSError as error:
             messagebox.showerror("Could not save settings", str(error), parent=self)
+        self.cancel_force_close_hold()
+        self.clear_deinterlace_file()
+        self.clear_aspect_file()
         self.winfo_toplevel().destroy()
 
     def update_fields(self, *_):
@@ -792,6 +1331,10 @@ class Launcher(ttk.Frame):
         self.snapshot_picker.state(graphics_state)
         self.speed_picker.configure(state="readonly" if self.window.get() and
                                     mode in ("Automatic", "Full replay") else "disabled")
+        self.aspect_picker.configure(state="readonly" if self.aspect_file is not None or (
+            self.window.get() and mode in ("Automatic", "Full replay")) else "disabled")
+        self.deinterlace_picker.configure(state="readonly" if self.deinterlace_file is not None or (
+            self.window.get() and mode in ("Automatic", "Full replay")) else "disabled")
         self.ir_picker.state(["!disabled"] if mode == "Recover translation cache" else ["disabled"])
         self.cache_miss_picker.state(
             ["disabled"] if special else ["!disabled"]
@@ -833,13 +1376,14 @@ class Launcher(ttk.Frame):
         Tooltip(picker, OPTION_HELP[label])
         return picker
 
-    def path_row(self, parent, row, label, variable, picker):
+    def path_row(self, parent, row, label, variable, picker, enabled=None):
         def browse():
             selected = picker(parent=self)
             if selected:
                 variable.set(selected)
 
-        caption = ttk.Label(parent, text=label)
+        caption = (ttk.Checkbutton(parent, text=label, variable=enabled)
+                   if enabled is not None else ttk.Label(parent, text=label))
         caption.grid(row=row, column=0, sticky="w", padx=(0, 12))
         Tooltip(caption, OPTION_HELP[label])
         entry = ttk.Entry(parent, textvariable=variable)
@@ -848,6 +1392,11 @@ class Launcher(ttk.Frame):
         button.grid(row=row, column=2, padx=(10, 0))
         Tooltip(entry, OPTION_HELP[label])
         Tooltip(button, OPTION_HELP[label])
+
+    def browse_aot_file(self):
+        selected = filedialog.askopenfilename(parent=self, filetypes=[("Native library", "*.dll *.so"), ("All files", "*")])
+        if selected:
+            self.fields["iop_aot"].set(selected)
 
     def game_command(self, env):
         disc = Path(self.disc.get()).expanduser().resolve()
@@ -860,14 +1409,107 @@ class Launcher(ttk.Frame):
             precompile_all=self.precompile_all.get(),
             fast_overlays=self.fast_overlays.get(),
             diagnostics={label: var.get() for label, var in self.diagnostics.items()},
+            runtime={key: self.fields[key].get() for key in RUNTIME_SETTINGS},
         )
+        env.pop("MAX_DISPATCHES", None)
         for key, _, _ in NUMERIC_SETTINGS.values():
             env.pop(key, None)
         for key, _ in DIAGNOSTIC_SETTINGS.values():
             env.pop(key, None)
+        for key, _, _ in RUNTIME_SETTINGS.values():
+            if key is not None:
+                env.pop(key, None)
+        env.pop("SDBZ_IOP_AOT_BUILD_OUT", None)
+        prepare_runtime_outputs(overrides)
         env.update(overrides, SDBZ_DISC_ROOT=str(disc),
-                   SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]))
+                   SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]),
+                   EE_WEBGPU_ASPECT=DISPLAY_ASPECTS[self.fields["display_aspect"].get()],
+                   EE_WEBGPU_DEINTERLACE=DEINTERLACE_MODES[self.fields["deinterlace"].get()])
         return ["cmd.exe", "/d", "/c", "run_ps2_game.bat", *args]
+
+    def toggle_launch(self):
+        if self.process is None:
+            self.launch()
+        else:
+            self.close_session()
+
+    def close_session(self):
+        if self.process is None or self.process.poll() is not None or self.stop_process is not None:
+            return
+        if self.close_requested:
+            # Menu and keyboard activation must not bypass the hold.
+            if self.fullscreen_active:
+                self.set_fullscreen(False)
+            self.play.focus_set()
+            self.status.set("Hold Force close for 2 seconds to stop the process tree")
+            return
+        # A running embedded game can exit normally, allowing boot logs,
+        # snapshots and the optional post-capture IOP build to finish.
+        if self.embedded_running:
+            try:
+                if request_embedded_close(self.game_host.winfo_id()):
+                    self.close_requested = True
+                    self.play.configure(text="Hold to force close")
+                    self.status.set("Closing game; finalizing session and diagnostics. Hold for 2 seconds only if stuck.")
+                    return
+            except OSError:
+                pass
+        # No graceful HWND close is available (e.g. compilation/headless).
+        # Require the same deliberate hold before terminating the tree.
+        self.close_requested = True
+        self.play.configure(text="Hold to force close")
+        if self.fullscreen_active:
+            self.set_fullscreen(False)
+        self.status.set("Hold Force close for 2 seconds to stop the process tree")
+
+    def begin_force_close_hold(self, _event=None):
+        if not self.close_requested or self.process is None or self.stop_process is not None:
+            return None
+        if self.play.instate(["disabled"]) or self.process.poll() is not None:
+            return "break"
+        self.cancel_force_close_hold()
+        self.force_close_press = True
+        process = self.process
+        self.play.configure(text="Keep holding…")
+        self.status.set("Hold for 2 seconds to force close; release to cancel")
+        self.force_close_timer = self.after(
+            FORCE_CLOSE_HOLD_MS, lambda: self.finish_force_close_hold(process)
+        )
+        return "break"
+
+    def cancel_force_close_hold(self, _event=None):
+        if self.force_close_timer is not None:
+            self.after_cancel(self.force_close_timer)
+            self.force_close_timer = None
+            if self.close_requested and self.stop_process is None:
+                self.play.configure(text="Hold to force close")
+
+    def end_force_close_hold(self, _event=None):
+        if self.force_close_press:
+            self.cancel_force_close_hold()
+            self.force_close_press = False
+            # Suppress the normal ttk release command, even if the
+            # old process exited while the mouse was still held.
+            return "break"
+        return None
+
+    def finish_force_close_hold(self, process):
+        self.force_close_timer = None
+        if (not self.force_close_press or self.process is not process or
+                not self.close_requested or self.stop_process is not None or
+                process.poll() is not None):
+            return
+        try:
+            self.stop_process = stop_process_tree(process)
+        except OSError as error:
+            self.play.configure(text="Hold to force close")
+            self.status.set(f"Could not close session: {error}")
+            return
+        if self.stop_process is not None:
+            self.close_requested = True
+            self.play.configure(text="Closing…")
+            self.play.state(["disabled"])
+            self.status.set("Stopping the running process tree")
 
     def launch(self, help_only=False):
         if self.process is not None:
@@ -913,6 +1555,28 @@ class Launcher(ttk.Frame):
                     env["SDBZ_MEMCARD"] = str(card)
                 self.persist_settings()
             LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+            env.pop("EE_WEBGPU_DEINTERLACE_FILE", None)
+            env.pop("EE_WEBGPU_ASPECT_FILE", None)
+            graphical = not help_only and (
+                (not is_direct and self.window.get() and
+                 self.mode.get() in ("Automatic", "Full replay"))
+                or (is_direct and "--gs-webgpu-window" in command)
+            )
+            if graphical:
+                selection = self.fields["deinterlace"].get()
+                with NamedTemporaryFile(mode="w", encoding="ascii", dir=LOG_PATH.parent,
+                                        prefix="deinterlace-", suffix=".mode", delete=False) as output:
+                    self.deinterlace_file = Path(output.name)
+                    output.write(DEINTERLACE_MODES[selection])
+                env["EE_WEBGPU_DEINTERLACE"] = DEINTERLACE_MODES[selection]
+                env["EE_WEBGPU_DEINTERLACE_FILE"] = str(self.deinterlace_file)
+                aspect = DISPLAY_ASPECTS[self.fields["display_aspect"].get()]
+                with NamedTemporaryFile(mode="w", encoding="ascii", dir=LOG_PATH.parent,
+                                        prefix="aspect-", suffix=".mode", delete=False) as output:
+                    self.aspect_file = Path(output.name)
+                    output.write(aspect)
+                env["EE_WEBGPU_ASPECT"] = aspect
+                env["EE_WEBGPU_ASPECT_FILE"] = str(self.aspect_file)
             with LOG_PATH.open("wb") as output:
                 self.process = subprocess.Popen(
                     command,
@@ -925,14 +1589,21 @@ class Launcher(ttk.Frame):
                 )
             self.log = LOG_PATH.open(encoding="utf-8", errors="replace")
             self.embedded_running = embed_game
+            self.update_fields()
+            self.update_fullscreen_button()
         except (OSError, ValueError) as error:
+            self.clear_deinterlace_file()
+            self.clear_aspect_file()
             self.status.set(str(error))
             return
 
         self.output.configure(state="normal")
         self.output.delete("1.0", tk.END)
         self.output.configure(state="disabled")
-        self.play.state(["disabled"])
+        self.close_requested = False
+        self.stop_process = None
+        self.play.configure(text="Close")
+        self.play.state(["!disabled"])
         self.help_button.state(["disabled"])
         self.speed_status.set("")
         self.status.set("Running command")
@@ -944,9 +1615,9 @@ class Launcher(ttk.Frame):
             for line in chunk.splitlines():
                 if line.startswith("EE speed: "):
                     self.speed_status.set(line.removeprefix("EE speed: "))
-            if "live cache-miss: PC=" in chunk:
+            if not self.close_requested and "live cache-miss: PC=" in chunk:
                 self.status.set("Compiling missing EE code; game state paused")
-            if "EE hot-expand: resumed guest pc=" in chunk:
+            if not self.close_requested and "EE hot-expand: resumed guest pc=" in chunk:
                 self.status.set("Guest execution resumed after live IR expansion")
             self.output.configure(state="normal")
             self.output.insert(tk.END, chunk)
@@ -957,13 +1628,28 @@ class Launcher(ttk.Frame):
             self.output.configure(state="disabled")
 
         result = self.process.poll()
-        if chunk or result is None:
+        if self.stop_process is not None and self.stop_process.poll() is not None:
+            stop_result = self.stop_process.returncode
+            self.stop_process = None
+            if stop_result != 0 and result is None:
+                self.play.configure(text="Hold to force close")
+                self.play.state(["!disabled"])
+                self.status.set(f"Could not stop process tree ({stop_result}); hold to retry")
+        if chunk or result is None or self.stop_process is not None:
             self.after(150, self.read_output)
         else:
+            self.cancel_force_close_hold()
             self.log.close()
             self.log = None
             self.process = None
+            self.clear_deinterlace_file()
+            self.clear_aspect_file()
             self.embedded_running = False
+            self.set_fullscreen(False)
+            self.update_fullscreen_button()
+            self.close_requested = False
+            self.play.configure(text="Launch")
+            self.update_fields()
             self.play.state(["!disabled"])
             self.help_button.state(["!disabled"])
             self.status.set(f"Launcher exited ({result}). Log: {LOG_PATH.name}")

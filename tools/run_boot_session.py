@@ -19,6 +19,7 @@ import threading
 import time
 
 from iop_disc_catalog import build_catalog, reconcile_runtime_loadfile
+from shared_ee_ir import ir_directory
 
 
 LINKED_COUNT_PATTERN = re.compile(
@@ -49,7 +50,7 @@ class c_ll_file_progress:
     """Show IR file counts in a terminal or the GUI launch log."""
 
     def __init__(self, work, stream=None, gui=False):
-        self.m_ir = Path(work) / "ir"
+        self.m_ir = ir_directory(work)
         self.m_stream = sys.stdout if stream is None else stream
         self.m_gui = gui
         self.m_enabled = gui or bool(getattr(self.m_stream, "isatty", lambda: False)())
@@ -212,11 +213,20 @@ def main(argv=None):
     )
     parser.add_argument("--expansion-passes", type=int, default=2)
     parser.add_argument("--expansion-per-pass", type=int, default=128)
+    parser.add_argument("--max-dispatches", type=int,
+                        help="Fallback dispatch limit for both phases")
+    parser.add_argument("--max-expansion-dispatches", type=int,
+                        help="Dispatch limit per headless expansion pass")
+    parser.add_argument("--max-replay-dispatches", type=int,
+                        help="Dispatch limit for the final traced replay")
     parser.add_argument(
         "--replay-after-expand", action="store_true",
         help="Legacy mode: restart the guest after each cache miss instead of resuming live",
     )
     parser.add_argument("--no-recompile", action="store_true")
+    parser.add_argument("--skip-headless-expansion", action="store_true",
+                        help="Cached graphics replay: skip the preliminary boot; "
+                             "retain live cache-miss expansion in final replay")
     parser.add_argument(
         "--quick-probe", action="store_true",
         help="Use the last expansion pass as the final report, with no traced replay",
@@ -246,10 +256,25 @@ def main(argv=None):
         help=argparse.SUPPRESS,
     )
     args, forwarded = parser.parse_known_args(argv)
+    for option, value in (
+        ("--max-dispatches", args.max_dispatches),
+        ("--max-expansion-dispatches", args.max_expansion_dispatches),
+        ("--max-replay-dispatches", args.max_replay_dispatches),
+    ):
+        if value is not None and not 1 <= value <= 0xFFFFFFFF:
+            parser.error(f"{option} must fit a positive uint32")
+    expansion_limit = args.max_expansion_dispatches or args.max_dispatches
+    replay_limit = args.max_replay_dispatches or args.max_dispatches
+    expansion_args = [f"--max-dispatches={expansion_limit}"] if expansion_limit is not None else []
+    replay_args = [f"--max-dispatches={replay_limit}"] if replay_limit is not None else []
     if not 1 <= args.expansion_passes <= 64:
         parser.error("--expansion-passes must be between 1 and 64")
     if not 1 <= args.expansion_per_pass <= 1024:
         parser.error("--expansion-per-pass must be between 1 and 1024")
+    if args.skip_headless_expansion and (
+            not args.no_recompile or args.quick_probe or args.replay_after_expand or
+            not (args.gs_webgpu_window or args.gs_webgpu_snapshot is not None)):
+        parser.error("--skip-headless-expansion requires a cached graphics replay with live expansion")
     if args.quick_probe and (args.gs_snapshot or args.gs_upload_snapshot or
                              args.gs_webgpu_snapshot or args.gs_webgpu_window):
         parser.error("GS snapshots and the WebGPU window require a full boot session")
@@ -266,7 +291,7 @@ def main(argv=None):
                            else "iop-disc-catalog.json")
     boot_log = work / ("quick-probe.log" if args.quick_probe else "boot.log")
     expansion_log = boot_log if args.quick_probe else work / "expansion.log"
-    metadata_path = work / "ir" / "ee_functions.json"
+    metadata_path = ir_directory(work) / "ee_functions.json"
     if report in (args.elf.resolve(), args.driver.resolve(), catalog_path,
                   boot_log, expansion_log, metadata_path, work / "translation-cache.json"):
         parser.error("report path must be distinct from inputs, logs, and cache metadata")
@@ -361,8 +386,12 @@ def main(argv=None):
         print("Expansion runs headless. The game window opens for the final traced replay.", flush=True)
 
     reuse = args.no_recompile
-    for index in range(args.expansion_passes):
-        command = [*base, f"--auto-expand={args.expansion_per_pass}"]
+    if args.skip_headless_expansion:
+        message = "Headless expansion skipped: cached graphics replay with live cache misses"
+        print(message, flush=True)
+        expansion_log.write_text("# " + message + "\n", encoding="utf-8")
+    for index in range(0 if args.skip_headless_expansion else args.expansion_passes):
+        command = [*base, *expansion_args, f"--auto-expand={args.expansion_per_pass}"]
         if reuse:
             command.append("--no-recompile")
         print(
@@ -479,7 +508,7 @@ def main(argv=None):
             flush=True,
         )
     final_command = [
-        *base, "--no-recompile", f"--auto-expand={final_expansion}", "--trace",
+        *base, *replay_args, "--no-recompile", f"--auto-expand={final_expansion}", "--trace",
     ]
     for option, path in snapshots:
         if path is not None:

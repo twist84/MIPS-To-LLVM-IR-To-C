@@ -1,0 +1,3 @@
+# Windows cmd.exe batch labels require reliable CRLF working-tree endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf

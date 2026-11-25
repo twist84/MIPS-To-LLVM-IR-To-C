@@ -20,9 +20,18 @@ public:
     void reset();
     bool raise(uint32_t cause);
 
-    uint32_t status() const;
-    uint32_t mask() const;
-    uint32_t pending() const;
+    uint32_t status() const
+    {
+        return m_status;
+    }
+    uint32_t mask() const
+    {
+        return m_mask;
+    }
+    uint32_t pending() const
+    {
+        return m_status & m_mask;
+    }
 
     static bool mmio_read(void* user, uint32_t physical_address,
                           uint32_t width, s_ee_u128* result);

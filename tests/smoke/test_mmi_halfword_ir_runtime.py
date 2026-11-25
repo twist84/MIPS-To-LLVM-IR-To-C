@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Reference-driven O0/O3 native JIT tests for R5900 MMI2 halfword operations.
 
-The model is independent of LLVM lowering and follows the public PCSX2
-interpreter and x86 recompiler. PHMADH/PHMSBH odd accumulator words are
-undocumented on hardware; their deterministic PCSX2 values are used here.
+The model follows the public PCSX2 interpreter and x86 recompiler.
+Direct PS2 vectors also verify the observed PHMADH/PHMSBH odd accumulator
+words; their behavior outside the measured cases remains undocumented.
 """
 
 import ctypes
@@ -15,6 +15,7 @@ import tempfile
 import llvmlite.binding as llvm
 
 from ee_diagnostic_stubs import register_ee_diagnostic_stubs
+from mmi_hardware_vectors import run_hardware_vectors
 from test_mmi_ir_runtime import U128, make_aligned_state, require
 from test_mmi_word_ir_runtime import compile_guest
 
@@ -71,7 +72,7 @@ def reference_step(opcode, source_a, source_b, before):
     return after, destination
 
 
-def test_case(fn, mode, pattern):
+def test_case(fn, mode, pattern, hardware=None):
     lo0, hi0, lo1, hi1, lhs, rhs = pattern
     backing, cpu = make_aligned_state()
     cpu.gpr[4] = U128(lhs & MASK64, lhs >> 64)
@@ -99,6 +100,8 @@ def test_case(fn, mode, pattern):
         expected_banks, expected_result = reference_step(
             opcode, source_a, source_b, expected_banks)
 
+    if hardware is not None:
+        expected_result, expected_banks = hardware
     expected_rs, expected_rt, expected_rd = effective_lhs, rhs, DEST
     if not zero_dest:
         if alias_rs:
@@ -182,6 +185,7 @@ def main():
                 for pattern in patterns:
                     test_case(fn, mode, pattern)
                     executions += 1
+                executions += run_hardware_vectors(fn, mode, test_case)
                 _ = engine, module, machine
 
     print("mmi_halfword_ir_runtime: PASS (" + str(executions) +

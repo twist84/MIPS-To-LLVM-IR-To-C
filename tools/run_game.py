@@ -24,6 +24,13 @@ import sys
 import tempfile
 import time
 
+# This driver is also loaded by path using importlib in tests/tools.
+# Resolve its sibling helpers for both script and module entry points.
+_tools_path = str(Path(__file__).resolve().parent)
+if _tools_path not in sys.path:
+    sys.path.insert(0, _tools_path)
+import shared_ee_ir as shared_ir
+
 
 STOP_PATTERN = re.compile(
     r"EE stopped: dispatched=(\d+) pc=0x([0-9a-fA-F]{8}) "
@@ -33,6 +40,18 @@ STOP_PATTERN = re.compile(
 
 
 CACHE_SCHEMA = "ee-translation-cache-v1"
+
+
+def ir_pipeline_id(profile):
+    # Keep this provenance identifier in sync with verify_ir.py.
+    return "llvm-default-O2-v1" if profile == 4 else None
+
+
+def native_target_identity(profile):
+    if profile != 5:
+        return None
+    from verify_ir import native_target_identity as target_identity
+    return target_identity(profile)
 
 
 def sha256_path(path):
@@ -50,6 +69,7 @@ def translation_inputs(elf, recomp, source_root):
         ("ee_recomp", recomp),
         ("tools/run_game.py", source_root / "tools" / "run_game.py"),
         ("tools/verify_ir.py", source_root / "tools" / "verify_ir.py"),
+        ("tools/shared_ee_ir.py", source_root / "tools" / "shared_ee_ir.py"),
         ("tools/link_native_objects.py",
          source_root / "tools" / "link_native_objects.py"),
         ("src/ee/ee_dispatcher.cpp",
@@ -84,6 +104,9 @@ def ir_generation_inputs(elf, source_root):
                 # Dispatch glue and runtime linking do not affect IR text.
                 continue
             paths.append((item.relative_to(source_root).as_posix(), item))
+    # The EE VU0 emitter also consumes the shared VU FMAC template.
+    shared_fmac = "src/runtime/ee_vu_fmac4_ir.h"
+    paths.append((shared_fmac, source_root / shared_fmac))
     paths.append((
         "src/tools/ee_recomp_main.cpp",
         source_root / "src/tools/ee_recomp_main.cpp"
@@ -91,19 +114,54 @@ def ir_generation_inputs(elf, source_root):
     return {name: sha256_path(item) for name, item in paths}
 
 
+def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
+    """Hash every module, resolving the ordinary directory only once.
+
+    Windows Path.resolve(strict=True) opens each individual file to
+    obtain its final path. For regular files directly inside the already
+    canonical directory, one scandir supplies the same ownership check.
+    Unusual paths and symlinks retain strict resolution.
+    """
+    if not isinstance(functions, list) or not functions:
+        raise ValueError("cached translation has no functions")
+    ir_dir = Path(ir_dir).resolve(strict=True)
+    with os.scandir(ir_dir) as scan:
+        entries = {entry.name: entry for entry in scan
+                   if entry.name.endswith(".ll")}
+    hashes = {}
+    for function in functions:
+        module = Path(function["ir_path"])
+        if not module.is_absolute() and len(module.parts) == 1:
+            module = ir_dir / module
+        entry = entries.get(module.name)
+        if (module.is_absolute() and module.parent == ir_dir and
+                entry is not None and entry.is_file(follow_symlinks=False)):
+            # Windows DirEntry.stat does not require another syscall for
+            # ordinary files. Resolve any reparse point conservatively.
+            if os.name == "nt" and (
+                    entry.stat(follow_symlinks=False).st_file_attributes & 0x400):
+                module = module.resolve(strict=True)
+            else:
+                module = ir_dir / entry.name
+        else:
+            module = shared_ir.module_path(str(module), ir_dir).resolve(strict=True)
+        if require_owned_directory and (
+                module.parent != ir_dir or module.suffix != ".ll"):
+            raise ValueError("function references an unexpected IR path")
+        if module.name in hashes:
+            raise ValueError(f"duplicate cached IR filename: {module.name}")
+        # Full content authentication, never trust timestamps or size.
+        hashes[module.name] = sha256_path(module)
+    if require_owned_directory and set(hashes) != set(entries):
+        raise ValueError("unowned IR modules in cache directory")
+    return hashes
+
+
 def translated_ir_hashes(metadata_path):
     """Record the exact translated modules owned by the function map."""
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    functions = metadata.get("functions")
-    if not isinstance(functions, list) or not functions:
-        raise ValueError("cached translation has no functions")
-    hashes = {}
-    for function in functions:
-        module = Path(function["ir_path"]).resolve(strict=True)
-        if module.name in hashes:
-            raise ValueError(f"duplicate cached IR filename: {module.name}")
-        hashes[module.name] = sha256_path(module)
-    return hashes
+    return hash_ir_modules(metadata_path.parent, metadata.get("functions"),
+                           require_owned_directory=shared_ir.active(metadata_path))
 
 
 def recover_append_only_metadata(snapshot, metadata_path):
@@ -172,7 +230,7 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
     owned = covered_pcs({"functions": metadata["functions"][:count]})
     expected_addresses = []
     expected_symbols = set()
-    destination_dir = (work / "ir").resolve()
+    destination_dir = metadata_path.parent.resolve()
     for function in suffix:
         address = int(function["vaddr"], 0)
         if (address == 0 or address & 3 or address in owned or
@@ -181,7 +239,7 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
             raise ValueError("interrupted append contains invalid guest entry")
         expected_addresses.append(address)
         expected_symbols.add(function["host_symbol"])
-        module = Path(function["ir_path"]).resolve(strict=True)
+        module = shared_ir.module_path(function["ir_path"], destination_dir).resolve(strict=True)
         if module.parent != destination_dir or module.suffix != ".ll":
             raise ValueError("interrupted append references unexpected IR path")
 
@@ -211,8 +269,8 @@ def verify_recovered_append(recomp, elf, work, metadata_path, suffix):
                     f"interrupted append entry 0x{address:08x} not retranslated"
                 )
             fresh = dict(fresh)
-            fresh_path = Path(fresh.pop("ir_path")).resolve(strict=True)
-            expected_path = Path(old["ir_path"]).resolve(strict=True)
+            fresh_path = shared_ir.module_path(fresh.pop("ir_path"), output).resolve(strict=True)
+            expected_path = shared_ir.module_path(old["ir_path"], destination_dir).resolve(strict=True)
             fresh["block_pcs"] = [
                 pc for pc in fresh["block_pcs"]
                 if int(pc, 0) not in owned
@@ -250,8 +308,11 @@ def validate_preserved_translation(path, inputs, ir_sources,
     snapshot = json.loads(path.read_text(encoding="utf-8"))
     if snapshot.get("schema") != CACHE_SCHEMA:
         raise ValueError("preserved translation has unknown provenance")
-    if snapshot.get("emit_opt") != emit_opt:
-        raise ValueError("preserved translation uses a different --emit-opt")
+    if (snapshot.get("emit_opt") != emit_opt or
+            snapshot.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
+        raise ValueError("preserved translation uses a different --emit-opt or IR pipeline")
+    if snapshot.get("native_target") != native_target_identity(emit_opt):
+        raise ValueError("preserved translation uses a different host CPU target")
     metadata_changed = (
         snapshot.get("metadata_sha256") != sha256_path(metadata_path)
     )
@@ -274,8 +335,33 @@ def validate_preserved_translation(path, inputs, ir_sources,
                 if name != old_host_key
             } == ir_sources
         )
+        # Dispatch hotspot observations are also host-only. The two exact
+        # historical header revisions (LF and CRLF checkouts) below never
+        # participated in guest lowering. Only remove that single stale
+        # fingerprint; all remaining generator and IR/object hashes stay strict.
+        old_diagnostics_key = "include/ee/ee_hot_loop_diagnostics.h"
+        known_diagnostics_digests = {
+            "6dd93590f16ee27ce21d26bc6545e80186a1f2869b058c0139e2ab99af3bbbee",
+            "d5c9345285e8a93958113d7d24d16c9d8131ced874765bb2a06c8761423017ad",
+            "0cfeffaa89a2b3dc9b282b0ff214e64197bb4ce166a76e2b4bfe6c5c0b87767d",
+            "a6305c7c8567a91048d3e8e841e20e1782c36fab8256942689e0a15aaf92f8bf",
+        }
+        migrated_diagnostics_header = (
+            isinstance(saved_sources, dict)
+            and isinstance(snapshot.get("inputs"), dict)
+            and saved_sources.get(old_diagnostics_key) in known_diagnostics_digests
+            and snapshot["inputs"].get(old_diagnostics_key) ==
+                saved_sources[old_diagnostics_key]
+            and old_diagnostics_key not in ir_sources
+            and "src/runtime/ee_hot_loop_diagnostics.h" in inputs
+            and {
+                name: digest for name, digest in saved_sources.items()
+                if name != old_diagnostics_key
+            } == ir_sources
+        )
         if (not isinstance(saved_sources, dict) or
-                (saved_sources != ir_sources and not migrated_host_header)):
+                (saved_sources != ir_sources and not migrated_host_header
+                 and not migrated_diagnostics_header)):
             changed = next((
                 name for name in sorted(
                     set(saved_sources if isinstance(saved_sources, dict) else {}) |
@@ -288,6 +374,12 @@ def validate_preserved_translation(path, inputs, ir_sources,
         if migrated_host_header:
             print(
                 "run_game: migrated misplaced host-only pad probe "
+                "fingerprint; preserving verified guest IR",
+                flush=True
+            )
+        if migrated_diagnostics_header:
+            print(
+                "run_game: migrated host-only dispatch diagnostics "
                 "fingerprint; preserving verified guest IR",
                 flush=True
             )
@@ -305,12 +397,18 @@ def validate_preserved_translation(path, inputs, ir_sources,
     # Normal reuse still requires exact metadata bytes. Interrupted auto-
     # expansion is the only exception: a verified, appended function suffix
     # may have been published before the next cache record was committed.
+    current_ir = translated_ir_hashes(metadata_path)
+    recorded_ir = snapshot.get("ir_hashes")
+    if metadata_changed and shared_ir.verified_extension(
+            snapshot, metadata_path, ir_sources, current_ir):
+        # Another profile committed this shared map. Emit missing objects
+        # incrementally; do not re-lift its already verified guest IR.
+        print("run_game: synchronizing native profile to shared EE IR", flush=True)
+        return [], False
     suffix = (
         recover_append_only_metadata(snapshot, metadata_path)
         if metadata_changed else []
     )
-    current_ir = translated_ir_hashes(metadata_path)
-    recorded_ir = snapshot.get("ir_hashes")
     if suffix:
         if (not isinstance(recorded_ir, dict) or
                 any(current_ir.get(key) != digest
@@ -323,7 +421,10 @@ def validate_preserved_translation(path, inputs, ir_sources,
     if not manifest_path.is_file():
         raise ValueError("preserved object manifest missing")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if not manifest.get("complete") or manifest.get("optimization_level") != emit_opt:
+    if (not manifest.get("complete") or
+            manifest.get("optimization_level") != emit_opt or
+            manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
+            manifest.get("native_target") != native_target_identity(emit_opt)):
         raise ValueError("preserved object manifest incomplete or incompatible")
     objects = manifest.get("objects")
     if not isinstance(objects, list):
@@ -360,7 +461,7 @@ def archive_known_function_manifest(path, snapshot):
     if (not isinstance(hashes, dict) or not hashes or
             not isinstance(inputs, dict) or
             not isinstance(inputs.get("ELF"), str) or
-            snapshot.get("emit_opt") != 0):
+            snapshot.get("emit_opt") not in range(6)):
         return
     # Preserve guest discovery/batch order independently of JSON key sorting.
     # Reconstructing the same address SET in a different order can change
@@ -369,7 +470,14 @@ def archive_known_function_manifest(path, snapshot):
     archived["known_entries"] = list(hashes)
     serialized = json.dumps(archived, sort_keys=True, indent=2) + "\n"
     digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-    folder = path.parent.parent / "ee-known-manifests"
+    owner = path.parent
+    # Nested native profiles share the root IR inventory; stage recoveries
+    # inside the root also archive outside the movable cache contents.
+    if ((owner / shared_ir.MARKER).is_file()):
+        owner = shared_ir.ir_directory(owner).parent
+    if owner.name.startswith("recovery-"):
+        owner = owner.parent
+    folder = owner.parent / "ee-known-manifests"
     folder.mkdir(parents=True, exist_ok=True)
     destination = folder / (
         f"ee-{inputs['ELF'][:12]}-{len(hashes):06d}-{digest[:16]}.json"
@@ -399,11 +507,15 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
         "schema": CACHE_SCHEMA,
         "inputs": inputs,
         "emit_opt": emit_opt,
+        "ir_pipeline": ir_pipeline_id(emit_opt),
+        "native_target": native_target_identity(emit_opt),
         "metadata_sha256": sha256_path(metadata_path),
         "library_sha256": sha256_path(library),
         "ir_sources": ir_sources,
         "ir_hashes": translated_ir_hashes(metadata_path),
     }
+    if shared_ir.active(metadata_path):
+        shared_ir.publish(metadata_path, ir_sources, snapshot["ir_hashes"])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -416,8 +528,8 @@ def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
             temporary.unlink()
 
 
-def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
-    """Never reuse a translated DLL whose guest code provenance is unknown."""
+def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, library):
+    """Check the saved native identity; this alone does NOT authorize execution."""
     if not path.is_file():
         raise ValueError(
             "cached translation has no provenance record; "
@@ -443,11 +555,14 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
             "cached translation input list changed; "
             "rerun without --no-recompile"
         )
-    if snapshot.get("emit_opt") != emit_opt:
+    if (snapshot.get("emit_opt") != emit_opt or
+            snapshot.get("ir_pipeline") != ir_pipeline_id(emit_opt)):
         raise ValueError(
-            "cached translation uses a different --emit-opt; "
+            "cached translation uses a different --emit-opt or IR pipeline; "
             "rerun without --no-recompile"
         )
+    if snapshot.get("native_target") != native_target_identity(emit_opt):
+        raise ValueError("cached translation uses a different host CPU target")
     for name, file_path in (("metadata_sha256", metadata_path),
                             ("library_sha256", library)):
         if snapshot.get(name) != sha256_path(file_path):
@@ -455,8 +570,33 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library):
                 f"cached translation {file_path.name} changed; "
                 "rerun without --no-recompile"
             )
+    return snapshot
+
+
+def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
+                               *, verified_ir_hashes=None):
+    """Authenticate native identity and current IR before execution."""
+    started = time.monotonic()
+    snapshot = validate_cached_library_identity(
+        path, inputs, emit_opt, metadata_path, library)
+    library_checked = time.monotonic()
+    if shared_ir.active(metadata_path):
+        current = (translated_ir_hashes(metadata_path) if verified_ir_hashes is None
+                   else verified_ir_hashes)
+        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"), current)
+        if current != snapshot.get("ir_hashes"):
+            raise ValueError("cached native profile IR does not match shared source")
+    elif verified_ir_hashes is not None:
+        raise ValueError("preverified hashes require a shared EE IR store")
+    ir_checked = time.monotonic()
     # A valid cache created before snapshot support is also preserved.
     archive_known_function_manifest(path, snapshot)
+    print(f"EE cache validation: profile={emit_opt} "
+          f"metadata/library={library_checked - started:.3f}s "
+          f"shared_ir={ir_checked - library_checked:.3f}s "
+          f"archive={time.monotonic() - ir_checked:.3f}s "
+          f"ir_scan={'fresh' if verified_ir_hashes is None else 'already-verified'}",
+          flush=True)
 
 
 
@@ -818,7 +958,8 @@ def covered_pcs(metadata):
     }
 
 
-def batch_append_functions(recomp, elf, work, metadata_path, addresses):
+def batch_append_functions(recomp, elf, work, metadata_path, addresses,
+                           *, reserved_entries=()):
     """Translate a group of newly reachable entries in one discovery pass.
 
     The EE CFG emitter writes one IR/metadata result per requested function.
@@ -827,6 +968,10 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
     Return the exact NEW IR paths for incremental object emission.
     """
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    shared_state = None
+    if shared_ir.active(metadata_path):
+        recorded = shared_ir.read_json(metadata_path.parent / shared_ir.PROVENANCE)
+        shared_state = shared_ir.current_state(metadata_path, recorded["ir_sources"])
     owned = covered_pcs(metadata)
     targets = [
         address for address in dict.fromkeys(addresses)
@@ -846,7 +991,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
         recomp, elf, output_dir,
         "--functions=" + ",".join(f"0x{pc:08x}" for pc in targets),
     ]
-    discovery_cache = work / "ir" / "ee_discovery_cache.bin"
+    discovery_cache = metadata_path.parent / "ee_discovery_cache.bin"
     if discovery_cache.is_file():
         command.append(f"--discovery-cache={discovery_cache}")
     run(command)
@@ -864,6 +1009,7 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
         generated[address] = function
 
     pending = []
+    reserved_entries = set(reserved_entries)
     published_owners = set(owned)
     published_names = {Path(item["ir_path"]).name
                        for item in metadata["functions"]}
@@ -887,8 +1033,11 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
             print(f"auto-expand: ignoring speculative table sibling "
                   f"0x{address:08x}: {message}", file=sys.stderr)
             continue
+        # Explicit recovery can reserve independently requested entry PCs
+        # for their own functions. Normal live discovery never reserves PCs.
         overlap = set(new_pcs) & published_owners
-        owned_blocks = [pc for pc in blocks if int(pc, 0) not in overlap]
+        excluded = overlap | (reserved_entries - {address})
+        owned_blocks = [pc for pc in blocks if int(pc, 0) not in excluded]
         if address in overlap or not owned_blocks:
             message = f"entry 0x{address:08x} already owned by another function"
             if address == targets[0]:
@@ -903,15 +1052,15 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
                 f"while translating entry 0x{address:08x}",
                 flush=True,
             )
-        source = Path(function["ir_path"])
-        destination = work / "ir" / source.name
+        source = shared_ir.module_path(function["ir_path"], output_dir)
+        destination = metadata_path.parent / source.name
         if (destination.exists() or
             source.name in published_names):
             raise ValueError(f"IR module filename collision: {destination}")
         if not source.is_file():
             raise ValueError(f"missing batched IR module: {source}")
         function["block_pcs"] = owned_blocks
-        function["ir_path"] = str(destination)
+        function["ir_path"] = destination.name
         pending.append((source, destination, function))
         published_owners.update(int(pc, 0) for pc in owned_blocks)
         published_names.add(source.name)
@@ -946,9 +1095,48 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses):
             destination.unlink(missing_ok=True)
         raise
 
+    if shared_state is not None:
+        hashes = dict(shared_state["ir_hashes"])
+        hashes.update({path.name: sha256_path(path) for path in committed})
+        shared_ir.publish(metadata_path, shared_state["ir_sources"], hashes)
+
     print(f"auto-expand: appended {len(pending)} function(s) in one "
           f"discovery and metadata transaction", flush=True)
     return [destination for _, destination, _ in pending]
+
+def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
+                                metadata_path, object_dir):
+    """Avoid a redundant emission pass after full preserved-IR verification.
+
+    The linker still reads and hashes every guest object before linking.
+    Retain the old incremental path for legacy provenance, incompatible
+    LLVM/emitter versions, or a changed function map.
+    """
+    try:
+        snapshot = shared_ir.read_json(cache_path)
+        if (snapshot.get("ir_sources") != ir_sources or
+                snapshot.get("metadata_sha256") != sha256_path(metadata_path) or
+                snapshot.get("inputs", {}).get("tools/verify_ir.py") !=
+                    inputs.get("tools/verify_ir.py")):
+            return False
+        from verify_ir import append_cached_objects, llvm
+        records = append_cached_objects(object_dir, emit_opt,
+                                        llvm.get_default_triple(), [])
+        metadata = shared_ir.read_json(metadata_path)
+        # Exact path equality is sufficient for the common case. Only
+        # canonicalize individual paths if their spellings differ.
+        module_paths = {shared_ir.module_path(fn["ir_path"], metadata_path.parent)
+                        for fn in metadata["functions"]}
+        record_paths = {Path(name) for name in records}
+        same_paths = module_paths == record_paths or (
+            {p.resolve() for p in module_paths} ==
+            {p.resolve() for p in record_paths})
+        return (same_paths and
+                {Path(name).name: item["ir_sha256"] for name, item in records.items()} ==
+                snapshot.get("ir_hashes"))
+    except (OSError, ValueError, KeyError, TypeError, ImportError):
+        return False
+
 
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
@@ -959,7 +1147,7 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
         # modules need LLVM parsing/emission. The native linker still hashes
         # ALL cached guest objects before linking the combined DLL.
         input_files = (list(appended_ir) if appended_ir is not None
-                       else [str(work / "ir" / "*.ll")])
+                       else [str(metadata_path.parent / "*.ll")])
         command = [
             sys.executable, source_root / "tools" / "verify_ir.py",
             *input_files,
@@ -1152,9 +1340,9 @@ def main(argv=None):
     )
     parser.add_argument("--pdb", action="store_true",
                         help="Generate game-translated.pdb using Windows Clang/LLD")
-    parser.add_argument("--emit-opt", type=int, choices=range(4), default=0,
-                        metavar="{0,1,2,3}",
-                        help="LLVM native object optimization level (default: 0)")
+    parser.add_argument("--emit-opt", type=int, choices=range(6), default=0,
+                        metavar="{0,1,2,3,4,5}",
+                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend")
     parser.add_argument("--emit-jobs", type=int, default=2,
                         help="parallel LLVM object-emission processes (default: 2)")
     parser.add_argument("--max-dispatches", type=int, default=10000)
@@ -1302,6 +1490,7 @@ def main(argv=None):
         parser.error("--relink-existing cannot be combined with --extra-functions")
     if args.link_only and args.auto_expand:
         parser.error("--link-only cannot be combined with --auto-expand")
+    lock = None
     try:
         functions = args.functions
         if functions not in ("entry", "all") and (
@@ -1316,6 +1505,9 @@ def main(argv=None):
         elf = args.elf.resolve(strict=True)
         build = args.build_dir.resolve()
         work = args.work_dir.resolve()
+        acquired_lock = shared_ir.ir_lock(work)
+        acquired_lock.__enter__()
+        lock = acquired_lock
         entry = elf_entry(elf) if args.entry is None else args.entry
         if not 0 <= entry <= 0xFFFFFFFF or entry & 3:
             parser.error("--entry must be an aligned uint32")
@@ -1324,7 +1516,7 @@ def main(argv=None):
 
         source_root = Path(__file__).resolve().parents[1]
         runner = native_executable(build, "ee_game_runner", args.config)
-        metadata_path = work / "ir" / "ee_functions.json"
+        metadata_path = shared_ir.ir_directory(work) / "ee_functions.json"
         object_dir = work / "objects"
         library_name = "game-translated.dll" if os.name == "nt" else (
             "libgame-translated.dylib" if sys.platform == "darwin" else
@@ -1333,10 +1525,23 @@ def main(argv=None):
         library = work / library_name
         recomp = native_executable(build, "ee_recomp", args.config)
         cache_path = work / "translation-cache.json"
+        fingerprints_started = time.monotonic()
         inputs = translation_inputs(elf, recomp, source_root)
         ir_sources = ir_generation_inputs(elf, source_root)
+        print(f"EE input fingerprints: {time.monotonic() - fingerprints_started:.3f}s",
+              flush=True)
+
+        if args.no_recompile and shared_ir.active(metadata_path) and cache_path.is_file():
+            snapshot = shared_ir.read_json(cache_path)
+            if snapshot.get("metadata_sha256") != sha256_path(metadata_path):
+                # Shared discovery can advance between boot-session passes.
+                # Preserved-translation validation proves the extension.
+                args.no_recompile = False
+                args.relink_existing = True
 
         if not (args.no_recompile or args.relink_existing):
+            if shared_ir.active(metadata_path):
+                raise ValueError("refusing to regenerate shared EE IR; use a new work directory")
             (work / "ir").mkdir(parents=True, exist_ok=True)
             for stale in (work / "ir").glob("*.ll"):
                 stale.unlink()
@@ -1347,6 +1552,7 @@ def main(argv=None):
             elif functions != "all":
                 command.append(f"--max-functions={functions}")
             run(command)
+            shared_ir.normalize_metadata(metadata_path, elf)
 
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             if entry not in covered_pcs(metadata):
@@ -1377,7 +1583,7 @@ def main(argv=None):
                     "(for --no-recompile) the linked guest library"
                 )
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-            source_elf = Path(metadata.get("elf", "")).resolve()
+            source_elf = shared_ir.elf_path(metadata, metadata_path.parent)
             if source_elf != elf:
                 raise ValueError(
                     "--no-recompile ELF does not match existing translation: "
@@ -1406,15 +1612,35 @@ def main(argv=None):
                         "run_game: preserving guest IR and objects; "
                         "rebuilding host DLL only", flush=True
                     )
-                build_linked_library(
-                    source_root, work, metadata_path, object_dir, library,
-                    args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs,
-                    reuse_objects=bool(pending_append and objects_complete),
-                    appended_ir=(
-                        [Path(item["ir_path"]) for item in pending_append]
-                        if pending_append and not objects_complete else None
-                    ),
-                )
+                direct_relink = (not pending_append and objects_complete and
+                    can_relink_verified_objects(
+                        cache_path, inputs, ir_sources, args.emit_opt,
+                        metadata_path, object_dir))
+                if direct_relink:
+                    print("run_game: complete verified object manifest; "
+                          "skipping redundant emission scan", flush=True)
+                try:
+                    build_linked_library(
+                        source_root, work, metadata_path, object_dir, library,
+                        args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs,
+                        reuse_objects=direct_relink or bool(pending_append and objects_complete),
+                        appended_ir=(
+                            [shared_ir.module_path(item["ir_path"], metadata_path.parent)
+                             for item in pending_append]
+                            if pending_append and not objects_complete else None
+                        ),
+                    )
+                except subprocess.CalledProcessError:
+                    if not direct_relink:
+                        raise
+                    # A missing/corrupt object is detected by the linker's
+                    # full object hash validation. Repair via the existing
+                    # incremental emitter before trying the link again.
+                    print("run_game: direct relink failed; verifying and repairing objects",
+                          flush=True)
+                    build_linked_library(
+                        source_root, work, metadata_path, object_dir, library,
+                        args.emit_opt, pdb=args.pdb, emit_jobs=args.emit_jobs)
                 write_translation_cache(
                     cache_path, inputs, args.emit_opt,
                     metadata_path, library, ir_sources
@@ -1649,10 +1875,14 @@ def main(argv=None):
                 # links printed before this header. Live relinks follow it.
                 print("\n== Executing translated EE code "
                       "(live cache-miss resume) ==", flush=True)
+                execution_started = time.monotonic()
                 result = run_hot_expand(
                     hot_command, session, args.timeout_seconds,
                     compile_live_miss
                 )
+                execution_finished = time.monotonic()
+                print(f"EE native process wall: {execution_finished - execution_started:.3f}s",
+                      flush=True)
                 if overlay_count and result.returncode != 1:
                     # The runner has exited and unloaded every module. Fold
                     # the overlays into one full library exactly once; all of
@@ -1690,6 +1920,9 @@ def main(argv=None):
                     )
                     print(f"live cache-miss: published {expanded_count} "
                           "new guest module(s) to translation cache",
+                          flush=True)
+                    print(f"EE post-replay consolidation and cache publication: "
+                          f"{time.monotonic() - execution_finished:.3f}s",
                           flush=True)
                 if (last_library is not None or overlay_count) and result.returncode == 1:
                     print("run_game: not publishing failed live expansion; "
@@ -1826,6 +2059,9 @@ def main(argv=None):
     except (ValueError, OSError, subprocess.CalledProcessError) as error:
         print(f"run_game: {error}", file=sys.stderr)
         return 1
+    finally:
+        if lock is not None:
+            lock.__exit__(None, None, None)
 
 
 if __name__ == "__main__":

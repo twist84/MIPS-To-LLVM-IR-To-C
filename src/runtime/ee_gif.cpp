@@ -1,4 +1,6 @@
 #include "ee_gif.h"
+#include "ee_runtime_profile.h"
+#include "ee_graphics_batch.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -9,6 +11,38 @@ namespace ee
 {
 namespace
 {
+// A lease owns its vector throughout the sink callback, including nested
+// consumes. No parser copy shares live events. Retain at most 16 MiB per
+// scratch vector after a call; unusually large batches release storage.
+template <typename t_element>
+class c_gif_scratch_lease
+{
+public:
+    explicit c_gif_scratch_lease(std::vector<t_element>& scratch)
+        : m_scratch(scratch)
+    {
+        m_data.swap(m_scratch);
+    }
+    ~c_gif_scratch_lease()
+    {
+        constexpr size_t limit = 16u * 1024u * 1024u / sizeof(t_element);
+        m_data.clear();
+        if (m_data.capacity() <= limit &&
+            m_data.capacity() > m_scratch.capacity())
+        {
+            m_data.swap(m_scratch);
+        }
+    }
+    c_gif_scratch_lease(const c_gif_scratch_lease&) = delete;
+    c_gif_scratch_lease& operator=(const c_gif_scratch_lease&) = delete;
+
+    std::vector<t_element>& data() { return m_data; }
+
+private:
+    std::vector<t_element>& m_scratch;
+    std::vector<t_element> m_data;
+};
+
 void trace_rejection(const char* function, int line)
 {
     const char* dump_path = std::getenv("EE_REJECTED_PATH2_DUMP");
@@ -52,8 +86,20 @@ void c_ee_gif_path3::bind_event_sink(
 
 void c_ee_gif_path3::reset()
 {
+    const bool digest = m_counters.m_image_payload_digest_enabled;
     m_state = {};
     m_counters = {};
+    m_counters.m_image_payload_digest_enabled = digest;
+}
+
+bool c_ee_gif_path3::set_image_payload_digest(bool enabled)
+{
+    if (m_counters.m_accepted_batches != 0u)
+    {
+        return enabled == m_counters.m_image_payload_digest_enabled;
+    }
+    m_counters.m_image_payload_digest_enabled = enabled;
+    return true;
 }
 
 const s_ee_gif_path3_state& c_ee_gif_path3::state() const
@@ -68,13 +114,14 @@ const s_ee_gif_path_counters& c_ee_gif_path3::counters() const
 
 bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
 {
-    // DMA QWC is 16 bits; reject out-of-contract direct callers.
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gif_consume, qwc);
+    // A host GIF transaction may aggregate multiple 16-bit DMA tags.
     // Zero-length DMA has no GIF words to parse or forward.
     if (qwc == 0u)
     {
         return true;
     }
-    if (data == nullptr || m_sink == nullptr || qwc > 0xffffu)
+    if (data == nullptr || m_sink == nullptr || qwc > k_max_graphics_batch_qwc)
     {
         ++m_counters.m_rejected_batches;
         trace_rejection(__func__, __LINE__);
@@ -82,7 +129,11 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     }
 
     s_ee_gif_path3_state next = m_state;
-    std::vector<s_ee_gif_event> events;
+    uint64_t tags = 0u, primitives = 0u, packed = 0u, reglist = 0u;
+    uint64_t images = 0u, image_qwc = 0u;
+    static thread_local std::vector<s_ee_gif_event> event_scratch;
+    c_gif_scratch_lease<s_ee_gif_event> event_lease(event_scratch);
+    auto& events = event_lease.data();
     // One reglist quad can generate two events; the tag may additionally
     // synthesize a PRE/PRIM event. Do not permanently queue events.
     events.reserve(static_cast<size_t>(qwc) * 2u);
@@ -111,6 +162,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
             events.push_back(event(
                 e_ee_gif_event_type::tag, 0u, offset, 1u, low, high
             ));
+            ++tags;
             // PRE allows the GIF tag's PRIM field to select the GS
             // primitive before its PACKED registers are processed.
             if (next.m_flg == 0u && ((low >> 46u) & 1u) != 0u)
@@ -119,6 +171,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                     e_ee_gif_event_type::primitive, 0u, offset, 0u,
                     (low >> 47u) & 0x7ffu, 0u
                 ));
+                ++primitives;
             }
             next.m_active = next.m_nloop != 0u;
             ++i;
@@ -134,6 +187,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                 e_ee_gif_event_type::packed, reg, offset, 1u,
                 read_le64(at), read_le64(at + 8u)
             ));
+            ++packed;
             if (++next.m_reg == next.m_nreg)
             {
                 next.m_reg = 0u;
@@ -158,6 +212,7 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                     offset + half * 8u, 0u,
                     read_le64(at + half * 8u), 0u
                 ));
+                ++reglist;
                 if (++next.m_reg == next.m_nreg)
                 {
                     next.m_reg = 0u;
@@ -186,6 +241,8 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
         events.push_back(event(
             e_ee_gif_event_type::image, 0u, offset, run, 0u, 0u
         ));
+        ++images;
+        image_qwc += run;
         next.m_loop += run;
         i += run;
         if (next.m_loop == next.m_nloop)
@@ -205,35 +262,29 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
     m_state = next;
     ++m_counters.m_accepted_batches;
     m_counters.m_input_qwc += qwc;
-    for (const s_ee_gif_event& item : events)
+    // Commit structural provenance only after sink acceptance. Counting
+    // during parsing avoids a second traversal of millions of packed events.
+    m_counters.m_tags += tags;
+    m_counters.m_primitive_events += primitives;
+    m_counters.m_packed_events += packed;
+    m_counters.m_reglist_events += reglist;
+    const bool first_image = m_counters.m_image_events == 0u;
+    m_counters.m_image_events += images;
+    m_counters.m_image_qwc += image_qwc;
+
+    // Retain the exact accepted-payload digest order when requested.
+    if (images != 0u && m_counters.m_image_payload_digest_enabled)
     {
-        switch (item.m_type)
+        if (first_image)
         {
-        case e_ee_gif_event_type::tag:
-            ++m_counters.m_tags;
-            break;
-        case e_ee_gif_event_type::primitive:
-            ++m_counters.m_primitive_events;
-            break;
-        case e_ee_gif_event_type::packed:
-            ++m_counters.m_packed_events;
-            break;
-        case e_ee_gif_event_type::reglist:
-            ++m_counters.m_reglist_events;
-            break;
-        case e_ee_gif_event_type::image:
+            m_counters.m_image_payload_fnv1a64 = 0xcbf29ce484222325ull;
+        }
+        for (const s_ee_gif_event& item : events)
         {
-            // Count the actual, GS-accepted IMAGE/IMAGE2 source bytes.
-            // Do not count rejected or partially staged guest DMA input.
-            // This does not imply the bytes were sampled as textures,
-            // transformed into pixels, or selected by scanout.
-            if (m_counters.m_image_events == 0u)
+            if (item.m_type != e_ee_gif_event_type::image)
             {
-                m_counters.m_image_payload_fnv1a64 =
-                    0xcbf29ce484222325ull;
+                continue;
             }
-            ++m_counters.m_image_events;
-            m_counters.m_image_qwc += item.m_qwc;
             const size_t begin = static_cast<size_t>(item.m_byte_offset);
             const size_t end = begin + static_cast<size_t>(item.m_qwc) * 16u;
             for (size_t byte = begin; byte < end; ++byte)
@@ -241,13 +292,94 @@ bool c_ee_gif_path3::consume(const uint8_t* data, uint32_t qwc)
                 const uint8_t value = data[byte];
                 m_counters.m_image_nonzero_bytes += value != 0u ? 1u : 0u;
                 m_counters.m_image_payload_fnv1a64 ^= value;
-                m_counters.m_image_payload_fnv1a64 *=
-                    0x100000001b3ull;
+                m_counters.m_image_payload_fnv1a64 *= 0x100000001b3ull;
             }
-            break;
-        }
         }
     }
+    return true;
+}
+
+bool c_ee_gif_path3::consume_ordered(
+    c_ee_gif_path3& path1, c_ee_gif_path3& path2,
+    const s_ee_gif_segment* segments, size_t count)
+{
+    ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::gif_ordered, count);
+    if (&path1 == &path2 || path1.m_sink == nullptr ||
+        path1.m_sink != path2.m_sink || path1.m_sink_user != path2.m_sink_user ||
+        (count != 0u && segments == nullptr))
+    {
+        return false;
+    }
+    uint32_t total_qwc = 0u;
+    for (size_t i = 0u; i < count; ++i)
+    {
+        const auto& segment = segments[i];
+        if ((segment.m_path != 1u && segment.m_path != 2u) ||
+            segment.m_data == nullptr || segment.m_qwc == 0u ||
+            segment.m_qwc > k_max_graphics_batch_qwc - total_qwc)
+        {
+            return false;
+        }
+        total_qwc += segment.m_qwc;
+    }
+    if (total_qwc == 0u)
+    {
+        return true;
+    }
+
+    static thread_local std::vector<uint8_t> data_scratch;
+    static thread_local std::vector<s_ee_gif_event> event_scratch;
+    c_gif_scratch_lease<uint8_t> data_lease(data_scratch);
+    c_gif_scratch_lease<s_ee_gif_event> event_lease(event_scratch);
+    struct s_staged_events
+    {
+        std::vector<uint8_t>& m_data;
+        std::vector<s_ee_gif_event>& m_events;
+    } staged{data_lease.data(), event_lease.data()};
+    staged.m_data.reserve(static_cast<size_t>(total_qwc) * 16u);
+    const auto collect = [](void* user, const s_ee_gif_event* events,
+                            size_t event_count, const uint8_t* data, uint32_t qwc)
+    {
+        auto& batch = *static_cast<s_staged_events*>(user);
+        const uint32_t offset = static_cast<uint32_t>(batch.m_data.size());
+        batch.m_data.insert(batch.m_data.end(), data,
+            data + static_cast<size_t>(qwc) * 16u);
+        for (size_t i = 0u; i < event_count; ++i)
+        {
+            auto event = events[i];
+            event.m_byte_offset += offset;
+            batch.m_events.push_back(event);
+        }
+        return true;
+    };
+
+    auto next1 = path1;
+    auto next2 = path2;
+    next1.bind_event_sink(&staged, collect);
+    next2.bind_event_sink(&staged, collect);
+    for (size_t i = 0u; i < count; ++i)
+    {
+        const auto& segment = segments[i];
+        auto& next = segment.m_path == 1u ? next1 : next2;
+        const auto& other = segment.m_path == 1u ? next2 : next1;
+        // A partially received tag cannot be interleaved with a different
+        // path in this synchronous model. Real arbitration is a later step.
+        if (other.m_state.m_active || !next.consume(segment.m_data, segment.m_qwc))
+        {
+            return false;
+        }
+    }
+    if (!path1.m_sink(path1.m_sink_user, staged.m_events.data(),
+            staged.m_events.size(), staged.m_data.data(), total_qwc))
+    {
+        ++path1.m_counters.m_rejected_batches;
+        ++path2.m_counters.m_rejected_batches;
+        return false;
+    }
+    path1.m_state = next1.m_state;
+    path1.m_counters = next1.m_counters;
+    path2.m_state = next2.m_state;
+    path2.m_counters = next2.m_counters;
     return true;
 }
 

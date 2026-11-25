@@ -3,11 +3,14 @@ struct Blit {
     height: u32,
     current: u32,
     previous: u32,
-    blend: u32,
+    method: u32,
     out_width: u32,
     out_height: u32,
     nearest: u32,
     options: u32,
+    scale: u32,
+    parity: u32,
+    history: u32,
 }
 
 @group(0) @binding(0) var<storage, read> pixels: array<u32>;
@@ -27,10 +30,60 @@ fn vs(@builtin(vertex_index) i: u32) -> VertexOut {
     return o;
 }
 
-fn texel(base: u32, x: i32, y: i32) -> vec4<f32> {
+fn raw_texel(base: u32, x: i32, y: i32) -> vec4<f32> {
     let cx = u32(clamp(x, 0, i32(blit.width) - 1));
     let cy = u32(clamp(y, 0, i32(blit.height) - 1));
     return unpack4x8unorm(pixels[base + cy * blit.width + cx]);
+}
+
+// Reconstruct in native scanline space before applying presentation scaling.
+// At internal upscales, all subpixels in one guest scanline share parity.
+fn bob_texel(base: u32, x: i32, y: i32, parity: u32) -> vec4<f32> {
+    let stride = i32(max(blit.scale, 1u));
+    let cy = clamp(y, 0, i32(blit.height) - 1);
+    if ((u32(cy / stride) & 1u) == parity) {
+        return raw_texel(base, x, cy);
+    }
+    let above = cy - stride;
+    let below = cy + stride;
+    if (above < 0) {
+        return raw_texel(base, x, below);
+    }
+    if (below >= i32(blit.height)) {
+        return raw_texel(base, x, above);
+    }
+    return (raw_texel(base, x, above) + raw_texel(base, x, below)) * 0.5;
+}
+
+fn texel(base: u32, x: i32, y: i32) -> vec4<f32> {
+    let cy = clamp(y, 0, i32(blit.height) - 1);
+    let current = raw_texel(base, x, cy);
+    if (blit.method == 0u) {
+        return current;
+    }
+    if (blit.method == 5u) {
+        return (current + raw_texel(blit.previous, x, cy)) * 0.5;
+    }
+    let bob = bob_texel(base, x, cy, blit.parity);
+    if (blit.method == 2u || blit.history == 0u) {
+        return bob;
+    }
+    if (blit.method == 3u) {
+        return (bob + bob_texel(blit.previous, x, cy, blit.parity ^ 1u)) * 0.5;
+    }
+    let stride = max(blit.scale, 1u);
+    if ((u32(cy) / stride & 1u) == blit.parity) {
+        return current;
+    }
+    let old = raw_texel(blit.previous, x, cy);
+    if (blit.method == 1u) {
+        return old;
+    }
+    // Motion-adaptive approximation: weave stable areas, interpolate
+    // missing lines when the opposite field differs from the current bob.
+    let delta = abs(old.rgb - bob.rgb);
+    let motion = max(delta.r, max(delta.g, delta.b));
+    return mix(old, bob, smoothstep(0.04, 0.12, motion));
 }
 
 fn sample(base: u32, uv: vec2<f32>) -> vec4<f32> {
@@ -54,9 +107,7 @@ fn sample(base: u32, uv: vec2<f32>) -> vec4<f32> {
 }
 
 fn scene(uv: vec2<f32>) -> vec3<f32> {
-    var c = sample(blit.current, uv).rgb;
-    if (blit.blend != 0u) { c = (c + sample(blit.previous, uv).rgb) * 0.5; }
-    return c;
+    return sample(blit.current, uv).rgb;
 }
 
 fn luma(c: vec3<f32>) -> f32 { return dot(c, vec3<f32>(0.299, 0.587, 0.114)); }
