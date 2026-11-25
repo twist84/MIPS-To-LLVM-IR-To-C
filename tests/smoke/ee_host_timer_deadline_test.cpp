@@ -115,6 +115,60 @@ int main()
             return 1;
         }
     }
+    // Source-level bounded paths accept only nontrapping GPR ALU
+    // operations and a dispatcher exit with a safe mandatory delay slot.
+    {
+        const auto slots = [](const std::vector<uint32_t>& words,
+            uint32_t base = 0x1000u)
+        {
+            return ee::ee_horizon_alu_exit_slots(base,
+                [&](uint32_t pc, uint32_t* word)
+                {
+                    if (pc < base || (pc - base) / 4u >= words.size())
+                    {
+                        return false;
+                    }
+                    *word = words[(pc - base) / 4u];
+                    return true;
+                });
+        };
+        if (!check(slots({0x25080001u, 0x03e00008u, 0x00000000u}) == 3u &&
+                slots({0x0c04000cu, 0x24020007u}) == 2u &&
+                slots({0x0320f809u, 0x00000000u}) == 2u &&
+                slots({0x03e10008u, 0u}) == 0u &&
+                slots({0x03e00008u, 0x8c020000u}) == 0u &&
+                slots({0x8c020000u, 0x03e00008u, 0u}) == 0u &&
+                slots({0x40826000u, 0x03e00008u, 0u}) == 0u &&
+                slots({0x1000ffffu, 0u}) == 0u &&
+                slots({0x20020001u, 0x03e00008u, 0u}) == 0u &&
+                slots({0x03e00008u}) == 0u &&
+                slots({0x03e00008u, 0u}, 0u) == 0u &&
+                slots({0x03e00008u, 0u}, 0xfffffffcu) == 0u &&
+                slots(std::vector<uint32_t>(32u, 0u)) == 0u &&
+                ee::ee_horizon_bound_fits(10u, 14u, 3u) &&
+                !ee::ee_horizon_bound_fits(10u, 13u, 3u) &&
+                !ee::ee_horizon_bound_fits(10u, 9u, 3u) &&
+                !ee::ee_horizon_bound_fits(10u, UINT64_MAX, 3u) &&
+                !ee::ee_horizon_bound_fits(10u, 14u, 0u),
+                "bounded ALU paths and strict deadline"))
+        {
+            return 1;
+        }
+        std::vector<uint32_t> limit(32u, 0u);
+        limit[30] = 0x03e00008u;
+        if (!check(slots(limit) == 32u,
+                "maximum bounded ALU path includes delay slot"))
+        {
+            return 1;
+        }
+        limit[30] = 0u;
+        limit[31] = 0x03e00008u;
+        limit.push_back(0u);
+        if (!check(slots(limit) == 0u, "delay slot exceeds bounded path"))
+        {
+            return 1;
+        }
+    }
     // Each combined batch must be exactly the concatenation of legacy
     // turns and end strictly before the predicted autonomous event.
     {
