@@ -11,6 +11,7 @@
 #include "ee_ram_interpreter.h"
 #include "ee_hw_bus.h"
 #include "ee_host_timers.h"
+#include "ee_iop_clock.h"
 #include "ee_hot_expand_protocol.h"
 #include "ee_kernel_thread_status.h"
 #include "ee_irq_syscall_services.h"
@@ -3676,11 +3677,8 @@ int main(int argc, char** argv)
     // All IOP work runs against elapsed EE guest time, not only
     // when a guest RPC call is outstanding. Retain fractional clocks
     // and a backlog after bounded native-dispatch safepoints.
-    uint64_t iop_clock_last_ee_cycle = 0u;
-    uint64_t iop_clock_remainder = 0u;
-    uint64_t iop_clock_due = 0u;
+    ee::c_ee_iop_clock iop_clock;
     uint64_t iop_clock_turns = 0u;
-    bool iop_clock_active = false;
     bool guest_rpc_idle_diagnostic_reported = false;
     uint64_t next_iop_guest_rpc_snapshot = 50000u;
     ee::c_ee_dispatch_hotspots hotspots;
@@ -4349,43 +4347,22 @@ int main(int argc, char** argv)
         {
             const uint64_t ee_cycle =
                 runtime.m_ee_cycle_scheduler.current_cycle();
-            if (!iop_clock_active)
+            const auto clock_result = iop_clock.observe(ee_cycle);
+            if (clock_result != ee::c_ee_iop_clock::e_result::accepted)
             {
-                iop_clock_active = true;
-                iop_clock_last_ee_cycle = ee_cycle;
-            }
-            else if (ee_cycle < iop_clock_last_ee_cycle)
-            {
-                std::fprintf(stderr,
-                    "IOP clock refused nonmonotonic EE timestamp\n");
+                std::fprintf(stderr, "%s\n",
+                    clock_result == ee::c_ee_iop_clock::e_result::nonmonotonic
+                        ? "IOP clock refused nonmonotonic EE timestamp"
+                        : "IOP clock refused accumulated cycle overflow");
                 return 1;
-            }
-            else
-            {
-                const uint64_t delta =
-                    ee_cycle - iop_clock_last_ee_cycle;
-                iop_clock_last_ee_cycle = ee_cycle;
-                const uint64_t whole = delta / 8u;
-                const uint64_t fraction =
-                    (delta % 8u) + iop_clock_remainder;
-                if (iop_clock_due >
-                    std::numeric_limits<uint64_t>::max() -
-                        whole - fraction / 8u)
-                {
-                    std::fprintf(stderr,
-                        "IOP clock refused accumulated cycle overflow\n");
-                    return 1;
-                }
-                iop_clock_due += whole + fraction / 8u;
-                iop_clock_remainder = fraction % 8u;
             }
             uint32_t turns = 0u;
             // Never drop guest cycles to make a host checkpoint fast.
             // A large translated function may leave a bounded backlog.
-            while (iop_clock_due != 0u && turns < 64u)
+            while (iop_clock.due() != 0u && turns < 64u)
             {
                 const uint32_t cycles = static_cast<uint32_t>(
-                    std::min<uint64_t>(iop_clock_due, 256u));
+                    std::min<uint64_t>(iop_clock.due(), 256u));
                 uint32_t prior_smflag = 0u;
                 const bool trace_smflag = trace &&
                     hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
@@ -4402,7 +4379,11 @@ int main(int argc, char** argv)
                 {
                     (void)iop_rpc->pump();
                 }
-                iop_clock_due -= cycles;
+                if (!iop_clock.consume(cycles))
+                {
+                    std::fprintf(stderr, "IOP clock refused invalid cycle consumption\n");
+                    return 1;
+                }
                 ++turns;
                 ++iop_clock_turns;
                 if (progressed.m_stop !=
