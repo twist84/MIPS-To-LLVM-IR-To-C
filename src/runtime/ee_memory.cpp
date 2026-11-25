@@ -622,8 +622,8 @@ void ee_mem_read128_pair(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out
     *out = {lo, hi};
 }
 
-void ee_mem_write128_pair(s_ee_runtime* runtime, uint32_t address,
-                          uint64_t lo, uint64_t hi)
+static bool try_write128_ram(s_ee_runtime* runtime, uint32_t address,
+                             uint64_t lo, uint64_t hi)
 {
     if (uint8_t* bytes = fast_quadword_span(runtime, address))
     {
@@ -635,11 +635,28 @@ void ee_mem_write128_pair(s_ee_runtime* runtime, uint32_t address,
         write_ram(bytes, lo);
         write_ram(bytes + 8u, hi);
 #endif
-        return;
+        return true;
     }
+    return false;
+}
 
-    ee_mem_write64(runtime, address, lo);
-    ee_mem_write64(runtime, address + 8u, hi);
+void ee_mem_write128_pair(s_ee_runtime* runtime, uint32_t address,
+                          uint64_t lo, uint64_t hi)
+{
+    if (!try_write128_ram(runtime, address, lo, hi))
+    {
+        ee_mem_write64(runtime, address, lo);
+        ee_mem_write64(runtime, address + 8u, hi);
+    }
+}
+
+uint32_t ee_mem_try_write128_ram(s_ee_runtime* runtime, uint32_t address,
+                                uint64_t lo, uint64_t hi)
+{
+    // Even a currently exhausted trace budget can retain ring history.
+    // Keep all traced stores on the original per-lane path.
+    return runtime != nullptr && !runtime->m_guest_store_trace_enabled &&
+        try_write128_ram(runtime, address, lo, hi) ? 1u : 0u;
 }
 
 void ee_trace_guest_store(

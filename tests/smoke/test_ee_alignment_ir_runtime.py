@@ -20,6 +20,9 @@ MEMORY = {}
 READS = []
 WRITES = []
 TRACES = []
+PAIRS = []
+EVENTS = []
+ALLOW_FUSED_STORE = False
 
 
 def read_word(address, size):
@@ -30,6 +33,7 @@ def read_word(address, size):
 
 def write_word(address, size, value):
     WRITES.append((size, int(address), int(value)))
+    EVENTS.append(("write", int(address)))
     for i in range(size):
         MEMORY[int(address) + i] = (int(value) >> (8 * i)) & 0xFF
 
@@ -64,6 +68,26 @@ def write64(_rt, addr, value):
     write_word(addr, 8, value)
 
 
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(U128))
+def read_pair(rt, addr, out):
+    PAIRS.append(("read", int(addr)))
+    lo = read64(rt, addr)
+    hi = read64(rt, addr + 8)
+    out[0] = U128(lo, hi)
+
+
+@ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                  ctypes.c_uint64, ctypes.c_uint64)
+def try_write_pair(_rt, addr, lo, hi):
+    PAIRS.append(("try_write", int(addr)))
+    if not ALLOW_FUSED_STORE:
+        return 0
+    for offset, value in ((0, lo), (8, hi)):
+        for i in range(8):
+            MEMORY[int(addr) + offset + i] = (int(value) >> (8 * i)) & 0xFF
+    return 1
+
+
 @ctypes.CFUNCTYPE(
     None, ctypes.c_void_p,
     ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32,
@@ -74,6 +98,7 @@ def write64(_rt, addr, value):
 def trace_store(_rt, pc, opcode, address, aligned, size,
                 value, slot, old0, old1, old2, old3):
     TRACES.append((int(address), int(aligned), int(size), int(slot)))
+    EVENTS.append(("trace", int(aligned)))
 
 
 def install_symbols(path):
@@ -85,6 +110,8 @@ def install_symbols(path):
         ("ee_mem_write16", write16),
         ("ee_mem_write32", write32),
         ("ee_mem_write64", write64),
+        ("ee_mem_read128_pair", read_pair),
+        ("ee_mem_try_write128_ram", try_write_pair),
     ):
         llvm.add_symbol(name, ctypes.cast(callback, ctypes.c_void_p).value)
     register_trace_symbols(trace_store)
@@ -96,7 +123,12 @@ def install_symbols(path):
     return library
 
 
-def execute(fixture, directory, target, mode, address):
+def execute(fixture, directory, target, mode, address, trace_enabled=True,
+            fused_store=False):
+    global ALLOW_FUSED_STORE
+    ALLOW_FUSED_STORE = fused_store and not trace_enabled
+    PAIRS.clear()
+    EVENTS.clear()
     MEMORY.clear()
     READS.clear()
     WRITES.clear()
@@ -111,7 +143,7 @@ def execute(fixture, directory, target, mode, address):
     require(offset + 8 < 0x4000, "JIT counter outside runtime backing")
     cpu_backing, cpu = aligned_instance(EEState)
     rt_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
-    set_store_trace_enabled(rt_backing, module, True)
+    set_store_trace_enabled(rt_backing, module, trace_enabled)
     UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
@@ -147,6 +179,7 @@ def main():
         require(result == EE_EXIT_DISPATCH and
                 READS == [(8, 0x40), (8, 0x48)] and not WRITES,
                 "LQ must read two halves at 0x40/0x48")
+        require(PAIRS == [("read", 0x40)], "LQ did not use paired helper")
         require(cpu.gpr[8].lo == expected_lo and
                 cpu.gpr[8].hi == expected_hi,
                 "LQ must replace the complete 128-bit GPR")
@@ -168,6 +201,33 @@ def main():
                     ((0xfedcba9876543210 >> (8 * i)) & 0xFF)
                     for i in range(8)),
                 "SQ high half corrupted")
+
+        require(EVENTS == [("trace", 0x40), ("write", 0x40),
+                           ("trace", 0x48), ("write", 0x48)],
+                "SQ trace/write ordering")
+        require(PAIRS == [("try_write", 0x40)], "SQ paired helper not attempted")
+
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_sq", 0x43,
+            trace_enabled=False, fused_store=True)
+        require(result == EE_EXIT_DISPATCH and
+                PAIRS == [("try_write", 0x40)] and not WRITES and not TRACES,
+                "SQ fused path must not repeat scalar writes")
+        require(bytes(MEMORY[i] for i in range(0x40, 0x50)) ==
+                bytes.fromhex("efcdab89674523011032547698badcfe"),
+                "SQ fused path corrupted lane data")
+
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_lq_zero", 0x43)
+        require(result == EE_EXIT_DISPATCH and
+                PAIRS == [("read", 0x40)] and READS == [(8, 0x40), (8, 0x48)] and
+                cpu.gpr[0].lo == 0 and cpu.gpr[0].hi == 0,
+                "LQ GPR0 must still read both lanes and discard the result")
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_sq_zero", 0x43)
+        require(result == EE_EXIT_DISPATCH and
+                WRITES == [(8, 0x40, 0), (8, 0x48, 0)],
+                "SQ GPR0 must write both zero halves")
 
         # Natural alignment is mandatory for scalar and COP1 transfers.
         for mode, width, excode in (

@@ -156,6 +156,31 @@ int main()
         }
     }
 
+    // The lowering's speculative store must not modify traced or non-RAM
+    // memory before its per-lane diagnostic fallback.
+    if (ee::ee_mem_try_write128_ram(&runtime, 0x800001a0u, fast_quad.m_lo, fast_quad.m_hi) != 1u ||
+        memory.read64(0x1a0u) != fast_quad.m_lo ||
+        memory.read64(0x1a8u) != fast_quad.m_hi)
+    {
+        return fail("untraced RAM-only store did not fuse");
+    }
+    runtime.m_guest_store_trace_enabled = true;
+    if (ee::ee_mem_try_write128_ram(&runtime, 0x1a0u, 0u, 0u) != 0u ||
+        memory.read64(0x1a0u) != fast_quad.m_lo ||
+        memory.read64(0x1a8u) != fast_quad.m_hi)
+    {
+        return fail("traced speculative store mutated RAM");
+    }
+    runtime.m_guest_store_trace_enabled = false;
+    if (ee::ee_mem_try_write128_ram(&runtime, k_vif_fifo, 0u, 0u) != 0u ||
+        ee::ee_mem_try_write128_ram(&runtime, 0x70000010u, 0u, 0u) != 0u ||
+        ee::ee_mem_try_write128_ram(&runtime, 0x11000000u, 0u, 0u) != 0u ||
+        ee::ee_mem_try_write128_ram(&runtime, 0xff8u, 0u, 0u) != 0u ||
+        io.m_writes != fast_writes)
+    {
+        return fail("speculative store touched non-eligible address");
+    }
+
     // A partial allocation must retain the successful first scalar lane.
     // An aligned quadword can be partially backed by a non-16-byte allocation.
     ee::ee_memory partial_memory(0x108u);

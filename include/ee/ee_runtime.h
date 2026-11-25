@@ -448,6 +448,10 @@ void     ee_mem_write128(s_ee_runtime* rt, uint32_t addr, const s_ee_u128* v);
 void ee_mem_read128_pair(s_ee_runtime* rt, uint32_t addr, s_ee_u128* out);
 void ee_mem_write128_pair(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
 
+// Try one untraced RAM-only store. Zero means no bytes were written and
+// the caller must execute the original per-lane trace and scalar stores.
+uint32_t ee_mem_try_write128_ram(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
+
 // Diagnostic only: emitted immediately BEFORE a guest memory store.
 // The SSA operands are sampled at the instruction, including in delay slots.
 // 'affected_address' is the aligned containing word/doubleword for partial

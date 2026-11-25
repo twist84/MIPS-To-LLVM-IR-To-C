@@ -24,6 +24,9 @@ MEMORY = {}
 READS = []
 WRITES = []
 TRACES = []
+PAIRS = []
+EVENTS = []
+ALLOW_FUSED_STORE = False
 
 READ64 = ctypes.CFUNCTYPE(
     ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32
@@ -49,13 +52,34 @@ def memory_read64(_rt, addr):
 @WRITE64
 def memory_write64(_rt, addr, value):
     WRITES.append((int(addr), int(value)))
+    EVENTS.append(("write", int(addr)))
     MEMORY[int(addr)] = int(value)
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(U128))
+def memory_read_pair(rt, addr, out):
+    PAIRS.append(("read", int(addr)))
+    lo = memory_read64(rt, addr)
+    hi = memory_read64(rt, addr + 8)
+    out[0] = U128(lo, hi)
+
+
+@ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                  ctypes.c_uint64, ctypes.c_uint64)
+def try_write_pair(_rt, addr, lo, hi):
+    PAIRS.append(("try_write", int(addr)))
+    if not ALLOW_FUSED_STORE:
+        return 0
+    MEMORY[int(addr)] = int(lo)
+    MEMORY[int(addr) + 8] = int(hi)
+    return 1
 
 
 @TRACE_STORE
 def trace_guest_store(_rt, pc, word, address, aligned, size,
                       value, slot, old0, old1, old2, old3):
     TRACES.append((int(pc), int(address), int(size), int(slot)))
+    EVENTS.append(("trace", int(aligned)))
 
 
 def register_callbacks(library_path):
@@ -73,11 +97,20 @@ def register_callbacks(library_path):
         "ee_mem_write64",
         ctypes.cast(memory_write64, ctypes.c_void_p).value
     )
+    llvm.add_symbol("ee_mem_read128_pair",
+                    ctypes.cast(memory_read_pair, ctypes.c_void_p).value)
+    llvm.add_symbol("ee_mem_try_write128_ram",
+                    ctypes.cast(try_write_pair, ctypes.c_void_p).value)
     register_trace_symbols(trace_guest_store)
     return library
 
 
-def execute(fixture, directory, target, mode, address, trace_enabled=True):
+def execute(fixture, directory, target, mode, address, trace_enabled=True,
+            fused_store=False):
+    global ALLOW_FUSED_STORE
+    ALLOW_FUSED_STORE = fused_store and not trace_enabled
+    PAIRS.clear()
+    EVENTS.clear()
     MEMORY.clear()
     READS.clear()
     WRITES.clear()
@@ -129,7 +162,8 @@ def main():
         require(cpu.vu0[6].lo == 0x0123456789abcdef and
                 cpu.vu0[6].hi == 0xfedcba9876543210,
                 "LQC2 must read full 128-bit vector")
-        require(READS == [0x100, 0x108], "LQC2 read order")
+        require(READS == [0x100, 0x108] and PAIRS == [("read", 0x100)],
+                "LQC2 paired read order")
 
         result, cpu = execute(
             fixture, directory, target, "lqc2_vf0", 0x100
@@ -151,6 +185,10 @@ def main():
             (0x108, 0x7777777766666666)
         ], "SQC2 preserves 128-bit vector and order")
         require(len(TRACES) == 2, "SQC2 retains trace instrumentation")
+        require(EVENTS == [("trace", 0x100), ("write", 0x100),
+                           ("trace", 0x108), ("write", 0x108)],
+                "SQC2 trace/write ordering")
+        require(PAIRS == [("try_write", 0x100)], "SQC2 did not attempt paired store")
         result, cpu = execute(
             fixture, directory, target, "sqc2_vf6", 0x100, trace_enabled=False
         )
@@ -158,6 +196,16 @@ def main():
             (0x100, 0x9999999988888888),
             (0x108, 0x7777777766666666)
         ] and not TRACES, "disabled SQC2 trace must preserve both writes")
+
+        result, cpu = execute(
+            fixture, directory, target, "sqc2_vf6", 0x100,
+            trace_enabled=False, fused_store=True
+        )
+        require(result == EE_EXIT_DISPATCH and
+                PAIRS == [("try_write", 0x100)] and not WRITES and not TRACES and
+                MEMORY[0x100] == 0x9999999988888888 and
+                MEMORY[0x108] == 0x7777777766666666,
+                "SQC2 fused path must preserve vector and not repeat stores")
 
         result, cpu = execute(
             fixture, directory, target, "sqc2_vf0", 0x100
@@ -199,7 +247,7 @@ def main():
                     f"{mode}: EXL must be set")
             require(cpu.pad == fault_pc,
                     f"{mode}: diagnostic PC must point to faulting transfer")
-            require(READS == [] and WRITES == [] and TRACES == [],
+            require(READS == [] and WRITES == [] and TRACES == [] and not PAIRS,
                     f"{mode}: alignment fault touched memory")
             require(cpu.vu0[6].lo == 0x9999999988888888 and
                     cpu.vu0[6].hi == 0x7777777766666666,

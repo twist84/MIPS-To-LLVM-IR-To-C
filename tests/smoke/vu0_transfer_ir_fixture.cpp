@@ -69,13 +69,18 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
             {"lwc1", 0x31u}, {"ld", 0x37u},
             {"swc1", 0x39u}, {"sd", 0x3fu}
         };
+        const bool zero = operation == "lq_zero" || operation == "sq_zero";
+        if (zero)
+        {
+            operation = operation.substr(0u, 2u);
+        }
         const auto found = k_load_store_opcodes.find(operation);
         if (found == k_load_store_opcodes.end())
         {
             return false;
         }
         const uint32_t transfer = (found->second << 26u) |
-                                  (9u << 21u) | (8u << 16u);
+                                  (9u << 21u) | ((zero ? 0u : 8u) << 16u);
         if (delay)
         {
             words = {make_beq(0u, 0u, 1), transfer, make_jr(31u), 0u};

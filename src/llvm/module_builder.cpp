@@ -482,6 +482,36 @@ void module_builder::emit_guest_store_trace(
              sp + ", i64 " + fp + ", i64 " + ra + ")\n";
 }
 
+void module_builder::emit_quadword_read(const std::string& address,
+                                        const std::string& lo, const std::string& hi)
+{
+    // One fixed entry-block slot is shared by all quadword loads. Do not
+    // allocate in guest loops or write directly into a guest register before
+    // both ordered fallback reads have completed.
+    const std::string high_ptr = newtemp();
+    m_out += "  call void @ee_mem_read128_pair(ptr %rt, i32 " + address +
+             ", ptr %quadword_read_slot)\n";
+    m_out += "  " + lo + " = load i64, ptr %quadword_read_slot, align 16\n";
+    m_out += "  " + high_ptr + " = getelementptr i8, ptr %quadword_read_slot, i64 8\n";
+    m_out += "  " + hi + " = load i64, ptr " + high_ptr + ", align 8\n";
+}
+
+void module_builder::emit_quadword_store(const ee::s_ee_instruction& ins,
+                                         const std::string& effective,
+                                         const std::string& affected,
+                                         const std::string& lo, const std::string& hi)
+{
+    const std::string base = src_lo(ins.rs);
+    const std::string sp = src_lo(29);
+    const std::string fp = src_lo(30);
+    const std::string ra = src_lo(31);
+    m_out += "  call void @ee_store_quadword(ptr %rt, i32 " +
+             std::to_string(ins.pc) + ", i32 " + std::to_string(ins.opcode_word) +
+             ", i32 " + effective + ", i32 " + affected +
+             ", i64 " + lo + ", i64 " + hi + ", i64 " + base +
+             ", i64 " + sp + ", i64 " + fp + ", i64 " + ra + ")\n";
+}
+
 void module_builder::emit_guest_v0_write(
     const std::string& old_value, const std::string& new_value
 )
@@ -1299,15 +1329,12 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         std::string sum = newtemp();
         std::string raw_addr = newtemp();
         std::string addr = newtemp();
-        std::string addr8 = newtemp();
         std::string vlo = newtemp();
         std::string vhi = newtemp();
         m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
         m_out += "  " + raw_addr + " = trunc i64 " + sum + " to i32\n";
         m_out += "  " + addr + " = and i32 " + raw_addr + ", -16\n";
-        m_out += "  " + vlo + " = call i64 @ee_mem_read64(ptr %rt, i32 " + addr + ")\n";
-        m_out += "  " + addr8 + " = add i32 " + addr + ", 8\n";
-        m_out += "  " + vhi + " = call i64 @ee_mem_read64(ptr %rt, i32 " + addr8 + ")\n";
+        emit_quadword_read(addr, vlo, vhi);
         set_gpr_temp(ins.rt, vlo, vhi);
         break;
     }
@@ -1319,20 +1346,13 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
         std::string sum = newtemp();
         std::string raw_addr = newtemp();
-        std::string raw_addr8 = newtemp();
         std::string addr = newtemp();
-        std::string addr8 = newtemp();
         m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
         m_out += "  " + raw_addr + " = trunc i64 " + sum + " to i32\n";
         m_out += "  " + addr + " = and i32 " + raw_addr + ", -16\n";
-        emit_guest_store_trace(ins, raw_addr, addr, 8u, src_lo(ins.rt), 0u);
-        m_out += "  call void @ee_mem_write64(ptr %rt, i32 " + addr + ", i64 " +
-                 src_lo(ins.rt) + ")\n";
-        m_out += "  " + addr8 + " = add i32 " + addr + ", 8\n";
-        m_out += "  " + raw_addr8 + " = add i32 " + raw_addr + ", 8\n";
-        emit_guest_store_trace(ins, raw_addr8, addr8, 8u, src_hi(ins.rt), 1u);
-        m_out += "  call void @ee_mem_write64(ptr %rt, i32 " + addr8 + ", i64 " +
-                 src_hi(ins.rt) + ")\n";
+        const std::string lo = src_lo(ins.rt);
+        const std::string hi = src_hi(ins.rt);
+        emit_quadword_store(ins, raw_addr, addr, lo, hi);
         break;
     }
     case ee::e_ee_opcode::OP_LWL:
@@ -1393,15 +1413,12 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
         std::string sum = newtemp();
         std::string addr = newtemp();
-        std::string addr8 = newtemp();
         std::string vlo = newtemp();
         std::string vhi = newtemp();
         m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
         m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
         guard_memory_alignment(addr, 16u, 4u); // EX_AdEL
-        m_out += "  " + addr8 + " = add i32 " + addr + ", 8\n";
-        m_out += "  " + vlo + " = call i64 @ee_mem_read64(ptr %rt, i32 " + addr + ")\n";
-        m_out += "  " + vhi + " = call i64 @ee_mem_read64(ptr %rt, i32 " + addr8 + ")\n";
+        emit_quadword_read(addr, vlo, vhi);
         // VF00 is hardwired to (0,0,0,1). The access may still trap
         // or read mapped memory, but it may not mutate the VF0 slot.
         if (ins.rt != 0u)
@@ -1417,13 +1434,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
         std::string sum = newtemp();
         std::string addr = newtemp();
-        std::string addr8 = newtemp();
         std::string vlo = newtemp();
         std::string vhi = newtemp();
         m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
         m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
         guard_memory_alignment(addr, 16u, 5u); // EX_AdES
-        m_out += "  " + addr8 + " = add i32 " + addr + ", 8\n";
         // SQC2 VF00 always stores (0,0,0,1), even if the host backing
         // VF0 bytes are stale. Only VF1..31 are backed by storage.
         if (ins.rt == 0u)
@@ -1436,10 +1451,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             m_out += "  " + vlo + " = load i64, ptr " + vu0_lo_ptr(ins.rt) + "\n";
             m_out += "  " + vhi + " = load i64, ptr " + vu0_hi_ptr(ins.rt) + "\n";
         }
-        emit_guest_store_trace(ins, addr, addr, 8u, vlo, 0u);
-        m_out += "  call void @ee_mem_write64(ptr %rt, i32 " + addr + ", i64 " + vlo + ")\n";
-        emit_guest_store_trace(ins, addr8, addr8, 8u, vhi, 1u);
-        m_out += "  call void @ee_mem_write64(ptr %rt, i32 " + addr8 + ", i64 " + vhi + ")\n";
+        emit_quadword_store(ins, addr, addr, vlo, vhi);
         break;
     }
     case ee::e_ee_opcode::OP_CACHE:
@@ -3344,12 +3356,46 @@ void module_builder::begin_function(const char* func_name)
     m_out += func_name;
     m_out += "(ptr %cpu, ptr %rt) {\n";
     m_out += "entry:\n";
+    m_quadword_entry_offset = m_out.size();
 }
 
 void module_builder::end_function()
 {
     // Callers ensure every path already has a terminator.
     m_out += "}\n";
+
+    // Emit these only in modules that actually use them. Unrelated IR
+    // retains its existing text/hash and native cache identity.
+    if (m_out.find("call void @ee_mem_read128_pair(", m_quadword_entry_offset) != std::string::npos)
+    {
+        m_out.insert(m_quadword_entry_offset,
+                     "  %quadword_read_slot = alloca { i64, i64 }, align 16\n");
+        m_out += "\ndeclare void @ee_mem_read128_pair(ptr, i32, ptr)\n";
+    }
+    if (m_out.find("call void @ee_store_quadword(", m_quadword_entry_offset) != std::string::npos)
+    {
+        // A failed RAM probe has no side effects. Preserve trace/write
+        // interleaving, including rechecking the trace flag after MMIO.
+        m_out += R"IR(
+declare i32 @ee_mem_try_write128_ram(ptr, i32, i64, i64)
+define internal void @ee_store_quadword(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i64 %lo, i64 %hi, i64 %base, i64 %sp, i64 %fp, i64 %ra) alwaysinline {
+entry:
+  %fused = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
+  %ok = icmp ne i32 %fused, 0
+  br i1 %ok, label %done, label %fallback
+fallback:
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 8, i64 %lo, i32 0, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  call void @ee_mem_write64(ptr %rt, i32 %affected, i64 %lo)
+  %effective8 = add i32 %effective, 8
+  %affected8 = add i32 %affected, 8
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective8, i32 %affected8, i32 8, i64 %hi, i32 1, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  call void @ee_mem_write64(ptr %rt, i32 %affected8, i64 %hi)
+  br label %done
+done:
+  ret void
+}
+)IR";
+    }
 }
 void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insns,
                                    uint32_t entry_pc, const char* func_name)

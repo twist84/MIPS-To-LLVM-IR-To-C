@@ -63,6 +63,13 @@ private:
                                 const std::string& affected_address,
                                 uint32_t width, const std::string& source_value,
                                 uint32_t source_lane);
+    void emit_quadword_read(const std::string& address,
+                            const std::string& lo, const std::string& hi);
+    void emit_quadword_store(const ee::s_ee_instruction& ins,
+                             const std::string& effective,
+                             const std::string& affected,
+                             const std::string& lo, const std::string& hi);
+    std::string::size_type m_quadword_entry_offset = 0;
     void emit_guest_v0_write(const std::string& old_value,
                              const std::string& new_value);
     void begin_function(const char* func_name);
