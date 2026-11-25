@@ -9,7 +9,7 @@
 namespace ee
 {
 // ABI changes invalidate native VU1 libraries, never the EE IR cache.
-inline constexpr uint32_t k_vu1_aot_abi = 17u; // Rebuild captured libraries for sparse delayed VI snapshots.
+inline constexpr uint32_t k_vu1_aot_abi = 18u; // Rebuild captured libraries for branch-operand VI snapshots.
 using t_vu1_aot_kick = uint32_t (*)(void*, uint32_t);
 using t_vu1_aot_efu = uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,

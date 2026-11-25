@@ -274,9 +274,10 @@ public:
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
     void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
-        bool flags, bool q, bool p)
+        bool flags, bool q, bool p, uint32_t branch_vi_mask)
     {
         m_dynamic = true;
+        m_branch_vi_mask = branch_vi_mask;
         m_flag_pipeline = flags;
         m_q_pipeline = q;
         m_p_pipeline = p;
@@ -301,17 +302,20 @@ public:
         line("%step_count = alloca i32, align 4");
         line("%cycle = alloca i32, align 4");
         line("%ending = alloca i1, align 1");
-        line("%previous_vi_mask = alloca i32, align 4");
-        line("%previous_vi = alloca [16 x i16], align 2");
+        if (m_branch_vi_mask != 0u)
+        {
+            line("%previous_vi_mask = alloca i32, align 4");
+            line("%previous_vi = alloca [16 x i16], align 2");
+            line("store [16 x i16] zeroinitializer, ptr %previous_vi, align 2");
+            line("store i32 0, ptr %previous_vi_mask, align 4");
+        }
         line("%ready = alloca [144 x i32], align 4");
         line("store [144 x i32] zeroinitializer, ptr %ready, align 4");
-        line("store [16 x i16] zeroinitializer, ptr %previous_vi, align 2");
         line("store i32 " + std::to_string(start) + ", ptr %pc, align 4");
         line("store i32 " + std::to_string((start + 8u) & 0x3fffu) + ", ptr %npc, align 4");
         line("store i32 0, ptr %step_count, align 4");
         line("store i32 16, ptr %cycle, align 4");
         line("store i1 false, ptr %ending, align 1");
-        line("store i32 0, ptr %previous_vi_mask, align 4");
         line("br label %dispatch");
         m_ir += "dispatch:\n";
         line("%old_steps = load i32, ptr %step_count, align 4");
@@ -324,7 +328,10 @@ public:
         line("%current_pc = load i32, ptr %pc, align 4");
         line("%npc_now = load i32, ptr %npc, align 4");
         line("%ending_now = load i1, ptr %ending, align 1");
-        line("%previous_vi_mask_now = load i32, ptr %previous_vi_mask, align 4");
+        if (m_branch_vi_mask != 0u)
+        {
+            line("%previous_vi_mask_now = load i32, ptr %previous_vi_mask, align 4");
+        }
         line("%sequential_raw = add i32 %npc_now, 8");
         line("%sequential = and i32 %sequential_raw, 16383");
         line("switch i32 %current_pc, label %fail [");
@@ -392,8 +399,11 @@ public:
                     ready_pointer(128u + use.m_vi_load) + ", align 4");
             }
         }
-        line("store i32 " + std::to_string(m_delay_vi_mask) +
-            ", ptr %previous_vi_mask, align 4");
+        if (m_branch_vi_mask != 0u)
+        {
+            line("store i32 " + std::to_string(m_delay_vi_mask) +
+                ", ptr %previous_vi_mask, align 4");
+        }
         line("store i32 %npc_now, ptr %pc, align 4");
         line("store i32 " + m_next_target + ", ptr %npc, align 4");
         line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
@@ -1495,7 +1505,8 @@ private:
         {
             const auto address = pointer(reg_index);
             const uint32_t bit = 1u << reg_index;
-            if (m_dynamic && m_delay_vi_writes && (m_delay_vi_mask & bit) == 0u)
+            if (m_dynamic && m_delay_vi_writes &&
+                (m_branch_vi_mask & bit) != 0u && (m_delay_vi_mask & bit) == 0u)
             {
                 // Capture the pre-pair value once, even when ILW writes
                 // several selected lanes to the same integer register.
@@ -1535,6 +1546,7 @@ private:
     bool m_dynamic = false;
     bool m_delay_vi_writes = false;
     uint32_t m_delay_vi_mask = 0u;
+    uint32_t m_branch_vi_mask = 0u;
     bool m_flag_pipeline = false;
     bool m_q_pipeline = false;
     bool m_p_pipeline = false;
@@ -1618,6 +1630,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     bool has_q = false;
     bool has_kick = false;
     bool has_p = false;
+    uint32_t branch_vi_mask = 0u;
     for (size_t index = 0u; index < queue.size(); ++index)
     {
         // Avoid pathological branch-in-delay graphs at lift time.
@@ -1631,6 +1644,21 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         const uint32_t hi = read_word(code.data() + pc + 4u);
         const bool branch = is_branch(lo, hi);
         has_branch |= branch;
+        // Include every emitted conditional branch, even an E-delay
+        // pair. Indirect transfers can only target emitted switch cases.
+        if (branch)
+        {
+            const uint32_t major = lo >> 25u;
+            if (major == 0x28u || major == 0x29u ||
+                (major >= 0x2cu && major <= 0x2fu))
+            {
+                branch_vi_mask |= 1u << ((lo >> 11u) & 15u);
+                if (major == 0x28u || major == 0x29u)
+                {
+                    branch_vi_mask |= 1u << ((lo >> 16u) & 15u);
+                }
+            }
+        }
         has_flags |= is_flag_pair(lo, hi);
         has_q |= is_q_pair(lo, hi);
         has_kick |= is_kick_pair(lo, hi);
@@ -1670,7 +1698,9 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         return {};
     }
     c_straight_line_emitter emitter;
-    emitter.begin_dynamic(start, reached, has_flags, has_q, has_p);
+    // VI0 is constant, and JR/JALR consume live VI values.
+    emitter.begin_dynamic(start, reached, has_flags, has_q, has_p,
+        branch_vi_mask & ~1u);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))

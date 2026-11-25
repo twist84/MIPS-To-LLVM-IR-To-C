@@ -442,7 +442,15 @@ int main(int argc, char** argv)
     }
     if (branches && (program.m_ir.find("%previous_vi_mask") == std::string::npos ||
         program.m_ir.find("load <16 x i16>") != std::string::npos ||
-        program.m_ir.find("store <16 x i16>") != std::string::npos))
+        program.m_ir.find("store <16 x i16>") != std::string::npos ||
+        program.m_ir.find("getelementptr i16, ptr %previous_vi, i32 15") != std::string::npos ||
+        program.m_ir.find("getelementptr i16, ptr %previous_vi, i32 13") == std::string::npos))
+    {
+        return 1;
+    }
+    // The Q/flag pipeline can require dynamic IR without consuming
+    // delayed conditional VI operands. It should have no snapshot state.
+    if (q_case && program.m_ir.find("%previous_vi") != std::string::npos)
     {
         return 1;
     }
