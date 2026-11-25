@@ -206,6 +206,22 @@ def main():
     run_dir.mkdir(parents=True)
     revision = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT,
                               capture_output=True, text=True, check=True).stdout.strip()
+    # Source HEAD alone does not prove that the runner was rebuilt.
+    # Reuse the configured CMake build, but rebuild both native tools
+    # before recording results. This does not touch retail caches.
+    build_command = ["cmake", "--build", str(args.build_dir), "--config", args.config,
+                     "--target", "ee_recomp", "ee_game_runner"]
+    with (run_dir / "native-build.log").open("wb") as log:
+        build = subprocess.run(build_command, cwd=ROOT, stdout=log,
+                               stderr=subprocess.STDOUT, check=False)
+    if build.returncode:
+        print(f"Native build failed: {run_dir / 'native-build.log'}", file=sys.stderr)
+        return 2
+    from run_game import native_executable
+    tool_hashes = {}
+    for name in ("ee_recomp", "ee_game_runner"):
+        executable = native_executable(args.build_dir, name, args.config)
+        tool_hashes[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
     results = []
     for case in cases:
         result = run_case(case, args, manifest, run_dir)
@@ -213,7 +229,8 @@ def main():
         print(f"{result['status']:12} {result['name']} ({result['seconds']}s)", flush=True)
     counts = {status: sum(r["status"] == status for r in results)
               for status in ("PASS", "DIFF", "INCOMPLETE", "NO_OUTPUT", "ERROR")}
-    summary = {"runtime_revision": revision, "reference_revision": manifest["revision"],
+    summary = {"runtime_revision": revision, "native_tool_sha256": tool_hashes,
+               "reference_revision": manifest["revision"],
                "suite_total": len(manifest["tests"]), "selected": len(cases),
                "counts": counts, "results": results}
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")

@@ -96,3 +96,18 @@ address for SIF0 reply delivery. Preserve zero, alignment and range
 rejections. Regression covers both CIDs, transactional validation,
 raw alias preservation and original physical command semantics.
 This is not an arithmetic fix or new pass; pilot 3 is required.
+
+## Full Windows baseline (7afadba, 2026-11-25 12:28 UTC)
+
+The user's archive `20261125T122818342585Z.zip` contains all 55 original
+ELF runs at reference revision 97469ff. 0 PASS, 0 DIFF, 0 INCOMPLETE,
+55 NO_OUTPUT; summed per-test wall 535.904 seconds. 21 stopped at the
+INIT_CMD receiver pointer in the 0x20xxxxxx uncached EE RAM alias;
+34 stopped on 0x54a0fff8 (BNEL) at relocated RAM PC 0x80075024 after
+nine RAM callback instructions. The recorded source HEAD 7afadba
+already implements BNEL. An old locally built runner is a plausible
+explanation, not proven by the old archive (no binary hashes recorded).
+The later Linux pilot at 1620cf5 reached FILEIO BIND for all three
+selected tests. Rebuild both native tools before each suite invocation
+and record their SHA-256 in summary.json, so a source-only pull cannot
+silently reuse an older native executable. No retail cache deletion.
