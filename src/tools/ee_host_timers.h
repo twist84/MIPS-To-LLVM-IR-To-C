@@ -36,6 +36,7 @@ public:
             return false;
         }
         c_ee_host_timers* timers = static_cast<c_ee_host_timers*>(user);
+        ++timers->m_mmio_generation;
         uint32_t index = 0u;
         uint32_t offset = 0u;
         if (!decode(address, width, &index, &offset))
@@ -69,6 +70,7 @@ public:
             return false;
         }
         c_ee_host_timers* timers = static_cast<c_ee_host_timers*>(user);
+        ++timers->m_mmio_generation;
         uint32_t index = 0u;
         uint32_t offset = 0u;
         if (!decode(address, width, &index, &offset))
@@ -121,6 +123,11 @@ public:
             m_runtime->m_cop0_clock_idle = cycles;
         }
     }
+
+    // Runner-thread observation of every valid callback attempt, including
+    // non-timer bus transactions and rejected device accesses. Equality
+    // is a necessary, not sufficient, condition for a quiet native slice.
+    uint64_t mmio_generation() const { return m_mmio_generation; }
 
     uint64_t next_event() const
     {
@@ -336,6 +343,7 @@ private:
     s_ee_runtime* m_runtime = nullptr;
     c_ee_hw_bus* m_hardware = nullptr;
     s_timer m_timers[4]{};
+    uint64_t m_mmio_generation = 0u;
     uint64_t m_next_event = std::numeric_limits<uint64_t>::max();
 };
 } // namespace ee
