@@ -104,7 +104,7 @@ jobs:
           }
       - name: Compile all project targets with MSVC warnings as errors
         shell: pwsh
-        run: cmake --build build --config Release --parallel 2
+        run: cmake --build build --config Release --parallel 2 -- -k 0
 
 
   native-webgpu-windows-clang:
@@ -175,7 +175,7 @@ jobs:
           }
       - name: Compile all project targets with Clang warnings as errors
         shell: pwsh
-        run: cmake --build build-clang --config Release --parallel 2
+        run: cmake --build build-clang --config Release --parallel 2 -- -k 0
       - name: Compile and execute Windows VU1 AOT DLLs at O0 and O3
         shell: pwsh
         run: |

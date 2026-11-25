@@ -29,7 +29,11 @@ static inline uint32_t sat32u(uint64_t v){ return v>0xffffffffULL?0xffffffffu:(u
 static inline ee::s_ee_u128 shr128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     if (n < 64) { r.m_hi = v.m_hi >> n; r.m_lo = (v.m_lo >> n) | (v.m_hi << (64 - n)); }
     else { int m = n - 64; r.m_hi = 0; r.m_lo = (m < 64) ? (v.m_hi >> m) : 0; }
     return r;
@@ -38,7 +42,11 @@ static inline ee::s_ee_u128 shr128(const ee::s_ee_u128& v, int n)
 static inline ee::s_ee_u128 shl128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     if (n < 64) { r.m_lo = v.m_lo << n; r.m_hi = (v.m_hi << n) | (v.m_lo >> (64 - n)); }
     else { int m = n - 64; r.m_lo = 0; r.m_hi = (m < 64) ? (v.m_lo << m) : 0; }
     return r;
@@ -47,7 +55,11 @@ static inline ee::s_ee_u128 shl128(const ee::s_ee_u128& v, int n)
 static inline ee::s_ee_u128 sar128(const ee::s_ee_u128& v, int n)
 {
     n &= 127;
-    ee::s_ee_u128 r;
+    if (n == 0)
+    {
+        return v;
+    }
+    ee::s_ee_u128 r{};
     uint64_t sign = (uint64_t)(int64_t)v.m_hi >> 63;
     if (n < 64) { r.m_hi = (uint64_t)(int64_t)v.m_hi >> n; r.m_lo = (v.m_lo >> n) | ((uint64_t)(int64_t)v.m_hi << (64 - n)); }
     else { int m = n - 64; r.m_hi = sign ? ~0ULL : 0; r.m_lo = (m < 64) ? (uint64_t)(int64_t)v.m_hi >> m : (sign ? ~0ULL : 0); }
