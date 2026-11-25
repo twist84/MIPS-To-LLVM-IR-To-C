@@ -732,3 +732,25 @@ normal/chain DMA payloads now match; both direct FIFOs and VIF0 DMA
 still need work. GS SIGLBLID access and GIF SIGNAL/LABEL commands are
 unimplemented, independent of allocation. The guest allocator correction
 also resolved the whitespace differences without any transcript changes.
+
+### Confirmed 40/55 and GS SIGNAL/LABEL
+
+PR head `dbc3506704d6bb81cd87d4c571d9551730c00150`, tested merge
+`2aeb7ba17b714760d8b7cf080207e74ca2bb3f04`, [full suite run
+45645532852](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45645532852),
+[summary artifact 15036324591](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45645532852/artifacts/15036324591).
+All five workflows passed. 40/55 exact (72.73%): PASS 40, DIFF 11,
+INCOMPLETE 4, NO_OUTPUT 0, ERROR 0. All eight thread tests now pass.
+
+Original GS label/signal packets previously failed because A+D 0x62/0x60
+were rejected and SIGLBLID was unmapped. Based on PCSX2 `82cac38`
+(Gif_Unit.cpp and GS.cpp), merge the masked 32-bit payload into the
+selected SIGLBLID lane; SIGNAL sets CSR bit zero and raises INTC GS if
+unmasked. Privileged 32/64-bit MMIO accesses share the same transactional
+GS state. CSR write-one-to-clear acknowledges SIGNAL, and unmasking a
+pending SIGNAL raises the IRQ. Commit IRQ only after full GIF validation.
+Second unacknowledged SIGNAL still fails closed: automatic queued SIGNAL
+and resumable partial GIF stalls, FINISH timing, and general GS reset
+semantics are not implemented in this batch. Regression coverage checks
+masked lane writes, CSR, DMA, IRQ masking/unmasking, acknowledgement,
+and rollback of rejected transactions. No original transcript changed.

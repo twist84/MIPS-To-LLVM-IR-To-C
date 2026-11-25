@@ -2547,6 +2547,7 @@ int main(int argc, char** argv)
     }
     ee::c_ee_vif1 vif1{};
     ee::c_ee_gs_state gs_state{};
+    hardware.bind_gs(&gs_state);
     gif_path3.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     gif_path2.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     gif_path1.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);

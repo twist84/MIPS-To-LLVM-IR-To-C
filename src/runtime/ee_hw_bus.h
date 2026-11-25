@@ -2,6 +2,7 @@
 
 #include "ee_dmac.h"
 #include "ee_gs_display.h"
+#include "ee_gs.h"
 #include "ee_intc.h"
 #include "ee_scanout_clock.h"
 #include "ee_sif.h"
@@ -49,6 +50,22 @@ public:
         m_vif1 = vif1;
     }
 
+    void bind_gs(c_ee_gs_state* gs)
+    {
+        m_gs = gs;
+        if (m_gs != nullptr)
+        {
+            m_gs->bind_signal_irq(this, [](void* user)
+            {
+                auto* bus = static_cast<c_ee_hw_bus*>(user);
+                if ((bus->m_gs_imr & 0x100u) == 0u)
+                {
+                    (void)bus->m_intc.raise(0u); // GS INTC
+                }
+            });
+        }
+    }
+
     void bind_device_download(
         void* user, c_ee_dmac::t_device_download_callback callback)
     {
@@ -66,6 +83,10 @@ public:
         m_sif.reset();
         m_ipu.reset();
         m_gs_imr = 0u;
+        if (m_gs != nullptr)
+        {
+            m_gs->reset_signal_state();
+        }
         m_gs_display = {};
         m_scanout = {};
         m_gs_crt_interlace = 0u;
@@ -131,14 +152,20 @@ public:
 
     static constexpr uint32_t k_gs_csr = 0x12001000u;
     static constexpr uint32_t k_gs_imr = 0x12001010u;
+    static constexpr uint32_t k_gs_siglblid = 0x12001080u;
 
     // GS_IMR is a privileged GS register, rather than a GIF packet register.
-    // It is reached by the EE kernel's GsPutIMR syscall.  The current GS
-    // model has no IRQ delivery, but retains the documented mask field so
-    // kernel calls and later reads observe coherent hardware state.
+    // It is reached by the EE kernel's GsPutIMR syscall. Unmasking
+    // an already latched SIGNAL also raises the GS interrupt.
     void set_gs_imr(uint64_t value)
     {
+        const uint64_t old_mask = m_gs_imr;
         m_gs_imr = value & 0x0000ff00ULL;
+        if (m_gs != nullptr && m_gs->signal_csr() != 0u &&
+            (old_mask & 0x100u) != 0u && (m_gs_imr & 0x100u) == 0u)
+        {
+            (void)m_intc.raise(0u);
+        }
     }
 
     uint64_t gs_imr() const
@@ -279,6 +306,16 @@ public:
             value->m_hi = 0u;
             return true;
         }
+        if (bus->m_gs != nullptr && value != nullptr &&
+            ((address == k_gs_siglblid && (width == 4u || width == 8u)) ||
+             (address == k_gs_siglblid + 4u && width == 4u)))
+        {
+            const uint64_t data = bus->m_gs->siglblid();
+            value->m_lo = width == 8u ? data :
+                static_cast<uint32_t>(data >> ((address & 4u) * 8u));
+            value->m_hi = 0u;
+            return true;
+        }
         if (value != nullptr && (width == 4u || width == 8u) &&
             (address == k_gs_csr || address == k_gs_imr ||
              (width == 4u &&
@@ -286,7 +323,9 @@ public:
         {
             const uint64_t register_value =
                 (address == k_gs_csr || address == k_gs_csr + 4u)
-                    ? bus->m_scanout.csr() : bus->m_gs_imr;
+                    ? bus->m_scanout.csr() |
+                      (bus->m_gs != nullptr ? bus->m_gs->signal_csr() : 0u)
+                    : bus->m_gs_imr;
             value->m_lo = (address & 4u) != 0u
                 ? register_value >> 32u : register_value;
             value->m_hi = 0u;
@@ -358,6 +397,18 @@ public:
                 static_cast<uint32_t>(index), data);
             return true;
         }
+        if (bus->m_gs != nullptr && value != nullptr &&
+            ((address == k_gs_siglblid && (width == 4u || width == 8u)) ||
+             (address == k_gs_siglblid + 4u && width == 4u)))
+        {
+            const uint32_t shift = (address & 4u) * 8u;
+            const uint64_t mask = 0xffffffffull << shift;
+            const uint64_t data = width == 8u ? value->m_lo :
+                (bus->m_gs->siglblid() & ~mask) |
+                ((value->m_lo << shift) & mask);
+            bus->m_gs->set_siglblid(data);
+            return true;
+        }
         if (value != nullptr && (width == 4u || width == 8u) &&
             (address == k_gs_csr || address == k_gs_imr ||
              (width == 4u &&
@@ -368,6 +419,10 @@ public:
             if (address == k_gs_csr || address == k_gs_csr + 4u)
             {
                 bus->m_scanout.acknowledge_csr(written);
+                if (bus->m_gs != nullptr && (written & 1u) != 0u)
+                {
+                    bus->m_gs->acknowledge_signal();
+                }
             }
             else
             {
@@ -400,6 +455,7 @@ private:
     c_ee_intc m_intc;
     c_ee_dmac m_dmac;
     c_ee_vif1* m_vif1 = nullptr;
+    c_ee_gs_state* m_gs = nullptr;
     c_ee_sif m_sif;
     c_ee_ipu m_ipu;
     c_ee_scanout_clock m_scanout;
