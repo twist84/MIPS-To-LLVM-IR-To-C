@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 
@@ -114,4 +115,42 @@ private:
     uint64_t m_due = 0u;
     bool m_active = false;
 };
+// Preserve the legacy 256-cycle service turns and 64-turn cap. Only
+// combine complete original turns strictly before a known IOP event;
+// never split a turn at a predicted event or consume more debt than due.
+struct s_ee_iop_service_batch
+{
+    uint32_t m_cycles = 0u;
+    uint32_t m_turns = 0u;
+};
+
+inline s_ee_iop_service_batch ee_iop_service_batch(
+    uint64_t due, uint32_t turns_left, uint64_t idle_interval)
+{
+    constexpr uint32_t turn_cycles = 256u;
+    if (due == 0u || turns_left == 0u)
+    {
+        return {};
+    }
+    const uint32_t ordinary = static_cast<uint32_t>(
+        std::min<uint64_t>(due, turn_cycles));
+    if (idle_interval <= turn_cycles ||
+        idle_interval == c_ee_iop_clock::k_no_deadline || turns_left == 1u)
+    {
+        return {ordinary, 1u};
+    }
+    const uint64_t cap = static_cast<uint64_t>(std::min(turns_left, 64u)) * turn_cycles;
+    uint64_t cycles = std::min({due, cap, idle_interval - 1u});
+    if (cycles < due)
+    {
+        cycles -= cycles % turn_cycles;
+    }
+    if (cycles <= ordinary)
+    {
+        return {ordinary, 1u};
+    }
+    return {static_cast<uint32_t>(cycles),
+        static_cast<uint32_t>((cycles + turn_cycles - 1u) / turn_cycles)};
+}
+
 } // namespace ee
