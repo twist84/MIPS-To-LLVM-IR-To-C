@@ -1,5 +1,6 @@
 #include "ee_host_timers.h"
 #include "ee_iop_clock.h"
+#include "ee_execution_horizon.h"
 
 #include <cstdio>
 #include <limits>
@@ -112,6 +113,72 @@ int main()
     if (!runtime.m_ee_cycle_scheduler.install_reference_compatibility_source())
     {
         return 1;
+    }
+    {
+        constexpr uint64_t none = ee::k_ee_no_deadline;
+        using e_source = ee::e_ee_horizon_source;
+        if (!check(ee::ee_cop0_compare_deadline(runtime, 100u) == 100u,
+                "uninitialized Count requires service"))
+        {
+            return 1;
+        }
+        runtime.m_cop0_clock_initialized = true;
+        runtime.m_cop0_clock_last = 100u;
+        runtime.m_cop0_clock_count = 0xfffffffcu;
+        runtime.m_cop0_clock_compare = 2u;
+        if (!check(ee::ee_cop0_compare_deadline(runtime, 99u) == 99u &&
+                ee::ee_cop0_compare_deadline(runtime, 100u) == 106u &&
+                ee::ee_cop0_compare_deadline(runtime, 105u) == 106u &&
+                ee::ee_cop0_compare_deadline(runtime, 107u) == 107u,
+                "COP0 deadline across Count wrap and overdue event"))
+        {
+            return 1;
+        }
+        runtime.m_cop0_clock_compare = runtime.m_cop0_clock_count;
+        if (!check(ee::ee_cop0_compare_deadline(runtime, 100u) ==
+                100u + (uint64_t{1u} << 32u),
+                "Count equality waits a full wrap"))
+        {
+            return 1;
+        }
+        runtime.m_cop0_clock_ip7 = true;
+        if (!check(ee::ee_cop0_compare_deadline(runtime, 100u) == none,
+                "latched IP7 has no new compare edge"))
+        {
+            return 1;
+        }
+        runtime.m_cop0_clock_ip7 = false;
+        runtime.m_cop0_clock_last = none - 3u;
+        if (!check(ee::ee_cop0_compare_deadline(runtime, none - 3u) == none - 3u,
+                "unrepresentable COP0 deadline requires service"))
+        {
+            return 1;
+        }
+
+        const auto timer = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, false);
+        const auto scanout = ee::ee_execution_horizon(100u, none, 120u, 130u, 140u, false);
+        const auto cop0 = ee::ee_execution_horizon(100u, none, none, 130u, 140u, false);
+        const auto iop = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 101u, false);
+        const auto due = ee::ee_execution_horizon(100u, 99u, none, none, none, false);
+        const auto blocked = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, true);
+        const auto empty = ee::ee_execution_horizon(100u, none, none, none, none, false);
+        const auto tied = ee::ee_execution_horizon(100u, 110u, 110u, 110u, 110u, false);
+        if (!check(timer.m_cycle == 110u && timer.m_source == e_source::timer &&
+                scanout.m_cycle == 120u && scanout.m_source == e_source::scanout &&
+                cop0.m_cycle == 130u && cop0.m_source == e_source::cop0 &&
+                iop.m_cycle == 101u && iop.m_source == e_source::iop &&
+                due.m_cycle == 100u && due.m_source == e_source::timer &&
+                blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
+                empty.m_cycle == none && empty.m_source == e_source::none &&
+                tied.m_cycle == 110u && tied.m_source == e_source::timer,
+                "unified horizon chooses earliest known event or barrier"))
+        {
+            return 1;
+        }
+        runtime.m_cop0_clock_initialized = false;
+        runtime.m_cop0_clock_last = 0u;
+        runtime.m_cop0_clock_count = 0u;
+        runtime.m_cop0_clock_compare = 0u;
     }
     ee::c_ee_host_timers timers(&runtime, &bus);
     constexpr uint64_t no_event = std::numeric_limits<uint64_t>::max();
