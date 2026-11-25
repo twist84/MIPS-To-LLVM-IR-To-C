@@ -14,7 +14,7 @@ provenance changes unless explicitly necessary.
 | P1-C | Asynchronous GS worker | Idle healthy worker is quiet; queued or executing batch and failed worker are not quiet; drained healthy worker is quiet again; no new fence or guest event. Headless shadow reports zero GS barriers. Any submission after the snapshot requires an independent pre-execution guard. | Entry observation implemented; CI pending |
 | P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | VU callback and COP0 endpoint observations added; pre-access guards open |
 | P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | RPC ownership observation added; debt flush and shared-memory audit open |
-| P1-F | Clock, timer/scanout reprogramming, host continuation | Verify fractional 8:1 accounting and preserved outstanding debt; unknown/overflow/overdue deadlines fail closed; test equal-time events, deadline replacement and continuation before service. | Groundwork present; integration audit open |
+| P1-F | Clock, timer/scanout reprogramming, host continuation | Verify fractional 8:1 accounting and preserved outstanding debt; unknown/overflow/overdue deadlines fail closed; test equal-time events, deadline replacement and continuation before service. | Aligned checkpoint guard implemented; pre-access ordering open |
 
 ## GS worker observation (P1-C)
 
@@ -112,7 +112,64 @@ boundaries (but synchronously on the runner thread). Do not enable
 deferral until pre-access debt flushes and callback ordering are
 proved. HLE reboot and all reply ownership states remain conservative.
 
-## Activation gates (not implemented)
+## Clock and continuation checkpoint (P1-F)
+
+A projection requires a reference-compatible source, a non-sentinel
+published timestamp equal to the checked live instruction/idle/HLE
+budget, and (when IOP scheduling is active) a matching IOP clock
+anchor, zero debt and a representable next cycle. An otherwise
+unblocked stale checkpoint increments `clock_barriers`. All three
+shadow horizon estimates reject it. Tests cover initial anchoring,
+unpublished slots, fractional cycles, a 300-unit HLE continuation,
+partial consumption and overflow.
+
+The existing runner publishes HLE/RAM continuation time at the outer
+loop before IOP service. The ordinary post-native device checkpoint
+publishes time before COP0/VU/DMA/timer/scanout processing. Deferred
+VIF1 is also polled at outer-loop entry before publication; direct
+HLE IOP runs and receive callbacks remain separate barriers. These
+paths have not been converted to deferred execution.
+
+## P2 preliminary optimisation: same-checkpoint idle IOP coalescing
+
+`SDBZ_IOP_COALESCE_IDLE_TURNS=1` is experimental and off by default.
+Within the existing scheduled IOP service loop, combine only complete
+legacy turns (256 cycles each, except the final debt tail) strictly
+before the known idle horizon. A batch never exceeds outstanding
+debt or the remaining logical 64-turn cap. Unknown/zero horizon,
+runnable IOP, pending IRQ, software event, DMA completion, SPU2
+sample boundary, Timer5 edge, RPC ownership, pending HLE reboot and
+unrepresentable cycle sums prevent a combined turn. The existing
+idle horizon rejects ROM0, AutoDMA, CDVD and interrupt ownership.
+On unexpected guest execution, timestamp divergence or stop reason
+during a combined turn, abort rather than retry mutated guest state.
+
+No IOP time is deferred across EE native functions or host services.
+The combined interval has no modeled guest execution or event;
+intermediate RPC pumps would have no work. Retain the original
+single-turn path at or beyond any predicted edge. The ordinary
+128-instruction quantum, logical turn accounting, fractional clock
+and outstanding debt are retained.
+
+Success criteria:
+- Planner reproduces exactly the constituent legacy turns and refuses
+  crossing or reaching the known event; test partial tails and cap.
+- Partitioned/combined kernel comparison agrees before and after
+  HLE callback and SPU2 sample delivery, including Timer5 phase.
+- Native ELF integration compares final EE reports and IOP/SPU2 clock
+  lines with opt-in disabled/enabled and must save actual service calls.
+- Final-head CI passes; bounded retail A/B compares matched workload
+  and checks `IOP clock coalesce:` counters and guest behavior.
+- No default enablement or EE IR regeneration for these host-only changes.
+
+`logical_turns = physical_runs + saved_turns` counts original service
+turns vs kernel calls in the scheduled path. `combined_batches` counts
+combined calls, `debt` reports remaining scheduled debt at stop.
+Direct HLE service calls are not part of these counters. Saved turns
+are not measured wall-time improvement.
+
+## Remaining activation gates (not implemented)
+
 
 P2: baseline-versus-experimental deterministic event traces must match
 for EE/IOP debt, timer/scanout, interrupt delivery, DMA/RPC, shared
