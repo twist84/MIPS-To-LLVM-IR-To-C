@@ -8833,12 +8833,15 @@ int main(int argc, char** argv)
         for (uint32_t core = 0u; core < 2u; ++core)
         {
             std::printf("IOP SPU2 effect area: core=%u enabled=%u enable_writes=%llu "
-                "start=0x%06x end=0x%06x ticks=%llu return_frames=%llu\n",
+                "start=0x%06x end=0x%06x ticks=%llu return_frames=%llu "
+                "fast_ticks=%llu zero_fir_skips=%llu\n",
                 core, spu2.effect_enabled(core) ? 1u : 0u,
                 static_cast<unsigned long long>(spu2.effect_enable_writes(core)),
                 spu2.effect_start(core), spu2.effect_end(core),
                 static_cast<unsigned long long>(spu2.effect_ticks(core)),
-                static_cast<unsigned long long>(spu2.effect_return_frames(core)));
+                static_cast<unsigned long long>(spu2.effect_return_frames(core)),
+                static_cast<unsigned long long>(spu2.effect_fast_ticks(core)),
+                static_cast<unsigned long long>(spu2.effect_zero_fir_skips(core)));
         }
     }
     if (report_path != nullptr &&

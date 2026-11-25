@@ -52,3 +52,23 @@ Listening control: set SDBZ_P40_LISTEN and SDBZ_HOST_AUDIO to 1.
 The script performs a fast-forward-only pull and uses the existing
 `build/vu1-native-v20` library. Keep the code baseline intact while
 measuring; do not compare paced and uncapped wall times directly.
+
+## Batch 1: disabled-effect arithmetic elimination
+
+The disabled reverb path does not simply discard its return. It omits
+only work that cannot affect output, RAM or IRQs in the existing model:
+input FIR and reflection calculations (their results feed suppressed
+writes); with APF2 gain zero, its delayed RAM tap alone determines the
+return; with only APF1 gain zero, the two delay taps suffice. Otherwise
+use the original comb and APF calculations. All input history, output
+history, sample phase and enabled-effect reads/writes remain intact.
+A maintained 64-bit occupancy mask per output history permits exact zero
+FIR elision, never based on zero EVOL or instantaneous silence alone.
+
+A forced-reference host-only test control compares PCM byte-for-byte,
+RAM (both work areas alias the same physical range), counters and IRQ
+latches/deadlines through disabled and enabled phases, signed gains,
+nonzero DMA input, invalid areas and re-enable. The runner reports
+`fast_ticks` and `zero_fir_skips` per core. No hardware behavior is changed
+or newly claimed. Performance gain requires a matched retail measurement;
+this batch does not alter EE lowering or VU1 AOT provenance.

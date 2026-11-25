@@ -1138,6 +1138,152 @@ bool test_spu2_effect_clock()
         hw.read(iop::c_hw::k_i_stat, 4u, &status) && (status & irq) != 0u;
 }
 
+bool test_spu2_effect_fast_path()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 reference;
+    iop::c_spu2 fast;
+    reference.enable_effect_fast_path(false);
+    std::vector<int16_t> pcm[2];
+    iop::c_spu2* models[] = {&reference, &fast};
+    for (uint32_t model = 0u; model < 2u; ++model)
+    {
+        iop::c_spu2& spu = *models[model];
+        spu.bind_pcm_sink(&pcm[model], [](void* user, const int16_t* data, uint32_t frames)
+        {
+            auto& output = *static_cast<std::vector<int16_t>*>(user);
+            output.insert(output.end(), data, data + frames * 2u);
+        });
+        for (uint32_t core = 0u; core < 2u; ++core)
+        {
+            const uint32_t bank = base + core * 0x400u;
+            const uint32_t volume = base + 0x760u + core * 0x28u;
+            // Both logical areas alias the same physical 64-word RAM
+            // region; enable transitions may affect the other core.
+            if (!spu.write(bank + 0x2e0u, 2u, core * 0x10u) ||
+                !spu.write(bank + 0x2e2u, 2u, 0xffc0u) ||
+                !spu.write(bank + 0x33cu, 2u, core * 0x10u) ||
+                !spu.write(bank + 0x198u, 2u, 0x030u) ||
+                !spu.write(volume + 4u, 2u, 0x4000u) ||
+                !spu.write(volume + 6u, 2u, 0xc000u))
+            {
+                return false;
+            }
+            const uint32_t regs[] = {0x2e4u, 0x2e8u, 0x2ecu, 0x2f0u,
+                0x2f4u, 0x2f8u, 0x30cu, 0x310u, 0x32cu, 0x330u, 0x334u, 0x338u};
+            const uint32_t taps[] = {5u, 7u, 9u, 13u, 17u, 19u,
+                23u, 29u, 31u, 37u, 41u, 47u};
+            for (uint32_t i = 0u; i < 12u; ++i)
+            {
+                if (!spu.write(bank + regs[i], 2u, 0u) ||
+                    !spu.write(bank + regs[i] + 2u, 2u, taps[i]))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    // Initially the entire return history is zero. Then exercise
+    // disabled nonzero RAM, each APF gain combination, enabled
+    // feedback, a disabled tail, a frozen invalid area and re-enable.
+    for (uint32_t phase = 0u; phase < 8u; ++phase)
+    {
+        for (iop::c_spu2* model : models)
+        {
+            iop::c_spu2& spu = *model;
+            if (phase == 1u)
+            {
+                std::vector<uint8_t> data(128u);
+                for (uint32_t i = 0u; i < 64u; ++i)
+                {
+                    const uint16_t word = static_cast<uint16_t>(i * 997u + 0x8000u);
+                    data[i * 2u] = static_cast<uint8_t>(word);
+                    data[i * 2u + 1u] = static_cast<uint8_t>(word >> 8u);
+                }
+                if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+                    !spu.write(base + 0x1aau, 2u, 0xffc0u) ||
+                    !spu.copy_dma(0u, data, true))
+                {
+                    return false;
+                }
+            }
+            for (uint32_t core = 0u; core < 2u; ++core)
+            {
+                const uint32_t bank = base + core * 0x400u;
+                const uint32_t coeff = base + 0x774u + core * 0x28u;
+                const uint32_t attr = phase == 4u || phase == 7u ? 0xc0u : 0x40u;
+                if (!spu.write(bank + 0x19au, 2u, 0u) ||
+                    !spu.write(bank + 0x19cu, 2u, 0u) ||
+                    !spu.write(bank + 0x19eu, 2u, 0xffe0u) ||
+                    !spu.write(bank + 0x19au, 2u, attr) ||
+                    !spu.write(bank + 0x2e0u, 2u, core * 0x10u + (phase == 6u ? 1u : 0u)) ||
+                    !spu.write(coeff, 2u, 0x4000u) ||
+                    !spu.write(coeff + 2u, 2u, 0xc000u) ||
+                    !spu.write(coeff + 10u, 2u, 0x4000u) ||
+                    !spu.write(coeff + 12u, 2u, phase >= 3u ? 0x6000u : 0u) ||
+                    !spu.write(coeff + 14u, 2u, phase >= 2u ? 0x8000u : 0u) ||
+                    !spu.write(coeff + 16u, 2u, 0x7fffu) ||
+                    !spu.write(coeff + 18u, 2u, 0x4000u))
+                {
+                    return false;
+                }
+                const uint8_t input[] = {0x00u, 0x40u, 0x00u, 0xc0u};
+                if (phase != 0u && !spu.push_input(core, input, sizeof(input)))
+                {
+                    return false;
+                }
+            }
+        }
+        for (uint32_t sample = 0u; sample < 96u; ++sample)
+        {
+            // Nonuniform partial-cycle advancement covers deadline
+            // prediction and exact sample-boundary IRQ delivery.
+            if (reference.voice_irq_cycles_remaining() != fast.voice_irq_cycles_remaining() ||
+                reference.advance_cycles(period - 1u) != fast.advance_cycles(period - 1u) ||
+                reference.voice_irq_cycles_remaining() != fast.voice_irq_cycles_remaining() ||
+                reference.advance_cycles(1u) != fast.advance_cycles(1u))
+            {
+                return false;
+            }
+        }
+        if (pcm[0] != pcm[1] || reference.irq_latches() != fast.irq_latches() ||
+            reference.effect_irq_events() != fast.effect_irq_events() ||
+            reference.playback_irq_events() != fast.playback_irq_events() ||
+            reference.mixed_frames() != fast.mixed_frames())
+        {
+            return false;
+        }
+        for (uint32_t core = 0u; core < 2u; ++core)
+        {
+            if (reference.effect_ticks(core) != fast.effect_ticks(core) ||
+                reference.effect_input_frames(core) != fast.effect_input_frames(core) ||
+                reference.effect_return_frames(core) != fast.effect_return_frames(core))
+            {
+                return false;
+            }
+        }
+        for (uint32_t word = 0u; word < 0x10000u; ++word)
+        {
+            uint16_t lhs = 0;
+            uint16_t rhs = 0;
+            if (!reference.ram_word(word, &lhs) || !fast.ram_word(word, &rhs) || lhs != rhs)
+            {
+                return false;
+            }
+        }
+    }
+    const bool exercised = fast.effect_fast_ticks(0u) != 0u &&
+        fast.effect_zero_fir_skips(0u) != 0u &&
+        fast.effect_return_frames(1u) != 0u &&
+        fast.effect_irq_events() != 0u &&
+        reference.effect_fast_ticks(0u) == 0u &&
+        reference.effect_zero_fir_skips(0u) == 0u;
+    fast.reset();
+    return exercised && fast.effect_fast_ticks(0u) == 0u &&
+        fast.effect_zero_fir_skips(0u) == 0u;
+}
+
 bool test_spu2_effect_return()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -2518,6 +2664,10 @@ int main()
     if (!test_spu2_effect_clock())
     {
         return fail("SPU2 alternating effect clock, physical alias and idle IRQ9 deadline");
+    }
+    if (!test_spu2_effect_fast_path())
+    {
+        return fail("SPU2 disabled-effect fast path/reference PCM, RAM and IRQ equivalence");
     }
     if (!test_spu2_effect_return())
     {
