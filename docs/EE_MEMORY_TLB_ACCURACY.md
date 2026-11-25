@@ -25,3 +25,17 @@ These are directed model tests, not independent console captures. No
 production guest memory path, TLB instruction, native ABI, or existing
 legacy translate behavior is changed. Fault delivery and cache execution
 remain separate tasks; do not automatically activate this lookup in HLE.
+
+## Batch 2: privilege and segment routing
+
+Add a side-effect-free address-space classifier from Figure 5-1 and
+sections 5.1.4–5.1.6 (printed pp. 113–117). Normal low addresses and
+allowed supervisor/kernel mapped segments require a TLB lookup. KSEG0
+and KSEG1 route to the low 512 MiB physical aperture, with Config.K0
+and fixed uncached mode respectively. ERL maps low addresses directly
+and uncached; EXL/ERL override KSU. Reserved KSU and K0 encodings fail
+closed. HLE-specific aliases are not assumed to be architectural mappings.
+The classifier does not determine physical bus validity or model cache
+contents. Directed tests cover 256 combinations of mode, exception level,
+segment and boundary, plus eight Config.K0 values. No guest path uses
+this classifier yet; no new retail replay required.

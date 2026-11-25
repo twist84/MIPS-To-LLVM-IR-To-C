@@ -1,5 +1,6 @@
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
+#include "ee_address_route.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 
@@ -277,6 +278,79 @@ int main()
                    tlb.lookup(virt, 0u, false).m_status == status::MULTIPLE_MATCHES &&
                    tlb.lookup(virt, 0u, false).m_physical_address == 0u,
                    "multiple matches do not pick an arbitrary PFN"))
+        {
+            return 1;
+        }
+    }
+
+    // Every segment boundary, in every operating mode and exception level.
+    // Expected routes follow Figure 5-1, independently of the TLB contents.
+    {
+        using route = ee::e_ee_address_route;
+        constexpr uint32_t starts[] = {0u, 0x20000000u, 0x40000000u,
+            0x60000000u, 0x80000000u, 0xa0000000u, 0xc0000000u, 0xe0000000u};
+        constexpr route expected[4][8] =
+        {
+            {route::TLB_MAPPED, route::TLB_MAPPED, route::TLB_MAPPED,
+             route::TLB_MAPPED, route::DIRECT_PHYSICAL, route::DIRECT_PHYSICAL,
+             route::TLB_MAPPED, route::TLB_MAPPED},
+            {route::TLB_MAPPED, route::TLB_MAPPED, route::TLB_MAPPED,
+             route::TLB_MAPPED, route::PRIVILEGE_ERROR, route::PRIVILEGE_ERROR,
+             route::TLB_MAPPED, route::PRIVILEGE_ERROR},
+            {route::TLB_MAPPED, route::TLB_MAPPED, route::TLB_MAPPED,
+             route::TLB_MAPPED, route::PRIVILEGE_ERROR, route::PRIVILEGE_ERROR,
+             route::PRIVILEGE_ERROR, route::PRIVILEGE_ERROR},
+            {route::RESERVED_MODE, route::RESERVED_MODE, route::RESERVED_MODE,
+             route::RESERVED_MODE, route::RESERVED_MODE, route::RESERVED_MODE,
+             route::RESERVED_MODE, route::RESERVED_MODE}
+        };
+        for (uint32_t mode = 0u; mode < 4u; ++mode)
+        {
+            for (uint32_t levels = 0u; levels < 4u; ++levels)
+            {
+                const uint32_t state = (mode << 3u) | (levels << 1u);
+                for (uint32_t segment = 0u; segment < 8u; ++segment)
+                {
+                    for (uint32_t offset : {0u, 0x1fffffffu})
+                    {
+                        const uint32_t address = starts[segment] + offset;
+                        const auto actual = ee::ee_classify_address(address, state, 3u);
+                        const bool direct_low = (levels & 2u) != 0u && segment < 4u;
+                        const route want = direct_low ? route::DIRECT_PHYSICAL :
+                            expected[levels != 0u ? 0u : mode][segment];
+                        if (!check(actual.m_route == want, "address privilege/segment route") ||
+                            (want == route::DIRECT_PHYSICAL &&
+                             !check(actual.m_physical_address == (direct_low ? address : offset) &&
+                                    actual.m_cache_mode == (!direct_low && segment == 4u ? 3u : 2u),
+                                    "direct mapping and cache attribute")))
+                        {
+                            return 1;
+                        }
+                    }
+                }
+            }
+        }
+        for (uint32_t cache = 0u; cache < 8u; ++cache)
+        {
+            const auto k0 = ee::ee_classify_address(0x9fc00000u, 0u, cache);
+            const auto k1 = ee::ee_classify_address(0xbfc00000u, 0u, cache);
+            const bool supported = cache == 2u || cache == 3u || cache == 7u;
+            if (!check(k0.m_route == (supported ? route::DIRECT_PHYSICAL :
+                                       route::RESERVED_CACHE_MODE) &&
+                       (!supported || (k0.m_physical_address == 0x1fc00000u &&
+                                       k0.m_cache_mode == cache)) &&
+                       k1.m_route == route::DIRECT_PHYSICAL &&
+                       k1.m_physical_address == 0x1fc00000u && k1.m_cache_mode == 2u,
+                       "KSEG0 Config.K0 versus fixed uncached KSEG1"))
+            {
+                return 1;
+            }
+        }
+        if (!check(ee::ee_classify_address(0x20000000u, 0u, 3u).m_route ==
+                       route::TLB_MAPPED &&
+                   ee::ee_classify_address(0x70000000u, 0u, 3u).m_route ==
+                       route::TLB_MAPPED,
+                   "HLE aliases and scratchpad are not unconditional architectural mappings"))
         {
             return 1;
         }
