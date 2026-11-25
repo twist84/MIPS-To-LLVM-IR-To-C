@@ -99,6 +99,13 @@ public:
             m_last_cycle + distance : k_no_deadline;
     }
 
+    // A projection is only meaningful from the actual published EE
+    // boundary, not a stale observation before a host continuation.
+    bool anchored_at(uint64_t cycle) const
+    {
+        return m_active && cycle != k_no_deadline && m_last_cycle == cycle;
+    }
+
     bool active() const { return m_active; }
 
 private:
