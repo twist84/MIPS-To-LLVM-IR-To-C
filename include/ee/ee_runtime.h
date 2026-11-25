@@ -353,6 +353,31 @@ struct s_ee_runtime
     uint32_t m_idle_probe_state = 0u;      // 0 armed, 1 first visit, 2 yielded
     uint32_t m_idle_probe_hit_pc = 0u;
     uint32_t m_idle_probe_remaining = 0u;  // budget at the first visit
+
+    // Optional VCALLMS/VCALLMSR launch callback. Signature matches the
+    // synchronization callback, but its fourth argument is a slot address.
+    // Append to preserve cached EE IR offsets. Missing engine fails closed.
+    t_ee_vu0_sync_callback m_vu0_start = nullptr;
+
+    // Core-global COP0 performance registers, not part of per-thread GPR
+    // context. Appended to preserve the runtime and translated CPU ABI.
+    uint32_t m_perf_control = 0u;
+    uint32_t m_perf_counter[2]{};
+
+    // Count/Compare/IP7 belong to the core, not a saved thread context.
+    // Compatibility idle units are supplied by the same host event budget
+    // used for timers and scanout. They are not calibrated EE cycles.
+    uint64_t m_cop0_clock_idle = 0u;
+    uint64_t m_cop0_clock_last = 0u;
+    uint32_t m_cop0_clock_count = 0u;
+    uint32_t m_cop0_clock_compare = 0u;
+    bool m_cop0_clock_ip7 = false;
+    bool m_cop0_clock_initialized = false;
+
+    // Separate accounting cursor for explicitly approximate performance
+    // counting; the validated producer continues using explicit deltas.
+    uint64_t m_perf_compat_last = 0u;
+    bool m_perf_compat_fault = false;
 };
 
 // Never infer cycles from these observations or implicitly install
@@ -448,6 +473,13 @@ void     ee_mem_write128(s_ee_runtime* rt, uint32_t addr, const s_ee_u128* v);
 void ee_mem_read128_pair(s_ee_runtime* rt, uint32_t addr, s_ee_u128* out);
 void ee_mem_write128_pair(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
 
+// Guest LQ/SQ/LQC2/SQC2 are one 128-bit transaction at a hardware FIFO.
+// Preserve the paired helpers' scalar semantics elsewhere and keep their
+// existing ABI available to older translated modules.
+uint32_t ee_mem_is_quadword_fifo(s_ee_runtime* rt, uint32_t addr);
+void ee_mem_read128_guest(s_ee_runtime* rt, uint32_t addr, s_ee_u128* out);
+void ee_mem_write128_words(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
+
 // Try one untraced RAM-only store. Zero means no bytes were written and
 // the caller must execute the original per-lane trace and scalar stores.
 uint32_t ee_mem_try_write128_ram(s_ee_runtime* rt, uint32_t addr, uint64_t lo, uint64_t hi);
@@ -511,6 +543,12 @@ struct s_ee_vu0_ialu_engine
     uint32_t m_max_instructions_per_call = 65536;
 };
 
+// Launch one real micro pair at the selected slot, retaining the running
+// state for subsequent synchronization. user points to the IALU engine.
+uint32_t ee_vu0_start_ialu_callback(
+    void* user, s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc);
+
 uint32_t ee_vu0_execute_ialu_callback(
     void* user,
     s_ee_cpu_state* cpu,
@@ -572,12 +610,27 @@ uint32_t ee_vu0_macro_indexed_memory(
 // BC2 reads VPU_STAT bit 8 directly, as the interpreter branch handlers do.
 // Returns 0/1 for false/true, or 2 when VU0 state is unavailable.
 uint32_t ee_vu0_get_branch_condition(const s_ee_runtime* rt);
+uint32_t ee_cop0_get_branch_condition(const s_ee_runtime* rt);
 
 // COP0 guest writes: centralize documented side effects. Writing Compare
 // acknowledges Cause.IP7; this does not advance Count or produce EE cycles.
 // Other registers retain the existing raw write behavior until their writable
 // masks and side effects are independently audited.
 void ee_cop0_write(s_ee_cpu_state* cpu, uint32_t reg, uint32_t value);
+// Synchronize core-global Count/Compare with the explicitly selected
+// clock. Unavailable clocks preserve legacy static register semantics.
+void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt);
+void ee_cop0_clock_write(s_ee_cpu_state* cpu, s_ee_runtime* rt,
+                         uint32_t reg, uint32_t value);
+
+// MFPS/MTPS/MFPC/MTPC. Return 0 on success, 4 on unavailable semantics.
+uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu, s_ee_runtime* rt,
+                               uint32_t instruction_word);
+// A validated timing producer must call this in architectural order, with
+// the status for the elapsed interval. The HLE compatibility source is
+// accounted separately at COP0 accesses and architectural safepoints.
+// False means unsupported event/overflow or unavailable timing; no mutation.
+bool ee_cop0_perf_advance(s_ee_runtime* rt, uint32_t status, uint64_t cycles);
 
 // Exception entry / return and interrupt helpers (ee_exceptions.cpp).
 uint32_t ee_raise_exception(s_ee_cpu_state* cpu, s_ee_runtime* rt,

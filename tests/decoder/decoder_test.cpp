@@ -86,8 +86,14 @@ int main()
     expect("0x3d reserved", R(0x3d, 4, 5, 0, 0, 0), "unknown", X);
     // SPECIAL 0x28/0x29 are real R5900 SA transfers, not UNKNOWN
     // and not yet implemented; other reserved functs are INVALID.
-    expect("mfsa", R(0x00, 0, 0, 6, 0, 0x28), "mfsa", U);
-    expect("mtsa", R(0x00, 4, 0, 0, 0, 0x29), "mtsa", U);
+    expect("mfsa", R(0x00, 0, 0, 6, 0, 0x28), "mfsa", V);
+    expect("mtsa", R(0x00, 4, 0, 0, 0, 0x29), "mtsa", V);
+    expect("mfsa bad rs", R(0x00, 4, 0, 6, 0, 0x28), "mfsa", U);
+    expect("mtsa bad rd", R(0x00, 4, 0, 6, 0, 0x29), "mtsa", U);
+    expect("pexch", R(0x1c, 0, 5, 6, 0x1a, 0x29), "pexch", V);
+    expect("pexcw", R(0x1c, 0, 5, 6, 0x1e, 0x29), "pexcw", V);
+    expect("pexch bad rs", R(0x1c, 4, 5, 6, 0x1a, 0x29), "pexch", U);
+    expect("pexcw bad rs", R(0x1c, 4, 5, 6, 0x1e, 0x29), "pexcw", U);
     expect("special reserved", R(0x00, 4, 5, 6, 0, 0x01),
            "special_rsvd", X);
     // MMI groups: funct 0x08=MMI0, 0x28=MMI1, 0x09=MMI2, 0x29=MMI3; sub-op in sa.
@@ -578,7 +584,8 @@ int main()
     expect("ctc2 bad funct", R(0x12,6,4,6,0,2), "ctc2", X);
     expect("vadd",    R(0x12,0x10,4,5,0,0x28), "vu0_macro", V);
     expect("vadda",   R(0x12,0x10,4,5,0,0x3c), "vu0_macro", V); // SPECIAL2 index 0
-    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vu0_macro", U);
+    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vcallms", V);
+    expect("vcallmsr", R(0x12,0x10,0,0,0,0x39), "vcallmsr", V);
 
     // Directly from SDBZ (US) 0x00108240..0x0010827C: a 4x4 matrix
     // multiply using the VU0 accumulator. Decode the actual 16 words
@@ -731,14 +738,13 @@ int main()
 
     // Exhaustively check the published SPECIAL1/SPECIAL2 dispatch tables.
     // Reserved encodings remain INVALID. Every defined macro executes via
-    // the VU0 macro runtime except VCALLMS/VCALLMSR (UNSUPPORTED).
+    // the VU0 macro runtime, including guarded microprogram launches.
     for (uint32_t funct = 0; funct < 64; ++funct)
     {
         const bool defined = funct <= 50 || funct == 52 || funct == 53 ||
                              funct == 56 || funct == 57 || funct >= 60;
         const auto ins = decode(0x100000, R(0x12,0x10,0,0,0,funct));
-        const bool native = funct != 0x38u && funct != 0x39u;
-        const auto want = !defined ? X : (native ? V : U);
+        const auto want = !defined ? X : V;
         const bool ok = ins.valid == want;
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL COP2 SPECIAL1 funct=%02x valid=%u want=%u\n",
@@ -842,9 +848,26 @@ int main()
 
     expect("mfc0", R(0x10,0x00,4,12,0,0), "mfc0", V);
     expect("mtc0", R(0x10,0x04,4,12,0,0), "mtc0", V);
+    for (uint32_t selector = 0; selector < 64; ++selector)
+    {
+        expect("perf read alias", R(0x10,0,4,25,0,selector),
+               (selector & 1u) ? "mfpc" : "mfps", V);
+        expect("perf write alias", R(0x10,4,4,25,0,selector),
+               (selector & 1u) ? "mtpc" : "mtps", V);
+    }
+    expect("perf reserved high selector", R(0x10,4,4,25,1,1),
+           "cop0_transfer", U);
     expect("tlbwi", R(0x10,0x10,0,0,0,0x02), "tlb", U);
     expect("bad cop0 co", R(0x10,0x10,0,0,0,0x3f), "cop0_reserved", X);
-    expect("bc0", R(0x10,0x08,0,0,0,0x00), "bc0", U);
+    for (uint32_t rt = 0; rt < 4; ++rt)
+    {
+        const auto ins = decode(0x00100000u, R(0x10,0x08,rt,0,0,0x03));
+        const bool ok = ins.valid == V && ins.has_delay_slot &&
+            ins.branch_likely == ((rt & 2u) != 0u) &&
+            ins.branch_target == 0x00100010u && lift(ins).kind == LOP_BC0;
+        ok ? ++g_pass : ++g_fail;
+    }
+    expect("bc0 reserved rt", R(0x10,0x08,4,0,0,0x00), "cop0_reserved", X);
     {
         const auto eret = decode(0x100000, R(0x10,0x10,0,0,0,0x18));
         const bool ok = eret.valid == V && eret.flow == e_ee_flow::FLOW_RETURN &&

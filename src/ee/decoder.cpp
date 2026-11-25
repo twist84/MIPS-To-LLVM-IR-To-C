@@ -193,7 +193,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
             return rd == 0;
         case 0x0e: case 0x12: case 0x13:               // PCPYUD / POR / PNOR
             return true;
-        case 0x1b:                                      // PCPYH uses rt only
+        case 0x1a: case 0x1b: case 0x1e:               // PEXCH / PCPYH / PEXCW
             return rs == 0;
         default:
             return false;
@@ -339,12 +339,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             set_mnemonic(insn, "trap");
             break;
         case e_ee_opcode::FUNCT_MFSA:
+            insn.valid = (insn.rs == 0 && insn.rt == 0 && insn.sa == 0)
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
+            set_mnemonic(insn, "mfsa");
+            break;
         case e_ee_opcode::FUNCT_MTSA:
-            // R5900 scalar shift-amount register transfers are genuine
-            // instructions, but have no complete native lowering yet.
-            insn.valid = e_ee_valid::UNSUPPORTED;
-            set_mnemonic(insn, insn.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_MFSA)
-                ? "mfsa" : "mtsa");
+            insn.valid = (insn.rt == 0 && insn.rd == 0 && insn.sa == 0)
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
+            set_mnemonic(insn, "mtsa");
             break;
         default:
             insn.valid = e_ee_valid::INVALID;
@@ -781,7 +783,15 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
         {
         case e_ee_opcode::COP0_MFC0:
         case e_ee_opcode::COP0_MTC0:
-            if (insn.sa == 0 && insn.funct == 0)
+            if (insn.rd == 25u && insn.sa == 0u)
+            {
+                insn.valid = e_ee_valid::VALID;
+                const bool counter = (insn.funct & 1u) != 0u;
+                set_mnemonic(insn, insn.rs == 0
+                    ? (counter ? "mfpc" : "mfps")
+                    : (counter ? "mtpc" : "mtps"));
+            }
+            else if (insn.sa == 0 && insn.funct == 0)
             {
                 insn.valid = e_ee_valid::VALID;
                 set_mnemonic(insn, insn.rs == 0 ? "mfc0" : "mtc0");
@@ -793,15 +803,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             }
             break;
         case e_ee_opcode::COP0_BC0:
-            // BC0F/T/FL/TL is recognised but not modelled by the current
-            // backend. Preserve the real edge shape and fail closed in IR.
+            // BC0F/T/FL/TL samples the DMAC condition before the delay slot.
             if (insn.rt > 3)
             {
                 insn.valid = e_ee_valid::INVALID;
                 set_mnemonic(insn, "cop0_reserved");
                 break;
             }
-            insn.valid = e_ee_valid::UNSUPPORTED;
+            insn.valid = e_ee_valid::VALID;
             insn.flow = (insn.rt & 2) ? e_ee_flow::FLOW_BRANCH_LIKELY
                                       : e_ee_flow::FLOW_BRANCH;
             insn.branch_likely = (insn.rt & 2) != 0;
@@ -1059,6 +1068,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                 {
                     name = "vmul";
                 }
+                else if (defined && funct == 0x38u)
+                {
+                    name = "vcallms";
+                }
+                else if (defined && funct == 0x39u)
+                {
+                    name = "vcallmsr";
+                }
                 else if (defined && funct >= 0x3cu)
                 {
                     const uint32_t special2_index =
@@ -1078,10 +1095,9 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
                     default: break;
                     }
                 }
-                // Every defined macro executes through the general VU0
-                // macro runtime helpers except VCALLMS/VCALLMSR, which need
-                // the VU0 micro-program engine and stay fail-closed.
-                if (defined && funct != 0x38u && funct != 0x39u)
+                // The general macro runtime routes VCALLMS/VCALLMSR
+                // through the installed micro-engine launch callback.
+                if (defined)
                 {
                     insn.valid = e_ee_valid::VALID;
                 }

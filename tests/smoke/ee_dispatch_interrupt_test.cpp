@@ -11,6 +11,9 @@ namespace
 {
 constexpr uint32_t k_entry = 0x00100000u;
 constexpr uint32_t k_resume = 0x00100008u;
+// Literal architectural addresses, independent of the production selector.
+constexpr uint32_t k_interrupt_vector_bev0 = 0x80000200u;
+constexpr uint32_t k_interrupt_vector_bev1 = 0xBFC00400u;
 constexpr uint32_t k_dmac_ip = 1u << (ee::CAUSE_IP_SHIFT + ee::INT_DMAC);
 constexpr uint32_t k_intc_ip = 1u << (ee::CAUSE_IP_SHIFT + ee::INT_INTC);
 
@@ -102,6 +105,23 @@ bool interrupted(const ee::s_ee_dispatch_result& result,
 
 int main()
 {
+    // IRQ vectors differ from general exceptions and TLB refill.
+    // A nested entry keeps the general-vector fallback.
+    if (ee::ee_exception_vector(0u, ee::EX_Int) != k_interrupt_vector_bev0 ||
+        ee::ee_exception_vector(ee::STATUS_BEV, ee::EX_Int) !=
+            k_interrupt_vector_bev1 ||
+        ee::ee_exception_vector(ee::STATUS_EXL, ee::EX_Int) != 0x80000180u ||
+        ee::ee_exception_vector(ee::STATUS_EXL | ee::STATUS_BEV, ee::EX_Int) !=
+            0xBFC00380u ||
+        ee::ee_exception_vector(0u, ee::EX_Sys) != 0x80000180u ||
+        ee::ee_exception_vector(ee::STATUS_BEV, ee::EX_Sys) != 0xBFC00380u ||
+        ee::ee_exception_vector(0u, ee::EX_TLBL) != 0x80000000u ||
+        ee::ee_exception_vector(ee::STATUS_BEV, ee::EX_TLBS) != 0xBFC00200u ||
+        ee::ee_exception_vector(ee::STATUS_EXL, ee::EX_TLBL) != 0x80000180u)
+    {
+        return fail("architectural interrupt/general/refill vector selection");
+    }
+
     // A DMA completion raised by guest execution becomes visible precisely
     // before the NEXT translated function entry, after the old exit.
     {
@@ -129,7 +149,7 @@ int main()
         const ee::s_ee_dispatch_result result =
             ee::ee_dispatch_run(&cpu, &runtime, table, 8);
 
-        if (!interrupted(result, cpu, ee::VEC_COMMON_BEV0, k_resume, 1) ||
+        if (!interrupted(result, cpu, k_interrupt_vector_bev0, k_resume, 1) ||
             g_function_calls != 1 || g_resume_calls != 0 ||
             (cpu.m_cop0[ee::COP0_Cause] & k_dmac_ip) == 0)
         {
@@ -165,7 +185,7 @@ int main()
         g_function_calls = 0;
         const ee::s_ee_dispatch_result result =
             ee::ee_dispatch_run(&cpu, &runtime, table, 8);
-        if (!interrupted(result, cpu, ee::VEC_COMMON_BEV1, k_entry, 0) ||
+        if (!interrupted(result, cpu, k_interrupt_vector_bev1, k_entry, 0) ||
             g_function_calls != 0 ||
             (cpu.m_cop0[ee::COP0_Cause] & k_intc_ip) == 0)
         {
@@ -275,7 +295,7 @@ int main()
         compiled.functions.push_back(
             make_function("resumed", k_entry, {k_entry}));
         compiled.functions.push_back(make_function(
-            "handler", ee::VEC_COMMON_BEV0, {ee::VEC_COMMON_BEV0}));
+            "handler", k_interrupt_vector_bev0, {k_interrupt_vector_bev0}));
         const ee::t_ee_translated_entry entries[] = {
             resumed_entry, exception_return_entry
         };
@@ -284,7 +304,7 @@ int main()
         ee::s_ee_cpu_state cpu{};
         ee::c_ee_hw_bus hardware;
         hardware.bind_cpu(&cpu);
-        cpu.m_pc = ee::VEC_COMMON_BEV0;
+        cpu.m_pc = k_interrupt_vector_bev0;
         cpu.m_cop0[ee::COP0_EPC] = k_entry;
         cpu.m_cop0[ee::COP0_Status] =
             ee::STATUS_IE | ee::STATUS_EIE |
@@ -298,7 +318,7 @@ int main()
         g_resume_calls = 0;
         const ee::s_ee_dispatch_result result =
             ee::ee_dispatch_run(&cpu, nullptr, table, 4);
-        if (!interrupted(result, cpu, ee::VEC_COMMON_BEV0, k_entry, 1) ||
+        if (!interrupted(result, cpu, k_interrupt_vector_bev0, k_entry, 1) ||
             g_handler_calls != 1 || g_resume_calls != 0)
         {
             return fail("ERET failed to resample still-pending interrupt");
@@ -340,7 +360,7 @@ int main()
 
         const ee::s_ee_dispatch_result second =
             ee::ee_dispatch_run(&cpu, &runtime, table, 4);
-        if (!interrupted(second, cpu, ee::VEC_COMMON_BEV0, k_resume, 0) ||
+        if (!interrupted(second, cpu, k_interrupt_vector_bev0, k_resume, 0) ||
             g_function_calls != 1)
         {
             return fail("interrupt lost across bounded dispatcher calls");

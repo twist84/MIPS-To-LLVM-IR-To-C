@@ -92,6 +92,9 @@ void module_builder::declare_memory_helpers()
     m_out += "declare i32 @ee_raise_exception(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_exception_return(ptr)\n";
     m_out += "declare void @ee_cop0_write(ptr, i32, i32)\n";
+    m_out += "declare void @ee_cop0_clock_sync(ptr, ptr)\n";
+    m_out += "declare void @ee_cop0_clock_write(ptr, ptr, i32, i32)\n";
+    m_out += "declare i32 @ee_cop0_perf_transfer(ptr, ptr, i32)\n";
     m_out += "declare i32 @ee_vu0_qmfc2(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_qmtc2(ptr, ptr, i32, i32, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_cfc2(ptr, ptr, i32, i32, i32, i32)\n";
@@ -100,6 +103,7 @@ void module_builder::declare_memory_helpers()
     m_out += "declare i32 @ee_vu0_macro_scalar(ptr, ptr, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_macro_indexed_memory(ptr, ptr, i32, i32)\n";
     m_out += "declare i32 @ee_vu0_get_branch_condition(ptr)\n";
+    m_out += "declare i32 @ee_cop0_get_branch_condition(ptr)\n";
     m_out += "\n";
 
     // Keep disabled diagnostic calls on the translated fast path. The
@@ -491,7 +495,7 @@ void module_builder::emit_quadword_read(const std::string& address,
     // allocate in guest loops or write directly into a guest register before
     // both ordered fallback reads have completed.
     const std::string high_ptr = newtemp();
-    m_out += "  call void @ee_mem_read128_pair(ptr %rt, i32 " + address +
+    m_out += "  call void @ee_mem_read128_guest(ptr %rt, i32 " + address +
              ", ptr %quadword_read_slot)\n";
     m_out += "  " + lo + " = load i64, ptr %quadword_read_slot, align 16\n";
     m_out += "  " + high_ptr + " = getelementptr i8, ptr %quadword_read_slot, i64 8\n";
@@ -655,6 +659,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             {
             case e_ee_opcode::FUNCT_MFHI:
             case e_ee_opcode::FUNCT_MFLO:
+            case e_ee_opcode::FUNCT_MFSA:
                 if (ins.rd != 0) w.insert(ins.rd);
                 break;
             case e_ee_opcode::FUNCT_JALR:
@@ -823,6 +828,12 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             {
             case e_ee_opcode::FUNCT_MFHI:
             case e_ee_opcode::FUNCT_MFLO:
+                break;
+            case e_ee_opcode::FUNCT_MFSA:
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
+            case e_ee_opcode::FUNCT_MTSA:
+                consider_read(ins.rs);
                 break;
             case e_ee_opcode::FUNCT_MTHI:
             case e_ee_opcode::FUNCT_MTLO:
@@ -1689,6 +1700,31 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             m_out += "  " + v + " = load i64, ptr " + ge + "\n";
             set_gpr_lo64(ins.rd, v);
         }
+        else if (funct == ee::e_ee_opcode::FUNCT_MFSA)
+        {
+            // Architectural SA is four bits in byte units; the stable
+            // runtime field stores a bit count for the LLVM funnel shift.
+            const std::string raw = newtemp();
+            const std::string bytes = newtemp();
+            const std::string masked = newtemp();
+            const std::string value = newtemp();
+            m_out += "  " + raw + " = load i32, ptr " + state_field(5) + "\n";
+            m_out += "  " + bytes + " = lshr i32 " + raw + ", 3\n";
+            m_out += "  " + masked + " = and i32 " + bytes + ", 15\n";
+            m_out += "  " + value + " = zext i32 " + masked + " to i64\n";
+            set_gpr_lo64(ins.rd, value);
+        }
+        else if (funct == ee::e_ee_opcode::FUNCT_MTSA)
+        {
+            const std::string source = src_lo(ins.rs);
+            const std::string bytes = newtemp();
+            const std::string bits = newtemp();
+            const std::string narrow = newtemp();
+            m_out += "  " + bytes + " = and i64 " + source + ", 15\n";
+            m_out += "  " + bits + " = shl i64 " + bytes + ", 3\n";
+            m_out += "  " + narrow + " = trunc i64 " + bits + " to i32\n";
+            m_out += "  store i32 " + narrow + ", ptr " + state_field(5) + "\n";
+        }
         else if (funct == ee::e_ee_opcode::FUNCT_MTHI)
         {
             m_out += "  store i64 " + src_lo(ins.rs) + ", ptr " + state_field(1) + "\n";
@@ -2064,8 +2100,40 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         const uint8_t cp0_reg = ins.rd;
         const uint8_t gpr = ins.rt;
 
-        if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0))
+        if (cp0_reg == 25u &&
+            (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0) ||
+             fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MTC0)))
         {
+            // The core-global performance bank lives in the runtime.
+            // Commit cached GPR operands before the helper reads/writes them.
+            const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
+            store_dirty_regs(dirty);
+            reset_tracking();
+            const std::string result = newtemp();
+            const std::string success = newtemp();
+            const std::string suffix = std::to_string(m_temp_counter++);
+            const std::string fail = "perf_fail_" + suffix;
+            const std::string ready = "perf_ready_" + suffix;
+            m_out += "  " + result +
+                " = call i32 @ee_cop0_perf_transfer(ptr %cpu, ptr %rt, i32 " +
+                std::to_string(ins.opcode_word) + ")\n";
+            m_out += "  " + success + " = icmp eq i32 " + result + ", 0\n";
+            m_out += "  br i1 " + success + ", label %" + ready + ", label %" + fail + "\n";
+            m_out += fail + ":\n";
+            const std::string pc_ptr = state_field(6);
+            const std::string exit_ptr = state_field(7);
+            m_out += "  store i32 " + std::to_string(ins.pc) + ", ptr " + pc_ptr + "\n";
+            m_out += "  store i32 4, ptr " + exit_ptr + "\n";
+            m_out += "  ret i32 4\n";
+            m_out += ready + ":\n";
+        }
+        else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_MFC0))
+        {
+            // Count must be sampled even for a discarded GPR0 result.
+            if (cp0_reg == 9u || cp0_reg == 11u)
+            {
+                m_out += "  call void @ee_cop0_clock_sync(ptr %cpu, ptr %rt)\n";
+            }
             // GPR.rt = sext32(COP0[rd])
             std::string p = newtemp();
             std::string v32 = newtemp();
@@ -2081,16 +2149,31 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             // store into m_cop0). In particular Compare writes clear IP7.
             const std::string v32 = newtemp();
             m_out += "  " + v32 + " = trunc i64 " + src_lo(gpr) + " to i32\n";
-            m_out += "  call void @ee_cop0_write(ptr %cpu, i32 " +
-                     std::to_string(cp0_reg) + ", i32 " + v32 + ")\n";
+            if (cp0_reg == 9u || cp0_reg == 11u)
+            {
+                m_out += "  call void @ee_cop0_clock_write(ptr %cpu, ptr %rt, i32 " +
+                         std::to_string(cp0_reg) + ", i32 " + v32 + ")\n";
+            }
+            else
+            {
+                if (cp0_reg == 12u)
+                {
+                    // Account elapsed time in the previous privilege mode.
+                    m_out += "  call void @ee_cop0_clock_sync(ptr %cpu, ptr %rt)\n";
+                }
+                m_out += "  call void @ee_cop0_write(ptr %cpu, i32 " +
+                         std::to_string(cp0_reg) + ", i32 " + v32 + ")\n";
+            }
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_BC0))
         {
-            // BC0F/BC0T: condition from Cause / simple always-false stub.
-            // Without a live COP0 condition bit, branch not-taken (conservative).
-            if (is_last_in_block) {
-                m_out += "  br label %" + block_label(fallthrough_pc) + "\n";
-            }
+            // Branches are lowered by the control-flow block emitter, never
+            // as a straight-line instruction with a guessed predicate.
+            const std::string pc_ptr = state_field(6);
+            const std::string exit_ptr = state_field(7);
+            m_out += "  store i32 " + std::to_string(ins.pc) + ", ptr " + pc_ptr + "\n";
+            m_out += "  store i32 4, ptr " + exit_ptr + "\n";
+            m_out += "  ret i32 4\n";
         }
         else if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP0_CO))
         {
@@ -2098,6 +2181,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             if (fn == static_cast<uint8_t>(ee::e_ee_opcode::COP0_ERET))
             {
                 // Full exception return: clear EXL, PC <- EPC, exit DISPATCH.
+                m_out += "  call void @ee_cop0_clock_sync(ptr %cpu, ptr %rt)\n";
                 std::string epc = newtemp();
                 m_out += "  " + epc + " = call i32 @ee_exception_return(ptr %cpu)\n";
                 m_out += "  ret i32 3\n"; // EE_EXIT_DISPATCH
@@ -2887,7 +2971,8 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                                 const std::set<uint8_t>& live_out,
                                 uint32_t fallthrough_pc,
                                 bool is_terminator,
-                                bool guarded_loop_header)
+                                bool guarded_loop_header,
+                                const std::map<uint32_t, ee::s_ee_instruction>* insn_map)
 {
     using ee::e_ee_opcode;
     if (block.empty()) return;
@@ -3111,18 +3196,21 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             m_out += "  " + fcc + " = and i32 " + fcsr + ", 8388608\n";
             m_out += "  " + cmp + " = icmp " + std::string((ctrl.rt & 1) ? "ne" : "eq") +
                      " i32 " + fcc + ", 0\n";
-        } else if (ctrl.opcode == e_ee_opcode::OP_COP2 &&
-                   ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)) {
-            // PCSX2's BC2 predicate is VPU_STAT bit 8. Read it before the
-            // delay slot; missing VU0 state is an execution failure, not a
-            // guessed branch outcome.
+        } else if ((ctrl.opcode == e_ee_opcode::OP_COP2 &&
+                    ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)) ||
+                   (ctrl.opcode == e_ee_opcode::OP_COP0 &&
+                    ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP0_BC0))) {
+            // BC2 reads VPU_STAT bit 8; BC0 reads DMAC CIS/CPC. Sample the
+            // live condition before the delay slot and fail closed if absent.
+            const bool cop0 = ctrl.opcode == e_ee_opcode::OP_COP0;
             const std::string condition = newtemp();
             const std::string unavailable = newtemp();
             const std::string suffix = std::to_string(m_temp_counter++);
-            const std::string fail_label = "bc2_fail_" + suffix;
-            const std::string ready_label = "bc2_ready_" + suffix;
-            m_out += "  " + condition +
-                     " = call i32 @ee_vu0_get_branch_condition(ptr %rt)\n";
+            const std::string fail_label = "cop_branch_fail_" + suffix;
+            const std::string ready_label = "cop_branch_ready_" + suffix;
+            m_out += "  " + condition + " = call i32 @" +
+                     (cop0 ? "ee_cop0_get_branch_condition" : "ee_vu0_get_branch_condition") +
+                     "(ptr %rt)\n";
             m_out += "  " + unavailable + " = icmp eq i32 " + condition + ", 2\n";
             m_out += "  br i1 " + unavailable + ", label %" + fail_label +
                      ", label %" + ready_label + "\n";
@@ -3147,6 +3235,255 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         const auto& ctrl = block[ctrl_idx];
         uint32_t ft = fallthrough_pc ? fallthrough_pc : (ctrl.pc + 8);
         uint32_t target = ctrl.branch_target ? ctrl.branch_target : ctrl.jump_target;
+
+        // Integer and branch-likely pairs use the preceding selected PC
+        // as the second branch's slot. Ordinary BC1F/T chains have a
+        // distinct observed sequential-slot behavior (see below).
+        // These R5900 cases are not portable MIPS.
+        const auto pair_branch = [](const ee::s_ee_instruction& ins)
+        {
+            if (ins.valid != ee::e_ee_valid::VALID ||
+                !ins.has_delay_slot)
+            {
+                return false;
+            }
+            switch (ins.opcode)
+            {
+            case e_ee_opcode::OP_BEQ: case e_ee_opcode::OP_BEQL:
+            case e_ee_opcode::OP_BNE: case e_ee_opcode::OP_BNEL:
+            case e_ee_opcode::OP_BLEZ: case e_ee_opcode::OP_BLEZL:
+            case e_ee_opcode::OP_BGTZ: case e_ee_opcode::OP_BGTZL:
+                return true;
+            case e_ee_opcode::OP_REGIMM:
+                return ins.rt <= 3u || (ins.rt >= 0x10u && ins.rt <= 0x13u);
+            case e_ee_opcode::OP_COP1:
+                return ins.rs == 8u && ins.rt <= 3u;
+            default:
+                return false;
+            }
+        };
+        if (delay_idx >= 0 && insn_map != nullptr &&
+            pair_branch(ctrl) && pair_branch(block[delay_idx]))
+        {
+            const auto& inner = block[delay_idx];
+            std::set<uint8_t> all;
+            for (uint8_t reg = 1u; reg < 32u; ++reg)
+            {
+                all.insert(reg);
+            }
+            const auto count = [&](const ee::s_ee_instruction& ins)
+            {
+                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " +
+                    std::to_string(ins.opcode_word) + ")\n";
+            };
+            const auto annul = [&](const ee::s_ee_instruction& ins)
+            {
+                m_out += "  call void @ee_count_reference_annulled_slot(ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " +
+                    std::to_string(ins.opcode_word) + ")\n";
+            };
+            const auto write_link = [&](const ee::s_ee_instruction& ins)
+            {
+                if (ins.opcode == e_ee_opcode::OP_REGIMM &&
+                    ins.rt >= 0x10u && ins.rt <= 0x13u)
+                {
+                    const std::string link = newtemp();
+                    m_out += "  " + link + " = add i64 " +
+                        std::to_string(ins.pc + 8u) + ", 0\n";
+                    set_gpr_lo64(31, link);
+                }
+            };
+            // A relocated delay instruction that can fault needs an
+            // explicit BD/EPC representation. Until that is implemented,
+            // lower only nontrapping scalar ALU instructions there.
+            const auto safe_slot = [](const ee::s_ee_instruction& ins)
+            {
+                if (ins.valid != ee::e_ee_valid::VALID ||
+                    ins.flow != ee::e_ee_flow::FLOW_NONE)
+                {
+                    return false;
+                }
+                switch (ins.opcode)
+                {
+                case e_ee_opcode::OP_ADDIU: case e_ee_opcode::OP_DADDIU:
+                case e_ee_opcode::OP_ANDI: case e_ee_opcode::OP_ORI:
+                case e_ee_opcode::OP_XORI: case e_ee_opcode::OP_LUI:
+                case e_ee_opcode::OP_SLTI: case e_ee_opcode::OP_SLTIU:
+                    return true;
+                case e_ee_opcode::OP_SPECIAL:
+                    switch (ins.funct)
+                    {
+                    case 0x00u: case 0x02u: case 0x03u:
+                    case 0x04u: case 0x06u: case 0x07u:
+                    case 0x21u: case 0x23u: case 0x24u:
+                    case 0x25u: case 0x26u: case 0x27u:
+                    case 0x2au: case 0x2bu: case 0x2du: case 0x2fu:
+                        return true;
+                    default:
+                        return false;
+                    }
+                default:
+                    return false;
+                }
+            };
+            const auto dispatch = [&](uint32_t pc, uint32_t reason)
+            {
+                const std::string pc_ptr = state_field(6);
+                const std::string exit_ptr = state_field(7);
+                m_out += "  store i32 " + std::to_string(pc) + ", ptr " + pc_ptr + "\n";
+                m_out += "  store i32 " + std::to_string(reason) + ", ptr " + exit_ptr + "\n";
+                m_out += "  ret i32 " + std::to_string(reason) + "\n";
+            };
+            const std::string prefix = "nested_branch_" + std::to_string(m_temp_counter++);
+            const auto ordinary_cop1_branch = [&](const ee::s_ee_instruction& ins)
+            {
+                return pair_branch(ins) && ins.opcode == e_ee_opcode::OP_COP1 &&
+                    !ins.branch_likely;
+            };
+            if (ordinary_cop1_branch(ctrl) && ordinary_cop1_branch(inner))
+            {
+                // The original hardware probe distinguishes BC1T (four
+                // consecutive taken branches select the last target) from
+                // BC1TL (the second target). PCSX2's ordinary interpreter
+                // recursively executes sequential slots for taken BC1F/T.
+                // No branch in a contiguous ordinary COP1 chain changes
+                // FCC0, so emit two paths for the sampled condition. Each
+                // path counts only the branches it actually executes.
+                const std::string condition = make_cond(ctrl);
+                store_dirty_regs(all);
+                const std::string taken_label = prefix + "_cop1_taken";
+                const std::string not_taken_label = prefix + "_cop1_not_taken";
+                m_out += "  br i1 " + condition + ", label %" +
+                    taken_label + ", label %" + not_taken_label + "\n";
+
+                const auto emit_cop1_chain = [&](bool fcc, const std::string& label)
+                {
+                    reset_tracking();
+                    m_out += label + ":\n";
+                    uint32_t pc = ctrl.pc;
+                    uint32_t pending_target = 0u;
+                    bool pending = false;
+                    constexpr uint32_t k_max_chain_branches = 64u;
+                    for (uint32_t n = 0u; n < k_max_chain_branches; ++n)
+                    {
+                        const auto it = insn_map->find(pc);
+                        if (it == insn_map->end())
+                        {
+                            dispatch(pc, pending ? 4u : 3u);
+                            return;
+                        }
+                        const auto& ins = it->second;
+                        if (!ordinary_cop1_branch(ins))
+                        {
+                            if (!pending)
+                            {
+                                // No pending transfer: dispatch normally
+                                // at the first instruction outside the
+                                // chain (including another branch type).
+                                dispatch(pc, 3u);
+                                return;
+                            }
+                            if (!safe_slot(ins))
+                            {
+                                dispatch(pc, 4u);
+                                return;
+                            }
+                            emit_insn(ins, false, 0u, true);
+                            store_dirty_regs(all);
+                            dispatch(pending_target, 3u);
+                            return;
+                        }
+                        count(ins);
+                        const bool taken = fcc == ((ins.rt & 1u) != 0u);
+                        if (taken)
+                        {
+                            pending_target = ins.branch_target;
+                            pending = true;
+                        }
+                        else if (pending)
+                        {
+                            // A not-taken ordinary branch in a taken
+                            // branch's slot ends that recursive transfer.
+                            dispatch(pending_target, 3u);
+                            return;
+                        }
+                        pc += 4u;
+                    }
+                    // Refuse an excessively deep pending transfer rather
+                    // than losing its delay state at a dispatcher boundary.
+                    dispatch(pc, pending ? 4u : 3u);
+                };
+
+                const bool taken_fcc = (ctrl.rt & 1u) != 0u;
+                emit_cop1_chain(taken_fcc, taken_label);
+                emit_cop1_chain(!taken_fcc, not_taken_label);
+                return;
+            }
+
+            count(ctrl);
+            const std::string outer_cond = make_cond(ctrl);
+            write_link(ctrl);
+            store_dirty_regs(all);
+            m_out += "  br i1 " + outer_cond + ", label %" + prefix +
+                "_outer_taken, label %" + prefix + "_outer_not_taken\n";
+            const auto emit_inner = [&](uint32_t slot_pc, const std::string& label)
+            {
+                reset_tracking();
+                m_out += label + ":\n";
+                const auto slot = insn_map->find(slot_pc);
+                // The next instruction is not necessarily inner.pc+4.
+                // Do not recursively execute a third transfer or invent
+                // the exception PC of an unsupported relocated slot.
+                if (slot == insn_map->end() ||
+                    !safe_slot(slot->second))
+                {
+                    dispatch(inner.pc, 4u);
+                    return;
+                }
+                count(inner);
+                const std::string inner_cond = make_cond(inner);
+                write_link(inner);
+                if (inner.branch_likely)
+                {
+                    store_dirty_regs(all);
+                    m_out += "  br i1 " + inner_cond + ", label %" + label +
+                        "_inner_taken, label %" + label + "_inner_annulled\n";
+                    m_out += label + "_inner_taken:\n";
+                    reset_tracking();
+                    emit_insn(slot->second, false, 0u, true);
+                    store_dirty_regs(all);
+                    m_out += "  br label %" + block_label(inner.branch_target) + "\n";
+                    m_out += label + "_inner_annulled:\n";
+                    reset_tracking();
+                    annul(slot->second);
+                    dispatch(slot_pc + 4u, 3u);
+                }
+                else
+                {
+                    emit_insn(slot->second, false, 0u, true);
+                    store_dirty_regs(all);
+                    m_out += "  br i1 " + inner_cond + ", label %" +
+                        block_label(inner.branch_target) + ", label %" + label +
+                        "_inner_not_taken\n";
+                    m_out += label + "_inner_not_taken:\n";
+                    dispatch(slot_pc + 4u, 3u);
+                }
+            };
+            emit_inner(target, prefix + "_outer_taken");
+            if (ctrl.branch_likely)
+            {
+                reset_tracking();
+                m_out += prefix + "_outer_not_taken:\n";
+                annul(inner);
+                m_out += "  br label %" + block_label(ctrl.pc + 8u) + "\n";
+            }
+            else
+            {
+                emit_inner(ctrl.pc + 8u, prefix + "_outer_not_taken");
+            }
+            return;
+        }
 
         // Do not let an unsupported branch reach make_cond()'s fallback
         // predicate (which is intentionally always true for unconditional
@@ -3242,6 +3579,8 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                  ctrl.opcode == e_ee_opcode::OP_BGTZ ||
                  ctrl.opcode == e_ee_opcode::OP_REGIMM ||
                  (ctrl.opcode == e_ee_opcode::OP_COP1 && ctrl.rs == 0x08) ||
+                 (ctrl.opcode == e_ee_opcode::OP_COP0 &&
+                  ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP0_BC0)) ||
                  (ctrl.opcode == e_ee_opcode::OP_COP2 &&
                   ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)));
             if (supported_conditional)
@@ -3362,24 +3701,38 @@ void module_builder::end_function()
 
     // Emit these only in modules that actually use them. Unrelated IR
     // retains its existing text/hash and native cache identity.
-    if (m_out.find("call void @ee_mem_read128_pair(", m_quadword_entry_offset) != std::string::npos)
+    if (m_out.find("call void @ee_mem_read128_guest(", m_quadword_entry_offset) != std::string::npos)
     {
         m_out.insert(m_quadword_entry_offset,
                      "  %quadword_read_slot = alloca { i64, i64 }, align 16\n");
-        m_out += "\ndeclare void @ee_mem_read128_pair(ptr, i32, ptr)\n";
+        m_out += "\ndeclare void @ee_mem_read128_guest(ptr, i32, ptr)\n";
     }
     if (m_out.find("call void @ee_store_quadword(", m_quadword_entry_offset) != std::string::npos)
     {
         // A failed RAM probe has no side effects. Preserve trace/write
-        // interleaving, including rechecking the trace flag after MMIO.
+        // interleaving for scalar fallback, but keep a hardware FIFO
+        // quadword indivisible (both diagnostic lanes precede its write).
         m_out += R"IR(
 declare i32 @ee_mem_try_write128_ram(ptr, i32, i64, i64)
+declare i32 @ee_mem_is_quadword_fifo(ptr, i32)
+declare void @ee_mem_write128_words(ptr, i32, i64, i64)
 define internal void @ee_store_quadword(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i64 %lo, i64 %hi, i64 %base, i64 %sp, i64 %fp, i64 %ra) alwaysinline {
 entry:
   %fused = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
   %ok = icmp ne i32 %fused, 0
   br i1 %ok, label %done, label %fallback
 fallback:
+  %fifo_flag = call i32 @ee_mem_is_quadword_fifo(ptr %rt, i32 %affected)
+  %fifo = icmp ne i32 %fifo_flag, 0
+  br i1 %fifo, label %fifo_write, label %scalar_write
+fifo_write:
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 8, i64 %lo, i32 0, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  %fifo_effective8 = add i32 %effective, 8
+  %fifo_affected8 = add i32 %affected, 8
+  call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %fifo_effective8, i32 %fifo_affected8, i32 8, i64 %hi, i32 1, i64 %base, i64 %sp, i64 %fp, i64 %ra)
+  call void @ee_mem_write128_words(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
+  br label %done
+scalar_write:
   call void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 8, i64 %lo, i32 0, i64 %base, i64 %sp, i64 %fp, i64 %ra)
   call void @ee_mem_write64(ptr %rt, i32 %affected, i64 %lo)
   %effective8 = add i32 %effective, 8
@@ -3400,6 +3753,11 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     header();
     declare_memory_helpers();
 
+    std::map<uint32_t, ee::s_ee_instruction> linear_insn_map;
+    for (const auto& ins : insns)
+    {
+        linear_insn_map.emplace(ins.pc, ins);
+    }
     std::vector<std::vector<ee::s_ee_instruction>> blocks;
     std::vector<ee::s_ee_instruction> cur;
 
@@ -3562,7 +3920,8 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
             (b + 1 < blocks.size() && !blocks[b + 1].empty())
                 ? blocks[b + 1][0].pc : 0;
         emit_block(blocks[b], b == blocks.size() - 1, entry_pc,
-                   touched, touched, fallthrough_pc, b == blocks.size() - 1);
+                   touched, touched, fallthrough_pc, b == blocks.size() - 1,
+                   false, &linear_insn_map);
     }
 
     // A direct target outside this emitted function is a dispatcher exit, not
@@ -4575,13 +4934,18 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
-        // Unary MMI2 lane permutations use rt exclusively. The 128-bit
-        // value is assembled before writing rd, including rd==rt.
-        if (fn == 0x09 &&
-            (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f))
+        // Unary MMI2/MMI3 lane permutations use rt exclusively. The
+        // complete source is captured before writing rd, including rd==rt.
+        if ((fn == 0x09 &&
+             (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f)) ||
+            (fn == 0x29 && (sa == 0x1a || sa == 0x1e)))
         {
             const bool halfword = sa == 0x1a || sa == 0x1b;
-            const char* mask = sa == 0x1a
+            const char* mask = fn == 0x29
+                ? (halfword
+                    ? "<i32 0, i32 2, i32 1, i32 3, i32 4, i32 6, i32 5, i32 7>"
+                    : "<i32 0, i32 2, i32 1, i32 3>")
+                : sa == 0x1a
                 ? "<i32 2, i32 1, i32 0, i32 3, i32 6, i32 5, i32 4, i32 7>"
                 : sa == 0x1b
                 ? "<i32 3, i32 2, i32 1, i32 0, i32 7, i32 6, i32 5, i32 4>"
@@ -5243,6 +5607,17 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
             block_killed_map[bb.start_pc] = block_written_map[bb.start_pc];
         }
         std::set<uint8_t> rbw = block_read_before_write(insns);
+        // A branch pair may consume an instruction outside its CFG block.
+        // Preserve all incoming registers across this uncommon edge.
+        if (insns.size() >= 2u &&
+            insns[insns.size() - 2u].has_delay_slot &&
+            insns.back().has_delay_slot)
+        {
+            for (uint8_t reg = 1u; reg < 32u; ++reg)
+            {
+                rbw.insert(reg);
+            }
+        }
         // The V0 write trace observes the pre-write SSA value even for an
         // instruction which otherwise kills V0 on entry to the block.
         // Keep that old value live across predecessors whenever this block
@@ -5513,7 +5888,7 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
         emit_block(block_insns_vec[i], i == fn.blocks.size() - 1, fn.entry_pc,
                    live_in[bb.start_pc], live_out[bb.start_pc],
                    bb.fallthrough_pc, bb.is_terminator,
-                   loop_headers.count(bb.start_pc) != 0u);
+                   loop_headers.count(bb.start_pc) != 0u, &insn_map);
     }
 
     // External / unresolved targets return to the host dispatcher. Returning

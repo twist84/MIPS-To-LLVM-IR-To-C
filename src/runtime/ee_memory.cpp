@@ -511,6 +511,26 @@ uint16_t ee_mem_read16(s_ee_runtime* runtime, uint32_t address)
     return read_scalar<uint16_t, &ee_memory::read16>(runtime, address);
 }
 
+uint32_t ee_cop0_get_branch_condition(const s_ee_runtime* runtime)
+{
+    // R5900 COP0 condition is true iff all selected DMAC channels have
+    // latched completion. It is not the interrupt mask/pending predicate.
+    // No bus/device means unavailable, not false (2 is the branch ABI).
+    if (runtime == nullptr || runtime->m_mmio_read == nullptr)
+    {
+        return 2u;
+    }
+    s_ee_u128 pcr{}, stat{};
+    if (!runtime->m_mmio_read(runtime->m_mmio_user, 0x1000e020u, 4u, &pcr) ||
+        !runtime->m_mmio_read(runtime->m_mmio_user, 0x1000e010u, 4u, &stat))
+    {
+        return 2u;
+    }
+    const uint32_t selected = static_cast<uint32_t>(pcr.m_lo) & 0x03ffu;
+    const uint32_t completed = static_cast<uint32_t>(stat.m_lo) & 0x03ffu;
+    return (completed & selected) == selected ? 1u : 0u;
+}
+
 uint32_t ee_mem_read32(s_ee_runtime* runtime, uint32_t address)
 {
     return read_scalar<uint32_t, &ee_memory::read32>(runtime, address);
@@ -620,6 +640,39 @@ void ee_mem_read128_pair(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out
     const uint64_t lo = ee_mem_read64(runtime, address);
     const uint64_t hi = ee_mem_read64(runtime, address + 8u);
     *out = {lo, hi};
+}
+
+uint32_t ee_mem_is_quadword_fifo(s_ee_runtime* runtime, uint32_t address)
+{
+    const ee_memory* memory = runtime_memory(runtime);
+    const uint32_t physical = memory != nullptr
+        ? memory->translate_direct_address(address) : address;
+    // VIF0/1, GIF and IPU FIFOs consume full quadwords. In particular,
+    // two 64-bit writes to VIF FIFO are not equivalent to one SQ.
+    const bool graphics_fifo = physical >= 0x10004000u &&
+        physical < 0x10007000u;
+    const bool ipu_fifo = physical == 0x10007000u ||
+        physical == 0x10007010u;
+    return (physical & 15u) == 0u && (graphics_fifo || ipu_fifo) ? 1u : 0u;
+}
+
+void ee_mem_read128_guest(s_ee_runtime* runtime, uint32_t address, s_ee_u128* out)
+{
+    if (ee_mem_is_quadword_fifo(runtime, address) != 0u)
+    {
+        ee_mem_read128(runtime, address, out);
+    }
+    else
+    {
+        ee_mem_read128_pair(runtime, address, out);
+    }
+}
+
+void ee_mem_write128_words(s_ee_runtime* runtime, uint32_t address,
+                           uint64_t lo, uint64_t hi)
+{
+    const s_ee_u128 value{lo, hi};
+    ee_mem_write128(runtime, address, &value);
 }
 
 static bool try_write128_ram(s_ee_runtime* runtime, uint32_t address,

@@ -31,39 +31,6 @@ uint64_t read64(const uint8_t* bytes)
     return result;
 }
 
-float to_float(uint32_t bits)
-{
-    // Reference VU input normalisation: flush denormals, saturate INF/NaN.
-    const uint32_t exponent = bits & 0x7f800000u;
-    if (exponent == 0u)
-    {
-        bits &= 0x80000000u;
-    }
-    else if (exponent == 0x7f800000u)
-    {
-        bits = (bits & 0x80000000u) | 0x7f7fffffu;
-    }
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-uint32_t to_bits(float value)
-{
-    uint32_t result = 0u;
-    std::memcpy(&result, &value, sizeof(result));
-    const uint32_t exponent = result & 0x7f800000u;
-    if (exponent == 0u)
-    {
-        result &= 0x80000000u;
-    }
-    else if (exponent == 0x7f800000u)
-    {
-        result = (result & 0x80000000u) | 0x7f7fffffu;
-    }
-    return result;
-}
-
 void store_vi(s_ee_vu1_state& state, uint32_t index, uint32_t value)
 {
     if (index != 0u)
@@ -549,53 +516,130 @@ bool branch_delay_exempt(uint32_t lower)
 
 // Reference EFU arithmetic from vu_ops.hpp::efu; pipeline latencies from
 // the VU manual. P retains its previous value until the producer retires.
+// Coefficients and polynomial identities from ps2-native-recomp's
+// MIT-licensed vu_ops.hpp, revision 2a1cbfe (LICENSE.ps2-native-recomp).
+// Evaluate with our existing FMAC and signed-digit quotient units.
+// Internal EFU summation order is not fully hardware-verified.
+template <bool coefficient_first, size_t N>
+uint32_t efu_odd_polynomial(uint32_t x, const std::array<uint32_t, N>& coefficients)
+{
+    // The truncated Booth tree is asymmetric. Do not treat the two
+    // multiplication inputs as freely interchangeable.
+    const auto term = [](uint32_t power, uint32_t coefficient)
+    {
+        if constexpr (coefficient_first)
+        {
+            return vu1_fp::mul(coefficient, power);
+        }
+        else
+        {
+            return vu1_fp::mul(power, coefficient);
+        }
+    };
+    const uint32_t square = vu1_fp::mul(x, x);
+    uint32_t power = x;
+    uint32_t sum = term(power, coefficients[0]);
+    for (size_t n = 1u; n < N; ++n)
+    {
+        power = vu1_fp::mul(power, square);
+        sum = vu1_fp::add(sum, term(power, coefficients[n]));
+    }
+    return sum;
+}
+
+uint32_t efu_atan(uint32_t y, uint32_t x)
+{
+    constexpr std::array<uint32_t, 8> coefficients{
+        0x3f7ffff5u, 0xbeaaa61cu, 0x3e4c40a6u, 0xbe0e6c63u,
+        0x3dc577dfu, 0xbd6501c4u, 0x3cb31652u, 0xbb84d7e7u};
+    // Argument reduction: pi/4 + atan((y-x)/(y+x)). Saturation and
+    // signed zero are handled by the same arithmetic for every input.
+    const uint32_t numerator = vu1_fp::flush(vu1_fp::sub(y, x));
+    const uint32_t denominator = vu1_fp::flush(vu1_fp::add(y, x));
+    const uint32_t reduced = vu_scalar_fp::quotient(numerator, denominator);
+    // PCSX2's EATAN polynomial uses coefficient * odd power. Keeping
+    // that operand order in the integer Booth model agrees with the
+    // hardware's saturated argument and unit-magnitude readbacks.
+    // The residual near-zero cancellation remains uncharacterized.
+    return vu1_fp::add(efu_odd_polynomial<true>(reduced, coefficients), 0x3f490fdau);
+}
+
+uint32_t efu_sin(uint32_t x)
+{
+    constexpr std::array<uint32_t, 5> coefficients{
+        0x3f800000u, 0xbe2aaaa4u, 0x3c08873eu, 0xb94fb222u, 0x362e9c14u};
+    return efu_odd_polynomial<false>(x, coefficients);
+}
+
+uint32_t efu_exp(uint32_t x)
+{
+    constexpr std::array<uint32_t, 6> coefficients{
+        0x3e7fffa8u, 0x3d0007f4u, 0x3b29d3ffu,
+        0x3933e553u, 0x36b63510u, 0x353961acu};
+    std::array<uint32_t, 6> terms{};
+    uint32_t power = x;
+    for (size_t n = 0u; n < terms.size(); ++n)
+    {
+        terms[n] = vu1_fp::mul(power, coefficients[n]);
+        power = vu1_fp::mul(power, x);
+    }
+    // Provisional evaluation order documented by the independent
+    // reference. It is an empirical generic grouping, not an established
+    // silicon schedule. No input-specific result correction is applied.
+    uint32_t sum = vu1_fp::add(
+        vu1_fp::add(terms[0], terms[2]), vu1_fp::add(terms[1], terms[3]));
+    sum = vu1_fp::add(vu1_fp::add(vu1_fp::kOne, sum), terms[4]);
+    sum = vu1_fp::add(sum, terms[5]);
+    sum = vu1_fp::mul(sum, sum);
+    sum = vu1_fp::mul(sum, sum);
+    return vu_scalar_fp::quotient(vu1_fp::kOne, sum);
+}
+
 bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
                 uint32_t fsf, uint32_t& value, uint32_t& latency)
 {
-    const float x = to_float(source[0]);
-    const float y = to_float(source[1]);
-    const float z = to_float(source[2]);
-    const float scalar = to_float(source[fsf]);
-    const float sum = x * x + y * y + z * z;
-    float result = 0.0f;
-
+    // EFU uses the PS2's full exponent range (including exponent 255).
+    // Compose the already validated integer FMAC and signed-digit
+    // root/quotient primitives instead of host IEEE float arithmetic.
+    const uint32_t scalar = source[fsf];
+    const auto squares = [&]()
+    {
+        return vu1_fp::add(vu1_fp::add(
+            vu1_fp::mul(source[0], source[0]),
+            vu1_fp::mul(source[1], source[1])),
+            vu1_fp::mul(source[2], source[2]));
+    };
+    const auto reciprocal = [](uint32_t bits)
+    {
+        return vu_scalar_fp::quotient(vu1_fp::kOne, bits);
+    };
     switch (index)
     {
-    case 0x70u: result = sum; latency = 11u; break; // ESADD
-    case 0x71u:
-        result = sum != 0.0f ? 1.0f / sum : 3.4e38f;
-        latency = 18u;
-        break; // ERSADD
-    case 0x72u: result = std::sqrt(sum); latency = 18u; break; // ELENG
+    case 0x70u: value = squares(); latency = 11u; return true; // ESADD
+    case 0x71u: value = reciprocal(squares()); latency = 18u; return true; // ERSADD
+    case 0x72u: value = vu_scalar_fp::root(squares()); latency = 18u; return true; // ELENG
     case 0x73u:
-        result = sum != 0.0f ? 1.0f / std::sqrt(sum) : 3.4e38f;
+        value = reciprocal(vu_scalar_fp::root(squares()));
         latency = 24u;
-        break; // ERLENG
-    case 0x74u: result = std::atan2(y, x); latency = 54u; break;
-    case 0x75u: result = std::atan2(z, x); latency = 54u; break;
+        return true; // ERLENG
     case 0x76u:
-        result = x + y + z + to_float(source[3]);
+        value = vu1_fp::add(vu1_fp::add(vu1_fp::add(
+            source[0], source[1]), source[2]), source[3]);
         latency = 12u;
-        break; // ESUM
-    case 0x78u: result = std::sqrt(std::fabs(scalar)); latency = 12u; break;
+        return true; // ESUM
+    case 0x78u: value = vu_scalar_fp::root(scalar); latency = 12u; return true; // ESQRT
     case 0x79u:
-    {
-        const float root = std::sqrt(std::fabs(scalar));
-        result = root != 0.0f ? 1.0f / root : 3.4e38f;
+        value = reciprocal(vu_scalar_fp::root(scalar));
         latency = 18u;
-        break;
-    }
-    case 0x7au:
-        result = scalar != 0.0f ? 1.0f / scalar : 3.4e38f;
-        latency = 12u;
-        break;
-    case 0x7cu: result = std::sin(scalar); latency = 29u; break;
-    case 0x7du: result = std::atan(scalar); latency = 54u; break;
-    case 0x7eu: result = std::exp(-scalar); latency = 44u; break;
+        return true; // ERSQRT
+    case 0x7au: value = reciprocal(scalar); latency = 12u; return true; // ERCPR
+    case 0x74u: value = efu_atan(source[1], source[0]); latency = 54u; return true;
+    case 0x75u: value = efu_atan(source[2], source[0]); latency = 54u; return true;
+    case 0x7cu: value = efu_sin(scalar); latency = 29u; return true;
+    case 0x7du: value = efu_atan(scalar, vu1_fp::kOne); latency = 54u; return true;
+    case 0x7eu: value = efu_exp(scalar); latency = 44u; return true;
     default: return false;
     }
-    value = to_bits(result);
-    return true;
 }
 
 bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
@@ -979,6 +1023,47 @@ bool c_ee_vu1::efu(const std::array<uint32_t, 4>& source, uint32_t index,
     return component < 4u && efu_result(source, index, component, value, latency);
 }
 
+struct s_ee_vu1_execution
+{
+    explicit s_ee_vu1_execution(const s_ee_vu1_state& state, uint32_t address)
+        : m_pc(address & 0x3ff8u), m_npc((m_pc + 8u) & 0x3fffu),
+          m_previous_vi(state.m_vi)
+    {
+        m_pipe.start(state);
+    }
+
+    uint32_t m_pc;
+    uint32_t m_npc;
+    std::array<uint16_t, 16> m_previous_vi;
+    bool m_previous_lower = false;
+    bool m_ending = false;
+    int32_t m_fsset = -1;
+    s_flag_pipe m_pipe{};
+    s_ee_vu1_dependency m_dependencies{};
+};
+
+static void initialize_vu1(s_ee_vu1_state& state)
+{
+    if (!state.m_initialized)
+    {
+        state = {};
+        state.m_vf[0][3] = 0x3f800000u;
+        state.m_initialized = true;
+    }
+}
+
+std::shared_ptr<s_ee_vu1_execution> c_ee_vu1::begin_execution(
+    s_ee_vu1_state& state, uint32_t address)
+{
+    if ((address & 7u) != 0u)
+    {
+        return {};
+    }
+    initialize_vu1(state);
+    state.m_tpc = address & 0x3ff8u;
+    return std::make_shared<s_ee_vu1_execution>(state, address);
+}
+
 bool c_ee_vu1::run(
     s_ee_vu1_state& state,
     std::array<uint8_t, k_memory_size>& code,
@@ -992,12 +1077,7 @@ bool c_ee_vu1::run(
     }
     *issue = {};
     c_runtime_profile_scope profile_scope(e_runtime_profile_id::vu1_run, 0u, &issue->m_steps);
-    if (!state.m_initialized)
-    {
-        state = {};
-        state.m_vf[0][3] = 0x3f800000u;
-        state.m_initialized = true;
-    }
+    initialize_vu1(state);
 
     if (g_vu1_aot != nullptr)
     {
@@ -1007,20 +1087,38 @@ bool c_ee_vu1::run(
             return true;
         }
     }
-    uint32_t pc = address & 0x3ff8u;
-    uint32_t npc = (pc + 8u) & 0x3fffu;
-    std::array<uint16_t, 16> previous_vi = state.m_vi;
-    bool previous_lower = false;
-    bool ending = false;
-    int32_t fsset = -1;
-    s_flag_pipe pipe{};
-    s_ee_vu1_dependency dependencies{};
-    // This bounded host-only cache survives MSCAL/MSCNT calls. Each
-    // lookup checks the current staged microinstruction's exact bits.
-    static thread_local c_ee_vu1_decode_cache decode_cache;
-    pipe.start(state);
+    s_ee_vu1_execution execution(state, address);
+    return run_slice(execution, state, code, data, top, itop,
+                     k_max_steps, path1_bytes, issue) ==
+        e_ee_vu1_slice::completed;
+}
 
-    for (uint32_t step = 0u; step < k_max_steps; ++step)
+e_ee_vu1_slice c_ee_vu1::run_slice(
+    s_ee_vu1_execution& execution, s_ee_vu1_state& state,
+    std::array<uint8_t, k_memory_size>& code,
+    std::array<uint8_t, k_memory_size>& data,
+    uint32_t top, uint32_t itop, uint32_t pair_budget,
+    std::vector<uint8_t>& path1_bytes, s_ee_vu1_issue* issue)
+{
+    if (issue == nullptr || pair_budget == 0u || pair_budget > k_max_steps ||
+        execution.m_pipe.now() > 0x7f000000u)
+    {
+        return e_ee_vu1_slice::rejected;
+    }
+    *issue = {};
+    auto& pc = execution.m_pc;
+    auto& npc = execution.m_npc;
+    auto& previous_vi = execution.m_previous_vi;
+    auto& previous_lower = execution.m_previous_lower;
+    auto& ending = execution.m_ending;
+    auto& fsset = execution.m_fsset;
+    auto& pipe = execution.m_pipe;
+    auto& dependencies = execution.m_dependencies;
+    const uint32_t slice_start = pipe.now();
+    // The decode cache remains thread-local and checks the exact words.
+    static thread_local c_ee_vu1_decode_cache decode_cache;
+
+    for (uint32_t step = 0u; step < pair_budget; ++step)
     {
         const uint32_t lo = read32(code.data() + pc);
         const uint32_t hi = read32(code.data() + pc + 4u);
@@ -1032,7 +1130,7 @@ bool c_ee_vu1::run(
         // D/T debug interrupts require guest-visible delivery, not NOPs.
         if ((hi & 0x18000000u) != 0u)
         {
-            return false;
+            return e_ee_vu1_slice::rejected;
         }
 
         ++pipe.m_t;
@@ -1047,7 +1145,7 @@ bool c_ee_vu1::run(
         s_upper_write pending{};
         if (!upper(state, hi, pending))
         {
-            return false;
+            return e_ee_vu1_slice::rejected;
         }
 
         const auto before = state.m_vi;
@@ -1067,7 +1165,7 @@ bool c_ee_vu1::run(
                        previous_lower ? previous_vi : state.m_vi,
                        path1_bytes, target, branched, pipe, fsset, *issue))
             {
-                return false;
+                return e_ee_vu1_slice::rejected;
             }
             if (branched)
             {
@@ -1119,21 +1217,22 @@ bool c_ee_vu1::run(
         previous_vi = before;
         previous_lower = (hi & 0x80000000u) == 0u &&
             !branch_delay_exempt(lo);
-        issue->m_cycles = pipe.now() - 16u;
+        issue->m_cycles = pipe.now() - slice_start;
 
         if (ending)
         {
             pipe.wait_q(state);
             pipe.wait_p(state);
-            issue->m_cycles = pipe.now() - 16u;
+            issue->m_cycles = pipe.now() - slice_start;
             state.m_tpc = pc;
-            return true;
+            return e_ee_vu1_slice::completed;
         }
         if ((hi & 0x40000000u) != 0u)
         {
             ending = true; // E-bit takes effect AFTER the delay-slot pair.
         }
     }
-    return false; // Real E-bit never reached within bounded execution.
+    state.m_tpc = pc;
+    return e_ee_vu1_slice::pending; // Keep branch, flag, Q/P and E-bit state.
 }
 } // namespace ee

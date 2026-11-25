@@ -77,6 +77,19 @@ int main(int argc, char** argv)
         delay_word = make_r(19, 0, 2, 0, 0x2d);
         function_name = "guest_jr_daddu_return_test";
     }
+    else if (mode == "nested_beq" || mode == "nested_bc1t" ||
+             mode == "nested_bc1tl" || mode == "nested_bc1t_chain" ||
+             mode == "nested_bc1t_mixed")
+    {
+        // Outer target and sequential path have distinct delay effects.
+        // The inner target is intentionally an external dispatcher PC.
+        const uint8_t rt = mode == "nested_bc1tl" ? 3u : 1u;
+        control_word = mode == "nested_beq" ? make_i(0x04, 2, 0, 4) :
+            make_i(0x11, 8, rt, 4);
+        delay_word = mode == "nested_beq" ? make_i(0x04, 3, 0, 7) :
+            make_i(0x11, 8, mode == "nested_bc1t_mixed" ? 0u : rt, 7);
+        function_name = "guest_nested_branch_test";
+    }
     else if (mode == "branch_liveness")
     {
         // A pointer written by a branch delay slot must reach BEQL in the
@@ -204,6 +217,16 @@ int main(int argc, char** argv)
         delay_word = make_i(0x09, 0, 2, 0);
         function_name = "guest_beq_not_taken_delay_test";
     }
+    else if (mode == "bc0f" || mode == "bc0t" ||
+             mode == "bc0fl" || mode == "bc0tl")
+    {
+        const uint8_t rt = mode == "bc0f" ? 0u :
+                           mode == "bc0t" ? 1u :
+                           mode == "bc0fl" ? 2u : 3u;
+        control_word = make_i(0x10, 8, rt, 4);
+        delay_word = make_i(0x09, 2, 2, 1);
+        function_name = "guest_bc0_delay_test";
+    }
     else if (mode == "bltzal")
     {
         // BLTZAL $v0, +4; its delay slot executes on both branch outcomes and
@@ -257,6 +280,30 @@ int main(int argc, char** argv)
 
     insn_map.emplace(control.pc, control);
     insn_map.emplace(delay.pc, delay);
+    const bool nested_pair = mode == "nested_beq" || mode == "nested_bc1t" ||
+        mode == "nested_bc1tl" || mode == "nested_bc1t_chain" ||
+        mode == "nested_bc1t_mixed";
+    if (nested_pair)
+    {
+        // Distinct source operands prove the selected delay instruction
+        // actually executes, rather than just taking the inner edge.
+        if (mode == "nested_bc1t_chain")
+        {
+            insn_map.emplace(entry_pc + 8u,
+                ee::decode(entry_pc + 8u, make_i(0x11, 8, 1, 7)));
+            insn_map.emplace(entry_pc + 12u,
+                ee::decode(entry_pc + 12u, make_i(0x11, 8, 1, 7)));
+            insn_map.emplace(entry_pc + 16u,
+                ee::decode(entry_pc + 16u, make_i(0x09, 4, 4, 4)));
+        }
+        else
+        {
+            insn_map.emplace(entry_pc + 8u,
+                ee::decode(entry_pc + 8u, make_i(0x09, 4, 4, 1)));
+        }
+        insn_map.emplace(entry_pc + 20u,
+            ee::decode(entry_pc + 20u, make_i(0x09, 4, 4, 2)));
+    }
     if (has_continuation)
     {
         const ee::s_ee_instruction continuation =
@@ -401,6 +448,11 @@ int main(int argc, char** argv)
                 block_layout_valid = false;
             }
         }
+    }
+    if (nested_pair)
+    {
+        block_layout_valid = !functions.empty() && !functions[0].blocks.empty() &&
+            functions[0].blocks[0].insn_indices.size() == 2u;
     }
     if (functions.size() != 1 || !block_layout_valid)
     {

@@ -86,6 +86,378 @@ int main()
     path2.bind_event_sink(&capture, capture_gif);
     vif1.bind_path2(&path2);
 
+    // VIF0 FIFO, DMA0 normal/chain and EE/COP2 share the same live
+    // 4 KiB VU0 banks. No VIF1 register or VU1 memory is modified.
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 vif0{};
+        vif0.bind_vu0(&vu0);
+        ee::c_ee_hw_bus bus;
+        ee::ee_memory memory(0x10000u);
+        bus.bind_memory(&memory);
+        bus.bind_vif0(&vif0);
+        bus.bind_device_transfer(&vif0, ee::c_ee_vif1::dma_transfer);
+        ee::s_ee_runtime runtime{};
+        runtime.m_user = &memory;
+        runtime.m_vu0_state = &vu0;
+        runtime.m_mmio_user = &bus;
+        runtime.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        runtime.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        constexpr uint32_t fifo = ee::c_ee_vif1::k_vif0_fifo_base;
+        constexpr uint32_t regs = ee::c_ee_vif1::k_vif0_register_base;
+        constexpr uint32_t d0 = ee::c_ee_dmac::k_vif0_base;
+        constexpr uint32_t vu_data = 0x11004000u;
+        // S32, two vectors, wrapping qword 255 -> 0.
+        const ee::s_ee_u128 packet{0x600200ff01000101ull,
+                                  0x5566778811223344ull};
+        ee::ee_mem_write128(&runtime, fifo, &packet);
+        if (!check(ee::ee_mem_read32(&runtime, regs + 0x40u) == 0x101u &&
+                   ee::ee_mem_read32(&runtime, vu_data + 0xff0u) == 0x11223344u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u,
+                   "VIF0 FIFO or VU0 wrap"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&runtime, vu_data + 0x20u, 0xdeadbeefu);
+        ee::ee_mem_write128(&runtime, 0x100u, &packet);
+        ee::ee_mem_write32(&runtime, d0 + 0x10u, 0x100u);
+        ee::ee_mem_write32(&runtime, d0 + 0x20u, 1u);
+        ee::ee_mem_write32(&runtime, d0, 0x101u);
+        if (!check(ee::ee_mem_read32(&runtime, d0 + 0x10u) == 0x110u &&
+                   ee::ee_mem_read32(&runtime, d0 + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&runtime, d0) & 0x100u) == 0u &&
+                   (bus.dmac().status() & 1u) != 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data + 0x20u) == 0xdeadbeefu,
+                   "VIF0 normal DMA or unrelated VU0 memory overwritten"))
+        {
+            return 1;
+        }
+        const ee::s_ee_u128 tag{0x0000010000000001ull, 0u}; // REFE 1 QWC
+        ee::ee_mem_write128(&runtime, 0x200u, &tag);
+        ee::ee_mem_write32(&runtime, vu_data, 0u);
+        ee::ee_mem_write32(&runtime, d0 + 0x30u, 0x200u);
+        ee::ee_mem_write32(&runtime, d0 + 0x20u, 0u);
+        ee::ee_mem_write32(&runtime, d0, 0x105u);
+        if (!check(ee::ee_mem_read32(&runtime, d0 + 0x30u) == 0x210u &&
+                   (ee::ee_mem_read32(&runtime, d0) & 0x100u) == 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u,
+                   "VIF0 REFE source chain"))
+        {
+            return 1;
+        }
+        // A VU0 MPG wraps within its 4 KiB micro memory, not VU1's.
+        if (!check(send(vif0, {0x4a010200u, 0x12345678u, 0x9abcdef0u, 0u}) &&
+                   ee::ee_mem_read32(&runtime, 0x11000000u) == 0x12345678u &&
+                   ee::ee_mem_read32(&runtime, 0x11000004u) == 0x9abcdef0u,
+                   "VIF0 MPG micro memory wrap"))
+        {
+            return 1;
+        }
+        // Do not let VIF0 execute a VU1-only command or commit a prefix.
+        const uint32_t old_cycle = vif0.read_register(0x40u);
+        if (!check(!send(vif0, {0x01000404u, 0x14000000u, 0u, 0u}) &&
+                   vif0.read_register(0x40u) == old_cycle,
+                   "VIF0 unsupported launch must roll back"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&runtime, regs + 0x10u, 1u);
+        if (!check(vif0.read_register(0x40u) == 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u &&
+                   ee::ee_mem_read32(&runtime, 0x11000000u) == 0x12345678u,
+                   "VIF0 reset destroyed VU0 residency"))
+        {
+            return 1;
+        }
+    }
+
+    // A MARK interrupt delivers INTC without stalling later commands.
+    // ERR.MII masks the IRQ, not MARK itself. Rejected transactions
+    // must not leak their staged IRQ to the bus.
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 units[2]{};
+        ee::c_ee_hw_bus bus;
+        units[0].bind_vu0(&vu0);
+        bus.bind_vif0(&units[0]);
+        bus.bind_vif1(&units[1]);
+        for (uint32_t i = 0u; i < 2u; ++i)
+        {
+            auto& vif = units[i];
+            const uint32_t irq = 1u << (4u + i);
+            if (!check(send(vif, {0x8700beefu, 0x20000000u, 0x12345678u, 0u}) &&
+                       vif.read_register(0x30u) == 0xbeefu &&
+                       vif.read_register(0x70u) == 0x12345678u &&
+                       vif.read_register(0x00u) == 0x840u &&
+                       (bus.intc().status() & irq) != 0u,
+                       "VIF MARK interrupt stopped decoding or missed INTC"))
+            {
+                return 1;
+            }
+            const ee::s_ee_u128 acknowledge{irq, 0u};
+            if (!check(ee::c_ee_intc::mmio_write(&bus.intc(),
+                           ee::c_ee_intc::k_stat_address, 4u, &acknowledge) &&
+                       vif.write_register(0x10u, 8u) &&
+                       vif.read_register(0x00u) == 0x40u &&
+                       vif.write_register(0x30u, 0u) &&
+                       vif.read_register(0x00u) == 0u &&
+                       vif.write_register(0x20u, 1u) &&
+                       send(vif, {0x87001234u, 0u, 0u, 0u}) &&
+                       vif.read_register(0x00u) == 0x40u &&
+                       (bus.intc().status() & irq) == 0u,
+                       "VIF MARK acknowledgement or ERR.MII masking"))
+            {
+                return 1;
+            }
+            if (!check(vif.write_register(0x10u, 1u) &&
+                       !send(vif, {0x8700beefu, 0x09000000u, 0u, 0u}) &&
+                       vif.read_register(0x30u) == 0u &&
+                       vif.read_register(0x00u) == 0u &&
+                       (bus.intc().status() & irq) == 0u,
+                       "rejected VIF transaction leaked MARK or IRQ"))
+            {
+                return 1;
+            }
+        }
+    }
+
+    // A short DMA burst fits in the VIF FIFO even if its I-bit command
+    // stops decoding. DMA owns no further words once the burst is accepted.
+    for (uint32_t i = 0u; i < 2u; ++i)
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 vif{};
+        ee::c_ee_hw_bus bus;
+        ee::ee_memory memory(0x1000u);
+        bus.bind_memory(&memory);
+        if (i == 0u)
+        {
+            vif.bind_vu0(&vu0);
+            bus.bind_vif0(&vif);
+        }
+        else
+        {
+            bus.bind_vif1(&vif);
+        }
+        bus.bind_device_transfer(&vif, ee::c_ee_vif1::dma_transfer);
+        ee::s_ee_runtime rt{};
+        rt.m_user = &memory;
+        rt.m_mmio_user = &bus;
+        rt.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        rt.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        const uint32_t dma = i == 0u ? ee::c_ee_dmac::k_vif0_base :
+                                      ee::c_ee_dmac::k_vif1_base;
+        const uint32_t irq = 1u << (4u + i);
+        const std::vector<uint32_t> words{
+            0x20000000u, 0xaaaaaaaau, 0x80000000u, 0xa0000000u,
+            0xbbbbbbbbu, 0x20000000u, 0xccccccccu, 0u};
+        for (uint32_t n = 0u; n < words.size(); ++n)
+        {
+            ee::ee_mem_write32(&rt, 0x100u + n * 4u, words[n]);
+        }
+        ee::ee_mem_write32(&rt, 0x1000e000u, 1u);
+        ee::ee_mem_write32(&rt, dma + 0x10u, 0x100u);
+        ee::ee_mem_write32(&rt, dma + 0x20u, 2u);
+        ee::ee_mem_write32(&rt, dma, 0x101u);
+        if (!check(vif.read_register(0x70u) == 0xaaaaaaaau &&
+                   vif.read_register(0x00u) == 0xc02u &&
+                   vif.read_register(0x80u) == 0x80000000u &&
+                   (bus.intc().status() & irq) != 0u &&
+                   ee::ee_mem_read32(&rt, dma + 0x10u) == 0x120u &&
+                   ee::ee_mem_read32(&rt, dma + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&rt, dma) & 0x100u) == 0u &&
+                   (bus.dmac().status() & (1u << i)) != 0u,
+                   "VIF stalled prefix or bounded DMA acceptance"))
+        {
+            return 1;
+        }
+        const ee::s_ee_u128 ack{irq, 0u};
+        if (!check(ee::c_ee_intc::mmio_write(&bus.intc(),
+                       ee::c_ee_intc::k_stat_address, 4u, &ack) &&
+                   vif.write_register(0x10u, 8u) &&
+                   vif.read_register(0x70u) == 0xbbbbbbbbu &&
+                   vif.read_register(0x00u) == 0xc02u &&
+                   (bus.intc().status() & irq) != 0u &&
+                   vif.write_register(0x10u, 8u) &&
+                   vif.read_register(0x70u) == 0xccccccccu &&
+                   vif.read_register(0x00u) == 0u &&
+                   vif.diagnostic().m_pending_words == 0u,
+                   "VIF STC did not resume through successive interrupts"))
+        {
+            return 1;
+        }
+        if (!check(vif.write_register(0x10u, 1u) &&
+                   vif.write_register(0x20u, 1u) &&
+                   send(vif, words) &&
+                   vif.read_register(0x70u) == 0xccccccccu &&
+                   vif.read_register(0x00u) == 0u,
+                   "VIF ERR.MII did not suppress stalls"))
+        {
+            return 1;
+        }
+        std::vector<uint32_t> oversized((i == 0u ? 9u : 17u) * 4u, 0u);
+        oversized[0] = 0x80000000u;
+        if (!check(vif.write_register(0x10u, 1u) &&
+                   !send(vif, oversized) &&
+                   vif.read_register(0x00u) == 0u &&
+                   vif.diagnostic().m_reason ==
+                       ee::c_ee_vif1::e_reject::irq_requires_resume,
+                   "VIF oversized stalled suffix was falsely accepted"))
+        {
+            return 1;
+        }
+    }
+
+    // VIF1 MSKPATH3 must change GIF_STAT.M3P and gate actual DMA.
+    {
+        ee::c_ee_vif1 mask_vif{};
+        ee::c_ee_gif_path3 path3{};
+        s_capture events{};
+        path3.bind_event_sink(&events, capture_gif);
+        ee::ee_memory memory(0x1000u);
+        ee::c_ee_hw_bus bus;
+        bus.bind_memory(&memory);
+        bus.bind_vif1(&mask_vif);
+        bus.bind_device_transfer(&path3, ee::c_ee_gif_path3::dma_transfer);
+        ee::s_ee_runtime rt{};
+        rt.m_user = &memory;
+        rt.m_mmio_user = &bus;
+        rt.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        rt.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        constexpr uint32_t gif_stat = 0x10003020u;
+        constexpr uint32_t d2 = ee::c_ee_dmac::k_gif_base;
+        const ee::s_ee_u128 tag{0x1000000000008000ull, 0xeu};
+        ee::ee_mem_write128(&rt, 0x100u, &tag);
+        if (!check(send(mask_vif, {0x06008000u, 0u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 2u,
+                   "VIF1 MSKPATH3 set"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&rt, d2 + 0x10u, 0x100u);
+        ee::ee_mem_write32(&rt, d2 + 0x20u, 1u);
+        ee::ee_mem_write32(&rt, d2, 0x101u);
+        if (!check(events.m_calls == 0u && bus.dmac().status() == 0u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x10u) == 0x100u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x20u) == 1u &&
+                   (ee::ee_mem_read32(&rt, d2) & 0x100u) != 0u,
+                   "masked GIF DMA retired prematurely") ||
+            !check(!send(mask_vif, {0x06000000u, 0x09000000u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 2u && events.m_calls == 0u,
+                   "rejected VIF transaction leaked mask change") ||
+            !check(send(mask_vif, {0x06000000u, 0u, 0u, 0u}) &&
+                   ee::ee_mem_read32(&rt, gif_stat) == 0u &&
+                   events.m_calls == 1u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x10u) == 0x110u &&
+                   ee::ee_mem_read32(&rt, d2 + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&rt, d2) & 0x100u) == 0u &&
+                   (bus.dmac().status() & 4u) != 0u,
+                   "unmask did not resume real GIF DMA"))
+        {
+            return 1;
+        }
+    }
+
+    // STMOD=3 writes incoming data to ROW on data-selected lanes.
+    // Masked ROW reads see the previous value; V4-5 ignores STMOD.
+    {
+        for (uint32_t unit = 0u; unit < 2u; ++unit)
+        {
+            ee::s_ee_vu0_state vu0{};
+            ee::c_ee_vif1 vif{};
+            if (unit == 0u)
+            {
+                vif.bind_vu0(&vu0);
+            }
+            if (!check(send(vif, {0x01000404u, 0x30000000u,
+                                 100u, 200u, 300u, 400u,
+                                 0x20000000u, 0x00000401u,
+                                 0x05000003u, 0x7c020000u,
+                                 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 0u, 0u}),
+                       "STMOD=3 masked UNPACK rejected"))
+            {
+                return 1;
+            }
+            const uint8_t* data = unit == 0u ?
+                vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 0u, 0u) == 100u &&
+                       lane32(data, 0u, 1u) == 2u &&
+                       lane32(data, 1u, 0u) == 5u &&
+                       lane32(data, 1u, 1u) == 2u &&
+                       vif.read_register(0x100u) == 5u &&
+                       vif.read_register(0x110u) == 2u &&
+                       vif.read_register(0x120u) == 7u &&
+                       vif.read_register(0x130u) == 8u,
+                       "STMOD=3 did not update unmasked ROW lanes"))
+            {
+                return 1;
+            }
+            if (!check(send(vif, {0x6f010002u, 0xffffu, 0u, 0u}),
+                       "V4-5 in STMOD=3 rejected"))
+            {
+                return 1;
+            }
+            data = unit == 0u ? vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 2u, 0u) == 0xf8u &&
+                       lane32(data, 2u, 3u) == 0x80u &&
+                       vif.read_register(0x100u) == 5u &&
+                       vif.read_register(0x130u) == 8u,
+                       "V4-5 incorrectly applied STMOD"))
+            {
+                return 1;
+            }
+        }
+    }
+
+    // WL=0 encodes 256, not a zero-length write cycle. Check the
+    // fill/mask sequence and CODE/NUM/VPS for a header-only UNPACK.
+    {
+        for (uint32_t unit = 0u; unit < 2u; ++unit)
+        {
+            ee::s_ee_vu0_state vu0{};
+            ee::c_ee_vif1 vif{};
+            if (unit == 0u)
+            {
+                vif.bind_vu0(&vu0);
+            }
+            if (!check(send(vif, {0x01000001u, 0x31000000u,
+                                 1u, 2u, 3u, 4u,
+                                 0x20000000u, 0xaaaaaaaau,
+                                 0x72000000u, 0x11u, 0u, 0u}),
+                       "WL=0 masked 256-vector fill rejected"))
+            {
+                return 1;
+            }
+            const uint8_t* data = unit == 0u ?
+                vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 0u, 0u) == 1u &&
+                       lane32(data, 1u, 3u) == 2u &&
+                       lane32(data, 2u, 0u) == 3u &&
+                       lane32(data, 3u, 0u) == 4u &&
+                       lane32(data, 255u, 3u) == 4u &&
+                       vif.read_register(0x40u) == 1u &&
+                       (vif.read_register(0x00u) & 3u) == 0u,
+                       "WL=0 fill sequence or raw cycle readback"))
+            {
+                return 1;
+            }
+            for (const uint32_t num : {1u, 255u, 0u})
+            {
+                const uint32_t code = 0x62000000u | (num << 16u);
+                if (!check(vif.write_register(0x10u, 1u) &&
+                           send(vif, {0u, 0u, 0x01000404u, code}) &&
+                           (vif.read_register(0x00u) & 3u) == 1u &&
+                           vif.read_register(0x80u) == code &&
+                           vif.read_register(0x60u) ==
+                               (unit == 1u && num == 0u ? 256u : num),
+                           "header-only UNPACK VPS/CODE/NUM"))
+                {
+                    return 1;
+                }
+            }
+        }
+    }
+
     // End-to-end aggregate PATH2 transaction: two DIRECT commands,
     // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
     // unrelated texture/VRAM side effects while exercising all limits.
@@ -355,7 +727,7 @@ int main()
         }
     }
 
-    // Unknown commands and IRQ stalls fail closed without altering
+    // Unknown commands and unsupported VU launch IRQs fail closed without altering
     // the accepted VIF state or delivering a second PATH2 batch.
     const uint32_t calls_before = capture.m_calls;
     const uint32_t accepted_before = vif1.diagnostic().m_commands;
@@ -368,7 +740,7 @@ int main()
         !check(capture.m_calls == calls_before &&
                vif1.read_register(0x80u) == 0u,
                "rejected opcode partially committed") ||
-        !check(!send(vif1, {0x80000000u, 0u, 0u, 0u}) &&
+        !check(!send(vif1, {0x94000000u, 0u, 0u, 0u}) &&
                vif1.diagnostic().m_reason ==
                    ee::c_ee_vif1::e_reject::irq_requires_resume,
                "VIF IRQ fabricated completion") ||
@@ -508,6 +880,60 @@ int main()
         return 1;
     }
 
+    // CMSAR1 runs the same resident program without synthesizing MSCAL.
+    const uint32_t cmsar_stat = vif1.read_register(0x00u);
+    const uint32_t cmsar_top = vif1.read_register(0xe0u);
+    const uint32_t cmsar_tops = vif1.read_register(0xc0u);
+    const uint32_t cmsar_code = vif1.read_register(0x80u);
+    const auto cmsar_calls = capture.m_calls;
+    if (!check(vif1.run_cmsar1(0x800u) &&
+               capture.m_calls == cmsar_calls + 1u &&
+               vif1.read_register(0x00u) == cmsar_stat &&
+               vif1.read_register(0xe0u) == cmsar_top &&
+               vif1.read_register(0xc0u) == cmsar_tops &&
+               vif1.read_register(0x80u) == cmsar_code &&
+               vif1.diagnostic().m_committed_opcodes[0x14u] == 1u,
+               "CMSAR1 did not execute resident VU1 or changed VIF state"))
+    {
+        return 1;
+    }
+
+    // A direct launch can legally have no E-bit yet. Keep running across
+    // bounded slices, then honor a later E-bit and its trailing pair.
+    {
+        ee::c_ee_vif1 direct{};
+        const ee::s_ee_u128 zero{};
+        const ee::s_ee_u128 end_pair{
+            (uint64_t{0x400002ffu} << 32u) | nop_lower,
+            (uint64_t{nop_upper} << 32u) | nop_lower};
+        if (!check(direct.start_cmsar1(0xffffu) &&
+                   direct.cmsar1_running() &&
+                   (direct.read_register(0x00u) & 4u) != 0u &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::pending &&
+                   direct.service_cmsar1(3u) == ee::e_ee_vu1_slice::pending &&
+                   direct.cmsar1_running(),
+                   "CMSAR1 no-E launch must survive bounded slices") ||
+            !check(!send(direct, {0u, 0u, 0u, 0u}) &&
+                   direct.cmsar1_running(),
+                   "direct launch rejected conflicting VIF DMA") ||
+            !check(ee::c_ee_vif1::mmio_write(&direct,
+                       ee::c_ee_vif1::k_vu1_code_base + 24u, 8u, &end_pair) &&
+                   ee::c_ee_vif1::mmio_write(&direct,
+                       ee::c_ee_vif1::k_vu1_code_base + 32u, 8u, &zero) &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::pending &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::completed &&
+                   !direct.cmsar1_running() &&
+                   (direct.read_register(0x00u) & 4u) == 0u,
+                   "CMSAR1 preserves E-bit delay across slice boundary") ||
+            !check(direct.start_cmsar1(0u) &&
+                   direct.control_vu_break_reset(0x200u) &&
+                   !direct.cmsar1_running(),
+                   "VU1 FBRST reset stops direct launch"))
+        {
+            return 1;
+        }
+    }
+
     // Detached VU execution must not expose partial VIF state or GIF
     // output, even if the worker finishes before the controller polls.
     {
@@ -548,7 +974,7 @@ int main()
             return 1;
         }
 
-        const auto bad = pack_words({0x14000000u, 0x06000000u, 0u, 0u});
+        const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
         if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
                 deferred.wait_deferred() == result::rejected &&
                 deferred_capture.m_calls == 1u &&
@@ -615,7 +1041,7 @@ int main()
         bus.bind_vif1(&deferred);
         auto& dma = bus.dmac();
         const ee::s_ee_u128 start_command{0x14000000u, 0u};
-        const ee::s_ee_u128 bad_command{0x0600000014000000ull, 0u};
+        const ee::s_ee_u128 bad_command{0x0900000014000000ull, 0u};
         const ee::s_ee_u128 end_tag{1u | (uint64_t{7u} << 28u), 0u};
         dma_memory.write128(0x100u, &start_command);
         dma_memory.write128(0x200u, &end_tag);

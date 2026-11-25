@@ -272,7 +272,7 @@ bool test_gpu_only_transactions(ee::c_ee_webgpu_bridge& bridge)
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_byte_offset = 16u;
     events[1].m_register = 0xeu;
-    events[1].m_word1 = 0x60u;
+    events[1].m_word1 = 0x61u; // FINISH remains unsupported
     if (gs.consume(events, 2u, bytes.data(), 2u) ||
         gs.state().m_transfer_pixels_written != 0u || gs.vram() != cpu.vram() ||
         !write_image(cpu, bytes.data(), 2u) || !write_image(gs, bytes.data(), 2u) ||

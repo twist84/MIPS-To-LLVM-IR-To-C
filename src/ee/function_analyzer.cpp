@@ -1026,6 +1026,48 @@ void function_analyzer::split_into_blocks(
 
                 if (is_conditional(ins))
                 {
+                    // A conditional branch occupying another conditional
+                    // branch's slot can select its own target. Keep that
+                    // guest address discoverable, including for COP1.
+                    const auto nested = insns.find(delay_pc);
+                    if (ins.has_delay_slot && nested != insns.end() &&
+                        nested->second.has_delay_slot &&
+                        is_conditional(nested->second))
+                    {
+                        const auto ordinary_cop1 = [](const s_ee_instruction& branch)
+                        {
+                            return branch.valid == e_ee_valid::VALID &&
+                                branch.has_delay_slot && !branch.branch_likely &&
+                                branch.opcode == e_ee_opcode::OP_COP1 &&
+                                branch.rs == 8u && branch.rt <= 1u;
+                        };
+                        // Ordinary BC1F/T can execute further sequential
+                        // branches in their slots. Retain every candidate
+                        // target; the emitted FCC path chooses the actual
+                        // successor. Other conditional pairs remain bounded
+                        // to their immediate nested target.
+                        auto candidate = nested;
+                        for (uint32_t depth = 0u; depth < 63u; ++depth)
+                        {
+                            const uint32_t nested_target = candidate->second.branch_target;
+                            if (!is_foreign_entry(nested_target))
+                            {
+                                bb.successors.insert(nested_target);
+                                worklist.push_back(nested_target);
+                            }
+                            if (!ordinary_cop1(ins) ||
+                                !ordinary_cop1(candidate->second))
+                            {
+                                break;
+                            }
+                            candidate = insns.find(candidate->first + 4u);
+                            if (candidate == insns.end() ||
+                                !ordinary_cop1(candidate->second))
+                            {
+                                break;
+                            }
+                        }
+                    }
                     bb.target_pc = ins.branch_target;
                     // Fallthrough: only if it is not another function entry.
                     if (!is_foreign_entry(bb.fallthrough_pc))

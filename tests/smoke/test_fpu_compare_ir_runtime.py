@@ -556,6 +556,118 @@ def run_cop1_transfer_cases(fixture, temp_dir, target):
             "ADDIU/CTC1 sequence clobbered the upper GPR half")
 
 
+def run_hardware_fcr_control_cases(fixture, temp_dir, target, opt):
+    # Literal physical-console observations from ps2autotests fcr.cpp
+    # and fcr.expected at 97469ffbed8631277b94e28d01dabd702aa97ef3.
+    # Keep expectations independent of the emitter's bit mask.
+    write_cases = [
+        (0x00000003, 0x01000001, "Update rounding mode (RM)"),
+        (0x0000007C, 0x01000079, "Update flags"),
+        (0x00000F80, 0x01000001, "Update enables"),
+        (0x0001F000, 0x0101C001, "Update cause"),
+        (0x00020000, 0x01020001, "Update unimplemented (E)"),
+        (0x01000000, 0x01000001, "Update flushing (FS)"),
+        (0x00400000, 0x01000001, "Update flushing (FO)"),
+        (0x00200000, 0x01000001, "Update flushing (FN)"),
+        (0x00800000, 0x01800001, "Update FCC"),
+        (0xFE000000, 0x01000001, "Update FCC1-7"),
+        (0x001C0000, 0x01000001, "Update unknown"),
+    ]
+    guest_fn, engine, module, target_machine = compile_jit(
+        fixture, temp_dir, "ctc1", target, opt
+    )
+    retained = (engine, module, target_machine)
+    for value, expected, label in write_cases:
+        for initial in (0x01000001, 0x0183C079):
+            backing, state = aligned_state()
+            _ = (backing, retained)
+            state.fcsr = initial
+            state.gpr[8][0] = 0xA5A5A5A500000000 | value
+            state.gpr[8][1] = 0x8877665544332211
+            state.fpu_acc = 0xDEADBEEF
+            state.fpu_acc_overflow = 1
+            require(guest_fn(ctypes.pointer(state), None) == 3 and
+                    state.pc == ENTRY_PC + 4 and
+                    state.fcsr == expected and
+                    state.gpr[8][0] == (0xA5A5A5A500000000 | value) and
+                    state.gpr[8][1] == 0x8877665544332211 and
+                    state.fpu_acc == 0xDEADBEEF and
+                    state.fpu_acc_overflow == 1,
+                    f"O{opt} {label}: CTC1 expected {expected:08x}, "
+                    f"got {state.fcsr:08x}")
+
+    # The reference prints all 32 aliases in both the initial state and
+    # after the flags write. The first sixteen read FCR0, the last
+    # sixteen read FCR31. The group fixtures use nonzero destination GPRs.
+    for mode, expected_fcr0 in (("fcr_read_low", True),
+                               ("fcr_read_high", False)):
+        guest_fn, engine, module, target_machine = compile_jit(
+            fixture, temp_dir, mode, target, opt
+        )
+        retained = (engine, module, target_machine)
+        for initial in (0x01000001, 0x01000079):
+            backing, state = aligned_state()
+            _ = (backing, retained)
+            state.fcsr = initial
+            for i in range(1, 32):
+                state.gpr[i][0] = 0x1234567800000000 | i
+                state.gpr[i][1] = 0x8877665500000000 | i
+            require(guest_fn(ctypes.pointer(state), None) == 3 and
+                    state.pc == ENTRY_PC + 64 and state.fcsr == initial,
+                    f"O{opt} {mode}: wrong exit or changed FCSR")
+            for i in range(1, 32):
+                expected = (0x00002E30 if expected_fcr0 else initial) if i <= 16 else (
+                    0x1234567800000000 | i)
+                require(state.gpr[i][0] == expected and
+                        state.gpr[i][1] == (0x8877665500000000 | i),
+                        f"O{opt} {mode}: GPR {i} alias or preservation mismatch")
+
+
+def run_hardware_fcr_arithmetic_cases(fixture, temp_dir, target, opt):
+    # Exact FCR31 observations, not flags calculated from the emitter.
+    # ps2autotests fcr.cpp / fcr.expected, pinned at
+    # 97469ffbed8631277b94e28d01dabd702aa97ef3.
+    # The printed decimal/NaN results are not raw result words; the
+    # separate existing arithmetic vectors cover those result bits.
+    cases = {
+        "sqrt_s": [
+            (0, 0xBF800000, 0x01020041, "sqrt(-1)"),
+        ],
+        "div_s": [
+            (0, 0, 0x01020041, "Divide zero by zero"),
+            (0x3F800000, 0, 0x01010021, "Divide one by zero"),
+            (0x00800000, 0x40400000, 0x01000001, "Underflow"),
+            (0x3F800000, 0x4040FFFF, 0x01000001, "Inexact"),
+        ],
+        "add_s": [
+            (0x7F800001, 0x7F800001, 0x01008011, "NAN math"),
+        ],
+        "mul_s": [
+            (0x7F7FFFFF, 0x7F7FFFFF, 0x01008011, "Overflow"),
+        ],
+    }
+    for mode, vectors in cases.items():
+        guest_fn, engine, module, target_machine = compile_jit(
+            fixture, temp_dir, mode, target, opt
+        )
+        retained = (engine, module, target_machine)
+        for lhs, rhs, expected, label in vectors:
+            backing, state = aligned_state()
+            _ = (backing, retained)
+            state.fcsr = 0x01000001  # reference writes CTC1 zero
+            state.fpr[1] = lhs
+            state.fpr[2] = rhs
+            state.fpu_acc = 0xDEADBEEF
+            state.fpu_acc_overflow = 1
+            require(guest_fn(ctypes.pointer(state), None) == 3 and
+                    state.exit_reason == 3 and state.pc == ENTRY_PC + 4 and
+                    state.fcsr == expected and state.fpr[1] == lhs and
+                    state.fpr[2] == rhs and state.fpu_acc == 0xDEADBEEF and
+                    state.fpu_acc_overflow == 1,
+                    f"O{opt} {mode} {label}: FCSR expected {expected:08x}, "
+                    f"got {state.fcsr:08x}")
+
+
 def run_bc1_delay_cases(fixture, temp_dir, target):
     # BC1T samples FCC0 before an ordinary delay slot that clears FCSR.
     guest_fn, engine, module, target_machine = compile_jit(
@@ -1489,6 +1601,9 @@ def main():
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "div_s", div_cases, opt)
         run_cop1_transfer_cases(fixture, temp_dir, target)
+        for opt in (0, 3):
+            run_hardware_fcr_control_cases(fixture, temp_dir, target, opt)
+            run_hardware_fcr_arithmetic_cases(fixture, temp_dir, target, opt)
         run_bc1_delay_cases(fixture, temp_dir, target)
         for opt in (0, 3):
             run_accumulator_cases(fixture, temp_dir, target, "adda_s", adda_cases, opt)

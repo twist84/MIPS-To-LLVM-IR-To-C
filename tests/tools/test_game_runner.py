@@ -503,7 +503,7 @@ def make_create_thread_elf(path):
 
 
 def make_heap_boundary_elf(path):
-    """EndOfHeap reads the same per-thread extent committed by SetupHeap."""
+    """EndOfHeap reads the process-wide extent committed by SetupHeap."""
     make_elf(path)
     image = bytearray(path.read_bytes())
     image.extend(bytes(max(0, 0x400 - len(image))))
@@ -548,6 +548,67 @@ def make_heap_boundary_elf(path):
     )
     for index, word in enumerate(instructions):
         struct.pack_into("<I", image, 0x108 + index * 4, word)
+    path.write_bytes(image)
+
+
+def make_shared_heap_elf(path):
+    """A real EE worker sees the main thread's configured libc heap."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    entry = (
+        0x24040000,  # gp = 0
+        0x2405ffff,  # automatic startup stack
+        0x24064000,  # stack size 16 KiB
+        0x2403003c,  # SetupThread
+        0x0000000c,
+        0x3c040064,  # heap base 0x00640000
+        0x2405ffff,  # all available memory below startup stack
+        0x2403003d,  # SetupHeap
+        0x0000000c,
+        0x00408021,  # s0 = 0x01ffb000
+        0x3c040010,
+        0x34840200,  # thread descriptor
+        0x24030020,
+        0x0000000c,
+        0x00408821,  # s1 = worker ID
+        0x24040002,
+        0x24050000,
+        0x24030022,  # StartThread
+        0x0000000c,
+        0x24030032,  # SleepThread: actually enter worker
+        0x0000000c,
+        0x3c080010,
+        0x35080240,  # t0 = worker result address
+        0x8d120000,  # lw s2,0(t0): worker result
+        0x2403003e,  # root still sees same limit
+        0x0000000c,
+        0x00409821,  # s3 = root EndOfHeap result
+        0x00000008,
+        0x00000000,
+    )
+    worker = (
+        0x2403003e,  # EndOfHeap called from thread 2
+        0x0000000c,
+        0x3c080010,
+        0x35080240,
+        0xad020000,  # save result in guest RAM
+        0x24040001,
+        0x24030033,  # WakeupThread(1)
+        0x0000000c,
+        0x24030023,
+        0x0000000c,
+        0x00000008,
+        0x00000000,
+    )
+    for index, word in enumerate(entry):
+        struct.pack_into("<I", image, 0x108 + index * 4, word)
+    for index, word in enumerate(worker):
+        struct.pack_into("<I", image, 0x1f0 + index * 4, word)
+    struct.pack_into("<9I", image, 0x300, 0, 0x001000f0, 0x00102000,
+                     0x800, 0, 64, 0, 0, 0)
     path.write_bytes(image)
 
 
@@ -614,18 +675,22 @@ def make_thread_sleep_wakeup_elf(path):
         0x0000000c,
         0x00408021,  # s0 = thread ID 2
         0x24040001,  # a0 = running thread ID 1
-        0x24030033,  # WakeupThread(1) before sleep: wakeup credit
+        0x24030033,  # WakeupThread(1): self wakeup must fail
         0x0000000c,
-        0x00408821,  # s1 = WakeupThread result 1
-        0x24030032,  # SleepThread consumes the credit, no context switch
+        0x00408821,  # s1 = -1
+        0x24040002,  # a0 = dormant worker ID 2
+        0x24030033,  # WakeupThread(2): dormant target must fail
         0x0000000c,
-        0x00409021,  # s2 = SleepThread result 1
+        0x0040b021,  # s6 = -1
         0x24040002,  # a0 = worker ID 2
         0x24030022,  # StartThread(2), worker is READY at priority 1
         0x0000000c,
         0x24030032,  # SleepThread with no credit: block thread 1
         0x0000000c,  # switch to guest worker entry
-        0x00409821,  # s3 = SleepThread result 1 after wake
+        0x00409021,  # s2 = SleepThread result 1 after wake
+        0x24030032,  # consume worker-granted wakeup credit without blocking
+        0x0000000c,
+        0x00409821,  # s3 = SleepThread result 1
         0x24040001,  # a0 = thread ID 1
         0x24030035,  # CancelWakeupThread(1)
         0x0000000c,
@@ -639,9 +704,12 @@ def make_thread_sleep_wakeup_elf(path):
     )
     worker = (
         0x24040001,  # a0 = sleeping main thread ID 1
-        0x24030033,  # WakeupThread(1)
-        0x0000000c,  # wake and preempt worker with ready main
-        0x24030023,  # ExitThread if worker is scheduled again
+        0x24030034,  # iWakeupThread(1): make main ready, defer reschedule
+        0x0000000c,
+        0x24040001,
+        0x24030033,  # WakeupThread(1): grant credit to ready main
+        0x0000000c,
+        0x24030023,  # ExitThread: return to main
         0x0000000c,
         0x00000008,
         0x00000000,
@@ -863,6 +931,39 @@ def make_thread_suspend_resume_elf(path):
     path.write_bytes(image)
 
 
+def make_self_suspend_elf(path):
+    """Self-suspension is visible until an explicit guest reschedule."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    instructions = (
+        0x24040001,  # self ID
+        0x24030037,  # SuspendThread(1)
+        0x0000000c,
+        0x00408021,  # s0 = ID
+        0x24040001,
+        0x24050000,  # no status buffer
+        0x24030030,  # ReferThreadStatus
+        0x0000000c,
+        0x00408821,  # s1 = SUSPEND
+        0x24040000,  # priority zero
+        0x2403002b,  # RotateThreadReadyQueue: real scheduler entry
+        0x0000000c,
+        0x24040001,
+        0x24050000,
+        0x24030030,
+        0x0000000c,
+        0x00409021,  # s2 = RUN
+        0x00000008,
+        0x00000000,
+    )
+    for index, word in enumerate(instructions):
+        struct.pack_into("<I", image, 0x108 + index * 4, word)
+    path.write_bytes(image)
+
+
 def make_thread_priority_elf(path):
     """Exercise EE thread-priority return values and per-thread state."""
     make_elf(path)
@@ -919,6 +1020,43 @@ def make_thread_priority_elf(path):
         0, 0x001000f0, 0x00102000, 0x800,
         0x0010f000, 64, 0, 0, 0
     )
+    path.write_bytes(image)
+
+
+def make_thread_lifecycle_elf(path):
+    """Real HLE dispatch: delete/terminate validity, restart and ID reuse."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    instructions = []
+
+    def call(service, arg, saved_register):
+        if arg == 0x00100200:
+            instructions.extend((0x3c040010, 0x34840200))
+        else:
+            instructions.append(0x24040000 | arg)
+        instructions.extend((0x24050000, 0x24030000 | service, 0x0000000c,
+                             0x00400021 | (saved_register << 11)))
+
+    call(0x21, 1, 16)  # self delete fails
+    call(0x20, 0x00100200, 17)  # create dormant thread 2
+    call(0x25, 2, 18)  # dormant terminate fails
+    call(0x22, 2, 19)  # start thread 2 (lower priority)
+    call(0x21, 2, 20)  # READY delete fails
+    call(0x25, 2, 21)  # terminate READY thread
+    call(0x22, 2, 22)  # restart terminated thread
+    call(0x25, 2, 23)  # terminate again
+    call(0x21, 2, 24)  # delete dormant thread
+    call(0x21, 2, 25)  # deleted ID fails
+    call(0x20, 0x00100200, 15)  # lowest free ID reused
+    instructions.extend((0x00000008, 0x00000000))
+    for index, word in enumerate(instructions):
+        struct.pack_into("<I", image, 0x108 + 4 * index, word)
+    struct.pack_into("<2I", image, 0x280, 0x03e00008, 0)
+    struct.pack_into("<9I", image, 0x300, 0, 0x00100180, 0x00102000,
+                     0x800, 0x0010f000, 64, 0, 0, 0)
     path.write_bytes(image)
 
 
@@ -3363,6 +3501,26 @@ def main():
             assert regs[13] == 0x00642000, state # EndOfHeap updated
             assert regs[14] == 0x00642000, state # EndOfHeap ignores A0
 
+        with tempfile.TemporaryDirectory(prefix="ee-native-shared-heap-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-shared-heap.elf"
+            make_shared_heap_elf(elf)
+            report_path = root / "shared-heap.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"),
+                "--max-dispatches=100", "--auto-expand=4",
+                "--trace", "--report", str(report_path), "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE EE thread switch: id=2 pc=0x001000f0" in combined, combined
+            assert "HLE EndOfHeap: id=2 end=0x01ffb000" in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            regs = state["gpr_lo"]
+            assert regs[16:20] == [0x01ffb000, 2, 0x01ffb000, 0x01ffb000], state
+            assert state["final_pc"] == 0, state
+
         with tempfile.TemporaryDirectory(prefix="ee-native-sleep-wakeup-") as tmp:
             root = Path(tmp)
             elf = root / "kernel-sleep-wakeup.elf"
@@ -3384,21 +3542,24 @@ def main():
             )
             combined = result.stdout + result.stderr
             assert "HLE CreateThread: id=2" in combined, combined
-            assert "HLE WakeupThread: id=1 status=1 wakeups=1" in combined, combined
+            assert "HLE WakeupThread: id=1 invalid status/context, result=-1" in combined, combined
+            assert "HLE WakeupThread: id=2 invalid status/context, result=-1" in combined, combined
+            assert "HLE WakeupThread: id=1 status=2 wakeups=1 released=0" in combined, combined
             assert "HLE SleepThread: id=1 consumed wakeup remaining=0" in combined, combined
             assert "HLE StartThread: id=2" in combined, combined
             assert "HLE SleepThread: id=1 status=4" in combined, combined
             assert "HLE EE thread switch: id=2 pc=0x001000f0" in combined, combined
-            assert "HLE WakeupThread: id=1 status=2 wakeups=0 released=1" in combined, combined
+            assert "HLE iWakeupThread: id=1 status=2 wakeups=0 released=1" in combined, combined
             assert "HLE EE thread switch: id=1" in combined, combined
             assert "HLE CancelWakeupThread: id=1 status=1 wakeups=0" in combined, combined
             assert "HLE WakeupThread: id=99 not found, result=-1" in combined, combined
             state = json.loads(report_path.read_text(encoding="utf-8"))
             registers = state["gpr_lo"]
             assert registers[16] == 2, state  # worker created
-            assert registers[17] == 1, state  # wakeup credit granted
-            assert registers[18] == 1, state  # credit consumed without block
-            assert registers[19] == 1, state  # returned from genuine sleep
+            assert registers[17] == 0xffffffffffffffff, state  # self wakeup rejected
+            assert registers[18] == 1, state  # returned from genuine sleep
+            assert registers[19] == 1, state  # credit consumed without block
+            assert registers[22] == 0xffffffffffffffff, state  # dormant wakeup rejected
             assert registers[20] == 0, state  # no leftover wakeup credit
             assert registers[21] == 0xffffffffffffffff, state # invalid ID
             assert state["final_pc"] != 0x001000f0, state # no worker escape
@@ -3533,6 +3694,43 @@ def main():
             assert regs[22] == 0xffffffffffffffff, state # invalid ID
             assert "HLE EE thread switch: id=2" not in combined, combined
             assert state["final_pc"] != 0x001000f0, state
+
+        with tempfile.TemporaryDirectory(prefix="ee-native-self-suspend-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-self-suspend.elf"
+            make_self_suspend_elf(elf)
+            report_path = root / "self-suspend.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--max-dispatches=100",
+                "--trace", "--report", str(report_path), "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE EE self-suspend reconciled: id=1" in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            assert state["gpr_lo"][16:19] == [1, 8, 1], state
+            assert state["final_pc"] == 0, state
+
+        with tempfile.TemporaryDirectory(prefix="ee-native-thread-lifecycle-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-lifecycle.elf"
+            make_thread_lifecycle_elf(elf)
+            report_path = root / "lifecycle.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=100", "--trace", "--report", str(report_path),
+                "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE SetSyscall:" not in combined, combined
+            assert "HLE EE thread switch: id=2" not in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            regs = state["gpr_lo"]
+            failure = 0xffffffffffffffff
+            assert regs[16:26] == [failure, 2, failure, 2, failure, 2, 2, 2, 2, failure], state
+            assert regs[15] == 2, state
 
         with tempfile.TemporaryDirectory(prefix="ee-native-thread-priority-") as tmp:
             root = Path(tmp)

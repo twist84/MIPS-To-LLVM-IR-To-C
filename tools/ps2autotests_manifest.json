@@ -1,0 +1,615 @@
+{
+  "repository": "unknownbrackets/ps2autotests",
+  "revision": "97469ffbed8631277b94e28d01dabd702aa97ef3",
+  "license": {
+    "path": "LICENSE.md",
+    "git_blob": "f4d2bdd006c79e05a993e94063888bc81b4f40a9"
+  },
+  "tests": [
+    {
+      "name": "cpu/ee/alu",
+      "elf": {
+        "path": "tests/cpu/ee/alu.elf",
+        "git_blob": "6d6e807d4b978a0776aaa67ae199f66e65f88493"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/alu.expected",
+        "git_blob": "7af0109db4749c742bc16658d3cd948ecd7d3a97"
+      }
+    },
+    {
+      "name": "cpu/ee/branch",
+      "elf": {
+        "path": "tests/cpu/ee/branch.elf",
+        "git_blob": "9568736c3b1a0df3af499184acfa7cab172e8a6e"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/branch.expected",
+        "git_blob": "a6ca7766f83ebd53ec1e015bb4a483350d1c2563"
+      }
+    },
+    {
+      "name": "cpu/ee/branchdelay",
+      "elf": {
+        "path": "tests/cpu/ee/branchdelay.elf",
+        "git_blob": "09cb4374fa87a987d9f27a3b6d62459221397514"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/branchdelay.expected",
+        "git_blob": "63d660a214b965d7ebf82747f22c4aee07cfb52e"
+      }
+    },
+    {
+      "name": "cpu/ee/lsu",
+      "elf": {
+        "path": "tests/cpu/ee/lsu.elf",
+        "git_blob": "2454057df2326334a46269377e34bcd7664a5097"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/lsu.expected",
+        "git_blob": "ad9505c09d481e842df9ee156194196a0efd0c52"
+      }
+    },
+    {
+      "name": "cpu/ee/lsudelay",
+      "elf": {
+        "path": "tests/cpu/ee/lsudelay.elf",
+        "git_blob": "65642dd66b17d037bb96d8353dabbc6f3c587002"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/lsudelay.expected",
+        "git_blob": "2c511fd6aab077d5ee5a1df8cbcddbcdb188bf95"
+      }
+    },
+    {
+      "name": "cpu/ee/muldiv",
+      "elf": {
+        "path": "tests/cpu/ee/muldiv.elf",
+        "git_blob": "c4a086b291462b2d40205c91ea6e6359899ae672"
+      },
+      "expected": {
+        "path": "tests/cpu/ee/muldiv.expected",
+        "git_blob": "3bb0f9a645107ea32713a4e515ef90bec93de091"
+      }
+    },
+    {
+      "name": "cpu/ee_cop0/performance",
+      "elf": {
+        "path": "tests/cpu/ee_cop0/performance.elf",
+        "git_blob": "b2aad923da643a46d8b0179e78a8e9c41e882ce9"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_cop0/performance.expected",
+        "git_blob": "3d205f7ef8666ed7681506cc319848c6a63b6c73"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/arithmetic",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/arithmetic.elf",
+        "git_blob": "ad7744a725b0e8a69303a904625bb3910ebb19d4"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/arithmetic.expected",
+        "git_blob": "60739a74b0730336fca22045fe267498a5770198"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/branch",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/branch.elf",
+        "git_blob": "d55284f21450afedf6995d2f1d4889ace403ef11"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/branch.expected",
+        "git_blob": "3b6c11e09f257d7d0e747cb9ca4bd4b855cf86ad"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/branchdelay",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/branchdelay.elf",
+        "git_blob": "65a0251ec0703bcce3dffb563d1fb5591f81e4fe"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/branchdelay.expected",
+        "git_blob": "86d661134730cf94e7f93cddf736315da17d49e4"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/compare",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/compare.elf",
+        "git_blob": "b8f91ff4f49eb88e065652770e9709c036266a7f"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/compare.expected",
+        "git_blob": "2fe6dcb3c2e92012a4e07522e4863a51184e837f"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/convert",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/convert.elf",
+        "git_blob": "648b7628d81cc5315e57f13d283a1700b7773fbe"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/convert.expected",
+        "git_blob": "1bbd5484438321d775f92cbe8a1d9341c668d7ba"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/fcr",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/fcr.elf",
+        "git_blob": "91d5e1992979bf095729a7e5d8b44669eedb758f"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/fcr.expected",
+        "git_blob": "e346c39ab9bb7ea253a7c64d23c2f82e3c91bdce"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/muldiv",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/muldiv.elf",
+        "git_blob": "1d71611ec7caef7e7a7a494071e303895c50dcbb"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/muldiv.expected",
+        "git_blob": "1b7e23fb49b4f48937e9a563734a5fb471cfc109"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/sqrt",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/sqrt.elf",
+        "git_blob": "d0204be055266446d92c8ee9f1d852524036d182"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/sqrt.expected",
+        "git_blob": "f049b85750ccdb2cc274eea33017c72ffd0ecd9c"
+      }
+    },
+    {
+      "name": "cpu/ee_fpu/transfer",
+      "elf": {
+        "path": "tests/cpu/ee_fpu/transfer.elf",
+        "git_blob": "544cf529267a34a777e261a10a2b55ff32040afe"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_fpu/transfer.expected",
+        "git_blob": "94600a16178f525067976a0c0001d43e0847f3ff"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/arithmetic",
+      "elf": {
+        "path": "tests/cpu/ee_simd/arithmetic.elf",
+        "git_blob": "a6b2c9ee2f61da3f9bfe5c6a826ddac1067bb07c"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/arithmetic.expected",
+        "git_blob": "a9605a0688e7a5f9ceefcd76cefe27c2a665ed7a"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/compare",
+      "elf": {
+        "path": "tests/cpu/ee_simd/compare.elf",
+        "git_blob": "1390849c1c1080f175fdc13e6f8bcf1b351beb01"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/compare.expected",
+        "git_blob": "7d14549195d6ddd13819e795816fbaea1c6d7cf5"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/funnel",
+      "elf": {
+        "path": "tests/cpu/ee_simd/funnel.elf",
+        "git_blob": "8f3517985d92f425c8ffc20a7d3853eec091cf9a"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/funnel.expected",
+        "git_blob": "4bb6f4c6d194faa793cfd8cef805f5db87e505fc"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/logic",
+      "elf": {
+        "path": "tests/cpu/ee_simd/logic.elf",
+        "git_blob": "c010bfee6025b0dd8d8882a4384fe28e80ec30de"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/logic.expected",
+        "git_blob": "707a5f5ba5e0b25b291f82ca789bb299a7187408"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/muldiv",
+      "elf": {
+        "path": "tests/cpu/ee_simd/muldiv.elf",
+        "git_blob": "c0b07c6b72329843a06d2e6e237046527bf137e4"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/muldiv.expected",
+        "git_blob": "1b84310f5db9b71211d3c8582d44119131d0a6bd"
+      }
+    },
+    {
+      "name": "cpu/ee_simd/shuffle",
+      "elf": {
+        "path": "tests/cpu/ee_simd/shuffle.elf",
+        "git_blob": "bf17835fcd244bdafc82c88d0a4ae7d3de455a59"
+      },
+      "expected": {
+        "path": "tests/cpu/ee_simd/shuffle.expected",
+        "git_blob": "aa8f983116bb9e4bbdaef8e0d7a97c9758df9121"
+      }
+    },
+    {
+      "name": "cpu/vu0_macro/integer",
+      "elf": {
+        "path": "tests/cpu/vu0_macro/integer.elf",
+        "git_blob": "61d759030dbf5da8411ca4e2b4b399758d913b5d"
+      },
+      "expected": {
+        "path": "tests/cpu/vu0_macro/integer.expected",
+        "git_blob": "b9c89a5caee5661b41d698ece45559008e3d29f2"
+      }
+    },
+    {
+      "name": "cpu/vu0_macro/transfer",
+      "elf": {
+        "path": "tests/cpu/vu0_macro/transfer.elf",
+        "git_blob": "6071c95dfdf3a3d09e5e54d028834f4421ae45eb"
+      },
+      "expected": {
+        "path": "tests/cpu/vu0_macro/transfer.expected",
+        "git_blob": "23be610f040683881308b8e1100253d165a8b153"
+      }
+    },
+    {
+      "name": "dma/dmac/cpcond",
+      "elf": {
+        "path": "tests/dma/dmac/cpcond.elf",
+        "git_blob": "d92eb9fb3788f0e1bca925f45fb8643d3c6f7a91"
+      },
+      "expected": {
+        "path": "tests/dma/dmac/cpcond.expected",
+        "git_blob": "67914dc7804fcba9ed914f19dfa8d931e449cda3"
+      }
+    },
+    {
+      "name": "dma/dmac/tagintr",
+      "elf": {
+        "path": "tests/dma/dmac/tagintr.elf",
+        "git_blob": "c7e03f73f083afa2006b4c553fee65943e74307e"
+      },
+      "expected": {
+        "path": "tests/dma/dmac/tagintr.expected",
+        "git_blob": "7865957eeffb53af623e549a6da73007b426d787"
+      }
+    },
+    {
+      "name": "dma/spr/chain",
+      "elf": {
+        "path": "tests/dma/spr/chain.elf",
+        "git_blob": "e051d2cb30cdffcf8b7267072ea8bca34ec852c0"
+      },
+      "expected": {
+        "path": "tests/dma/spr/chain.expected",
+        "git_blob": "fc6e14ab03cadb1860223613e4d456d48f068da0"
+      }
+    },
+    {
+      "name": "dma/spr/interleave",
+      "elf": {
+        "path": "tests/dma/spr/interleave.elf",
+        "git_blob": "4c12acbf1c964e6eae2ac246b46681a9ec8f3e4d"
+      },
+      "expected": {
+        "path": "tests/dma/spr/interleave.expected",
+        "git_blob": "7a0b2c5ed577bcbcf22feea4e5a392d000a7dd82"
+      }
+    },
+    {
+      "name": "dma/spr/normal",
+      "elf": {
+        "path": "tests/dma/spr/normal.elf",
+        "git_blob": "76a3b2f3b8c691f43910700e5d642e9b06213c7b"
+      },
+      "expected": {
+        "path": "tests/dma/spr/normal.expected",
+        "git_blob": "e8f8d6c8abc1b1bb510a031165b4da751cc28801"
+      }
+    },
+    {
+      "name": "dma/vif/basic",
+      "elf": {
+        "path": "tests/dma/vif/basic.elf",
+        "git_blob": "65d4ef1c92279de335420c97596a376b7b47b7a3"
+      },
+      "expected": {
+        "path": "tests/dma/vif/basic.expected",
+        "git_blob": "c73375beb32b06a95d2cd20766c3517a76c7f667"
+      }
+    },
+    {
+      "name": "dma/vif/intstall",
+      "elf": {
+        "path": "tests/dma/vif/intstall.elf",
+        "git_blob": "e2e64da5a6c1c493785f2b0011aaa1401fcc5f11"
+      },
+      "expected": {
+        "path": "tests/dma/vif/intstall.expected",
+        "git_blob": "e6bfb24f496e734b22bd443a5cde4d1a3e501ddd"
+      }
+    },
+    {
+      "name": "dma/vif/mskpath3",
+      "elf": {
+        "path": "tests/dma/vif/mskpath3.elf",
+        "git_blob": "f239fb6411317624c6ead4e38a74cece10803a19"
+      },
+      "expected": {
+        "path": "tests/dma/vif/mskpath3.expected",
+        "git_blob": "83eda9427e7a5e37920839f2562dcbfc5f4accf4"
+      }
+    },
+    {
+      "name": "dma/vif/stcycl",
+      "elf": {
+        "path": "tests/dma/vif/stcycl.elf",
+        "git_blob": "c4d04a9fb26e564a719e4a5ffe64f3d8b5e85ec8"
+      },
+      "expected": {
+        "path": "tests/dma/vif/stcycl.expected",
+        "git_blob": "d44fc6cb47bf81bb0794cd326ff48381f5ae045e"
+      }
+    },
+    {
+      "name": "dma/vif/stmod",
+      "elf": {
+        "path": "tests/dma/vif/stmod.elf",
+        "git_blob": "8274e2294c3a1a6ea09663beb951783ae6fae53b"
+      },
+      "expected": {
+        "path": "tests/dma/vif/stmod.expected",
+        "git_blob": "caa6fe7bab7e4108920e50c80636e86046d17ee9"
+      }
+    },
+    {
+      "name": "dma/vif/unpack",
+      "elf": {
+        "path": "tests/dma/vif/unpack.elf",
+        "git_blob": "baef9c83e715af2acf667d67f2c098278ef87639"
+      },
+      "expected": {
+        "path": "tests/dma/vif/unpack.expected",
+        "git_blob": "86f9e9da97b2c6da254bcea8a4e44690f095ff96"
+      }
+    },
+    {
+      "name": "gs/label",
+      "elf": {
+        "path": "tests/gs/label.elf",
+        "git_blob": "0b77dc1f00c1e1846742a6620628d18dd9bf604a"
+      },
+      "expected": {
+        "path": "tests/gs/label.expected",
+        "git_blob": "b857f029ccc7c9b7ac63d1176a173e7719fd4a39"
+      }
+    },
+    {
+      "name": "gs/signal",
+      "elf": {
+        "path": "tests/gs/signal.elf",
+        "git_blob": "2aee1d1adadc0f95deea6c3175f474d07f132e30"
+      },
+      "expected": {
+        "path": "tests/gs/signal.expected",
+        "git_blob": "99f3d3b43c8f122c1569cdfb4a74430631ea28d2"
+      }
+    },
+    {
+      "name": "kernel/ee/interrupt/dmac_order",
+      "elf": {
+        "path": "tests/kernel/ee/interrupt/dmac_order.elf",
+        "git_blob": "644a446be218aca4f98d420d7bdbeb761bb9ec99"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/interrupt/dmac_order.expected",
+        "git_blob": "c9a3011952112a98e522c64709a568d0822c069b"
+      }
+    },
+    {
+      "name": "kernel/ee/interrupt/intc_order",
+      "elf": {
+        "path": "tests/kernel/ee/interrupt/intc_order.elf",
+        "git_blob": "093b37d863267df12b26a3e2e8af2f32f04b0bf5"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/interrupt/intc_order.expected",
+        "git_blob": "33e8be41287067942e190e60dee4c789cdb7f06b"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/delete",
+      "elf": {
+        "path": "tests/kernel/ee/thread/delete.elf",
+        "git_blob": "74060c247572f0099a773fce8514f10199250121"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/delete.expected",
+        "git_blob": "22006bdfa9bb7e8e39ac526a150e54f29e72c49a"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/exit",
+      "elf": {
+        "path": "tests/kernel/ee/thread/exit.elf",
+        "git_blob": "da2b66de9b26df38db41f4209045ab60e8a1ac9b"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/exit.expected",
+        "git_blob": "8839b1282a5d3a7bc226b72c1515e420a06de516"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/resume",
+      "elf": {
+        "path": "tests/kernel/ee/thread/resume.elf",
+        "git_blob": "73839f1a9951c51ac4547d3ace416a0e4ed2f1cc"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/resume.expected",
+        "git_blob": "8a1970a4ca0096300f054f954e26ff84dddb4b8a"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/sleep",
+      "elf": {
+        "path": "tests/kernel/ee/thread/sleep.elf",
+        "git_blob": "73ddceb5885771308339ae9e585629bf59b4c94e"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/sleep.expected",
+        "git_blob": "e6762ceb2a85f19f3f75f0ca859637a569af5348"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/stat",
+      "elf": {
+        "path": "tests/kernel/ee/thread/stat.elf",
+        "git_blob": "dd961935ba3b42dc7f2193cdbe055b4b66765c53"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/stat.expected",
+        "git_blob": "928967c9e84f4296e0fda166d3e48dcaf1570413"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/suspend",
+      "elf": {
+        "path": "tests/kernel/ee/thread/suspend.elf",
+        "git_blob": "2e4f3cdb50ce985174d883ffb03e944a7c4b8744"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/suspend.expected",
+        "git_blob": "b82fc44013ce40bb5874ad1656f1e73ac866874a"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/terminate",
+      "elf": {
+        "path": "tests/kernel/ee/thread/terminate.elf",
+        "git_blob": "92e816d1cf8fb5aeea7b7f3bc40cc87b6e0fdab5"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/terminate.expected",
+        "git_blob": "d02d56b5b5ec00fede41376423b1163e6625aaee"
+      }
+    },
+    {
+      "name": "kernel/ee/thread/wakeup",
+      "elf": {
+        "path": "tests/kernel/ee/thread/wakeup.elf",
+        "git_blob": "9a9c9310eb3cab2149dc7c9609dc2ee807dbfb0c"
+      },
+      "expected": {
+        "path": "tests/kernel/ee/thread/wakeup.expected",
+        "git_blob": "d0c575955c953a632ba2e287b3c52fac4abb43e8"
+      }
+    },
+    {
+      "name": "memory/ee/default",
+      "elf": {
+        "path": "tests/memory/ee/default.elf",
+        "git_blob": "8b81f32a3770a8cbb16632aef2e842c5450420da"
+      },
+      "expected": {
+        "path": "tests/memory/ee/default.expected",
+        "git_blob": "516e5edb9972c3107dfeb790fded7820c130f5f3"
+      }
+    },
+    {
+      "name": "vu/games/triace",
+      "elf": {
+        "path": "tests/vu/games/triace.elf",
+        "git_blob": "25ffd29001c07351e4445e58681fe1127adffb31"
+      },
+      "expected": {
+        "path": "tests/vu/games/triace.expected",
+        "git_blob": "4ef03ce9c88899236afe9d57c3d75a9eb85f50ea"
+      }
+    },
+    {
+      "name": "vu/lower/branch",
+      "elf": {
+        "path": "tests/vu/lower/branch.elf",
+        "git_blob": "3db97e447d649c82e11034d40a03b38ee56b43f6"
+      },
+      "expected": {
+        "path": "tests/vu/lower/branch.expected",
+        "git_blob": "0294c744699de130bc8a52808f902c67951ef609"
+      }
+    },
+    {
+      "name": "vu/lower/efu",
+      "elf": {
+        "path": "tests/vu/lower/efu.elf",
+        "git_blob": "0dd155de27bc7b886bbf3c686756afd8f1d61d8d"
+      },
+      "expected": {
+        "path": "tests/vu/lower/efu.expected",
+        "git_blob": "51bc7235260d18aa6963991f8ff9f154ac4a3a2b"
+      }
+    },
+    {
+      "name": "vu/lower/fdivdelay",
+      "elf": {
+        "path": "tests/vu/lower/fdivdelay.elf",
+        "git_blob": "317cd16f01c27c274418442199ab9cb31a24ecc2"
+      },
+      "expected": {
+        "path": "tests/vu/lower/fdivdelay.expected",
+        "git_blob": "b13a79d524dfc1def9c2137048d8212e12a3bd8c"
+      }
+    },
+    {
+      "name": "vu/lower/integer",
+      "elf": {
+        "path": "tests/vu/lower/integer.elf",
+        "git_blob": "09006fe8e886bcfd102e8f76ab75e9a63723e2d2"
+      },
+      "expected": {
+        "path": "tests/vu/lower/integer.expected",
+        "git_blob": "ea86539e6c87615101965b99ad6d5e63a6f12d77"
+      }
+    },
+    {
+      "name": "vu/lower/random",
+      "elf": {
+        "path": "tests/vu/lower/random.elf",
+        "git_blob": "dfef9b0f38a78a4a8cbc6de52e102594dcbcf2bc"
+      },
+      "expected": {
+        "path": "tests/vu/lower/random.expected",
+        "git_blob": "a40634a4cb8ad40f6ccb1dbf422adeb1e0eadbe7"
+      }
+    },
+    {
+      "name": "vu/upper/clip",
+      "elf": {
+        "path": "tests/vu/upper/clip.elf",
+        "git_blob": "b79d7ecd689dc3568d1907a9abee1aa924053bfe"
+      },
+      "expected": {
+        "path": "tests/vu/upper/clip.expected",
+        "git_blob": "0d077c997001462434a39fd0a93771c998a67b7c"
+      }
+    }
+  ]
+}

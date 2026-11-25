@@ -34,6 +34,35 @@ int main()
     constexpr uint32_t intc_ip = 1u << (ee::CAUSE_IP_SHIFT + ee::INT_INTC);
     constexpr uint32_t ch1 = 1u << 1;
     constexpr uint32_t ch8 = 1u << 8;
+    constexpr uint32_t d_pcr = ee::c_ee_dmac::k_pcr_address;
+
+    if (ee::ee_cop0_get_branch_condition(nullptr) != 2u ||
+        ee::ee_cop0_get_branch_condition(&runtime) != 1u)
+    {
+        return fail("BC0 missing bus or empty selection");
+    }
+    ee::ee_mem_write32(&runtime, d_pcr, ch1 | ch8);
+    if (ee::ee_mem_read32(&runtime, d_pcr) != (ch1 | ch8) ||
+        ee::ee_cop0_get_branch_condition(&runtime) != 0u ||
+        !hardware.dmac().raise(1u) ||
+        ee::ee_cop0_get_branch_condition(&runtime) != 0u ||
+        !hardware.dmac().raise(8u) ||
+        ee::ee_cop0_get_branch_condition(&runtime) != 1u ||
+        hardware.dmac().pending() != 0u)
+    {
+        return fail("BC0 requires all selected completions independent of CIM");
+    }
+    ee::ee_mem_write32(&runtime, d_stat, ch1);
+    if (ee::ee_cop0_get_branch_condition(&runtime) != 0u)
+    {
+        return fail("BC0 must observe W1C completion");
+    }
+    ee::ee_mem_write32(&runtime, d_pcr, ch8);
+    if (ee::ee_cop0_get_branch_condition(&runtime) != 1u)
+    {
+        return fail("BC0 must observe CPC changes");
+    }
+    hardware.dmac().reset();
 
     cpu.m_cop0[ee::COP0_Status] = ee::STATUS_IE | ee::STATUS_EIE |
                                    dmac_ip | intc_ip;

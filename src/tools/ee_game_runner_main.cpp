@@ -3,6 +3,7 @@
 #include "ee_dispatch_index.h"
 #include "ee_native_target_cache.h"
 #include "ee_runtime_profile.h"
+#include "ee_pc_profile.h"
 #include "ee_host_audio.h"
 #include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
@@ -20,6 +21,7 @@
 #include "ee_reached_isa_inventory.h"
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
+#include "ee_sdbz_slot_callback_probe.h"
 #include "ee_sdbz_pad_return_probe.h"
 #include "ee_sdbz_spawn_probe.h"
 #include "ee_gif.h"
@@ -628,32 +630,159 @@ bool parse_u32(const char* value, uint32_t* out)
     return true;
 }
 
-// The native runner has no VU1 engine and begins with VU0 halted.  It may
-// therefore synchronize ordinary COP2 control traffic only while VU0 remains
-// halted; attempting to run a microprogram still fails closed rather than
-// treating an unimplemented engine as a no-op.
-uint32_t runner_vu0_sync(
-    void*, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
-    uint32_t mode, uint32_t
-)
+struct s_runner_vu0_control
 {
+    ee::c_ee_vif1* m_vif1;
+    ee::c_ee_dmac* m_dmac;
+    ee::s_ee_runtime* m_runtime;
+    ee::s_ee_vu0_ialu_engine m_engine{};
+    ee::s_ee_vu0_scheduler m_scheduler{};
+    uint64_t m_last_attempt = 0u;
+    uint64_t m_next_attempt = 0u;
+    uint64_t m_cmsar1_last_attempt = 0u;
+};
+
+bool runner_service_cmsar1(s_runner_vu0_control& context, ee::s_ee_vu0_state& vu0)
+{
+    if (!context.m_vif1->cmsar1_running())
+    {
+        return true;
+    }
+    const uint64_t now = context.m_runtime->m_guest_instruction_attempts;
+    if (now < context.m_cmsar1_last_attempt)
+    {
+        return false;
+    }
+    // Use reached EE instructions as the existing approximate compatibility
+    // budget, not wall time or native dispatch count. Bound each host turn.
+    const uint32_t pairs = static_cast<uint32_t>(
+        std::min<uint64_t>(now - context.m_cmsar1_last_attempt, 4096u));
+    if (pairs == 0u)
+    {
+        return true;
+    }
+    const auto result = context.m_vif1->service_cmsar1(pairs);
+    context.m_cmsar1_last_attempt += pairs;
+    if (result == ee::e_ee_vu1_slice::rejected)
+    {
+        return false;
+    }
+    if (result == ee::e_ee_vu1_slice::completed)
+    {
+        vu0.m_vpu_status &= ~0x100u;
+    }
+    else
+    {
+        vu0.m_vpu_status |= 0x100u;
+    }
+    vu0.m_vi[29] = vu0.m_vpu_status;
+    return true;
+}
+
+uint32_t runner_vu0_execute(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint64_t cycles, uint32_t flags, uint32_t pc)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    return ee::ee_vu0_execute_ialu_callback(
+        &context->m_engine, cpu, vu0, cycles, flags, pc);
+}
+
+uint32_t runner_vu0_vu1_catch_up(
+    void* user, ee::s_ee_cpu_state*, ee::s_ee_vu0_state*, uint32_t)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    const auto result = context->m_dmac->service_deferred_vif1(true);
+    return static_cast<uint32_t>(
+        result == ee::c_ee_dmac::e_deferred_vif1::rejected ||
+        result == ee::c_ee_dmac::e_deferred_vif1::pending
+            ? ee::e_ee_vu0_sync_result::UNAVAILABLE
+            : ee::e_ee_vu0_sync_result::COMPLETE);
+}
+
+void runner_vu0_schedule_event(
+    void* user, ee::s_ee_cpu_state*, ee::s_ee_vu0_state*,
+    uint32_t delta, uint32_t)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    context->m_next_attempt = context->m_runtime->m_guest_instruction_attempts + delta;
+}
+
+uint32_t runner_vu0_sync(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint32_t mode, uint32_t pc)
+{
+    using result = ee::e_ee_vu0_sync_result;
     if (cpu == nullptr || vu0 == nullptr ||
         mode > static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::WAIT_TO_E_OR_M))
     {
-        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::INVALID_ARGUMENT);
+        return static_cast<uint32_t>(result::INVALID_ARGUMENT);
     }
-
-    return ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
-        ? static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE)
-        : static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context != nullptr && !runner_service_cmsar1(*context, *vu0))
+    {
+        return static_cast<uint32_t>(result::FAILED);
+    }
+    // Preserve the hot halted macro path used by retail code.
+    if ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
+    {
+        return static_cast<uint32_t>(result::COMPLETE);
+    }
+    if (context == nullptr)
+    {
+        return static_cast<uint32_t>(result::UNAVAILABLE);
+    }
+    // Instruction attempts are the runner's existing reference-compatible
+    // budget, not calibrated R5900 issue cycles. Do not install a hardware
+    // clock or report these as such.
+    const uint64_t now = context->m_runtime->m_guest_instruction_attempts;
+    if (now < context->m_last_attempt ||
+        now - context->m_last_attempt > UINT64_MAX - vu0->m_ee_cycle)
+    {
+        return static_cast<uint32_t>(result::FAILED);
+    }
+    vu0->m_ee_cycle += now - context->m_last_attempt;
+    context->m_last_attempt = now;
+    const uint32_t synced = ee::ee_vu0_scheduler_sync_callback(
+        &context->m_scheduler, cpu, vu0, mode, pc);
+    if (vu0->m_running != 0u && context->m_next_attempt <= now)
+    {
+        context->m_next_attempt = now + 1u;
+    }
+    return synced;
 }
 
-// FBRST's VU1 reset/break bits complete immediately when the runner has no
-// VU1 work in flight.  VU0 force-break is representable by its visible halted
-// state.  A VU0 reset or CMSAR1 VU1 launch requires an engine and is rejected
-// by this callback before the runtime commits the CTC2 register write.
+uint32_t runner_vu0_start(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc)
+{
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context == nullptr || vu0 == nullptr || cpu == nullptr ||
+        context->m_runtime->m_ee_cycle_scheduler.source() !=
+            ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+    {
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+    }
+    const uint64_t now = context->m_runtime->m_guest_instruction_attempts;
+    const uint64_t prior_ee_cycle = vu0->m_ee_cycle;
+    vu0->m_ee_cycle = std::max(now, vu0->m_ee_cycle);
+    const uint32_t started = ee::ee_vu0_start_ialu_callback(
+        &context->m_engine, cpu, vu0, address, pc);
+    if (started == static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE))
+    {
+        context->m_last_attempt = now;
+        context->m_next_attempt = now + 1u;
+    }
+    else
+    {
+        vu0->m_ee_cycle = prior_ee_cycle;
+    }
+    return started;
+}
+
+// CMSAR1 uses the resident VU1 engine, but is not a VIF command.
 uint32_t runner_vu0_control(
-    void*, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
     uint32_t register_index, uint32_t value, uint32_t
 )
 {
@@ -661,21 +790,49 @@ uint32_t runner_vu0_control(
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::INVALID_ARGUMENT);
     }
+    if (register_index == 31u)
+    {
+        auto* context = static_cast<s_runner_vu0_control*>(user);
+        if (context == nullptr)
+        {
+            return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const auto pending = context->m_dmac->service_deferred_vif1(true);
+        if (pending == ee::c_ee_dmac::e_deferred_vif1::rejected ||
+            pending == ee::c_ee_dmac::e_deferred_vif1::pending ||
+            !context->m_vif1->start_cmsar1(value))
+        {
+            return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        // CMSAR1 accepts the launch, not completion. Subsequent EE
+        // execution advances the resident pipeline until a real E-bit.
+        context->m_cmsar1_last_attempt = context->m_runtime->m_guest_instruction_attempts;
+        vu0->m_vpu_status = (vu0->m_vpu_status & ~0xff00u) | 0x100u;
+        vu0->m_vi[29] = vu0->m_vpu_status;
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE);
+    }
     if (register_index != 28u)
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
-    if ((value & 0x00000001u) != 0u)
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context == nullptr)
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
-    if ((value & 0x00000100u) != 0u)
+    // A worker owns a transactional VU1 run until publication. We cannot
+    // interrupt it mid-pair or silently publish its uncommitted effects.
+    if ((value & 0x300u) != 0u &&
+        !context->m_vif1->control_vu_break_reset(value))
     {
-        vu0->m_vpu_status &= ~1u;
-        vu0->m_running = 0u;
-        vu0->m_e_bit = 0u;
-        vu0->m_m_bit = 0u;
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
+    if ((value & 3u) != 0u)
+    {
+        context->m_next_attempt = 0u;
+        context->m_last_attempt = context->m_runtime->m_guest_instruction_attempts;
+    }
+    // The architectural FBRST/status updates are owned by ee_vu0_ctc2.
     return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE);
 }
 
@@ -2433,8 +2590,12 @@ int main(int argc, char** argv)
         gif_path3.set_image_payload_digest(false);
         std::puts("GIF image payload digest: disabled (event and QWC counters retained)");
     }
+    ee::c_ee_vif1 vif0{};
+    vif0.bind_vu0(&vu0);
+    hardware.bind_vif0(&vif0);
     ee::c_ee_vif1 vif1{};
     ee::c_ee_gs_state gs_state{};
+    hardware.bind_gs(&gs_state);
     gif_path3.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     gif_path2.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
     gif_path1.bind_event_sink(&gs_state, &ee::c_ee_gs_state::gif_events);
@@ -2445,11 +2606,12 @@ int main(int argc, char** argv)
 
     struct s_graphics_dma_routes
     {
+        ee::c_ee_vif1* m_vif0 = nullptr;
         ee::c_ee_vif1* m_vif1 = nullptr;
         ee::c_ee_gif_path3* m_path3 = nullptr;
         bool m_rejection_logged = false;
     };
-    s_graphics_dma_routes graphics_dma{&vif1, &gif_path3, false};
+    s_graphics_dma_routes graphics_dma{&vif0, &vif1, &gif_path3, false};
     hardware.bind_device_transfer(
         &graphics_dma,
         [](void* user, uint32_t channel, const uint8_t* data,
@@ -2458,7 +2620,11 @@ int main(int argc, char** argv)
             s_graphics_dma_routes* routes =
                 static_cast<s_graphics_dma_routes*>(user);
             bool accepted = false;
-            if (channel == 1u)
+            if (channel == 0u)
+            {
+                accepted = routes->m_vif0->consume(data, qwc);
+            }
+            else if (channel == 1u)
             {
                 accepted = routes->m_vif1->consume(data, qwc);
                 if (!accepted && !routes->m_rejection_logged)
@@ -3056,9 +3222,17 @@ int main(int argc, char** argv)
         "SDBZ_AUDIO_PROFILE", &audio_profile_environment);
     const bool audio_profile_enabled = audio_profile_value != nullptr &&
         std::strcmp(audio_profile_value, "1") == 0;
+    std::string effect_fast_path_environment;
+    const char* effect_fast_path_value = read_host_environment(
+        "SDBZ_SPU2_EFFECT_FAST_PATH", &effect_fast_path_environment);
+    const bool effect_fast_path_enabled = effect_fast_path_value == nullptr ||
+        std::strcmp(effect_fast_path_value, "0") != 0;
     if (iop_kernel != nullptr)
     {
         iop_kernel->hardware().enable_spu2_audio_profile(audio_profile_enabled);
+        iop_kernel->hardware().enable_spu2_effect_fast_path(effect_fast_path_enabled);
+        std::printf("IOP SPU2 effect fast path: %s\n",
+            effect_fast_path_enabled ? "enabled" : "disabled (reference)");
     }
     if (host_audio_enabled)
     {
@@ -3101,6 +3275,16 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "EE compatibility clock installation failed\n");
             return 1;
         }
+        // ps2-web-recomp starts the PAL field schedule at boot even
+        // before SetGsCrt (system.cpp::boot, Options::pal = true).
+        // Only the explicitly enabled compatibility clock owns this
+        // bootstrap schedule; a later guest SetGsCrt supersedes it.
+        if (!hardware.start_hle_scanout(
+                runtime.m_ee_cycle_scheduler.current_cycle()))
+        {
+            std::fprintf(stderr, "EE HLE startup scanout initialization failed\n");
+            return 1;
+        }
         // ps2-web-recomp runs guest execution against an event budget.
         // Preserve real safepoints for due GS fields; do not derive time
         // from host dispatches, loop visits, or wall-clock duration.
@@ -3114,6 +3298,14 @@ int main(int argc, char** argv)
     runtime.m_user = memory.get();
     runtime.m_vu0_state = &vu0;
     runtime.m_vu0_sync = runner_vu0_sync;
+    s_runner_vu0_control vu0_control{&vif1, &hardware.dmac(), &runtime};
+    vu0_control.m_scheduler.m_user = &vu0_control;
+    vu0_control.m_scheduler.m_execute = runner_vu0_execute;
+    vu0_control.m_scheduler.m_vu1_catch_up = runner_vu0_vu1_catch_up;
+    vu0_control.m_scheduler.m_schedule_event = runner_vu0_schedule_event;
+    runtime.m_vu0_user = &vu0_control;
+    runtime.m_vu0_start = runner_vu0_start;
+    runtime.m_vu0_control_user = &vu0_control;
     runtime.m_vu0_control = runner_vu0_control;
     // The timers share the hardware MMIO bus but own their clocked state
     // in this host runner, leaving cached translated IR unchanged.
@@ -3190,6 +3382,8 @@ int main(int argc, char** argv)
 
     uint32_t startup_stack_top = stack;
     uint32_t startup_stack_size = 0;
+    // EE libc's heap is shared by the executable's guest threads.
+    uint32_t startup_heap_end = 0u;
     bool startup_thread_set = false;
 
     struct s_kernel_semaphore
@@ -3230,6 +3424,7 @@ int main(int argc, char** argv)
     {
         bool m_used = false;
         uint32_t m_status = 16u; // dormant; 1=run, 2=ready, 4=wait, 8=suspend, 12=wait+suspend
+        bool m_self_suspend_pending = false;
         uint64_t m_order = 0u;
         bool m_has_context = false;
         uint32_t m_wait_semaphore = 0u;
@@ -3243,7 +3438,6 @@ int main(int argc, char** argv)
         uint32_t m_gp = 0u;
         uint32_t m_priority = 0u;
         uint32_t m_initial_priority = 0u;
-        uint32_t m_heap_end = 0u;
         uint32_t m_attr = 0u;
         uint32_t m_option = 0u;
     };
@@ -3262,9 +3456,37 @@ int main(int argc, char** argv)
     bool reschedule_requested = false;
     uint64_t idle_started_cycle = 0u;
     uint64_t idle_cycles = 0u;
+    const auto make_thread_dormant = [](s_kernel_thread& thread)
+    {
+        thread.m_status = ee_kernel_thread::k_dormant;
+        thread.m_self_suspend_pending = false;
+        thread.m_has_context = false;
+        thread.m_wait_type = 0u;
+        thread.m_wait_semaphore = 0u;
+        thread.m_wakeups = 0u;
+        thread.m_priority = thread.m_initial_priority;
+    };
     const auto schedule_threads = [&]() -> bool
     {
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::thread_schedule);
+        // A self-suspend reports SUSPEND until a real scheduling boundary,
+        // but the thread still owns the running CPU. Reconcile that owner
+        // before selecting the next runnable thread. Never release another
+        // thread's suspension or override an actual WAIT/DORMANT transition.
+        s_kernel_thread& running = threads[current_thread_id];
+        if (running.m_self_suspend_pending)
+        {
+            running.m_self_suspend_pending = false;
+            if (running.m_status == ee_kernel_thread::k_suspend)
+            {
+                running.m_status = ee_kernel_thread::k_run;
+                if (trace)
+                {
+                    std::printf("HLE EE self-suspend reconciled: id=%u\n",
+                                current_thread_id);
+                }
+            }
+        }
         uint32_t next_id = 0u;
         for (uint32_t id = 1u; id < 256u; ++id)
         {
@@ -3292,8 +3514,11 @@ int main(int argc, char** argv)
         }
         if (next_id != current_thread_id)
         {
+            // Attribute outstanding elapsed budget to the outgoing
+            // privilege mode before replacing its context.
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             s_kernel_thread& current = threads[current_thread_id];
-            if (current.m_used)
+            if (current.m_used && current.m_status != ee_kernel_thread::k_dormant)
             {
                 current.m_context = cpu;
                 current.m_vu0_context = vu0;
@@ -3324,6 +3549,7 @@ int main(int argc, char** argv)
                 return false;
             }
             cpu = next.m_context;
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             vu0 = next.m_vu0_context;
             next.m_status = 1u;
             current_thread_id = next_id;
@@ -3367,8 +3593,22 @@ int main(int argc, char** argv)
     ee::s_ee_cpu_state irq_interrupted_cpu{};
     ee::s_ee_vu0_state irq_interrupted_vu0{};
     constexpr uint32_t k_irq_kernel_stack = 0x8007fff0u;
+    constexpr uint32_t k_slot_callback_limit = 16u;
+    uint32_t slot_callback_samples = 0u;
+    bool slot_callback_armed = false;
+    ee::c_ee_sdbz_slot_callback_probe::s_slot_observation slot_callback_before{};
     const auto enter_irq_callback = [&](const s_kernel_interrupt_handler& handler)
     {
+        // Observe only the identified VIF1 handler while the retail
+        // wait is suspended, with a fixed log bound per replay.
+        slot_callback_armed = report_path != nullptr &&
+            slot_callback_samples < k_slot_callback_limit &&
+            ee::c_ee_sdbz_slot_callback_probe::is_slot_callback(
+                irq_callback_is_intc, irq_callback_cause,
+                handler.m_address, irq_interrupted_cpu.m_pc) &&
+            ee::c_ee_sdbz_slot_callback_probe::sample_slots(
+                memory.get(), slot_callback_before);
+        ee::ee_cop0_clock_sync(&cpu, &runtime);
         cpu.m_cop0[12] = (irq_interrupted_cpu.m_cop0[12] & ~0x10001u) | 2u;
         cpu.m_gpr[4] = {irq_callback_cause, 0u};
         cpu.m_gpr[5] = {handler.m_arg, 0u};
@@ -3588,20 +3828,12 @@ int main(int argc, char** argv)
     // SDBZ_PROFILE_PCS=1: reuse the native-boundary clock; rank by
     // inclusive native time, excluding live compilation and outer-loop work.
     // Accounted guest attempts include charged idle-loop instructions.
-    struct s_pc_profile
-    {
-        uint64_t m_calls = 0u;
-        uint64_t m_dispatches = 0u;
-        uint64_t m_instructions = 0u;
-        uint64_t m_idle_instructions = 0u;
-        uint64_t m_wall_ns = 0u;
-    };
     std::string profile_pcs_environment;
     const char* profile_pcs_value = read_host_environment(
         "SDBZ_PROFILE_PCS", &profile_pcs_environment);
     const bool profile_pcs = profile_pcs_value != nullptr &&
         std::strcmp(profile_pcs_value, "0") != 0;
-    std::unordered_map<uint32_t, s_pc_profile> pc_profile;
+    ee::c_ee_pc_profile<> pc_profile(profile_pcs);
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -3677,7 +3909,34 @@ int main(int argc, char** argv)
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
+        ee::ee_cop0_clock_sync(&cpu, &runtime);
+        if (runtime.m_perf_compat_fault)
+        {
+            std::fprintf(stderr, "EE COP0 compatibility performance event/overflow unsupported\n");
+            return e_device_service::failed;
+        }
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
+        if (vif1.cmsar1_running() &&
+            reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
+            !runner_service_cmsar1(vu0_control, vu0))
+        {
+            std::fprintf(stderr, "VU1 CMSAR1 slice rejected\n");
+            return e_device_service::failed;
+        }
+        if (vu0.m_running != 0u &&
+            reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
+            runtime.m_guest_instruction_attempts >= vu0_control.m_next_attempt)
+        {
+            const auto synced = runner_vu0_sync(&vu0_control, &cpu, &vu0,
+                static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::CATCH_UP_TO_EE_CYCLE),
+                cpu.m_pc);
+            if (synced != static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE))
+            {
+                std::fprintf(stderr, "VU0 micro execution stopped at byte PC=%04x result=%u\n",
+                    vu0.m_micro_pc, synced);
+                return e_device_service::failed;
+            }
+        }
         if (hardware.dmac().deferred_vif1_pending())
         {
             // Present only committed GS state at the next field boundary.
@@ -4315,7 +4574,7 @@ int main(int argc, char** argv)
             uint64_t next = std::min(now + k_idle_slice, host_timers.next_event());
             if (hardware.scanout().enabled())
             {
-                next = std::min(next, hardware.scanout().next_field_cycle());
+                next = std::min(next, hardware.scanout().next_event_cycle());
             }
             // The preceding service has already handled all due events.
             // A device with no future deadline must not stall idle time.
@@ -4325,6 +4584,7 @@ int main(int argc, char** argv)
             }
             idle_cycles += next - now;
             host_timers.set_idle_cycles(idle_cycles);
+            runtime.m_cop0_clock_idle = idle_cycles;
             if (!runtime.m_ee_cycle_scheduler.publish_cycle(next))
             {
                 return 1;
@@ -4853,14 +5113,9 @@ int main(int argc, char** argv)
         {
             // Attribute measured boundary durations across retries, not
             // the time spent compiling, opening libraries or updating reports.
-            s_pc_profile& entry = pc_profile[from_pc];
-            entry.m_calls += 1u;
-            entry.m_dispatches += count;
-            entry.m_instructions +=
-                runtime.m_guest_instruction_attempts -
-                instructions_before_dispatch;
-            entry.m_idle_instructions += idle_skip_instructions - idle_before_dispatch;
-            entry.m_wall_ns += pc_native_ns;
+            pc_profile.record(from_pc, count,
+                runtime.m_guest_instruction_attempts - instructions_before_dispatch,
+                idle_skip_instructions - idle_before_dispatch, pc_native_ns);
         }
 
         dispatched += count;
@@ -5109,12 +5364,32 @@ int main(int argc, char** argv)
              reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH)))
         {
             const int32_t result = static_cast<int32_t>(cpu.m_gpr[2].m_lo);
+            if (slot_callback_armed)
+            {
+                slot_callback_armed = false;
+                ee::c_ee_sdbz_slot_callback_probe::s_slot_observation after{};
+                if (ee::c_ee_sdbz_slot_callback_probe::sample_slots(memory.get(), after))
+                {
+                    ++slot_callback_samples;
+                    std::fprintf(stderr,
+                        "EE SDBZ slot callback: dispatch=%llu "
+                        "handler=0x00102a60 resume=0x001025a4 result=%d "
+                        "selector=%u->%u flags=[%u,%u]->[%u,%u] "
+                        "(read-only callback boundaries)\n",
+                        static_cast<unsigned long long>(dispatched), result,
+                        slot_callback_before.m_selector, after.m_selector,
+                        slot_callback_before.m_flag0, slot_callback_before.m_flag1,
+                        after.m_flag0, after.m_flag1);
+                }
+            }
             if (result >= 0 && irq_callback_index < irq_callback_handlers.size())
             {
                 enter_irq_callback(irq_callback_handlers[irq_callback_index++]);
                 continue;
             }
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             cpu = irq_interrupted_cpu;
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             vu0 = irq_interrupted_vu0;
             hardware.intc().bind_cpu(&cpu);
             hardware.dmac().bind_cpu(&cpu);
@@ -5155,7 +5430,9 @@ int main(int argc, char** argv)
             // A genuine interrupt-safe SignalSema may have promoted an EE
             // waiter to READY. The kernel must finish restoring interrupted
             // EE/VU0 state before scheduling the newly runnable thread.
-            if ((reschedule_requested || current_thread_id == 0u) && !schedule_threads())
+            if ((reschedule_requested || current_thread_id == 0u ||
+                 threads[current_thread_id].m_self_suspend_pending) &&
+                !schedule_threads())
             {
                 reason = static_cast<uint32_t>(
                     ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED);
@@ -5199,8 +5476,7 @@ int main(int argc, char** argv)
             !callback_active)
         {
             s_kernel_thread& finished = threads[current_thread_id];
-            finished.m_status = 16u;
-            finished.m_has_context = false;
+            make_thread_dormant(finished);
             if (trace)
             {
                 std::printf("HLE EE thread returned: id=%u\n",
@@ -5326,7 +5602,7 @@ int main(int argc, char** argv)
             if (service == 0x02u ||
                 (service >= 0x10u && service <= 0x17u) ||
                 (service >= 0x1au && service <= 0x1du) ||
-                (service >= 0x20u && service <= 0x24u) ||
+                (service >= 0x20u && service <= 0x25u) ||
                 service == 0x29u || service == 0x2au || service == 0x2bu ||
                 service == 0x2du || service == 0x2eu ||
                 service == 0x2fu || service == 0x30u || service == 0x31u ||
@@ -5630,6 +5906,58 @@ int main(int argc, char** argv)
                     }
                 }
 
+                else if (service == 0x21u || service == 0x25u)
+                {
+                    // DeleteThread only frees dormant threads. TerminateThread
+                    // makes an existing non-current active thread dormant.
+                    const uint32_t id = static_cast<uint32_t>(cpu.m_gpr[4].m_lo);
+                    const bool deleting = service == 0x21u;
+                    s_kernel_thread* target = id > 0u && id < 256u &&
+                        threads[id].m_used ? &threads[id] : nullptr;
+                    const bool allowed = target != nullptr && (deleting
+                        ? ee_kernel_thread::can_delete(target->m_status, id == current_thread_id)
+                        : ee_kernel_thread::can_terminate(target->m_status, id == current_thread_id));
+                    if (allowed)
+                    {
+                        if (deleting)
+                        {
+                            *target = {};
+                        }
+                        else
+                        {
+                            // Detach semaphore waiters before changing thread state.
+                            // Never leave a dead thread in a live wait queue.
+                            if (target->m_wait_type == 2u)
+                            {
+                                const uint32_t sema = target->m_wait_semaphore;
+                                if (sema == 0u || sema > 64u ||
+                                    !semaphores[sema - 1u].m_used)
+                                {
+                                    std::fprintf(stderr, "TerminateThread HLE refused invalid semaphore\n");
+                                    break;
+                                }
+                                auto& waiters = semaphores[sema - 1u].m_waiters;
+                                const auto waiter = std::find(waiters.begin(), waiters.end(), id);
+                                if (waiter == waiters.end())
+                                {
+                                    std::fprintf(stderr, "TerminateThread HLE refused untracked waiter\n");
+                                    break;
+                                }
+                                waiters.erase(waiter);
+                            }
+                            make_thread_dormant(*target);
+                        }
+                    }
+                    cpu.m_gpr[2].m_lo = allowed ? id : static_cast<uint64_t>(-1ll);
+                    cpu.m_gpr[2].m_hi = 0u;
+                    if (trace)
+                    {
+                        std::printf("HLE %sThread: id=%u result=%d\n",
+                            deleting ? "Delete" : "Terminate", id,
+                            allowed ? static_cast<int>(id) : -1);
+                    }
+                }
+
                 else if (service == 0x22u)
                 {
                     const uint32_t id =
@@ -5662,6 +5990,7 @@ int main(int argc, char** argv)
                             break;
                         }
                         thread->m_context = {};
+                        thread->m_self_suspend_pending = false;
                         thread->m_wait_semaphore = 0u;
                         thread->m_wait_type = 0u;
                         thread->m_wakeups = 0u;
@@ -5709,11 +6038,7 @@ int main(int argc, char** argv)
                         break;
                     }
                     s_kernel_thread& thread = threads[current_thread_id];
-                    thread.m_status = 16u;
-                    thread.m_has_context = false;
-                    thread.m_wait_type = 0u;
-                    thread.m_wait_semaphore = 0u;
-                    thread.m_wakeups = 0u;
+                    make_thread_dormant(thread);
                     if (service == 0x24u)
                     {
                         thread.m_used = false;
@@ -6076,6 +6401,22 @@ int main(int argc, char** argv)
                                     requested_id);
                             }
                         }
+                        else if ((service == 0x33u || service == 0x34u) &&
+                            !ee_kernel_thread::can_wakeup(
+                                threads[requested_id].m_status,
+                                requested_id == current_thread_id && !irq_callback_active))
+                        {
+                            // A normal thread cannot wake itself or a dormant
+                            // target. Preserve interrupt-context wakeup semantics.
+                            cpu.m_gpr[2].m_lo = static_cast<uint64_t>(-1ll);
+                            cpu.m_gpr[2].m_hi = 0u;
+                            if (trace)
+                            {
+                                std::printf("HLE %s: id=%u invalid status/context, result=-1\n",
+                                    service == 0x33u ? "WakeupThread" : "iWakeupThread",
+                                    requested_id);
+                            }
+                        }
                         else
                         {
                             s_kernel_thread& thread = threads[requested_id];
@@ -6168,7 +6509,15 @@ int main(int argc, char** argv)
                             : ee_kernel_thread::resume(
                                 old_status, thread_id == current_thread_id);
                         thread.m_status = next.m_status;
-                        cpu.m_gpr[2].m_lo = thread_id;
+                        if (next.m_changed && thread_id == current_thread_id)
+                        {
+                            thread.m_self_suspend_pending =
+                                service == 0x37u &&
+                                old_status == ee_kernel_thread::k_run &&
+                                !irq_callback_active;
+                        }
+                        cpu.m_gpr[2].m_lo = next.m_changed
+                            ? thread_id : static_cast<uint64_t>(-1ll);
                         cpu.m_gpr[2].m_hi = 0u;
                         if (service == 0x39u && next.m_changed)
                         {
@@ -6182,10 +6531,11 @@ int main(int argc, char** argv)
                         {
                             std::printf(
                                 "HLE %sThread: id=%u old_status=%u "
-                                "new_status=%u changed=%u result=%u\n",
+                                "new_status=%u changed=%u result=%d\n",
                                 service == 0x37u ? "Suspend" : "Resume",
                                 thread_id, old_status, thread.m_status,
-                                next.m_changed ? 1u : 0u, thread_id);
+                                next.m_changed ? 1u : 0u,
+                                next.m_changed ? static_cast<int>(thread_id) : -1);
                         }
                     }
                 }
@@ -6261,9 +6611,10 @@ int main(int argc, char** argv)
                         std::fprintf(stderr, "SetupHeap HLE refused overlapping heap/stack\n");
                         break;
                     }
-                    // SetupHeap records the current thread's heap boundary
-                    // and returns it. EndOfHeap must query this same value;
-                    // it must not infer the boundary from the caller's A0.
+                    // SetupHeap records the process-wide EE heap boundary.
+                    // PS2SDK libc shares its allocator between EE threads;
+                    // OpenPS2BIOS likewise stores one heap_end in ee/kernel.c.
+                    // EndOfHeap must not depend on the caller's thread or A0.
                     // This does not implement malloc/sbrk.
                     if (current_thread_id == 0u ||
                         current_thread_id >= 256u ||
@@ -6274,7 +6625,7 @@ int main(int argc, char** argv)
                         break;
                     }
                     const uint32_t heap_end32 = static_cast<uint32_t>(heap_end);
-                    threads[current_thread_id].m_heap_end = heap_end32;
+                    startup_heap_end = heap_end32;
                     cpu.m_gpr[2].m_lo = heap_end32;
                     cpu.m_gpr[2].m_hi = 0u;
                     if (trace)
@@ -6298,8 +6649,7 @@ int main(int argc, char** argv)
                             "EndOfHeap HLE refused invalid running thread\n");
                         break;
                     }
-                    const uint32_t heap_end =
-                        threads[current_thread_id].m_heap_end;
+                    const uint32_t heap_end = startup_heap_end;
                     cpu.m_gpr[2].m_lo = heap_end;
                     cpu.m_gpr[2].m_hi = 0u;
                     if (trace)
@@ -6679,12 +7029,69 @@ int main(int argc, char** argv)
                                     // WaitSema succeed on re-entry.
                                     continue;
                                 }
-                                std::fprintf(stderr,
-                                    "WaitSema HLE refused blocking wait: "
-                                    "id=%u current_thread=%u count=0 "
-                                    "(no runnable peer)\n",
-                                    semaphore_id, current_thread_id);
-                                break;
+                                // No runnable peer does not imply a
+                                // deadlock: a registered, enabled device
+                                // interrupt may signal the semaphore
+                                // while the kernel is idle. Preserve the
+                                // special IOP RPC waits above, and use
+                                // the ordinary bounded idle scheduler
+                                // only when a modeled producer exists.
+                                const uint32_t status_word = cpu.m_cop0[12];
+                                const bool irq_enabled =
+                                    (status_word & (ee::STATUS_IE | ee::STATUS_EIE |
+                                        ee::STATUS_ERL)) ==
+                                        (ee::STATUS_IE | ee::STATUS_EIE);
+                                const uint32_t intc_mask = hardware.intc().mask();
+                                const uint32_t intc_pending = hardware.intc().pending();
+                                const bool scheduled_timer =
+                                    host_timers.next_event() !=
+                                        std::numeric_limits<uint64_t>::max();
+                                const bool intc_producer =
+                                    (status_word & (1u << (ee::CAUSE_IP_SHIFT + ee::INT_INTC))) != 0u &&
+                                    std::any_of(intc_handlers.begin(), intc_handlers.end(),
+                                        [&](const s_kernel_interrupt_handler& handler)
+                                        {
+                                            if (handler.m_cause >= 32u)
+                                            {
+                                                return false;
+                                            }
+                                            const uint32_t bit = 1u << handler.m_cause;
+                                            return (intc_mask & bit) != 0u &&
+                                                ((intc_pending & bit) != 0u ||
+                                                 (handler.m_cause ==
+                                                    ee::c_ee_scanout_clock::k_intc_vblank_start &&
+                                                  hardware.scanout().enabled()) ||
+                                                 (handler.m_cause >= 9u &&
+                                                  handler.m_cause <= 12u && scheduled_timer));
+                                        });
+                                const bool dmac_producer =
+                                    std::any_of(dmac_handlers.begin(), dmac_handlers.end(),
+                                        [&](const s_kernel_interrupt_handler& handler)
+                                        {
+                                            return handler.m_cause < 10u &&
+                                                (hardware.dmac().pending() &
+                                                    (1u << handler.m_cause)) != 0u;
+                                        });
+                                const bool idle_wait = !other_ready &&
+                                    !callback_active && !irq_callback_active &&
+                                    current_thread_id != 0u && irq_enabled &&
+                                    runtime.m_ee_cycle_scheduler.source() ==
+                                        ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
+                                    (intc_producer || dmac_producer);
+                                if (!idle_wait)
+                                {
+                                    std::fprintf(stderr,
+                                        "WaitSema HLE refused blocking wait: "
+                                        "id=%u current_thread=%u count=0 "
+                                        "(no runnable peer or modeled IRQ producer)\n",
+                                        semaphore_id, current_thread_id);
+                                    break;
+                                }
+                                if (trace)
+                                {
+                                    std::printf("HLE WaitSema idle: id=%u thread=%u\n",
+                                                semaphore_id, current_thread_id);
+                                }
                             }
                             semaphore.m_waiters.push_back(current_thread_id);
                             threads[current_thread_id].m_status = 4u;
@@ -6733,6 +7140,13 @@ int main(int argc, char** argv)
                             if (semaphore.m_waiters.empty())
                             {
                                 ++semaphore.m_count;
+                                // An ordinary signal is a scheduling boundary
+                                // for a still-executing self-suspended owner.
+                                if (service == 0x42u &&
+                                    threads[current_thread_id].m_self_suspend_pending)
+                                {
+                                    reschedule_requested = true;
+                                }
                             }
                             else
                             {
@@ -8023,7 +8437,7 @@ int main(int argc, char** argv)
                     cpu.m_gpr[2].m_hi = 0u;
                 }
 
-                else
+                else if (service == 0x74u)
                 {
                     // SetSyscall(number, handler) installs an EE kernel
                     // callback in the native dispatcher AND in guest RAM.
@@ -8087,6 +8501,12 @@ int main(int argc, char** argv)
                     // including for unsupported out-of-range indices.
                     cpu.m_gpr[2].m_lo = 0u;
                     cpu.m_gpr[2].m_hi = 0u;
+                }
+
+                else
+                {
+                    std::fprintf(stderr, "Unhandled EE HLE syscall 0x%02x\n", service);
+                    break;
                 }
 
                 // Syscall HLE returns to the interrupted guest callback.
@@ -8290,10 +8710,11 @@ int main(int argc, char** argv)
                          item.first, item.second.reason);
         }
     }
-    if (profile_pcs && !pc_profile.empty())
+    if (profile_pcs && !pc_profile.entries().empty())
     {
-        std::vector<std::pair<uint32_t, s_pc_profile>> ranked(
-            pc_profile.begin(), pc_profile.end());
+        const auto& entries = pc_profile.entries();
+        std::vector<std::pair<uint32_t, ee::s_pc_profile>> ranked(
+            entries.begin(), entries.end());
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b)
                   {
@@ -8321,7 +8742,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(total_wall_ns));
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
-            const s_pc_profile& item = ranked[i].second;
+            const ee::s_pc_profile& item = ranked[i].second;
             const uint64_t non_skipped = item.m_instructions - item.m_idle_instructions;
             std::fprintf(stderr,
                 "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
@@ -8833,12 +9254,15 @@ int main(int argc, char** argv)
         for (uint32_t core = 0u; core < 2u; ++core)
         {
             std::printf("IOP SPU2 effect area: core=%u enabled=%u enable_writes=%llu "
-                "start=0x%06x end=0x%06x ticks=%llu return_frames=%llu\n",
+                "start=0x%06x end=0x%06x ticks=%llu return_frames=%llu "
+                "fast_ticks=%llu zero_fir_skips=%llu\n",
                 core, spu2.effect_enabled(core) ? 1u : 0u,
                 static_cast<unsigned long long>(spu2.effect_enable_writes(core)),
                 spu2.effect_start(core), spu2.effect_end(core),
                 static_cast<unsigned long long>(spu2.effect_ticks(core)),
-                static_cast<unsigned long long>(spu2.effect_return_frames(core)));
+                static_cast<unsigned long long>(spu2.effect_return_frames(core)),
+                static_cast<unsigned long long>(spu2.effect_fast_ticks(core)),
+                static_cast<unsigned long long>(spu2.effect_zero_fir_skips(core)));
         }
     }
     if (report_path != nullptr &&

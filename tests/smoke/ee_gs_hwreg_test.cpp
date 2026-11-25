@@ -321,7 +321,7 @@ bool test_lanes_and_rollback()
     events[0].m_word1 = 0x54u;
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
-    events[1].m_word1 = 0x60u; // unsupported SIGNAL
+    events[1].m_word1 = 0x61u; // unsupported FINISH
     events[1].m_byte_offset = 16u;
     if (gs.consume(events, 2u, packet.data(), 2u) ||
         !read32(gs, base, 0u) ||

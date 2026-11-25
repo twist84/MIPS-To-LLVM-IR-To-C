@@ -1,0 +1,133 @@
+name: Original ps2autotests
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build autotest tools
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure headless native tools
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build only required targets
+        run: cmake --build build --parallel 2 --target ee_recomp ee_game_runner
+
+      - name: Package revision-pinned tools
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import subprocess
+
+          build = pathlib.Path("build")
+          tools = ("ee_recomp", "ee_game_runner")
+          manifest = {
+              "runtime_revision": subprocess.check_output(
+                  ["git", "rev-parse", "HEAD"], text=True).strip(),
+              "native_tool_sha256": {
+                  name: hashlib.sha256((build / name).read_bytes()).hexdigest()
+                  for name in tools
+              },
+          }
+          (build / "autotest-tools.json").write_text(
+              json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+          PY
+          tar -czf "$RUNNER_TEMP/ee-autotest-tools.tar.gz" \
+            build/ee_recomp build/ee_game_runner build/autotest-tools.json
+
+      - name: Upload autotest tools
+        uses: actions/upload-artifact@v4
+        with:
+          name: ee-autotest-tools
+          path: ${{ runner.temp }}/ee-autotest-tools.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  autotests:
+    name: "Original ps2autotests (${{ matrix.group }}; observational)"
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON('[{"group":"ee","patterns":"cpu/ee/* cpu/ee_cop0/*"},{"group":"fpu","patterns":"cpu/ee_fpu/*"},{"group":"simd","patterns":"cpu/ee_simd/*"},{"group":"dma","patterns":"dma/*"},{"group":"kernel","patterns":"kernel/* gs/* memory/*"},{"group":"vu","patterns":"cpu/vu0_macro/* vu/*"}]') }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ee-autotest-tools
+          path: .
+
+      - name: Restore revision-pinned native tools
+        run: tar -xzf ee-autotest-tools.tar.gz
+
+      - name: Install Python LLVM binding
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install llvmlite
+
+      - name: Compare original console transcripts
+        run: |
+          read -r -a patterns <<< "$AUTOTEST_PATTERNS"
+          .venv/bin/python tools/run_ps2autotests.py "${patterns[@]}" \
+            --jobs 2 --emit-jobs 1 --report-only --build-dir build \
+            --prebuilt-manifest build/autotest-tools.json
+        env:
+          AUTOTEST_PATTERNS: ${{ matrix.patterns }}
+
+      - name: Upload transcripts and stop reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps2autotests-${{ matrix.group }}
+          path: build/autotests/runs/
+          if-no-files-found: warn
+          retention-days: 7
+
+  summary:
+    name: All 55 original transcripts
+    needs: [build, autotests]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shard reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ps2autotests-*
+          path: reports
+
+      - name: Aggregate exact transcript outcomes
+        run: |
+          python3 tools/ci/summarize_ps2autotests.py reports --output combined
+          cat combined/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload combined summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps2autotests-summary
+          path: combined/
+          if-no-files-found: warn
+          retention-days: 7

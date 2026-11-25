@@ -102,6 +102,151 @@ int main()
           callable.find("cpu->m_cop0[11] =") == std::string::npos,
           "native callable emitter calls the shared COP0 write helper");
 
+    // Original console performance register semantics, including all 32
+    // alias indices, with no dependence on host or diagnostic timing.
+    ee::s_ee_runtime runtime{};
+    const auto transfer = [&](uint32_t fmt, uint32_t gpr, uint32_t selector)
+    {
+        return ee::ee_cop0_perf_transfer(&cpu, &runtime,
+            (0x10u << 26u) | (fmt << 21u) | (gpr << 16u) |
+            (25u << 11u) | selector);
+    };
+    cpu.m_gpr[4].m_lo = 0x89abcdefu;
+    check(transfer(4u, 4u, 1u) == 0u, "MTPC0 full width");
+    cpu.m_gpr[4].m_lo = 0x01234567u;
+    check(transfer(4u, 4u, 3u) == 0u, "MTPC1 full width");
+    cpu.m_gpr[5].m_hi = 0x1234abcdu;
+    for (uint32_t i = 0; i < 32u; ++i)
+    {
+        check(transfer(0u, 5u, (i << 1u) | 1u) == 0u &&
+              cpu.m_gpr[5].m_lo == ((i & 1u) ? 0x01234567ull : 0xffffffff89abcdefull) &&
+              cpu.m_gpr[5].m_hi == 0x1234abcdu, "MFPC alias and sign extension");
+    }
+    cpu.m_gpr[4].m_lo = 0x7fffffffu;
+    check(transfer(4u, 4u, 0u) == 0u, "MTPS disabled");
+    for (uint32_t i = 0; i < 32u; ++i)
+    {
+        check(transfer(0u, 5u, i << 1u) == 0u &&
+              cpu.m_gpr[5].m_lo == 0x000ffbfeu, "MFPS alias and mask");
+    }
+    check(transfer(4u, 0u, 30u) == 0u &&
+          runtime.m_perf_control == 0x000ffbfeu, "nonzero MTPS ignored");
+    check(transfer(0u, 0u, 1u) == 0u && cpu.m_gpr[0].m_lo == 0u,
+          "MFPC zero destination");
+    cpu.m_gpr[4].m_lo = 0x8000003eu;
+    check(transfer(4u, 4u, 0u) == 4u &&
+          runtime.m_perf_control == 0x000ffbfeu,
+          "active cycle event without any clock fails closed");
+    check(runtime.m_ee_cycle_scheduler.install_reference_compatibility_source() &&
+          transfer(4u, 0u, 1u) == 0u &&
+          transfer(4u, 0u, 3u) == 0u &&
+          transfer(4u, 4u, 0u) == 0u &&
+          !ee::ee_cop0_perf_advance(&runtime, 0u, 100u),
+          "compatibility source enables only its own approximate budget");
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    runtime.m_guest_instruction_attempts = 23u;
+    check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u &&
+          runtime.m_perf_counter[1] == 0u &&
+          transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u,
+          "elapsed compatibility budget is charged exactly once");
+    runtime.m_cop0_clock_idle = 7u;
+    ee::ee_cop0_clock_sync(&cpu, &runtime);
+    check(runtime.m_perf_counter[0] == 30u &&
+          transfer(4u, 0u, 0u) == 0u,
+          "idle units use same clock and stop accounts old control");
+    runtime.m_guest_instruction_attempts += 19u;
+    check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 30u,
+          "disabled compatibility counter remains unchanged");
+    runtime.m_ee_cycle_scheduler.reset();
+    check(runtime.m_ee_cycle_scheduler.install_validated_source(), "explicit validated test source");
+    check(transfer(4u, 0u, 1u) == 0u && transfer(4u, 0u, 3u) == 0u &&
+          transfer(4u, 4u, 0u) == 0u, "enable processor-cycle counter 0");
+    check(ee::ee_cop0_perf_advance(&runtime, 0u, 17u) &&
+          runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
+          "explicit cycle interval updates selected counter only");
+    check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_ERL, 99u) &&
+          runtime.m_perf_counter[0] == 17u, "ERL inhibits counting");
+    check(!ee::ee_cop0_perf_advance(&runtime, 0u, 0x80000000ull) &&
+          runtime.m_perf_counter[0] == 17u, "overflow fails transactionally");
+    cpu.m_gpr[4].m_lo = 0x80008020u;
+    check(transfer(4u, 4u, 0u) == 0u &&
+          ee::ee_cop0_perf_advance(&runtime, 0u, 9u) &&
+          runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
+          "no mode enables means neither cycle counter counts");
+
+    // EE manual 7.1.1/7.2.2: the four mode enables are exclusive;
+    // EXL overrides KSU and ERL inhibits counting completely.
+    for (uint32_t mode = 0u; mode < 4u; ++mode)
+    {
+        const uint32_t enable = 1u << (mode + 1u);
+        const uint32_t status_words[] =
+        {
+            ee::STATUS_EXL, 0u, 1u << 3u, 2u << 3u
+        };
+        cpu.m_gpr[4].m_lo = 0x80008020u | enable | (enable << 10u);
+        check(transfer(4u, 0u, 1u) == 0u &&
+              transfer(4u, 0u, 3u) == 0u &&
+              transfer(4u, 4u, 0u) == 0u,
+              "enable isolated performance privilege mode");
+        for (uint32_t actual = 0u; actual < 4u; ++actual)
+        {
+            const uint32_t before = runtime.m_perf_counter[0];
+            check(ee::ee_cop0_perf_advance(&runtime, status_words[actual], 7u) &&
+                  runtime.m_perf_counter[0] == before + (mode == actual ? 7u : 0u) &&
+                  runtime.m_perf_counter[1] == runtime.m_perf_counter[0],
+                  "performance mode selectors are mutually exclusive");
+        }
+        const uint32_t before = runtime.m_perf_counter[0];
+        check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_EXL | (2u << 3u), 3u) &&
+              runtime.m_perf_counter[0] == before + (mode == 0u ? 3u : 0u),
+              "EXL overrides saved user KSU");
+        const uint32_t after = runtime.m_perf_counter[0];
+        check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_ERL | ee::STATUS_EXL, 9u) &&
+              runtime.m_perf_counter[0] == after,
+              "ERL inhibits all performance modes");
+    }
+    // PCR1 event zero is real hardware branch issue, not the reserved
+    // PCR0 selector. Until issue-slot events exist, reject it explicitly.
+    const uint32_t old_control = runtime.m_perf_control;
+    cpu.m_gpr[4].m_lo = 0x80001000u;
+    check(transfer(4u, 4u, 0u) == 4u &&
+          runtime.m_perf_control == old_control,
+          "unmodeled PCR1 low-order branch issue fails closed");
+    cpu.m_gpr[4].m_lo = 0x80000004u;
+    check(transfer(4u, 4u, 0u) == 0u,
+          "reserved PCR0 event zero remains accepted");
+
+    {
+        ee::s_ee_cpu_state a{};
+        ee::s_ee_cpu_state b{};
+        ee::s_ee_runtime clock{};
+        a.m_cop0[ee::COP0_Count] = 0xfffffffcu;
+        a.m_cop0[ee::COP0_Compare] = 2u;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 0xfffffffcu,
+              "unavailable clock leaves Count unchanged");
+        check(clock.m_ee_cycle_scheduler.install_reference_compatibility_source(),
+              "explicit compatibility source");
+        clock.m_guest_instruction_attempts = 6u;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 2u &&
+              (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
+              "Count wraps and latches Compare at the elapsed budget");
+        ee::ee_cop0_clock_write(&a, &clock, ee::COP0_Compare, 10u);
+        clock.m_guest_instruction_attempts = 9u;
+        clock.m_cop0_clock_idle = 2u;
+        ee::ee_cop0_clock_sync(&b, &clock);
+        check(b.m_cop0[ee::COP0_Count] == 7u &&
+              b.m_cop0[ee::COP0_Compare] == 10u &&
+              (b.m_cop0[ee::COP0_Cause] & k_timer_ip) == 0u,
+              "thread context cannot restore stale timer state");
+        ee::ee_cop0_clock_write(&b, &clock, ee::COP0_Count, 9u);
+        clock.m_guest_instruction_attempts++;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 10u &&
+              (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
+              "Count write reanchors without double counting");
+    }
     std::printf("ee_cop0_write_test: %d failure(s)\n", s_failures);
     return s_failures != 0 ? 1 : 0;
 }

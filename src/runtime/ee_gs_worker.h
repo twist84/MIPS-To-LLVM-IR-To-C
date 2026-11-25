@@ -2,6 +2,7 @@
 
 #include "ee_gif.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -89,6 +90,12 @@ public:
         const uint64_t prepare_start = now_ns();
         const size_t event_bytes = count * sizeof(s_ee_gif_event);
         size_t image_bytes = 0u;
+        // IMAGE events are usually sparse among committed register
+        // writes. Retain a bounded index list while validating the
+        // source. Dense batches use the original full-scan fallback.
+        constexpr size_t k_image_index_capacity = 128u;
+        std::array<size_t, k_image_index_capacity> image_indices;
+        size_t image_count = 0u;
         for (size_t i = 0u; i < count; ++i)
         {
             const auto& event = events[i];
@@ -103,6 +110,11 @@ public:
                 return e_submit::invalid;
             }
             image_bytes += static_cast<size_t>(event.m_qwc) * 16u;
+            if (image_count < image_indices.size())
+            {
+                image_indices[image_count] = i;
+            }
+            ++image_count;
         }
         if (m_job_limit == 0u || event_bytes > m_byte_limit ||
             image_bytes > m_byte_limit - event_bytes ||
@@ -143,15 +155,34 @@ public:
                 batch.m_events.assign(events, events + count);
             }
             batch.m_images.reserve(image_bytes);
-            for (auto& event : batch.m_events)
+            const auto copy_image = [&](s_ee_gif_event& event)
             {
-                if (event.m_type == e_ee_gif_event_type::image && event.m_qwc != 0u)
+                const size_t offset = batch.m_images.size();
+                const auto* begin = data + event.m_byte_offset;
+                batch.m_images.insert(batch.m_images.end(), begin,
+                    begin + static_cast<size_t>(event.m_qwc) * 16u);
+                event.m_byte_offset = static_cast<uint32_t>(offset);
+            };
+            if (image_count <= image_indices.size())
+            {
+                // Includes the no-IMAGE case: the event copy above is
+                // sufficient and there is no second event traversal.
+                for (size_t i = 0u; i < image_count; ++i)
                 {
-                    const size_t offset = batch.m_images.size();
-                    const auto* begin = data + event.m_byte_offset;
-                    batch.m_images.insert(batch.m_images.end(), begin,
-                        begin + static_cast<size_t>(event.m_qwc) * 16u);
-                    event.m_byte_offset = static_cast<uint32_t>(offset);
+                    copy_image(batch.m_events[image_indices[i]]);
+                }
+            }
+            else
+            {
+                // The stack index list is only an acceleration hint,
+                // not a capacity limit on valid guest GIF transactions.
+                for (auto& event : batch.m_events)
+                {
+                    if (event.m_type == e_ee_gif_event_type::image &&
+                        event.m_qwc != 0u)
+                    {
+                        copy_image(event);
+                    }
                 }
             }
             batch.m_bytes = bytes;

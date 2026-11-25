@@ -1232,6 +1232,22 @@ def build_overlay_library(source_root, metadata_path, object_dir, new_ir,
     ])
 
 
+def read_live_request(request):
+    """Retry transient sharing violations on an atomically published request.
+
+    Windows can temporarily deny access after the producer has renamed
+    its closed request file. Never retry invalid protocol contents or
+    manufacture a response for a failed read.
+    """
+    for attempt in range(40):
+        try:
+            return request.read_text(encoding="utf-8").splitlines()
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.025)
+
+
 def run_hot_expand(command, directory, timeout_seconds, compile_missing):
     """Hold one native process alive while the host recompiles cache misses.
 
@@ -1254,7 +1270,7 @@ def run_hot_expand(command, directory, timeout_seconds, compile_missing):
                 if request.is_file():
                     response = directory / f"response-{sequence}.txt"
                     try:
-                        parts = request.read_text(encoding="utf-8").splitlines()
+                        parts = read_live_request(request)
                         if len(parts) != 2 or int(parts[0]) != sequence:
                             raise ValueError("invalid live cache-miss request")
                         pc = int(parts[1], 0)

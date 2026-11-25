@@ -149,6 +149,55 @@ int main()
     assert(cached.find("\"pc_cache_misses\": 3") != std::string::npos);
     assert(cached.find("\"edge_cache_misses\": 3") != std::string::npos);
 
+    // Packed edge keys retain all 64 bits and the original (from, to)
+    // tie order, even when one half is zero or the full uint32_t range.
+    ee::c_ee_dispatch_hotspots full_width;
+    full_width.record(1u, 0xffffffffu, 0u, {});
+    full_width.record(2u, 0u, 0xffffffffu, {});
+    full_width.record(3u, 0xffffffffu, 0xffffffffu, {});
+    full_width.record(4u, 0u, 0u, {});
+    full_width.record(5u, 0xffffffffu, 0xffffffffu, {});
+    const std::string full_json = serialize(full_width);
+    const auto full_first = full_json.find(
+        "\"from_pc\": 4294967295, \"to_pc\": 4294967295, \"visits\": 2");
+    const auto full_zero = full_json.find(
+        "\"from_pc\": 0, \"to_pc\": 0, \"visits\": 1");
+    const auto full_low = full_json.find(
+        "\"from_pc\": 0, \"to_pc\": 4294967295, \"visits\": 1");
+    const auto full_high = full_json.find(
+        "\"from_pc\": 4294967295, \"to_pc\": 0, \"visits\": 1");
+    assert(full_first < full_zero && full_zero < full_low &&
+        full_low < full_high && full_high != std::string::npos);
+
+    // Every state field independently participates in the equality
+    // reduction, including the upper half of each 64-bit field.
+    const ee::s_ee_hot_loop_state unchanged{};
+    assert(unchanged == ee::s_ee_hot_loop_state{});
+    const auto verify_field = [&](auto member, auto value)
+    {
+        auto different = unchanged;
+        different.*member = value;
+        assert(unchanged != different);
+        assert(different != unchanged);
+        assert(different == different);
+    };
+    verify_field(&ee::s_ee_hot_loop_state::m_thread_id, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_cop0_status, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_cop0_cause, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_intc_status, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_intc_mask, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_dmac_status, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_dmac_pending, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_chcr, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_madr, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_qwc, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_tadr, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_reject, 0x80000000u);
+    verify_field(&ee::s_ee_hot_loop_state::m_gif_write_sequence, 0x8000000000000000ull);
+    verify_field(&ee::s_ee_hot_loop_state::m_gs_fields, 0x8000000000000000ull);
+    verify_field(&ee::s_ee_hot_loop_state::m_gs_csr, 0x8000000000000000ull);
+    verify_field(&ee::s_ee_hot_loop_state::m_iop_rpc_sequence, 0x8000000000000000ull);
+
     ee::c_ee_dispatch_hotspots changes;
     ee::s_ee_hot_loop_state state{};
     for (uint32_t i = 0u; i < 100u; ++i)

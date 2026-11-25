@@ -330,7 +330,7 @@ int main()
     events[2].m_type = ee::e_ee_gif_event_type::packed;
     events[2].m_register = 0xeu;
     events[2].m_byte_offset = 32u;
-    events[2].m_word1 = 0x60u; // SIGNAL not implemented
+    events[2].m_word1 = 0x61u; // FINISH not implemented
     uint32_t previous_vram = 0u;
     if (!gs.read_vram32(k_cbp32 * 256u + 8u, previous_vram))
     {
@@ -428,7 +428,7 @@ int main()
     }
     const auto& live_vram = gs.vram();
     const auto original_vram = live_vram;
-    push_register(0x60u, 0u);
+    push_register(0x61u, 0u);
     if (gs.consume(interleaved.data(), interleaved.size(), payload.data(),
             static_cast<uint32_t>(payload.size() / 16u)) ||
         gs.state().m_clut_load_count != before_interleaved ||

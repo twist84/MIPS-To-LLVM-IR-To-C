@@ -126,7 +126,7 @@ int main()
         return fail("PSMCT16S page crossing, DMA continuation or padding");
     }
 
-    // A rejected late SIGNAL must preserve previous VRAM contents and
+    // A rejected late FINISH must preserve previous VRAM contents and
     // the transfer cursor, so the same IMAGE can be retried.
     std::array<uint8_t, 32> retry{};
     for (uint32_t i = 0u; i < 8u; ++i)
@@ -143,7 +143,7 @@ int main()
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
     events[1].m_byte_offset = 16u;
-    events[1].m_word1 = 0x60u; // SIGNAL is unsupported
+    events[1].m_word1 = 0x61u; // FINISH is unsupported
     if (gs.consume(events, 2u, retry.data(), 2u) ||
         !read16(gs, k_base + 3528u, 0x6001u) ||
         gs.state().m_transfer_pixels_written != 0u ||

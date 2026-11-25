@@ -22,6 +22,8 @@ namespace ee
 class c_ee_vif1
 {
 public:
+    static constexpr uint32_t k_vif0_register_base = 0x10003800u;
+    static constexpr uint32_t k_vif0_fifo_base = 0x10004000u;
     static constexpr uint32_t k_register_base = 0x10003c00u;
     static constexpr uint32_t k_fifo_base = 0x10005000u;
     static constexpr uint32_t k_vu1_code_base = 0x11008000u;
@@ -76,9 +78,24 @@ public:
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
 
+    // A separate controller instance may decode VIF0's common commands.
+    // It snapshots and commits the live VU0 memory, never VU1's residency.
+    void bind_vu0(s_ee_vu0_state* vu0) { m_vu0 = vu0; }
     void bind_path2(c_ee_gif_path3* path2);
     void bind_path1(c_ee_gif_path3* path1);
     void bind_path3(const c_ee_gif_path3* path3);
+    using t_path3_mask = void (*)(void*, bool);
+    void bind_path3_mask(void* user, t_path3_mask callback)
+    {
+        m_mask_user = user;
+        m_mask_callback = callback;
+    }
+    using t_interrupt = void (*)(void*);
+    void bind_interrupt(void* user, t_interrupt callback)
+    {
+        m_interrupt_user = user;
+        m_interrupt_callback = callback;
+    }
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
     const s_diagnostic& diagnostic() const
@@ -122,6 +139,14 @@ public:
     bool deferred_busy() const;
     void cancel_deferred();
 
+    // Direct COP2 CMSAR1 launch, independent of VIF MSCAL bookkeeping.
+    // The caller must first retire any outstanding VIF1 DMA transaction.
+    bool run_cmsar1(uint32_t address);
+    bool start_cmsar1(uint32_t address);
+    bool cmsar1_running() const { return m_cmsar1 != nullptr; }
+    e_ee_vu1_slice service_cmsar1(uint32_t pair_budget);
+    bool control_vu_break_reset(uint32_t value);
+
     uint32_t read_register(uint32_t offset) const;
     bool write_register(uint32_t offset, uint32_t value);
     const uint8_t* vu1_data() const;
@@ -141,6 +166,8 @@ private:
     // explicit ownership handoff without lending MMIO pointers to a worker.
     struct s_machine
     {
+        bool m_vif0 = false;
+        bool m_path3_masked = false;
         uint32_t m_stat = 0u;
         uint32_t m_err = 0u;
         uint32_t m_mark = 0u;
@@ -158,6 +185,7 @@ private:
         uint32_t m_row[4]{};
         uint32_t m_col[4]{};
         bool m_dbf = false;
+        bool m_vu_debug_stopped = false;
         std::vector<uint32_t> m_pending;
         c_ee_vu1_resident_slot m_vu1{};
         uint32_t m_commands = 0u;
@@ -197,6 +225,7 @@ private:
         s_ee_vu1_issue m_issue{};
         e_reject m_rejection = e_reject::none;
         uint32_t m_rejected_code = 0u;
+        bool m_interrupt = false;
         bool m_committed = false;
         bool m_active = false;
     };
@@ -235,6 +264,11 @@ private:
     std::unique_ptr<s_ee_vu1_job> take_worker_job(bool wait);
     void record_worker_job(const s_ee_vu1_job& job, bool discarded);
 
+    // FIFO capacity bounds retained words when command decoding stalls.
+    static size_t stalled_fifo_words(const s_machine& machine)
+    {
+        return machine.m_vif0 ? 32u : 64u;
+    }
     static uint32_t command_data_words(const s_machine& machine,
                                        uint32_t code);
     static void unpack(s_machine& machine, uint32_t code,
@@ -246,7 +280,10 @@ private:
                         s_ee_vu1_issue* vu_issue,
                         e_reject* reject);
 
+    s_ee_vu0_state* m_vu0 = nullptr;
     s_machine m_machine{};
+    // Direct COP2 launch owns the resident VU1 pipeline independently of DMA.
+    std::shared_ptr<s_ee_vu1_execution> m_cmsar1;
     // Host-only transaction storage. Never part of committed VIF state.
     std::vector<uint32_t> m_pending_scratch;
     std::vector<uint8_t> m_path1_scratch;
@@ -255,6 +292,10 @@ private:
     c_ee_gif_path3* m_path2 = nullptr;
     c_ee_gif_path3* m_path1 = nullptr;
     const c_ee_gif_path3* m_path3 = nullptr;
+    void* m_mask_user = nullptr;
+    t_path3_mask m_mask_callback = nullptr;
+    void* m_interrupt_user = nullptr;
+    t_interrupt m_interrupt_callback = nullptr;
     // Host timing only. Neither timestamps nor overlap advance guest cycles.
     struct s_worker_profile
     {

@@ -60,7 +60,42 @@ struct s_ee_issue_replay_profile
     // caller-provided result latency is mandatory; scalar integer latency
     // is not evidence of MMI pipeline timing. Pairing remains disabled.
     uint32_t m_packed_mmi_latency = 0u;
+    // LWC1 is not an integer load: EE manual section 2.12 specifies
+    // a distinct cache-hit result latency through the C1/LS pipes.
+    uint32_t m_fpu_load_latency = 0u;
 };
+
+// Manual-based, cache-hit candidate, not a validated clock. Leave
+// undocumented register-transfer/packed-MMI classes unavailable rather
+// than borrowing unrelated latencies. See EE Core User's Manual v6.0
+// section 2.12, printed p.58, and docs/M1_A_R5900_REFERENCE_AUDIT.md.
+inline s_ee_issue_replay_profile ee_manual_cache_hit_profile()
+{
+    s_ee_issue_replay_profile profile{};
+    profile.m_integer_latency = 1u;
+    profile.m_load_latency = 1u;
+    profile.m_hilo_multiply_latency = 4u;
+    profile.m_hilo_divide_latency = 37u;
+    profile.m_hilo_transfer_latency = 1u;
+    profile.m_hilo_accumulate_latency = 4u;
+    profile.m_fpu_transfer_latency = 2u;
+    profile.m_fpu_arithmetic_latency = 4u;
+    profile.m_fpu_divide_latency = 8u;
+    profile.m_fpu_accumulate_latency = 4u;
+    profile.m_fpu_compare_latency = 4u;
+    profile.m_fpu_sqrt_latency = 8u;
+    profile.m_fpu_rsqrt_latency = 14u;
+    profile.m_fpu_load_latency = 2u;
+    profile.m_mac_multiply_interval = 2u;
+    profile.m_mac_divide_interval = 37u;
+    profile.m_mac_accumulate_interval = 2u;
+    profile.m_cop1_arithmetic_interval = 1u;
+    profile.m_cop1_divide_interval = 7u;
+    profile.m_cop1_sqrt_interval = 7u;
+    profile.m_cop1_rsqrt_interval = 13u;
+    profile.m_require_throughput = true;
+    return profile;
+}
 
 enum class e_ee_issue_replay_status : uint8_t
 {
@@ -954,6 +989,16 @@ private:
             instruction->m_result_latency = m_profile.m_load_latency;
             instruction->m_gpr_read_mask = rs;
             instruction->m_gpr_write_mask = rt;
+            return true;
+        case 0x31u: // LWC1: cache-hit load result is an FPR, not a GPR.
+            if (m_profile.m_fpu_load_latency == 0u)
+            {
+                return false;
+            }
+            instruction->m_pipe = e_ee_probe_pipe::LOAD;
+            instruction->m_gpr_read_mask = rs;
+            instruction->m_fpr_write_mask = fpr_mask(decoded.rt);
+            instruction->m_fpr_result_latency = m_profile.m_fpu_load_latency;
             return true;
         case 0x28u: case 0x29u: case 0x2bu: case 0x3fu:
             instruction->m_pipe = e_ee_probe_pipe::STORE;

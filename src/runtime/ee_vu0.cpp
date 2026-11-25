@@ -851,6 +851,548 @@ bool vu0_is_supported_lower_ialu(const s_ee_vu0_micro_instruction& instruction)
     }
 }
 
+bool vu0_is_supported_lower_flag_read(const s_ee_vu0_micro_instruction& instruction)
+{
+    using op = e_ee_vu0_micro_opcode;
+    switch (instruction.m_lower_fields.m_operation)
+    {
+    case op::FCEQ:
+    case op::FCAND:
+    case op::FCOR:
+    case op::FSEQ:
+    case op::FSAND:
+    case op::FSOR:
+    case op::FMEQ:
+    case op::FMAND:
+    case op::FMOR:
+    case op::FCGET:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void vu0_execute_lower_flag_read(
+    s_ee_vu0_state* vu0, const s_ee_vu0_micro_instruction& instruction)
+{
+    using op = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const uint32_t clip = vu0->m_clip_flags & 0xffffffu;
+    const uint32_t status = vu0->m_status_flags & 0xfffu;
+    const uint32_t mac = vu0->m_mac_flags & 0xffffu;
+    const uint32_t source = vu0_read_ialu_vi(vu0, fields.m_is);
+    const uint32_t imm24 = instruction.m_lower & 0xffffffu;
+    const uint32_t imm12 = (instruction.m_lower & 0x7ffu) |
+        ((instruction.m_lower >> 10u) & 0x800u);
+    uint32_t destination = fields.m_it;
+    uint32_t value = 0;
+    switch (fields.m_operation)
+    {
+    case op::FCEQ: destination = 1; value = clip == imm24; break;
+    case op::FCAND: destination = 1; value = (clip & imm24) != 0; break;
+    case op::FCOR: destination = 1; value = (clip | imm24) == 0xffffffu; break;
+    case op::FSEQ: value = status == imm12; break;
+    case op::FSAND: value = status & imm12; break;
+    case op::FSOR: value = status | imm12; break;
+    case op::FMEQ: value = mac == source; break;
+    case op::FMAND: value = mac & source; break;
+    case op::FMOR: value = mac | source; break;
+    case op::FCGET: value = clip & 0xfffu; break;
+    default: return;
+    }
+    vu0_write_ialu_vi(vu0, destination, static_cast<uint16_t>(value));
+}
+
+void vu0_record_lower_fmac(s_ee_vu0_state* vu0, uint32_t reg, uint32_t lanes)
+{
+    const uint64_t ready = vu0->m_cycle + 4u;
+    vu0->m_vf_memory_ready_cycle = ready;
+    auto& issue = vu0->m_vf_memory_issues[vu0->m_vf_memory_issue_index & 3u];
+    ++vu0->m_vf_memory_issue_index;
+    issue.m_ready_cycle = ready;
+    issue.m_register = reg;
+    issue.m_lane_mask = reg != 0 ? lanes : 0u;
+}
+
+// Forward declarations of the shared raw VF accessors below.
+uint32_t vu0_fmac_read_vf(const s_ee_cpu_state* cpu, uint32_t index, uint32_t lane);
+void vu0_fmac_set_lane(s_ee_u128* vector, uint32_t lane, uint32_t bits);
+void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
+                            uint32_t lane, uint32_t* flags);
+void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags);
+
+uint32_t vu0_fmac_lane(const s_ee_u128& vector, uint32_t lane);
+
+uint32_t vu0_macro_bits(float value);
+uint32_t vu0_macro_order_key(uint32_t bits);
+uint32_t vu0_macro_ftoi(uint32_t bits, double scale);
+
+enum class e_vu0_upper_arith { none, add, sub, mul, madd, msub, max, mini, abs, itof, ftoi };
+struct s_vu0_upper_arith
+{
+    e_vu0_upper_arith m_kind = e_vu0_upper_arith::none;
+    // -1 vector, 0..3 broadcast, 4 scalar I, 5 outer product, 6 scalar Q.
+    int m_source = -1;
+    bool m_to_acc = false;
+    uint32_t m_scale = 0u;
+};
+
+bool vu0_upper_unary(const s_vu0_upper_arith& op)
+{
+    using kind = e_vu0_upper_arith;
+    return op.m_kind == kind::abs || op.m_kind == kind::itof ||
+        op.m_kind == kind::ftoi;
+}
+
+bool vu0_upper_writes_flags(const s_vu0_upper_arith& op)
+{
+    return !vu0_upper_unary(op) && op.m_kind != e_vu0_upper_arith::max &&
+        op.m_kind != e_vu0_upper_arith::mini;
+}
+
+s_vu0_upper_arith vu0_decode_upper_arith(uint32_t word)
+{
+    using kind = e_vu0_upper_arith;
+    const uint32_t primary = word & 63u;
+    const bool acc = primary >= 0x3cu;
+    const uint32_t op = acc ? ((word & 3u) | ((word >> 4u) & 0x7cu)) : primary;
+    if (op <= 3u) return {kind::add, static_cast<int>(op & 3u), acc};
+    if (op >= 4u && op <= 7u) return {kind::sub, static_cast<int>(op & 3u), acc};
+    if (op >= 8u && op <= 11u) return {kind::madd, static_cast<int>(op & 3u), acc};
+    if (op >= 12u && op <= 15u) return {kind::msub, static_cast<int>(op & 3u), acc};
+    if (op >= 0x10u && op <= 0x17u)
+    {
+        if (acc)
+        {
+            return {op < 0x14u ? kind::itof : kind::ftoi, -1, false, op & 3u};
+        }
+        return {op < 0x14u ? kind::max : kind::mini, static_cast<int>(op & 3u)};
+    }
+    if (op >= 0x18u && op <= 0x1bu) return {kind::mul, static_cast<int>(op & 3u), acc};
+    switch (op)
+    {
+    case 0x28u: return {kind::add, -1, acc};
+    case 0x29u: return {kind::madd, -1, acc};
+    case 0x2cu: return {kind::sub, -1, acc};
+    case 0x2du: return {kind::msub, -1, acc};
+    case 0x2au: return {kind::mul, -1, acc};
+    case 0x1cu: return {kind::mul, 6, acc};
+    case 0x20u: return {kind::add, 6, acc};
+    case 0x21u: return {kind::madd, 6, acc};
+    case 0x24u: return {kind::sub, 6, acc};
+    case 0x25u: return {kind::msub, 6, acc};
+    case 0x22u: return {kind::add, 4, acc};
+    case 0x23u: return {kind::madd, 4, acc};
+    case 0x26u: return {kind::sub, 4, acc};
+    case 0x27u: return {kind::msub, 4, acc};
+    case 0x1eu: return {kind::mul, 4, acc};
+    case 0x1du: return acc ? s_vu0_upper_arith{kind::abs} :
+        s_vu0_upper_arith{kind::max, 4};
+    case 0x1fu: return acc ? s_vu0_upper_arith{} :
+        s_vu0_upper_arith{kind::mini, 4};
+    case 0x2bu: return acc ? s_vu0_upper_arith{} :
+        s_vu0_upper_arith{kind::max, -1};
+    case 0x2fu: return acc ? s_vu0_upper_arith{} :
+        s_vu0_upper_arith{kind::mini, -1};
+    case 0x2eu: return {acc ? kind::mul : kind::msub, 5, acc};
+    default: return {};
+    }
+}
+
+s_ee_u128 vu0_stage_upper_arith(const s_ee_cpu_state* cpu,
+    const s_ee_vu0_state* vu0, const s_ee_vu0_micro_op_fields& fields,
+    const s_vu0_upper_arith& op, uint32_t* mac, uint32_t* product_sticky,
+    uint32_t* acc_overflow)
+{
+    const bool unary = vu0_upper_unary(op);
+    const uint32_t destination = unary ? fields.m_ft : fields.m_fd;
+    s_ee_u128 output = op.m_to_acc ? vu0->m_acc : cpu->m_vu0[destination];
+    // Sentinel outside the 16-bit MAC domain: reserve VF timing without
+    // modifying visible flags at retirement.
+    *mac = vu0_upper_writes_flags(op) ? 0u : 0xffffffffu;
+    if (op.m_source == 5)
+    {
+        // OPMULA/OPMSUB do not touch W, including its four MAC bits.
+        uint32_t previous = vu0->m_mac_flags;
+        uint64_t latest = 0u;
+        for (const auto& issue : vu0->m_upper_fmac_issues)
+        {
+            if (issue.m_ready_cycle > latest && issue.m_mac != 0xffffffffu)
+            {
+                latest = issue.m_ready_cycle;
+                previous = issue.m_mac;
+            }
+        }
+        *mac = previous & 0x1111u;
+    }
+    *product_sticky = 0u;
+    *acc_overflow = vu0->m_acc_overflow_mask;
+    for (uint32_t lane = 0; lane < 4u; ++lane)
+    {
+        const uint32_t mask = op.m_source == 5 ? 14u : fields.m_xyzw;
+        if ((mask & (8u >> lane)) == 0u)
+        {
+            continue;
+        }
+        const uint32_t fs_lane = op.m_source == 5 ? (lane + 1u) % 3u : lane;
+        const uint32_t lhs = vu0_fmac_read_vf(cpu, fields.m_fs, fs_lane);
+        if (unary)
+        {
+            static constexpr double k_scale[4] = {1.0, 16.0, 4096.0, 32768.0};
+            const uint32_t bits = op.m_kind == e_vu0_upper_arith::abs
+                ? lhs & 0x7fffffffu
+                : op.m_kind == e_vu0_upper_arith::itof
+                    ? vu0_macro_bits(static_cast<float>(
+                        static_cast<double>(static_cast<int32_t>(lhs)) / k_scale[op.m_scale]))
+                    : vu0_macro_ftoi(lhs, k_scale[op.m_scale]);
+            vu0_fmac_set_lane(&output, lane, bits);
+            continue;
+        }
+        // Q reads never wait for a pending FDIV. Use the value visible
+        // after this pair's stalls and pipe retirement, not the pending bits.
+        const uint32_t rhs = op.m_source == 4 ? vu0->m_vi[21] :
+            op.m_source == 6 ? vu0->m_vi[22] :
+            vu0_fmac_read_vf(cpu, fields.m_ft,
+                op.m_source == 5 ? (lane + 2u) % 3u :
+                op.m_source < 0 ? lane : static_cast<uint32_t>(op.m_source));
+        if (!vu0_upper_writes_flags(op))
+        {
+            const uint32_t a_key = vu0_macro_order_key(lhs);
+            const uint32_t b_key = vu0_macro_order_key(rhs);
+            const bool take_a = op.m_kind == e_vu0_upper_arith::max
+                ? a_key >= b_key : a_key <= b_key;
+            vu0_fmac_set_lane(&output, lane, take_a ? lhs : rhs);
+            continue;
+        }
+        const uint32_t lane_bit = 8u >> lane;
+        vu_fmac_fp::s_fmac_result result{};
+        if (op.m_kind == e_vu0_upper_arith::madd ||
+            op.m_kind == e_vu0_upper_arith::msub)
+        {
+            const auto product = vu_fmac_fp::mac(vu0_fmac_lane(vu0->m_acc, lane),
+                lhs, rhs, op.m_kind == e_vu0_upper_arith::msub,
+                (vu0->m_acc_overflow_mask & lane_bit) != 0u);
+            result = product.m_final;
+            *product_sticky |= product.m_sticky;
+        }
+        else
+        {
+            result = op.m_kind == e_vu0_upper_arith::mul
+                ? vu_fmac_fp::mul(lhs, rhs)
+                : vu_fmac_fp::add(lhs, rhs, op.m_kind == e_vu0_upper_arith::sub);
+        }
+        if (op.m_to_acc)
+        {
+            *acc_overflow = (*acc_overflow & ~lane_bit) |
+                (result.m_overflow ? lane_bit : 0u);
+        }
+        vu0_fmac_set_lane(&output, lane, result.m_bits);
+        vu0_fmac_integer_flags(result.m_bits, result.m_overflow,
+            result.m_underflow, lane, mac);
+    }
+    return output;
+}
+
+void vu0_retire_upper_fmac(s_ee_vu0_state* vu0)
+{
+    for (;;)
+    {
+        s_ee_vu0_state::s_upper_fmac_issue* oldest = nullptr;
+        for (auto& issue : vu0->m_upper_fmac_issues)
+        {
+            if (issue.m_ready_cycle != 0u && issue.m_ready_cycle <= vu0->m_cycle &&
+                (oldest == nullptr || issue.m_ready_cycle < oldest->m_ready_cycle))
+            {
+                oldest = &issue;
+            }
+        }
+        if (oldest == nullptr)
+        {
+            break;
+        }
+        constexpr uint32_t k_fsset = 0x80000000u;
+        const bool sets_sticky = (oldest->m_product_sticky & k_fsset) != 0u;
+        if (oldest->m_mac != 0xffffffffu)
+        {
+            if (!sets_sticky)
+            {
+                vu0->m_status_flags |= oldest->m_product_sticky;
+            }
+            vu0_macro_update_status(vu0, oldest->m_mac);
+        }
+        if (sets_sticky)
+        {
+            vu0->m_status_flags = (vu0->m_status_flags & 0x3fu) |
+                (oldest->m_product_sticky & 0xfc0u);
+            vu0->m_vi[16] = vu0->m_status_flags;
+        }
+        *oldest = {};
+    }
+}
+
+bool vu0_issue_upper_fmac(s_ee_vu0_state* vu0, uint32_t reg,
+                          uint32_t lanes, uint32_t mac, uint32_t product_sticky)
+{
+    for (auto& issue : vu0->m_upper_fmac_issues)
+    {
+        if (issue.m_ready_cycle == 0u)
+        {
+            issue = {vu0->m_cycle + 4u, reg, lanes, mac, product_sticky};
+            vu0->m_vf_memory_ready_cycle = issue.m_ready_cycle;
+            return true;
+        }
+    }
+    return false;
+}
+
+bool vu0_is_lower_scalar(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::DIV || op == kind::SQRT ||
+        op == kind::RSQRT || op == kind::WAITQ;
+}
+
+void vu0_retire_micro_q(s_ee_vu0_state* vu0)
+{
+    // Existing macro Q producers use pending=1 and publish I/D at
+    // issue; micro producers use pending=2 and publish I/D at retirement.
+    if (vu0->m_q_pending != 2u || vu0->m_cycle < vu0->m_q_ready_cycle)
+    {
+        return;
+    }
+    vu0_fmac_set_lane(&vu0->m_q, 0u, vu0->m_q_pending_bits);
+    vu0->m_vi[22] = vu0->m_q_pending_bits;
+    vu0->m_status_flags = vu_scalar_fp::update_status(
+        vu0->m_status_flags, vu0->m_q_pending_flags);
+    vu0->m_vi[16] = vu0->m_status_flags;
+    vu0->m_q_pending = 0u;
+    vu0->m_q_ready_cycle = 0u;
+    vu0->m_q_pending_flags = 0u;
+}
+
+void vu0_issue_micro_q(const s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+                       const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& lower = instruction.m_lower_fields;
+    const auto op = lower.m_operation;
+    if (op == kind::WAITQ)
+    {
+        return;
+    }
+    const bool sqrt = op == kind::SQRT;
+    const bool rsqrt = op == kind::RSQRT;
+    const uint32_t a = vu0_fmac_read_vf(cpu, lower.m_fs,
+        (instruction.m_lower >> 21u) & 3u);
+    const uint32_t b = vu0_fmac_read_vf(cpu, lower.m_ft,
+        (instruction.m_lower >> 23u) & 3u);
+    const uint32_t denominator = sqrt || rsqrt ? vu_scalar_fp::root(b) : b;
+    vu0->m_q_pending_bits = sqrt ? denominator : vu_scalar_fp::quotient(a, denominator);
+    vu0->m_q_pending_flags = vu_scalar_fp::current_flags(a, b, sqrt, rsqrt);
+    vu0->m_q_ready_cycle = vu0->m_cycle + (rsqrt ? 13u : 7u);
+    vu0->m_q_pending = 2u;
+}
+
+uint32_t vu0_macro_r(uint32_t value);
+uint32_t vu0_next_r(uint32_t value)
+{
+    const uint32_t feedback = ((value >> 4u) ^ (value >> 22u)) & 1u;
+    return vu0_macro_r((value << 1u) ^ feedback);
+}
+
+bool vu0_is_lower_random(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::RINIT || op == kind::RGET ||
+        op == kind::RNEXT || op == kind::RXOR;
+}
+
+bool vu0_random_reads_vf(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::RINIT || op == kind::RXOR;
+}
+
+void vu0_execute_lower_random(s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+                             const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const auto op = fields.m_operation;
+    if (vu0_random_reads_vf(op))
+    {
+        const uint32_t source = vu0_fmac_read_vf(cpu, fields.m_fs,
+            (instruction.m_lower >> 21u) & 3u);
+        vu0->m_vi[20] = vu0_macro_r(op == kind::RXOR ?
+            vu0->m_vi[20] ^ source : source);
+        vu0_record_lower_fmac(vu0, 0u, 0u);
+        return;
+    }
+    if (fields.m_ft != 0u)
+    {
+        if (op == kind::RNEXT)
+        {
+            vu0->m_vi[20] = vu0_next_r(vu0->m_vi[20]);
+        }
+        s_ee_u128 output = cpu->m_vu0[fields.m_ft];
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((fields.m_xyzw & (8u >> lane)) != 0u)
+            {
+                vu0_fmac_set_lane(&output, lane, vu0->m_vi[20]);
+            }
+        }
+        cpu->m_vu0[fields.m_ft] = output;
+    }
+    vu0_record_lower_fmac(vu0, fields.m_ft, fields.m_xyzw);
+}
+
+bool vu0_is_lower_transfer(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::MOVE || op == kind::MR32 ||
+        op == kind::MTIR || op == kind::MFIR;
+}
+
+void vu0_execute_lower_transfer(s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const auto op = fields.m_operation;
+    if (op == kind::MTIR)
+    {
+        if (fields.m_it != 0u)
+        {
+            vu0_backup_ialu_vi(vu0, fields.m_it);
+            vu0_write_ialu_vi(vu0, fields.m_it, static_cast<uint16_t>(
+                vu0_fmac_read_vf(cpu, fields.m_fs, (instruction.m_lower >> 21u) & 3u)));
+        }
+        vu0_record_lower_fmac(vu0, 0u, 0u);
+        return;
+    }
+    if (fields.m_ft != 0u)
+    {
+        s_ee_u128 output = cpu->m_vu0[fields.m_ft];
+        const uint32_t integer = static_cast<uint32_t>(static_cast<int32_t>(
+            static_cast<int16_t>(vu0_read_ialu_vi(vu0, fields.m_is))));
+        for (uint32_t lane = 0; lane < 4u; ++lane)
+        {
+            if ((fields.m_xyzw & (8u >> lane)) != 0u)
+            {
+                const uint32_t source_lane = op == kind::MR32 ? (lane + 1u) & 3u : lane;
+                vu0_fmac_set_lane(&output, lane, op == kind::MFIR ? integer :
+                    vu0_fmac_read_vf(cpu, fields.m_fs, source_lane));
+            }
+        }
+        cpu->m_vu0[fields.m_ft] = output;
+    }
+    // MOVE to VF0 is a NOP (including the canonical lower NOP).
+    // The remaining transfers occupy the lower FMAC pipe.
+    if (op != kind::MOVE || fields.m_ft != 0u)
+    {
+        vu0_record_lower_fmac(vu0, fields.m_ft, fields.m_xyzw);
+    }
+}
+
+uint32_t vu0_clip_result(const s_ee_cpu_state* cpu, uint32_t fs,
+                         uint32_t ft, uint32_t previous)
+{
+    // Compare raw signed magnitudes, not host IEEE floats. A denormal
+    // threshold is treated as the largest denormal; exponent 255 retains
+    // its magnitude rather than collapsing distinct bit patterns.
+    const uint32_t w = vu0_fmac_read_vf(cpu, ft, 3u);
+    const uint32_t limit = (w & 0x7f800000u) != 0u
+        ? w & 0x7fffffffu : 0x007fffffu;
+    uint32_t result = (previous << 6u) & 0x00ffffffu;
+    for (uint32_t lane = 0; lane < 3u; ++lane)
+    {
+        const uint32_t bits = vu0_fmac_read_vf(cpu, fs, lane);
+        if ((bits & 0x7fffffffu) > limit)
+        {
+            result |= ((bits & 0x80000000u) != 0u ? 2u : 1u) << (lane * 2u);
+        }
+    }
+    return result;
+}
+
+void vu0_stall_vf_read(s_ee_vu0_state* vu0, uint32_t reg, uint32_t lanes)
+{
+    if (reg == 0u)
+    {
+        return;
+    }
+    for (const auto& issue : vu0->m_vf_memory_issues)
+    {
+        if (issue.m_register == reg && (issue.m_lane_mask & lanes) != 0u &&
+            issue.m_ready_cycle > vu0->m_cycle)
+        {
+            vu0->m_cycle = issue.m_ready_cycle;
+        }
+    }
+    for (const auto& issue : vu0->m_upper_fmac_issues)
+    {
+        if (issue.m_register == reg && (issue.m_lane_mask & lanes) != 0u &&
+            issue.m_ready_cycle > vu0->m_cycle)
+        {
+            vu0->m_cycle = issue.m_ready_cycle;
+        }
+    }
+}
+
+void vu0_retire_clip(s_ee_vu0_state* vu0)
+{
+    // Several entries can mature during a dependency stall. Publish them
+    // in issue order so the newest matured history remains visible.
+    for (;;)
+    {
+        s_ee_vu0_state::s_clip_issue* oldest = nullptr;
+        for (auto& issue : vu0->m_clip_issues)
+        {
+            if (issue.m_ready_cycle != 0u && issue.m_ready_cycle <= vu0->m_cycle &&
+                (oldest == nullptr || issue.m_ready_cycle < oldest->m_ready_cycle))
+            {
+                oldest = &issue;
+            }
+        }
+        if (oldest == nullptr)
+        {
+            break;
+        }
+        vu0->m_clip_flags = oldest->m_value;
+        vu0->m_vi[18] = oldest->m_value;
+        *oldest = {};
+    }
+}
+
+uint32_t vu0_latest_clip(const s_ee_vu0_state* vu0)
+{
+    uint64_t latest = 0u;
+    uint32_t value = vu0->m_clip_flags;
+    for (const auto& issue : vu0->m_clip_issues)
+    {
+        if (issue.m_ready_cycle > latest)
+        {
+            latest = issue.m_ready_cycle;
+            value = issue.m_value;
+        }
+    }
+    return value;
+}
+
+bool vu0_issue_clip(s_ee_vu0_state* vu0, uint32_t value)
+{
+    for (auto& issue : vu0->m_clip_issues)
+    {
+        if (issue.m_ready_cycle == 0u)
+        {
+            issue = {vu0->m_cycle + 4u, value, 0u};
+            return true;
+        }
+    }
+    return false;
+}
+
 bool vu0_is_supported_lower_memory(const s_ee_vu0_micro_instruction& instruction)
 {
     using op = e_ee_vu0_micro_opcode;
@@ -858,6 +1400,8 @@ bool vu0_is_supported_lower_memory(const s_ee_vu0_micro_instruction& instruction
     {
     case op::ILW:
     case op::ISW:
+    case op::ILWR:
+    case op::ISWR:
     case op::LQ:
     case op::SQ:
     case op::LQI:
@@ -896,7 +1440,8 @@ uint32_t vu0_memory_byte_address(
     const int32_t base = static_cast<int16_t>(vu0_read_ialu_vi(vu0, base_index));
     const int32_t offset = indexed
         ? (operation == op::LQD || operation == op::SQD ? -1 : 0)
-        : vu0_signed_memory_immediate(instruction.m_lower);
+        : (operation == op::ILWR || operation == op::ISWR)
+            ? 0 : vu0_signed_memory_immediate(instruction.m_lower);
     return (static_cast<uint32_t>((base + offset) * 16) & 0xffffu);
 }
 
@@ -987,7 +1532,7 @@ bool vu0_execute_lower_memory(
         return true;
     }
 
-    if (fields.m_operation == e_ee_vu0_micro_opcode::ILW)
+    if (fields.m_operation == op::ILW || fields.m_operation == op::ILWR)
     {
         // For multiple selected components, PCSX2 overwrites VI in X,Y,Z,W
         // order, leaving the last selected component as the final value.
@@ -1016,7 +1561,7 @@ bool vu0_execute_lower_memory(
         return true;
     }
 
-    if (fields.m_operation == e_ee_vu0_micro_opcode::ISW)
+    if (fields.m_operation == op::ISW || fields.m_operation == op::ISWR)
     {
         const uint16_t value = vu0_read_ialu_vi(vu0, fields.m_it);
         for (uint32_t component = 0; component < 4; ++component)
@@ -1437,21 +1982,55 @@ uint32_t ee_vu0_execute_ialu_callback(
             return fetch_result;
         }
 
-        const bool lower_ialu = vu0_is_supported_lower_ialu(instruction);
-        const bool lower_branch = vu0_is_supported_lower_branch(instruction);
-        const bool lower_memory = vu0_is_supported_lower_memory(instruction);
+        // I replaces the lower opcode with a raw 32-bit immediate. The
+        // upper instruction still reads the I value from before this pair.
+        const bool immediate = (instruction.m_flags & EE_VU0_MICRO_FLAG_I) != 0u;
+        const bool lower_ialu = !immediate && vu0_is_supported_lower_ialu(instruction);
+        const bool lower_branch = !immediate && vu0_is_supported_lower_branch(instruction);
+        const bool lower_flag_read = !immediate && vu0_is_supported_lower_flag_read(instruction);
+        const bool lower_transfer = !immediate &&
+            vu0_is_lower_transfer(instruction.m_lower_fields.m_operation);
+        const bool lower_memory = !immediate && vu0_is_supported_lower_memory(instruction);
         const uint32_t memory_address = lower_memory
             ? vu0_memory_byte_address(vu0, instruction) : 0;
 
         // Only ordinary 4 KB VU0 data memory is supported. PCSX2 maps
         // addresses with bit 14 set into VU1 registers; those must be handled
         // by the host rather than aliased into the ordinary VU0 data array.
-        // I/D/T flags and non-NOP upper operations remain unsupported.
+        const bool upper_clip = instruction.m_upper_fields.m_operation ==
+            e_ee_vu0_micro_opcode::CLIP;
+        const auto arith = vu0_decode_upper_arith(instruction.m_upper);
+        const bool upper_arith = arith.m_kind != e_vu0_upper_arith::none;
+        const auto& upper = instruction.m_upper_fields;
+        const uint32_t upper_dest = vu0_upper_unary(arith) ? upper.m_ft : upper.m_fd;
+        const uint32_t upper_lanes = arith.m_source == 5 ? 14u : upper.m_xyzw;
+        const auto lower_op = instruction.m_lower_fields.m_operation;
+        const bool lower_scalar = !immediate && vu0_is_lower_scalar(lower_op);
+        const bool lower_random = !immediate && vu0_is_lower_random(lower_op);
+        const bool lower_fcset = !immediate && lower_op == e_ee_vu0_micro_opcode::FCSET;
+        const bool lower_fsset = !immediate && lower_op == e_ee_vu0_micro_opcode::FSSET;
+        const bool lower_load = lower_memory &&
+            (lower_op == e_ee_vu0_micro_opcode::LQ ||
+             lower_op == e_ee_vu0_micro_opcode::LQI ||
+             lower_op == e_ee_vu0_micro_opcode::LQD);
+        const bool transfer_vf_write = lower_transfer &&
+            lower_op != e_ee_vu0_micro_opcode::MTIR;
+        // VU manual 3.4.3: upper wins at register granularity, even for
+        // disjoint lane masks. The pinned PCSX2 interpreter skips the
+        // lower handler but still processes its original pipe metadata.
+        const bool vf_conflict = upper_arith && !arith.m_to_acc && upper_dest != 0u &&
+            (lower_load || transfer_vf_write ||
+                (lower_random && !vu0_random_reads_vf(lower_op))) &&
+            upper_dest == instruction.m_lower_fields.m_ft;
         if ((instruction.m_flags &
-             (EE_VU0_MICRO_FLAG_I | EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
-            instruction.m_upper_fields.m_operation != e_ee_vu0_micro_opcode::NOP ||
-            (!lower_ialu && !lower_branch && !lower_memory) ||
-            (lower_memory && (memory_address & 0x4000u) != 0))
+             (EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
+            (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
+                e_ee_vu0_micro_opcode::NOP) ||
+            (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
+                !lower_flag_read && !lower_transfer && !lower_scalar && !lower_random &&
+                !lower_fcset && !lower_fsset) ||
+            (lower_scalar && vu0->m_q_pending == 1u) ||
+            (lower_memory && !vf_conflict && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
             return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
@@ -1477,17 +2056,70 @@ uint32_t ee_vu0_execute_ialu_callback(
         {
             const uint32_t source = instruction.m_lower_fields.m_fs;
             const uint32_t lanes = instruction.m_lower_fields.m_xyzw;
-            if (source != 0 && lanes != 0)
+            vu0_stall_vf_read(vu0, source, lanes);
+        }
+        if (lower_transfer)
+        {
+            const auto& lower = instruction.m_lower_fields;
+            uint32_t lanes = lower.m_xyzw;
+            if (lower_op == e_ee_vu0_micro_opcode::MTIR)
             {
-                for (const auto& issue : vu0->m_vf_memory_issues)
+                lanes = 8u >> ((instruction.m_lower >> 21u) & 3u);
+            }
+            else if (lower_op == e_ee_vu0_micro_opcode::MR32)
+            {
+                lanes = (lanes >> 1u) | ((lanes << 3u) & 8u);
+            }
+            if (lower_op != e_ee_vu0_micro_opcode::MFIR &&
+                !(lower_op == e_ee_vu0_micro_opcode::MOVE && lower.m_ft == 0u))
+            {
+                vu0_stall_vf_read(vu0, lower.m_fs, lanes);
+            }
+        }
+        if (upper_clip)
+        {
+            vu0_stall_vf_read(vu0, instruction.m_upper_fields.m_fs, 14u);
+            vu0_stall_vf_read(vu0, instruction.m_upper_fields.m_ft, 1u);
+        }
+        if (upper_arith)
+        {
+            vu0_stall_vf_read(vu0, upper.m_fs, upper_lanes);
+            if (!vu0_upper_unary(arith) && arith.m_source != 4 &&
+                arith.m_source != 6 && upper_lanes != 0u)
+            {
+                const uint32_t lanes = arith.m_source < 0 || arith.m_source == 5
+                    ? upper_lanes : 8u >> static_cast<uint32_t>(arith.m_source);
+                vu0_stall_vf_read(vu0, upper.m_ft, lanes);
+            }
+        }
+        if (lower_random && vu0_random_reads_vf(lower_op))
+        {
+            vu0_stall_vf_read(vu0, instruction.m_lower_fields.m_fs,
+                8u >> ((instruction.m_lower >> 21u) & 3u));
+        }
+        if (lower_scalar)
+        {
+            const auto& lower = instruction.m_lower_fields;
+            if (lower_op != e_ee_vu0_micro_opcode::WAITQ)
+            {
+                if (lower_op != e_ee_vu0_micro_opcode::SQRT)
                 {
-                    if (issue.m_register == source &&
-                        (issue.m_lane_mask & lanes) != 0 &&
-                        issue.m_ready_cycle > vu0->m_cycle)
-                    {
-                        vu0->m_cycle = issue.m_ready_cycle;
-                    }
+                    vu0_stall_vf_read(vu0, lower.m_fs,
+                        8u >> ((instruction.m_lower >> 21u) & 3u));
                 }
+                vu0_stall_vf_read(vu0, lower.m_ft,
+                    8u >> ((instruction.m_lower >> 23u) & 3u));
+            }
+            if (vu0->m_q_pending == 2u && vu0->m_q_ready_cycle > vu0->m_cycle)
+            {
+                vu0->m_cycle = vu0->m_q_ready_cycle;
+            }
+            if (lower_op != e_ee_vu0_micro_opcode::WAITQ &&
+                vu0->m_cycle > UINT64_MAX -
+                    (lower_op == e_ee_vu0_micro_opcode::RSQRT ? 13u : 7u))
+            {
+                vu0->m_micro_pc = pair_pc;
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
             }
         }
         // PCSX2 only tests IALU read dependencies for VUPIPE_BRANCH.
@@ -1514,13 +2146,42 @@ uint32_t ee_vu0_execute_ialu_callback(
             return retire_result;
         }
 
+        vu0_retire_clip(vu0);
+        vu0_retire_upper_fmac(vu0);
+        vu0_retire_micro_q(vu0);
+        if ((upper_clip || upper_arith || lower_fcset || lower_fsset) &&
+            vu0->m_cycle > UINT64_MAX - 4u)
+        {
+            vu0->m_micro_pc = pair_pc;
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+        }
+        // Sample upper VF operands before the lower half writes them.
+        const uint32_t clip_result = upper_clip
+            ? vu0_clip_result(cpu, instruction.m_upper_fields.m_fs,
+                instruction.m_upper_fields.m_ft, vu0_latest_clip(vu0))
+            : 0u;
+        uint32_t upper_mac = 0u;
+        uint32_t upper_sticky = 0u;
+        uint32_t upper_acc_overflow = vu0->m_acc_overflow_mask;
+        const s_ee_u128 upper_output = upper_arith
+            ? vu0_stage_upper_arith(cpu, vu0, upper, arith, &upper_mac,
+                &upper_sticky, &upper_acc_overflow)
+            : s_ee_u128{};
+
         // Match _vu0Exec: VIBackupCycles is aged after lower-pipe stalls and
         // pipe retirement, but before the actual lower-op handler. A stalled
         // branch whose dependency outlives the backup therefore reads the
         // current VI value, not the expired backup value.
         vu0_advance_vi_backup(vu0, vu0->m_cycle - cycles_before_pair);
 
-        if (lower_ialu)
+        if (vf_conflict)
+        {
+            // Keep the lower FMAC lane reservation, but do not execute
+            // its write or any VI index / random-register side effects.
+            vu0_record_lower_fmac(vu0, instruction.m_lower_fields.m_ft,
+                instruction.m_lower_fields.m_xyzw);
+        }
+        else if (lower_ialu)
         {
             uint32_t write_mask = 0;
             if (!vu0_execute_lower_ialu(vu0, instruction, &write_mask))
@@ -1549,7 +2210,7 @@ uint32_t ee_vu0_execute_ialu_callback(
                 return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
             }
 
-            // PCSX2 declares a four-cycle IALU reservation for ILW.
+            // PCSX2 declares a four-cycle IALU reservation for ILW/ILWR.
             // LQ/SQ use the separate four-cycle FMAC pipeline. Even SQ
             // contributes an issue, so pending memory work may extend E.
             const auto memory_op = instruction.m_lower_fields.m_operation;
@@ -1560,21 +2221,12 @@ uint32_t ee_vu0_execute_ialu_callback(
                 memory_op == e_ee_vu0_micro_opcode::LQD ||
                 memory_op == e_ee_vu0_micro_opcode::SQD)
             {
-                const uint64_t ready = vu0->m_cycle + 4u;
-                vu0->m_vf_memory_ready_cycle = ready;
-                auto& issue = vu0->m_vf_memory_issues[
-                    vu0->m_vf_memory_issue_index & 3u
-                ];
-                ++vu0->m_vf_memory_issue_index;
-                issue.m_ready_cycle = ready;
-                issue.m_register =
+                const uint32_t reg =
                     (memory_op == e_ee_vu0_micro_opcode::LQ ||
                      memory_op == e_ee_vu0_micro_opcode::LQI ||
                      memory_op == e_ee_vu0_micro_opcode::LQD)
                         ? instruction.m_lower_fields.m_ft : 0u;
-                issue.m_lane_mask =
-                    issue.m_register != 0
-                        ? instruction.m_lower_fields.m_xyzw : 0u;
+                vu0_record_lower_fmac(vu0, reg, instruction.m_lower_fields.m_xyzw);
             }
             const uint32_t schedule_result = ee_vu0_ialu_schedule_write(
                 vu0, write_mask, 4
@@ -1584,7 +2236,25 @@ uint32_t ee_vu0_execute_ialu_callback(
                 return schedule_result;
             }
         }
-        else
+        else if (lower_scalar)
+        {
+            vu0_issue_micro_q(cpu, vu0, instruction);
+        }
+        else if (lower_random)
+        {
+            vu0_execute_lower_random(cpu, vu0, instruction);
+        }
+        else if (lower_transfer)
+        {
+            vu0_execute_lower_transfer(cpu, vu0, instruction);
+        }
+        else if (lower_flag_read)
+        {
+            // Flag reads occupy the lower FMAC pipe but write no VF lane.
+            vu0_execute_lower_flag_read(vu0, instruction);
+            vu0_record_lower_fmac(vu0, 0u, 0u);
+        }
+        else if (lower_branch)
         {
             s_vu0_branch_action branch_action{};
             if (!vu0_prepare_lower_branch(vu0, instruction, &branch_action))
@@ -1594,6 +2264,71 @@ uint32_t ee_vu0_execute_ialu_callback(
             }
 
             vu0_apply_lower_branch(vu0, branch_action);
+        }
+
+        if (lower_fcset || lower_fsset)
+        {
+            // Flag setters occupy the shared four-cycle FMAC pair slot.
+            vu0_record_lower_fmac(vu0, 0u, 0u);
+        }
+
+        if (upper_clip || lower_fcset)
+        {
+            // The lower FCSET overrides same-pair upper CLIP. Forward the
+            // queued value to later CLIP operations, but not flag reads.
+            const uint32_t next_clip = lower_fcset ?
+                instruction.m_lower & 0xffffffu : clip_result;
+            if (!vu0_issue_clip(vu0, next_clip))
+            {
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+            // A pair with a lower FMAC reservation already owns one slot.
+            // CLIP itself has no VF destination, so do not overwrite it.
+            if (vu0->m_vf_memory_ready_cycle != vu0->m_cycle + 4u)
+            {
+                vu0_record_lower_fmac(vu0, 0u, 0u);
+            }
+        }
+
+        if (lower_fsset)
+        {
+            const uint32_t sticky = ((instruction.m_lower & 0x7ffu) |
+                ((instruction.m_lower >> 10u) & 0x800u)) & 0xfc0u;
+            // The lower FSSET overrides same-pair upper sticky updates.
+            upper_sticky = 0x80000000u | sticky;
+            if (!upper_arith && !vu0_issue_upper_fmac(vu0, 0u, 0u,
+                    0xffffffffu, upper_sticky))
+            {
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+        }
+        if (upper_arith)
+        {
+            // The lower half has consumed the pre-pair register values.
+            // Commit the staged vector and queue the flags for later reads.
+            if (!vu0_issue_upper_fmac(vu0, arith.m_to_acc ? 0u : upper_dest,
+                    upper_lanes, upper_mac, upper_sticky))
+            {
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+            // ACC forwards between consecutive upper instructions without
+            // a VF interlock; only the flag visibility is delayed.
+            if (arith.m_to_acc)
+            {
+                vu0->m_acc = upper_output;
+                vu0->m_acc_overflow_mask = upper_acc_overflow;
+            }
+            else if (upper_dest != 0u)
+            {
+                cpu->m_vu0[upper_dest] = upper_output;
+            }
+        }
+
+        if (immediate)
+        {
+            // No lower-op reservation, memory write, branch or integer ALU
+            // side effect is permitted for these literal bits.
+            vu0->m_vi[21] = instruction.m_lower;
         }
 
         ++executed;
@@ -1626,6 +2361,13 @@ uint32_t ee_vu0_execute_ialu_callback(
                 {
                     vu0->m_cycle = vu0->m_vf_memory_ready_cycle;
                 }
+                if (vu0->m_q_pending == 2u && vu0->m_q_ready_cycle > vu0->m_cycle)
+                {
+                    vu0->m_cycle = vu0->m_q_ready_cycle;
+                }
+                vu0_retire_clip(vu0);
+                vu0_retire_upper_fmac(vu0);
+                vu0_retire_micro_q(vu0);
                 vu0->m_vf_memory_ready_cycle = 0;
                 const uint32_t flush_result = ee_vu0_ialu_flush_all(vu0);
                 if (flush_result != static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE))
@@ -1676,6 +2418,44 @@ uint32_t ee_vu0_execute_ialu_callback(
     return static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
 }
 
+uint32_t ee_vu0_start_ialu_callback(
+    void* user, s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+    uint32_t address, uint32_t pc)
+{
+    using result = e_ee_vu0_sync_result;
+    if (!user || !cpu || !vu0)
+    {
+        return static_cast<uint32_t>(result::INVALID_ARGUMENT);
+    }
+    if (vu0_is_running(vu0) || vu0->m_q_pending != 0u)
+    {
+        return static_cast<uint32_t>(result::UNAVAILABLE);
+    }
+    // The micro-engine currently accepts only a subset of VU0 pairs.
+    // A rejected first pair must not publish a partial launch.
+    const auto previous_vu = *vu0;
+    const auto previous_cpu = *cpu;
+    vu0->m_tpc = address & 0x1ffu;
+    vu0->m_micro_pc = vu0->m_tpc * 8u;
+    vu0->m_vpu_status = (vu0->m_vpu_status & ~0xffu) | 1u;
+    vu0->m_running = 1u;
+    vu0->m_cycle = vu0->m_ee_cycle;
+    vu0->m_e_bit = 0u;
+    vu0->m_m_bit = 0u;
+    vu0->m_branch = 0u;
+    vu0->m_take_delay_branch = 0u;
+    vu0->m_vi_backup_cycles = 0u;
+    const uint32_t started = ee_vu0_execute_ialu_callback(
+        user, cpu, vu0, 1u,
+        EE_VU0_EXECUTE_STOP_AT_E | EE_VU0_EXECUTE_EXACT_CYCLES, pc);
+    if (started != static_cast<uint32_t>(result::COMPLETE))
+    {
+        *vu0 = previous_vu;
+        *cpu = previous_cpu;
+    }
+    return started;
+}
+
 extern "C" uint32_t ee_vu0_read_vi(
     const s_ee_vu0_state* vu0,
     uint32_t index
@@ -1691,9 +2471,15 @@ extern "C" uint32_t ee_vu0_read_vi(
     case 16: return vu0->m_status_flags;
     case 17: return vu0->m_mac_flags;
     case 18: return vu0->m_clip_flags;
+    // Observed COP2 control readback, independently documented by
+    // ps2-native-recomp at 2a1cbfe (runtime/src/cop.cpp).
+    case 19: return 0x00002e30u;
+    case 23: case 25: return 0u;
+    case 24: return vu0->m_vi[24] & 0x00000c0cu;
     case 26: return vu0->m_tpc;
     case 28: return vu0->m_fbrst;
     case 29: return vu0->m_vpu_status;
+    case 31: return vu0->m_cmsar1;
     default: return vu0->m_vi[index];
     }
 }
@@ -1814,6 +2600,20 @@ extern "C" uint32_t ee_vu0_cfc2(
     if (gpr_index != 0)
     {
         uint32_t value = ee_vu0_read_vi(rt->m_vu0_state, vi_index);
+        // COP2 exposes only the architected bits of these registers.
+        if (vi_index < 16 || vi_index == 17 || vi_index == 26 ||
+            vi_index == 27 || vi_index == 31)
+        {
+            value &= 0xffffu;
+        }
+        else if (vi_index == 16)
+        {
+            value &= 0xfffu;
+        }
+        else if (vi_index == 18)
+        {
+            value &= 0xffffffu;
+        }
         if (vi_index == VU0_REG_R)
         {
             // PCSX2 writes only UL[0] on this special path. Preserve UL[1]
@@ -1866,8 +2666,29 @@ extern "C" uint32_t ee_vu0_ctc2(
         : static_cast<uint32_t>(cpu->m_gpr[gpr_index].m_lo);
 
     s_ee_vu0_state* vu0 = rt->m_vu0_state;
+    if (vi_index < 16)
+    {
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffu);
+        return sync_result;
+    }
     switch (vi_index)
     {
+    case 16: // STATUS: only the six sticky flags are writable.
+        ee_vu0_write_vi(vu0, vi_index,
+            (vu0->m_status_flags & 0x3fu) | (value & 0xfc0u));
+        return sync_result;
+
+    case 27: // CMSAR0 is a 16-bit control register.
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffu);
+        return sync_result;
+
+    case 24: // Observed control latch, only bits 2/3/10/11 writable.
+        ee_vu0_write_vi(vu0, vi_index, value & 0x00000c0cu);
+        return sync_result;
+
+    case 19: // Fixed control-register readback.
+    case 23: // Reserved, reads zero.
+    case 25: // Reserved, reads zero.
     case 17: // MAC_FLAG is read-only.
     case 26: // TPC is read-only.
     case 29: // VPU_STAT is read-only.
@@ -1898,7 +2719,50 @@ extern "C" uint32_t ee_vu0_ctc2(
             }
         }
 
-        ee_vu0_write_vi(vu0, vi_index, value & 0x00000c0cu);
+        // VU manual 1.3 and 5.1.3: break/reset are write strobes.
+        // Reset takes precedence and clears that unit's debug enables.
+        uint32_t fbrst = value & 0x00000c0cu;
+        if ((value & 2u) != 0u)
+        {
+            fbrst &= ~0xffu;
+            vu0->m_vpu_status &= ~0xffu;
+        }
+        else if ((value & 1u) != 0u)
+        {
+            vu0->m_vpu_status = (vu0->m_vpu_status & ~0x0fu) | 8u;
+        }
+        if ((value & 3u) != 0u)
+        {
+            // Stop the modeled execution pipeline without erasing VF,
+            // VI data registers, microprogram memory or data memory.
+            vu0->m_running = 0u;
+            vu0->m_e_bit = 0u;
+            vu0->m_m_bit = 0u;
+            vu0->m_branch = 0u;
+            vu0->m_take_delay_branch = 0u;
+            vu0->m_vi_backup_cycles = 0u;
+            for (auto& issue : vu0->m_ialu) issue = {};
+            vu0->m_ialu_read_pos = vu0->m_ialu_write_pos = vu0->m_ialu_count = 0u;
+            for (auto& issue : vu0->m_vf_memory_issues) issue = {};
+            for (auto& issue : vu0->m_clip_issues) issue = {};
+            for (auto& issue : vu0->m_upper_fmac_issues) issue = {};
+            vu0->m_vf_memory_ready_cycle = 0u;
+            vu0->m_vf_memory_issue_index = 0u;
+            vu0->m_q_pending = 0u;
+            vu0->m_q_ready_cycle = 0u;
+            vu0->m_vpu_status &= ~0x10u;
+        }
+        if ((value & 0x200u) != 0u)
+        {
+            fbrst &= ~0xff00u;
+            vu0->m_vpu_status &= ~0xff00u;
+        }
+        else if ((value & 0x100u) != 0u)
+        {
+            vu0->m_vpu_status = (vu0->m_vpu_status & ~0x0f00u) | 0x800u;
+        }
+        vu0->m_vi[29] = vu0->m_vpu_status;
+        ee_vu0_write_vi(vu0, vi_index, fbrst);
         return sync_result;
     }
 
@@ -1923,9 +2787,8 @@ extern "C" uint32_t ee_vu0_ctc2(
         return sync_result;
     }
 
-    case 18: // CLIP_FLAG also updates the separately tracked clip flags.
-        vu0->m_clip_flags = value;
-        ee_vu0_write_vi(vu0, vi_index, value);
+    case 18: // CLIP_FLAG is a 24-bit register.
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffffu);
         return sync_result;
 
     default:
@@ -2187,7 +3050,7 @@ bool vu0_macro_is_supported(uint32_t funct, uint32_t special2)
 } // namespace
 
 // Executes every COP2 macro-mode SPECIAL1/SPECIAL2 VU0 operation except
-// VCALLMS/VCALLMSR, LQI/SQI/LQD/SQD (ee_vu0_macro_indexed_memory) and
+// LQI/SQI/LQD/SQD (ee_vu0_macro_indexed_memory) and
 // SQRT/RSQRT/WAITQ (ee_vu0_macro_scalar). Floating-point semantics follow
 // the VU: subnormal operands flush to zero, exponent 255 is a finite max,
 // products are rounded before accumulation, and MAC/status flags update only
@@ -2207,6 +3070,24 @@ extern "C" uint32_t ee_vu0_macro_fmac(
 
     const uint32_t funct = word & 63u;
     const uint32_t special2 = (word & 3u) | ((word >> 4) & 0x7cu);
+    if (funct == 0x38u || funct == 0x39u)
+    {
+        if (!rt->m_vu0_start || !rt->m_vu0_state)
+        {
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const uint32_t synced = ee_vu0_sync(cpu, rt,
+            static_cast<uint32_t>(e_ee_vu0_sync_mode::FINISH_TO_E), pc);
+        if (synced != static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE))
+        {
+            return synced;
+        }
+        const uint32_t address = funct == 0x38u
+            ? ((word >> 6u) & 0x7fffu)
+            : (ee_vu0_read_vi(rt->m_vu0_state, 27u) & 0xffffu);
+        return validate_vu0_callback_result(
+            rt->m_vu0_start(rt->m_vu0_user, cpu, rt->m_vu0_state, address, pc));
+    }
     if (!vu0_macro_is_supported(funct, special2))
     {
         return static_cast<uint32_t>(e_ee_vu0_sync_result::INVALID_ARGUMENT);
@@ -2416,15 +3297,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         return complete;
     case 0x1fu: // VCLIPw.xyz fs, ft: six judgement bits per call.
     {
-        const float limit = std::fabs(
-            vu0_fmac_operand(vu0_fmac_read_vf(cpu, ft, 3u)));
-        uint32_t clip = (vu0->m_clip_flags << 6u) & 0x00ffffffu;
-        for (uint32_t lane = 0; lane < 3; ++lane)
-        {
-            const float value = vu0_fmac_operand(vu0_fmac_lane(source, lane));
-            if (value > limit) clip |= 1u << (lane * 2u);
-            if (value < -limit) clip |= 2u << (lane * 2u);
-        }
+        const uint32_t clip = vu0_clip_result(cpu, fs, ft, vu0->m_clip_flags);
         vu0->m_clip_flags = clip;
         vu0->m_vi[18] = clip;
         return complete;
@@ -2500,8 +3373,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         uint32_t r = vu0->m_vi[20];
         if (special2 == 0x40u)
         {
-            const uint32_t feedback = ((r >> 4u) ^ (r >> 22u)) & 1u;
-            r = vu0_macro_r((r << 1u) ^ feedback);
+            r = vu0_next_r(r);
             vu0->m_vi[20] = r;
         }
         for (uint32_t lane = 0; lane < 4; ++lane)

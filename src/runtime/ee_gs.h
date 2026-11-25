@@ -38,6 +38,8 @@ struct s_ee_gs_state
     std::array<uint64_t, 3> m_gpu_upload_layout{};
     std::array<uint64_t, 128> m_registers{};
     std::array<bool, 128> m_written{};
+    uint64_t m_siglblid = 0u;
+    bool m_signal_pending = false;
     uint32_t m_q_bits = 0x3f800000u; // GIFtag resets the STQ Q to 1.0
     uint64_t m_tag_count = 0;
     uint64_t m_vertex_count = 0; // diagnostic only; no rasterization
@@ -98,8 +100,9 @@ struct s_ee_gs_state
 };
 
 // Transactional consumer for c_ee_gif_path3::t_event_callback.
-// Unsupported stateful GS operations (SIGNAL/FINISH/LABEL, HWREG,
-// unknown register addresses) are rejected instead of being executed.
+// Unimplemented stateful GS operations and unknown registers are rejected.
+// A second SIGNAL with CSR.SIGNAL already set requires resumable GIF
+// stalling; until that is implemented, reject it transactionally.
 class c_ee_gs_state
 {
 public:
@@ -163,6 +166,19 @@ public:
     bool read_indexed_clut_value(
         uint32_t context, uint32_t x, uint32_t y, uint32_t& value
     ) const;
+
+    // Privileged GS registers share the same state as committed GIF A+D.
+    using t_signal_irq = void (*)(void* user);
+    void bind_signal_irq(void* user, t_signal_irq callback);
+    uint64_t siglblid() const { return m_state.m_siglblid; }
+    void set_siglblid(uint64_t value) { m_state.m_siglblid = value; }
+    uint64_t signal_csr() const { return m_state.m_signal_pending ? 1u : 0u; }
+    void acknowledge_signal() { m_state.m_signal_pending = false; }
+    void reset_signal_state()
+    {
+        m_state.m_siglblid = 0u;
+        m_state.m_signal_pending = false;
+    }
 
     void reset();
     const s_ee_gs_state& state() const;
@@ -296,6 +312,8 @@ private:
         s_ee_gs_state& state, uint32_t reg, uint64_t low, uint64_t high
     );
 
+    void* m_signal_user = nullptr;
+    t_signal_irq m_signal_irq = nullptr;
     void* m_committed_user = nullptr;
     t_committed_event_callback m_committed_callback = nullptr;
 

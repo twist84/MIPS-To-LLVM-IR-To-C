@@ -291,7 +291,8 @@ bool c_sif_rpc_bridge::prepare_command(
             packet[8] >= k_arkd_first_server &&
             packet[8] <= k_arkd_last_server &&
             !m_sifcmd.has_guest_rpc_server(packet[8]);
-        if (packet[8] != k_loadfile_server &&
+        const bool fileio_server = packet[8] == k_fileio_server && m_sectors != nullptr;
+        if (!fileio_server && packet[8] != k_loadfile_server &&
             packet[8] != k_iop_heap_server &&
             packet[8] != k_cdvd_init_server && !cdvd_server &&
             !m_sifcmd.has_guest_rpc_server(packet[8]) &&
@@ -363,6 +364,49 @@ bool c_sif_rpc_bridge::prepare_command(
                      &candidate.m_module_arguments))
         {
             return refuse(e_rpc_rejection::invalid_arguments);
+        }
+    }
+    else if (server_id == k_fileio_server &&
+             m_sectors != nullptr &&
+             !m_sifcmd.has_guest_rpc_server(server_id))
+    {
+        // PS2SDK synchronous FILEIO write: fd, pointer, size, mis,
+        // and the inline unaligned prefix. The shorter legacy
+        // three-word form (possibly padded to 16) has no prefix.
+        // Only the existing stdout/stderr descriptors are modeled.
+        if (method != 3u)
+        {
+            return refuse(e_rpc_rejection::unsupported_method);
+        }
+        if ((packet[9] != 12u && packet[9] != 16u && packet[9] != 32u) ||
+            packet[11] != 4u ||
+            !m_ee_ram.contains(result, 4u) ||
+            !m_ee_ram.contains(payload_source, packet[9]))
+        {
+            return refuse(e_rpc_rejection::invalid_arguments);
+        }
+        const uint32_t fd = m_ee_ram.read32(payload_source);
+        const uint32_t pointer = m_ee_ram.read32(payload_source + 4u);
+        const uint32_t bytes = m_ee_ram.read32(payload_source + 8u);
+        const uint32_t mis = packet[9] == 32u
+            ? m_ee_ram.read32(payload_source + 12u) : 0u;
+        const uint32_t expected_mis = std::min(bytes, (16u - (pointer & 15u)) & 15u);
+        uint32_t source = 0u;
+        // Bound the host-side diagnostic allocation. Reject malformed
+        // arguments before staging anything or acknowledging SIF1.
+        if ((fd != 1u && fd != 2u) || bytes > 1024u * 1024u ||
+            (packet[9] == 32u && mis != expected_mis) ||
+            (bytes > mis &&
+             (!normalize_ee_ram(pointer, &source) ||
+              !m_ee_ram.contains(source, bytes))))
+        {
+            return refuse(e_rpc_rejection::invalid_arguments);
+        }
+        candidate.m_fileio_console_bytes.reserve(bytes);
+        for (uint32_t index = 0u; index < bytes; ++index)
+        {
+            candidate.m_fileio_console_bytes.push_back(m_ee_ram.read8(
+                index < mis ? payload_source + 16u + index : source + index));
         }
     }
     else if (server_id == k_cdvd_init_server)
@@ -876,6 +920,38 @@ void c_sif_rpc_bridge::commit_command(const s_request& request)
         }
     }
     else if (request.m_words[2] == k_call_cid &&
+             request.m_server_id == k_fileio_server)
+    {
+        // A committed write, not an inferred test transcript. Encode
+        // every byte in the same lossless line-safe format as KPUTS.
+        // Chunk host records so large writes do not create huge lines.
+        const auto& bytes = request.m_fileio_console_bytes;
+        for (size_t begin = 0u; begin < bytes.size(); begin += 256u)
+        {
+            std::string line = "EE FILEIO: ";
+            constexpr char hex[] = "0123456789abcdef";
+            for (size_t index = begin;
+                 index < std::min(begin + 256u, bytes.size()); ++index)
+            {
+                const uint8_t ch = bytes[index];
+                if (ch >= 0x20u && ch <= 0x7eu && ch != 0x5cu && ch != 0x22u)
+                {
+                    line.push_back(static_cast<char>(ch));
+                }
+                else
+                {
+                    line += "\\x";
+                    line.push_back(hex[ch >> 4u]);
+                    line.push_back(hex[ch & 15u]);
+                }
+            }
+            std::printf("%s\n", line.c_str());
+        }
+        std::fflush(stdout);
+        m_ee_ram.write32(request.m_result_destination,
+                         static_cast<uint32_t>(bytes.size()));
+    }
+    else if (request.m_words[2] == k_call_cid &&
              request.m_server_id == k_cdvd_init_server)
     {
         // CdInit always completes, but only updates result[3] if
@@ -1337,12 +1413,8 @@ void c_sif_rpc_bridge::set_ee_receive_busy(bool busy)
     m_ee_receive_busy = busy;
 }
 
-bool c_sif_rpc_bridge::pump()
+bool c_sif_rpc_bridge::pump_pending()
 {
-    if (m_pending_module_starts.empty() && m_replies.empty())
-    {
-        return false;
-    }
     // A stopped initializer can still be restarted. A deleted or faulted
     // initializer can never return, so complete its LOADFILE call with an error.
     for (auto it = m_pending_module_starts.begin();
@@ -1448,11 +1520,6 @@ bool c_sif_rpc_bridge::pump()
 size_t c_sif_rpc_bridge::pending_replies() const
 {
     return m_replies.size();
-}
-
-size_t c_sif_rpc_bridge::pending_guest_calls() const
-{
-    return m_guest_pending.size();
 }
 
 size_t c_sif_rpc_bridge::pending_module_starts() const

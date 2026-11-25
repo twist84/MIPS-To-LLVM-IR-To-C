@@ -200,6 +200,12 @@ int main(int argc, char** argv)
              mode == "pexew" ? 0x1eu : 0x1fu;
         rs = 0u; // All four permutations read only rt.
     }
+    else if (mode == "pexch" || mode == "pexcw")
+    {
+        funct = 0x29u;
+        sa = mode == "pexch" ? 0x1au : 0x1eu;
+        rs = 0u;
+    }
     else if (mode == "pdivbw")
     {
         funct = 0x09u;

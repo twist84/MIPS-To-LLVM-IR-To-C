@@ -30,6 +30,7 @@ public:
     static constexpr uint32_t k_sif0_base = 0x1000c000u; // channel 5, IOP -> EE
     static constexpr uint32_t k_sif1_base = 0x1000c400u; // channel 6, EE -> IOP
     static constexpr uint32_t k_stat_address = 0x1000e010u;
+    static constexpr uint32_t k_pcr_address = 0x1000e020u;
     static constexpr uint32_t k_sqwc_address = 0x1000e030u;
     static constexpr uint32_t k_channel_count = 10u;
     static constexpr uint32_t k_to_spr_base = 0x1000d400u; // channel 9
@@ -105,6 +106,10 @@ public:
         cyclic_chain
     };
     e_vif1_chain_reject vif1_chain_last_reject() const;
+
+    // VIF1 MSKPATH3 gates new synchronous GIF DMA transactions.
+    void set_gif_path3_mask(bool masked);
+    bool gif_path3_masked() const { return m_gif_path3_masked; }
 
     void bind_cpu(s_ee_cpu_state* cpu);
     void bind_memory(ee_memory* memory);
@@ -230,7 +235,7 @@ private:
     bool write_spr_channel(uint32_t address, uint32_t value);
     bool transfer_device_normal(uint32_t channel);
     bool transfer_gif_source_chain();
-    bool transfer_vif1_source_chain();
+    bool transfer_vif_source_chain(uint32_t channel_index);
     bool transfer_spr_normal(uint32_t channel);
     bool transfer_spr_interleave(uint32_t channel);
     bool transfer_from_spr_chain();
@@ -255,10 +260,13 @@ private:
     void* m_download_user = nullptr;
     t_device_download_callback m_device_download = nullptr;
     uint32_t m_status = 0;
+    uint32_t m_pcr = 0;
     uint32_t m_sqwc = 0;
     s_gif_dma_write m_gif_trace[k_gif_trace_capacity]{};
     uint64_t m_gif_trace_count = 0u;
     e_gif_dma_reject m_gif_last_reject = e_gif_dma_reject::none;
+    bool m_gif_path3_masked = false;
+    bool m_gif_waiting_for_unmask = false;
     e_vif1_chain_reject m_vif1_chain_last_reject =
         e_vif1_chain_reject::none;
     s_spr_channel m_device_channels[3]{}; // VIF0, VIF1, GIF PATH3

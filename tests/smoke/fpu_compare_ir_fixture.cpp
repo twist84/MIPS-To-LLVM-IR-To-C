@@ -39,6 +39,9 @@ int main(int argc, char** argv)
     }
 
     const char* mode = argv[2];
+    const bool fcr_read_low = std::strcmp(mode, "fcr_read_low") == 0;
+    const bool fcr_read_high = std::strcmp(mode, "fcr_read_high") == 0;
+    const bool fcr_read_group = fcr_read_low || fcr_read_high;
     uint8_t funct = 0;
     if (std::strcmp(mode, "c_f") == 0) funct = 0x30;
     else if (std::strcmp(mode, "c_eq") == 0) funct = 0x32;
@@ -63,7 +66,8 @@ int main(int argc, char** argv)
     else if (std::strcmp(mode, "min_s") == 0) funct = 0x29;
     else if (std::strcmp(mode, "abs_s") == 0) funct = 0x05;
     else if (std::strcmp(mode, "neg_s") == 0) funct = 0x07;
-    else if (std::strcmp(mode, "mfc1") == 0 ||
+    else if (fcr_read_group ||
+             std::strcmp(mode, "mfc1") == 0 ||
              std::strcmp(mode, "mtc1") == 0 ||
              std::strcmp(mode, "cfc1") == 0 ||
              std::strcmp(mode, "cfc1_fcr0") == 0 ||
@@ -123,7 +127,26 @@ int main(int argc, char** argv)
     else
         word = make_cop1_s(2, 1, destination_or_cc, funct);
     std::map<uint32_t, ee::s_ee_instruction> insn_map;
-    if (std::strcmp(mode, "ctc1_after_branch") == 0 ||
+    if (fcr_read_group)
+    {
+        // Each group reads 16 different control-register encodings into
+        // writable GPRs 1..16. No JR or host calls between the reads.
+        const uint8_t base = fcr_read_high ? 16u : 0u;
+        for (uint8_t i = 0u; i < 16u; ++i)
+        {
+            const uint32_t pc = entry_pc + 4u * i;
+            const auto decoded = ee::decode(pc,
+                make_cop1_transfer(2u, i + 1u, base + i));
+            if (decoded.valid != ee::e_ee_valid::VALID ||
+                decoded.opcode != ee::e_ee_opcode::OP_COP1)
+            {
+                std::fprintf(stderr, "FCR read alias %u not decoded\n", base + i);
+                return 3;
+            }
+            insn_map.emplace(pc, decoded);
+        }
+    }
+    else if (std::strcmp(mode, "ctc1_after_branch") == 0 ||
         std::strcmp(mode, "bc1_t_delay") == 0 ||
         std::strcmp(mode, "bc1_fl_annul") == 0)
     {
@@ -193,7 +216,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "COP1 fixture CFG analysis failed\n");
         return 4;
     }
-    if (std::strcmp(mode, "ctc1_after_branch") != 0 &&
+    if (fcr_read_group &&
+        (functions[0].blocks.size() != 1 ||
+         functions[0].blocks[0].insn_indices.size() != 16))
+    {
+        std::fprintf(stderr, "FCR read group fixture CFG analysis failed\n");
+        return 4;
+    }
+    if (!fcr_read_group &&
+        std::strcmp(mode, "ctc1_after_branch") != 0 &&
         std::strcmp(mode, "bc1_t_delay") != 0 &&
         std::strcmp(mode, "bc1_fl_annul") != 0 &&
         (functions[0].blocks.size() != 1 ||

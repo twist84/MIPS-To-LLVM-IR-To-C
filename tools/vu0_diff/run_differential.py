@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 PCSX2_REVISION = "82cac38b2af19d593dedfd9ddaa63448e7ec493c"
-GTEST_FILTER = "VU0IssueOrder.EmitDeterministicPerPairTrace"
+GTEST_FILTER = "VU0IssueOrder.EmitDeterministicPerPairTrace:VU0IssueOrder.DualIssueDestinationPriority"
 
 
 def run(command: list[str], *, cwd: Path | None = None,

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <vector>
 
 namespace ee
@@ -61,6 +62,15 @@ struct s_ee_vu1_issue
 // Deliberately a strict subset, NOT a general-purpose VU1 interpreter.
 // Unsupported microinstructions/hazards reject the entire staged VIF transfer.
 // No GS output or resident state becomes visible on a rejected run.
+struct s_ee_vu1_execution;
+
+enum class e_ee_vu1_slice
+{
+    pending,
+    completed,
+    rejected
+};
+
 class c_ee_vu1
 {
 public:
@@ -74,6 +84,17 @@ public:
     // Shared EFU arithmetic, including host-specific transcendental results.
     static bool efu(const std::array<uint32_t, 4>& source, uint32_t index,
         uint32_t component, uint32_t& value, uint32_t& latency);
+
+    // A direct launch may run indefinitely; preserve the full interpreter
+    // pipeline across slices. Synchronous VIF runs keep their E-bit limit.
+    static std::shared_ptr<s_ee_vu1_execution> begin_execution(
+        s_ee_vu1_state& state, uint32_t address);
+    static e_ee_vu1_slice run_slice(
+        s_ee_vu1_execution& execution, s_ee_vu1_state& state,
+        std::array<uint8_t, k_memory_size>& code,
+        std::array<uint8_t, k_memory_size>& data,
+        uint32_t top, uint32_t itop, uint32_t pair_budget,
+        std::vector<uint8_t>& path1_bytes, s_ee_vu1_issue* issue);
 
     static bool run(
         s_ee_vu1_state& state,

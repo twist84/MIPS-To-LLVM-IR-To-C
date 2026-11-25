@@ -112,7 +112,8 @@ private:
                     const std::set<uint8_t>& live_out,
                     uint32_t fallthrough_pc = 0,
                     bool is_terminator = false,
-                    bool guarded_loop_header = false);
+                    bool guarded_loop_header = false,
+                    const std::map<uint32_t, ee::s_ee_instruction>* insn_map = nullptr);
     void emit_insn(const ee::s_ee_instruction& ins, bool is_last_in_block,
                    uint32_t fallthrough_pc, bool in_delay_slot = false);
     void emit_mmi_insn(const ee::s_ee_instruction& ins);

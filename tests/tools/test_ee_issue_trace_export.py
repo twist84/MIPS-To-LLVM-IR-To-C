@@ -34,6 +34,27 @@ def main() -> int:
         ), events
         assert events[5]["kind"] == "1", events[5]
 
+        manual_output = root / "manual.csv"
+        manual = subprocess.run(
+            [str(binary), str(fixture), "--manual-cache-hit",
+             f"--candidate-events={manual_output}"],
+            text=True, capture_output=True, check=False
+        )
+        assert manual.returncode == 0, manual.stdout + manual.stderr
+        assert "profile_source=ee_manual_v6_cache_hit" in manual.stdout
+        assert "NOT validated R5900 cycles" in manual.stdout
+        with manual_output.open("r", encoding="utf-8", newline="") as stream:
+            manual_events = list(csv.DictReader(stream))
+        assert [int(row["candidate_issue_cycle"]) for row in manual_events] == [
+            0, 0, 1, 2, 3, 4, 5
+        ], manual_events
+        conflict = subprocess.run(
+            [str(binary), str(fixture), "--manual-cache-hit",
+             "--throughput=2,37,2,1,7,7,13"],
+            text=True, capture_output=True, check=False
+        )
+        assert conflict.returncode == 2, conflict.stdout + conflict.stderr
+
         # Completion is a *separate* candidate result deadline. Annulled
         # likely slots do not have an instruction result to timestamp.
         completion_output = root / "completions.csv"

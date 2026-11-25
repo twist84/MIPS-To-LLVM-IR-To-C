@@ -25,6 +25,8 @@ public:
     void enable_audio_profile(bool enabled) { m_audio_profile_enabled = enabled; }
     void report_audio_profile() const;
     void report_signal_path() const;
+    // Host-only differential control; guest state is identical.
+    void enable_effect_fast_path(bool enabled) { m_effect_fast_path = enabled; }
 
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
@@ -140,6 +142,14 @@ public:
     {
         return core < 2u ? m_cores[core].m_effect_return_frames : 0u;
     }
+    uint64_t effect_fast_ticks(uint32_t core) const
+    {
+        return core < 2u ? m_cores[core].m_effect_fast_ticks : 0u;
+    }
+    uint64_t effect_zero_fir_skips(uint32_t core) const
+    {
+        return core < 2u ? m_cores[core].m_effect_zero_fir_skips : 0u;
+    }
     uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
@@ -211,6 +221,9 @@ private:
         uint16_t m_effect_coefficients[10]{};
         uint64_t m_effect_enable_writes = 0u;
         uint64_t m_effect_ticks = 0u;
+        uint64_t m_effect_fast_ticks = 0u;
+        uint64_t m_effect_zero_fir_skips = 0u;
+        uint64_t m_effect_up_nonzero[2]{};
         uint64_t m_effect_return_frames = 0u;
         uint32_t m_effect_history_pos = 0u;
         int16_t m_effect_down[2][64]{};
@@ -238,6 +251,8 @@ private:
     void check_effect_irq(uint32_t address);
     int64_t effect_tap_offset(uint32_t core, uint32_t reg) const;
     uint32_t effect_irq_cycles_remaining() const;
+    bool read_disabled_effect(uint32_t core, uint32_t channel, uint64_t step,
+        int16_t* output);
     void advance_effect(uint32_t core, const int32_t (&input)[2], int16_t (&output)[2]);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     void mix_frames(uint64_t samples);
@@ -258,6 +273,7 @@ private:
 
     // Host diagnostics accumulate across guest resets; no guest-visible state.
     bool m_audio_profile_enabled = false;
+    bool m_effect_fast_path = true;
     s_audio_profile_counter m_profile_mix{};
     s_audio_profile_counter m_profile_voices{};
     s_audio_profile_counter m_profile_adpcm{};

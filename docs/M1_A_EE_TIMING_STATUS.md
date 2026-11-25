@@ -224,3 +224,16 @@ A focused regression checks real scanout->COP0 IP2 exception, INTC W1C
 acknowledgement and ERET resume. A subsequent matched real-game run must
 verify actual guest INTC callback execution and progression beyond the
 previous exception at `0x80000180`.
+
+## Accuracy direction (PR #156, 25 November 2026)
+
+Baseline: 54/55 original exact transcripts, all five CI workflows green
+at `4aa9cdf2afffe0a5b8a0b706841b33d1a0456946` ([run 45662090326](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45662090326)).
+EFU remains the sole transcript mismatch. Passing COP0 changed/unchanged
+counter checks does not validate exact processor-cycle measurements.
+The offline issue replay now exposes a manual cache-hit profile with
+explicit provenance and distinct LWC1 FPR latency; see the reference
+audit. Next accuracy work: documented pipeline resource stalls, measured
+cache behavior, precise retirement/exception accounting, and independent
+hardware counter/trace comparisons. Maintain original ELF and retail
+regression evidence separately from timing-model validation.

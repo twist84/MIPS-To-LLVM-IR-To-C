@@ -1,4 +1,5 @@
 #include "ee_runtime_profile.h"
+#include "../../src/tools/ee_pc_profile.h"
 
 #include <cstdio>
 #include <string>
@@ -6,6 +7,37 @@
 int main()
 {
     using ee::e_runtime_profile_id;
+    // A tiny cache forces collisions, including zero, unaligned and
+    // full-width PCs. Rehashing the owning map must preserve references.
+    ee::c_ee_pc_profile<4u> pcs(true);
+    ee::c_ee_pc_profile<4u> disabled(false);
+    disabled.record(0u, 1u, 2u, 0u, 3u);
+    pcs.record(0u, 0u, 0u, 0u, 7u);
+    pcs.record(0u, 1u, 10u, 2u, 11u);
+    pcs.record(1u, 1u, 3u, 0u, 13u);
+    pcs.record(16u, 1u, 4u, 0u, 17u);
+    pcs.record(0xffffffffu, 1u, 5u, 1u, 19u);
+    // Word PCs with low two bits equal to 1 and a zero folded low
+    // component use a different slot from PC zero after its reinsert.
+    pcs.record(0u, 1u, 20u, 8u, 23u);
+    const auto* zero = &pcs.entries().at(0u);
+    for (uint32_t i = 1u; i <= 4096u; ++i)
+    {
+        pcs.record(i * 16u + 4u, 1u, 1u, 0u, 1u);
+    }
+    pcs.record(0u, 1u, 30u, 4u, 29u);
+    const auto& entry = pcs.entries().at(0u);
+    if (!disabled.entries().empty() || &entry != zero ||
+        pcs.entries().size() != 4100u || entry.m_calls != 4u ||
+        entry.m_dispatches != 3u || entry.m_instructions != 60u ||
+        entry.m_idle_instructions != 14u || entry.m_wall_ns != 70u ||
+        pcs.entries().at(1u).m_wall_ns != 13u ||
+        pcs.entries().at(16u).m_wall_ns != 17u ||
+        pcs.entries().at(0xffffffffu).m_idle_instructions != 1u)
+    {
+        return 10;
+    }
+
     ee::runtime_profile_begin(false);
     {
         ee::c_runtime_profile_scope scope(e_runtime_profile_id::ee_native_boundary);

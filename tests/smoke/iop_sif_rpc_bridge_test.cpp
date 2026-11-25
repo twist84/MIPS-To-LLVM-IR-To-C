@@ -1239,6 +1239,20 @@ int main()
     {
         return fail("IOP scheduler reported work with no runnable module");
     }
+    // Repeated empty pump calls cannot publish a reply or alter
+    // DMA status before SIFCMD initialization.
+    const auto idle_dma_status = dmac.status();
+    for (uint32_t i = 0u; i < 1024u; ++i)
+    {
+        if (rpc.pump() || rpc.pending_replies() != 0u ||
+            rpc.pending_guest_calls() != 0u ||
+            rpc.pending_module_starts() != 0u ||
+            dmac.status() != idle_dma_status || kernel.has_guest_work())
+        {
+            return fail("empty RPC pump produced observable work");
+        }
+    }
+
     // The EE cannot dispatch any LOADFILE command merely because
     // a module exists on the host disc.
     const std::vector<uint32_t> bind = {
@@ -1364,6 +1378,80 @@ int main()
     {
         return fail("unknown 64-byte RPC bind mutated guest state");
     }
+
+    // FILEIO is a bounded console service, not an arbitrary RPC
+    // acknowledgement. Test the real SIF1 request and SIF0 reply.
+    dmac.acknowledge(5u);
+    dmac.acknowledge(6u);
+    memory.write32(bind_source + 32u, iop::c_sif_rpc_bridge::k_fileio_server);
+    if (!sif1.set_dma(list, 1u, &dma_id) ||
+        memory.read32(ee_receive + 36u) !=
+            (iop::c_sif_rpc_bridge::k_fileio_server ^
+             iop::c_sif_rpc_bridge::k_server_xor) ||
+        rpc.pending_replies() != 0u)
+    {
+        return fail("FILEIO bind did not reply through SIF0");
+    }
+    constexpr uint32_t console_source = 0x001a000du;
+    // Inline bytes override the unaligned original guest bytes.
+    // Bytes after the aligned boundary come from EE RAM.
+    memory.write8(console_source + 0u, 'x');
+    memory.write8(console_source + 1u, 'x');
+    memory.write8(console_source + 2u, 'x');
+    memory.write8(console_source + 3u, 'o');
+    memory.write8(console_source + 4u, 0x0au);
+    packet(memory, args_source, {1u, 0x20000000u | console_source,
+                                 5u, 3u, 0x006c6548u, 0u, 0u, 0u});
+    const std::vector<uint32_t> fileio_call = {
+        0x2040u, iop::c_sif_rpc_bridge::k_rpc_data_destination,
+        iop::c_sif_rpc_bridge::k_call_cid, 0u,
+        5u, 0x11040u, 0x1234u, 0x15000u,
+        3u, 32u, rpc_result, 4u, 1u,
+        iop::c_sif_rpc_bridge::k_fileio_server ^
+            iop::c_sif_rpc_bridge::k_server_xor, 0u, 0u
+    };
+    iop::c_sif_rpc_bridge::s_request staged_console{};
+    if (!rpc.prepare_command(fileio_call, 64u, args_source, 32u,
+                             &staged_console) ||
+        staged_console.m_fileio_console_bytes !=
+            std::vector<uint8_t>{'H', 'e', 'l', 'o', 0x0au})
+    {
+        return fail("FILEIO unaligned prefix or aliased remainder incorrect");
+    }
+    packet(memory, call_source, fileio_call);
+    descriptor(memory, list, args_source,
+               iop::c_sif_rpc_bridge::k_rpc_data_destination, 32u);
+    descriptor(memory, list + 16u, call_source,
+               iop::c_sifcmd_bridge::k_command_buffer, 64u);
+    memory.write32(list + 28u, 0x44u);
+    memory.write32(rpc_result, 0xabcdef01u);
+    dmac.acknowledge(5u);
+    dmac.acknowledge(6u);
+    // Malformed inline prefix must fail before either DMA commits.
+    memory.write32(args_source + 12u, 4u);
+    if (sif1.set_dma(list, 2u, &dma_id) ||
+        memory.read32(rpc_result) != 0xabcdef01u ||
+        rpc.pending_replies() != 0u ||
+        (dmac.status() & ((1u << 5u) | (1u << 6u))) != 0u)
+    {
+        return fail("malformed FILEIO write mutated state");
+    }
+    memory.write32(args_source + 12u, 3u);
+    if (!sif1.set_dma(list, 2u, &dma_id) ||
+        memory.read32(rpc_result) != 5u ||
+        memory.read32(ee_receive + 32u) !=
+            iop::c_sif_rpc_bridge::k_call_cid ||
+        rpc.last_observation().m_return_word != 5u ||
+        rpc.pending_replies() != 0u ||
+        (dmac.status() & (1u << 5u)) == 0u)
+    {
+        return fail("FILEIO write did not return committed byte count");
+    }
+    // Restore the BIND descriptor for the remaining independent tests.
+    packet(memory, bind_source, bind64);
+    descriptor(memory, list, bind_source,
+               iop::c_sifcmd_bridge::k_command_buffer, 64u);
+    memory.write32(list + 12u, 0x44u);
 
     // The next retail SDBZ bind targets CDVDFSV CdInit (0x80000592).
     // It uses the ordinary 64-byte SDK packet and terminal 0x44 DMA.

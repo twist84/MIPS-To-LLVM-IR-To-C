@@ -334,7 +334,9 @@ static_assert(offsetof(ee::s_ee_vu0_state, m_vf_memory_issue_index) == 8608);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_ready_cycle) == 8616);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending_bits) == 8624);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending) == 8628);
-static_assert(sizeof(ee::s_ee_vu0_state) == 8640);
+static_assert(offsetof(ee::s_ee_vu0_state, m_clip_issues) == 8632);
+static_assert(offsetof(ee::s_ee_vu0_state, m_upper_fmac_issues) == 8696);
+static_assert(sizeof(ee::s_ee_vu0_state) == 8800);
 
 int main()
 {
@@ -345,6 +347,660 @@ int main()
     ee::s_ee_cpu_state cpu{};
     ee::s_ee_vu0_state vu0{};
     s_mock_scheduler scheduler{};
+
+    // VCALLMS uses a 15-bit immediate and VCALLMSR reads CMSAR0.
+    // Both launch the real micro-engine at a wrapped 9-bit VU0 slot.
+    {
+        ee::s_ee_cpu_state launch_cpu{};
+        ee::s_ee_vu0_state launch_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        ee::s_ee_runtime rt{};
+        rt.m_vu0_state = &launch_vu;
+        rt.m_vu0_user = &engine;
+        rt.m_vu0_sync = [](void*, ee::s_ee_cpu_state*, ee::s_ee_vu0_state* state,
+            uint32_t, uint32_t) -> uint32_t
+        {
+            return static_cast<uint32_t>((state->m_vpu_status & 1u) != 0u
+                ? e_ee_vu0_sync_result::UNAVAILABLE : e_ee_vu0_sync_result::COMPLETE);
+        };
+        const uint32_t call = 0x4a000038u | (0x203u << 6u);
+        const auto complete = static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        const auto unavailable = static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
+        install_vu0_pair(&launch_vu, 3u, make_vu0_iaddiu(1u, 0u, 7u),
+            make_vu0_upper_nop() | 0x40000000u);
+        install_vu0_pair(&launch_vu, 4u, make_vu0_iaddiu(2u, 1u, 4u),
+            make_vu0_upper_nop());
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, call, 0u) == unavailable &&
+              launch_vu.m_running == 0u, "VCALLMS without engine fails closed");
+        rt.m_vu0_start = ee::ee_vu0_start_ialu_callback;
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, call, 0u) == complete &&
+              launch_vu.m_running == 1u && launch_vu.m_micro_pc == 32u &&
+              launch_vu.m_vi[1] == 7u, "VCALLMS starts real microcode");
+        check(ee::ee_vu0_execute_ialu_callback(&engine, &launch_cpu, &launch_vu,
+              8u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u) == complete &&
+              launch_vu.m_running == 0u && launch_vu.m_vi[2] == 11u,
+              "VCALLMS E delay pair completes");
+        launch_vu.m_vi[27] = 0x203u;
+        check(ee::ee_vu0_macro_fmac(&launch_cpu, &rt, 0x4a000039u, 0u) == complete &&
+              launch_vu.m_micro_pc == 32u && launch_vu.m_running == 1u,
+              "VCALLMSR reads CMSAR0");
+    }
+
+    // Read the three flag banks using the original microinstruction forms.
+    {
+        ee::s_ee_cpu_state flag_cpu{};
+        ee::s_ee_vu0_state flag_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        flag_vu.m_vpu_status = 1u;
+        flag_vu.m_clip_flags = 0xabc123u;
+        flag_vu.m_mac_flags = 0x3456u;
+        flag_vu.m_status_flags = 0x245u;
+        flag_vu.m_vi[1] = 0xabcd0000u;
+        flag_vu.m_vi[4] = 0x80u;
+        flag_vu.m_vi[0] = 0xdeadbeefu;
+        install_vu0_pair(&flag_vu, 0, (0x1cu << 25u) | (1u << 16u),
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 1, (0x1bu << 25u) | (2u << 16u) | (4u << 11u),
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 2, (0x17u << 25u) | (3u << 16u) | (1u << 21u) | 0x20u,
+            make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 3, (0x1cu << 25u),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&flag_vu, 4, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &flag_cpu,
+            &flag_vu, 20u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              flag_vu.m_running == 0u && flag_vu.m_micro_pc == 40u &&
+              flag_vu.m_vi[1] == 0xabcd0123u && flag_vu.m_vi[2] == 0x34d6u &&
+              flag_vu.m_vi[3] == 0xa65u && flag_vu.m_vi[0] == 0xdeadbeefu &&
+              flag_vu.m_cycle == 8u,
+              "VU0 flag reads, VI0 and lower NOP/E completion");
+    }
+
+    // Four consecutive upper CLIP/lower FCGET pairs and six readbacks.
+    // Expected history comes from the original console upper/clip Multi
+    // test, with the real four-cycle delay and no transcript substitution.
+    {
+        ee::s_ee_cpu_state clip_cpu{};
+        ee::s_ee_vu0_state clip_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        clip_vu.m_vpu_status = 1u;
+        clip_cpu.m_vu0[1] = {0x4000000040000000ull, 0x4000000040000000ull};
+        clip_cpu.m_vu0[2] = {0xc0000000c0000000ull, 0xc0000000c0000000ull};
+        clip_cpu.m_vu0[3] = {0xc000000040000000ull, 0xc000000040000000ull};
+        clip_cpu.m_vu0[4] = {0x40000000c0000000ull, 0x40000000c0000000ull};
+        for (uint32_t i = 0; i < 10u; ++i)
+        {
+            const uint32_t fcget = (0x1cu << 25u) | ((i + 1u) << 16u);
+            const uint32_t upper = i < 4u
+                ? (14u << 21u) | ((i + 1u) << 11u) | (7u << 6u) | 0x3fu
+                : make_vu0_upper_nop(i == 8u ? 0x40000000u : 0u);
+            install_vu0_pair(&clip_vu, i, fcget, upper);
+        }
+        const uint32_t expected[] = {0, 0, 0, 0, 0x15, 0x56a, 0xa99,
+                                      0x666, 0x666, 0x666};
+        const uint32_t result = ee::ee_vu0_execute_ialu_callback(
+            &engine, &clip_cpu, &clip_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              clip_vu.m_running == 0u && clip_vu.m_cycle == 14u,
+              "CLIP pair engine stops and flushes at E");
+        for (uint32_t i = 0; i < 10u; ++i)
+        {
+            check(clip_vu.m_vi[i + 1u] == expected[i],
+                  "CLIP/FCGET four-cycle history");
+        }
+    }
+
+    // Upper arithmetic issues a VF dependency and delayed MAC/status
+    // result independently of the paired lower instruction.
+    {
+        ee::s_ee_cpu_state fmac_cpu{};
+        ee::s_ee_vu0_state fmac_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        fmac_vu.m_vpu_status = 1u;
+        fmac_cpu.m_vu0[1] = {0x400000003f800000ull, 0u};
+        fmac_cpu.m_vu0[2] = {0x40000000bf800000ull, 0u};
+        fmac_cpu.m_vu0[3] = {0x400000003f800000ull, 0u};
+        const auto upper_op = [](uint32_t op, uint32_t fd, uint32_t fs,
+                                 uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+        };
+        const auto fmor = [](uint32_t dest)
+        {
+            return (0x1bu << 25u) | (dest << 16u);
+        };
+        install_vu0_pair(&fmac_vu, 0, fmor(1), upper_op(0x28, 3, 1, 2, 8));
+        // Reading the unaffected Y lane must not stall on the X result.
+        install_vu0_pair(&fmac_vu, 1, fmor(2), upper_op(0x2a, 4, 3, 2, 4));
+        // An overlapping X dependency stalls until ADD matures at cycle 5.
+        install_vu0_pair(&fmac_vu, 2, fmor(3), upper_op(0x2c, 5, 3, 1, 8));
+        install_vu0_pair(&fmac_vu, 3, fmor(4), make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&fmac_vu, 4, fmor(5), make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &fmac_cpu,
+            &fmac_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              fmac_vu.m_cycle == 11u && fmac_vu.m_running == 0u,
+              "upper FMAC overlap stalls and E flushes");
+        check(fmac_cpu.m_vu0[3].m_lo == 0x4000000000000000ull &&
+              fmac_cpu.m_vu0[4].m_lo == 0x4080000000000000ull &&
+              fmac_cpu.m_vu0[5].m_lo == 0x00000000bf800000ull,
+              "upper ADD/MUL/SUB values and lane masks");
+        check(fmac_vu.m_vi[1] == 0u && fmac_vu.m_vi[2] == 0u &&
+              fmac_vu.m_vi[3] == 8u && fmac_vu.m_vi[4] == 0u &&
+              fmac_vu.m_vi[5] == 0u && fmac_vu.m_mac_flags == 0x80u &&
+              fmac_vu.m_status_flags == 0xc2u,
+              "upper FMAC delayed MAC and sticky status flags");
+    }
+
+    // Both halves sample the old VF value even when the upper arithmetic
+    // overwrites the vector consumed by the lower store in the same pair.
+    {
+        ee::s_ee_cpu_state pair_cpu{};
+        ee::s_ee_vu0_state pair_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        pair_vu.m_vpu_status = 1u;
+        pair_vu.m_vi[21] = 0x40000000u; // I = 2.0
+        pair_cpu.m_vu0[2].m_lo = 0x3f800000u;
+        pair_cpu.m_vu0[3].m_lo = 0x40a0000040400000ull; // y=5, x=3
+        const uint32_t addx = (12u << 21u) | (2u << 16u) |
+            (3u << 11u) | (3u << 6u);
+        const uint32_t addi = (8u << 21u) | (3u << 11u) |
+            (4u << 6u) | 0x22u;
+        install_vu0_pair(&pair_vu, 0, make_vu0_memory(0x01, 8, 0, 3, 2), addx);
+        install_vu0_pair(&pair_vu, 1, 0x8000033cu, addi);
+        install_vu0_pair(&pair_vu, 2, 0x8000033cu, make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&pair_vu, 3, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu,
+            &pair_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              pair_vu.m_cycle == 9u && pair_vu.m_running == 0u,
+              "paired ADDx/SQ and dependent ADDi retire");
+        check(pair_cpu.m_vu0[3].m_lo == 0x40c0000040800000ull &&
+              pair_cpu.m_vu0[4].m_lo == 0x40c00000u,
+              "broadcast, I register and aliased destination use original operands");
+        check(pair_vu.m_data_memory[32] == 0u &&
+              pair_vu.m_data_memory[33] == 0u &&
+              pair_vu.m_data_memory[34] == 0x40u &&
+              pair_vu.m_data_memory[35] == 0x40u,
+              "lower SQ observes the VF value before the paired ADDx");
+
+        // A conflicting lower LQ is discarded; ADDx still executes.
+        ee::s_ee_vu0_state conflict{};
+        conflict.m_vpu_status = 1u;
+        const auto previous = pair_cpu.m_vu0[3];
+        install_vu0_pair(&conflict, 0, make_vu0_memory(0x00, 8, 3, 0, 2), addx);
+        check(ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu, &conflict, 1u,
+                  ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u) ==
+                  static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              conflict.m_cycle == 1u && conflict.m_micro_pc == 8u &&
+              pair_cpu.m_vu0[3].m_lo == 0x40e0000040a00000ull &&
+              pair_cpu.m_vu0[3].m_hi == previous.m_hi,
+              "conflicting upper/lower VF writes execute upper ADDx only");
+    }
+
+    // ACC forwarding, masked writes and multiply/accumulate flag timing.
+    {
+        ee::s_ee_cpu_state acc_cpu{};
+        ee::s_ee_vu0_state acc_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        acc_vu.m_vpu_status = 1u;
+        acc_cpu.m_vu0[1].m_lo = 0x400000003f800000ull; // x=1, y=2
+        acc_cpu.m_vu0[2].m_lo = 0x4080000040400000ull; // x=3, y=4
+        acc_vu.m_acc.m_hi = 0x123456789abcdef0ull;
+        const auto upper = [](uint32_t op, uint32_t fd, uint32_t fs,
+                               uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+        };
+        const auto special = [&](uint32_t op, uint32_t fs, uint32_t ft, uint32_t mask)
+        {
+            return upper(0x3cu | (op & 3u), op >> 2u, fs, ft, mask);
+        };
+        const uint32_t nop = 0x8000033cu;
+        // ADDA: ACC=(4,6), MULA.y: ACC=(4,8),
+        // MADDA.x: ACC=(7,8), MSUBA.y: ACC=(7,0).
+        install_vu0_pair(&acc_vu, 0, nop, special(0x28, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 1, nop, special(0x2a, 1, 2, 4));
+        install_vu0_pair(&acc_vu, 2, nop, special(0x29, 1, 2, 8));
+        install_vu0_pair(&acc_vu, 3, nop, special(0x2d, 1, 2, 4));
+        install_vu0_pair(&acc_vu, 4, nop, upper(0x29, 3, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 5, nop, upper(0x2d, 4, 1, 2, 12));
+        install_vu0_pair(&acc_vu, 6, nop, special(0x2c, 1, 2, 8) | 0x40000000u);
+        install_vu0_pair(&acc_vu, 7, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &acc_cpu,
+            &acc_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              acc_vu.m_cycle == 11u && acc_vu.m_running == 0u,
+              "ACC chain forwards without a VF dependency stall");
+        check(acc_cpu.m_vu0[3].m_lo == 0x4100000041200000ull &&
+              acc_cpu.m_vu0[4].m_lo == 0xc100000040800000ull &&
+              acc_vu.m_acc.m_lo == 0x00000000c0000000ull &&
+              acc_vu.m_acc.m_hi == 0x123456789abcdef0ull,
+              "ADDA/MULA/MADDA/MSUBA/MADD/MSUB/SUBA results");
+        check(acc_vu.m_mac_flags == 0x80u &&
+              acc_vu.m_status_flags == 0xc2u,
+              "ACC flags retire in issue order with sticky zero and sign");
+    }
+
+    // I-bit lower words are literals, not opcodes. ADDi in an I pair
+    // sees the old I, even when the lower word resembles a branch.
+    {
+        ee::s_ee_cpu_state imm_cpu{};
+        ee::s_ee_vu0_state imm_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        imm_vu.m_vpu_status = 1u;
+        imm_vu.m_vi[21] = 0x3f800000u; // 1.0
+        imm_cpu.m_vu0[1].m_lo = 0x40000000u; // 2.0
+        const auto addi = [](uint32_t fd)
+        {
+            return (8u << 21u) | (1u << 11u) | (fd << 6u) | 0x22u;
+        };
+        install_vu0_pair(&imm_vu, 0, 0x40000000u, addi(2) | 0x80000000u);
+        install_vu0_pair(&imm_vu, 1, 0xdeadbeefu, addi(3) | 0x80000000u);
+        install_vu0_pair(&imm_vu, 2, 0x7fffffffu,
+            make_vu0_upper_nop(0xc0000000u)); // I and E
+        install_vu0_pair(&imm_vu, 3, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &imm_cpu,
+            &imm_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              imm_vu.m_micro_pc == 32u && imm_vu.m_branch == 0u &&
+              imm_vu.m_running == 0u && imm_vu.m_cycle == 6u,
+              "I-bit literals never execute as lower branch or other instructions");
+        check(imm_cpu.m_vu0[2].m_lo == 0x40400000u &&
+              imm_cpu.m_vu0[3].m_lo == 0x40800000u &&
+              imm_vu.m_vi[21] == 0x7fffffffu,
+              "upper ADDi reads previous I and commits exact new literal bits");
+    }
+
+    // Non-flag-writing upper operations reserve VF lanes but preserve MAC/SF.
+    {
+        ee::s_ee_cpu_state unary_cpu{};
+        ee::s_ee_vu0_state unary_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        unary_vu.m_vpu_status = 1u;
+        unary_vu.m_mac_flags = 0x1234u;
+        unary_vu.m_status_flags = 0x345u;
+        unary_cpu.m_vu0[1].m_lo = 0x80000000bfc00000ull; // -0, -1.5
+        unary_cpu.m_vu0[2].m_lo = 0xdeadbeef00000000ull;
+        unary_cpu.m_vu0[6].m_lo = 0x7fffffff00000000ull;
+        const auto unary = [](uint32_t code, uint32_t ft, uint32_t fs, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) |
+                ((code >> 2u) << 6u) | (0x3cu | (code & 3u));
+        };
+        const auto binary = [](uint32_t code, uint32_t fd, uint32_t fs, uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | code;
+        };
+        const uint32_t nop = 0x8000033cu;
+        install_vu0_pair(&unary_vu, 0, nop, unary(0x1d, 2, 1, 8)); // ABS.x
+        install_vu0_pair(&unary_vu, 1, nop, unary(0x15, 3, 2, 8)); // FTOI4.x
+        install_vu0_pair(&unary_vu, 2, nop, unary(0x11, 4, 3, 8)); // ITOF4.x
+        install_vu0_pair(&unary_vu, 3, nop, binary(0x2b, 5, 4, 1, 8)); // MAX.x
+        install_vu0_pair(&unary_vu, 4, nop, binary(0x2f, 6, 5, 1, 8)); // MINI.x
+        install_vu0_pair(&unary_vu, 5, nop, make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&unary_vu, 6, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &unary_cpu,
+            &unary_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              unary_vu.m_running == 0u && unary_vu.m_cycle == 21u,
+              "non-flag FMAC chain has four-cycle VF interlocks");
+        check(unary_cpu.m_vu0[2].m_lo == 0xdeadbeef3fc00000ull &&
+              unary_cpu.m_vu0[3].m_lo == 24u &&
+              unary_cpu.m_vu0[4].m_lo == 0x3fc00000u &&
+              unary_cpu.m_vu0[5].m_lo == 0x3fc00000u &&
+              unary_cpu.m_vu0[6].m_lo == 0x7fffffffbfc00000ull,
+              "ABS/FTOI/ITOF/MAX/MINI use correct destinations and preserve masked lanes");
+        check(unary_vu.m_mac_flags == 0x1234u && unary_vu.m_status_flags == 0x345u,
+              "non-flag FMAC does not clear or alter existing flags");
+    }
+
+    // OPMULA/OPMSUB always operate on XYZ, with W left untouched.
+    {
+        ee::s_ee_cpu_state outer_cpu{};
+        ee::s_ee_vu0_state outer_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        outer_vu.m_vpu_status = 1u;
+        outer_cpu.m_vu0[1] = {0x4040000040000000ull, 0x3f80000040a00000ull};
+        outer_cpu.m_vu0[2] = {0x4130000040e00000ull, 0x3f80000041500000ull};
+        outer_cpu.m_vu0[3].m_hi = 0xdeadbeef00000000ull;
+        outer_vu.m_acc.m_hi = 0x1234567800000000ull;
+        outer_vu.m_mac_flags = 1u;
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t opmula = (2u << 16u) | (1u << 11u) | (11u << 6u) | 0x3eu;
+        const uint32_t opmsub = (1u << 16u) | (2u << 11u) | (3u << 6u) | 0x2eu;
+        install_vu0_pair(&outer_vu, 0, nop, opmula);
+        install_vu0_pair(&outer_vu, 1, nop, opmsub | 0x40000000u);
+        install_vu0_pair(&outer_vu, 2, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &outer_cpu,
+            &outer_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              outer_vu.m_cycle == 6u && outer_vu.m_running == 0u,
+              "outer product pair executes with ACC forwarding");
+        check(outer_vu.m_acc.m_lo == 0x420c0000421c0000ull &&
+              outer_vu.m_acc.m_hi == 0x1234567841b00000ull &&
+              outer_cpu.m_vu0[3].m_lo == 0x41100000c1800000ull &&
+              outer_cpu.m_vu0[3].m_hi == 0xdeadbeef3f800000ull,
+              "OPMULA and OPMSUB rotated XYZ operands and preserved W");
+        check(outer_vu.m_mac_flags == 0x81u,
+              "outer product preserves W MAC bits");
+    }
+
+    // Lower MOVE/MR32/MTIR/MFIR operate on raw VF words and VI halfwords.
+    {
+        ee::s_ee_cpu_state transfer_cpu{};
+        ee::s_ee_vu0_state transfer_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        transfer_vu.m_vpu_status = 1u;
+        transfer_vu.m_vi[1] = 0x12340000u;
+        transfer_cpu.m_vu0[1] = {0x2222800133331234ull, 0x4444444455555555ull};
+        transfer_cpu.m_vu0[3].m_hi = 0xdeadbeefcafebabeull;
+        const auto lower = [](uint32_t table, uint32_t index, uint32_t ft,
+                              uint32_t fs, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (fs << 11u) | (index << 6u) | (0x3cu | table);
+        };
+        install_vu0_pair(&transfer_vu, 0, lower(0, 12, 2, 1, 15), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 1, lower(1, 12, 2, 2, 15), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 2, lower(0, 15, 1, 2, 0), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 3, lower(1, 15, 3, 1, 10), make_vu0_upper_nop());
+        install_vu0_pair(&transfer_vu, 4, lower(0, 12, 0, 3, 15),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&transfer_vu, 5, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &transfer_cpu,
+            &transfer_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              transfer_vu.m_running == 0u && transfer_vu.m_cycle == 14u,
+              "lower transfer lane dependencies and E drain");
+        check(transfer_cpu.m_vu0[2].m_lo == 0x5555555522228001ull &&
+              transfer_cpu.m_vu0[2].m_hi == 0x3333123444444444ull &&
+              transfer_vu.m_vi[1] == 0x12348001u &&
+              transfer_cpu.m_vu0[3].m_lo == 0x00000000ffff8001ull &&
+              transfer_cpu.m_vu0[3].m_hi == 0xdeadbeefffff8001ull &&
+              transfer_cpu.m_vu0[0].m_lo == 0u && transfer_cpu.m_vu0[0].m_hi == 0u,
+              "lower MOVE/MR32 aliasing, MTIR low half and MFIR sign extension");
+    }
+
+    // Register-wide dual-issue priority: mirror the focused PCSX2 probe.
+    {
+        ee::s_ee_cpu_state pair_cpu{};
+        ee::s_ee_vu0_state pair_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        pair_vu.m_vpu_status = 1u;
+        pair_vu.m_vi[1] = 3u;
+        pair_vu.m_vi[20] = 0x3f812345u;
+        pair_cpu.m_vu0[1].m_lo = 0xc0000000u;
+        pair_cpu.m_vu0[2].m_lo = 0x404000003f800000ull;
+        pair_cpu.m_vu0[4].m_lo = 0xc0800000u;
+        const auto abs_x = [](uint32_t ft, uint32_t fs)
+        {
+            return (8u << 21u) | (ft << 16u) | (fs << 11u) |
+                (7u << 6u) | 0x3du;
+        };
+        const auto lq_indexed = [](uint32_t secondary, uint32_t mask, uint32_t ft)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (1u << 11u) | (13u << 6u) | secondary;
+        };
+        const uint32_t sq_y = (1u << 25u) | (4u << 21u) | (2u << 11u) | 1u;
+        const uint32_t move_x = 0x80000000u | (8u << 21u) |
+            (3u << 16u) | (2u << 11u) | (12u << 6u) | 0x3cu;
+        const uint32_t rnext_x = 0x80000000u | (8u << 21u) |
+            (2u << 16u) | (16u << 6u) | 0x3cu;
+        install_vu0_pair(&pair_vu, 0, lq_indexed(0x3cu, 4u, 2u), abs_x(2, 1));
+        install_vu0_pair(&pair_vu, 1, sq_y, make_vu0_upper_nop());
+        install_vu0_pair(&pair_vu, 2, move_x, abs_x(2, 4));
+        install_vu0_pair(&pair_vu, 3, rnext_x, abs_x(2, 1));
+        install_vu0_pair(&pair_vu, 4, lq_indexed(0x3eu, 8u, 2u), abs_x(2, 4));
+        install_vu0_pair(&pair_vu, 5, lq_indexed(0x3cu, 8u, 0u), abs_x(0, 1));
+        const auto step = [&]()
+        {
+            return ee::ee_vu0_execute_ialu_callback(&engine, &pair_cpu,
+                &pair_vu, 1u, ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u) ==
+                static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        };
+        check(step() && pair_vu.m_cycle == 1u && pair_vu.m_vi[1] == 3u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040000000ull,
+              "disjoint LQI conflict discards load and index update");
+        check(step() && pair_vu.m_cycle == 5u &&
+              pair_vu.m_data_memory[22] == 0x40u && pair_vu.m_data_memory[23] == 0x40u,
+              "discarded lower retains its lane reservation");
+        check(step() && pair_cpu.m_vu0[3].m_lo == 0x40000000u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040800000ull,
+              "nonconflicting lower reads old upper destination");
+        check(step() && pair_vu.m_vi[20] == 0x3f812345u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040000000ull,
+              "overlapping RNEXT conflict preserves random state");
+        check(step() && pair_vu.m_vi[1] == 3u &&
+              pair_cpu.m_vu0[2].m_lo == 0x4040000040800000ull,
+              "overlapping LQD conflict discards pre-decrement");
+        check(step() && pair_vu.m_vi[1] == 4u &&
+              pair_cpu.m_vu0[0].m_lo == 0u && pair_cpu.m_vu0[0].m_hi == 0u,
+              "VF0 does not cause a conflict or suppress lower VI update");
+    }
+
+    // Micro FDIV publishes Q and I/D together, with WAITQ and E drain.
+    {
+        ee::s_ee_cpu_state scalar_cpu{};
+        ee::s_ee_vu0_state scalar_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        scalar_vu.m_vpu_status = 1u;
+        scalar_vu.m_q.m_lo = 0x3f800000u;
+        scalar_vu.m_vi[22] = 0x3f800000u;
+        scalar_cpu.m_vu0[1].m_lo = 0x41000000u; // 8
+        scalar_cpu.m_vu0[2].m_lo = 0x40800000u; // 4
+        const auto scalar = [](uint32_t op, uint32_t fs, uint32_t ft)
+        {
+            return 0x80000000u | (ft << 16u) | (fs << 11u) |
+                (14u << 6u) | (0x3cu | op);
+        };
+        install_vu0_pair(&scalar_vu, 0, scalar(0, 1, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 1, scalar(3, 0, 0), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 2, scalar(1, 0, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 3, scalar(2, 1, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 4, scalar(0, 1, 0),
+            make_vu0_upper_nop(0x40000000u)); // divide by zero
+        install_vu0_pair(&scalar_vu, 5, 0x8000033cu, make_vu0_upper_nop());
+        const auto step = [&]()
+        {
+            return ee::ee_vu0_execute_ialu_callback(&engine, &scalar_cpu,
+                &scalar_vu, 1u, ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u);
+        };
+        const auto complete = static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        check(step() == complete && scalar_vu.m_q_pending == 2u &&
+              scalar_vu.m_cycle == 1u && scalar_vu.m_vi[22] == 0x3f800000u,
+              "DIV leaves old Q visible until retirement");
+        check(step() == complete && scalar_vu.m_cycle == 8u &&
+              scalar_vu.m_vi[22] == 0x40000000u,
+              "WAITQ retires DIV at seven cycles");
+        check(step() == complete && scalar_vu.m_cycle == 9u &&
+              scalar_vu.m_q_ready_cycle == 16u,
+              "SQRT schedules seven-cycle Q");
+        check(step() == complete && scalar_vu.m_cycle == 16u &&
+              scalar_vu.m_q_ready_cycle == 29u && scalar_vu.m_vi[22] == 0x40000000u,
+              "RSQRT serializes prior SQRT");
+        check(step() == complete && scalar_vu.m_cycle == 29u &&
+              scalar_vu.m_vi[22] == 0x40800000u &&
+              (scalar_vu.m_status_flags & 0x30u) == 0u,
+              "RSQRT retires before new DIV, flags remain old");
+        check(step() == complete && scalar_vu.m_cycle == 36u &&
+              scalar_vu.m_q_pending == 0u && scalar_vu.m_running == 0u &&
+              scalar_vu.m_vi[22] == 0x7fffffffu &&
+              (scalar_vu.m_status_flags & 0x830u) == 0x820u,
+              "E drains divide-by-zero Q and D/DS flags");
+    }
+
+    // Upper Q consumers do not wait unless the lower half interlocks FDIV.
+    {
+        ee::s_ee_cpu_state q_cpu{};
+        ee::s_ee_vu0_state q_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        q_vu.m_vpu_status = 1u;
+        q_vu.m_vi[22] = 0x3f800000u;
+        q_vu.m_q.m_lo = 0x3f800000u;
+        q_cpu.m_vu0[1].m_lo = 0x41000000u; // 8
+        q_cpu.m_vu0[2].m_lo = 0x40800000u; // 4
+        q_cpu.m_vu0[3].m_hi = 0x12345678abcdef01ull;
+        const auto upper_q = [](uint32_t op, uint32_t fd, bool acc)
+        {
+            const uint32_t base = (8u << 21u) | (1u << 11u);
+            return acc ? base | ((op >> 2u) << 6u) | (0x3cu | (op & 3u)) :
+                base | (fd << 6u) | op;
+        };
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t div = 0x80000000u | (2u << 16u) | (1u << 11u) |
+            (14u << 6u) | 0x3cu;
+        const uint32_t waitq = 0x80000000u | (14u << 6u) | 0x3fu;
+        install_vu0_pair(&q_vu, 0, div, upper_q(0x20, 3, false)); // 8+1
+        install_vu0_pair(&q_vu, 1, nop, upper_q(0x1c, 4, false)); // 8*1
+        install_vu0_pair(&q_vu, 2, waitq, upper_q(0x24, 5, false)); // 8-2
+        install_vu0_pair(&q_vu, 3, nop, upper_q(0x20, 0, true)); // ACC=10
+        install_vu0_pair(&q_vu, 4, nop, upper_q(0x24, 0, true)); // ACC=6
+        install_vu0_pair(&q_vu, 5, nop, upper_q(0x1c, 0, true)); // ACC=16
+        install_vu0_pair(&q_vu, 6, nop, upper_q(0x21, 0, true)); // ACC=32
+        install_vu0_pair(&q_vu, 7, nop, upper_q(0x25, 0, true)); // ACC=16
+        install_vu0_pair(&q_vu, 8, nop, upper_q(0x21, 6, false)); // 32
+        install_vu0_pair(&q_vu, 9, nop, upper_q(0x25, 7, false) | 0x40000000u); // 0
+        install_vu0_pair(&q_vu, 10, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &q_cpu,
+            &q_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              q_vu.m_cycle == 19u && q_vu.m_running == 0u,
+              "Q consumers do not stall before WAITQ and E drains FMAC");
+        check(q_cpu.m_vu0[3].m_lo == 0x41100000u &&
+              q_cpu.m_vu0[3].m_hi == 0x12345678abcdef01ull &&
+              q_cpu.m_vu0[4].m_lo == 0x41000000u &&
+              q_cpu.m_vu0[5].m_lo == 0x40c00000u &&
+              q_vu.m_acc.m_lo == 0x41800000u &&
+              q_cpu.m_vu0[6].m_lo == 0x42000000u &&
+              q_cpu.m_vu0[7].m_lo == 0u,
+              "all ten upper Q variants use the visible scalar and preserve masked lanes");
+    }
+
+    // Lower random register instructions preserve raw mantissa sequences.
+    {
+        ee::s_ee_cpu_state random_cpu{};
+        ee::s_ee_vu0_state random_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        random_vu.m_vpu_status = 1u;
+        random_cpu.m_vu0[1].m_lo = 0x89abcdef01234567ull;
+        random_cpu.m_vu0[4].m_hi = 0xdeadbeefcafebabeull;
+        const auto random = [](uint32_t op, uint32_t ft, uint32_t fs, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (fs << 11u) | (16u << 6u) | (0x3cu | op);
+        };
+        install_vu0_pair(&random_vu, 0, random(2, 0, 1, 0), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 1, random(1, 2, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 2, random(0, 3, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 3, random(0, 0, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 4, random(0, 4, 0, 8), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 5, random(3, 0, 4, 0), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 6, random(1, 5, 0, 15),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&random_vu, 7, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &random_cpu,
+            &random_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              random_vu.m_running == 0u && random_vu.m_cycle == 14u,
+              "random VF source interlock and E drain");
+        check(random_cpu.m_vu0[2].m_lo == 0x3fa345673fa34567ull &&
+              random_cpu.m_vu0[3].m_lo == 0x3fc68ace3fc68aceull &&
+              random_cpu.m_vu0[4].m_lo == 0x3f8d159du &&
+              random_cpu.m_vu0[4].m_hi == 0xdeadbeefcafebabeull &&
+              random_vu.m_vi[20] == 0x3f800000u &&
+              random_cpu.m_vu0[5].m_hi == 0x3f8000003f800000ull,
+              "RINIT RGET RNEXT RXOR exact words, VF0 suppresses RNEXT and masks preserved");
+    }
+
+    // Register-addressed integer loads/stores ignore the opcode's low
+    // immediate-looking bits and keep the ordinary IALU latency.
+    {
+        ee::s_ee_cpu_state memory_cpu{};
+        ee::s_ee_vu0_state memory_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        memory_vu.m_vpu_status = 1u;
+        memory_vu.m_vi[1] = 0x101u; // wraps to byte 0x10 in VU0 memory
+        memory_vu.m_vi[2] = 0xabcd9876u;
+        memory_vu.m_vi[3] = 0xbeef0000u;
+        for (uint32_t i = 16u; i < 32u; ++i)
+        {
+            memory_vu.m_data_memory[i] = static_cast<uint8_t>(i);
+        }
+        const auto indexed = [](uint32_t table, uint32_t it, uint32_t is, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (it << 16u) |
+                (is << 11u) | (15u << 6u) | (0x3cu | table);
+        };
+        const uint32_t nop = 0x8000033cu;
+        install_vu0_pair(&memory_vu, 0, indexed(3, 2, 1, 10), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 1, indexed(2, 3, 1, 11), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 2, indexed(2, 0, 1, 15), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 3, indexed(3, 0, 1, 4),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&memory_vu, 4, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &memory_cpu,
+            &memory_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              memory_vu.m_running == 0u && memory_vu.m_cycle == 6u,
+              "ILWR reserves four IALU cycles and drains at E");
+        check(memory_vu.m_vi[3] == 0xbeef1d1cu && memory_vu.m_vi[0] == 0u &&
+              memory_vu.m_vi[1] == 0x101u &&
+              memory_vu.m_data_memory[16] == 0x76u &&
+              memory_vu.m_data_memory[17] == 0x98u &&
+              memory_vu.m_data_memory[18] == 0u &&
+              memory_vu.m_data_memory[19] == 0u &&
+              memory_vu.m_data_memory[20] == 0u &&
+              memory_vu.m_data_memory[23] == 0u &&
+              memory_vu.m_data_memory[24] == 0x76u &&
+              memory_vu.m_data_memory[25] == 0x98u &&
+              memory_vu.m_data_memory[28] == 28u,
+              "ILWR last selected halfword, ISWR zero extension, masks and VI0");
+    }
+
+    // FCSET/FSSET use the FMAC retirement slot; lower setters override
+    // the corresponding same-pair upper flag update.
+    {
+        ee::s_ee_cpu_state flag_cpu{};
+        ee::s_ee_vu0_state flag_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        flag_vu.m_vpu_status = 1u;
+        flag_vu.m_clip_flags = 0x123u;
+        flag_vu.m_vi[18] = 0x123u;
+        flag_vu.m_status_flags = 0x430u;
+        flag_vu.m_vi[16] = 0x430u;
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t fcset = (0x11u << 25u) | 0xabcdefu;
+        const uint32_t fsset = (0x15u << 25u) | (1u << 21u) | 0x140u;
+        const auto fcget = [](uint32_t it)
+        {
+            return (0x1cu << 25u) | (it << 16u);
+        };
+        const auto fsor = [](uint32_t it)
+        {
+            return (0x17u << 25u) | (it << 16u);
+        };
+        const uint32_t clip = (14u << 21u) | (7u << 6u) | 0x3fu;
+        const uint32_t add_zero = (8u << 21u) | (2u << 6u) | 0x28u;
+        install_vu0_pair(&flag_vu, 0, fcset, clip);
+        install_vu0_pair(&flag_vu, 1, fsset, add_zero);
+        install_vu0_pair(&flag_vu, 2, fcget(1), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 3, fsor(2), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 4, fcget(3), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 5, fsor(4), make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&flag_vu, 6, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &flag_cpu,
+            &flag_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              flag_vu.m_running == 0u && flag_vu.m_cycle == 10u,
+              "flag setters retire after four cycles and drain at E");
+        check(flag_vu.m_vi[1] == 0x123u && flag_vu.m_vi[2] == 0x430u &&
+              flag_vu.m_vi[3] == 0xdefu && flag_vu.m_vi[4] == 0x971u &&
+              flag_vu.m_clip_flags == 0xabcdefu && flag_vu.m_status_flags == 0x971u,
+              "FCSET and FSSET replace same-pair flags with delayed visibility");
+    }
 
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
@@ -702,7 +1358,7 @@ int main()
           cpu.m_gpr[13].m_hi == 0x3f80000000000000ULL,
           "QMFC2 reads VF0 as (0, 0, 0, 1.0f)");
 
-    // CFC2 sign-extends ordinary VI words; R only replaces UL[0].
+    // CFC2 zero-extends 16-bit VI registers; R only replaces UL[0].
     vu0.m_vi[6] = 0x81234567u;
     cpu.m_gpr[10].m_hi = 0x123456789abcdef0ULL;
     check(
@@ -710,8 +1366,8 @@ int main()
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CFC2 succeeds after scheduler synchronization"
     );
-    check(cpu.m_gpr[10].m_lo == 0xffffffff81234567ULL,
-          "CFC2 sign-extends ordinary VI values");
+    check(cpu.m_gpr[10].m_lo == 0x4567u,
+          "CFC2 zero-extends 16-bit VI values");
     check(cpu.m_gpr[10].m_hi == 0x123456789abcdef0ULL,
           "CFC2 preserves the upper 64-bit GPR half");
     vu0.m_vi[20] = 0xffabcdefu;
@@ -750,18 +1406,48 @@ int main()
     check(ee::ee_vu0_read_vi(&vu0, 26) == 0x00001234u,
           "CFC2 TPC reads tracked micro-PC");
 
+    // Reserved and masked control registers must not act as writable
+    // 32-bit VI storage. Test more than just the all-ones hardware probe.
+    for (const uint32_t pattern : {0xffffffffu, 0x55555555u, 0u})
+    {
+        cpu.m_gpr[8].m_lo = pattern;
+        for (const uint32_t reg : {19u, 23u, 24u, 25u})
+        {
+            vu0.m_vi[reg] = 0xdeadbeefu;
+            cpu.m_gpr[10].m_hi = 0x1122334455667788ull;
+            const uint32_t expected = reg == 19u ? 0x2e30u :
+                reg == 24u ? (pattern & 0xc0cu) : 0u;
+            check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, reg, write_mode, 0x00100048u) ==
+                      static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+                  ee::ee_vu0_cfc2(&cpu, &runtime, 10, reg, read_mode, 0x0010004cu) ==
+                      static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+                  cpu.m_gpr[10].m_lo == expected &&
+                  cpu.m_gpr[10].m_hi == 0x1122334455667788ull,
+                  "CTC2/CFC2 reserved and masked control readback");
+        }
+    }
+
     // Ordinary CTC2 writes VI, while the dedicated special cases are
-    // implemented explicitly and the three read-only registers ignore writes.
+    // implemented explicitly and read-only registers ignore writes.
     cpu.m_gpr[8].m_lo = 0x89abcdefu;
     check(
         ee::ee_vu0_ctc2(&cpu, &runtime, 8, 7, write_mode, 0x00100048u) ==
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CTC2 ordinary VI write succeeds"
     );
-    check(ee::ee_vu0_read_vi(&vu0, 7) == 0x89abcdefu,
+    check(ee::ee_vu0_read_vi(&vu0, 7) == 0xcdefu,
           "CTC2 writes the selected VI register");
     vu0.m_mac_flags = 0x12345678u;
     cpu.m_gpr[8].m_lo = 0xffffffffu;
+    vu0.m_status_flags = 0x15u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 16, write_mode, 0x00100048u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          vu0.m_status_flags == 0xfd5u && vu0.m_vi[16] == 0xfd5u,
+          "CTC2 STATUS writes sticky bits only");
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 27, write_mode, 0x00100048u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          vu0.m_vi[27] == 0xffffu,
+          "CTC2 CMSAR0 retains 16 bits");
     check(
         ee::ee_vu0_ctc2(&cpu, &runtime, 8, 17, write_mode, 0x0010004cu) ==
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
@@ -799,8 +1485,8 @@ int main()
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CTC2 CLIP_FLAG write succeeds"
     );
-    check(vu0.m_clip_flags == 0x12345678u &&
-          ee::ee_vu0_read_vi(&vu0, 18) == 0x12345678u,
+    check(vu0.m_clip_flags == 0x345678u &&
+          ee::ee_vu0_read_vi(&vu0, 18) == 0x345678u,
           "CTC2 CLIP_FLAG updates VI and the clip flag");
 
     cpu.m_gpr[8].m_lo = 0x00000c0fu;
@@ -813,8 +1499,24 @@ int main()
     check(control.m_calls == control_calls_before_fbrst + 1 &&
           control.m_last_register == 28 && control.m_last_value == 0x00000c0fu,
           "CTC2 FBRST forwards reset/break bits to the host");
-    check(ee::ee_vu0_read_vi(&vu0, 28) == 0x00000c0cu,
-          "CTC2 FBRST stores only the documented mask");
+    check(ee::ee_vu0_read_vi(&vu0, 28) == 0x00000c00u,
+          "CTC2 FBRST reset clears only the affected unit debug enables");
+    cpu.m_gpr[8].m_lo = 0x0000030fu;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          ee::ee_vu0_read_vi(&vu0, 28) == 0u &&
+          (vu0.m_vpu_status & 0xffffu) == 0u,
+          "both resets dominate force break and clear their debug status");
+    cpu.m_gpr[8].m_lo = 0x00000001u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          (vu0.m_vpu_status & 0xfu) == 8u && vu0.m_running == 0u,
+          "VU0 force break sets its own debug stop status");
+    cpu.m_gpr[8].m_lo = 0x00000002u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          (vu0.m_vpu_status & 0xffu) == 0u,
+          "VU0 reset exits debug stop");
 
     cpu.m_gpr[8].m_lo = 0x12345678u;
     const uint32_t control_calls_before_cmsar = control.m_calls;
@@ -826,6 +1528,10 @@ int main()
     check(control.m_calls == control_calls_before_cmsar + 1 &&
           control.m_last_register == 31 && control.m_last_value == 0x5678u,
           "CTC2 CMSAR1 forwards its low 16-bit micro entry address");
+    check(ee::ee_vu0_cfc2(&cpu, &runtime, 10, 31, read_mode, 0x00100064u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          cpu.m_gpr[10].m_lo == 0x5678u,
+          "CFC2 CMSAR1 reads the committed micro entry");
 
     // Side-effectful writes fail closed without a host action callback.
     ee::s_ee_runtime no_control = runtime;
@@ -2373,8 +3079,8 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, (0x40u << 25) | (15u << 6) | 0x3cu,
-                         make_vu0_upper_nop()); // MTIR remains unsupported.
+        install_vu0_pair(&state, 0, (0x40u << 25) | (31u << 6) | 0x3fu,
+                         make_vu0_upper_nop()); // Unassigned lower encoding.
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 4,
@@ -2389,7 +3095,7 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, make_vu0_iaddiu(1, 0, 1), 0x00000000u);
+        install_vu0_pair(&state, 0, make_vu0_iaddiu(1, 0, 1), 0x00000030u);
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 1,

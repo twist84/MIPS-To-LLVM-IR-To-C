@@ -71,6 +71,10 @@ def write64(_rt, addr, value):
 @ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(U128))
 def read_pair(rt, addr, out):
     PAIRS.append(("read", int(addr)))
+    if int(addr) == 0x10005000:
+        value = read_word(addr, 16)
+        out[0] = U128(value & 0xffffffffffffffff, value >> 64)
+        return
     lo = read64(rt, addr)
     hi = read64(rt, addr + 8)
     out[0] = U128(lo, hi)
@@ -86,6 +90,17 @@ def try_write_pair(_rt, addr, lo, hi):
         for i in range(8):
             MEMORY[int(addr) + offset + i] = (int(value) >> (8 * i)) & 0xFF
     return 1
+
+
+@ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32)
+def is_fifo(_rt, addr):
+    return int(addr) == 0x10005000
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32,
+                  ctypes.c_uint64, ctypes.c_uint64)
+def write_quadword(_rt, addr, lo, hi):
+    write_word(addr, 16, int(lo) | (int(hi) << 64))
 
 
 @ctypes.CFUNCTYPE(
@@ -110,8 +125,10 @@ def install_symbols(path):
         ("ee_mem_write16", write16),
         ("ee_mem_write32", write32),
         ("ee_mem_write64", write64),
-        ("ee_mem_read128_pair", read_pair),
+        ("ee_mem_read128_guest", read_pair),
         ("ee_mem_try_write128_ram", try_write_pair),
+        ("ee_mem_is_quadword_fifo", is_fifo),
+        ("ee_mem_write128_words", write_quadword),
     ):
         llvm.add_symbol(name, ctypes.cast(callback, ctypes.c_void_p).value)
     register_trace_symbols(trace_store)
@@ -230,6 +247,26 @@ def main():
         require(result == EE_EXIT_DISPATCH and
                 WRITES == [(8, 0x40, 0), (8, 0x48, 0)],
                 "SQ GPR0 must write both zero halves")
+
+        # Genuine SQ to a VIF FIFO is one atomic 16-byte transaction.
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_sq", 0x10005003)
+        require(result == EE_EXIT_DISPATCH and
+                WRITES == [(16, 0x10005000,
+                            0xfedcba98765432100123456789abcdef)] and
+                EVENTS == [("trace", 0x10005000), ("trace", 0x10005008),
+                           ("write", 0x10005000)],
+                "SQ FIFO split or diagnostic order incorrect")
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_lq", 0x10005003)
+        require(result == EE_EXIT_DISPATCH and READS == [(16, 0x10005000)],
+                "LQ FIFO split into scalar reads")
+        result, cpu, original = execute(
+            fixture, directory, target, "ee_sq", 0x10005003,
+            trace_enabled=False)
+        require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
+                WRITES[0][0] == 16 and not TRACES,
+                "untraced SQ FIFO lost full-width transaction")
 
         # Natural alignment is mandatory for scalar and COP1 transfers.
         for mode, width, excode in (

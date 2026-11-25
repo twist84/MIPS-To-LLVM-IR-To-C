@@ -35,6 +35,7 @@ class c_sif_rpc_bridge
 public:
     static constexpr uint32_t k_rpc_data_destination = 0xdeadbef0u;
     static constexpr uint32_t k_loadfile_server = 0x80000006u;
+    static constexpr uint32_t k_fileio_server = 0x80000001u;
     static constexpr uint32_t k_iop_heap_server = 0x80000003u;
     static constexpr uint32_t k_cdvd_init_server = 0x80000592u;
     static constexpr uint32_t k_cdvd_s_server = 0x80000593u;
@@ -76,6 +77,7 @@ public:
         bool m_cdvd_lookup_found = false;
         bool m_guest_rpc = false;
         bool m_deferred_bind = false;
+        std::vector<uint8_t> m_fileio_console_bytes;
         std::vector<uint8_t> m_guest_rpc_bytes;
         std::vector<uint8_t> m_cdvd_bytes;
         std::string m_guest_path;
@@ -177,11 +179,21 @@ public:
     // Pending replies remain queued if the EE cannot accept them yet.
     // The EE can acknowledge DMA5 before the guest has copied its packet.
     void set_ee_receive_busy(bool busy);
-    bool pump();
+    // The EE runner invokes this after every IOP turn. Keep the
+    // empty-queue path visible to callers without requiring LTO.
+    // Both queues matter: an initializer can produce a new reply.
+    bool pump()
+    {
+        return (!m_pending_module_starts.empty() || !m_replies.empty()) &&
+            pump_pending();
+    }
     size_t pending_replies() const;
     // Calls pending a real R3000 SIFCMD finish trampoline.
     // A committed request alone never counts as a completed reply.
-    size_t pending_guest_calls() const;
+    size_t pending_guest_calls() const
+    {
+        return m_guest_pending.size();
+    }
     // LOADFILE success is not a guest module start result until _start returns.
     size_t pending_module_starts() const;
     size_t pending_binds() const;
@@ -191,6 +203,8 @@ public:
     uint32_t load_requests() const;
 
 private:
+    bool pump_pending();
+
     struct s_reply
     {
         uint32_t m_words[16]{};

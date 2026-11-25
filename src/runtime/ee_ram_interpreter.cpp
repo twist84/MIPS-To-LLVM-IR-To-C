@@ -13,6 +13,7 @@ namespace
 struct s_ee_ram_step
 {
     bool m_is_branch = false;
+    bool m_likely = false;
     bool m_tlb_written = false;
     bool m_taken = false;
     uint32_t m_target = 0;
@@ -144,12 +145,13 @@ e_ee_ram_result step(
             return e_ee_ram_result::UNSUPPORTED;
         }
     case 0x01u: // REGIMM
-        if (rt != 0u && rt != 1u)
+        if (rt > 3u)
         {
             return e_ee_ram_result::UNSUPPORTED;
         }
         branch.m_is_branch = true;
-        branch.m_taken = rt == 0u
+        branch.m_likely = (rt & 2u) != 0u;
+        branch.m_taken = (rt & 1u) == 0u
             ? static_cast<int64_t>(a) < 0
             : static_cast<int64_t>(a) >= 0;
         branch.m_target = branch_target(pc, imm);
@@ -167,18 +169,24 @@ e_ee_ram_result step(
         return e_ee_ram_result::RETURNED;
     case 0x04u: // BEQ
     case 0x05u: // BNE
+    case 0x14u: // BEQL
+    case 0x15u: // BNEL
         branch.m_is_branch = true;
-        branch.m_taken = primary == 0x04u ? a == b : a != b;
+        branch.m_likely = (primary & 0x10u) != 0u;
+        branch.m_taken = (primary & 1u) == 0u ? a == b : a != b;
         branch.m_target = branch_target(pc, imm);
         return e_ee_ram_result::RETURNED;
     case 0x06u: // BLEZ
     case 0x07u: // BGTZ
+    case 0x16u: // BLEZL
+    case 0x17u: // BGTZL
         if (rt != 0u)
         {
             return e_ee_ram_result::UNSUPPORTED;
         }
         branch.m_is_branch = true;
-        branch.m_taken = primary == 0x06u
+        branch.m_likely = (primary & 0x10u) != 0u;
+        branch.m_taken = (primary & 1u) == 0u
             ? static_cast<int64_t>(a) <= 0
             : static_cast<int64_t>(a) > 0;
         branch.m_target = branch_target(pc, imm);
@@ -488,6 +496,50 @@ s_ee_ram_execution ee_execute_ram_callback(
         {
             delay_slot = false;
             pc = pending_taken ? pending_target : pc + 4u;
+        }
+        else if (branch.m_is_branch && branch.m_likely && !branch.m_taken)
+        {
+            // The architectural instruction is annulled, so there is
+            // no fetch fault, side effect or retirement for its slot.
+            // Match native IR's separate reference-slot observation.
+            if (runtime != nullptr)
+            {
+                const uint32_t slot_pc = pc + 4u;
+                const uint32_t opcode = memory->contains(slot_pc, 4u)
+                    ? memory->read32(slot_pc) : 0u;
+                ++runtime->m_reference_instruction_slots;
+                ee_observe_timing_event(
+                    *runtime, slot_pc, opcode, 1u, 0u,
+                    runtime->m_guest_instruction_attempts,
+                    runtime->m_reference_instruction_slots);
+                if (runtime->m_instruction_trace != nullptr &&
+                    slot_pc >= runtime->m_instruction_trace_first_pc &&
+                    slot_pc <= runtime->m_instruction_trace_last_pc)
+                {
+                    if (runtime->m_instruction_trace_count <
+                        runtime->m_instruction_trace_capacity)
+                    {
+                        auto& entry = runtime->m_instruction_trace[
+                            runtime->m_instruction_trace_count++];
+                        entry.m_attempt = runtime->m_guest_instruction_attempts;
+                        entry.m_pc = slot_pc;
+                        entry.m_opcode_word = opcode;
+                        entry.m_kind = 1u;
+                        entry.m_reference_slot = runtime->m_reference_instruction_slots;
+                        entry.m_hle_service = 0u;
+                    }
+                    else
+                    {
+                        runtime->m_instruction_trace_overflow = 1u;
+                    }
+                }
+                if (runtime->m_timing_observer_failed != 0u)
+                {
+                    result.m_result = e_ee_ram_result::TIMING_OBSERVER_REJECTED;
+                    return result;
+                }
+            }
+            pc += 8u;
         }
         else if (branch.m_is_branch)
         {

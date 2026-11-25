@@ -103,6 +103,7 @@ int main()
 
     hardware.bind_cpu(&cpu);
     hardware.bind_memory(&memory);
+    hardware.bind_gs(&gs);
     hardware.bind_device_transfer(&gif, ee::c_ee_gif_path3::dma_transfer);
     gif.bind_event_sink(&gs, ee::c_ee_gs_state::gif_events);
 
@@ -261,14 +262,14 @@ int main()
         return fail("REGLIST GS state or odd-halfword padding");
     }
 
-    // Reject SIGNAL with no GS interrupt model. Even the earlier valid
+    // Reject unsupported FINISH. Even the earlier valid
     // FRAME_1 write in the SAME DMA batch must be rolled back.
     hardware.reset();
     gif.reset();
     gs.reset();
     tag(&runtime, 0x500u, 2u, 0u, 1u, 0xeull);
     ad(&runtime, 0x510u, 0x4cu, 0x55aa55aaull);
-    ad(&runtime, 0x520u, 0x60u, 0x1234u);
+    ad(&runtime, 0x520u, 0x61u, 0x1234u);
     dma(&runtime, 0x500u, 3u);
     if (gs.was_written(0x4cu) ||
         gs.state().m_tag_count != 0u ||
@@ -278,7 +279,7 @@ int main()
         (mmio(&runtime, k_gif) & k_str) == 0u ||
         hardware.dmac().status() != 0u)
     {
-        return fail("unsupported SIGNAL committed partial state or DMA");
+        return fail("unsupported FINISH committed partial state or DMA");
     }
 
     // Retry with TEXFLUSH. It must commit the batch without latching data.
@@ -291,7 +292,7 @@ int main()
         gs.state().m_tag_count != 1u ||
         (hardware.dmac().status() & k_gif_bit) == 0u)
     {
-        return fail("DMA retry after rejecting unsupported GS signal");
+        return fail("DMA retry after rejecting unsupported GS FINISH");
     }
 
     // IMAGE without a configured TRXDIR cannot be treated as uploaded.
@@ -366,12 +367,12 @@ int main()
         return fail("retail CHCR=0x101 GIF DMA did not reach the GS sink");
     }
 
-    // A rejected SIGNAL packet may not complete the same CHCR mode.
+    // A rejected FINISH packet may not complete the same CHCR mode.
     hardware.reset();
     gif.reset();
     gs.reset();
     tag(&runtime, 0x740u, 1u, 0u, 1u, 0xeull);
-    ad(&runtime, 0x750u, 0x60u, 0x1u);
+    ad(&runtime, 0x750u, 0x61u, 0x1u);
     ee::ee_mem_write32(&runtime, k_gif + 0x10u, 0x740u);
     ee::ee_mem_write32(&runtime, k_gif + 0x20u, 2u);
     ee::ee_mem_write32(&runtime, k_gif, 0x101u);
@@ -410,7 +411,7 @@ int main()
         return fail("real GIF source-chain END nine-qword transfer");
     }
 
-    // The parser refuses unsupported GS SIGNAL, retaining DMA source
+    // The parser refuses unsupported GS FINISH, retaining DMA source
     // state and STR. A partially parsed A+D batch must not commit.
     hardware.reset();
     gif.reset();
@@ -418,7 +419,7 @@ int main()
     quad(&runtime, 0x800u, 0x70000003u, 0u); // END with three qwords
     tag(&runtime, 0x810u, 2u, 0u, 1u, 0xeull);
     ad(&runtime, 0x820u, 0x4cu, 0x55aau);
-    ad(&runtime, 0x830u, 0x60u, 1u); // GS SIGNAL is not yet supported
+    ad(&runtime, 0x830u, 0x61u, 1u); // GS FINISH is not yet supported
     ee::ee_mem_write32(&runtime, k_gif + 0x30u, 0x800u);
     ee::ee_mem_write32(&runtime, k_gif + 0x20u, 0u);
     ee::ee_mem_write32(&runtime, k_gif, 0x105u);
@@ -473,7 +474,7 @@ int main()
     ee::s_ee_gif_event bad_signal{};
     bad_signal.m_type = ee::e_ee_gif_event_type::reglist;
     bad_signal.m_byte_offset = 0u;
-    bad_signal.m_register = 0x60u; // SIGNAL unsupported without GS IRQ
+    bad_signal.m_register = 0x61u; // FINISH unsupported
     bad_signal.m_word0 = 1u;
     const ee::s_ee_gif_event rejected[2] = {
         good_tag, bad_signal
@@ -493,6 +494,79 @@ int main()
         return fail("GPU observer did not see committed GS transaction");
     }
     gs.bind_committed_event_observer(nullptr, nullptr);
+
+    // Both guest-visible SIGLBLID lanes share the committed GIF state.
+    hardware.reset();
+    gif.reset();
+    gs.reset();
+    constexpr uint32_t k_siglblid = ee::c_ee_hw_bus::k_gs_siglblid;
+    constexpr uint32_t k_csr = ee::c_ee_hw_bus::k_gs_csr;
+    const ee::s_ee_u128 initial{0x12345678aabbccddull, 0u};
+    if (!ee::c_ee_hw_bus::mmio_write(&hardware, k_siglblid, 8u, &initial))
+    {
+        return fail("SIGLBLID 64-bit write");
+    }
+    tag(&runtime, 0xa00u, 1u, 0u, 1u, 0xeull);
+    ad(&runtime, 0xa10u, 0x62u, 0x0000ff000000ab00ull);
+    dma(&runtime, 0xa00u, 2u);
+    if (mmio(&runtime, k_siglblid) != 0xaabbccddu ||
+        mmio(&runtime, k_siglblid + 4u) != 0x1234ab78u ||
+        (mmio(&runtime, k_csr) & 1u) != 0u ||
+        hardware.intc().status() != 0u ||
+        (mmio(&runtime, k_gif) & k_str) != 0u)
+    {
+        return fail("LABEL masked update, DMA or unexpected SIGNAL");
+    }
+    ee::ee_mem_write32(&runtime, k_siglblid, 0x11223344u);
+    hardware.set_gs_imr(0x100u); // mask SIGNAL
+    ad(&runtime, 0xa10u, 0x60u, 0x000000ff00000099ull);
+    dma(&runtime, 0xa00u, 2u);
+    if (mmio(&runtime, k_siglblid) != 0x11223399u ||
+        mmio(&runtime, k_siglblid + 4u) != 0x1234ab78u ||
+        (mmio(&runtime, k_csr) & 1u) == 0u ||
+        hardware.intc().status() != 0u)
+    {
+        return fail("masked SIGNAL did not latch or incorrectly raised IRQ");
+    }
+    hardware.set_gs_imr(0u); // unmask pending SIGNAL
+    if ((hardware.intc().status() & 1u) == 0u)
+    {
+        return fail("unmask pending SIGNAL did not raise GS IRQ");
+    }
+    // A second unacknowledged SIGNAL must not fabricate completion.
+    ad(&runtime, 0xa10u, 0x60u, 0x000000ff00000055ull);
+    dma(&runtime, 0xa00u, 2u);
+    if (mmio(&runtime, k_siglblid) != 0x11223399u ||
+        (mmio(&runtime, k_gif) & k_str) == 0u)
+    {
+        return fail("second SIGNAL fabricated DMA completion");
+    }
+    ee::ee_mem_write32(&runtime, k_csr, 1u);
+    ee::ee_mem_write32(&runtime, ee::c_ee_intc::k_stat_address, 1u);
+    ee::ee_mem_write32(&runtime, k_gif, 0u);
+    dma(&runtime, 0xa00u, 2u);
+    if (mmio(&runtime, k_siglblid) != 0x11223355u ||
+        (mmio(&runtime, k_csr) & 1u) == 0u ||
+        (hardware.intc().status() & 1u) == 0u ||
+        (mmio(&runtime, k_gif) & k_str) != 0u)
+    {
+        return fail("acknowledged SIGNAL retry or unmasked IRQ");
+    }
+    // A valid SIGNAL followed by an invalid event cannot leak its
+    // register update, CSR latch or IRQ out of a rejected transaction.
+    ee::ee_mem_write32(&runtime, k_csr, 1u);
+    ee::ee_mem_write32(&runtime, ee::c_ee_intc::k_stat_address, 1u);
+    tag(&runtime, 0xa00u, 2u, 0u, 1u, 0xeull);
+    ad(&runtime, 0xa10u, 0x60u, 0x000000ff00000066ull);
+    ad(&runtime, 0xa20u, 0x61u, 0u);
+    dma(&runtime, 0xa00u, 3u);
+    if (mmio(&runtime, k_siglblid) != 0x11223355u ||
+        (mmio(&runtime, k_csr) & 1u) != 0u ||
+        hardware.intc().status() != 0u ||
+        (mmio(&runtime, k_gif) & k_str) == 0u)
+    {
+        return fail("rejected batch leaked SIGNAL state or IRQ");
+    }
 
     std::puts("EE GS register capture via DMA/GIF with atomic IMAGE: PASS");
     return 0;
