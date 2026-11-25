@@ -34,6 +34,13 @@ define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) 
   ret void
 }
 
+define void @test_clz26_4(ptr %in, ptr %out) {
+  %v = load <4 x i32>, ptr %in, align 4
+  %r = call <4 x i32> @vu_clz26_4(<4 x i32> %v)
+  store <4 x i32> %r, ptr %out, align 4
+  ret void
+}
+
 define void @test_fmac4(i32 %op, ptr %in, ptr %out) {
   %acc = load <4 x i32>, ptr %in, align 4
   %ap = getelementptr i32, ptr %in, i32 4
@@ -98,6 +105,23 @@ define void @test_fmac4(i32 %op, ptr %in, ptr %out) {
         ptr = ctypes.POINTER(word)
         vector = ctypes.CFUNCTYPE(None, word, ptr, ptr)(vector_address)
         vector_out = (word * 16)()
+        # Check both sides of every power-of-two transition, including
+        # the binary32 precision boundary and the maximum 26-bit input.
+        clz_address = engine.get_function_address("test_clz26_4")
+        assert clz_address
+        clz = ctypes.CFUNCTYPE(None, ptr, ptr)(clz_address)
+        clz_out = (word * 4)()
+        clz_rng = random.Random(0x26)
+        magnitudes = sorted({n for k in range(27)
+                             for n in range((1 << k) - 8, (1 << k) + 9)
+                             if 0 <= n < (1 << 26)})
+        magnitudes.extend(clz_rng.randrange(1 << 26) for _ in range(4096))
+        magnitudes.extend([0] * (-len(magnitudes) % 4))
+        for i in range(0, len(magnitudes), 4):
+            lanes = magnitudes[i:i + 4]
+            clz((word * 4)(*lanes), clz_out)
+            expected = tuple(32 - n.bit_length() for n in lanes)
+            assert tuple(clz_out) == expected, (opt, lanes, tuple(clz_out), expected)
         rng = random.Random(0x5900)
         edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x0080008b,
                  0x008000ea, 0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000,

@@ -5,7 +5,27 @@
 namespace llvm
 {
 inline constexpr char k_vu_fmac4_ir[] = R"IR(
-declare <4 x i32> @llvm.ctlz.v4i32(<4 x i32>, i1 immarg)
+declare <4 x i32> @llvm.umax.v4i32(<4 x i32>, <4 x i32>)
+declare <4 x i32> @llvm.umin.v4i32(<4 x i32>, <4 x i32>)
+
+; The two aligned 25-bit significands sum to a magnitude below 2^26.
+; For n >= 4, removing the two low bits preserves its highest set bit
+; and makes it exactly representable as binary32. For n < 4, keep n.
+; The conversion is exact under every host rounding mode; only its
+; exponent is used for counting bits, never for guest FP arithmetic.
+; This avoids the long packed ctlz expansion on AVX2 hosts.
+define internal <4 x i32> @vu_clz26_4(<4 x i32> %magnitude) alwaysinline {
+entry:
+  %high = and <4 x i32> %magnitude, <i32 -4, i32 -4, i32 -4, i32 -4>
+  %low = and <4 x i32> %magnitude, <i32 3, i32 3, i32 3, i32 3>
+  %exact = call <4 x i32> @llvm.umax.v4i32(<4 x i32> %high, <4 x i32> %low)
+  %encoded = sitofp <4 x i32> %exact to <4 x float>
+  %bits = bitcast <4 x float> %encoded to <4 x i32>
+  %exp = lshr <4 x i32> %bits, <i32 23, i32 23, i32 23, i32 23>
+  %raw = sub <4 x i32> <i32 158, i32 158, i32 158, i32 158>, %exp
+  %leading = call <4 x i32> @llvm.umin.v4i32(<4 x i32> %raw, <4 x i32> <i32 32, i32 32, i32 32, i32 32>)
+  ret <4 x i32> %leading
+}
 
 define internal { <4 x i32>, <4 x i1>, <4 x i1> } @vu_add4(<4 x i32> %lhs, <4 x i32> %rhs, i1 %subtract) alwaysinline {
 entry:
@@ -46,7 +66,7 @@ entry:
   %negative = icmp slt <4 x i32> %sum, <i32 0, i32 0, i32 0, i32 0>
   %neg_sum = sub <4 x i32> <i32 0, i32 0, i32 0, i32 0>, %sum
   %magnitude = select <4 x i1> %negative, <4 x i32> %neg_sum, <4 x i32> %sum
-  %leading = call <4 x i32> @llvm.ctlz.v4i32(<4 x i32> %magnitude, i1 false)
+  %leading = call <4 x i32> @vu_clz26_4(<4 x i32> %magnitude)
   %safe_shift = and <4 x i32> %leading, <i32 31, i32 31, i32 31, i32 31>
   %normalized = shl <4 x i32> %magnitude, %safe_shift
   %significand = lshr <4 x i32> %normalized, <i32 8, i32 8, i32 8, i32 8>
