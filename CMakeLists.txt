@@ -359,6 +359,29 @@ add_test(NAME ee_reached_isa_inventory COMMAND ee_reached_isa_inventory_test)
 add_executable(ee_game_runner src/tools/ee_game_runner_main.cpp)
 target_link_libraries(ee_game_runner PRIVATE ee_core iop_cpu ${CMAKE_DL_LIBS})
 
+# Standalone pinned raudio; no device is opened by headless/default test runs.
+add_library(ee_raudio STATIC third_party/raudio/src/raudio.c)
+set_target_properties(ee_raudio PROPERTIES C_EXTENSIONS ON)
+target_compile_definitions(ee_raudio PRIVATE RAUDIO_STANDALONE
+    SUPPORT_MODULE_RAUDIO AUDIO_DEVICE_SAMPLE_RATE=48000)
+target_include_directories(ee_raudio PUBLIC third_party/raudio/src)
+target_link_libraries(ee_raudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+if(WIN32)
+    target_compile_definitions(ee_raudio PRIVATE _CRT_SECURE_NO_WARNINGS)
+    target_link_libraries(ee_raudio PUBLIC winmm ole32 uuid)
+elseif(UNIX AND NOT APPLE)
+    target_link_libraries(ee_raudio PUBLIC m)
+elseif(APPLE)
+    target_link_libraries(ee_raudio PUBLIC "-framework CoreAudio"
+        "-framework AudioToolbox" "-framework CoreFoundation")
+endif()
+target_sources(ee_game_runner PRIVATE src/runtime/ee_host_audio.cpp)
+target_link_libraries(ee_game_runner PRIVATE ee_raudio)
+
+add_executable(ee_pcm_queue_test tests/smoke/ee_pcm_queue_test.cpp)
+target_link_libraries(ee_pcm_queue_test PRIVATE Threads::Threads)
+add_test(NAME ee_pcm_queue COMMAND ee_pcm_queue_test)
+
 # Original native WebGPU compute renderer, extracted from ps2-web-recomp:SDBZ.
 # No Emscripten, browser host, game code, or SDL; headless builds unchanged.
 option(EE_ENABLE_WEBGPU "Enable native wgpu-native GS rendering" OFF)
@@ -461,6 +484,10 @@ if(EE_ENABLE_WEBGPU)
         include(FetchContent)
         # Pin raylib 5.5 to a specific commit under build/_deps.
         set(BUILD_EXAMPLES OFF CACHE BOOL "Build raylib examples" FORCE)
+        # The standalone audio library is the sole raudio implementation.
+        set(CUSTOMIZE_BUILD ON CACHE BOOL "Customize raylib modules" FORCE)
+        set(USE_AUDIO OFF CACHE BOOL "Disable raylib audio" FORCE)
+        set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "Disable duplicate raudio" FORCE)
         FetchContent_Declare(raylib
             GIT_REPOSITORY https://github.com/raysan5/raylib.git
             GIT_TAG c1ab645ca298a2801097931d1079b10ff7eb9df8)
@@ -1078,6 +1105,9 @@ set_tests_properties(multi_function smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_S
 # Apply warning policy only to project targets, not FetchContent raylib/GLFW.
 get_property(EE_PROJECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
 foreach(target IN LISTS EE_PROJECT_TARGETS)
+    if(target STREQUAL "ee_raudio")
+        continue()
+    endif()
     get_target_property(target_type ${target} TYPE)
     if(NOT target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
         continue()

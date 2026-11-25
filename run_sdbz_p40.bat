@@ -13,6 +13,12 @@ if errorlevel 1 exit /b 1
 set "SDBZ_EE_OPT=5"
 set "SDBZ_SKIP_HEADLESS_EXPANSION=1"
 set "SDBZ_SPEED_PERCENT=0"
+rem Opt-in real-time listening; default P40 remains uncapped and device-free.
+if "%SDBZ_P40_LISTEN%"=="1" (
+    set "SDBZ_SPEED_PERCENT=100"
+    set "SDBZ_HOST_AUDIO=1"
+)
+if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"
 
 set "MAX_DISPATCHES=40000000"
 set "MAX_EXPANSION_DISPATCHES=40000000"

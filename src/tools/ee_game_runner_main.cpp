@@ -3,6 +3,7 @@
 #include "ee_dispatch_index.h"
 #include "ee_native_target_cache.h"
 #include "ee_runtime_profile.h"
+#include "ee_host_audio.h"
 #include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
 #include "ee_memory.h"
@@ -2182,6 +2183,27 @@ int main(int argc, char** argv)
             return 2;
         }
     }
+    // Preserve device-free uncapped benchmarks and headless runs by default.
+    bool host_audio_enabled = gs_webgpu_window && speed_percent != 0u;
+    std::string host_audio_environment;
+    const char* host_audio_setting = read_host_environment(
+        "SDBZ_HOST_AUDIO", &host_audio_environment);
+    if (host_audio_setting != nullptr)
+    {
+        if (std::strcmp(host_audio_setting, "0") == 0)
+        {
+            host_audio_enabled = false;
+        }
+        else if (std::strcmp(host_audio_setting, "1") == 0)
+        {
+            host_audio_enabled = true;
+        }
+        else
+        {
+            std::fprintf(stderr, "invalid SDBZ_HOST_AUDIO (expected 0 or 1)\n");
+            return 2;
+        }
+    }
     uint32_t dispatch_trace_every = 1u;
     std::string dispatch_trace_environment;
     const char* dispatch_trace_setting = read_host_environment(
@@ -2598,6 +2620,7 @@ int main(int argc, char** argv)
     // Declared before the kernel so translated code outlives the IOP CPU.
     std::unique_ptr<iop::c_iop_aot> iop_aot;
     std::unique_ptr<iop::c_kernel> iop_kernel;
+    ee::c_ee_host_audio host_audio;
     iop::c_iop_guest_fault_probe iop_fault_probe{};
     std::unique_ptr<iop::c_sif1_dma_transport> iop_sif1_transport;
     std::unique_ptr<iop::c_sif0_dma_transport> iop_sif0_transport;
@@ -3025,6 +3048,11 @@ int main(int argc, char** argv)
                         "(SIF-poll rendezvous, not cycle accurate)\n",
                         iop_irx_paths[index].c_str(), thread_id, iop_quantum);
         }
+    }
+
+    if (host_audio_enabled)
+    {
+        host_audio.start(iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr);
     }
 
     if (instruction_trace_window_seen && instruction_trace_path == nullptr)
@@ -4732,9 +4760,11 @@ int main(int argc, char** argv)
             std::string failure;
             const auto compile_start = std::chrono::steady_clock::now();
             ee::c_runtime_profile_scope compile_profile_scope(ee::e_runtime_profile_id::compile_wait);
+            host_audio.pause();
             const bool expanded = request_hot_expand(
                 hot_expand_dir, ++hot_expand_sequence, from_pc,
                 &replacement, &replacement_is_overlay, &failure);
+            host_audio.resume();
             compile_profile_scope.stop();
             compile_wait_ms += std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - compile_start).count();
@@ -7130,6 +7160,7 @@ int main(int argc, char** argv)
                             {
                                 cdvd->m_transport.reset();
                             }
+                            host_audio.pause();
                             iop_kernel->reset();
                             if (!iop_kernel->attach_hle_hardware())
                             {
@@ -7137,6 +7168,7 @@ int main(int argc, char** argv)
                                     "[iop] HLE MMIO reattachment failed\n");
                                 break;
                             }
+                            host_audio.resume();
                             if (pad0_cross_poll_count != 0u)
                             {
                                 iop_kernel->hardware()
@@ -8720,6 +8752,8 @@ int main(int argc, char** argv)
     graphics_probe.set_gpu_progress(
         webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
 #endif
+    host_audio.shutdown();
+    host_audio.report();
     if (iop_kernel != nullptr)
     {
         const auto& spu2 = iop_kernel->hardware().spu2();
