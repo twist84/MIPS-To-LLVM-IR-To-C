@@ -454,6 +454,18 @@ int main(int argc, char** argv)
     {
         return 1;
     }
+    // The branch fixtures write architectural MAC/STATUS but never
+    // read their delayed history. The Q fixture reads STATUS and CLIP
+    // but not MAC. The full flag fixture consumes all three histories.
+    const bool has_mac_ring = program.m_ir.find("%mac_ring_head = alloca") != std::string::npos;
+    const bool has_status_ring = program.m_ir.find("%status_ring_head = alloca") != std::string::npos;
+    const bool has_clip_ring = program.m_ir.find("%clip_ring_head = alloca") != std::string::npos;
+    if ((branches && (has_mac_ring || has_status_ring || has_clip_ring)) ||
+        (q_case && (has_mac_ring || !has_status_ring || !has_clip_ring)) ||
+        (flag_case && (!has_mac_ring || !has_status_ring || !has_clip_ring)))
+    {
+        return 1;
+    }
     ee::s_ee_vu1_state state{};
     state.m_initialized = true;
     state.m_vf[0][3] = 0x3f800000u;

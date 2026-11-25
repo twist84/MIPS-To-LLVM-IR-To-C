@@ -160,6 +160,30 @@ define internal void @vu_q_wait(ptr %q, ptr %ready, ptr %pending,
 )IR";
 
 constexpr uint32_t k_unknown_pc = 0xffffffffu;
+constexpr uint32_t k_mac_history = 1u;
+constexpr uint32_t k_status_history = 2u;
+constexpr uint32_t k_clip_history = 4u;
+
+// Only lower flag readers observe historical values. Flag producers
+// always update the live architectural registers, even without readers.
+uint32_t flag_history_reads(uint32_t lo, uint32_t hi)
+{
+    if ((hi & 0x80000000u) != 0u)
+    {
+        return 0u;
+    }
+    switch (lo >> 25u)
+    {
+    case 0x10u: case 0x12u: case 0x13u: case 0x1cu:
+        return k_clip_history;
+    case 0x14u: case 0x16u: case 0x17u:
+        return k_status_history;
+    case 0x18u: case 0x1au: case 0x1bu:
+        return k_mac_history;
+    default:
+        return 0u;
+    }
+}
 
 bool is_branch(uint32_t lo, uint32_t hi)
 {
@@ -274,10 +298,11 @@ public:
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
     void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
-        bool flags, bool q, bool p, uint32_t branch_vi_mask)
+        bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask)
     {
         m_dynamic = true;
         m_branch_vi_mask = branch_vi_mask;
+        m_flag_history_mask = flag_history_mask;
         m_flag_pipeline = flags;
         m_q_pipeline = q;
         m_p_pipeline = p;
@@ -291,10 +316,16 @@ public:
             line("%q_pending_flags = alloca i32, align 4");
             line("store i32 0, ptr %q_pending_flags, align 4");
         }
-        if (flags)
+        if ((m_flag_history_mask & k_mac_history) != 0u)
         {
             init_ring("mac");
+        }
+        if ((m_flag_history_mask & k_status_history) != 0u)
+        {
             init_ring("status");
+        }
+        if ((m_flag_history_mask & k_clip_history) != 0u)
+        {
             init_ring("clip");
         }
         line("%pc = alloca i32, align 4");
@@ -457,16 +488,28 @@ public:
             const auto status = operation("or i32 " + current + ", " +
                 std::to_string(m_fsset));
             line("store i32 " + status + ", ptr %status, align 4");
-            const auto time = operation("sub i32 " + m_flag_time + ", 4");
-            push_ring("status", time, status);
-            push_ring("mac", time, operation("load i32, ptr %mac, align 4"));
+            if ((m_flag_history_mask & (k_status_history | k_mac_history)) != 0u)
+            {
+                const auto time = operation("sub i32 " + m_flag_time + ", 4");
+                if ((m_flag_history_mask & k_status_history) != 0u)
+                {
+                    push_ring("status", time, status);
+                }
+                if ((m_flag_history_mask & k_mac_history) != 0u)
+                {
+                    push_ring("mac", time, operation("load i32, ptr %mac, align 4"));
+                }
+            }
         }
         if (!m_pending_clip.empty())
         {
             line("store i32 " + m_pending_clip + ", ptr %clip, align 4");
-            const auto now = (m_q_pipeline || m_p_pipeline) ?
-                operation("load i32, ptr %cycle, align 4") : m_issue_cycle;
-            push_ring("clip", now, m_pending_clip);
+            if ((m_flag_history_mask & k_clip_history) != 0u)
+            {
+                const auto now = (m_q_pipeline || m_p_pipeline) ?
+                    operation("load i32, ptr %cycle, align 4") : m_issue_cycle;
+                push_ring("clip", now, m_pending_clip);
+            }
         }
         return true;
     }
@@ -847,7 +890,10 @@ private:
         if (major == 0x11u)
         {
             line("store i32 " + imm24 + ", ptr %clip, align 4");
-            push_ring("clip", operation("sub i32 " + m_flag_time + ", 4"), imm24);
+            if ((m_flag_history_mask & k_clip_history) != 0u)
+            {
+                push_ring("clip", operation("sub i32 " + m_flag_time + ", 4"), imm24);
+            }
             return true;
         }
         if (major == 0x15u)
@@ -1215,9 +1261,12 @@ private:
             status = operation("or i32 " + status + ", " + flag);
         }
         line("store i32 " + status + ", ptr %status, align 4");
-        if (m_flag_pipeline)
+        if ((m_flag_history_mask & k_mac_history) != 0u)
         {
             push_ring("mac", m_flag_time, mac);
+        }
+        if ((m_flag_history_mask & k_status_history) != 0u)
+        {
             push_ring("status", m_flag_time, status);
         }
     }
@@ -1548,6 +1597,7 @@ private:
     uint32_t m_delay_vi_mask = 0u;
     uint32_t m_branch_vi_mask = 0u;
     bool m_flag_pipeline = false;
+    uint32_t m_flag_history_mask = 0u;
     bool m_q_pipeline = false;
     bool m_p_pipeline = false;
     std::string m_flag_time;
@@ -1631,6 +1681,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     bool has_kick = false;
     bool has_p = false;
     uint32_t branch_vi_mask = 0u;
+    uint32_t flag_history_mask = 0u;
     for (size_t index = 0u; index < queue.size(); ++index)
     {
         // Avoid pathological branch-in-delay graphs at lift time.
@@ -1660,6 +1711,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             }
         }
         has_flags |= is_flag_pair(lo, hi);
+        flag_history_mask |= flag_history_reads(lo, hi);
         has_q |= is_q_pair(lo, hi);
         has_kick |= is_kick_pair(lo, hi);
         has_p |= is_p_pair(lo, hi);
@@ -1700,7 +1752,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     c_straight_line_emitter emitter;
     // VI0 is constant, and JR/JALR consume live VI values.
     emitter.begin_dynamic(start, reached, has_flags, has_q, has_p,
-        branch_vi_mask & ~1u);
+        branch_vi_mask & ~1u, flag_history_mask);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))
