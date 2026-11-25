@@ -12,6 +12,8 @@ sys.path.insert(0, str(ROOT / "tools"))
 import recover_translation_cache as recovery
 import run_game
 import shared_ee_ir as shared_ir
+import cache_backup
+import subprocess
 
 
 def digest(data):
@@ -190,7 +192,8 @@ def test_link_or_validation_failure_does_not_activate():
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
              patch.object(recovery.run_game, "translation_inputs", return_value={}), \
-             patch.object(recovery, "validate_portable_cache"):
+             patch.object(recovery, "validate_portable_cache"), \
+             patch.object(cache_backup, "seven_zip", return_value=None):
             promoted = recovery.recover(elf, build, "Release", base, 8)
         assert promoted == base and recovery.active_work(base) == base
         assert not recovery.pointer_path(base).exists()
@@ -350,7 +353,82 @@ def test_launcher_recovers_before_automatic_rebuild():
     assert "choice /C YN" not in batch
 
 
+def test_verified_maximum_compression_backup():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        backup = root / "backup-123"
+        objects = backup / "O5-native" / "objects"
+        objects.mkdir(parents=True)
+        (objects / "objects.json").write_text("manifest")
+        (objects / "example.o").write_bytes(b"original")
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "a":
+                assert kwargs["cwd"] == backup
+                assert all(flag in command for flag in ("-t7z", "-mx=9", "-m0=LZMA2", "-ms=on"))
+                Path(command[-2]).write_bytes(b"archive")
+            elif command[1] == "t":
+                assert backup.is_dir()
+                assert Path(command[-1]).is_file()
+            elif command[1] == "x":
+                assert "-i!O5-native/objects/*" in command
+                target = Path(next(v[2:] for v in command if v.startswith("-o")))
+                extracted = target / "O5-native" / "objects"
+                extracted.mkdir(parents=True)
+                (extracted / "example.o").write_bytes(b"original")
+            return None
+
+        with patch.object(cache_backup, "seven_zip", return_value="7z"), \
+             patch.object(cache_backup.subprocess, "run", side_effect=fake_run):
+            archive = cache_backup.compress_backup(backup)
+            assert archive == root / "backup-123.7z"
+            assert archive.is_file() and not backup.exists()
+            with cache_backup.backup_object_candidates(root, "O5-native") as candidates:
+                found = [p for p in candidates if (p / "objects" / "example.o").is_file()]
+                assert len(found) == 1
+                assert (found[0] / "objects" / "example.o").read_bytes() == b"original"
+            assert not found[0].exists()
+        assert [c[1] for c in calls] == ["a", "t", "x"]
+
+        backup.mkdir()
+        (backup / "sentinel").write_bytes(b"preserve")
+        archive.unlink()
+        def failed_test(command, **kwargs):
+            if command[1] == "a":
+                Path(command[-2]).write_bytes(b"invalid")
+            else:
+                raise subprocess.CalledProcessError(2, command)
+
+        with patch.object(cache_backup, "seven_zip", return_value="7z"), \
+             patch.object(cache_backup.subprocess, "run", side_effect=failed_test):
+            assert cache_backup.compress_backup(backup) == backup
+        assert (backup / "sentinel").read_bytes() == b"preserve"
+        assert not archive.exists()
+
+
+def test_real_7z_backup_if_available():
+    if not cache_backup.seven_zip():
+        return
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        backup = root / "backup-123"
+        for profile in ("O5-native", "legacy-O5-native", "legacy-recovery-42-O5-native"):
+            objects = backup / profile / "objects"
+            objects.mkdir(parents=True)
+            (objects / "example.o").write_bytes(profile.encode())
+        archive = cache_backup.compress_backup(backup)
+        assert archive.suffix == ".7z" and not backup.exists()
+        with cache_backup.backup_object_candidates(root, "O5-native") as candidates:
+            recovered = {(p / "objects" / "example.o").read_bytes()
+                         for p in candidates if (p / "objects" / "example.o").is_file()}
+            assert recovered == {b"O5-native", b"legacy-O5-native", b"legacy-recovery-42-O5-native"}
+
+
 def main():
+    test_verified_maximum_compression_backup()
+    test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()
     test_changed_lowering_requires_explicit_opt_in()
     test_pointer_rejects_unsafe_paths_and_rollback()

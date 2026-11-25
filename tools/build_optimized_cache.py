@@ -11,6 +11,7 @@ import time
 
 import run_game
 import shared_ee_ir as shared_ir
+import cache_backup
 
 
 def function_map(metadata):
@@ -216,12 +217,13 @@ def seed_backup_objects(source_work, work, metadata_path, hashes, opt):
         return 0
     from verify_ir import llvm, native_target_identity, ir_pipeline_id
 
-    candidates = []
-    for backup in sorted(source_work.glob("backup-*"), reverse=True):
-        if not backup.is_dir() or backup.is_symlink():
-            continue
-        candidates.extend((backup / work.name, backup / ("legacy-" + work.name)))
-        candidates.extend(backup.glob("legacy-recovery-*-" + work.name))
+    with cache_backup.backup_object_candidates(source_work, work.name) as candidates:
+        return seed_candidate_objects(candidates, work, metadata_path, hashes, opt,
+                                      llvm, native_target_identity, ir_pipeline_id)
+
+
+def seed_candidate_objects(candidates, work, metadata_path, hashes, opt,
+                           llvm, native_target_identity, ir_pipeline_id):
     best = None
     for source in candidates:
         directory = source / "objects"

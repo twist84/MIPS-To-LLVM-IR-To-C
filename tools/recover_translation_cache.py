@@ -4,7 +4,8 @@
 A verified historical translation manifest supplies the known guest entries.
 Reconstruction or verified migration takes place in a recovery-* child
 of the canonical cache. After validation the cache contents are promoted
-to the root and previous data retained in backup-* children. Optimized
+to the root and previous data retained in verified backup-*.7z archives
+(or backup-* directories if 7-Zip is unavailable). Optimized
 profiles are children of the same root. Legacy siblings and active pointers
 are read for migration but no new pointer is written.
 
@@ -26,6 +27,7 @@ from datetime import datetime, timezone
 import run_game
 import run_known_replays
 import shared_ee_ir as shared_ir
+import cache_backup
 
 
 def history_dir(base_work):
@@ -427,6 +429,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
                 comparison["mismatched_sha256"] and not allow_ir_changes):
             raise ValueError("reconstructed IR did not meet the recovery policy")
         backup = promote_canonical(base_work, work, validate, elf=elf)
+        if backup is not None:
+            backup = cache_backup.compress_backup(backup)
 
     print(f"Cache recovery validated and activated: {base_work}", flush=True)
     if backup is not None:
