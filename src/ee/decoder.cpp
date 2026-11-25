@@ -193,7 +193,7 @@ bool mmi_lowered_exactly(uint32_t funct, uint32_t sa, uint32_t rs,
             return rd == 0;
         case 0x0e: case 0x12: case 0x13:               // PCPYUD / POR / PNOR
             return true;
-        case 0x1b:                                      // PCPYH uses rt only
+        case 0x1a: case 0x1b: case 0x1e:               // PEXCH / PCPYH / PEXCW
             return rs == 0;
         default:
             return false;
@@ -339,12 +339,14 @@ s_ee_instruction decode(uint32_t pc, uint32_t word)
             set_mnemonic(insn, "trap");
             break;
         case e_ee_opcode::FUNCT_MFSA:
+            insn.valid = (insn.rs == 0 && insn.rt == 0 && insn.sa == 0)
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
+            set_mnemonic(insn, "mfsa");
+            break;
         case e_ee_opcode::FUNCT_MTSA:
-            // R5900 scalar shift-amount register transfers are genuine
-            // instructions, but have no complete native lowering yet.
-            insn.valid = e_ee_valid::UNSUPPORTED;
-            set_mnemonic(insn, insn.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_MFSA)
-                ? "mfsa" : "mtsa");
+            insn.valid = (insn.rt == 0 && insn.rd == 0 && insn.sa == 0)
+                ? e_ee_valid::VALID : e_ee_valid::UNSUPPORTED;
+            set_mnemonic(insn, "mtsa");
             break;
         default:
             insn.valid = e_ee_valid::INVALID;

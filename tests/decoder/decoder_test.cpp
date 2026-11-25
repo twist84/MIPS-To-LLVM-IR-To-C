@@ -86,8 +86,14 @@ int main()
     expect("0x3d reserved", R(0x3d, 4, 5, 0, 0, 0), "unknown", X);
     // SPECIAL 0x28/0x29 are real R5900 SA transfers, not UNKNOWN
     // and not yet implemented; other reserved functs are INVALID.
-    expect("mfsa", R(0x00, 0, 0, 6, 0, 0x28), "mfsa", U);
-    expect("mtsa", R(0x00, 4, 0, 0, 0, 0x29), "mtsa", U);
+    expect("mfsa", R(0x00, 0, 0, 6, 0, 0x28), "mfsa", V);
+    expect("mtsa", R(0x00, 4, 0, 0, 0, 0x29), "mtsa", V);
+    expect("mfsa bad rs", R(0x00, 4, 0, 6, 0, 0x28), "mfsa", U);
+    expect("mtsa bad rd", R(0x00, 4, 0, 6, 0, 0x29), "mtsa", U);
+    expect("pexch", R(0x1c, 0, 5, 6, 0x1a, 0x29), "pexch", V);
+    expect("pexcw", R(0x1c, 0, 5, 6, 0x1e, 0x29), "pexcw", V);
+    expect("pexch bad rs", R(0x1c, 4, 5, 6, 0x1a, 0x29), "pexch", U);
+    expect("pexcw bad rs", R(0x1c, 4, 5, 6, 0x1e, 0x29), "pexcw", U);
     expect("special reserved", R(0x00, 4, 5, 6, 0, 0x01),
            "special_rsvd", X);
     // MMI groups: funct 0x08=MMI0, 0x28=MMI1, 0x09=MMI2, 0x29=MMI3; sub-op in sa.

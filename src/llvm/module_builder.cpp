@@ -655,6 +655,7 @@ static std::set<uint8_t> block_written(const std::vector<ee::s_ee_instruction>& 
             {
             case e_ee_opcode::FUNCT_MFHI:
             case e_ee_opcode::FUNCT_MFLO:
+            case e_ee_opcode::FUNCT_MFSA:
                 if (ins.rd != 0) w.insert(ins.rd);
                 break;
             case e_ee_opcode::FUNCT_JALR:
@@ -823,6 +824,12 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
             {
             case e_ee_opcode::FUNCT_MFHI:
             case e_ee_opcode::FUNCT_MFLO:
+                break;
+            case e_ee_opcode::FUNCT_MFSA:
+                if (ins.rd != 0) written_so_far.insert(ins.rd);
+                break;
+            case e_ee_opcode::FUNCT_MTSA:
+                consider_read(ins.rs);
                 break;
             case e_ee_opcode::FUNCT_MTHI:
             case e_ee_opcode::FUNCT_MTLO:
@@ -1688,6 +1695,31 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             std::string v = newtemp();
             m_out += "  " + v + " = load i64, ptr " + ge + "\n";
             set_gpr_lo64(ins.rd, v);
+        }
+        else if (funct == ee::e_ee_opcode::FUNCT_MFSA)
+        {
+            // Architectural SA is four bits in byte units; the stable
+            // runtime field stores a bit count for the LLVM funnel shift.
+            const std::string raw = newtemp();
+            const std::string bytes = newtemp();
+            const std::string masked = newtemp();
+            const std::string value = newtemp();
+            m_out += "  " + raw + " = load i32, ptr " + state_field(5) + "\n";
+            m_out += "  " + bytes + " = lshr i32 " + raw + ", 3\n";
+            m_out += "  " + masked + " = and i32 " + bytes + ", 15\n";
+            m_out += "  " + value + " = zext i32 " + masked + " to i64\n";
+            set_gpr_lo64(ins.rd, value);
+        }
+        else if (funct == ee::e_ee_opcode::FUNCT_MTSA)
+        {
+            const std::string source = src_lo(ins.rs);
+            const std::string bytes = newtemp();
+            const std::string bits = newtemp();
+            const std::string narrow = newtemp();
+            m_out += "  " + bytes + " = and i64 " + source + ", 15\n";
+            m_out += "  " + bits + " = shl i64 " + bytes + ", 3\n";
+            m_out += "  " + narrow + " = trunc i64 " + bits + " to i32\n";
+            m_out += "  store i32 " + narrow + ", ptr " + state_field(5) + "\n";
         }
         else if (funct == ee::e_ee_opcode::FUNCT_MTHI)
         {
@@ -4575,13 +4607,18 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         std::string vb16 = build16i8(b.first, b.second);
         std::string vr = newtemp();
 
-        // Unary MMI2 lane permutations use rt exclusively. The 128-bit
-        // value is assembled before writing rd, including rd==rt.
-        if (fn == 0x09 &&
-            (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f))
+        // Unary MMI2/MMI3 lane permutations use rt exclusively. The
+        // complete source is captured before writing rd, including rd==rt.
+        if ((fn == 0x09 &&
+             (sa == 0x1a || sa == 0x1b || sa == 0x1e || sa == 0x1f)) ||
+            (fn == 0x29 && (sa == 0x1a || sa == 0x1e)))
         {
             const bool halfword = sa == 0x1a || sa == 0x1b;
-            const char* mask = sa == 0x1a
+            const char* mask = fn == 0x29
+                ? (halfword
+                    ? "<i32 0, i32 2, i32 1, i32 3, i32 4, i32 6, i32 5, i32 7>"
+                    : "<i32 0, i32 2, i32 1, i32 3>")
+                : sa == 0x1a
                 ? "<i32 2, i32 1, i32 0, i32 3, i32 6, i32 5, i32 4, i32 7>"
                 : sa == 0x1b
                 ? "<i32 3, i32 2, i32 1, i32 0, i32 7, i32 6, i32 5, i32 4>"

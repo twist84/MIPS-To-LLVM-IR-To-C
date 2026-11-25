@@ -101,6 +101,8 @@ s_lifted_op lift(const s_ee_instruction& insn)
         case e_ee_opcode::FUNCT_NOR: op.kind = LOP_NOR; break;
         case e_ee_opcode::FUNCT_SLT: op.kind = LOP_SLT; break;
         case e_ee_opcode::FUNCT_SLTU: op.kind = LOP_SLTU; break;
+        case e_ee_opcode::FUNCT_MFSA: op.kind = LOP_MFSA; break;
+        case e_ee_opcode::FUNCT_MTSA: op.kind = LOP_MTSA; break;
         case e_ee_opcode::FUNCT_MFHI: op.kind = LOP_MFHI; break;
         case e_ee_opcode::FUNCT_MTHI: op.kind = LOP_MTHI; break;
         case e_ee_opcode::FUNCT_MFLO: op.kind = LOP_MFLO; break;
@@ -236,6 +238,7 @@ s_lifted_op lift(const s_ee_instruction& insn)
             case 0x0e: op.kind = LOP_MMI_COPY_UPPER_D; break;
             case 0x12: op.kind = LOP_MMI_OR; break;
             case 0x13: op.kind = LOP_MMI_NOR; break;
+            case 0x1a: case 0x1e: op.kind = LOP_MMI_PERMUTE; break;
             case 0x1b: op.kind = LOP_MMI_COPY_H; break;
             default: op.kind = LOP_UNSUPPORTED; break;
             }

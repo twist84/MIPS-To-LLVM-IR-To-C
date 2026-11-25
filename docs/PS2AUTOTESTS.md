@@ -51,7 +51,7 @@ and result.json. Default exit is nonzero unless every selected output
 matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
 pilot uses separate EE and VU matrix runners with two tests and one emit
-worker per test; it retains the six previously selected original ELFs.
+worker per test; it includes the original six ELFs plus funnel and shuffle.
 Manually dispatch Build and test with autotests_full enabled to run all
 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
 with transcripts and a summary; these are observational artifacts,
@@ -227,3 +227,16 @@ other read-only flag predicates in the partial VU0 engine, using the
 existing four-cycle FMAC reservation for flag reads. The canonical
 lower MOVE-to-VF0 NOP has no FMAC reservation. General MOVE, flag
 writes and non-NOP upper execution are not enabled by this change.
+
+## Full Windows baseline (b698e1c, 2026-11-25)
+
+Archive `20261125T130858470210Z.zip` records 20 PASS, 11 DIFF,
+24 INCOMPLETE, zero NO_OUTPUT/ERROR; cumulative per-test wall time
+708.531 seconds. This is before the parallel harness. The funnel test
+stops at MFSA (0x00100978), shuffle at PEXCH (0x00102188).
+The pinned upstream funnel transcript exposes a four-bit byte count:
+MTSA(16) reads zero, MTSAB(15) reads 15, MTSAH(7) reads 14.
+Implement MFSA/MTSA while retaining the existing internal bit-count SA
+field (no ABI or QFSRV representation change), and MMI3 PEXCH/PEXCW
+with exact unary lane permutations. Rerun original funnel/shuffle; no
+new passing transcript is claimed by this implementation.
