@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+rem Keep Windows CRLF checkout endings for cmd.exe backward GOTO labels.
 
 rem Boot the repo's extracted PS2_GAME disc through the BIOS-free HLE path.
 rem BOOT2 in SYSTEM.CNF chooses the executable; no region/ELF is hardcoded.

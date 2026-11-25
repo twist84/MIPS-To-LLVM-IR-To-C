@@ -3,6 +3,8 @@
 import importlib.util
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import sys
@@ -784,6 +786,28 @@ def main():
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
     assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
+
+    # Exercise real CMD backward jumps through all three launcher options.
+    # Resolve-only uses a synthetic disc and stops before configuring tools,
+    # modifying caches, emitting IR or launching a game.
+    if os.name == "nt":
+        for filename in ("run_ps2_game.bat", "run_sdbz_p40.bat"):
+            data = (ROOT / filename).read_bytes()
+            assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), filename
+        with tempfile.TemporaryDirectory(prefix="ee-cmd-launcher-") as directory:
+            disc = Path(directory)
+            (disc / "SYSTEM.CNF").write_text(
+                "BOOT2 = cdrom0:\\FIXTURE.ELF;1\n", encoding="ascii"
+            )
+            (disc / "FIXTURE.ELF").write_bytes(b"synthetic boot target")
+            env = dict(os.environ, SDBZ_DISC_ROOT=str(disc),
+                       PS2_GAME_RESOLVE_ONLY="1", SDBZ_EE_OPT="5")
+            resolved = subprocess.run(
+                ["cmd.exe", "/d", "/c", "call run_ps2_game.bat --full --neutral --overwrite-ir"],
+                cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
+            )
+            assert resolved.returncode == 0, resolved.stdout + resolved.stderr
+            assert "Boot ELF:" in resolved.stdout and "FIXTURE.ELF" in resolved.stdout, resolved.stdout
 
     print("boot session orchestration: PASS")
 

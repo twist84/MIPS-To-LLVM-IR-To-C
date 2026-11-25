@@ -1,5 +1,6 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
+rem Batch launchers use CRLF in the working tree (.gitattributes).
 
 rem Uncapped P40 retail profiling replay; requires an existing EE cache
 rem and the previously built VU1 AOT library. Pass --overwrite-ir to refresh EE IR.
