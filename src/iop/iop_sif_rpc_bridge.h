@@ -197,6 +197,14 @@ public:
     // LOADFILE success is not a guest module start result until _start returns.
     size_t pending_module_starts() const;
     size_t pending_binds() const;
+    // Advisory only. A raw DMA5 completion or an active EE receive
+    // callback can own the mailbox even after all reply queues empty.
+    bool scheduler_barrier() const
+    {
+        return m_ee_receive_busy || (m_dmac.status() & (1u << 5u)) != 0u ||
+            !m_replies.empty() || !m_pending_module_starts.empty() ||
+            !m_guest_pending.empty() || !m_deferred_binds.empty();
+    }
     // A blocked EE bind permits a guest IOP scheduler turn only while
     // real R3000 threads or guest-owned timed work are runnable.
     bool has_waiting_bind_guest_work() const;
