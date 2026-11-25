@@ -1542,27 +1542,11 @@ uint32_t c_spu2::compute_voice_irq_cycles_remaining() const
     return earliest;
 }
 
-uint32_t c_spu2::advance_cycles(uint32_t cycles)
+uint32_t c_spu2::advance_sample_edges(uint64_t samples)
 {
-    uint32_t raised = 0u;
-    if (m_clock_active)
-    {
-        const uint64_t before = m_clock_cycles;
-        m_clock_cycles += cycles;
-        if (m_clock_cycles < before ||
-            elapsed_samples() != before / k_cycles_per_sample)
-        {
-            m_irq_deadline_valid = false;
-        }
-        const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
-        if (samples != 0u)
-        {
-            const uint32_t prior = irq_latches();
-            mix_frames(samples);
-            raised = irq_latches() & ~prior;
-        }
-    }
-    return raised;
+    const uint32_t prior = irq_latches();
+    mix_frames(samples);
+    return irq_latches() & ~prior;
 }
 
 uint32_t c_spu2::set_hi(uint32_t address, uint32_t value)
