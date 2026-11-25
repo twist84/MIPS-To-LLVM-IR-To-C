@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
+import run_game
 
 SPEC = importlib.util.spec_from_file_location(
     "autotests", Path(__file__).resolve().parents[2] / "tools/run_ps2autotests.py")
@@ -13,6 +17,30 @@ SPEC.loader.exec_module(at)
 
 
 class AutotestsHarness(unittest.TestCase):
+    def test_live_request_transient_sharing_violation(self):
+        request = Mock()
+        request.read_text.side_effect = [PermissionError("sharing violation"),
+                                         "3\n0x00114150\n"]
+        with patch.object(run_game.time, "sleep") as sleep:
+            self.assertEqual(run_game.read_live_request(request),
+                             ["3", "0x00114150"])
+            self.assertEqual(request.read_text.call_count, 2)
+            sleep.assert_called_once_with(0.025)
+        request.reset_mock()
+        request.read_text.side_effect = PermissionError("persistent denial")
+        with patch.object(run_game.time, "sleep") as sleep:
+            with self.assertRaises(PermissionError):
+                run_game.read_live_request(request)
+            self.assertEqual(request.read_text.call_count, 40)
+            self.assertEqual(sleep.call_count, 39)
+        request.reset_mock()
+        request.read_text.side_effect = ValueError("bad decoding")
+        with patch.object(run_game.time, "sleep") as sleep:
+            with self.assertRaises(ValueError):
+                run_game.read_live_request(request)
+            self.assertEqual(request.read_text.call_count, 1)
+            sleep.assert_not_called()
+
     def test_inventory(self):
         manifest = json.loads(at.MANIFEST.read_text())
         self.assertEqual(len(manifest["tests"]), 55)

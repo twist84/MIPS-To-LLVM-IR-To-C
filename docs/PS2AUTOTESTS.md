@@ -128,3 +128,56 @@ reply. The shorter three-word legacy form is also accepted. The harness
 collects losslessly escaped FILEIO records alongside KPUTS. No generic
 file open/read/seek success, arbitrary RPC success or bypass of startup.
 The original ELFs have not yet demonstrated a complete transcript.
+
+## Full executable baseline (e59a4f2, 2026-11-25 12:47 UTC)
+
+Archive `20261125T124751140497Z.zip`, original pinned 55 ELFs, rebuilt
+Windows tools with SHA-256 recorded, O0, 1M dispatches/test. 19 PASS,
+10 DIFF, 26 INCOMPLETE, no NO_OUTPUT or ERROR, summed per-test time
+509.343 s. Exact transcript comparison, not clean process-exit count:
+all 19 passing tests still stop with runner exit 3 after TEST END.
+
+| Group | PASS | DIFF | INCOMPLETE |
+|---|---:|---:|---:|
+| EE integer | 4 | 1 | 1 |
+| COP0 | 0 | 0 | 1 |
+| COP1 | 7 | 1 | 1 |
+| MMI/SIMD | 4 | 0 | 2 |
+| VU0 macro | 1 | 0 | 1 |
+| DMA/VIF | 2 | 7 | 2 |
+| GS | 0 | 0 | 2 |
+| Kernel | 1 | 0 | 9 |
+| Memory | 0 | 1 | 0 |
+| VU micro | 0 | 0 | 7 |
+
+Exact matches: cpu/ee/{alu,lsu,lsudelay,muldiv};
+cpu/ee_fpu/{arithmetic,branch,compare,convert,fcr,sqrt,transfer};
+cpu/ee_simd/{arithmetic,compare,logic,muldiv}; cpu/vu0_macro/integer;
+dma/dmac/tagintr; dma/spr/interleave; kernel/ee/interrupt/dmac_order.
+
+Prioritize independent blockers by evidence:
+
+- cpu/ee/branch: Windows PermissionError reading live expansion request
+  3 after 323 transcript lines, not an ISA result. Bound retry to 40
+  reads with 25 ms delay on PermissionError only; persistent failures
+  still fail closed. No change to guest state or sequence validation.
+- cpu/ee_fpu/muldiv and dma/vif/stcycl: hit 1M dispatch budget; latter
+  also prints genuine DMA timeouts. Retest individually at 5M before
+  interpreting incomplete output as an instruction mismatch.
+- Unsupported instructions: MTSA (0x01c00029), MMI shuffle
+  (0x70108ea9), COP0 performance transfer (0x4084c801), BC0T
+  (0x41010003), VCALLMS (0x4a000038; six tests), CTC2
+  (0x48c0f800; EFU and random). Inspect decoder/lowering and physical
+  reference before implementation; no guessed execution.
+- EE/COP1 branchdelay: completed transcripts disagree on branches
+  in delay slots; require explicit R5900 behavior.
+- DMA/VIF: seven completed DIFFs, including scratchpad tag payload,
+  MADR high bit, VIF0/1 register/data and timeout discrepancies.
+- GS/INTC: blocking WaitSema with no runnable peer; investigate actual
+  event scheduling. Thread tests need syscall/thread lifecycle audit.
+- memory/ee/default: large allocations fail and reported address region
+  differs. Audit standalone heap bounds and alias semantics.
+
+Next: host handshake retry regression, then ISA and device batches.
+No exceptions added to exact-output grading. The 19/55 result is for
+this archive only, not yet a cross-platform full-suite result.
