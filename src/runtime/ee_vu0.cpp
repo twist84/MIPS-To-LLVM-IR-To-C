@@ -1126,6 +1126,54 @@ bool vu0_issue_upper_fmac(s_ee_vu0_state* vu0, uint32_t reg,
     return false;
 }
 
+bool vu0_is_lower_scalar(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::DIV || op == kind::SQRT ||
+        op == kind::RSQRT || op == kind::WAITQ;
+}
+
+void vu0_retire_micro_q(s_ee_vu0_state* vu0)
+{
+    // Existing macro Q producers use pending=1 and publish I/D at
+    // issue; micro producers use pending=2 and publish I/D at retirement.
+    if (vu0->m_q_pending != 2u || vu0->m_cycle < vu0->m_q_ready_cycle)
+    {
+        return;
+    }
+    vu0_fmac_set_lane(&vu0->m_q, 0u, vu0->m_q_pending_bits);
+    vu0->m_vi[22] = vu0->m_q_pending_bits;
+    vu0->m_status_flags = vu_scalar_fp::update_status(
+        vu0->m_status_flags, vu0->m_q_pending_flags);
+    vu0->m_vi[16] = vu0->m_status_flags;
+    vu0->m_q_pending = 0u;
+    vu0->m_q_ready_cycle = 0u;
+    vu0->m_q_pending_flags = 0u;
+}
+
+void vu0_issue_micro_q(const s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+                       const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& lower = instruction.m_lower_fields;
+    const auto op = lower.m_operation;
+    if (op == kind::WAITQ)
+    {
+        return;
+    }
+    const bool sqrt = op == kind::SQRT;
+    const bool rsqrt = op == kind::RSQRT;
+    const uint32_t a = vu0_fmac_read_vf(cpu, lower.m_fs,
+        (instruction.m_lower >> 21u) & 3u);
+    const uint32_t b = vu0_fmac_read_vf(cpu, lower.m_ft,
+        (instruction.m_lower >> 23u) & 3u);
+    const uint32_t denominator = sqrt || rsqrt ? vu_scalar_fp::root(b) : b;
+    vu0->m_q_pending_bits = sqrt ? denominator : vu_scalar_fp::quotient(a, denominator);
+    vu0->m_q_pending_flags = vu_scalar_fp::current_flags(a, b, sqrt, rsqrt);
+    vu0->m_q_ready_cycle = vu0->m_cycle + (rsqrt ? 13u : 7u);
+    vu0->m_q_pending = 2u;
+}
+
 bool vu0_is_lower_transfer(e_ee_vu0_micro_opcode op)
 {
     using kind = e_ee_vu0_micro_opcode;
@@ -1881,6 +1929,7 @@ uint32_t ee_vu0_execute_ialu_callback(
         const uint32_t upper_dest = vu0_upper_unary(arith) ? upper.m_ft : upper.m_fd;
         const uint32_t upper_lanes = arith.m_source == 5 ? 14u : upper.m_xyzw;
         const auto lower_op = instruction.m_lower_fields.m_operation;
+        const bool lower_scalar = !immediate && vu0_is_lower_scalar(lower_op);
         const bool lower_load = lower_memory &&
             (lower_op == e_ee_vu0_micro_opcode::LQ ||
              lower_op == e_ee_vu0_micro_opcode::LQI ||
@@ -1896,7 +1945,8 @@ uint32_t ee_vu0_execute_ialu_callback(
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
                 e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
             (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
-                !lower_flag_read && !lower_transfer) ||
+                !lower_flag_read && !lower_transfer && !lower_scalar) ||
+            (lower_scalar && vu0->m_q_pending == 1u) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
@@ -1958,6 +2008,31 @@ uint32_t ee_vu0_execute_ialu_callback(
                 vu0_stall_vf_read(vu0, upper.m_ft, lanes);
             }
         }
+        if (lower_scalar)
+        {
+            const auto& lower = instruction.m_lower_fields;
+            if (lower_op != e_ee_vu0_micro_opcode::WAITQ)
+            {
+                if (lower_op != e_ee_vu0_micro_opcode::SQRT)
+                {
+                    vu0_stall_vf_read(vu0, lower.m_fs,
+                        8u >> ((instruction.m_lower >> 21u) & 3u));
+                }
+                vu0_stall_vf_read(vu0, lower.m_ft,
+                    8u >> ((instruction.m_lower >> 23u) & 3u));
+            }
+            if (vu0->m_q_pending == 2u && vu0->m_q_ready_cycle > vu0->m_cycle)
+            {
+                vu0->m_cycle = vu0->m_q_ready_cycle;
+            }
+            if (lower_op != e_ee_vu0_micro_opcode::WAITQ &&
+                vu0->m_cycle > UINT64_MAX -
+                    (lower_op == e_ee_vu0_micro_opcode::RSQRT ? 13u : 7u))
+            {
+                vu0->m_micro_pc = pair_pc;
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+        }
         // PCSX2 only tests IALU read dependencies for VUPIPE_BRANCH.
         // ILW/ISW are VUPIPE_IALU: loads reserve their destination for
         // four cycles, but an adjacent store does not stall on that pipe.
@@ -1984,6 +2059,7 @@ uint32_t ee_vu0_execute_ialu_callback(
 
         vu0_retire_clip(vu0);
         vu0_retire_upper_fmac(vu0);
+        vu0_retire_micro_q(vu0);
         if ((upper_clip || upper_arith) && vu0->m_cycle > UINT64_MAX - 4u)
         {
             vu0->m_micro_pc = pair_pc;
@@ -2062,6 +2138,10 @@ uint32_t ee_vu0_execute_ialu_callback(
             {
                 return schedule_result;
             }
+        }
+        else if (lower_scalar)
+        {
+            vu0_issue_micro_q(cpu, vu0, instruction);
         }
         else if (lower_transfer)
         {
@@ -2159,8 +2239,13 @@ uint32_t ee_vu0_execute_ialu_callback(
                 {
                     vu0->m_cycle = vu0->m_vf_memory_ready_cycle;
                 }
+                if (vu0->m_q_pending == 2u && vu0->m_q_ready_cycle > vu0->m_cycle)
+                {
+                    vu0->m_cycle = vu0->m_q_ready_cycle;
+                }
                 vu0_retire_clip(vu0);
                 vu0_retire_upper_fmac(vu0);
+                vu0_retire_micro_q(vu0);
                 vu0->m_vf_memory_ready_cycle = 0;
                 const uint32_t flush_result = ee_vu0_ialu_flush_all(vu0);
                 if (flush_result != static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE))

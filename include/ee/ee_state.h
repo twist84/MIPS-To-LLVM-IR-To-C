@@ -122,6 +122,8 @@ struct alignas(16) s_ee_vu0_state
         uint32_t m_product_sticky;
     };
     s_upper_fmac_issue m_upper_fmac_issues[4];
+    // In former tail padding: micro FDIV flags retire with Q.
+    uint32_t m_q_pending_flags;
 };
 
 static_assert(offsetof(s_ee_vu0_state, m_q_ready_cycle) == 8616);

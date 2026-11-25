@@ -416,3 +416,18 @@ plus idle units, including access inside a translated block. Unavailable
 source retains static register semantics. This does not calibrate R5900
 cycles, authorize performance counters, or change original test scoring.
 Legacy source emission and RAM fallback timing still require audit.
+
+## Standalone pilot and VU0 micro scalar Q
+
+Standalone workflow 45634230156 at 42c9202 completed successfully:
+EE 6/7, VU 2/4. Original vu/lower/integer and vu/upper/clip now match
+exactly after Count progression. Combined distinct matches 25/55;
+not a fresh full suite. Transfer advances to 0x00100544, EFU remains
+HOST_YIELD at 0x001128e0, performance remains unsupported at 0x00100728.
+
+Micro DIV/SQRT/RSQRT/WAITQ use the shared signed-digit scalar primitive,
+7/7/13 cycle FDIV reservations, lane-specific VF interlocks, delayed Q
+and I/D/IS/DS publication, serialization and E drain. Macro timing
+remains separate. The pending flags occupy former tail padding; ABI
+size and existing offsets remain unchanged. No new pass claimed for
+this implementation before CI.

@@ -723,6 +723,57 @@ int main()
               "lower MOVE/MR32 aliasing, MTIR low half and MFIR sign extension");
     }
 
+    // Micro FDIV publishes Q and I/D together, with WAITQ and E drain.
+    {
+        ee::s_ee_cpu_state scalar_cpu{};
+        ee::s_ee_vu0_state scalar_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        scalar_vu.m_vpu_status = 1u;
+        scalar_vu.m_q.m_lo = 0x3f800000u;
+        scalar_vu.m_vi[22] = 0x3f800000u;
+        scalar_cpu.m_vu0[1].m_lo = 0x41000000u; // 8
+        scalar_cpu.m_vu0[2].m_lo = 0x40800000u; // 4
+        const auto scalar = [](uint32_t op, uint32_t fs, uint32_t ft)
+        {
+            return 0x80000000u | (ft << 16u) | (fs << 11u) |
+                (14u << 6u) | (0x3cu | op);
+        };
+        install_vu0_pair(&scalar_vu, 0, scalar(0, 1, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 1, scalar(3, 0, 0), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 2, scalar(1, 0, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 3, scalar(2, 1, 2), make_vu0_upper_nop());
+        install_vu0_pair(&scalar_vu, 4, scalar(0, 1, 0),
+            make_vu0_upper_nop(0x40000000u)); // divide by zero
+        install_vu0_pair(&scalar_vu, 5, 0x8000033cu, make_vu0_upper_nop());
+        const auto step = [&]()
+        {
+            return ee::ee_vu0_execute_ialu_callback(&engine, &scalar_cpu,
+                &scalar_vu, 1u, ee::EE_VU0_EXECUTE_EXACT_CYCLES, 0u);
+        };
+        const auto complete = static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE);
+        check(step() == complete && scalar_vu.m_q_pending == 2u &&
+              scalar_vu.m_cycle == 1u && scalar_vu.m_vi[22] == 0x3f800000u,
+              "DIV leaves old Q visible until retirement");
+        check(step() == complete && scalar_vu.m_cycle == 8u &&
+              scalar_vu.m_vi[22] == 0x40000000u,
+              "WAITQ retires DIV at seven cycles");
+        check(step() == complete && scalar_vu.m_cycle == 9u &&
+              scalar_vu.m_q_ready_cycle == 16u,
+              "SQRT schedules seven-cycle Q");
+        check(step() == complete && scalar_vu.m_cycle == 16u &&
+              scalar_vu.m_q_ready_cycle == 29u && scalar_vu.m_vi[22] == 0x40000000u,
+              "RSQRT serializes prior SQRT");
+        check(step() == complete && scalar_vu.m_cycle == 29u &&
+              scalar_vu.m_vi[22] == 0x40800000u &&
+              (scalar_vu.m_status_flags & 0x30u) == 0u,
+              "RSQRT retires before new DIV, flags remain old");
+        check(step() == complete && scalar_vu.m_cycle == 36u &&
+              scalar_vu.m_q_pending == 0u && scalar_vu.m_running == 0u &&
+              scalar_vu.m_vi[22] == 0x7fffffffu &&
+              (scalar_vu.m_status_flags & 0x830u) == 0x820u,
+              "E drains divide-by-zero Q and D/DS flags");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
@@ -2766,8 +2817,8 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, (0x40u << 25) | (14u << 6) | 0x3cu,
-                         make_vu0_upper_nop()); // DIV remains unsupported.
+        install_vu0_pair(&state, 0, (0x40u << 25) | (16u << 6) | 0x3cu,
+                         make_vu0_upper_nop()); // RNEXT remains unsupported.
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 4,
