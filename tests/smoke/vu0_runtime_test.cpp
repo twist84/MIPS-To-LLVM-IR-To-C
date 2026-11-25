@@ -821,6 +821,42 @@ int main()
               "all ten upper Q variants use the visible scalar and preserve masked lanes");
     }
 
+    // Lower random register instructions preserve raw mantissa sequences.
+    {
+        ee::s_ee_cpu_state random_cpu{};
+        ee::s_ee_vu0_state random_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        random_vu.m_vpu_status = 1u;
+        random_cpu.m_vu0[1].m_lo = 0x89abcdef01234567ull;
+        random_cpu.m_vu0[4].m_hi = 0xdeadbeefcafebabeull;
+        const auto random = [](uint32_t op, uint32_t ft, uint32_t fs, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (ft << 16u) |
+                (fs << 11u) | (16u << 6u) | (0x3cu | op);
+        };
+        install_vu0_pair(&random_vu, 0, random(2, 0, 1, 0), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 1, random(1, 2, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 2, random(0, 3, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 3, random(0, 0, 0, 15), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 4, random(0, 4, 0, 8), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 5, random(3, 0, 4, 0), make_vu0_upper_nop());
+        install_vu0_pair(&random_vu, 6, random(1, 5, 0, 15),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&random_vu, 7, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &random_cpu,
+            &random_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              random_vu.m_running == 0u && random_vu.m_cycle == 14u,
+              "random VF source interlock and E drain");
+        check(random_cpu.m_vu0[2].m_lo == 0x3fa345673fa34567ull &&
+              random_cpu.m_vu0[3].m_lo == 0x3fc68ace3fc68aceull &&
+              random_cpu.m_vu0[4].m_lo == 0x3f8d159du &&
+              random_cpu.m_vu0[4].m_hi == 0xdeadbeefcafebabeull &&
+              random_vu.m_vi[20] == 0x3f800000u &&
+              random_cpu.m_vu0[5].m_hi == 0x3f8000003f800000ull,
+              "RINIT RGET RNEXT RXOR exact words, VF0 suppresses RNEXT and masks preserved");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
@@ -2864,8 +2900,8 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, (0x40u << 25) | (16u << 6) | 0x3cu,
-                         make_vu0_upper_nop()); // RNEXT remains unsupported.
+        install_vu0_pair(&state, 0, (0x40u << 25) | (15u << 6) | 0x3eu,
+                         make_vu0_upper_nop()); // ILWR remains unsupported.
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 4,

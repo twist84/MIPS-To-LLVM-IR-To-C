@@ -441,3 +441,13 @@ No fictitious Ft dependency for scalar Q forms. Tests cover all ten
 encodings, previous-Q reads, paired WAITQ, ACC forwarding and masks.
 At c07f476 the standalone original pilot remained 8/11 exact; the
 four non-CTest workflows passed, CTest was still running when checked.
+
+### VU0 lower random register operations
+
+RINIT/RXOR sample the selected VF component after its FMAC dependency;
+RGET/RNEXT write enabled lanes, with R maintained as a 23-bit mantissa
+and implicit exponent. Shared LFSR step uses taps 4 and 22. RNEXT to VF0
+leaves R unchanged in the PCSX2 reference micro path. Regression uses
+raw words from the pinned upstream random sequence, with masked writes,
+zero destination, dependency and E drain checks. The original random ELF
+executes VU1, so this VU0 change alone does not claim its transcript.

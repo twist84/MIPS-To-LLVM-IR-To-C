@@ -1182,6 +1182,60 @@ void vu0_issue_micro_q(const s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
     vu0->m_q_pending = 2u;
 }
 
+uint32_t vu0_macro_r(uint32_t value);
+uint32_t vu0_next_r(uint32_t value)
+{
+    const uint32_t feedback = ((value >> 4u) ^ (value >> 22u)) & 1u;
+    return vu0_macro_r((value << 1u) ^ feedback);
+}
+
+bool vu0_is_lower_random(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::RINIT || op == kind::RGET ||
+        op == kind::RNEXT || op == kind::RXOR;
+}
+
+bool vu0_random_reads_vf(e_ee_vu0_micro_opcode op)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    return op == kind::RINIT || op == kind::RXOR;
+}
+
+void vu0_execute_lower_random(s_ee_cpu_state* cpu, s_ee_vu0_state* vu0,
+                             const s_ee_vu0_micro_instruction& instruction)
+{
+    using kind = e_ee_vu0_micro_opcode;
+    const auto& fields = instruction.m_lower_fields;
+    const auto op = fields.m_operation;
+    if (vu0_random_reads_vf(op))
+    {
+        const uint32_t source = vu0_fmac_read_vf(cpu, fields.m_fs,
+            (instruction.m_lower >> 21u) & 3u);
+        vu0->m_vi[20] = vu0_macro_r(op == kind::RXOR ?
+            vu0->m_vi[20] ^ source : source);
+        vu0_record_lower_fmac(vu0, 0u, 0u);
+        return;
+    }
+    if (fields.m_ft != 0u)
+    {
+        if (op == kind::RNEXT)
+        {
+            vu0->m_vi[20] = vu0_next_r(vu0->m_vi[20]);
+        }
+        s_ee_u128 output = cpu->m_vu0[fields.m_ft];
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((fields.m_xyzw & (8u >> lane)) != 0u)
+            {
+                vu0_fmac_set_lane(&output, lane, vu0->m_vi[20]);
+            }
+        }
+        cpu->m_vu0[fields.m_ft] = output;
+    }
+    vu0_record_lower_fmac(vu0, fields.m_ft, fields.m_xyzw);
+}
+
 bool vu0_is_lower_transfer(e_ee_vu0_micro_opcode op)
 {
     using kind = e_ee_vu0_micro_opcode;
@@ -1938,6 +1992,7 @@ uint32_t ee_vu0_execute_ialu_callback(
         const uint32_t upper_lanes = arith.m_source == 5 ? 14u : upper.m_xyzw;
         const auto lower_op = instruction.m_lower_fields.m_operation;
         const bool lower_scalar = !immediate && vu0_is_lower_scalar(lower_op);
+        const bool lower_random = !immediate && vu0_is_lower_random(lower_op);
         const bool lower_load = lower_memory &&
             (lower_op == e_ee_vu0_micro_opcode::LQ ||
              lower_op == e_ee_vu0_micro_opcode::LQI ||
@@ -1947,13 +2002,15 @@ uint32_t ee_vu0_execute_ialu_callback(
         // Conflicting writes to the same VF require a separate dual-issue
         // arbitration audit. Reject the pair before either side executes.
         const bool vf_conflict = upper_arith && !arith.m_to_acc && upper_dest != 0u &&
-            (lower_load || transfer_vf_write) && upper_dest == instruction.m_lower_fields.m_ft;
+            (lower_load || transfer_vf_write ||
+                (lower_random && !vu0_random_reads_vf(lower_op))) &&
+            upper_dest == instruction.m_lower_fields.m_ft;
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
                 e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
             (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
-                !lower_flag_read && !lower_transfer && !lower_scalar) ||
+                !lower_flag_read && !lower_transfer && !lower_scalar && !lower_random) ||
             (lower_scalar && vu0->m_q_pending == 1u) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
@@ -2016,6 +2073,11 @@ uint32_t ee_vu0_execute_ialu_callback(
                     ? upper_lanes : 8u >> static_cast<uint32_t>(arith.m_source);
                 vu0_stall_vf_read(vu0, upper.m_ft, lanes);
             }
+        }
+        if (lower_random && vu0_random_reads_vf(lower_op))
+        {
+            vu0_stall_vf_read(vu0, instruction.m_lower_fields.m_fs,
+                8u >> ((instruction.m_lower >> 21u) & 3u));
         }
         if (lower_scalar)
         {
@@ -2151,6 +2213,10 @@ uint32_t ee_vu0_execute_ialu_callback(
         else if (lower_scalar)
         {
             vu0_issue_micro_q(cpu, vu0, instruction);
+        }
+        else if (lower_random)
+        {
+            vu0_execute_lower_random(cpu, vu0, instruction);
         }
         else if (lower_transfer)
         {
@@ -3220,8 +3286,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         uint32_t r = vu0->m_vi[20];
         if (special2 == 0x40u)
         {
-            const uint32_t feedback = ((r >> 4u) ^ (r >> 22u)) & 1u;
-            r = vu0_macro_r((r << 1u) ^ feedback);
+            r = vu0_next_r(r);
             vu0->m_vi[20] = r;
         }
         for (uint32_t lane = 0; lane < 4; ++lane)
