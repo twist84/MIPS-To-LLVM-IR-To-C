@@ -5023,11 +5023,10 @@ int main(int argc, char** argv)
             uint64_t lookahead_deadline = iop_deadline;
             if (iop_scheduled && !barrier && iop_clock.due() == 0u)
             {
-                const bool rpc_pending = iop_rpc != nullptr &&
-                    (iop_rpc->pending_guest_calls() != 0u ||
-                     iop_rpc->pending_module_starts() != 0u ||
-                     iop_rpc->pending_replies() != 0u ||
-                     iop_rpc->pending_binds() != 0u);
+                // HLE reboot can still own the mailbox even when
+                // its old RPC queues have been cleared.
+                const bool rpc_pending = hle_iop_reboot_bootstrap_pending ||
+                    (iop_rpc != nullptr && iop_rpc->scheduler_barrier());
                 if (rpc_pending)
                 {
                     ++horizon_iop_rpc_barriers;
