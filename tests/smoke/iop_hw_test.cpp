@@ -688,6 +688,83 @@ bool test_spu2_voice_routing()
         spu.active_voice_mask(1u) == (1u << 23u);
 }
 
+bool test_spu2_effect_registers()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    iop::c_spu2 spu;
+    uint32_t value = 0u;
+    uint32_t address = 0u;
+    if (spu.effect_start(0u) != 0xefff8u ||
+        spu.effect_end(0u) != 0xeffffu ||
+        spu.effect_start(1u) != 0xffff8u ||
+        spu.effect_end(1u) != 0xfffffu ||
+        spu.effect_enabled(0u) || spu.effect_enabled(1u))
+    {
+        return false;
+    }
+    if (!spu.effect_address(0u, 0u, -1, &address) || address != 0xeffffu ||
+        !spu.effect_address(0u, 8u, 1, &address) || address != 0xefff9u ||
+        spu.effect_address(2u, 0u, 0, &address) ||
+        spu.effect_address(0u, 0u, 0, nullptr))
+    {
+        return false;
+    }
+
+    // Effect addresses are high-halfword first; EEA low is read-only.
+    if (!spu.write(base + 0x2e0u, 4u, 0xfff80010u) ||
+        !spu.write(base + 0x33cu, 4u, 0x12340010u) ||
+        !spu.read(base + 0x33cu, 4u, &value) || value != 0xffff0010u ||
+        spu.effect_start(0u) != 0x10fff8u ||
+        spu.effect_end(0u) != 0x10ffffu ||
+        !spu.effect_address(0u, 0u, -1, &address) || address != 0x0ffffu ||
+        !spu.effect_address(0u, 0xffffffffffffffffull, 2, &address) ||
+        address != 0x0fff9u ||
+        !spu.write(base + 0x33cu, 2u, 0x000fu) ||
+        spu.effect_address(0u, 0u, 0, &address))
+    {
+        return false;
+    }
+
+    // Address parameters and signed coefficient bit patterns are
+    // independent between cores and remain accessible while disabled.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        for (uint32_t reg = 0x2e4u; reg <= 0x338u; reg += 4u)
+        {
+            const uint32_t expected = 0x34560000u | (reg + core);
+            if (!spu.write(base + core * 0x400u + reg, 4u, expected) ||
+                !spu.read(base + core * 0x400u + reg, 4u, &value) ||
+                value != expected)
+            {
+                return false;
+            }
+        }
+        for (uint32_t reg = 0u; reg < 10u; ++reg)
+        {
+            const uint32_t expected = 0x8000u + reg + core * 16u;
+            const uint32_t mmio = base + 0x774u + core * 0x28u + reg * 2u;
+            if (!spu.write(mmio, 2u, expected) ||
+                !spu.read(mmio, 2u, &value) || value != expected)
+            {
+                return false;
+            }
+        }
+    }
+    if (!spu.read(base + 0x774u, 2u, &value) || value != 0x8000u ||
+        !spu.read(base + 0x2e4u, 4u, &value) || value != 0x345602e4u ||
+        !spu.write(base + 0x59au, 2u, 0x80u) ||
+        !spu.effect_enabled(1u) || spu.effect_enabled(0u) ||
+        spu.effect_enable_writes(1u) != 1u ||
+        !spu.write(base + 0x59au, 2u, 0u) || spu.effect_enabled(1u))
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_enable_writes(1u) == 0u &&
+        spu.effect_start(0u) == 0xefff8u &&
+        spu.read(base + 0x774u, 2u, &value) && value == 0u;
+}
+
 bool test_spu2_mmix()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1766,6 +1843,10 @@ int main()
     if (!test_spu2_voice_routing())
     {
         return fail("SPU2 independent dry/wet voice routing");
+    }
+    if (!test_spu2_effect_registers())
+    {
+        return fail("SPU2 effect registers and work-area address wrapping");
     }
     if (!test_spu2_mmix())
     {

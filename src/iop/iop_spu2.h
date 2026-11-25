@@ -85,6 +85,14 @@ public:
     {
         return core < 2u ? m_effect_input_frames[core] : 0u;
     }
+    // Effect addresses are logical halfword addresses; map to shared
+    // physical sound RAM only after wrapping within the work area.
+    uint32_t effect_start(uint32_t core) const;
+    uint32_t effect_end(uint32_t core) const;
+    bool effect_enabled(uint32_t core) const;
+    uint64_t effect_enable_writes(uint32_t core) const;
+    bool effect_address(uint32_t core, uint64_t step, int64_t offset,
+        uint32_t* address) const;
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
     uint32_t input_frames(uint32_t core) const;
@@ -136,6 +144,9 @@ private:
         uint16_t m_registers[0x200]{};
         // Reference master-volume window at 0x760 and 0x788.
         uint16_t m_master[8]{};
+        // IIR, COMB1..4, WALL, APF1/2, input L/R coefficients.
+        uint16_t m_effect_coefficients[10]{};
+        uint64_t m_effect_enable_writes = 0u;
         uint32_t m_irqa = 0x800u;
         uint32_t m_tsa = 0u;
         uint32_t m_endx = 0u;

@@ -62,6 +62,15 @@ void c_spu2::reset()
     }
     m_cores[0].m_registers[0x198u / 2u] = 0x0ff0u;
     m_cores[1].m_registers[0x198u / 2u] = 0x0ffcu;
+    // Compatibility reset work areas (word addresses).
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint16_t page = static_cast<uint16_t>(0x000eu + core);
+        m_cores[core].m_registers[0x2e0u / 2u] = page;
+        m_cores[core].m_registers[0x2e2u / 2u] = 0xfff8u;
+        m_cores[core].m_registers[0x33cu / 2u] = page;
+        m_cores[core].m_registers[0x33eu / 2u] = 0xffffu;
+    }
     std::fill(m_ram.begin(), m_ram.end(), 0u);
     m_spdif_out = 0u;
     m_spdif_mode = 0u;
@@ -101,6 +110,59 @@ int32_t scale_mix(int32_t value, int32_t gain)
     return static_cast<int32_t>(product >= 0 ? product >> 15u :
         -1 - ((-1 - product) >> 15u));
 }
+}
+
+uint32_t c_spu2::effect_start(uint32_t core) const
+{
+    uint32_t result = 0u;
+    if (core < 2u)
+    {
+        const uint16_t* regs = m_cores[core].m_registers;
+        result = (static_cast<uint32_t>(regs[0x2e0u / 2u] & 0x3fu) << 16u) |
+            regs[0x2e2u / 2u];
+    }
+    return result;
+}
+
+uint32_t c_spu2::effect_end(uint32_t core) const
+{
+    return core < 2u ?
+        (static_cast<uint32_t>(m_cores[core].m_registers[0x33cu / 2u] & 0x3fu) << 16u) |
+        0xffffu : 0u;
+}
+
+bool c_spu2::effect_enabled(uint32_t core) const
+{
+    return core < 2u && (m_cores[core].m_attr & 0x80u) != 0u;
+}
+
+uint64_t c_spu2::effect_enable_writes(uint32_t core) const
+{
+    return core < 2u ? m_cores[core].m_effect_enable_writes : 0u;
+}
+
+bool c_spu2::effect_address(uint32_t core, uint64_t step, int64_t offset,
+    uint32_t* address) const
+{
+    bool result = false;
+    const uint32_t start = effect_start(core);
+    const uint32_t end = effect_end(core);
+    if (core < 2u && address != nullptr && start < end)
+    {
+        const uint32_t length = end - start + 1u;
+        // Reduce both terms separately, so negative taps and very large
+        // guest-clock positions cannot overflow signed arithmetic.
+        int64_t relative = static_cast<int64_t>(step % length) +
+            offset % static_cast<int64_t>(length);
+        relative %= static_cast<int64_t>(length);
+        if (relative < 0)
+        {
+            relative += length;
+        }
+        *address = (start + static_cast<uint32_t>(relative)) & (k_ram_words - 1u);
+        result = true;
+    }
+    return result;
 }
 
 void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
@@ -999,6 +1061,11 @@ bool c_spu2::write_core(
 {
     s_core& core = m_cores[index];
 
+    // EEA selects the upper address page only; its low half is fixed.
+    if (offset == 0x33eu)
+    {
+        return true;
+    }
     // Preserve register latches and update dynamic voice state.
     core.m_registers[offset / 2u] = value;
     if (offset < 0x180u)
@@ -1044,6 +1111,10 @@ bool c_spu2::write_core(
             (core.m_attr & 0x8000u) == 0u)
         {
             core.m_statx_settling = 16u;
+        }
+        if ((value & 0x80u) != 0u)
+        {
+            ++core.m_effect_enable_writes;
         }
         core.m_attr = value;
         if ((value & 0x40u) == 0u)
@@ -1153,8 +1224,15 @@ bool c_spu2::read16(uint32_t offset, uint16_t* value)
     {
         const uint32_t bank = (offset - 0x760u) / 0x28u;
         const uint32_t field = (offset - 0x760u) % 0x28u;
-        *value = field < 0x10u ?
-            m_cores[bank].m_master[field / 2u] : 0u;
+        *value = 0u;
+        if (field < 0x10u)
+        {
+            *value = m_cores[bank].m_master[field / 2u];
+        }
+        else if (field >= 0x14u)
+        {
+            *value = m_cores[bank].m_effect_coefficients[(field - 0x14u) / 2u];
+        }
         return true;
     }
 
@@ -1203,6 +1281,10 @@ bool c_spu2::write16(uint32_t offset, uint16_t value)
         if (field < 0x10u)
         {
             m_cores[bank].m_master[field / 2u] = value;
+        }
+        else if (field >= 0x14u)
+        {
+            m_cores[bank].m_effect_coefficients[(field - 0x14u) / 2u] = value;
         }
         return true;
     }
