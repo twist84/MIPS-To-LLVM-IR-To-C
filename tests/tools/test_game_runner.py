@@ -4728,6 +4728,10 @@ def main():
             assert int(horizon["alu_bound_candidates"]) == (
                 int(horizon["alu_bound_matched"]) + int(horizon["alu_bound_mismatch"])), lines
             assert int(horizon["alu_bound_matched"]) <= int(horizon["mmio_free_direct_quiet"]), lines
+            assert (0 <= int(horizon["alu_certified_matched"]) <= int(horizon["alu_owner_matched"])
+                    <= int(horizon["alu_bound_matched"])), lines
+            assert (0 <= int(horizon["alu_certified"]) <= int(horizon["alu_owner_known"])
+                    <= int(horizon["alu_bound_candidates"])), lines
             for key in ("entry_callback", "entry_idle", "entry_irq", "entry_vu",
                         "entry_other", *(f"dmac_str{i}" for i in range(10))):
                 assert 0 <= int(horizon[key]) <= total_samples, lines
@@ -4794,7 +4798,9 @@ def main():
                     replay + ["--report", str(report)],
                     capture_output=True, text=True, check=False, timeout=40,
                     env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
-                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1"),
+                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1",
+                             SDBZ_EE_DIRECT_DISPATCH="1",
+                             SDBZ_NATIVE_ALU_CERTIFICATES="1"),
                 )
                 assert run.returncode == 3, run.stdout + run.stderr
                 state = json.loads(report.read_text(encoding="utf-8"))
@@ -4813,6 +4819,9 @@ def main():
                 assert int(horizon["alu_bound_matched"]) > 0, horizon_line
                 assert int(horizon["alu_bound_mismatch"]) == 0, horizon_line
                 assert int(horizon["alu_bound_candidates"]) == int(horizon["alu_bound_matched"]), horizon_line
+                assert int(horizon["alu_owner_known"]) == int(horizon["alu_bound_candidates"]), horizon_line
+                assert int(horizon["alu_certified_matched"]) > 0, horizon_line
+                assert int(horizon["alu_certified"]) == int(horizon["alu_certified_matched"]), horizon_line
                 assert all(int(horizon[key]) == 0 for key in
                            ("entry_vif1_pending", "entry_cmsar1", "entry_vu0_running")), horizon_line
                 clock = [line for line in run.stdout.splitlines()
