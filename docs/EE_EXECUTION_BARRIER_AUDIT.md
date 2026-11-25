@@ -209,6 +209,48 @@ combined calls, `debt` reports remaining scheduled debt at stop.
 Direct HLE service calls are not part of these counters. Saved turns
 are not measured wall-time improvement.
 
+## Second retail replay and source-level pre-execution bounds
+
+All five CI workflows passed at 945d831. The subsequent 40M-boundary
+replay confirmed the dominant STR mask was 0x020 (SIF0 only),
+21,119,805 observations; 17,517,263 qualified as passive. Started-DMA
+barriers fell to 4,045,121 and total barriers to 23,907,296.
+14,556,200 normal exits preceded the projected IOP deadline;
+14,175,254 were also MMIO-free and endpoint/direct-helper-quiet
+(35.44% of sampled boundaries). Coalescing saved 813,587 of
+42,296,753 logical turns (1.92%) with zero debt. These runs differ
+in workload and no matched wall-clock speedup is established.
+
+The dominant remaining aggregate entry barrier was VU-related
+(18,223,091). Split it into `entry_vif1_pending`,
+`entry_cmsar1`, and `entry_vu0_running`; the counts overlap. A
+deferred VIF1 worker can complete at any host timestamp and publish
+committed DMA/GS effects at a poll. CMSAR1 uses instruction-attempt
+budgets, and VU0 has its own next-attempt scheduler. None is safely
+interchangeable with an EE cycle deadline. Preserve all existing
+service/poll barriers until a separate ordering proof exists.
+
+P3 groundwork: source-level register-only paths are cached per
+exact ELF PC in shadow mode. The bounded analysis accepts up to
+32 slots (including a mandatory nontrapping ALU delay slot) ending
+in JAL, canonical JR or JALR. It rejects conditional branches,
+memory, COP instructions, arithmetic traps, unknown encodings,
+missing bytes and PC overflow. The bound must fit strictly before
+a finite projected deadline. The native outcome is compared against
+the predicted slot count, attempted instructions, normal one-entry
+exit and MMIO/VU/COP0 observations. `alu_bound_candidates =
+alu_bound_matched + alu_bound_mismatch`. A mismatch is diagnostic;
+no new execution or failure path is introduced.
+
+These are source-level candidates, not native-entry certificates:
+the ELF bytes do not independently establish the loaded object's
+provenance, its exact CFG entry ownership, all runtime helper effects
+or all host continuations. The proof must bind to the actual loaded
+native owner and preserve pre-access debt/interrupt ordering before
+enabling chaining. The synthetic native coalescing replay requires
+a positive matched bound and zero mismatches; smoke tests reject
+unsafe operations and equal deadlines. All changes are host-side.
+
 ## Remaining activation gates (not implemented)
 
 
