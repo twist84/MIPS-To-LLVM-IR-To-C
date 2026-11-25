@@ -879,12 +879,20 @@ bool c_sifcmd_bridge::prepare_command(
         (cid == 0x80000000u && size == 20u) ||
         (cid == 0x80000002u &&
          (size == 20u || (size == 24u && words[5] == 0u)));
+    // PS2SDK publishes UNCACHED_SEG(pktbuf) in both commands.
+    // SIF0 writes to physical EE RDRAM, not a CPU virtual alias.
+    // Accept only the existing physical range or its 0x20000000
+    // uncached mirror. Do not mask arbitrary virtual/MMIO addresses.
+    const uint32_t receive_address =
+        (index_or_address >= 0x20000000u &&
+         index_or_address < 0x22000000u)
+        ? index_or_address - 0x20000000u : index_or_address;
     if (receive_command &&
-        index_or_address != 0u &&
-        (index_or_address & 0x0fu) == 0u &&
-        index_or_address < 0x02000000u)
+        receive_address != 0u &&
+        (receive_address & 0x0fu) == 0u &&
+        receive_address < 0x02000000u)
     {
-        *command = {cid, 0u, index_or_address};
+        *command = {cid, 0u, receive_address};
         return true;
     }
 

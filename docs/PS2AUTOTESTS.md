@@ -77,3 +77,22 @@ No guest ELF changes or unknown syscall bypasses. Runtime provenance
 may require a native relink; no IR or VU1 lowering changed. Pilot 2
 will execute the original three ELFs with the corrected IOP mount and
 RAM callback path; the score is not yet known.
+
+## Pilot 2 findings (7afadba, 2026-11-25)
+
+[Artifact](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45613832333/artifacts/15021567782).
+All three ELFs progress through the original startup to the same actual
+SifSetDma rejection, after 94 (ALU), 155 (MUL/DIV) and 94 (FCR)
+dispatches. All remain NO_OUTPUT. MUL/DIV has passed its earlier RAM
+BNEL stop. The rejected packets have CID 0x80000002, opt=0, size=20,
+destination 0x0001e000 and terminal attribute 0x44. Their buffer words
+are respectively 0x20118f40, 0x20122cc0 and 0x201096c0.
+The command decoder only accepted physical RDRAM; PS2SDK's
+[ee/kernel/src/sifcmd.c](https://github.com/ps2dev/ps2sdk/blob/master/ee/kernel/src/sifcmd.c)
+explicitly uses UNCACHED_SEG(pktbuf) for INIT_CMD and CHANGE_SADDR.
+Normalize the 0x20000000 EE uncached RAM mirror at command validation,
+retain the original bytes written to IOP RAM and use the physical
+address for SIF0 reply delivery. Preserve zero, alignment and range
+rejections. Regression covers both CIDs, transactional validation,
+raw alias preservation and original physical command semantics.
+This is not an arithmetic fix or new pass; pilot 3 is required.
