@@ -585,6 +585,10 @@ add_executable(ee_vu1_pipeline_test tests/smoke/ee_vu1_pipeline_test.cpp)
 target_link_libraries(ee_vu1_pipeline_test PRIVATE ee_core)
 add_test(NAME ee_vu1_pipeline COMMAND ee_vu1_pipeline_test)
 
+# Standalone diagnostic: build explicitly; known console differences are not CTest failures.
+add_executable(ee_vu1_efu_probe EXCLUDE_FROM_ALL src/tools/ee_vu1_efu_probe.cpp)
+target_link_libraries(ee_vu1_efu_probe PRIVATE ee_core)
+
 add_executable(ee_vu1_worker_test tests/smoke/ee_vu1_worker_test.cpp)
 target_link_libraries(ee_vu1_worker_test PRIVATE ee_core)
 add_test(NAME ee_vu1_worker COMMAND ee_vu1_worker_test)
