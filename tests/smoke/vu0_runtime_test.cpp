@@ -583,6 +583,36 @@ int main()
               "ACC flags retire in issue order with sticky zero and sign");
     }
 
+    // I-bit lower words are literals, not opcodes. ADDi in an I pair
+    // sees the old I, even when the lower word resembles a branch.
+    {
+        ee::s_ee_cpu_state imm_cpu{};
+        ee::s_ee_vu0_state imm_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        imm_vu.m_vpu_status = 1u;
+        imm_vu.m_vi[21] = 0x3f800000u; // 1.0
+        imm_cpu.m_vu0[1].m_lo = 0x40000000u; // 2.0
+        const auto addi = [](uint32_t fd)
+        {
+            return (8u << 21u) | (1u << 11u) | (fd << 6u) | 0x22u;
+        };
+        install_vu0_pair(&imm_vu, 0, 0x40000000u, addi(2) | 0x80000000u);
+        install_vu0_pair(&imm_vu, 1, 0xdeadbeefu, addi(3) | 0x80000000u);
+        install_vu0_pair(&imm_vu, 2, 0x7fffffffu,
+            make_vu0_upper_nop(0xc0000000u)); // I and E
+        install_vu0_pair(&imm_vu, 3, 0x8000033cu, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &imm_cpu,
+            &imm_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              imm_vu.m_micro_pc == 32u && imm_vu.m_branch == 0u &&
+              imm_vu.m_running == 0u && imm_vu.m_cycle == 6u,
+              "I-bit literals never execute as lower branch or other instructions");
+        check(imm_cpu.m_vu0[2].m_lo == 0x40400000u &&
+              imm_cpu.m_vu0[3].m_lo == 0x40800000u &&
+              imm_vu.m_vi[21] == 0x7fffffffu,
+              "upper ADDi reads previous I and commits exact new literal bits");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {

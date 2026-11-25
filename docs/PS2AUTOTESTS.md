@@ -326,3 +326,11 @@ flags travel with the delayed MAC result instead of becoming visible
 at issue. The upper issue structure reuses its padding word, preserving
 all offsets. Q and outer-product forms remain separate work. No new
 original ELF pass claimed.
+
+## VU0 I-bit microinstruction pairs
+
+When I is set, treat all 32 lower bits as a literal, irrespective of
+what lower opcode they resemble. Execute the upper using the previous
+I value, then commit the literal to VI21. No lower dependency, branch,
+memory, or integer ALU side effects. Tests cover consecutive ADDi/I
+pairs, arbitrary literal bits, and I+E termination. D/T remain unsupported.

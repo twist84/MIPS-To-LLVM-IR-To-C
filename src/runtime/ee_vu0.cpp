@@ -1729,12 +1729,15 @@ uint32_t ee_vu0_execute_ialu_callback(
             return fetch_result;
         }
 
-        const bool lower_ialu = vu0_is_supported_lower_ialu(instruction);
-        const bool lower_branch = vu0_is_supported_lower_branch(instruction);
-        const bool lower_flag_read = vu0_is_supported_lower_flag_read(instruction);
+        // I replaces the lower opcode with a raw 32-bit immediate. The
+        // upper instruction still reads the I value from before this pair.
+        const bool immediate = (instruction.m_flags & EE_VU0_MICRO_FLAG_I) != 0u;
+        const bool lower_ialu = !immediate && vu0_is_supported_lower_ialu(instruction);
+        const bool lower_branch = !immediate && vu0_is_supported_lower_branch(instruction);
+        const bool lower_flag_read = !immediate && vu0_is_supported_lower_flag_read(instruction);
         // Canonical lower NOP is MOVE to VF0 with no enabled lanes.
-        const bool lower_nop = instruction.m_lower == 0x8000033cu;
-        const bool lower_memory = vu0_is_supported_lower_memory(instruction);
+        const bool lower_nop = !immediate && instruction.m_lower == 0x8000033cu;
+        const bool lower_memory = !immediate && vu0_is_supported_lower_memory(instruction);
         const uint32_t memory_address = lower_memory
             ? vu0_memory_byte_address(vu0, instruction) : 0;
 
@@ -1747,18 +1750,20 @@ uint32_t ee_vu0_execute_ialu_callback(
         const bool upper_arith = arith.m_kind != e_vu0_upper_arith::none;
         const auto& upper = instruction.m_upper_fields;
         const auto lower_op = instruction.m_lower_fields.m_operation;
-        const bool lower_load = lower_op == e_ee_vu0_micro_opcode::LQ ||
-            lower_op == e_ee_vu0_micro_opcode::LQI ||
-            lower_op == e_ee_vu0_micro_opcode::LQD;
+        const bool lower_load = lower_memory &&
+            (lower_op == e_ee_vu0_micro_opcode::LQ ||
+             lower_op == e_ee_vu0_micro_opcode::LQI ||
+             lower_op == e_ee_vu0_micro_opcode::LQD);
         // Conflicting writes to the same VF require a separate dual-issue
         // arbitration audit. Reject the pair before either side executes.
         const bool vf_conflict = upper_arith && !arith.m_to_acc && upper.m_fd != 0u &&
             lower_load && upper.m_fd == instruction.m_lower_fields.m_ft;
         if ((instruction.m_flags &
-             (EE_VU0_MICRO_FLAG_I | EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
+             (EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
                 e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
-            (!lower_ialu && !lower_branch && !lower_memory && !lower_flag_read && !lower_nop) ||
+            (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
+                !lower_flag_read && !lower_nop) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
             vu0->m_micro_pc = pair_pc;
@@ -1960,6 +1965,13 @@ uint32_t ee_vu0_execute_ialu_callback(
             {
                 cpu->m_vu0[upper.m_fd] = upper_output;
             }
+        }
+
+        if (immediate)
+        {
+            // No lower-op reservation, memory write, branch or integer ALU
+            // side effect is permitted for these literal bits.
+            vu0->m_vi[21] = instruction.m_lower;
         }
 
         ++executed;
