@@ -209,12 +209,11 @@ extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
         // Within a translated function the host's last publication can
         // lag the reached-instruction budget. Observe the same budget
         // directly at Count/Compare accesses, never host wall time.
-        if (rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+        if (!ee_reference_compatibility_cycle(*rt, now))
         {
             rt->m_perf_compat_fault = true;
             return;
         }
-        now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
         // This path does not turn the reference budget into a validated
         // hardware clock. Faults are observed by the runner/next transfer.
         (void)perf_compat_sync(cpu, rt);
@@ -297,13 +296,12 @@ bool perf_compat_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
     {
         return true;
     }
-    if (rt->m_perf_compat_fault ||
-        rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+    uint64_t now = 0u;
+    if (rt->m_perf_compat_fault || !ee_reference_compatibility_cycle(*rt, now))
     {
         rt->m_perf_compat_fault = true;
         return false;
     }
-    const uint64_t now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
     if (now < rt->m_perf_compat_last ||
         !perf_advance_interval(rt, cpu->m_cop0[COP0_Status],
                                now - rt->m_perf_compat_last))

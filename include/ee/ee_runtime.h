@@ -385,6 +385,26 @@ struct s_ee_runtime
     bool m_last_exception_in_bd_slot = false;
 };
 
+// ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,
+// including annulled likely slots; recognized syscall HLE defaults to 300.
+// This compatibility budget is not hardware issue/retirement timing.
+// Keep the original diagnostic ordinals intact and check arithmetic.
+inline constexpr uint64_t k_reference_syscall_cost = 300u;
+
+inline bool ee_reference_compatibility_cycle(const s_ee_runtime& rt, uint64_t& out)
+{
+    const uint64_t slots = rt.m_reference_instruction_slots;
+    if (slots > UINT64_MAX - rt.m_cop0_clock_idle ||
+        rt.m_hle_timing_boundaries >
+            (UINT64_MAX - slots - rt.m_cop0_clock_idle) / k_reference_syscall_cost)
+    {
+        return false;
+    }
+    out = slots + rt.m_cop0_clock_idle +
+        rt.m_hle_timing_boundaries * k_reference_syscall_cost;
+    return true;
+}
+
 // Never infer cycles from these observations or implicitly install
 // c_ee_cycle_scheduler. A rejected event is latched for the host to detect
 // at the next architectural safepoint.
@@ -404,8 +424,9 @@ inline void ee_observe_timing_event(
 }
 
 
-// Record host HLE handoff without guessing a latency or advancing any
-// guest instruction/slot counter. The trace is optional and bounded.
+// Record host HLE handoff without advancing guest instruction/slot
+// ordinals. Only the reference compatibility clock charges its documented
+// approximate syscall cost. The trace is optional and bounded.
 inline void ee_record_hle_timing_boundary(
     s_ee_runtime& runtime, uint32_t pc, uint32_t opcode,
     uint32_t service)

@@ -164,3 +164,22 @@ Host tests exercise all 48 defined Wired values, read-only writes and real
 fault entry. Generated LLVM tests cover MTC0/MFC0 and sign extension before
 and after a Wired write. No new lowering or runtime layout changes. Retail
 regression validation is required because guest COP0 behavior changed.
+
+## Batch 9: reference compatibility budget alignment
+
+Pinned reference: [ps2-web-recomp SDBZ 985c0ac](https://github.com/twist84/ps2-web-recomp/tree/985c0ac15f2622199f90b206bac3db89268e2f22).
+[Codegen](https://github.com/twist84/ps2-web-recomp/blob/985c0ac15f2622199f90b206bac3db89268e2f22/recomp/codegen.cpp)
+charges two slots for control transfers including likely annulment;
+[kernel](https://github.com/twist84/ps2-web-recomp/blob/985c0ac15f2622199f90b206bac3db89268e2f22/runtime/src/kernel.cpp#L481-L483)
+charges a default 300 units per syscall (reference environment override
+not yet mirrored). Use one checked slot + idle + recognized HLE cost
+budget for COP0 Count/performance, EE timers and scheduler publication,
+with IOP catch-up following the published time. Publish HLE/RAM progress
+at the next host continuation safepoint. Preserve trace ordinals and
+attempt counts. This is a compatibility-policy change, not validated
+hardware timing. Remaining differences: ERET zero-charge in reference,
+block-local charging and preemption placement, scheduler quantum/idle
+cap, syscall override and unrecognized service handling, VU timing,
+scanout phase and device event ordering. Those are not claimed equivalent.
+Fresh retail replay required; shared runtime header changed and IR source
+provenance must be refreshed. Original 55-suite remains the acceptance gate.

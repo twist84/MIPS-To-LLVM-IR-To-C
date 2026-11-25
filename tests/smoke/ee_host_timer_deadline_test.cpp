@@ -50,14 +50,14 @@ int main()
         return 1;
     }
 
-    runtime.m_guest_instruction_attempts = 9u;
+    runtime.m_reference_instruction_slots = 9u;
     timers.service();
     if (!check(timers.next_event() == 10u && bus.intc().status() == 0u &&
             timers.current_count(1u) == 4u, "early service fired timer"))
     {
         return 1;
     }
-    runtime.m_guest_instruction_attempts = 10u;
+    runtime.m_reference_instruction_slots = 10u;
     timers.service();
     if (!check(timers.next_event() == 40u &&
             bus.intc().status() == (1u << 10u) &&
@@ -86,7 +86,7 @@ int main()
     {
         return 1;
     }
-    runtime.m_guest_instruction_attempts = 21u;
+    runtime.m_reference_instruction_slots = 21u;
     timers.service();
     if (!check(timers.next_event() == 22u &&
             timers.current_count(2u) == 2u &&
@@ -95,7 +95,7 @@ int main()
     {
         return 1;
     }
-    runtime.m_guest_instruction_attempts = 22u;
+    runtime.m_reference_instruction_slots = 22u;
     timers.service();
     if (!check(timers.next_event() == 28u && timers.current_count(2u) == 0u,
             "recurring exact deadline"))

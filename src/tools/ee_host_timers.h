@@ -116,7 +116,10 @@ public:
 
     void set_idle_cycles(uint64_t cycles)
     {
-        m_idle_cycles = cycles;
+        if (m_runtime != nullptr)
+        {
+            m_runtime->m_cop0_clock_idle = cycles;
+        }
     }
 
     uint64_t next_event() const
@@ -175,7 +178,13 @@ private:
         {
             // Unlike a post-dispatch timestamp, this advances *inside*
             // an instrumented native guest loop at its instruction sites.
-            return m_runtime->m_guest_instruction_attempts + m_idle_cycles;
+            uint64_t cycle = 0u;
+            if (!ee_reference_compatibility_cycle(*m_runtime, cycle))
+            {
+                m_runtime->m_perf_compat_fault = true;
+                return m_runtime->m_ee_cycle_scheduler.current_cycle();
+            }
+            return cycle;
         }
         return m_runtime->m_ee_cycle_scheduler.current_cycle();
     }
@@ -327,7 +336,6 @@ private:
     s_ee_runtime* m_runtime = nullptr;
     c_ee_hw_bus* m_hardware = nullptr;
     s_timer m_timers[4]{};
-    uint64_t m_idle_cycles = 0u;
     uint64_t m_next_event = std::numeric_limits<uint64_t>::max();
 };
 } // namespace ee

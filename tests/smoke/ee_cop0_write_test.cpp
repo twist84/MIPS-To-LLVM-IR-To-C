@@ -219,7 +219,8 @@ int main()
           !ee::ee_cop0_perf_advance(&runtime, 0u, 100u),
           "compatibility source enables only its own approximate budget");
     cpu.m_cop0[ee::COP0_Status] = 0u;
-    runtime.m_guest_instruction_attempts = 23u;
+    runtime.m_guest_instruction_attempts = 20u;
+    runtime.m_reference_instruction_slots = 23u;
     check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u &&
           runtime.m_perf_counter[1] == 0u &&
           transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u,
@@ -229,7 +230,7 @@ int main()
     check(runtime.m_perf_counter[0] == 30u &&
           transfer(4u, 0u, 0u) == 0u,
           "idle units use same clock and stop accounts old control");
-    runtime.m_guest_instruction_attempts += 19u;
+    runtime.m_reference_instruction_slots += 19u;
     check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 30u,
           "disabled compatibility counter remains unchanged");
     runtime.m_ee_cycle_scheduler.reset();
@@ -302,13 +303,13 @@ int main()
               "unavailable clock leaves Count unchanged");
         check(clock.m_ee_cycle_scheduler.install_reference_compatibility_source(),
               "explicit compatibility source");
-        clock.m_guest_instruction_attempts = 6u;
+        clock.m_reference_instruction_slots = 6u;
         ee::ee_cop0_clock_sync(&a, &clock);
         check(a.m_cop0[ee::COP0_Count] == 2u &&
               (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
               "Count wraps and latches Compare at the elapsed budget");
         ee::ee_cop0_clock_write(&a, &clock, ee::COP0_Compare, 10u);
-        clock.m_guest_instruction_attempts = 9u;
+        clock.m_reference_instruction_slots = 9u;
         clock.m_cop0_clock_idle = 2u;
         ee::ee_cop0_clock_sync(&b, &clock);
         check(b.m_cop0[ee::COP0_Count] == 7u &&
@@ -316,11 +317,22 @@ int main()
               (b.m_cop0[ee::COP0_Cause] & k_timer_ip) == 0u,
               "thread context cannot restore stale timer state");
         ee::ee_cop0_clock_write(&b, &clock, ee::COP0_Count, 9u);
-        clock.m_guest_instruction_attempts++;
+        clock.m_reference_instruction_slots++;
         ee::ee_cop0_clock_sync(&a, &clock);
         check(a.m_cop0[ee::COP0_Count] == 10u &&
               (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
               "Count write reanchors without double counting");
+        ee::ee_record_hle_timing_boundary(clock, 0x1000u, 0xcu, 0x44u);
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 310u &&
+              clock.m_reference_instruction_slots == 10u,
+              "recognized syscall charges reference cost without changing slots");
+        uint64_t cycle = 0u;
+        check(ee::ee_reference_compatibility_cycle(clock, cycle) && cycle == 312u,
+              "shared compatibility timeline includes slots, idle and syscall cost");
+        clock.m_hle_timing_boundaries = UINT64_MAX;
+        check(!ee::ee_reference_compatibility_cycle(clock, cycle) && cycle == 312u,
+              "reference budget overflow is rejected without changing output");
     }
     std::printf("ee_cop0_write_test: %d failure(s)\n", s_failures);
     return s_failures != 0 ? 1 : 0;

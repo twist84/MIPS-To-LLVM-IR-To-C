@@ -3909,6 +3909,17 @@ int main(int argc, char** argv)
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
+        if (runtime.m_ee_cycle_scheduler.source() ==
+            ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+        {
+            uint64_t cycle = 0u;
+            if (!ee::ee_reference_compatibility_cycle(runtime, cycle) ||
+                !runtime.m_ee_cycle_scheduler.publish_cycle(cycle))
+            {
+                std::fprintf(stderr, "EE compatibility cycle publication rejected\n");
+                return e_device_service::failed;
+            }
+        }
         ee::ee_cop0_clock_sync(&cpu, &runtime);
         if (runtime.m_perf_compat_fault)
         {
@@ -4278,6 +4289,30 @@ int main(int argc, char** argv)
             return 1;
         }
 
+        // HLE and RAM callbacks can continue directly to this loop. Publish
+        // their elapsed budget before the next guest instruction or IOP slice.
+        if (runtime.m_ee_cycle_scheduler.source() ==
+            ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+        {
+            uint64_t cycle = 0u;
+            if (!ee::ee_reference_compatibility_cycle(runtime, cycle))
+            {
+                return 1;
+            }
+            if (cycle != runtime.m_ee_cycle_scheduler.current_cycle())
+            {
+                const auto device_result = service_devices();
+                if (device_result == e_device_service::failed)
+                {
+                    return 1;
+                }
+                if (device_result == e_device_service::window_closed)
+                {
+                    break;
+                }
+            }
+        }
+
         // The primary SDBZ reference advances the IOP from every
         // elapsed EE cycle, including polling, timer, and idle periods.
         // Dividing by eight is reference compatibility timing, not an
@@ -4584,7 +4619,6 @@ int main(int argc, char** argv)
             }
             idle_cycles += next - now;
             host_timers.set_idle_cycles(idle_cycles);
-            runtime.m_cop0_clock_idle = idle_cycles;
             if (!runtime.m_ee_cycle_scheduler.publish_cycle(next))
             {
                 return 1;
@@ -5155,17 +5189,6 @@ int main(int argc, char** argv)
             }
         }
         remaining -= count;
-        // Model ps2-web-recomp's execution-budget/event architecture using
-        // reached guest instructions as approximate budget units. This is
-        // deliberately not a pipeline, cache, or HLE timing calibration.
-        if (runtime.m_ee_cycle_scheduler.source() ==
-            ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
-            !runtime.m_ee_cycle_scheduler.publish_cycle(
-                runtime.m_guest_instruction_attempts + idle_cycles))
-        {
-            std::fprintf(stderr, "EE compatibility cycle publication rejected\n");
-            return 1;
-        }
         const auto device_result = service_devices();
         if (device_result == e_device_service::failed)
         {
@@ -5643,7 +5666,7 @@ int main(int argc, char** argv)
                 }
 
                 // Explicitly mark entry to modeled host kernel services.
-                // Never convert this boundary into an invented EE delay.
+                // The reference clock charges the upstream default syscall budget.
                 ee::ee_record_hle_timing_boundary(runtime, epc, opcode, service);
 
                 if (interrupt_sif_service && trace)
@@ -9030,7 +9053,7 @@ int main(int argc, char** argv)
     );
     std::printf(
         "EE observed HLE timing boundaries: %llu "
-        "(latencies not calibrated; no EE time charged)\n",
+        "(reference compatibility: 300 budget units each; not calibrated)\n",
         static_cast<unsigned long long>(runtime.m_hle_timing_boundaries)
     );
     std::printf("EE timing observer: %s (stock runner does not install one)\n",
