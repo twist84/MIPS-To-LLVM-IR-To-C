@@ -642,6 +642,7 @@ struct s_runner_vu0_control
     uint64_t m_last_attempt = 0u;
     uint64_t m_next_attempt = 0u;
     uint64_t m_cmsar1_last_attempt = 0u;
+    uint64_t m_callback_generation = 0u;
 };
 
 bool runner_service_cmsar1(s_runner_vu0_control& context, ee::s_ee_vu0_state& vu0)
@@ -3878,6 +3879,29 @@ int main(int argc, char** argv)
         "SDBZ_PROFILE_HORIZON", &horizon_environment);
     const bool profile_horizon = horizon_value != nullptr &&
         std::strcmp(horizon_value, "1") == 0;
+    if (profile_horizon)
+    {
+        // Only the opt-in shadow path wraps the native runtime callbacks.
+        // Count attempts, including failed or no-op synchronization.
+        runtime.m_vu0_sync = [](void* user, ee::s_ee_cpu_state* cpu,
+            ee::s_ee_vu0_state* vu0, uint32_t mode, uint32_t pc)
+        {
+            ++static_cast<s_runner_vu0_control*>(user)->m_callback_generation;
+            return runner_vu0_sync(user, cpu, vu0, mode, pc);
+        };
+        runtime.m_vu0_start = [](void* user, ee::s_ee_cpu_state* cpu,
+            ee::s_ee_vu0_state* vu0, uint32_t address, uint32_t pc)
+        {
+            ++static_cast<s_runner_vu0_control*>(user)->m_callback_generation;
+            return runner_vu0_start(user, cpu, vu0, address, pc);
+        };
+        runtime.m_vu0_control = [](void* user, ee::s_ee_cpu_state* cpu,
+            ee::s_ee_vu0_state* vu0, uint32_t reg, uint32_t value, uint32_t pc)
+        {
+            ++static_cast<s_runner_vu0_control*>(user)->m_callback_generation;
+            return runner_vu0_control(user, cpu, vu0, reg, value, pc);
+        };
+    }
     constexpr size_t horizon_sources = static_cast<size_t>(
         ee::e_ee_horizon_source::count);
     uint64_t horizon_samples[horizon_sources]{};
@@ -3893,6 +3917,10 @@ int main(int argc, char** argv)
     uint64_t horizon_dmac_started_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
+    uint64_t horizon_vu_callback_boundaries = 0u;
+    uint64_t horizon_cop0_changed_boundaries = 0u;
+    uint64_t horizon_mmio_free_direct_touched = 0u;
+    uint64_t horizon_mmio_free_direct_quiet = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -4940,6 +4968,11 @@ int main(int argc, char** argv)
             ? runtime.m_ee_cycle_scheduler.current_cycle() : 0u;
         const uint64_t horizon_mmio_start = horizon_sample
             ? host_timers.mmio_generation() : 0u;
+        const uint64_t horizon_vu_start = horizon_sample
+            ? vu0_control.m_callback_generation : 0u;
+        const auto horizon_cop0_start = horizon_sample
+            ? ee::ee_horizon_cop0_snapshot(cpu, runtime)
+            : ee::t_ee_horizon_cop0_snapshot{};
         if (horizon_sample)
         {
             const bool iop_scheduled = hle_startup &&
@@ -5338,6 +5371,17 @@ int main(int argc, char** argv)
             {
                 const auto source = static_cast<size_t>(horizon.m_source);
                 ++horizon_samples[source];
+                const bool vu_touched = vu0_control.m_callback_generation != horizon_vu_start;
+                const bool cop0_changed = ee::ee_horizon_cop0_snapshot(cpu, runtime) !=
+                    horizon_cop0_start;
+                if (vu_touched)
+                {
+                    ++horizon_vu_callback_boundaries;
+                }
+                if (cop0_changed)
+                {
+                    ++horizon_cop0_changed_boundaries;
+                }
                 if (reached < horizon.m_cycle)
                 {
                     ++horizon_before[source];
@@ -5363,6 +5407,14 @@ int main(int argc, char** argv)
                     if (host_timers.mmio_generation() == horizon_mmio_start)
                     {
                         ++horizon_lookahead_mmio_free;
+                        if (vu_touched || cop0_changed)
+                        {
+                            ++horizon_mmio_free_direct_touched;
+                        }
+                        else
+                        {
+                            ++horizon_mmio_free_direct_quiet;
+                        }
                     }
                     else
                     {
@@ -8986,7 +9038,9 @@ int main(int argc, char** argv)
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
             "iop_idle_candidates=%llu iop_rpc_barriers=%llu "
             "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu "
-            "gs_worker_barriers=%llu dmac_started_barriers=%llu unknown=%llu\n",
+            "gs_worker_barriers=%llu dmac_started_barriers=%llu "
+            "vu_callback_boundaries=%llu cop0_changed_boundaries=%llu "
+            "mmio_free_direct_touched=%llu mmio_free_direct_quiet=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -8996,6 +9050,10 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_lookahead_mmio_touched),
             static_cast<unsigned long long>(horizon_gs_worker_barriers),
             static_cast<unsigned long long>(horizon_dmac_started_barriers),
+            static_cast<unsigned long long>(horizon_vu_callback_boundaries),
+            static_cast<unsigned long long>(horizon_cop0_changed_boundaries),
+            static_cast<unsigned long long>(horizon_mmio_free_direct_touched),
+            static_cast<unsigned long long>(horizon_mmio_free_direct_quiet),
             static_cast<unsigned long long>(horizon_unknown));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
