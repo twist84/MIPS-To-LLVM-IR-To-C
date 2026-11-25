@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_runtime.h"
+#include "ee_exceptions.h"
 #include "ee_iop_clock.h"
 
 #include <array>
