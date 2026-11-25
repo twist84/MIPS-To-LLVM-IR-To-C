@@ -2,7 +2,7 @@
 setlocal
 
 cd /d "%~dp0.."
-call "%~dp0build_cdvd.bat"
+call "%~dp0build.bat" --cdvd
 if errorlevel 1 exit /b %errorlevel%
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

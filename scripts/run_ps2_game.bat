@@ -8,7 +8,7 @@ rem Never switch branches, fetch ROM0, or require an ISO.
 cd /d "%~dp0.."
 if errorlevel 1 exit /b 1
 
-rem Usage: scripts\run_ps2_game.bat [--full^|--quick^|--matched^|--recover-cache] [--cross^|--neutral]
+rem Usage: scripts\run_ps2_game.bat [--p40^|--p40-listen] [--full^|--quick^|--matched^|--recover-cache] [--cross^|--neutral]
 rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
@@ -29,6 +29,69 @@ set "ACCEPT_NEW_IR="
 set "OVERWRITE_IR="
 set "CACHE_MISS_ARGS="
 set "LIVE_RELINK_ARG="
+set "P40_PRESET="
+rem P40 is a first-position preset. Re-enter the updated launcher after
+rem fast-forwarding so the actual run uses the new script on disk.
+if /I "%~1"=="--p40" goto :p40_prepare
+if /I "%~1"=="--p40-listen" goto :p40_prepare
+goto :parse_launcher_options
+
+:p40_prepare
+if /I "%PS2_GAME_RESOLVE_ONLY%"=="1" goto :p40_apply
+if "%PS2_P40_UPDATED%"=="1" goto :p40_apply
+git pull --ff-only
+if errorlevel 1 exit /b 1
+set "PS2_P40_UPDATED=1"
+call "%~f0" %*
+exit /b %ERRORLEVEL%
+
+:p40_apply
+set "PS2_P40_UPDATED="
+set "P40_PRESET=1"
+if /I "%~1"=="--p40-listen" set "SDBZ_P40_LISTEN=1"
+set "REQUESTED_SESSION_MODE=full"
+set "REQUESTED_PAD_PROFILE=neutral"
+shift
+set "SDBZ_EE_OPT=5"
+set "SDBZ_SKIP_HEADLESS_EXPANSION=1"
+set "SDBZ_SPEED_PERCENT=0"
+rem Opt-in real-time listening; default P40 remains uncapped and device-free.
+if "%SDBZ_P40_LISTEN%"=="1" (
+    set "SDBZ_SPEED_PERCENT=100"
+    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"
+)
+if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"
+
+set "MAX_DISPATCHES=40000000"
+set "MAX_EXPANSION_DISPATCHES=40000000"
+set "MAX_REPLAY_DISPATCHES=40000000"
+set "BOOT_TIMEOUT_SECONDS=600"
+
+rem Preserve full profiling by default, but allow a profiler-off control.
+if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"
+set "SDBZ_TRACE_BUFFERED=1"
+set "SDBZ_REPORT_SNAPSHOT_MS=2000"
+rem Progress text only; retain exact dispatch counters and periodic snapshots.
+set "SDBZ_REPORT_PROGRESS_EVERY=8192"
+set "SDBZ_DISPATCH_TRACE_EVERY=1024"
+rem Host polling gate; every observed guest field advance is still serviced.
+set "SDBZ_WINDOW_PUMP_STRIDE=64"
+
+set "SDBZ_EE_DIRECT_DISPATCH=1"
+set "SDBZ_VU1_ASYNC=1"
+set "SDBZ_GS_ASYNC=1"
+rem Retail-validated experimental mode; regular runner defaults remain unchanged.
+set "SDBZ_GS_GPU_VRAM=1"
+rem Disable byte-wise image hashing, retain committed event/QWC counters.
+set "SDBZ_GIF_IMAGE_DIGEST=0"
+
+set "SDBZ_VU1_AOT=%CD%\build\vu1-native-v20"
+set "SDBZ_VU1_AOT_CAPTURE="
+set "SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\build\vu1-misses"
+
+set "EE_WEBGPU_SNAPSHOT=1"
+set "EE_WEBGPU_WINDOW=1"
+echo P40 preset: speed=%SDBZ_SPEED_PERCENT% audio=%SDBZ_HOST_AUDIO% opt=%SDBZ_EE_OPT% dispatches=%MAX_DISPATCHES%
 :parse_launcher_options
 if "%~1"=="" goto :launcher_options_ready
 if /I "%~1"=="--full" (
@@ -82,10 +145,14 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: scripts\run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: scripts\run_ps2_game.bat [--p40 or --p40-listen] [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
+if defined P40_PRESET if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+    echo ERROR: P40 requires full replay.
+    exit /b 2
+)
 rem Optimized native object variants never replace the O0 baseline.
 if not defined SDBZ_EE_OPT set "SDBZ_EE_OPT=0"
 if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"=="2" if not "%SDBZ_EE_OPT%"=="3" if not "%SDBZ_EE_OPT%"=="4" if not "%SDBZ_EE_OPT%"=="5" (
