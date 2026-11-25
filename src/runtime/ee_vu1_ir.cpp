@@ -301,17 +301,17 @@ public:
         line("%step_count = alloca i32, align 4");
         line("%cycle = alloca i32, align 4");
         line("%ending = alloca i1, align 1");
-        line("%previous_lower = alloca i1, align 1");
-        line("%previous_vi = alloca <16 x i16>, align 2");
+        line("%previous_vi_mask = alloca i32, align 4");
+        line("%previous_vi = alloca [16 x i16], align 2");
         line("%ready = alloca [144 x i32], align 4");
         line("store [144 x i32] zeroinitializer, ptr %ready, align 4");
-        line("store <16 x i16> zeroinitializer, ptr %previous_vi, align 2");
+        line("store [16 x i16] zeroinitializer, ptr %previous_vi, align 2");
         line("store i32 " + std::to_string(start) + ", ptr %pc, align 4");
         line("store i32 " + std::to_string((start + 8u) & 0x3fffu) + ", ptr %npc, align 4");
         line("store i32 0, ptr %step_count, align 4");
         line("store i32 16, ptr %cycle, align 4");
         line("store i1 false, ptr %ending, align 1");
-        line("store i1 false, ptr %previous_lower, align 1");
+        line("store i32 0, ptr %previous_vi_mask, align 4");
         line("br label %dispatch");
         m_ir += "dispatch:\n";
         line("%old_steps = load i32, ptr %step_count, align 4");
@@ -324,9 +324,7 @@ public:
         line("%current_pc = load i32, ptr %pc, align 4");
         line("%npc_now = load i32, ptr %npc, align 4");
         line("%ending_now = load i1, ptr %ending, align 1");
-        line("%previous_lower_now = load i1, ptr %previous_lower, align 1");
-        line("%previous_vi_now = load <16 x i16>, ptr %previous_vi, align 2");
-        line("%before_vi = load <16 x i16>, ptr %vi, align 2");
+        line("%previous_vi_mask_now = load i32, ptr %previous_vi_mask, align 4");
         line("%sequential_raw = add i32 %npc_now, 8");
         line("%sequential = and i32 %sequential_raw, 16383");
         line("switch i32 %current_pc, label %fail [");
@@ -346,6 +344,8 @@ public:
         m_ir += "pair_" + std::to_string(pc) + ":\n";
         m_current_pc = pc;
         m_next_target = "%sequential";
+        m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
+        m_delay_vi_mask = 0u;
 
         // Identical dependency lists and four-cycle retire semantics to
         // s_ee_vu1_dependency. Readiness is local to this invocation.
@@ -392,11 +392,8 @@ public:
                     ready_pointer(128u + use.m_vi_load) + ", align 4");
             }
         }
-        const bool previous_lower = (hi & 0x80000000u) == 0u &&
-            !branch_delay_exempt(lo);
-        line("store <16 x i16> %before_vi, ptr %previous_vi, align 2");
-        line(std::string("store i1 ") + (previous_lower ? "true" : "false") +
-            ", ptr %previous_lower, align 1");
+        line("store i32 " + std::to_string(m_delay_vi_mask) +
+            ", ptr %previous_vi_mask, align 4");
         line("store i32 %npc_now, ptr %pc, align 4");
         line("store i32 " + m_next_target + ", ptr %npc, align 4");
         line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
@@ -929,11 +926,17 @@ private:
         {
             return "0";
         }
-        const auto previous = operation("extractelement <16 x i16> %previous_vi_now, i32 " +
+        // Only a VI actually written by the preceding nonexempt lower
+        // can differ from the current value. All upper writes target VF,
+        // ACC or flags, never VI. Conditional branches do not write VI.
+        const auto saved = operation("getelementptr i16, ptr %previous_vi, i32 " +
             std::to_string(index));
-        const auto current = operation("extractelement <16 x i16> %before_vi, i32 " +
-            std::to_string(index));
-        return operation("select i1 %previous_lower_now, i16 " + previous +
+        const auto previous = operation("load i16, ptr " + saved + ", align 2");
+        const auto current = reg(index);
+        const auto bit = operation("and i32 %previous_vi_mask_now, " +
+            std::to_string(1u << index));
+        const auto delayed = operation("icmp ne i32 " + bit + ", 0");
+        return operation("select i1 " + delayed + ", i16 " + previous +
             ", i16 " + current);
     }
 
@@ -1491,6 +1494,17 @@ private:
         if (reg_index != 0u)
         {
             const auto address = pointer(reg_index);
+            const uint32_t bit = 1u << reg_index;
+            if (m_dynamic && m_delay_vi_writes && (m_delay_vi_mask & bit) == 0u)
+            {
+                // Capture the pre-pair value once, even when ILW writes
+                // several selected lanes to the same integer register.
+                const auto previous = operation("load i16, ptr " + address + ", align 2");
+                const auto saved = operation("getelementptr i16, ptr %previous_vi, i32 " +
+                    std::to_string(reg_index));
+                line("store i16 " + previous + ", ptr " + saved + ", align 2");
+                m_delay_vi_mask |= bit;
+            }
             line("store i16 " + value + ", ptr " + address + ", align 2");
         }
     }
@@ -1519,6 +1533,8 @@ private:
     bool m_upper_acc = false;
     bool m_writes_data = false;
     bool m_dynamic = false;
+    bool m_delay_vi_writes = false;
+    uint32_t m_delay_vi_mask = 0u;
     bool m_flag_pipeline = false;
     bool m_q_pipeline = false;
     bool m_p_pipeline = false;

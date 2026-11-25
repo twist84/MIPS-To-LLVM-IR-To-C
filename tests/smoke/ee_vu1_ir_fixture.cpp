@@ -396,6 +396,26 @@ int main(int argc, char** argv)
         append(branch(0x2fu, 1u, 0u, 2));
         append(k_nop);
         append(integer(0x32u, 1u, 15u, 15u));
+        // Preserve only the VI written by the previous pair. The other
+        // operand must be live, and a NOP must invalidate the saved value.
+        append((0x08u << 25u) | (3u << 16u) | 7u); // VI3 = 7
+        append((0x08u << 25u) | (4u << 16u) | 7u); // VI4 = 7
+        append((0x08u << 25u) | (3u << 16u) | 9u); // VI3 = 9
+        append(branch(0x28u, 3u, 4u, 2)); // old VI3 == live VI4
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u)); // skipped
+        append((0x08u << 25u) | (3u << 16u) | 7u); // VI3 = 7
+        append(k_nop);
+        append(branch(0x28u, 3u, 4u, 2)); // live VI3 == live VI4
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u)); // skipped
+        // ILW can overwrite the same VI for several selected lanes. Its
+        // delayed value must be the original VI, not an intermediate lane.
+        append((0x08u << 25u) | (3u << 16u) | 7u);
+        append((0x04u << 25u) | (15u << 21u) | (3u << 16u));
+        append(branch(0x28u, 3u, 4u, 2));
+        append(k_nop);
+        append(integer(0x32u, 7u, 15u, 15u)); // skipped
         // BAL calls forward; JR returns to the discovered continuation.
         append(branch(0x21u, 0u, 6u, 4));
         append(k_nop);
@@ -417,6 +437,12 @@ int main(int argc, char** argv)
     if (program.m_ir.empty() || (program.m_steps == 0u) != (branches || flag_case || q_case) ||
         program.m_writes_data != (conversion_case || acc_case || flag_case || q_case ||
             std::strcmp(argv[2], "stores") == 0))
+    {
+        return 1;
+    }
+    if (branches && (program.m_ir.find("%previous_vi_mask") == std::string::npos ||
+        program.m_ir.find("load <16 x i16>") != std::string::npos ||
+        program.m_ir.find("store <16 x i16>") != std::string::npos))
     {
         return 1;
     }
