@@ -82,26 +82,38 @@ extern "C" uint32_t ee_raise_exception(s_ee_cpu_state* cpu,
     // set (e.g. a syscall within a genuine DMA5 guest callback). Reuse the
     // previously unused CPU state pad; the guest cannot observe this field.
     cpu->m_pad = pc;
+    if (rt != nullptr)
+    {
+        rt->m_last_exception_in_bd_slot = in_bd_slot != 0u;
+    }
     // Vector selection depends on the exception level *before* this entry.
     // In particular, the first TLBL/TLBS must use the TLB refill vector.
     const uint32_t pre_entry_status = status;
 
     const s_ee_exception_info* info = ee_exception_info(excode);
 
-    // Cause: preserve IP bits (15..8), set ExcCode and BD.
-    uint32_t new_cause = cause & CAUSE_IP_MASK;
+    // Manual section 4.1.2 pseudocode: nested Level 1 entry updates
+    // ExcCode but must preserve the EPC/BD restart pair. BD2/EXC2
+    // belong to Level 2 and are not overwritten by this entry.
+    constexpr uint32_t level2_cause = (1u << 30u) | (7u << 16u);
+    uint32_t new_cause = cause & (CAUSE_IP_MASK | level2_cause);
     new_cause |= (excode & 0x1fu) << 2;
-    if (in_bd_slot)
+    const bool nested = (pre_entry_status & STATUS_EXL) != 0u;
+    if (nested)
+    {
+        new_cause |= cause & CAUSE_BD;
+    }
+    else if (in_bd_slot)
+    {
         new_cause |= CAUSE_BD;
-    else
-        new_cause &= ~CAUSE_BD;
+    }
     cause = new_cause;
 
     if (info && info->sets_badvaddr)
         cpu->m_cop0[COP0_BadVAddr] = badvaddr;
 
     // EPC only updated when not already in exception level.
-    if ((status & STATUS_EXL) == 0)
+    if (!nested)
     {
         if (in_bd_slot)
             epc = pc - 4;

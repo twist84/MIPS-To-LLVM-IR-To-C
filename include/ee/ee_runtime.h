@@ -378,6 +378,11 @@ struct s_ee_runtime
     // counting; the validated producer continues using explicit deltas.
     uint64_t m_perf_compat_last = 0u;
     bool m_perf_compat_fault = false;
+
+    // Host-only diagnostic for the latest taken exception. Cause.BD may
+    // refer to an earlier exception while EXL is set. HLE callbacks need
+    // the actual nested trap's delay-slot status, alongside cpu.m_pad.
+    bool m_last_exception_in_bd_slot = false;
 };
 
 // Never infer cycles from these observations or implicitly install

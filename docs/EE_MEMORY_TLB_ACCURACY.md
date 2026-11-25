@@ -74,3 +74,18 @@ Tests cover both halves, boundaries, ASID, permissions, malformed
 alignment/V/D and overlapping RAM. This supersedes earlier deferral of
 well-formed SPRAM lookup; raw TLB register readback and active guest
 memory behavior are unchanged.
+
+## Batch 6: preserve architectural restart state on nested faults
+
+This is the first live runtime behavior change in this PR and a prerequisite
+for future precise TLB fault entry (#162). EE Core Manual section 4.1.2
+pseudocode (pp. 90–91) and the explicit nested-refill rule (p. 101) preserve
+both EPC and BD while EXL is set. Prior code preserved only EPC. Level 1
+entry also retains the independent BD2/EXC2 fields. A host-only diagnostic
+records the actual trap delay-slot flag beside cpu.m_pad; the two HLE
+syscall checks use it in IRQ callback context rather than the saved
+architectural BD. The diagnostic is appended in the existing runtime tail.
+Tests cross BEV and original/nested delay-slot state, preserve BadVAddr and
+ErrorEPC, and verify ERET resumes the original restart. No Level 2 event
+producer, TLB access activation or cache execution is added. A fresh bounded
+retail replay is required because the live exception/HLE path changed.

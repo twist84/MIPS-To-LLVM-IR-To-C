@@ -5541,11 +5541,14 @@ int main(int argc, char** argv)
                 // separately records the actual trap instruction PC.
                 const uint32_t epc = irq_callback_active
                     ? cpu.m_pad : cpu.m_cop0[14];
+                const bool trap_in_bd_slot = irq_callback_active
+                    ? runtime.m_last_exception_in_bd_slot
+                    : (cpu.m_cop0[13] & ee::CAUSE_BD) != 0u;
                 const uint32_t handler = installed_syscall_handlers[service];
                 uint32_t opcode = 0;
                 if (!image.read32_at(epc, &opcode) ||
                     (opcode & 0xfc00003fu) != 0x0000000cu ||
-                    (cpu.m_cop0[13] & 0x80000000u) != 0u ||
+                    trap_in_bd_slot ||
                     epc > 0xfffffffbu)
                 {
                     std::fprintf(stderr,
@@ -5625,11 +5628,14 @@ int main(int argc, char** argv)
                 // separately records the actual trap instruction PC.
                 const uint32_t epc = irq_callback_active
                     ? cpu.m_pad : cpu.m_cop0[14];
+                const bool trap_in_bd_slot = irq_callback_active
+                    ? runtime.m_last_exception_in_bd_slot
+                    : (cpu.m_cop0[13] & ee::CAUSE_BD) != 0u;
                 uint32_t opcode = 0;
                 if (!image.read32_at(epc, &opcode) ||
                     (opcode & 0x3fu) != 0x0cu ||
                     (opcode >> 26) != 0u ||
-                    (cpu.m_cop0[13] & 0x80000000u) != 0u ||
+                    trap_in_bd_slot ||
                     epc > 0xfffffffbu)
                 {
                     std::fprintf(stderr, "startup HLE refused invalid syscall context\n");
