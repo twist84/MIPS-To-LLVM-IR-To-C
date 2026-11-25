@@ -312,7 +312,9 @@ int main(int argc, char** argv)
         append(scalar(0x38u, 21u, 0u, 0u, 0u));
         append(fsand(11u));
         append(scalar(0x3bu, 0u, 0u, 0u, 0u));
-        append(fsand(12u));
+        // VI12 is overwritten by the shared E delay slot; retain this
+        // observation in VI9 instead.
+        append(fsand(9u));
         append(scalar(0x38u, 21u, 22u, 0u, 0u));
         append(scalar(0x3bu, 0u, 0u, 0u, 0u));
         append(fsand(13u));
