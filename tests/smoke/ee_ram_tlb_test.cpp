@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 namespace
 {
@@ -195,6 +196,90 @@ int main()
                "unmodeled Random/Wired TLBWR must fail closed"))
     {
         return 1;
+    }
+
+    // Detailed lookup is independent of the legacy direct-address path.
+    // Exercise every supported page size and both ends of both pages.
+    using status = ee::e_ee_tlb_lookup_status;
+    constexpr uint32_t masks[] = {0u, 0x6000u, 0x1e000u, 0x7e000u,
+                                  0x1fe000u, 0x7fe000u, 0x1ffe000u};
+    for (const uint32_t mask : masks)
+    {
+        ee::c_ee_tlb tlb{};
+        constexpr uint32_t virt = 0x40000000u;
+        constexpr uint32_t even = 0x10000000u;
+        constexpr uint32_t odd = 0x20000000u;
+        const uint32_t size = ((mask | 0x1fffu) + 1u) / 2u;
+        const uint32_t lo0 = ((even >> 12u) << 6u) | (3u << 3u) | 6u;
+        const uint32_t lo1 = ((odd >> 12u) << 6u) | (2u << 3u) | 2u;
+        if (!check(tlb.write(47u, mask, virt | 0xabu, lo0, lo1),
+                   "supported page mask at last TLB index"))
+        {
+            return 1;
+        }
+        for (const uint32_t offset : {0u, size - 1u})
+        {
+            const auto a = tlb.lookup(virt + offset, 0xabu, true);
+            const auto b = tlb.lookup(virt + size + offset, 0xabu, false);
+            if (!check(a.m_status == status::TRANSLATED &&
+                       a.m_physical_address == even + offset &&
+                       a.m_page_size == size && a.m_entry_index == 47u &&
+                       !a.m_odd_page && a.m_cache_mode == 3u &&
+                       b.m_status == status::TRANSLATED &&
+                       b.m_physical_address == odd + offset &&
+                       b.m_page_size == size && b.m_odd_page && b.m_cache_mode == 2u,
+                       "even/odd PFN, boundary and cache-mode classification"))
+            {
+                return 1;
+            }
+        }
+        if (!check(tlb.lookup(virt + size, 0xabu, true).m_status ==
+                       status::PAGE_NOT_DIRTY &&
+                   tlb.lookup(virt, 0xacu, false).m_status == status::NO_MATCH &&
+                   tlb.lookup(virt + 2u * size, 0xabu, false).m_status == status::NO_MATCH,
+                   "modified, ASID and pair boundary are distinct"))
+        {
+            return 1;
+        }
+        if (!check(tlb.write(47u, mask, virt | 0xabu, lo0 | 1u, lo1) &&
+                   tlb.lookup(virt, 0xacu, false).m_status == status::NO_MATCH &&
+                   tlb.write(47u, mask, virt | 0xabu, lo0 | 1u, lo1 | 1u) &&
+                   tlb.lookup(virt, 0xacu, false).m_status == status::TRANSLATED,
+                   "both G bits required for global ASID bypass"))
+        {
+            return 1;
+        }
+    }
+
+    {
+        ee::c_ee_tlb tlb{};
+        constexpr uint32_t virt = 0x00400000u;
+        constexpr uint32_t lo = (0x100u << 6u) | (7u << 3u) | 6u;
+        if (!check(tlb.write(0u, 0u, virt, lo & ~2u, lo) &&
+                   tlb.lookup(virt, 0u, true).m_status == status::PAGE_INVALID &&
+                   tlb.lookup(virt + 0x1000u, 0u, true).m_cache_mode == 7u &&
+                   tlb.lookup(virt + 0x1000u, 0u, true).m_status == status::TRANSLATED,
+                   "invalid even page does not invalidate odd page"))
+        {
+            return 1;
+        }
+        if (!check(tlb.write(0u, 0u, virt, lo & ~0x38u, lo) &&
+                   tlb.lookup(virt, 0u, false).m_status == status::RESERVED_CACHE_MODE &&
+                   tlb.write(0u, 0u, virt, lo | 0x80000000u, lo) &&
+                   tlb.lookup(virt + 0x1000u, 0u, false).m_status ==
+                       status::SCRATCHPAD_UNMODELED,
+                   "reserved cache modes and scratchpad cannot yield RAM mappings"))
+        {
+            return 1;
+        }
+        if (!check(tlb.write(0u, 0u, virt, lo, lo) &&
+                   tlb.write(1u, 0u, virt, lo, lo) &&
+                   tlb.lookup(virt, 0u, false).m_status == status::MULTIPLE_MATCHES &&
+                   tlb.lookup(virt, 0u, false).m_physical_address == 0u,
+                   "multiple matches do not pick an arbitrary PFN"))
+        {
+            return 1;
+        }
     }
 
     std::puts("ee_ram_tlb_test: PASS");

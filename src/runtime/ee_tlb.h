@@ -17,6 +17,30 @@ struct s_ee_tlb_entry
     bool m_written = false;
 };
 
+// Detailed opt-in lookup. These are model outcomes, not delivered guest
+// exceptions. Multiple matches and unsupported attributes deliberately
+// fail closed rather than choose an arbitrary physical mapping.
+enum class e_ee_tlb_lookup_status : uint8_t
+{
+    TRANSLATED,
+    NO_MATCH,
+    PAGE_INVALID,
+    PAGE_NOT_DIRTY,
+    SCRATCHPAD_UNMODELED,
+    RESERVED_CACHE_MODE,
+    MULTIPLE_MATCHES
+};
+
+struct s_ee_tlb_lookup
+{
+    e_ee_tlb_lookup_status m_status = e_ee_tlb_lookup_status::NO_MATCH;
+    uint32_t m_physical_address = 0u;
+    uint32_t m_entry_index = 0xffffffffu;
+    uint32_t m_page_size = 0u;
+    uint32_t m_cache_mode = 0u;
+    bool m_odd_page = false;
+};
+
 class c_ee_tlb
 {
 public:
@@ -92,6 +116,73 @@ public:
             }
         }
         return false;
+    }
+
+    // Architectural classification for a caller that can deliver precise
+    // faults. Existing HLE direct aliases and legacy translate() are not
+    // changed; cache modes are reported, not emulated.
+    s_ee_tlb_lookup lookup(uint32_t virtual_address, uint32_t asid,
+                           bool write_access) const
+    {
+        s_ee_tlb_lookup result{};
+        for (uint32_t i = 0u; i < k_entry_count; ++i)
+        {
+            const s_ee_tlb_entry& entry = m_entries[i];
+            if (!entry.m_written)
+            {
+                continue;
+            }
+            const uint32_t mask = entry.m_page_mask | 0x1fffu;
+            const bool global = (entry.m_entry_lo0 & entry.m_entry_lo1 & 1u) != 0u;
+            if (((virtual_address ^ entry.m_entry_hi) & ~mask) != 0u ||
+                (!global && (asid & 0xffu) != (entry.m_entry_hi & 0xffu)))
+            {
+                continue;
+            }
+            if (result.m_entry_index != 0xffffffffu)
+            {
+                result = {};
+                result.m_status = e_ee_tlb_lookup_status::MULTIPLE_MATCHES;
+                return result;
+            }
+
+            result.m_entry_index = i;
+            result.m_page_size = (mask + 1u) / 2u;
+            result.m_odd_page = (virtual_address & result.m_page_size) != 0u;
+            const uint32_t lo = result.m_odd_page ?
+                entry.m_entry_lo1 : entry.m_entry_lo0;
+            result.m_cache_mode = (lo >> 3u) & 7u;
+
+            // S belongs to EntryLo0, not to each independent PFN.
+            // Scratchpad translation needs a separately audited mapping.
+            if ((entry.m_entry_lo0 & 0x80000000u) != 0u ||
+                (entry.m_entry_lo1 & 0x80000000u) != 0u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
+            }
+            else if ((lo & 2u) == 0u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::PAGE_INVALID;
+            }
+            else if (write_access && (lo & 4u) == 0u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::PAGE_NOT_DIRTY;
+            }
+            else if (result.m_cache_mode != 2u && result.m_cache_mode != 3u &&
+                     result.m_cache_mode != 7u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::RESERVED_CACHE_MODE;
+            }
+            else
+            {
+                const uint32_t frame = ((lo & 0x03ffffc0u) << 6u) &
+                    ~(result.m_page_size - 1u);
+                result.m_physical_address = frame |
+                    (virtual_address & (result.m_page_size - 1u));
+                result.m_status = e_ee_tlb_lookup_status::TRANSLATED;
+            }
+        }
+        return result;
     }
 
     // Explicit translation of a matched user/mapped address. A matching
