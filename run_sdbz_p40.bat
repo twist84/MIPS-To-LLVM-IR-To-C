@@ -1,8 +1,8 @@
 @echo off
 setlocal EnableExtensions DisableDelayedExpansion
 
-rem Uncapped P40 retail profiling replay; requires a recovered EE cache
-rem and the previously built VU1 AOT library. Never recover or rebuild IR here.
+rem Uncapped P40 retail profiling replay; requires an existing EE cache
+rem and the previously built VU1 AOT library. Pass --overwrite-ir to refresh EE IR.
 cd /d "%~dp0"
 if errorlevel 1 exit /b 1
 
@@ -42,5 +42,5 @@ set "SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\build\vu1-misses"
 set "EE_WEBGPU_SNAPSHOT=1"
 set "EE_WEBGPU_WINDOW=1"
 
-call run_ps2_game.bat --full --neutral
+call run_ps2_game.bat --full --neutral %*
 exit /b %ERRORLEVEL%

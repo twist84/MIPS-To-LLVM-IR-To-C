@@ -783,7 +783,7 @@ def main():
         "set \"EE_WEBGPU_SNAPSHOT=1\"",
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
-    assert preset.endswith("call run_ps2_game.bat --full --neutral\nexit /b %ERRORLEVEL%\n")
+    assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
 
     print("boot session orchestration: PASS")
 

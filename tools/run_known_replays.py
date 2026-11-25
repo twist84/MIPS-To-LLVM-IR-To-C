@@ -168,7 +168,7 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
 
 
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
-                allow_mismatches):
+                allow_mismatches, *, ir_only=False):
     """Build known guest entries without any intermediate game execution."""
     ir_dir = work / "ir"
     for candidate in (ir_dir, work / "objects", work / "translation-cache.json",
@@ -216,6 +216,8 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
             "after inspecting the differences; parity is not established."
         )
     run_game.shared_ir.normalize_metadata(metadata_path, elf)
+    if ir_only:
+        return comparison
     # Emit all guest objects once, then link one library. Never run a guest
     # between function batches or rebuild guest code just for host changes.
     lib_name = "game-translated.dll" if os.name == "nt" else (

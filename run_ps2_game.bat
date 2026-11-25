@@ -11,6 +11,8 @@ rem Usage: run_ps2_game.bat [--full^|--quick^|--matched^|--recover-cache] [--cro
 rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
+rem --overwrite-ir explicitly replaces shared EE IR using the saved entry
+rem inventory, builds only the selected native profile, and continues --full.
 rem --replay-after-expand opts out of in-process live cache-miss resume.
 rem --live-full-relink disables PR #152's fast overlay DLLs for live misses.
 rem PRECOMPILE_ALL=0 disables cold whole-image precompilation.
@@ -23,6 +25,7 @@ rem Without either switch, retain explicitly configured pad variables.
 set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
+set "OVERWRITE_IR="
 set "CACHE_MISS_ARGS="
 set "LIVE_RELINK_ARG="
 :parse_launcher_options
@@ -44,6 +47,11 @@ if /I "%~1"=="--matched" (
 )
 if /I "%~1"=="--recover-cache" (
     set "REQUESTED_SESSION_MODE=recover"
+    shift
+    goto :parse_launcher_options
+)
+if /I "%~1"=="--overwrite-ir" (
+    set "OVERWRITE_IR=1"
     shift
     goto :parse_launcher_options
 )
@@ -73,7 +81,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
@@ -85,6 +93,10 @@ if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"==
 )
 if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
     echo ERROR: Optimized EE cache experiments require --full.
+    exit /b 2
+)
+if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full" (
+    echo ERROR: --overwrite-ir requires --full and an existing canonical cache.
     exit /b 2
 )
 if defined ACCEPT_NEW_IR if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
@@ -284,16 +296,25 @@ rem --quick forces the non-traced probe even if no guest cache survives.
 rem Without --quick, WebGPU requests still require full replay snapshots.
 rem Only rebuild guest IR when preserved provenance cannot be verified.
 set "CACHE_FLAG="
+if defined OVERWRITE_IR (
+    echo === Re-emitting existing EE function inventory for selected native profile ===
+    python tools\refresh_known_ir.py --elf "%GAME_ELF%" ^
+        --build-dir build --config Release ^
+        --base-work-dir "%CD%\%BASE_WORK_DIR%" ^
+        --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
+    if errorlevel 1 exit /b 1
+    set "CACHE_FLAG=--no-recompile"
+)
 rem Optimized full replay validates the shared source IR in the profile
 rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
-if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
+if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating shared EE IR for selected optimization profile ===
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
         --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
     if errorlevel 1 (
         echo ERROR: Shared source is not current. Existing caches retained.
         echo Run with SDBZ_EE_OPT=0 and --recover-cache --accept-new-ir
-        echo only when changed lowering is intentional.
+        echo only when changed lowering is intentional, or use --full --overwrite-ir.
         exit /b 1
     )
     set "CACHE_FLAG=--no-recompile"

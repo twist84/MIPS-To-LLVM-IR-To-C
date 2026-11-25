@@ -10,6 +10,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import recover_translation_cache as recovery
+import refresh_known_ir as refresh
 import run_game
 import shared_ee_ir as shared_ir
 import cache_backup
@@ -426,7 +427,113 @@ def test_real_7z_backup_if_available():
             assert recovered == {b"O5-native", b"legacy-O5-native", b"legacy-recovery-42-O5-native"}
 
 
+def test_overwrite_ir_uses_active_inventory_and_selected_profile():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp)
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"fixture-elf")
+        base = root / "ps2-game-hle"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        old_sources = {"ELF": run_game.sha256_path(elf), "lowering": "old"}
+        new_sources = dict(old_sources, lowering="new")
+        entries = [0x100020, 0x100008]
+        names = [f"sub_0x{pc:x}_0x{pc:x}.ll" for pc in entries]
+
+        def write_ir(directory, payload):
+            directory.mkdir(parents=True, exist_ok=True)
+            metadata = {
+                "elf": shared_ir.relative_path(elf, directory),
+                "path_format": "manifest-relative-v1",
+                "function_count": len(entries),
+                "functions": [
+                    {"ir_path": name, "vaddr": hex(pc), "block_pcs": [hex(pc)]}
+                    for name, pc in zip(names, entries)
+                ],
+            }
+            for name in names:
+                (directory / name).write_bytes(payload)
+            shared_ir.write_json(directory / "ee_functions.json", metadata)
+            return {name: digest(payload) for name in names}
+
+        old_hashes = write_ir(ir, b"old")
+        shared_ir.publish(ir / "ee_functions.json", old_sources, old_hashes)
+        profile = base / "O2-native"
+        profile.mkdir()
+        shared_ir.attach(profile, ir)
+        (profile / "objects").mkdir()
+        (profile / "objects" / "unchanged.o").write_bytes(b"retained")
+        calls = []
+
+        def fake_reconstruct(manifest, known_entries, elf_arg, build, config,
+                             work, jobs, allow_mismatches, *, ir_only=False):
+            assert known_entries == entries
+            assert manifest["ir_hashes"] == old_hashes
+            assert allow_mismatches and ir_only and elf_arg == elf
+            write_ir(work / "ir", b"new")
+            return {"missing": [], "extra": [], "mismatched_sha256": names}
+
+        def fake_build(source, work, metadata, objects, library, opt, **kwargs):
+            assert work == profile and metadata == ir / "ee_functions.json"
+            assert opt == 5 and kwargs["emit_jobs"] == 3
+            assert (objects / "unchanged.o").read_bytes() == b"retained"
+            assert shared_ir.current_state(metadata, new_sources)["ir_hashes"] == {
+                name: digest(b"new") for name in names}
+            calls.append(opt)
+            raise RuntimeError("synthetic link failure")
+
+        with patch.object(run_game, "ir_generation_inputs", return_value=new_sources), \
+             patch.object(run_game, "native_executable", return_value=root / "ee_recomp"), \
+             patch.object(run_game, "translation_inputs", return_value={"ELF": old_sources["ELF"]}), \
+             patch.object(refresh.known, "reconstruct", side_effect=fake_reconstruct), \
+             patch.object(run_game, "build_linked_library", side_effect=fake_build):
+            try:
+                refresh.refresh(elf, root, "Release", base, 5, 3)
+            except RuntimeError as error:
+                assert "synthetic link failure" in str(error)
+            else:
+                raise AssertionError("failed link was accepted")
+        assert calls == [5]
+        assert shared_ir.current_state(ir / "ee_functions.json", old_sources)["ir_hashes"] == old_hashes
+        assert all((ir / name).read_bytes() == b"old" for name in names)
+        assert not list(base.glob(".overwrite-ir-*"))
+
+        def successful_build(source, work, metadata, objects, library, opt, **kwargs):
+            assert opt == 5 and work == profile
+            library.write_bytes(b"new-native")
+
+        with patch.object(run_game, "ir_generation_inputs", return_value=new_sources), \
+             patch.object(run_game, "native_executable", return_value=root / "ee_recomp"), \
+             patch.object(run_game, "translation_inputs", return_value={"ELF": old_sources["ELF"]}), \
+             patch.object(refresh.known, "reconstruct", side_effect=fake_reconstruct), \
+             patch.object(run_game, "build_linked_library", side_effect=successful_build), \
+             patch.object(run_game, "validate_translation_cache") as validate:
+            refresh.refresh(elf, root, "Release", base, 5, 3)
+            validate.assert_called_once()
+        assert all((ir / name).read_bytes() == b"new" for name in names)
+        assert not list(base.glob(".overwrite-ir-*"))
+        assert shared_ir.ir_directory(profile) == ir
+        assert shared_ir.read_json(profile / "translation-cache.json")["emit_opt"] == 5
+        assert not (base / "translation-cache.json").exists()
+        assert (profile / "objects" / "unchanged.o").is_file()
+
+
+def test_overwrite_launcher_routes_before_preflight():
+    launcher = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    assert 'if /I "%~1"=="--overwrite-ir" (' in launcher
+    assert 'if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full"' in launcher
+    start = launcher.index("python tools\\refresh_known_ir.py")
+    end = launcher.index("=== Validating shared EE IR")
+    assert start < end
+    assert "--emit-opt=%SDBZ_EE_OPT%" in launcher[start:end]
+    assert 'set "CACHE_FLAG=--no-recompile"' in launcher[start:end]
+    assert 'if errorlevel 1 exit /b 1' in launcher[start:end]
+    assert 'if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0"' in launcher[start:end]
+
+
 def main():
+    test_overwrite_ir_uses_active_inventory_and_selected_profile()
+    test_overwrite_launcher_routes_before_preflight()
     test_verified_maximum_compression_backup()
     test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()
