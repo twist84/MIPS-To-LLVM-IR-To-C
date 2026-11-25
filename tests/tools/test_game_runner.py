@@ -4802,6 +4802,8 @@ def main():
                 assert (int(horizon["dmac_passive_sif0"]) <=
                         int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), horizon_line
                 assert int(horizon["dmac_started_barriers"]) == 0, horizon_line
+                assert int(horizon["dmac_top_mask"], 16) == 0x20, horizon_line
+                assert int(horizon["dmac_top_mask_count"]) == int(horizon["dmac_sif0_only"]), horizon_line
                 clock = [line for line in run.stdout.splitlines()
                          if line.startswith("IOP SPU2 clock:")]
                 assert len(clock) == 1, run.stdout
