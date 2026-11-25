@@ -47,10 +47,10 @@ set "SDBZ_HOST_AUDIO=0"
 set "SDBZ_RUNTIME_PROFILE=1"
 set "SDBZ_PROFILE_PCS=1"
 set "SDBZ_AUDIO_PROFILE=1"
-scripts\run_sdbz_p40.bat
+scripts\run_ps2_game.bat --p40
 ```
 
-Listening control: set SDBZ_P40_LISTEN and SDBZ_HOST_AUDIO to 1.
+Listening control: use `scripts\run_ps2_game.bat --p40-listen` (or set SDBZ_P40_LISTEN=1 with --p40). Set SDBZ_HOST_AUDIO=1 to explicitly enable host playback.
 The script performs a fast-forward-only pull and uses the existing
 `build/vu1-native-v20` library. Keep the code baseline intact while
 measuring; do not compare paced and uncapped wall times directly.

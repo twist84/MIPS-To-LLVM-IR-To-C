@@ -38,6 +38,7 @@ if not exist "%SDBZ_CLANG_CXX%" (
 )
 set "CXX=%SDBZ_CLANG_CXX%"
 for %%I in ("%CXX%") do set "PATH=%%~dpI;%PATH%"
+if not defined CC for %%I in ("%CXX%") do if exist "%%~dpIclang.exe" set "CC=%%~dpIclang.exe"
 
 where python >nul 2>nul
 if errorlevel 1 (

@@ -33,7 +33,7 @@ if not exist "%SDBZ_ISO%" (
 set "SDBZ_IOP_ROM0=%CD%\build\openps2bios\rom0.bin"
 if not exist "%SDBZ_IOP_ROM0%" (
     echo ERROR: OpenPS2BIOS ROM0 is missing at "%SDBZ_IOP_ROM0%".
-    echo Run build_openps2bios.bat or build.bat first.
+    echo Supply a verified OpenPS2BIOS ROM0 under build\openps2bios\rom0.bin.
     exit /b 1
 )
 

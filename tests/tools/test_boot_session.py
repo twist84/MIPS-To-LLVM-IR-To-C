@@ -776,6 +776,14 @@ def main():
             ROOT / "scripts" / parent
         ).read_text(encoding="utf-8"), (parent, child)
 
+    for filename in ("build_cdvd.bat", "test_sdbz_native.bat", "run_sdbz_p40.bat"):
+        assert not (ROOT / "scripts" / filename).exists(), filename
+    build_script = (ROOT / "scripts" / "build.bat").read_text(encoding="utf-8")
+    for mode in ("--test", "--native-tests", "--quick-tests", "--cdvd", "--sif-probe"):
+        assert mode in build_script
+    assert "game_runner_end_to_end_[0-3]" in build_script
+    assert "--no-tests=error" in build_script
+
     shell_script = ROOT / "scripts" / "build.sh"
     assert shell_script.is_file()
     assert not (ROOT / "build.sh").exists()
@@ -873,6 +881,16 @@ def main():
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
+            help_result = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
+                cwd=ROOT, capture_output=True, text=True, timeout=30,
+            )
+            assert help_result.returncode == 0 and "--native-tests" in help_result.stdout
+            invalid = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\build.bat --invalid"],
+                cwd=ROOT, capture_output=True, text=True, timeout=30,
+            )
+            assert invalid.returncode == 2, invalid.stdout + invalid.stderr
             # Exercise a real invocation from outside the checkout, using
             # a quoted absolute script path (also covers paths with spaces).
             launcher = ROOT / "scripts" / "run_ps2_game.bat"

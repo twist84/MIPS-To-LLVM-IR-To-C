@@ -86,6 +86,26 @@ The batch files also resolve the root from their own path when launched
 from elsewhere (including Explorer). Build output and extracted game
 files remain in their existing root-relative locations. The Linux entry point is now `./scripts/build.sh` (or `sh scripts/build.sh`).
 
+## Common Windows commands
+
+```bat
+scripts\build.bat
+scripts\build.bat --test
+scripts\build.bat --quick-tests
+scripts\run_ps2_game.bat --full
+scripts\run_ps2_game.bat --p40
+scripts\run_ps2_game.bat --p40-listen
+```
+
+`build.bat` configures and builds host targets without running a retail game.
+Use `--test` for all configured CTest tests, `--native-tests` for the
+focused native runner regressions, `--quick-tests` for the short subset,
+or `--cdvd` for focused CDVD regressions. `--sif-probe` explicitly
+selects the old build-and-real-disc probe (requires local retail assets).
+The former `build_cdvd.bat` and `test_sdbz_native.bat` are replaced
+by these modes. `run_sdbz_p40.bat` is replaced by the first-position
+`--p40` preset of the common game launcher.
+
 ## Build and test
 
 ~~~sh
@@ -234,22 +254,21 @@ native session diagnostics.
 With an existing compatible EE cache and VU1 AOT library at
 `build/vu1-native-v20`, run the bounded P40 preset. It performs
 `git pull --ff-only`, uses separate 40-million-dispatch budgets and
-enables native asynchronous workers, profiling and WebGPU capture.
+enables native asynchronous workers, profiling and WebGPU capture. The preset must be the first argument; append `--overwrite-ir` or a pad profile if needed. `--p40-listen` sets the existing listening control; an explicitly supplied `SDBZ_HOST_AUDIO` still takes precedence.
 
 ```bat
 set "SDBZ_P40_LISTEN="
 set "SDBZ_HOST_AUDIO=0"
-scripts\run_sdbz_p40.bat
+scripts\run_ps2_game.bat --p40
 ```
 
 For listening at the guest speed target with host audio:
 
 ```bat
-set "SDBZ_P40_LISTEN=1"
 set "SDBZ_HOST_AUDIO=1"
 set "SDBZ_AUDIO_PROFILE=1"
 set "SDBZ_PROFILE_PCS=1"
-scripts\run_sdbz_p40.bat
+scripts\run_ps2_game.bat --p40-listen
 ```
 
 Keep the EE and VU1 caches unless their translation provenance changes.

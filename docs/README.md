@@ -15,6 +15,10 @@
 
 Sources: [original transcript run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559), [Build and test 45663177622](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177622), [VU artifact 15044679435](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15044679435), and [retail replay evidence](SDBZ_RUNTIME_VALIDATION_20261125.md). The tested PR merge was `0e48f9a42d1eb4696f01bc1fafaeb95e76a8ced7`, PR head `8bbc80d8f6d639265ea8a9dae27ecac815584148`. No fresh retail replay on the squash commit is claimed. A passing observational autotest workflow means the matrix completed and aggregated correctly, not that all guest transcripts matched. Clean guest exit is separately recorded.
 
+## Common entry points
+
+From the root, use `scripts\build.bat` (host build), `scripts\build.bat --test` (build and CTest), `scripts\run_ps2_game.bat --full` (normal retail replay), `scripts\run_ps2_game.bat --p40` (40M profiling preset), or `scripts\run_ps2_game.bat --p40-listen` (paced audio). See [project README](../README.md) for focused build modes and launcher options.
+
 ## Current guides
 
 - [Project README and launch commands](../README.md)
