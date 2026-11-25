@@ -3924,6 +3924,7 @@ int main(int argc, char** argv)
         "SDBZ_PROFILE_HORIZON", &horizon_environment);
     const bool profile_horizon = horizon_value != nullptr &&
         std::strcmp(horizon_value, "1") == 0;
+    ee::c_native_alu_identity_cache alu_identities(profile_horizon && direct_dispatch);
     if (profile_horizon)
     {
         // Only the opt-in shadow path wraps the native runtime callbacks.
@@ -5287,51 +5288,56 @@ int main(int argc, char** argv)
                 }) : nullptr;
             if (horizon_alu_slots != 0u)
             {
-                // Bind the observation to the actual loaded first owner.
-                // Never infer identity from an ELF function address or
-                // allow a later overlay to certify an earlier owner.
-                horizon_alu_owner = 0u;
-                horizon_alu_certificate = false;
-                if (resolved != nullptr && native_resolve != nullptr)
-                {
-                    auto target = native_resolve(from_pc);
-                    auto identify = native_owner_resolve;
-                    auto certify = native_alu_certificate;
-                    for (size_t i = 0u; target == nullptr &&
-                         i < overlay_resolvers.size(); ++i)
+                // Exact cached identity is valid only while its native
+                // module and the immutable ELF source remain loaded.
+                const auto identity = alu_identities.resolve(
+                    from_pc, resolved, horizon_alu_slots,
+                    [&](uint32_t pc, ee::t_ee_translated_entry entry,
+                        uint32_t bound)
                     {
-                        if (overlay_resolvers[i] == nullptr)
+                        ee::s_native_alu_identity result{};
+                        auto target = native_resolve(pc);
+                        auto identify = native_owner_resolve;
+                        auto certify = native_alu_certificate;
+                        for (size_t i = 0u; target == nullptr &&
+                             i < overlay_resolvers.size(); ++i)
                         {
-                            break;
+                            if (overlay_resolvers[i] == nullptr)
+                            {
+                                break;
+                            }
+                            target = overlay_resolvers[i](pc);
+                            identify = overlay_owner_resolvers[i];
+                            certify = overlay_alu_certificates[i];
                         }
-                        target = overlay_resolvers[i](from_pc);
-                        identify = overlay_owner_resolvers[i];
-                        certify = overlay_alu_certificates[i];
-                    }
-                    if (target == resolved && identify != nullptr)
-                    {
-                        horizon_alu_owner = identify(from_pc, resolved);
-                        if (horizon_alu_owner != 0u && certify != nullptr)
+                        if (target != entry || identify == nullptr)
+                        {
+                            return result;
+                        }
+                        result.m_owner = identify(pc, entry);
+                        if (result.m_owner != 0u && certify != nullptr)
                         {
                             uint32_t slots = 0u;
-                            const uint32_t* words = certify(from_pc, resolved, &slots);
-                            if (words != nullptr && slots == horizon_alu_slots)
+                            const uint32_t* words = certify(pc, entry, &slots);
+                            if (words != nullptr && slots == bound)
                             {
-                                horizon_alu_certificate = true;
+                                result.m_certified = true;
                                 for (uint32_t i = 0u; i < slots; ++i)
                                 {
                                     uint32_t word = 0u;
-                                    if (!image.read32_at(from_pc + 4u * i, &word) ||
+                                    if (!image.read32_at(pc + 4u * i, &word) ||
                                         word != words[i])
                                     {
-                                        horizon_alu_certificate = false;
+                                        result.m_certified = false;
                                         break;
                                     }
                                 }
                             }
                         }
-                    }
-                }
+                        return result;
+                    });
+                horizon_alu_owner = identity.m_owner;
+                horizon_alu_certificate = identity.m_certified;
             }
             if (resolved == nullptr && hot_expand_dir != nullptr &&
                 !cpu_before_dispatch.has_value())
@@ -5556,6 +5562,7 @@ int main(int argc, char** argv)
                 // Native pointers must be invalidated before unloading
                 // any owning library, not after a stale cache hit.
                 native_targets.clear();
+                alu_identities.clear();
                 overlay_owner_by_pc.clear();
                 overlay_runs.clear();
                 overlay_resolvers.clear();
@@ -9360,7 +9367,8 @@ int main(int argc, char** argv)
             "entry_vif1_pending=%llu entry_cmsar1=%llu entry_vu0_running=%llu "
             "alu_bound_candidates=%llu alu_bound_matched=%llu alu_bound_mismatch=%llu "
             "alu_owner_known=%llu alu_owner_matched=%llu "
-            "alu_certified=%llu alu_certified_matched=%llu\n",
+            "alu_certified=%llu alu_certified_matched=%llu "
+            "alu_identity_hits=%llu alu_identity_misses=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -9405,7 +9413,9 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_alu_owner_known),
             static_cast<unsigned long long>(horizon_alu_owner_matched),
             static_cast<unsigned long long>(horizon_alu_certified),
-            static_cast<unsigned long long>(horizon_alu_certified_matched));
+            static_cast<unsigned long long>(horizon_alu_certified_matched),
+            static_cast<unsigned long long>(alu_identities.hits()),
+            static_cast<unsigned long long>(alu_identities.misses()));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
             std::fprintf(stderr,
