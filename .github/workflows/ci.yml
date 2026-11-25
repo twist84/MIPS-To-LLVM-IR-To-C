@@ -108,3 +108,30 @@ jobs:
             build/Testing/Temporary/LastTest.log
           if-no-files-found: warn
           retention-days: 7
+
+  autotests-pilot:
+    name: Original ps2autotests ELF pilot (observational)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ee-ctest-build
+          path: .
+      - name: Restore build and Python environment
+        run: tar -xzf ee-ctest-build.tar.gz
+      - name: Compare original console transcripts
+        run: |
+          .venv/bin/python tools/run_ps2autotests.py \
+            cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr \
+            --report-only --build-dir build
+      - name: Upload pilot transcripts and stop reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ps2autotests-pilot
+          path: build/autotests/runs/
+          if-no-files-found: warn
+          retention-days: 7

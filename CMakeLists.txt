@@ -1008,6 +1008,9 @@ if(EE_HAVE_LLVM_JIT_TEST)
                     $<TARGET_FILE:ee_game_runner>
                     ${game_shard})
     endforeach()
+    add_test(NAME ps2autotests_harness
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ps2autotests_harness.py)
     add_test(NAME ee_native_thread_scheduler
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_thread_scheduler.py

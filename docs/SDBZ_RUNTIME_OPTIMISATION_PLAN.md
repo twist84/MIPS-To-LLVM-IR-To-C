@@ -441,3 +441,7 @@ reserved filters and mute polarity remain open. No standalone retail
 replay required for Batches 11–13. The expanded VU0 trace still needs
 its independent PCSX2 run and the combined PR head needs all four CI
 workflows before acceptance.
+
+## Next milestone: complete ps2autotests ELFs
+
+All four CI workflows passed on `da448d4`. Begin the independent 55-test console-output baseline using the existing native ELF runtime; see [PS2AUTOTESTS.md](PS2AUTOTESTS.md). This infrastructure-only commit does not change retail execution or cache provenance. The first pilot selects CPU ALU, integer mul/div and FCR, with explicit observational CI and complete captured stop evidence.

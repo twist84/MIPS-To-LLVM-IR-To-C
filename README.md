@@ -237,3 +237,7 @@ Do not compare uncapped and paced wall times as speedups. A nominally
 neutral scripted preset does not exclude physical controller input.
 Unknown services and guest failures remain explicit; the runner does
 not synthesize hardware progress to force a successful boot.
+
+## Original console test suite
+
+Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Initial pilot results are pending; synthetic vectors are not counted as complete ELF passes.
