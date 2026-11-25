@@ -4463,7 +4463,7 @@ int main(int argc, char** argv)
                 ee::s_ee_iop_service_batch batch{
                     static_cast<uint32_t>(std::min<uint64_t>(iop_clock.due(), 256u)),
                     1u};
-                const uint64_t kernel_before = iop_kernel->cycles();
+                uint64_t kernel_before = 0u;
                 if (iop_coalesce && iop_clock.due() > 256u && turns < 63u &&
                     runtime.m_ee_cycle_scheduler.source() ==
                         ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
@@ -4477,13 +4477,16 @@ int main(int argc, char** argv)
                     const auto candidate = ee::ee_iop_service_batch(
                         iop_clock.due(), 64u - turns,
                         iop_kernel->idle_event_cycles_remaining());
-                    const auto& spu2 = iop_kernel->hardware().spu2();
-                    if (candidate.m_turns > 1u &&
-                        candidate.m_cycles <= UINT64_MAX - kernel_before &&
-                        (!spu2.clock_active() ||
-                            candidate.m_cycles <= UINT64_MAX - spu2.clock_cycles()))
+                    if (candidate.m_turns > 1u)
                     {
-                        batch = candidate;
+                        kernel_before = iop_kernel->cycles();
+                        const auto& spu2 = iop_kernel->hardware().spu2();
+                        if (candidate.m_cycles <= UINT64_MAX - kernel_before &&
+                            (!spu2.clock_active() ||
+                                candidate.m_cycles <= UINT64_MAX - spu2.clock_cycles()))
+                        {
+                            batch = candidate;
+                        }
                     }
                 }
                 const uint32_t cycles = batch.m_cycles;
