@@ -614,3 +614,9 @@ overlapping masks, RNEXT, old-value MOVE and VF0. The manual differential
 workflow now includes the focused reference probe. Physical-console
 confirmation of all side effects and wider flag/FDIV interaction remain
 outstanding. No original transcript pass is claimed before execution.
+
+### COP2 transfer width audit and VU output ordering
+
+At the 27/55 baseline, `cpu/vu0_macro/transfer` reaches CTC2 CMSAR1 at `0x00100544` (`0x48c8f800`) but already disagrees on several earlier register reads. The documented VI00–VI15 widths, STATUS sticky-bit write mask, CLIP width and CMSAR widths are handled at the CFC2/CTC2 boundary (VU User's Manual v6.0, sections 5.1.2–5.1.3). The successful CMSAR1 callback's stored address is returned by CFC2. Reserved registers are not assigned observed transcript values. No CMSAR1 execution success or original ELF pass is claimed here.
+
+In the VU shard of run 45637108081 (artifact 15034356263), all 40 changed lines of `vu/lower/random` and all 321 changed lines of `vu/lower/fdivdelay` agree after removing whitespace **for diagnosis only**. Raw FILEIO writes already contain the misplaced spaces. The original test runner prints vector components with separate `printf` calls; the ELF compiles the separating space calls to `putchar`. Investigate guest stdio/EE/FILEIO ordering; exact comparison is unchanged. EFU stops while formatting EEXP CVF_MIN immediately after `7f7fffff/`. Reserved COP2 values, CMSAR1 resident microcode execution and the EFU formatting loop remain open.

@@ -2474,6 +2474,7 @@ extern "C" uint32_t ee_vu0_read_vi(
     case 26: return vu0->m_tpc;
     case 28: return vu0->m_fbrst;
     case 29: return vu0->m_vpu_status;
+    case 31: return vu0->m_cmsar1;
     default: return vu0->m_vi[index];
     }
 }
@@ -2594,6 +2595,20 @@ extern "C" uint32_t ee_vu0_cfc2(
     if (gpr_index != 0)
     {
         uint32_t value = ee_vu0_read_vi(rt->m_vu0_state, vi_index);
+        // COP2 exposes only the architected bits of these registers.
+        if (vi_index < 16 || vi_index == 17 || vi_index == 26 ||
+            vi_index == 27 || vi_index == 31)
+        {
+            value &= 0xffffu;
+        }
+        else if (vi_index == 16)
+        {
+            value &= 0xfffu;
+        }
+        else if (vi_index == 18)
+        {
+            value &= 0xffffffu;
+        }
         if (vi_index == VU0_REG_R)
         {
             // PCSX2 writes only UL[0] on this special path. Preserve UL[1]
@@ -2646,8 +2661,22 @@ extern "C" uint32_t ee_vu0_ctc2(
         : static_cast<uint32_t>(cpu->m_gpr[gpr_index].m_lo);
 
     s_ee_vu0_state* vu0 = rt->m_vu0_state;
+    if (vi_index < 16)
+    {
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffu);
+        return sync_result;
+    }
     switch (vi_index)
     {
+    case 16: // STATUS: only the six sticky flags are writable.
+        ee_vu0_write_vi(vu0, vi_index,
+            (vu0->m_status_flags & 0x3fu) | (value & 0xfc0u));
+        return sync_result;
+
+    case 27: // CMSAR0 is a 16-bit control register.
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffu);
+        return sync_result;
+
     case 17: // MAC_FLAG is read-only.
     case 26: // TPC is read-only.
     case 29: // VPU_STAT is read-only.
@@ -2746,9 +2775,8 @@ extern "C" uint32_t ee_vu0_ctc2(
         return sync_result;
     }
 
-    case 18: // CLIP_FLAG also updates the separately tracked clip flags.
-        vu0->m_clip_flags = value;
-        ee_vu0_write_vi(vu0, vi_index, value);
+    case 18: // CLIP_FLAG is a 24-bit register.
+        ee_vu0_write_vi(vu0, vi_index, value & 0xffffffu);
         return sync_result;
 
     default:

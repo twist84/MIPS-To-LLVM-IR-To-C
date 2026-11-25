@@ -732,8 +732,8 @@ def main():
         )
         require(result == EE_EXIT_DISPATCH,
                 "CFC2 should return to the dispatcher")
-        require(cpu.gpr[8].lo == 0xffffffff81234567,
-                "CFC2 must sign-extend an ordinary VI value")
+        require(cpu.gpr[8].lo == 0x4567,
+                "CFC2 must zero-extend an ordinary 16-bit VI value")
         require(cpu.gpr[8].hi == 0x123456789abcdef0,
                 "CFC2 must preserve the upper 64-bit GPR half")
         check_sync(sync, 0, ENTRY_PC, "CFC2")
@@ -744,8 +744,8 @@ def main():
         result, cpu, vu0, sync, control, keep = run_guest(
             fixture, temp_dir, target, "ctc2", init_ctc
         )
-        require(result == EE_EXIT_DISPATCH and vu0.vi[6] == 0x89abcdef,
-                "CTC2 must write the low GPR word to VI")
+        require(result == EE_EXIT_DISPATCH and vu0.vi[6] == 0xcdef,
+                "CTC2 must write the low 16 GPR bits to VI")
         check_sync(sync, 0, ENTRY_PC, "CTC2")
 
         # VF0 is the fixed (0, 0, 0, 1.0f) vector, independent of its
@@ -910,7 +910,7 @@ def main():
             fixture, temp_dir, target, "cfc2_then_addiu",
             init_cfc_then_addiu
         )
-        require(cpu.gpr[10].lo == 0xffffffff80000000,
+        require(cpu.gpr[10].lo == 0x10000,
                 "later ALU instruction must reload the GPR written by CFC2")
 
         # BC2 samples VPU_STAT bit 8 before the architectural delay slot.

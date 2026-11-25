@@ -1358,7 +1358,7 @@ int main()
           cpu.m_gpr[13].m_hi == 0x3f80000000000000ULL,
           "QMFC2 reads VF0 as (0, 0, 0, 1.0f)");
 
-    // CFC2 sign-extends ordinary VI words; R only replaces UL[0].
+    // CFC2 zero-extends 16-bit VI registers; R only replaces UL[0].
     vu0.m_vi[6] = 0x81234567u;
     cpu.m_gpr[10].m_hi = 0x123456789abcdef0ULL;
     check(
@@ -1366,8 +1366,8 @@ int main()
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CFC2 succeeds after scheduler synchronization"
     );
-    check(cpu.m_gpr[10].m_lo == 0xffffffff81234567ULL,
-          "CFC2 sign-extends ordinary VI values");
+    check(cpu.m_gpr[10].m_lo == 0x4567u,
+          "CFC2 zero-extends 16-bit VI values");
     check(cpu.m_gpr[10].m_hi == 0x123456789abcdef0ULL,
           "CFC2 preserves the upper 64-bit GPR half");
     vu0.m_vi[20] = 0xffabcdefu;
@@ -1414,10 +1414,19 @@ int main()
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CTC2 ordinary VI write succeeds"
     );
-    check(ee::ee_vu0_read_vi(&vu0, 7) == 0x89abcdefu,
+    check(ee::ee_vu0_read_vi(&vu0, 7) == 0xcdefu,
           "CTC2 writes the selected VI register");
     vu0.m_mac_flags = 0x12345678u;
     cpu.m_gpr[8].m_lo = 0xffffffffu;
+    vu0.m_status_flags = 0x15u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 16, write_mode, 0x00100048u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          vu0.m_status_flags == 0xfd5u && vu0.m_vi[16] == 0xfd5u,
+          "CTC2 STATUS writes sticky bits only");
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 27, write_mode, 0x00100048u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          vu0.m_vi[27] == 0xffffu,
+          "CTC2 CMSAR0 retains 16 bits");
     check(
         ee::ee_vu0_ctc2(&cpu, &runtime, 8, 17, write_mode, 0x0010004cu) ==
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
@@ -1455,8 +1464,8 @@ int main()
             static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE),
         "CTC2 CLIP_FLAG write succeeds"
     );
-    check(vu0.m_clip_flags == 0x12345678u &&
-          ee::ee_vu0_read_vi(&vu0, 18) == 0x12345678u,
+    check(vu0.m_clip_flags == 0x345678u &&
+          ee::ee_vu0_read_vi(&vu0, 18) == 0x345678u,
           "CTC2 CLIP_FLAG updates VI and the clip flag");
 
     cpu.m_gpr[8].m_lo = 0x00000c0fu;
@@ -1498,6 +1507,10 @@ int main()
     check(control.m_calls == control_calls_before_cmsar + 1 &&
           control.m_last_register == 31 && control.m_last_value == 0x5678u,
           "CTC2 CMSAR1 forwards its low 16-bit micro entry address");
+    check(ee::ee_vu0_cfc2(&cpu, &runtime, 10, 31, read_mode, 0x00100064u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          cpu.m_gpr[10].m_lo == 0x5678u,
+          "CFC2 CMSAR1 reads the committed micro entry");
 
     // Side-effectful writes fail closed without a host action callback.
     ee::s_ee_runtime no_control = runtime;
