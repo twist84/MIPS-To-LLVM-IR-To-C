@@ -221,6 +221,57 @@ int main()
         }
     }
 
+    // STMOD=3 writes incoming data to ROW on data-selected lanes.
+    // Masked ROW reads see the previous value; V4-5 ignores STMOD.
+    {
+        for (uint32_t unit = 0u; unit < 2u; ++unit)
+        {
+            ee::s_ee_vu0_state vu0{};
+            ee::c_ee_vif1 vif{};
+            if (unit == 0u)
+            {
+                vif.bind_vu0(&vu0);
+            }
+            if (!check(send(vif, {0x01000404u, 0x30000000u,
+                                 100u, 200u, 300u, 400u,
+                                 0x20000000u, 0x00000401u,
+                                 0x05000003u, 0x7c020000u,
+                                 1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 0u, 0u}),
+                       "STMOD=3 masked UNPACK rejected"))
+            {
+                return 1;
+            }
+            const uint8_t* data = unit == 0u ?
+                vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 0u, 0u) == 100u &&
+                       lane32(data, 0u, 1u) == 2u &&
+                       lane32(data, 1u, 0u) == 5u &&
+                       lane32(data, 1u, 1u) == 2u &&
+                       vif.read_register(0x100u) == 5u &&
+                       vif.read_register(0x110u) == 2u &&
+                       vif.read_register(0x120u) == 7u &&
+                       vif.read_register(0x130u) == 8u,
+                       "STMOD=3 did not update unmasked ROW lanes"))
+            {
+                return 1;
+            }
+            if (!check(send(vif, {0x6f010002u, 0xffffu, 0u, 0u}),
+                       "V4-5 in STMOD=3 rejected"))
+            {
+                return 1;
+            }
+            data = unit == 0u ? vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 2u, 0u) == 0xf8u &&
+                       lane32(data, 2u, 3u) == 0x80u &&
+                       vif.read_register(0x100u) == 5u &&
+                       vif.read_register(0x130u) == 8u,
+                       "V4-5 incorrectly applied STMOD"))
+            {
+                return 1;
+            }
+        }
+    }
+
     // End-to-end aggregate PATH2 transaction: two DIRECT commands,
     // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
     // unrelated texture/VRAM side effects while exercising all limits.

@@ -828,3 +828,12 @@ normal DMA and source-chain uploads. No previous passes lost. The DMA
 artifact 15036939897 shows stmod differs only in mode 3 ROW updates,
 and unpack differs only in WL=0 and incomplete-command readback for
 both units.
+
+### UNPACK STMOD mode 3
+
+The original stmod transcript on 72180fb differs exclusively in mode 3
+ROW updates for VIF0 and VIF1 (artifact 15036939897). PCSX2 `82cac38`
+Vif_Unpack.cpp::writeXYZW writes raw incoming data into ROW for mode 3,
+only for data-selected lanes; V4-5 bypasses MODE. Apply this in the
+common decoder and keep mode 3 off the memcpy fast path. Regression
+checks both VIF units, masked ROW reads and packed V4-5 bypass.

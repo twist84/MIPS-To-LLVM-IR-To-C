@@ -163,12 +163,14 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
     }
     const uint32_t cl = machine.m_cycle & 0xffu;
     const uint32_t wl = (machine.m_cycle >> 8u) & 0xffu;
+    // Packed V4-5 ignores STMOD. Other formats use the current mode.
+    const uint32_t mode = vn == 3u && vl == 3u ? 0u : machine.m_mode;
     // V4-32, unmasked, no row arithmetic and CL == WL consumes one
     // complete source vector per destination qword with no skips or fills.
     // Split at the physical 16 KiB wrap, including NUM=0 (256 vectors).
     // Keep all other cycling, masks and formats on the reference path.
     if (vn == 3u && vl == 0u && !masked &&
-        machine.m_mode != 1u && machine.m_mode != 2u && cl == wl &&
+        mode == 0u && cl == wl &&
         host_little_endian())
     {
         const uint32_t start = address & address_mask;
@@ -247,11 +249,17 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
             {
                 output = machine.m_col[mask_row];
             }
-            else if (machine.m_mode == 1u || machine.m_mode == 2u)
+            else
             {
-                output += machine.m_row[lane];
-                if (machine.m_mode == 2u)
+                if (mode == 1u || mode == 2u)
                 {
+                    output += machine.m_row[lane];
+                }
+                if (mode == 2u || mode == 3u)
+                {
+                    // Difference mode accumulates ROW; mode 3 stores raw
+                    // incoming data in ROW. Masked ROW/COL/protected lanes
+                    // do not update it.
                     machine.m_row[lane] = output;
                 }
             }
