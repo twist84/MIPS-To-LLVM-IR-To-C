@@ -127,3 +127,26 @@ position, out-of-range lines, and read-only Cause. Generated LLVM fixture
 executes MTC0 Cause followed by MFC0 and checks exact readback and preserved
 upper GPR halves. No new IR helper ABI or clock changes. Live exception and
 interrupt semantics changed; a fresh retail replay is required after CI.
+
+## Cause/IRQ retail validation — 2026-11-25 20:00
+
+Archive `sdbz-graphics-pr148-neutral-20261125-200052476.zip`: O5,
+16,250 cached IR modules, no-recompile path, reference_compatibility clock,
+40M dispatches, budget stop with RETURN at 0x0019b134, no IOP guest fault
+or timing observer failure. Native process wall 49.141 s; profiled runner
+44.4880167 s, 899118.526001 dispatches/s. 4,572 guest fields, 3,287/3,287
+successful presentations, 4,828,506 GPU draws. VU1: 84 programs, 402,657
+native runs, 457,727,557 pairs, all submitted jobs collected; no pending,
+fallback, capture, reject, discard or host failure. Display PPMs identical
+from the same source. Guest PCM 3,659,546 frames, 1,777,917 nonzero, peak
+32766; host audio disabled. SIO2 0 Cross-pressed polls out of 3,196;
+EE observer 118 Cross-bit-low candidates and 284 analogue samples outside
+deadzone. Archive has no explicit Git HEAD and workload is not matched.
+This validates bounded compatibility-path execution, not hardware IRQ
+latencies or general MMU correctness.
+
+At code head `4ec5d1e`, [ROM0](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45690274802),
+[SIF DMA](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45690274835) and
+[original suite](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45690274885) succeeded.
+Remaining CI pending when recorded. No production changes in this evidence
+commit; no new replay needed solely for this documentation.
