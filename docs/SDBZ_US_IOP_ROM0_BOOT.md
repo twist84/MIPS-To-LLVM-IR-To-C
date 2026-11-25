@@ -1,5 +1,8 @@
 # SDBZ US: authentic IOP ROM0 reset-vector bootstrap (experimental)
 
+> **Record status (2026-11-25):** Historical opt-in ROM0 boot investigation; the current normal target is HLE-first, without ROM0. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Why this exists
 
 The SDBZ US EE has consistently stalled at `0x001750B4` polling
@@ -34,7 +37,7 @@ References:
 ## Running with automatically managed OpenPS2BIOS
 
 No BIOS data is bundled with this project. By default,
-\`run_sdbz_native.bat\` checks the official
+\`scripts\run_sdbz_native.bat\` checks the official
 [TamaribaEmu/OpenPS2BIOS releases](https://github.com/TamaribaEmu/OpenPS2BIOS/releases)
 for its latest **stable** release and downloads the matching 4 MiB ROM0
 image to \`build/openps2bios/rom0.bin\`. It verifies the downloaded bytes
@@ -47,14 +50,14 @@ A missing or corrupted cache is never executed. No Sony ROM is downloaded.
 **Standard run (no manual ROM path):**
 
 \`\`\`bat
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 \`\`\`
 
 **Manual override (takes precedence, no automatic download):**
 
 \`\`\`bat
 set "SDBZ_IOP_ROM0=C:\path\to\your\bios-rom0.bin"
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 \`\`\`
 
 Explicit \`IOP_IRX\` / \`IOP_IRX_LIST\` compatibility mode skips the

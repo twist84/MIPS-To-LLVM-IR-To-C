@@ -1,5 +1,8 @@
 # M2.7 — Strict bounded native VU1 and GIF PATH1, first batch
 
+> **Record status (2026-11-25):** First bounded VU1 implementation; native VU1 AOT and asynchronous execution were later observed in gameplay. The remaining EFU and precise timing work is tracked separately. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Status:** partial implementation; real USA SDBZ game boot unverified.
 **Branch:** feature/sdbz-hle-first-bootstrap; draft PR #142 (unmerged).
 **Reference:** twist84/ps2-web-recomp:SDBZ runtime/src/vu_micro.cpp and runtime/include/ps2/vu_ops.hpp (Samir Nuri, MIT 2026); retained license attribution.

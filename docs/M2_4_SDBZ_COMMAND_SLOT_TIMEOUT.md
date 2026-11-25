@@ -1,5 +1,8 @@
 # M2.4 — USA SDBZ command-slot timeout and native red-loop producer
 
+> **Record status (2026-11-25):** Matched historical command-slot/red-loop investigation, not a current retail blocker. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Observed local batch:** `boot(20261119-112918).log`,
 `first-boot(20261119-112917).json`, 11:29 matching
 expansion, catalog, translation-cache and three PPMs.

@@ -1,5 +1,8 @@
 # SDBZ US: guest SIF LOADFILE RPC binding and module-start transport
 
+> **Record status (2026-11-25):** Historical LOADFILE/SIF RPC audit; early pending service and stop claims apply to their recorded revision. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Scope
 
 The native runner now constructs a bounded IOP LOADFILE RPC service **only**
@@ -109,7 +112,7 @@ An independent **synthetic** complete SIO2MAN-import fixture verifies all 28 imp
 
 ### Limitations and next evidence
 
-This batch does not implement actual SIO2 packet/device transfer, interrupt callback invocation, real firmware ROM0/UDNL execution, full LOADFILE async lifecycle, or all PS2 kernel library ordinals. `SetSyscall(0x12C)` also remains a separate EE HLE omission. Unknown kernel imports and unsupported DMA behavior are explicit blockers. After a `git pull` and `run_ps2_game.bat`, use the next *matched five-file* diagnostic batch to verify actual runtime module ID/thread ID, exact unresolved `LIB#ORD` or guest syscall stop PC/opcode, and whether the 100,000-dispatch loop is broken.
+This batch does not implement actual SIO2 packet/device transfer, interrupt callback invocation, real firmware ROM0/UDNL execution, full LOADFILE async lifecycle, or all PS2 kernel library ordinals. `SetSyscall(0x12C)` also remains a separate EE HLE omission. Unknown kernel imports and unsupported DMA behavior are explicit blockers. After a `git pull` and `scripts\run_ps2_game.bat`, use the next *matched five-file* diagnostic batch to verify actual runtime module ID/thread ID, exact unresolved `LIB#ORD` or guest syscall stop PC/opcode, and whether the 100,000-dispatch loop is broken.
 
 ## 2026-11-18 14:10 — first genuine SIO2MAN R3000 stop
 

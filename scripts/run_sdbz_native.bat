@@ -3,7 +3,7 @@ setlocal
 
 rem Build and run the local Super Dragon Ball Z USA ELF.
 rem Real-game execution happens only on this Windows PC.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if errorlevel 1 goto :failed
 
 set "ELF=PS2_GAME\SLUS_214.42"

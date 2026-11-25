@@ -1,6 +1,8 @@
 # SDBZ runtime optimisation follow-up
 
-Base: squash-merged PR #155, `f16a660bedee560d2e4b8179b39202aefd3aee8f`.
+**Status:** historical PR #156 implementation and measurement log; the workstream was squash-merged as [`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea). Further accuracy development is tracked in [ACCURACY_PLAN.md](ACCURACY_PLAN.md). The later original matrix reached 54/55; see [PS2AUTOTESTS.md](PS2AUTOTESTS.md).
+
+Original base: squash-merged PR #155, `f16a660bedee560d2e4b8179b39202aefd3aee8f`.
 
 Evidence: [2026-11-25 retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md).
 The listening replay reached training gameplay with audible PCM and zero
@@ -45,10 +47,10 @@ set "SDBZ_HOST_AUDIO=0"
 set "SDBZ_RUNTIME_PROFILE=1"
 set "SDBZ_PROFILE_PCS=1"
 set "SDBZ_AUDIO_PROFILE=1"
-run_sdbz_p40.bat
+scripts\run_ps2_game.bat --p40
 ```
 
-Listening control: set SDBZ_P40_LISTEN and SDBZ_HOST_AUDIO to 1.
+Listening control: use `scripts\run_ps2_game.bat --p40-listen` (or set SDBZ_P40_LISTEN=1 with --p40). Set SDBZ_HOST_AUDIO=1 to explicitly enable host playback.
 The script performs a fast-forward-only pull and uses the existing
 `build/vu1-native-v20` library. Keep the code baseline intact while
 measuring; do not compare paced and uncapped wall times directly.

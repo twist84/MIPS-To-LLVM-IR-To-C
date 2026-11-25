@@ -1,5 +1,8 @@
 # PR #148 — matched USA retail graphics replay (21 November 2026)
 
+> **Record status (2026-11-25):** Preserved historical PR #148 replay evidence; the reported stop PCs and black images are not current runtime status. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 Source archive: **sdbz-graphics-pr148.zip**, containing boot.log,
 expansion.log, first-boot.json, translation-cache.json,
 iop-disc-catalog.json, and all three CPU/GPU/upload PPMs.
@@ -245,7 +248,7 @@ unsupported opcode or crash, at EE PC `0x00175210`. The 4,000,000
 configured dispatch limit was not reached: dispatch count was
 3,981,062. The native runner had a 1,000,000-guest-instruction
 loop-header watchdog but the `--loop-yield-resumes` option was not
-forwarded by `run_ps2_game.bat`, so its CLI default was **zero**.
+forwarded by `scripts\run_ps2_game.bat`, so its CLI default was **zero**.
 Thus the first translated-loop HOST_YIELD ended execution. It must
 not be described as a fresh EE INTC MMIO blocker: the current EE PC
 is again adjacent to the modeled `INTC_STAT` read.
@@ -272,7 +275,7 @@ for these host-side diagnostic improvements.
   every Nth and all non-ordinary or non-successful dispatches
   remain. CTest, all actual guest dispatches, recent JSON history,
   hotspots, hardware state and timing boundaries remain unsampled.
-- `run_ps2_game.bat --full` defaults this cadence to **1024**;
+- `scripts\run_ps2_game.bat --full` defaults this cadence to **1024**;
   set `SDBZ_DISPATCH_TRACE_EVERY=1` to restore the old full trace.
   The previous 4-million-line `boot.log` was 293 MB uncompressed.
 - The batch script now forwards the existing
@@ -362,7 +365,7 @@ GS packet or frame is fabricated. CTest
 loops and genuine GS, GIF and RPC progress, including
 the previous cumulative-cap failure.
 
-`run_ps2_game.bat --full` retains the native watchdog,
+`scripts\run_ps2_game.bat --full` retains the native watchdog,
 the explicit user's 6-million-dispatch budget and
 the low-volume verbose text cadence. The guest IR cache,
 `run_game.py` cache schema and fingerprints remain
@@ -1060,7 +1063,7 @@ Windows full replay:
 ```bat
 set "SDBZ_PAD0_CROSS_FIRST_POLL=200"
 set "SDBZ_PAD0_CROSS_POLL_COUNT=8"
-run_ps2_game.bat --full
+scripts\run_ps2_game.bat --full
 ```
 
 Then **clear** both settings before a

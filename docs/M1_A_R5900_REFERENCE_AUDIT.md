@@ -1,8 +1,7 @@
 # M1-A R5900 timing reference audit (implementation, NOT clock validation)
 
 **Branch:** `feature/sdbz-hle-first-bootstrap` · **PR:** #142 (draft)
-**Scope:** off-line instruction issue replay only. The native runner's EE clock
-source remains unavailable; this document is **not** M1-B game-boot evidence.
+**Scope:** offline instruction issue replay. The original November 18 audit predates the runtime's reference-compatibility clock. The current HLE runner uses that approximate clock; the manual-cache-hit profile below is still offline only. Neither establishes calibrated R5900 timing. See [current status](README.md).
 
 ## Primary architectural reference
 
@@ -22,7 +21,7 @@ The EE manual explicitly notes that a complete program's cycle count also
 depends on dynamic pairing and cache misses. A table of *instruction*
 latencies is not a validated whole-program cycle producer.
 
-## Manual-derived, hardware-reference constants (not installed)
+## Manual-derived reference constants (offline profile)
 
 | Instruction category | Latency (cycles) | Throughput (cycles) |
 |---|---:|---:|
@@ -37,8 +36,7 @@ latencies is not a validated whole-program cycle producer.
 | SQRT.S | 8 | 7 |
 | RSQRT.S | 14 | 13 |
 
-These are a reference to audit candidate latencies, **not** auto-loaded
-values. The existing explicit profile remains opt-in and synthetic. The experimental probe can now accept separately supplied **initiation
+These were initially reference-only values. PR #156 exposes the explicitly selected `--manual-cache-hit` profile; they are not installed as the runtime clock. The existing explicit profile remains opt-in and synthetic. The experimental probe can now accept separately supplied **initiation
 intervals** for MAC0, MAC1 and a conservatively shared scalar COP1 unit.
 These values are **not defaulted from the table**; the CLI's explicit
 throughput mode requires all seven positive intervals. The table is still

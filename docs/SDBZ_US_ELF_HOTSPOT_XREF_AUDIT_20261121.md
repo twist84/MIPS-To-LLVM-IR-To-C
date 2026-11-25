@@ -1,5 +1,8 @@
 # USA SDBZ ELF hotspot xref audit — 2026-11-21
 
+> **Record status (2026-11-25):** Historical static/dynamic hotspot audit, not a new profile of the merged code. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Evidence limitations
 
 This audit uses the sixth matching PR #148 replay

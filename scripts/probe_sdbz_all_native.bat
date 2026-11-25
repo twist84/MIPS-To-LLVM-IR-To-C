@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions EnableDelayedExpansion
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
@@ -33,7 +33,7 @@ if not exist "%SDBZ_ISO%" (
 set "SDBZ_IOP_ROM0=%CD%\build\openps2bios\rom0.bin"
 if not exist "%SDBZ_IOP_ROM0%" (
     echo ERROR: OpenPS2BIOS ROM0 is missing at "%SDBZ_IOP_ROM0%".
-    echo Run build_openps2bios.bat or build.bat first.
+    echo Supply a verified OpenPS2BIOS ROM0 under build\openps2bios\rom0.bin.
     exit /b 1
 )
 
@@ -52,11 +52,11 @@ echo Report snapshot interval: %SDBZ_REPORT_SNAPSHOT_MS% ms
 set "SDBZ_WORK=build\sdbz-all-native"
 set "SDBZ_LOG=%SDBZ_WORK%\probe.log"
 if not exist "%SDBZ_WORK%\game-translated.dll" (
-    echo ERROR: Native SDBZ DLL is missing. Run build_sdbz_all_native.bat first.
+    echo ERROR: Native SDBZ DLL is missing. Run scripts\build_sdbz_all_native.bat first.
     exit /b 1
 )
 if not exist "%SDBZ_WORK%\translation-cache.json" (
-    echo ERROR: Translation cache is missing. Run build_sdbz_all_native.bat first.
+    echo ERROR: Translation cache is missing. Run scripts\build_sdbz_all_native.bat first.
     exit /b 1
 )
 

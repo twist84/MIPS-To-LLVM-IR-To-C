@@ -1,5 +1,8 @@
 # Work Log
 
+> **Record status (2026-11-25):** Chronological early work log. Its recovery branch instructions and validation counts are historical; do not treat them as current development gates. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## 2026-11-11 — Recovery baseline
 
 - Confirmed private GitHub repository access and created this dedicated recovery branch from the initial repository README.

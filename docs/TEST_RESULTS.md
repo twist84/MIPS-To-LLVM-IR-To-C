@@ -1,5 +1,14 @@
 # Test Results
 
+## 2026-11-25 pre-merge PR #156 validation
+
+- [Build and test 45663177622](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177622): **174/174 CTest** (seven shards).
+- [original transcript run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559): **54/55 exact original transcripts** (1 DIFF, EFU; zero incomplete/error/no-output).
+- Native WebGPU, SIF DMA acceptance and OpenPS2BIOS ROM0 execution passed at the same PR head `8bbc80d`.
+- [VU artifact 15044679435](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15044679435): 201/208 EFU numerical words match.
+
+The current runtime baseline is [`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea); the preceding CI tested its PR merge, not a separately claimed post-merge run. See [current status](README.md) and [retail evidence](SDBZ_RUNTIME_VALIDATION_20261125.md). Older results below are historical.
+
 ## 2026-11-11 clean recovery build
 
 Environment: GCC 14.2.0, CMake/Ninja, Python 3, llvmlite/LLVM 20.1.8.

@@ -1,5 +1,8 @@
 # EE R5900 architecture fidelity — deterministic alignment/COP1 batch
 
+> **Record status (2026-11-25):** Implementation and validation history for alignment/COP1. Later original tests and retail evidence supersede the early ARKD and replay gates. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 ## Baseline and scope
 
 Base: `feature/sdbz-deferred-arkd-rpc-binds` PR #145 at `90e9cfd74342a1d4082d1bcd82df443ce5c6fd67`. The original review inspected `main` at `4939867` and the earlier PR commit `a58816d`. The batch changes shared EE lowering only. It does **not** claim a new retail boot replay or resolve ARKD method `0x500:1`.
@@ -163,7 +166,7 @@ After all four workflows passed on 701cbac6, replace the VU0 macro FMAC scalar l
 
 ### Explicit EE IR overwrite during a retail launch
 
-`run_sdbz_p40.bat --overwrite-ir` (or `run_ps2_game.bat --full --neutral --overwrite-ir` with the desired `SDBZ_EE_OPT`) rebuilds the exact active shared EE inventory using the current lowering, then emits and links only the selected native profile. The normal launcher remains strict by default. The overwrite is explicitly destructive to the previous IR on success; the original IR directory is kept until the replacement and native cache validate, then discarded rather than compressed. No intermediate O0 build is required for O5. Existing native objects are reused only by the normal SHA-256/target checks. A failed translation does not publish new IR; a failed native build restores the old IR, but modified native artifacts must be revalidated or rebuilt before use. Other profiles are not rebuilt and their stale provenance cannot authorize execution. The path requires an existing canonical cache and same ELF, and preserves ordered function entries including live discoveries; legacy/missing metadata still requires recovery. VU1 is unaffected. Tests cover the exact inventory, selected profile, object retention, rollback and launcher routing.
+`scripts\run_ps2_game.bat --p40 --overwrite-ir` (or `scripts\run_ps2_game.bat --full --neutral --overwrite-ir` with the desired `SDBZ_EE_OPT`) rebuilds the exact active shared EE inventory using the current lowering, then emits and links only the selected native profile. The normal launcher remains strict by default. The overwrite is explicitly destructive to the previous IR on success; the original IR directory is kept until the replacement and native cache validate, then discarded rather than compressed. No intermediate O0 build is required for O5. Existing native objects are reused only by the normal SHA-256/target checks. A failed translation does not publish new IR; a failed native build restores the old IR, but modified native artifacts must be revalidated or rebuilt before use. Other profiles are not rebuilt and their stale provenance cannot authorize execution. The path requires an existing canonical cache and same ELF, and preserves ordered function entries including live discoveries; legacy/missing metadata still requires recovery. VU1 is unaffected. Tests cover the exact inventory, selected profile, object retention, rollback and launcher routing.
 
 
 ### VU0 opcode-shape specialization and miscellaneous vectors

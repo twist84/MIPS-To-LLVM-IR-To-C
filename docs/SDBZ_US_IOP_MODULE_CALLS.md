@@ -1,5 +1,8 @@
 # SDBZ US: IOP module-load call-site recovery
 
+> **Record status (2026-11-25):** Historical original IRX module-call audit; later gameplay demonstrates progress beyond initial module-load checkpoints. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Source and reproducibility
 
 - Game: **Super Dragon Ball Z (US)**, `SLUS_214.42`.

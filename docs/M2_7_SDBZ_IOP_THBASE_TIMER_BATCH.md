@@ -1,5 +1,8 @@
 # SDBZ USA native boot — IOP THBASE timer batch
 
+> **Record status (2026-11-25):** Historical THBASE service and ROM0/IOP boot checkpoint; later retail execution progressed past these module-load stops. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 ## Evidence (Windows 2026-11-19 22:41)
 
 - Final replay: **14,385 dispatches**, versus the preceding 14,240 baseline.

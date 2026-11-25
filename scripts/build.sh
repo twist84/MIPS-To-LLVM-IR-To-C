@@ -1,6 +1,8 @@
 #!/bin/sh
-# Portable build without CMake/clang (g++ only). Usage: ./build.sh
+# Portable build without CMake/clang (g++ only). Usage: ./scripts/build.sh
 set -e
+# Resolve the checkout root independently of the caller's working directory.
+cd "$(dirname "$0")/.."
 SRCS="src/ee/decoder.cpp src/ee/opcode_tables.cpp src/ee/function_analyzer.cpp src/elf/elf_loader.cpp src/llvm/llvm_context.cpp src/llvm/module_builder.cpp src/llvm/object_emitter.cpp src/lift/instruction_lifter.cpp src/lift/native_codegen.cpp src/runtime/ee_memory.cpp src/runtime/ee_exceptions.cpp"
 INC="-Iinclude -Iinclude/ee -Isrc/llvm -Isrc/lift -Isrc/runtime"
 CXX=${CXX:-g++}

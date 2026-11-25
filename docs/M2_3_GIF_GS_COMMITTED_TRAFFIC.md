@@ -1,5 +1,8 @@
 # M2.3 — Committed GIF PATH3 traffic vs current GS primitive state
 
+> **Record status (2026-11-25):** Historical instrumentation checkpoint; the later retail runner renders and presents real game frames. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Status:** instrumented, synthetic-regression-ready; real SDBZ replay pending  
 **Scope:** original USA `SLUS_214.42`, HLE-first native GS consumer  
 **Primary reference:** `twist84/ps2-web-recomp:SDBZ`:

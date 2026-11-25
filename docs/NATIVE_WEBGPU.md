@@ -27,10 +27,7 @@ Emscripten, JavaScript, SDL, or window required.
 - `.github/workflows/native-webgpu.yml`: native Linux and Windows
   build verification and Linux software-Vulkan smoke testing.
 
-The existing CPU GS state and 4-MiB VRAM remain authoritative for the
-emulated machine. The GPU bridge is a **one-way render mirror**, fed only
-after the CPU GS transaction has committed. A failure to initialise the GPU
-does not change the semantics of a normal HLE boot.
+In the default CPU-authoritative mode, the existing CPU GS state and 4-MiB VRAM remain authoritative. The GPU bridge receives committed GS events. The optional GPU-authoritative mode described below instead materializes VRAM on the GPU, with checked readbacks; it cannot silently fall back to stale CPU VRAM.
 
 ### Experimental GPU-backed guest readback
 
@@ -75,7 +72,7 @@ From a Windows command prompt in the repository root:
 ```bat
 git pull
 set EE_WEBGPU_SNAPSHOT=1
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 When WebGPU is enabled, the launcher automatically downloads and
@@ -121,10 +118,7 @@ cmake --build build --config Release --target ee_webgpu_native_smoke
 ctest --test-dir build -C Release -R ee_webgpu_native_smoke --output-on-failure
 ```
 
-Disable the opt-in by clearing `EE_WEBGPU_SNAPSHOT` or setting it to 0,
-then rerun `run_ps2_game.bat`. The launcher explicitly configures
-`-DEE_ENABLE_WEBGPU=OFF` for that mode, even if CMake previously cached
-the GPU-enabled build.
+For a CPU-only full replay, explicitly set both `EE_WEBGPU_SNAPSHOT=0` and `EE_WEBGPU_WINDOW=0` before running `scripts\run_ps2_game.bat --full`. Full mode defaults both flags to 1 when unset; quick, matched and recovery modes force both off. The launcher explicitly configures the CMake GPU options for the selected mode.
 
 ## Optional raylib Win32 window
 
@@ -138,7 +132,7 @@ On Windows, in the normal extracted-disc workflow:
 ```bat
 git pull
 set EE_WEBGPU_WINDOW=1
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 The launcher enables `EE_ENABLE_WEBGPU` and `EE_ENABLE_RAYLIB_WINDOW`.
@@ -161,9 +155,7 @@ offscreen WebGPU snapshots, and GPU-independent HLE execution remain available.
 
 ## Current acceptance boundaries
 
-The native backend and its synthetic GPU smoke tests exist, but the
-user's next full SDBZ native run with `EE_WEBGPU_SNAPSHOT=1` is still
-needed to validate a **game-driven** GPU image. The GPU implementation
+Native game-driven rendering and Win32 window presentation have been observed in bounded SDBZ training gameplay. The [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) records 2,886 successful presents in the 12:06 run. Matching display captures in GPU-authoritative mode are not independent CPU/GPU raster evidence. Full graphics parity, other modes/titles and a new retail replay on the final PR #156 revision remain unverified. The GPU implementation
 cannot invent GS primitives, renderer commands, VBlank events, or valid
 framebuffer state that the guest has not produced. Keep the existing
 HLE and DMA tests and the strict matched-log workflow.

@@ -1,5 +1,15 @@
 # Original ps2autotests ELF validation
 
+## Current verified baseline
+
+[`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea) incorporates PR #156. Its final pre-merge head `8bbc80d8f6d639265ea8a9dae27ecac815584148` was tested at merge revision `0e48f9a42d1eb4696f01bc1fafaeb95e76a8ced7` ([original transcript run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559), [summary artifact 15045607944](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15045607944)). All five workflows passed; the original matrix recorded **54/55 exact (98.18%)**, 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. CTest: 174/174 in seven shards ([Build and test 45663177622](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177622)).
+
+The only remaining transcript is `vu/lower/efu`. [VU artifact 15044679435](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15044679435) verifies 201/208 numerical words matching: four EATAN and three ESIN differences. The test prints its full transcript but stops at PC `0xffffffe0` (UNSUPPORTED); transcript equality and clean exit remain separate. The COP0 performance transcript passes with the explicitly approximate reference compatibility clock, not calibrated EE cycles.
+
+The implementation history below retains the earlier observations and predictions at the revisions where they were recorded.
+
+## Running the suite
+
 This milestone runs the unmodified upstream ELF binaries through the
 existing EE LLVM translation / native HLE runtime. Reference revision:
 [97469ffbed8631277b94e28d01dabd702aa97ef3](https://github.com/unknownbrackets/ps2autotests/tree/97469ffbed8631277b94e28d01dabd702aa97ef3).
@@ -1120,3 +1130,19 @@ EXL overriding saved user mode and ERL inhibition. This audit does not
 implement processor issue/retirement timing, branch/cache/bus event
 sources, or precise level-2 counter overflow exceptions. Those remain
 real accuracy work, not artificial prerequisites for functional cycles.
+
+## Final PR #156 EFU runtime evidence
+
+The final original VU artifact confirms the 201/208 prediction. All other EFU result words match, including EATANxy/EATANxz, EEXP and the eight algebraic operations. The seven residual raw words are:
+
+| Operation / input | Console expected | Native actual |
+| --- | --- | --- |
+| EATAN CVF_ZERO | `33e60000` | `34000000` |
+| EATAN CVF_NEGZERO | `33e60000` | `34000000` |
+| EATAN CVF_MIN_EXP | `33e60000` | `34000000` |
+| EATAN CVF_GARBAGE1 | `33e60000` | `34000000` |
+| ESIN CVF_INCREASING | `3e126230` | `3e126228` |
+| ESIN CVF_PI | `3b565de0` | `3b565be0` |
+| ESIN CVF_3PI_OVER2 | `bf1a9934` | `bf1a9964` |
+
+Source: [VU artifact 15044679435](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559/artifacts/15044679435), `vu/lower/efu/test.diff` and `result.json`. Resolve using general arithmetic, not special-value replacements. The score does not establish precise hardware timing or full retail compatibility.

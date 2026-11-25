@@ -277,7 +277,7 @@ def test_ll_counter():
 def test_windows_launcher_preserves_guest_cache():
     # The Windows launcher must try a safe host-only relink before any
     # checkout-triggered cache miss falls back to recompiling all guest IR.
-    launcher = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     # Progress is always enabled, including --quick (which is what the
     # retail boot user runs); do not duplicate it in --full arguments.
     assert 'python tools\\run_boot_session.py "%GAME_ELF%" ^\n    --ll-progress ^' in launcher
@@ -754,13 +754,70 @@ def main():
             assert "compilation failed" in summary
             assert "dispatches=? stop=unknown" in summary
 
+    # All shipped Windows entry points are rooted in scripts/, while
+    # their working directory and build/disc paths remain repo-relative.
+    batch_names = (
+        "build.bat", "build_sdbz_all_native.bat",
+        "probe_sdbz_all_native.bat", "run_ps2_game.bat", "run_sdbz_cdvd.bat",
+        "run_sdbz_native.bat",
+        "trace_sdbz_vblank.bat",
+    )
+    for filename in batch_names:
+        script = ROOT / "scripts" / filename
+        assert script.is_file(), filename
+        assert not (ROOT / filename).exists(), filename
+        assert 'cd /d "%~dp0.."' in script.read_text(encoding="utf-8"), filename
+    for parent, child in (
+        ("build.bat", "run_sdbz_cdvd.bat"),
+        ("run_sdbz_cdvd.bat", "build.bat"),
+        ("build_sdbz_all_native.bat", "probe_sdbz_all_native.bat"),
+    ):
+        assert f'call "%~dp0{child}"' in (
+            ROOT / "scripts" / parent
+        ).read_text(encoding="utf-8"), (parent, child)
+
+    for filename in ("build_cdvd.bat", "test_sdbz_native.bat", "run_sdbz_p40.bat"):
+        assert not (ROOT / "scripts" / filename).exists(), filename
+    build_script = (ROOT / "scripts" / "build.bat").read_text(encoding="utf-8")
+    for mode in ("--test", "--native-tests", "--quick-tests", "--cdvd", "--sif-probe"):
+        assert mode in build_script
+    assert "game_runner_end_to_end_[0-3]" in build_script
+    assert "--no-tests=error" in build_script
+
+    shell_script = ROOT / "scripts" / "build.sh"
+    assert shell_script.is_file()
+    assert not (ROOT / "build.sh").exists()
+    if os.name != "nt":
+        # Check POSIX syntax and root discovery without invoking the legacy
+        # compiler or touching the real checkout's build outputs.
+        with tempfile.TemporaryDirectory(prefix="ee-shell-launcher-") as directory:
+            checkout = Path(directory) / "checkout with spaces"
+            scripts = checkout / "scripts"
+            scripts.mkdir(parents=True)
+            launcher = scripts / "build.sh"
+            launcher.write_bytes(shell_script.read_bytes())
+            fake_compiler = checkout / "fake-compiler"
+            fake_compiler.write_text(
+                '#!/bin/sh\n[ "$PWD" = "$EXPECTED_ROOT" ]\n',
+                encoding="utf-8",
+            )
+            fake_compiler.chmod(0o755)
+            subprocess.run(["sh", "-n", str(launcher)], check=True)
+            subprocess.run(
+                ["sh", str(launcher)], cwd=directory,
+                env=dict(os.environ, CXX="./fake-compiler",
+                         EXPECTED_ROOT=str(checkout.resolve())),
+                check=True, timeout=30,
+            )
+            assert (checkout / "build" / "recompiled").is_dir()
+
     # Keep the reproducible P40 retail profiling preset identical to the
     # manually validated replay environment, and propagate launcher failure.
-    preset = (ROOT / "run_sdbz_p40.bat").read_text(encoding="utf-8")
-    assert 'cd /d "%~dp0"' in preset
-    assert "git pull --ff-only\nif errorlevel 1 exit /b 1" in preset
-    assert preset.index("git pull --ff-only") < preset.index('set "SDBZ_EE_OPT=5"')
-    assert [line for line in preset.splitlines() if line.startswith('set "')] == [
+    launcher_text = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
+    preset = launcher_text.split(':p40_apply\n', 1)[1].split(':parse_launcher_options\n', 1)[0]
+    assert "git pull --ff-only\nif errorlevel 1 exit /b 1" in launcher_text
+    assert launcher_text.index("git pull --ff-only") < launcher_text.index('set "SDBZ_EE_OPT=5"')
+    assert [line for line in preset.splitlines() if line.startswith('set "') and not line.startswith(('set "PS2_P40_UPDATED=', 'set "P40_PRESET=', 'set "REQUESTED_'))] == [
         "set \"SDBZ_EE_OPT=5\"",
         "set \"SDBZ_SKIP_HEADLESS_EXPANSION=1\"",
         "set \"SDBZ_SPEED_PERCENT=0\"",
@@ -790,14 +847,14 @@ def main():
             '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
             ')\n'
             'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
-    assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
+    assert 'call "%~f0" %*\nexit /b %ERRORLEVEL%' in launcher_text
 
     # Exercise real CMD backward jumps through all three launcher options.
     # Resolve-only uses a synthetic disc and stops before configuring tools,
     # modifying caches, emitting IR or launching a game.
     if os.name == "nt":
-        for filename in ("run_ps2_game.bat", "run_sdbz_p40.bat"):
-            data = (ROOT / filename).read_bytes()
+        for filename in ("run_ps2_game.bat", "build.bat"):
+            data = (ROOT / "scripts" / filename).read_bytes()
             assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), filename
         with tempfile.TemporaryDirectory(prefix="ee-cmd-launcher-") as directory:
             disc = Path(directory)
@@ -808,11 +865,41 @@ def main():
             env = dict(os.environ, SDBZ_DISC_ROOT=str(disc),
                        PS2_GAME_RESOLVE_ONLY="1", SDBZ_EE_OPT="5")
             resolved = subprocess.run(
-                ["cmd.exe", "/d", "/c", "call run_ps2_game.bat --full --neutral --overwrite-ir"],
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --full --neutral --overwrite-ir"],
                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
             )
             assert resolved.returncode == 0, resolved.stdout + resolved.stderr
             assert "Boot ELF:" in resolved.stdout and "FIXTURE.ELF" in resolved.stdout, resolved.stdout
+            for option, speed, audio in (("--p40", "0", "0"), ("--p40-listen", "100", "1")):
+                preset_env = dict(env)
+                preset_env.pop("SDBZ_P40_LISTEN", None)
+                preset_env.pop("SDBZ_HOST_AUDIO", None)
+                result = subprocess.run(
+                    ["cmd.exe", "/d", "/c", fr"call scripts\run_ps2_game.bat {option} --overwrite-ir"],
+                    cwd=ROOT, env=preset_env, capture_output=True, text=True, timeout=30,
+                )
+                assert result.returncode == 0, result.stdout + result.stderr
+                assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
+                assert "Boot ELF:" in result.stdout
+            help_result = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
+                cwd=ROOT, capture_output=True, text=True, timeout=30,
+            )
+            assert help_result.returncode == 0 and "--native-tests" in help_result.stdout
+            invalid = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\build.bat --invalid"],
+                cwd=ROOT, capture_output=True, text=True, timeout=30,
+            )
+            assert invalid.returncode == 2, invalid.stdout + invalid.stderr
+            # Exercise a real invocation from outside the checkout, using
+            # a quoted absolute script path (also covers paths with spaces).
+            launcher = ROOT / "scripts" / "run_ps2_game.bat"
+            external = subprocess.run(
+                f'cmd.exe /d /c call "{launcher}" --full --neutral --overwrite-ir',
+                cwd=disc, env=env, capture_output=True, text=True, timeout=30,
+            )
+            assert external.returncode == 0, external.stdout + external.stderr
+            assert "Boot ELF:" in external.stdout and "FIXTURE.ELF" in external.stdout, external.stdout
 
     print("boot session orchestration: PASS")
 

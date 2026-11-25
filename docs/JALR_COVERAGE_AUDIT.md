@@ -1,5 +1,8 @@
 # USA SLUS_214.42 — JALR coverage audit
 
+> **Record status (2026-11-25):** Historical static indirect-call audit at the pinned revision; not a current coverage percentage. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Date:** 2026-11-12  
 **Branch:** `recovery/reassembled-source-2026-11-11`  
 **Audit implementation:** per-site static JALR records, commit `e50614269c642740dc58c8297da571eb9fa5eae2`  

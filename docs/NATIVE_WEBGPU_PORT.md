@@ -1,5 +1,8 @@
 # Native WebGPU GS raster (no browser)
 
+> **Record status (2026-11-25):** Initial WebGPU port record; use [Native WebGPU guide](NATIVE_WEBGPU.md) for current configuration and acceptance limits. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Provenance and scope
 
 The native GS compute backend, VRAM/CLUT/upload/raster/display WGSL, and
@@ -23,12 +26,12 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DEE_ENABLE_WEBGPU=ON -D
 cmake --build build --target ee_game_runner ee_webgpu_native_smoke
 ~~~
 
-For the normal `run_ps2_game.bat` workflow:
+For the normal `scripts\run_ps2_game.bat` workflow:
 
 ~~~bat
 set "EE_WEBGPU_ROOT=C:\Dev\wgpu-native"
 set "EE_WEBGPU_SNAPSHOT=1"
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ~~~
 
 The launcher configures the optional GPU target and produces

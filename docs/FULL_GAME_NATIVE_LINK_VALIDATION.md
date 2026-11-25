@@ -1,5 +1,8 @@
 # USA SLUS_214.42 — full-image native-link validation
 
+> **Record status (2026-11-25):** Historical static translation/link experiment, not the latest live translation-cache inventory or a retail boot measurement. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Date:** 2026-11-11  
 **Branch:** `recovery/reassembled-source-2026-11-11`  
 **Linker implementation:** `tools/link_native_objects.py` at commit `f583796cc2f8a53a2fe8ab5a7cf73caa79a8676a`

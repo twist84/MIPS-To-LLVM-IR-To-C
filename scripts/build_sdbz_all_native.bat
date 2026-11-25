@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
@@ -18,16 +18,29 @@ if not defined VSINSTALL (
 call "%VSINSTALL%\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b %errorlevel%
 
+set "CXX=C:\Program Files\LLVM\bin\clang++.exe"
+if not exist "%CXX%" (
+    echo ERROR: LLVM clang++.exe was not found at %CXX%.
+    exit /b 1
+)
+
+echo === Configuring and building native tools ===
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 if errorlevel 1 exit /b %errorlevel%
-
-rem run_sdbz_cdvd.bat regenerates guest IR via ee_recomp.exe; build it with
-rem the runner so native boot probes never silently use a stale lifter.
-cmake --build build --target iop_cdvd_test iop_hw_test ee_decoder_test ee_vu0_macro_fmac_test ee_recomp ee_game_runner -j 8
+cmake --build build --target ee_recomp ee_game_runner -j 8
 if errorlevel 1 exit /b %errorlevel%
 
-ctest --test-dir build -C Release --output-on-failure -R "^(iop_cdvd|iop_hw|decoder|vu0_macro_fmac)$"
+echo === Generating all SDBZ IR modules, compiling objects, and linking ===
+echo This intentionally does not launch the game runner.
+python tools\run_game.py PS2_GAME\SLUS_214.42 ^
+    --work-dir=build\sdbz-all-native ^
+    --build-dir=build ^
+    --config=Release ^
+    --functions=all ^
+    --emit-jobs=8 ^
+    --emit-opt=0 ^
+    --link-only
 if errorlevel 1 exit /b %errorlevel%
 
-echo CDVD focused build and tests passed.
-exit /b 0
+call "%~dp0probe_sdbz_all_native.bat"
+exit /b %ERRORLEVEL%

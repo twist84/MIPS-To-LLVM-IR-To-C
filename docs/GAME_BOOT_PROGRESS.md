@@ -1,5 +1,8 @@
 # Native game boot research — Super Dragon Ball Z (USA)
 
+> **Record status (2026-11-25):** Historical boot milestones and debugging log. Use the latest retail evidence for current progression rather than the initial stop PCs and pending requests below. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 > **Current checkpoint (2026-11-25):** [Retail gameplay, audio and runtime validation](SDBZ_RUNTIME_VALIDATION_20261125.md). The earlier boot milestones below are historical; the HLE-first runner now reaches bounded interactive training gameplay with audible audio. Full compatibility and hardware accuracy remain open.
 
 > **Current M2 implementation plan:** [SDBZ runtime progression, GS/VIF/VU and EE ISA coverage](M2_SDBZ_NATIVE_RUNTIME_AND_ISA_PLAN.md). This plan supersedes earlier static-gap priority assumptions where the 2026-11-19 07:27 boot provides newer runtime evidence.
@@ -90,7 +93,7 @@ Previously generated manifests have no IR hash and therefore receive a
 one-time full rebuild. Only after complete linking is the higher-level
 translation-cache provenance updated. Parallelism speeds up emission; a
 single newly discovered function still requires a new link and game replay.
-Run `run_sdbz_native.bat` on your Windows machine to update, build and
+Run `scripts\run_sdbz_native.bat` on your Windows machine to update, build and
 execute the local ELF and pause before the console closes.
 The launcher now probes `--no-recompile --link-only` when a previous
 `translation-cache.json` exists. If its complete source/ELF/binary provenance
@@ -1291,7 +1294,7 @@ The native runner now supports two **opt-in diagnostics**:
   interpret game-specific C layouts or modify guest state.
 
 The **November 16, 00:38 local run** again stopped at dispatch 6048
-with the same register state. Although `run_sdbz_native.bat`
+with the same register state. Although `scripts\run_sdbz_native.bat`
 had gained optional diagnostic arguments, the command lines in both
 `expansion.log` and `boot.log` contained neither
 `--trace-entry` nor `--watch-word`. The earlier diagnostic
@@ -1309,7 +1312,7 @@ final traced replay. The generic `run_game.py` and
 For the next local run, no special shell setup is required:
 
 ```bat
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 ```
 
 To turn off the SDBZ launcher defaults for a different experiment,
@@ -1914,17 +1917,17 @@ The completed USA run still reached dispatch 10495 with pending command flag 1, 
 
 Same-invocation snapshots: GS display and GS upload are all black; WebGPU readback has one nonblack red pixel. Diagnostic GS counters still report 2275 nonblack untextured sprite kicks; these are not proof of correctly displayed graphics. The disc catalog records 7 static candidate IRX paths but just 1 final-replay committed runtime load (`SIO2MAN.IRX`) and 13 SIFRPC commits, not seven runtime module starts. Do not claim progress before the next post-fix run.
 
-The pre-fix batch is matched by `20261119-161404` through `20261119-161408` filenames. The translation-cache input hash includes the current VU1 code; compilation/rebuild happens through `run_ps2_game.bat`. Do not blame stale executable without evidence. Continue HLE-first, preserve transactional DMA semantics, and do not fake guest completion or graphics.
+The pre-fix batch is matched by `20261119-161404` through `20261119-161408` filenames. The translation-cache input hash includes the current VU1 code; compilation/rebuild happens through `scripts\run_ps2_game.bat`. Do not blame stale executable without evidence. Continue HLE-first, preserve transactional DMA semantics, and do not fake guest completion or graphics.
 
 
 ## Windows expansion configuration (2026-11-19)
 
-`run_ps2_game.bat` accepts two independent environment variables without changing the HLE-first execution path:
+`scripts\run_ps2_game.bat` accepts two independent environment variables without changing the HLE-first execution path:
 
 ```bat
 set EXPANSION_PASSES=64
 set EXPANSION_PER_PASS=128
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 Defaults remain **8 passes** and **128 new functions per pass**. Valid values: `EXPANSION_PASSES=1..64`, `EXPANSION_PER_PASS=1..128`. The wrapper passes both values through as `--expansion-passes` and `--expansion-per-pass`, and reports them at boot-session start. The max pass count increases from eight to 64; the 128-per-pass safety cap in `run_game.py` is unchanged. As before, each pass stops early on genuine guest blockers or when it does not hit its budget. `LLVM IR [N/7901]` is a compilation progress indicator, not proof of native boot advancement or rendering correctness. The already-running process cannot be reconfigured until its next invocation.
@@ -2052,7 +2055,7 @@ diagnosed without inventing a working boot or GS frame.
 The user's 19 November 2026 Windows launcher initially aborted with
 `[wgpu-native] SDK directory exists but is incomplete:
 C:\\Dev\\MIPS-To-LLVM-IR-To-C`. The validator correctly refused to
-overwrite user files; the actual fault was in `run_ps2_game.bat`.
+overwrite user files; the actual fault was in `scripts\run_ps2_game.bat`.
 `cmd.exe` expands percent variables before executing a parenthesized block,
 so assigning `EE_WEBGPU_ROOT` and reading `%EE_WEBGPU_ROOT%` inside the
 same block passed an empty `--root`, resolving to the repository directory.

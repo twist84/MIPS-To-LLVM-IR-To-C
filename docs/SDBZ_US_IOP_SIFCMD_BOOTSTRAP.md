@@ -1,5 +1,8 @@
 # SDBZ (US): guest-initialized IOP SIFCMD bootstrap
 
+> **Record status (2026-11-25):** Historical SIFCMD bootstrap record; current retail execution has progressed beyond early bootstrap. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Any branch, PR, pending replay or feature-status claims below refer to the documented stage.
+
+
 ## Why this milestone exists
 
 In the most recent real-game boot, the EE initialized SIF0 channel 5

@@ -1,5 +1,8 @@
 # M2.3 — 09:09 committed GS sprite provenance
 
+> **Record status (2026-11-25):** Matched historical GS sprite capture; not a current rendering status. See [current status](README.md), [retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md) and [accuracy plan](ACCURACY_PLAN.md). Branch names, open PR instructions, and pending gates in the historical text refer to the documented revision.
+
+
 **Target:** Super Dragon Ball Z USA, `SLUS_214.42`
 **Original ELF SHA-256:** `1b213a85a2c305dc0f893c007a502c93e0851d1bb7db6164f9e0b72adb074a16`
 **Matched input batch:** 19 November 2026, 09:09

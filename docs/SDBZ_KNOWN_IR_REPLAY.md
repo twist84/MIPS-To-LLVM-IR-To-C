@@ -14,7 +14,7 @@ Windows WebGPU presentation path.
 In the Visual Studio Developer Command Prompt, from the repo root:
 
     git pull --ff-only
-    run_ps2_game.bat --matched
+    scripts\run_ps2_game.bat --matched
 
 The launcher still builds the host tools, validates existing guest
 translation provenance, and attempts **verified host-only relink** when
@@ -136,14 +136,14 @@ rebuild confirmation remains authoritative; declining preserves the cache.
 
 To request **reconstruction only** without running the game:
 
-    run_ps2_game.bat --recover-cache
+    scripts\run_ps2_game.bat --recover-cache
 
 If guest lowering was deliberately changed, or legitimate batch-boundary
 differences cause IR hashes to differ, the strict mode fails safely. After
 reviewing the code change and understanding that OLD IR equivalence is not
 established, explicitly opt in:
 
-    run_ps2_game.bat --recover-cache --accept-new-ir
+    scripts\run_ps2_game.bat --recover-cache --accept-new-ir
 
 This invokes `tools/recover_translation_cache.py --allow-ir-changes`.
 It **still requires the identical original ELF**, the exact known

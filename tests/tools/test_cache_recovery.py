@@ -322,7 +322,7 @@ def test_active_source_preflight_rejects_stale_shared_provenance():
 
 
 def test_launcher_recovers_before_automatic_rebuild():
-    batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    batch = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--recover-cache" (' in batch
     assert 'if /I "%~1"=="--accept-new-ir" (' in batch
     assert "--print-active" in batch
@@ -519,7 +519,7 @@ def test_overwrite_ir_uses_active_inventory_and_selected_profile():
 
 
 def test_overwrite_launcher_routes_before_preflight():
-    launcher = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--overwrite-ir" (' in launcher
     assert 'if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full"' in launcher
     start = launcher.index("python tools\\refresh_known_ir.py")
