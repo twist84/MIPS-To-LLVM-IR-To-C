@@ -1921,6 +1921,24 @@ bool test_spu2_auto_dma()
 
 bool test_spu2_playback_irq()
 {
+    // Highest legal voice index in the second core, with no lower
+    // active voices. Its pending decode bounds the IRQ opportunity
+    // to the next sample even with a distant IRQA and fractional phase.
+    {
+        iop::c_spu2 spu;
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        if (!spu.write(base + 0x59au, 2u, 0x40u) ||
+            !spu.write(base + 0x59eu, 2u, 0x7000u) ||
+            !spu.write(base + 0x5a2u, 2u, 0x80u) ||
+            spu.voice_irq_cycles_remaining() != period ||
+            spu.advance_cycles(period - 1u) != 0u ||
+            spu.voice_irq_cycles_remaining() != 1u ||
+            spu.irq_latches() != 0u)
+        {
+            return false;
+        }
+    }
     iop::c_kernel kernel;
     if (!kernel.attach_hle_hardware())
     {
