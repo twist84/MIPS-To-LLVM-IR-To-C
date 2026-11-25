@@ -8742,6 +8742,15 @@ int main(int argc, char** argv)
             "IOP SPU2 playback IRQ: events=%llu latches=0x%x next_fetch_cycles=%u\n",
             static_cast<unsigned long long>(spu2.playback_irq_events()),
             spu2.irq_latches(), spu2.voice_irq_cycles_remaining());
+        std::printf(
+            "IOP SPU2 AutoDMA: starts=%llu completed=%llu bytes=%llu "
+            "input_written=%llu input_consumed=%llu buffered0=%u buffered1=%u\n",
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_started()),
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_completed()),
+            static_cast<unsigned long long>(iop_kernel->hardware().spu2_auto_dma_bytes()),
+            static_cast<unsigned long long>(spu2.input_frames_written()),
+            static_cast<unsigned long long>(spu2.input_frames_consumed()),
+            spu2.input_frames(0u), spu2.input_frames(1u));
     }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,

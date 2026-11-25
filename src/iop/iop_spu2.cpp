@@ -18,6 +18,8 @@ void c_spu2::reset()
     m_voice_starts = 0u;
     m_voice_end_events = 0u;
     m_playback_irq_events = 0u;
+    m_input_frames_written = 0u;
+    m_input_frames_consumed = 0u;
     for (s_core& core : m_cores)
     {
         core = s_core{};
@@ -264,6 +266,97 @@ void c_spu2::advance_voices(uint64_t samples)
     }
 }
 
+uint32_t c_spu2::input_frames(uint32_t core) const
+{
+    return core < 2u ? m_cores[core].m_input_count : 0u;
+}
+
+uint32_t c_spu2::input_refill_cycles(uint32_t core) const
+{
+    if (core >= 2u || !m_clock_active)
+    {
+        return 0u;
+    }
+    // Reference feed_input refills after a 32-frame tick once an
+    // entire 256-frame half is available. Initial fill is immediate.
+    const uint32_t count = input_frames(core);
+    const uint64_t now = elapsed_samples();
+    const uint64_t ready = now + std::max<uint32_t>(
+        1u, count > 256u ? count - 256u : 0u);
+    const uint64_t tick = ((ready + k_input_batch - 1u) / k_input_batch) * k_input_batch;
+    return static_cast<uint32_t>((tick - now) * k_cycles_per_sample - sample_phase());
+}
+
+bool c_spu2::push_input(uint32_t core, const uint8_t* data, uint32_t bytes)
+{
+    if (core >= 2u || data == nullptr || bytes == 0u ||
+        bytes > k_input_chunk_bytes || (bytes & 3u) != 0u ||
+        input_frames(core) > k_input_frames - 256u)
+    {
+        return false;
+    }
+    s_core& state = m_cores[core];
+    const uint32_t frames = bytes / 4u;
+    const uint32_t base = 0x2000u + core * 0x400u;
+    for (uint32_t i = 0u; i < frames; ++i)
+    {
+        const uint32_t slot = (state.m_input_read + state.m_input_count + i) %
+            k_input_frames;
+        for (uint32_t channel = 0u; channel < 2u; ++channel)
+        {
+            const uint32_t offset = channel * (bytes / 2u) + i * 2u;
+            const uint16_t word = static_cast<uint16_t>(data[offset] |
+                (static_cast<uint16_t>(data[offset + 1u]) << 8u));
+            const int32_t signed_word = static_cast<int32_t>(word) -
+                (word >= 0x8000u ? 0x10000 : 0);
+            state.m_input[slot][channel] = static_cast<int16_t>(signed_word);
+            m_ram[base + channel * k_input_frames + slot] = word;
+        }
+    }
+    state.m_input_count += frames;
+    m_input_frames_written += frames;
+    return true;
+}
+
+void c_spu2::check_input_irq(uint32_t address, uint32_t words)
+{
+    for (s_core& candidate : m_cores)
+    {
+        const uint32_t distance = (candidate.m_irqa - address) & (k_ram_words - 1u);
+        if ((candidate.m_attr & 0x40u) != 0u && !candidate.m_irq &&
+            distance < words)
+        {
+            candidate.m_irq = true;
+            ++m_playback_irq_events;
+        }
+    }
+}
+
+void c_spu2::advance_input(uint64_t samples)
+{
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        s_core& state = m_cores[core];
+        const uint32_t count = static_cast<uint32_t>(
+            std::min<uint64_t>(samples, state.m_input_count));
+        if (count == 0u)
+        {
+            continue;
+        }
+        // Reference checks the left input-ring address on consumption.
+        const uint32_t base = 0x2000u + core * 0x400u;
+        const uint32_t first = std::min(count, k_input_frames - state.m_input_read);
+        check_input_irq(base + state.m_input_read, first);
+        if (count > first)
+        {
+            check_input_irq(base, count - first);
+        }
+        state.m_input_read = (state.m_input_read + count) % k_input_frames;
+        state.m_input_count -= count;
+        m_input_frames_consumed += count;
+    }
+}
+
 uint32_t c_spu2::voice_irq_cycles_remaining() const
 {
     if (!m_clock_active ||
@@ -311,6 +404,31 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
             }
         }
     }
+    // Buffered input may also raise IRQ after its DMA has completed.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const s_core& state = m_cores[core];
+        const uint32_t base = 0x2000u + core * 0x400u;
+        for (const s_core& candidate : m_cores)
+        {
+            if ((candidate.m_attr & 0x40u) == 0u || candidate.m_irq ||
+                candidate.m_irqa < base || candidate.m_irqa >= base + k_input_frames)
+            {
+                continue;
+            }
+            const uint32_t distance = (candidate.m_irqa - base +
+                k_input_frames - state.m_input_read) % k_input_frames;
+            if (distance < state.m_input_count)
+            {
+                const uint32_t cycles = (distance + 1u) * k_cycles_per_sample -
+                    sample_phase();
+                if (earliest == 0u || cycles < earliest)
+                {
+                    earliest = cycles;
+                }
+            }
+        }
+    }
     // This is an opportunity, not a promised IRQ: address comparison
     // and envelope termination are evaluated only by real advancement.
     return earliest;
@@ -323,13 +441,15 @@ uint32_t c_spu2::advance_cycles(uint32_t cycles)
     {
         const uint64_t before = m_clock_cycles;
         m_clock_cycles += cycles;
-        if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask) != 0u)
+        if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask |
+             m_cores[0].m_input_count | m_cores[1].m_input_count) != 0u)
         {
             const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
             if (samples != 0u)
             {
                 const uint32_t prior = irq_latches();
                 advance_voices(samples);
+                advance_input(samples);
                 raised = irq_latches() & ~prior;
             }
         }
@@ -690,6 +810,13 @@ bool c_spu2::write_core(
         }
         m_ram[core.m_tsa & (k_ram_words - 1u)] = value;
         core.m_tsa = (core.m_tsa + 1u) & (k_ram_words - 1u);
+        break;
+    case 0x1b0u:
+        if (value == 0u)
+        {
+            core.m_input_count = 0u;
+            core.m_input_read = 0u;
+        }
         break;
     case 0x340u:
         core.m_endx &= 0xffff0000u;

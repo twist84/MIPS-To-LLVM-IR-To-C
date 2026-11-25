@@ -486,8 +486,8 @@ bool test_authentic_spu2_dma()
         return false;
     }
 
-    // AutoDMA is a separate streaming-ring protocol in the primary
-    // reference, not ordinary TSA memcpy. Fail closed until it exists.
+    // Small AutoDMA fits in the input ring immediately, and completes
+    // after 32 cycles, without changing TSA.
     hw.reset();
     if (!kernel.attach_hle_hardware() ||
         !hw.write(spu2 + 0x1b0u, 2u, 1u) ||
@@ -497,13 +497,19 @@ bool test_authentic_spu2_dma()
     {
         return false;
     }
-    hw.advance_cycles(1000u);
+    hw.advance_cycles(31u);
     if (!hw.read(dma4 + 8u, 4u, &actual) ||
         (actual & iop::c_hw::k_spu2_dma_str_bit) == 0u ||
-        !hw.read(iop::c_hw::k_i_stat, 4u, &actual) ||
-        actual != 0u ||
-        !hw.read(spu2 + 0x1aau, 2u, &actual) ||
-        actual != 0u)
+        hw.spu2().input_frames(0u) != 4u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &actual) || actual != 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        hw.spu2_auto_dma_completed() != 1u ||
+        !hw.read(spu2 + 0x1aau, 2u, &actual) || actual != 0u)
     {
         return false;
     }
@@ -543,6 +549,98 @@ bool test_authentic_spu2_dma()
         return false;
     }
     return true;
+}
+
+bool test_spu2_auto_dma()
+{
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    auto& cpu = kernel.cpu();
+    constexpr uint32_t spu = iop::c_spu2::k_base;
+    constexpr uint32_t dma = iop::c_hw::k_spu2_dma4_base;
+    constexpr uint32_t source = 0x60030u;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    uint32_t value = 0u;
+    uint16_t word = 0u;
+    for (uint32_t chunk = 0u; chunk < 3u; ++chunk)
+    {
+        for (uint32_t i = 0u; i < 256u; ++i)
+        {
+            const uint32_t address = source + chunk * 1024u + i * 2u;
+            const uint16_t left = static_cast<uint16_t>(0x1000u + chunk * 0x100u + i);
+            const uint16_t right = static_cast<uint16_t>(0x8000u + chunk * 0x100u + i);
+            if (!cpu.write8(address, static_cast<uint8_t>(left)) ||
+                !cpu.write8(address + 1u, static_cast<uint8_t>(left >> 8u)) ||
+                !cpu.write8(address + 512u, static_cast<uint8_t>(right)) ||
+                !cpu.write8(address + 513u, static_cast<uint8_t>(right >> 8u)))
+            {
+                return false;
+            }
+        }
+    }
+    if (!hw.write(spu + 0x1b0u, 2u, 1u) ||
+        !hw.write(dma, 4u, source) ||
+        !hw.write(dma + 4u, 4u, 0x00010300u) ||
+        !hw.write(dma + 8u, 4u, 0x01000201u) ||
+        hw.spu2().input_frames(0u) != 512u ||
+        hw.spu2_auto_dma_bytes() != 2048u ||
+        !hw.spu2_ram_word(0x2000u, &word) || word != 0x1000u ||
+        !hw.spu2_ram_word(0x2200u, &word) || word != 0x8000u ||
+        !hw.spu2_ram_word(0x2100u, &word) || word != 0x1100u ||
+        hw.spu2_dma_cycles_remaining() != 256u * period)
+    {
+        return false;
+    }
+    // Later chunk reads live IOP RAM, not a snapshot at DMA start.
+    if (!cpu.write8(source + 2048u, 0x55u))
+    {
+        return false;
+    }
+    (void)kernel.run(256u * period - 1u);
+    if (hw.spu2_auto_dma_bytes() != 2048u ||
+        hw.spu2().input_frames(0u) != 257u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (hw.spu2_auto_dma_bytes() != 3072u ||
+        hw.spu2().input_frames(0u) != 512u ||
+        !hw.spu2_ram_word(0x2000u, &word) || word != 0x1255u ||
+        !hw.spu2_ram_word(0x2200u, &word) || word != 0x8200u ||
+        hw.spu2_dma_cycles_remaining() != 32u)
+    {
+        return false;
+    }
+    (void)kernel.run(31u);
+    if (!hw.read(dma + 8u, 4u, &value) ||
+        (value & iop::c_hw::k_spu2_dma_str_bit) == 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (!hw.read(dma + 8u, 4u, &value) ||
+        (value & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        hw.spu2_auto_dma_completed() != 1u ||
+        hw.spu2().input_frames_consumed() != 256u ||
+        !hw.read(spu + 0x1aau, 2u, &value) || value != 0u)
+    {
+        return false;
+    }
+    // Cancel a new transfer before refill and verify no DMA completion.
+    if (!hw.write(dma + 8u, 4u, 0x01000201u) ||
+        !hw.write(dma + 8u, 4u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(1024u * period);
+    return hw.spu2_auto_dma_started() == 2u &&
+        hw.spu2_auto_dma_completed() == 1u &&
+        hw.spu2_auto_dma_bytes() == 3072u &&
+        hw.spu2().input_frames(0u) == 0u;
 }
 
 bool test_spu2_playback_irq()
@@ -1346,6 +1444,10 @@ int main()
     if (!test_guest_sio2_controller())
     {
         return fail("guest SIO2 PIO/DMA11/12 transport or IRQ17 fidelity");
+    }
+    if (!test_spu2_auto_dma())
+    {
+        return fail("SPU2 AutoDMA planar ring, refill, completion or cancellation");
     }
     if (!test_spu2_playback_irq())
     {

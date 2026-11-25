@@ -7,7 +7,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// No voice mixer, AutoDMA completion or mixer-ring IRQ yet.
+// No voice mixer or mixer-ring IRQ yet.
 class c_spu2
 {
 public:
@@ -57,8 +57,16 @@ public:
     // SPU2 uses shared 2 MiB sound RAM for both core DMA channels.
     // An ordinary DMA copies real little-endian halfwords starting at
     // the core's guest-programmed TSA, wrapping in the sound RAM.
-    // AutoDMA streaming is a different mode and is not implemented.
+    // AutoDMA uses separate planar input rings, not TSA.
     bool auto_dma_enabled(uint32_t core) const;
+    static constexpr uint32_t k_input_frames = 512u;
+    static constexpr uint32_t k_input_chunk_bytes = 1024u;
+    static constexpr uint32_t k_input_batch = 32u;
+    uint32_t input_frames(uint32_t core) const;
+    uint32_t input_refill_cycles(uint32_t core) const;
+    bool push_input(uint32_t core, const uint8_t* data, uint32_t bytes);
+    uint64_t input_frames_written() const { return m_input_frames_written; }
+    uint64_t input_frames_consumed() const { return m_input_frames_consumed; }
     bool copy_dma(uint32_t core, std::vector<uint8_t>& data, bool to_spu);
     bool ram_word(uint32_t address, uint16_t* value) const;
 
@@ -108,6 +116,9 @@ private:
         uint32_t m_endx = 0u;
         uint32_t m_key_mask = 0u;
         s_voice m_voices[24]{};
+        uint32_t m_input_read = 0u;
+        uint32_t m_input_count = 0u;
+        int16_t m_input[k_input_frames][2]{};
         uint32_t m_statx_settling = 0u;
         uint16_t m_attr = 0u;
         bool m_irq = false;
@@ -116,6 +127,8 @@ private:
     static uint32_t voice_address(const s_core& core, uint32_t voice, uint32_t field);
     void decode_voice_block(s_voice& voice, uint32_t slot);
     void check_voice_irq(uint32_t address);
+    void check_input_irq(uint32_t address, uint32_t words);
+    void advance_input(uint64_t samples);
     void start_voice(s_core& core, uint32_t index);
     static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
     void advance_voices(uint64_t samples);
@@ -133,6 +146,8 @@ private:
     uint64_t m_voice_starts = 0u;
     uint64_t m_voice_end_events = 0u;
     uint64_t m_playback_irq_events = 0u;
+    uint64_t m_input_frames_written = 0u;
+    uint64_t m_input_frames_consumed = 0u;
     s_core m_cores[2]{};
     // 2 MiB of SPU2 sound RAM, allocated on the heap (not the IOP stack).
     std::vector<uint16_t> m_ram;

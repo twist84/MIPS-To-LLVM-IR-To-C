@@ -175,20 +175,10 @@ public:
     const c_spu2& spu2() const { return m_spu2; }
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
-    uint32_t spu2_dma_cycles_remaining() const
-    {
-        const uint32_t first = m_spu2_dma_remaining[0u];
-        const uint32_t second = m_spu2_dma_remaining[1u];
-        if (first == 0u)
-        {
-            return second;
-        }
-        if (second == 0u)
-        {
-            return first;
-        }
-        return first < second ? first : second;
-    }
+    uint32_t spu2_dma_cycles_remaining() const;
+    uint64_t spu2_auto_dma_started() const { return m_spu2_auto_started; }
+    uint64_t spu2_auto_dma_completed() const { return m_spu2_auto_completed; }
+    uint64_t spu2_auto_dma_bytes() const { return m_spu2_auto_bytes; }
 
     // For the ordinary MMIO/scratchpad range, address is physical.
     // The cache-control register retains its privileged full address.
@@ -319,6 +309,8 @@ private:
     void assert_dma_irq(uint32_t& control, bool sif_channel);
     void start_spu2_dma(uint32_t core);
     void advance_spu2_dma(uint32_t cycles);
+    void feed_spu2_input(uint32_t core);
+    void advance_spu2_devices(uint32_t cycles);
     bool process_sio2_packet();
     bool run_sio2_transfer();
 
@@ -403,6 +395,16 @@ private:
     // Countdown starts only after an actual IOP <-> sound-RAM copy.
     // A guest CHCR.STR clear cancels the pending completion.
     uint32_t m_spu2_dma_remaining[2]{};
+    struct s_spu2_auto_transfer
+    {
+        uint32_t m_address = 0u;
+        uint32_t m_bytes = 0u;
+        bool m_active = false;
+    };
+    s_spu2_auto_transfer m_spu2_auto[2]{};
+    uint64_t m_spu2_auto_started = 0u;
+    uint64_t m_spu2_auto_completed = 0u;
+    uint64_t m_spu2_auto_bytes = 0u;
     c_cpu* m_dma_cpu = nullptr;
     uint32_t m_dma_pcr = 0u;
     uint32_t m_dma_pcr2 = 0u;
