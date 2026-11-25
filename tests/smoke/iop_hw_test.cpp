@@ -592,7 +592,7 @@ bool test_spu2_mixer_rings()
         !hw.spu2_ram_word(0x420u, &word) || word != 7168u ||
         !hw.spu2_ram_word(0x1020u, &word) || word != 7167u ||
         !hw.spu2_ram_word(0x820u, &word) || word != 7166u ||
-        !hw.spu2_ram_word(0x1420u, &word) || word != 0u ||
+        !hw.spu2_ram_word(0x1420u, &word) || word != 7167u ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
     {
         return false;
@@ -627,6 +627,65 @@ bool test_spu2_mixer_rings()
         return false;
     }
     return true;
+}
+
+bool test_spu2_voice_routing()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    uint32_t mask = 0u;
+    uint16_t word = 0u;
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t registers = base + core * 0x400u;
+        for (uint32_t offset = 0x188u; offset <= 0x194u; offset += 4u)
+        {
+            if (!spu.read(registers + offset, 4u, &mask) || mask != 0xffffffu)
+            {
+                return false;
+            }
+        }
+        const uint32_t voice = core == 0u ? 1u : 23u;
+        const uint32_t bit = 1u << voice;
+        const uint32_t parameters = registers + voice * 16u;
+        const uint32_t address = registers + 0x1c0u + voice * 12u;
+        // Core 0: voice 1 dry L / wet R. Core 1: voice 23 dry R / wet L.
+        if (!spu.write(registers + 0x188u, 4u, core == 0u ? bit : 0u) ||
+            !spu.write(registers + 0x18cu, 4u, core == 1u ? bit : 0u) ||
+            !spu.write(registers + 0x190u, 4u, core == 1u ? bit : 0u) ||
+            !spu.write(registers + 0x194u, 4u, core == 0u ? bit : 0u) ||
+            !spu.write(registers + 0x1aau, 2u, 0x5000u) ||
+            !spu.write(registers + 0x1acu, 2u, 0u) ||
+            !spu.write(registers + 0x1acu, 2u, 0x4444u) ||
+            !spu.write(address + 2u, 2u, 0x5000u) ||
+            !spu.write(parameters, 2u, 0x3fffu) ||
+            !spu.write(parameters + 2u, 2u, 0x3fffu) ||
+            !spu.write(parameters + 6u, 2u, 0x000fu) ||
+            !spu.write(registers + 0x1a0u, 4u, bit))
+        {
+            return false;
+        }
+    }
+    (void)spu.advance_cycles(32u * period);
+    const uint32_t addresses[] =
+    {
+        0x1020u, 0x1220u, 0x1420u, 0x1620u,
+        0x1820u, 0x1a20u, 0x1c20u, 0x1e20u
+    };
+    const uint16_t expected[] =
+    {
+        7167u, 0u, 0u, 7167u, 0u, 7167u, 7167u, 0u
+    };
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (!spu.ram_word(addresses[i], &word) || word != expected[i])
+        {
+            return false;
+        }
+    }
+    return spu.active_voice_mask(0u) == 2u &&
+        spu.active_voice_mask(1u) == (1u << 23u);
 }
 
 bool test_spu2_pcm_mixer()
@@ -1617,6 +1676,10 @@ int main()
     if (!test_spu2_mixer_rings())
     {
         return fail("SPU2 mixer-ring taps, silent IRQ or ring wrap");
+    }
+    if (!test_spu2_voice_routing())
+    {
+        return fail("SPU2 independent dry/wet voice routing");
     }
     if (!test_spu2_pcm_mixer())
     {

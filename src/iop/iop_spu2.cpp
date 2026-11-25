@@ -45,6 +45,13 @@ void c_spu2::reset()
     for (s_core& core : m_cores)
     {
         core = s_core{};
+        // Initial voice routing follows the SPU2 compatibility defaults:
+        // all 24 voices routed to both dry and effect paths.
+        for (uint32_t offset = 0x188u; offset <= 0x194u; offset += 4u)
+        {
+            core.m_registers[offset / 2u] = 0xffffu;
+            core.m_registers[offset / 2u + 1u] = 0x00ffu;
+        }
         core.m_master[0] = 0x3fffu;
         core.m_master[1] = 0x3fffu;
         core.m_master[4] = 0x7fffu;
@@ -240,7 +247,8 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
     check_voice_irq(voice.m_block[0]);
 }
 
-void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2])
+void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2],
+    int32_t (&wet)[2][k_input_batch][2])
 {
     c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_voices);
     constexpr uint32_t block_length = 28u << 12u;
@@ -251,6 +259,13 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2
         {
             continue;
         }
+        const auto voice_mask = [&core](uint32_t offset)
+        {
+            return static_cast<uint32_t>(core.m_registers[offset / 2u]) |
+                (static_cast<uint32_t>(core.m_registers[offset / 2u + 1u] & 0xffu) << 16u);
+        };
+        const uint32_t dry_mask[2] = {voice_mask(0x188u), voice_mask(0x190u)};
+        const uint32_t wet_mask[2] = {voice_mask(0x18cu), voice_mask(0x194u)};
         for (uint32_t index = 0u; index < 24u; ++index)
         {
             const uint32_t bit = 1u << index;
@@ -331,8 +346,15 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2
                 for (uint32_t channel = 0u; channel < 2u; ++channel)
                 {
                     const int32_t gain = voice.m_volume[channel].m_level;
-                    sum[core_index][sample][channel] += floor_shift(
-                        enveloped * gain, 15u);
+                    const int32_t contribution = floor_shift(enveloped * gain, 15u);
+                    if ((dry_mask[channel] & bit) != 0u)
+                    {
+                        dry[core_index][sample][channel] += contribution;
+                    }
+                    if ((wet_mask[channel] & bit) != 0u)
+                    {
+                        wet[core_index][sample][channel] += contribution;
+                    }
                 }
             }
         }
@@ -542,8 +564,10 @@ void c_spu2::mix_frames(uint64_t samples)
         else
         {
             int32_t sum[2][k_input_batch][2]{};
-            advance_voices(count, sum);
-            // Dry taps precede AutoDMA input gain and master scaling.
+            int32_t wet[2][k_input_batch][2]{};
+            advance_voices(count, sum, wet);
+            // Dry and wet voice taps precede input gain and master scaling.
+            // Wet taps are effect inputs, not the processed reverb return.
             for (uint32_t core = 0u; core < 2u; ++core)
             {
                 for (uint32_t sample = 0u; sample < count; ++sample)
@@ -552,6 +576,8 @@ void c_spu2::mix_frames(uint64_t samples)
                     {
                         m_mixer_rings[core][4u + channel][offset + sample] =
                             clamp_sample(sum[core][sample][channel]);
+                        m_mixer_rings[core][6u + channel][offset + sample] =
+                            clamp_sample(wet[core][sample][channel]);
                     }
                 }
             }

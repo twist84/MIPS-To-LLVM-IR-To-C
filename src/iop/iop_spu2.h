@@ -156,7 +156,8 @@ private:
     void emit_pcm(int16_t left, int16_t right);
     void start_voice(s_core& core, uint32_t index);
     static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
-    void advance_voices(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
+    void advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2],
+        int32_t (&wet)[2][k_input_batch][2]);
     static uint32_t set_hi(uint32_t address, uint32_t value);
     static uint32_t set_lo(uint32_t address, uint32_t value);
 
