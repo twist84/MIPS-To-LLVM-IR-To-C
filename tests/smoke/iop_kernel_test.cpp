@@ -146,7 +146,7 @@ int main()
             return fail("IOP lookahead ready/dormant transition");
         }
         if (!hw.write(iop::c_hw::k_timer5_mode, 4u, 0u) ||
-            !hw.spu2().write(iop::c_spu2::k_base + 0x19au, 2u, 0u) ||
+            !hw.write(iop::c_spu2::k_base + 0x19au, 2u, 0u) ||
             idle.idle_event_cycles_remaining() != iop::c_spu2::k_cycles_per_sample)
         {
             return fail("IOP lookahead SPU2 sample boundary");
