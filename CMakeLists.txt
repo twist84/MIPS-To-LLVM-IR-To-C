@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.18)
 project(ps2_recompiler C CXX)
 
 option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
+option(EE_CLANG_WARNINGS_AS_ERRORS "Treat project Clang compiler warnings as errors" ON)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
@@ -1074,20 +1075,30 @@ if(EE_HAVE_LLVM_JIT_TEST)
 endif()
 set_tests_properties(multi_function smoke PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# Apply the project's warning policy only to targets declared here. In
-# particular, FetchContent raylib/GLFW targets keep their upstream flags.
-# Use the actual Microsoft compiler, not clang++ or clang-cl.
-if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
-    get_property(EE_PROJECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
-    foreach(target IN LISTS EE_PROJECT_TARGETS)
-        get_target_property(target_type ${target} TYPE)
-        if(target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
-            target_compile_options(${target} PRIVATE
-                "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
-            if(EE_MSVC_WARNINGS_AS_ERRORS)
-                target_compile_options(${target} PRIVATE
-                    "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
-            endif()
+# Apply warning policy only to project targets, not FetchContent raylib/GLFW.
+get_property(EE_PROJECT_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+foreach(target IN LISTS EE_PROJECT_TARGETS)
+    get_target_property(target_type ${target} TYPE)
+    if(NOT target_type MATCHES "^(EXECUTABLE|STATIC_LIBRARY|SHARED_LIBRARY|MODULE_LIBRARY|OBJECT_LIBRARY)$")
+        continue()
+    endif()
+    # Standard C/C++ CRT APIs are intentionally portable. The Windows UCRT
+    # annotates them as deprecated in favor of Microsoft-specific variants.
+    # This opts into standard CRT usage, not general deprecation suppression.
+    if(WIN32 AND (MSVC OR CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+        target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/W3>")
+        if(EE_MSVC_WARNINGS_AS_ERRORS)
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
         endif()
-    endforeach()
-endif()
+    elseif(CMAKE_CXX_COMPILER_ID MATCHES "^(Clang|AppleClang)$" AND EE_CLANG_WARNINGS_AS_ERRORS)
+        # clang-cl requires the MSVC driver spelling; clang++ uses -Werror.
+        if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:/WX>")
+        else()
+            target_compile_options(${target} PRIVATE "$<$<COMPILE_LANGUAGE:C,CXX>:-Werror>")
+        endif()
+    endif()
+endforeach()

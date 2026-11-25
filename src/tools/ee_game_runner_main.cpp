@@ -2625,7 +2625,8 @@ int main(int argc, char** argv)
         // SDBZ_IOP_AOT=LIB loads ahead-of-time translated IRX code;
         // SDBZ_IOP_AOT_CAPTURE=DIR saves each loaded module's relocated,
         // import-linked .text for tools/iop_recomp.py.
-        if (const char* aot_path = std::getenv("SDBZ_IOP_AOT"))
+        std::string aot_path_storage;
+        if (const char* aot_path = read_host_environment("SDBZ_IOP_AOT", &aot_path_storage))
         {
             // SDBZ_IOP_AOT is a directory of per-module libraries
             // (tools/build_iop_aot.py OUT/modules) or one library.
@@ -2652,14 +2653,16 @@ int main(int argc, char** argv)
             }
         }
         {
-            const char* capture_dir = std::getenv("SDBZ_IOP_AOT_CAPTURE");
+            std::string capture_storage;
+            const bool capture_enabled = read_host_environment(
+                "SDBZ_IOP_AOT_CAPTURE", &capture_storage) != nullptr;
             iop::c_kernel* kernel_for_aot = iop_kernel.get();
             iop::c_iop_aot* aot_for_kernel = iop_aot.get();
             iop_kernel->set_module_loaded_callback(
-                [capture_dir, kernel_for_aot, aot_for_kernel](
+                [capture_storage, capture_enabled, kernel_for_aot, aot_for_kernel](
                     const iop::s_irx_module& module)
             {
-                if (capture_dir != nullptr && module.m_text_size != 0u)
+                if (capture_enabled && module.m_text_size != 0u)
                 {
                     std::vector<uint8_t> text(module.m_text_size);
                     if (kernel_for_aot->cpu().dma_read(
@@ -2673,14 +2676,14 @@ int main(int argc, char** argv)
                         }
                         char stem[128];
                         std::snprintf(stem, sizeof(stem), "%s/%s@%08x",
-                                      capture_dir, name.c_str(), module.m_base);
-                        if (FILE* bin = std::fopen(
+                                      capture_storage.c_str(), name.c_str(), module.m_base);
+                        if (FILE* bin = open_host_file(
                                 (std::string(stem) + ".bin").c_str(), "wb"))
                         {
                             std::fwrite(text.data(), 1u, text.size(), bin);
                             std::fclose(bin);
                         }
-                        if (FILE* meta = std::fopen(
+                        if (FILE* meta = open_host_file(
                                 (std::string(stem) + ".json").c_str(), "w"))
                         {
                             std::fprintf(meta,
@@ -3037,7 +3040,8 @@ int main(int argc, char** argv)
     if (instruction_trace_path != nullptr)
     {
         // SDBZ_TRACE_LIMIT=N raises the bounded entry count (diagnostic).
-        const char* limit_text = std::getenv("SDBZ_TRACE_LIMIT");
+        std::string limit_storage;
+        const char* limit_text = read_host_environment("SDBZ_TRACE_LIMIT", &limit_storage);
         const unsigned long long limit = limit_text != nullptr
             ? std::strtoull(limit_text, nullptr, 0) : 0ull;
         instruction_trace.resize(limit != 0ull && limit <= 0x10000000ull
@@ -3610,7 +3614,8 @@ int main(int argc, char** argv)
     // hot path. A disabled frame dump requires no local-static guard.
     const std::pair<std::string, uint64_t> s_frame_dump = []
     {
-        const char* text = std::getenv("SDBZ_FRAME_DUMP");
+        std::string storage;
+        const char* text = read_host_environment("SDBZ_FRAME_DUMP", &storage);
         if (text == nullptr)
         {
             return std::pair<std::string, uint64_t>{};
@@ -8103,7 +8108,8 @@ int main(int argc, char** argv)
             static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
         );
     }
-    if (std::getenv("SDBZ_TRACE_IOP_THREADS") != nullptr && iop_kernel != nullptr)
+    std::string trace_iop_storage;
+    if (read_host_environment("SDBZ_TRACE_IOP_THREADS", &trace_iop_storage) != nullptr && iop_kernel != nullptr)
     {
         for (const auto& item : iop_kernel->threads())
         {
@@ -8121,7 +8127,8 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(thread.m_guest_instructions));
         }
     }
-    if (std::getenv("SDBZ_TRACE_IPU") != nullptr)
+    std::string trace_ipu_storage;
+    if (read_host_environment("SDBZ_TRACE_IPU", &trace_ipu_storage) != nullptr)
     {
         const auto& observed = hardware.ipu_observation();
         std::fprintf(stderr, "EE IPU MMIO: reads=%llu writes=%llu\n",
@@ -8146,9 +8153,10 @@ int main(int argc, char** argv)
             iop_aot->milliseconds(), iop_aot->refresh_milliseconds());
     }
     // SDBZ_DUMP_RAM=FILE writes the 32 MiB EE RAM image at exit (diagnostic).
-    if (const char* dump_path = std::getenv("SDBZ_DUMP_RAM"))
+    std::string dump_path_storage;
+    if (const char* dump_path = read_host_environment("SDBZ_DUMP_RAM", &dump_path_storage))
     {
-        if (FILE* dump = std::fopen(dump_path, "wb"))
+        if (FILE* dump = open_host_file(dump_path, "wb"))
         {
             std::vector<uint8_t> image(32u * 1024u * 1024u);
             for (uint32_t address = 0u; address < image.size(); address += 4u)

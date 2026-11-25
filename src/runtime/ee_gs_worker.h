@@ -76,15 +76,17 @@ public:
     e_submit submit(const s_ee_gif_event* events, size_t count,
                     const uint8_t* data, uint32_t qwc)
     {
+        // Unsigned multiplication is defined even on 32-bit hosts. A
+        // round-trip detects overflow without an impossible x64 comparison.
+        const size_t input_bytes = static_cast<size_t>(qwc) * 16u;
         if (m_consume == nullptr || (events == nullptr && count != 0u) ||
             (data == nullptr && qwc != 0u) ||
-            qwc > std::numeric_limits<size_t>::max() / 16u ||
+            input_bytes / 16u != qwc ||
             count > std::numeric_limits<size_t>::max() / sizeof(s_ee_gif_event))
         {
             return e_submit::invalid;
         }
         const uint64_t prepare_start = now_ns();
-        const size_t input_bytes = static_cast<size_t>(qwc) * 16u;
         const size_t event_bytes = count * sizeof(s_ee_gif_event);
         size_t image_bytes = 0u;
         for (size_t i = 0u; i < count; ++i)
