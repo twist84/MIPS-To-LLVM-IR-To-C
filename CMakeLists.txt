@@ -794,6 +794,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME boot_session_orchestration
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_boot_session.py)
+    add_test(NAME iop_aot_export_names
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_aot_names.py)
     # Rebuilding host-only probe headers must relink existing guest
     # objects, never force a fresh ELF-to-LLVM translation.
     add_test(NAME ee_translation_cache_input_split
