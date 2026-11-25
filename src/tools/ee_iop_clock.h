@@ -77,6 +77,28 @@ public:
             m_last_cycle + distance : k_no_deadline;
     }
 
+    // Project a relative kernel/device deadline onto the compatibility
+    // clock. Existing debt must first be serviced; do not extrapolate
+    // from an unanchored clock or overflow the timestamp.
+    uint64_t cycle_after_iop(uint64_t cycles) const
+    {
+        if (!m_active || cycles == k_no_deadline)
+        {
+            return k_no_deadline;
+        }
+        if (m_due != 0u || cycles == 0u)
+        {
+            return m_last_cycle;
+        }
+        if (cycles > k_no_deadline / 8u)
+        {
+            return k_no_deadline;
+        }
+        const uint64_t distance = cycles * 8u - m_remainder;
+        return distance < k_no_deadline - m_last_cycle ?
+            m_last_cycle + distance : k_no_deadline;
+    }
+
     bool active() const { return m_active; }
 
 private:
