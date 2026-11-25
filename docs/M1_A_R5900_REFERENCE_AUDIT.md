@@ -218,3 +218,24 @@ synthetic until a provenance-tagged hardware/reference trace is supplied.
 There are no ELF-derived timing constants or new local SDBZ boot findings
 in this batch. **No GS/INTC event generation and no simulated VBlank** are
 authorized by this work.
+
+## PR #156: manual cache-hit profile (25 November 2026)
+
+The manual's section 2.12 is now available as an explicit offline
+`--manual-cache-hit` profile. It supplies documented integer, cache-hit
+load, HI/LO, scalar COP1 and functional-unit initiation intervals, rather
+than requiring the user to reenter the reference table. LWC1 has its own
+2-cycle FPR result latency and participates in the FPR dependency bank
+(including FPR0); it is not priced as a 1-cycle integer load. The profile
+keeps unspecified COP0, VU0, FCR control and packed-MMI timing absent.
+Some shared classes are conservative approximations (e.g. ACC arithmetic
+and FCR31 reservations); the manual does not fully characterize internal
+forwarding. A cache-hit profile does not predict cache misses, contention,
+Y-pair A-stage stalls, HLE cost or actual program retirement. The runner
+still uses the separately labelled reference compatibility clock; this
+profile is never installed as validated timing.
+
+Example: `ee_issue_trace_candidate trace.csv --manual-cache-hit --candidate-completions=manual.csv`.
+The output reports the profile provenance, and tests check load/FPR
+hazards, preservation of unknown categories and explicit CLI selection.
+Physical-console cycle comparisons remain required.

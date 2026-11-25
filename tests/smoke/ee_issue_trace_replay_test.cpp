@@ -96,6 +96,41 @@ int main()
           e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
           "no fabricated COP1 pipeline cost");
 
+    // Manual profile is explicitly cache-hit only. Verify actual
+    // distinct load-to-FPR timing, including FPR0 as a writable register.
+    {
+        const auto profile = ee::ee_manual_cache_hit_profile();
+        check(profile.m_integer_latency == 1u &&
+              profile.m_load_latency == 1u &&
+              profile.m_fpu_load_latency == 2u &&
+              profile.m_hilo_multiply_latency == 4u &&
+              profile.m_hilo_divide_latency == 37u &&
+              profile.m_fpu_rsqrt_latency == 14u &&
+              profile.m_mac_multiply_interval == 2u &&
+              profile.m_cop1_rsqrt_interval == 13u &&
+              profile.m_fpu_control_latency == 0u &&
+              profile.m_cop0_transfer_latency == 0u &&
+              profile.m_packed_mmi_latency == 0u &&
+              profile.m_require_throughput,
+              "manual profile preserves documented and unknown categories");
+        // lwc1 f0, 0(r8); mfc1 r9, f0.
+        constexpr uint32_t lwc1 = (0x31u << 26u) | (8u << 21u);
+        constexpr uint32_t mfc1 = (0x11u << 26u) | (9u << 16u);
+        check(replay.configure(profile) &&
+              replay.observe(record(1u, 0x1000u, lwc1, 0u, 1u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.last_candidate_completion_cycle() == 2u &&
+              replay.observe(record(2u, 0x1004u, mfc1, 0u, 2u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 2u &&
+              replay.last_candidate_completion_cycle() == 4u,
+              "manual LWC1 cache-hit dependency reaches FPR0 after two cycles");
+        check(replay.configure({1u, 1u}) &&
+              replay.observe(record(1u, 0x1000u, lwc1, 0u, 1u)) ==
+                  e_ee_issue_replay_status::UNMODELED_INSTRUCTION,
+              "caller profile cannot silently reuse integer latency for LWC1");
+    }
+
     // Per-pipeline availability is never inferred from the generic scalar
     // profile. Demand an explicit MUL, DIV, move or accumulate latency.
     replay.configure({1u, 3u});
