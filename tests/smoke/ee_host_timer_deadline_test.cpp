@@ -189,6 +189,55 @@ int main()
         runtime.m_cop0_clock_count = 0u;
         runtime.m_cop0_clock_compare = 0u;
     }
+    // A host continuation can advance slots or HLE budget before the
+    // next publication. A caught-up EE clock alone does not establish
+    // that the IOP observed or consumed the corresponding time.
+    {
+        ee::s_ee_runtime checkpoint{};
+        t_iop_clock clock;
+        if (!check(!ee::ee_horizon_checkpoint_ready(checkpoint, clock, false) &&
+                checkpoint.m_ee_cycle_scheduler.install_reference_compatibility_source() &&
+                ee::ee_horizon_checkpoint_ready(checkpoint, clock, false) &&
+                !ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.observe(0u) == e_result::accepted &&
+                ee::ee_horizon_checkpoint_ready(checkpoint, clock, true),
+                "checkpoint source and initial IOP anchor"))
+        {
+            return 1;
+        }
+        checkpoint.m_reference_instruction_slots = 7u;
+        if (!check(!ee::ee_horizon_checkpoint_ready(checkpoint, clock, false) &&
+                checkpoint.m_ee_cycle_scheduler.publish_cycle(7u) &&
+                !ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.observe(7u) == e_result::accepted &&
+                ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.next_cycle() == 8u,
+                "stale publication and fractional anchor"))
+        {
+            return 1;
+        }
+        checkpoint.m_hle_timing_boundaries = 1u;
+        if (!check(!ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                checkpoint.m_ee_cycle_scheduler.publish_cycle(307u) &&
+                !ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.observe(307u) == e_result::accepted && clock.due() == 38u &&
+                !ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.consume(37u) &&
+                !ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.consume(1u) &&
+                ee::ee_horizon_checkpoint_ready(checkpoint, clock, true) &&
+                clock.next_cycle() == 312u,
+                "HLE continuation and partially consumed debt"))
+        {
+            return 1;
+        }
+        checkpoint.m_reference_instruction_slots = UINT64_MAX;
+        if (!check(!ee::ee_horizon_checkpoint_ready(checkpoint, clock, false),
+                "overflowed live budget authorized a checkpoint"))
+        {
+            return 1;
+        }
+    }
     // Snapshot comparisons detect scheduler-visible endpoint differences,
     // including an unchanged Compare value with a different clock anchor.
     {
