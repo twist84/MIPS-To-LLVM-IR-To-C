@@ -872,3 +872,24 @@ Retain the expanded count on VIF1 (nine bits), truncate VIF0 to eight
 bits. Correct the pending-header regression to check the distinct
 architectural readback, not a shared eight-bit result. No test output
 or input changed.
+
+### Confirmed VIF correction result (9d12287)
+
+PR head `9d12287f0e1ab5c8a9fd795a2fcbd3ba6ebed13b`, tested merge
+`0b374c9a8c698cb50592af9bcf51a766b50a09f4`, [run 45650177873](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45650177873),
+[summary artifact 15040515764](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45650177873/artifacts/15040515764),
+DMA artifact 15040076129. All five PR workflows passed. **47/55 exact
+(85.45%)**: PASS 47, DIFF 4, INCOMPLETE 4, NO_OUTPUT 0, ERROR 0.
+Newly passing dma/vif/stcycl, dma/vif/stmod and dma/vif/unpack; no
+previous passes lost. Progressive partial-payload UNPACK remains open.
+
+| Remaining test | Status | Stop | PC | Dispatches |
+|---|---|---|---|---:|
+| cpu/ee/branchdelay | DIFF | EXCEPTION | 0x80000180 | 2831 |
+| cpu/ee_cop0/performance | INCOMPLETE | UNSUPPORTED | 0x00100728 | 8193 |
+| cpu/ee_fpu/branchdelay | DIFF | EXCEPTION | 0x80000180 | 1981 |
+| cpu/ee_fpu/muldiv | INCOMPLETE | DISPATCH | 0x00129830 | 1000000 |
+| cpu/vu0_macro/transfer | INCOMPLETE | UNSUPPORTED | 0x00100544 | 8425 |
+| dma/vif/intstall | DIFF | UNSUPPORTED | 0xffffffe0 | 5121 |
+| kernel/ee/interrupt/intc_order | INCOMPLETE | EXCEPTION | 0x80000180 | 1276 |
+| vu/lower/efu | DIFF | UNSUPPORTED | 0xffffffe0 | 254357 |
