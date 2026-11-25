@@ -688,6 +688,86 @@ bool test_spu2_voice_routing()
         spu.active_voice_mask(1u) == (1u << 23u);
 }
 
+bool test_spu2_effect_ram()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    // Both logical work areas alias the same physical 8-word tail.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t reg = base + core * 0x400u;
+        if (!spu.write(reg + 0x2e0u, 2u, 0x10u) ||
+            !spu.write(reg + 0x2e2u, 2u, 0xfff8u) ||
+            !spu.write(reg + 0x33cu, 2u, 0x10u))
+        {
+            return false;
+        }
+    }
+    // Seed through the real DMA path before enabling IRQs.
+    std::vector<uint8_t> data{0x00u, 0x80u};
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xffffu) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t reg = base + core * 0x400u;
+        if (!spu.write(reg + 0x19cu, 2u, 0u) ||
+            !spu.write(reg + 0x19eu, 2u, 0xffffu) ||
+            !spu.write(reg + 0x19au, 2u, 0x40u))
+        {
+            return false;
+        }
+    }
+    int16_t sample = 0;
+    uint16_t word = 0u;
+    // Disabled effects can read but may neither write nor latch an IRQ.
+    if (!spu.read_effect_sample(0u, 0u, -1, &sample) || sample != -32768 ||
+        spu.write_effect_sample(0u, 0u, -1, 123) ||
+        !spu.ram_word(0xffffu, &word) || word != 0x8000u ||
+        spu.irq_latches() != 0u || spu.effect_irq_events() != 0u)
+    {
+        return false;
+    }
+    // Core 0's actual enabled read compares both IRQ addresses.
+    if (!spu.write(base + 0x19au, 2u, 0xc0u) ||
+        spu.irq_latches() != 0u ||
+        !spu.read_effect_sample(0u, 8u, -1, &sample) ||
+        sample != -32768 || spu.irq_latches() != 3u ||
+        spu.effect_irq_events() != 2u || spu.playback_irq_events() != 2u)
+    {
+        return false;
+    }
+    // Repeated accesses do not raise another edge until acknowledged.
+    if (!spu.write_effect_sample(0u, 7u, 0, 100000) ||
+        !spu.read_effect_sample(1u, 0u, -1, &sample) || sample != 32767 ||
+        spu.effect_irq_events() != 2u ||
+        !spu.write(base + 0x59au, 2u, 0u) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write_effect_sample(0u, 0u, -1, -100000) ||
+        spu.irq_latches() != 3u || spu.effect_irq_events() != 3u ||
+        !spu.ram_word(0xffffu, &word) || word != 0x8000u)
+    {
+        return false;
+    }
+    // Invalid addresses must not mutate RAM or latches.
+    if (spu.read_effect_sample(2u, 0u, 0, &sample) ||
+        spu.read_effect_sample(0u, 0u, 0, nullptr) ||
+        spu.write_effect_sample(2u, 0u, 0, 123) ||
+        !spu.write(base + 0x33cu, 2u, 0x0fu) ||
+        spu.read_effect_sample(0u, 0u, 0, &sample) ||
+        spu.write_effect_sample(0u, 0u, 0, 123) ||
+        spu.effect_irq_events() != 3u)
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_irq_events() == 0u && spu.playback_irq_events() == 0u &&
+        spu.irq_latches() == 0u && spu.ram_word(0xffffu, &word) && word == 0u;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1843,6 +1923,10 @@ int main()
     if (!test_spu2_voice_routing())
     {
         return fail("SPU2 independent dry/wet voice routing");
+    }
+    if (!test_spu2_effect_ram())
+    {
+        return fail("SPU2 shared effect RAM, saturation and cross-core IRQ latches");
     }
     if (!test_spu2_effect_registers())
     {

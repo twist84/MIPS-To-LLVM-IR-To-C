@@ -42,6 +42,7 @@ void c_spu2::reset()
     m_effect_input_frames[0] = m_effect_input_frames[1] = 0u;
     m_mixer_ring_batches = 0u;
     m_mixer_irq_events = 0u;
+    m_effect_irq_events = 0u;
     m_pcm_pending = 0u;
     for (s_core& core : m_cores)
     {
@@ -161,6 +162,43 @@ bool c_spu2::effect_address(uint32_t core, uint64_t step, int64_t offset,
         }
         *address = (start + static_cast<uint32_t>(relative)) & (k_ram_words - 1u);
         result = true;
+    }
+    return result;
+}
+
+void c_spu2::check_effect_irq(uint32_t address)
+{
+    const uint32_t prior = irq_latches();
+    check_input_irq(address, 1u);
+    const uint32_t raised = irq_latches() & ~prior;
+    m_effect_irq_events += (raised & 1u) + ((raised >> 1u) & 1u);
+}
+
+bool c_spu2::read_effect_sample(uint32_t core, uint64_t step, int64_t offset,
+    int16_t* sample)
+{
+    uint32_t address = 0u;
+    const bool result = sample != nullptr && effect_address(core, step, offset, &address);
+    if (result)
+    {
+        *sample = static_cast<int16_t>(signed_halfword(m_ram[address]));
+        if (effect_enabled(core))
+        {
+            check_effect_irq(address);
+        }
+    }
+    return result;
+}
+
+bool c_spu2::write_effect_sample(uint32_t core, uint64_t step, int64_t offset,
+    int32_t sample)
+{
+    uint32_t address = 0u;
+    const bool result = effect_enabled(core) && effect_address(core, step, offset, &address);
+    if (result)
+    {
+        m_ram[address] = static_cast<uint16_t>(clamp_sample(sample));
+        check_effect_irq(address);
     }
     return result;
 }

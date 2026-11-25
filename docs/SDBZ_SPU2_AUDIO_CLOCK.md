@@ -88,3 +88,21 @@ Implement the MMIX source gates (0x198 per core), with separate dry/wet bits for
 Batch 15 completed 40M dispatches, 3707 fields and training gameplay without cache expansion or guest faults. PCM frames 2,966,958, mixer 796.872 ms, effect input nonzero 0 on both cores. A zero routed input is not proof that effects were never enabled. Both captures match and the 16,208-module translation manifest is unchanged.
 
 Implement the effect coefficient banks at 0x774..0x786 and 0x79c..0x7ae, leaving current master-volume readback as previously modelled. Preserve high-halfword-first address parameter latches. ESA (0x2e0/0x6e0) and EEA (0x33c/0x73c) use 22-bit logical halfword addresses; EEA low half reads 0xffff and ignores writes. Compatibility reset areas follow PCSX2. Add a bounded effect_address helper wrapping positive/negative offsets and large guest step positions in the inclusive logical work area, then masking to physical 2 MiB sound RAM. Invalid/nonpositive-length areas fail without access. The helper uses mathematical signed modulo; hardware boundary quirks need differential validation. Report ATTR bit 7 and enable-write counts plus area endpoints per core. No actual reverb RAM reads/writes, filter or effect IRQ scheduling yet; address/coefficients tests exercise both cores, reset, high page aliasing, wrap and invalid areas. References: PCSX2 SPU2 regs.h, RegTable.cpp, Reverb.cpp, spu2sys.cpp. No EE/VU1 changes.
+
+### Effect RAM transactions (Batch 17)
+
+Effect tap reads resolve the wrapped work-area address to shared sound RAM and
+interpret a signed halfword. Enabled writes saturate to signed 16-bit before
+storing. The current compatibility policy permits disabled reads but suppresses
+writeback and effect IRQ comparisons while ATTR bit 7 is clear. This follows the
+observed distinction in PCSX2's reverb model; disabled-read IRQ behavior remains
+a hardware-validation item. Each enabled actual access compares both cores'
+physical IRQA through the existing playback latch path, with a separate effect
+IRQ edge counter. Repeated hits do not create new edges until acknowledged.
+
+Synthetic coverage seeds RAM through DMA, checks logical aliasing, positive and
+negative wrapping, saturated samples, disabled effects, both IRQ latches,
+re-arming one core, invalid addresses and reset. These helpers are not called
+by the mixer yet: no dummy tap reads or writes, effect deadlines or synthetic
+IRQ events are introduced by this batch. Guest-clock activation, silent-tail
+handling and scheduler deadlines must be added with real filter processing.

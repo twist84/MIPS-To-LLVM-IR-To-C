@@ -93,6 +93,14 @@ public:
     uint64_t effect_enable_writes(uint32_t core) const;
     bool effect_address(uint32_t core, uint64_t step, int64_t offset,
         uint32_t* address) const;
+    // Effect taps are real shared RAM accesses. Reads remain available
+    // while writeback and effect IRQ comparisons are disabled.
+    // Call only for an actual filter transaction at its guest sample tick.
+    bool read_effect_sample(uint32_t core, uint64_t step, int64_t offset,
+        int16_t* sample);
+    bool write_effect_sample(uint32_t core, uint64_t step, int64_t offset,
+        int32_t sample);
+    uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
     uint32_t input_frames(uint32_t core) const;
@@ -164,6 +172,7 @@ private:
     void decode_voice_block(s_voice& voice, uint32_t slot);
     void check_voice_irq(uint32_t address);
     void check_input_irq(uint32_t address, uint32_t words);
+    void check_effect_irq(uint32_t address);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     void mix_frames(uint64_t samples);
     void write_mixer_rings();
@@ -207,6 +216,7 @@ private:
     uint64_t m_effect_input_frames[2]{};
     uint64_t m_mixer_ring_batches = 0u;
     uint64_t m_mixer_irq_events = 0u;
+    uint64_t m_effect_irq_events = 0u;
     // Per-core input L/R, voice 1/3, dry L/R and wet L/R.
     int16_t m_mixer_rings[2][8][k_input_batch]{};
     void* m_pcm_user = nullptr;
