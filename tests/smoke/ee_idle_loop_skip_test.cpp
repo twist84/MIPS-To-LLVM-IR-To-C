@@ -111,6 +111,52 @@ int main()
               e_idle_iteration::exits,
           "LB sign-extends 0x80 so BGEZ falls through");
 
+    // A forward branch can bypass an instruction, but its delay slot
+    // executes on both paths. The merge reads a definitely assigned v1.
+    const s_code forward_poll = {0x00310000u, {
+        0x8c820000u,   // lw v0,0(a0)
+        0x10400002u,   // beq v0,zero,merge
+        0x24030001u,   // addiu v1,zero,1 (delay slot)
+        0x24030002u,   // addiu v1,zero,2
+        0x00601021u,   // merge: addu v0,v1,zero
+        0x1000fffau,   // b header
+        0x00000000u}};
+    const auto forward_shape = ee::analyze_idle_loop(
+        forward_poll.base, forward_poll, true);
+    s_memory forward_memory;
+    uint64_t forward_gpr[32] = {};
+    forward_gpr[4] = 0x00400000u;
+    uint32_t executed = 0u;
+    check(forward_shape.eligible &&
+        ee::predict_idle_iteration(forward_shape, forward_gpr,
+            forward_memory, &executed) == e_idle_iteration::loops &&
+        executed == 6u, "taken forward branch charges only executed instructions");
+    forward_memory.values[0x00400000u] = 1u;
+    check(ee::predict_idle_iteration(forward_shape, forward_gpr,
+        forward_memory, &executed) == e_idle_iteration::loops &&
+        executed == 7u, "fallthrough charges the complete loop");
+    forward_memory.refuse = true;
+    check(ee::predict_idle_iteration(forward_shape, forward_gpr,
+        forward_memory, &executed) == e_idle_iteration::unsupported &&
+        executed == 0u, "unsupported prediction publishes no loop charge");
+    auto carried = forward_poll;
+    carried.words[2] = 0u; // v1 now has no reaching write on the taken path.
+    const auto carried_shape = ee::analyze_idle_loop(carried.base, carried, true);
+    check(!carried_shape.eligible &&
+        std::strcmp(carried_shape.reason, "loop-carried register") == 0,
+        "merge rejects a register not written on every incoming path");
+    auto delay_entry = forward_poll;
+    delay_entry.words[1] = 0x10400004u; // target the final branch delay slot.
+    check(!ee::analyze_idle_loop(delay_entry.base, delay_entry, true).eligible,
+        "forward branch into a delay slot is rejected");
+    auto secondary_loop = forward_poll;
+    secondary_loop.words[4] = 0x1000fffdu; // backwards to index 2.
+    secondary_loop.words[5] = 0u;
+    secondary_loop.words.push_back(0x1000fff8u);
+    secondary_loop.words.push_back(0u);
+    check(!ee::analyze_idle_loop(secondary_loop.base, secondary_loop, true).eligible,
+        "secondary backward edge is rejected");
+
     struct s_rejected
     {
         const char* name;
