@@ -31,39 +31,6 @@ uint64_t read64(const uint8_t* bytes)
     return result;
 }
 
-float to_float(uint32_t bits)
-{
-    // Reference VU input normalisation: flush denormals, saturate INF/NaN.
-    const uint32_t exponent = bits & 0x7f800000u;
-    if (exponent == 0u)
-    {
-        bits &= 0x80000000u;
-    }
-    else if (exponent == 0x7f800000u)
-    {
-        bits = (bits & 0x80000000u) | 0x7f7fffffu;
-    }
-    float result = 0.0f;
-    std::memcpy(&result, &bits, sizeof(result));
-    return result;
-}
-
-uint32_t to_bits(float value)
-{
-    uint32_t result = 0u;
-    std::memcpy(&result, &value, sizeof(result));
-    const uint32_t exponent = result & 0x7f800000u;
-    if (exponent == 0u)
-    {
-        result &= 0x80000000u;
-    }
-    else if (exponent == 0x7f800000u)
-    {
-        result = (result & 0x80000000u) | 0x7f7fffffu;
-    }
-    return result;
-}
-
 void store_vi(s_ee_vu1_state& state, uint32_t index, uint32_t value)
 {
     if (index != 0u)
@@ -549,6 +516,68 @@ bool branch_delay_exempt(uint32_t lower)
 
 // Reference EFU arithmetic from vu_ops.hpp::efu; pipeline latencies from
 // the VU manual. P retains its previous value until the producer retires.
+// Coefficients and polynomial identities from ps2-native-recomp's
+// MIT-licensed vu_ops.hpp, revision 2a1cbfe (LICENSE.ps2-native-recomp).
+// Evaluate with our existing FMAC and signed-digit quotient units.
+// Internal EFU summation order is not fully hardware-verified.
+template <size_t N>
+uint32_t efu_odd_polynomial(uint32_t x, const std::array<uint32_t, N>& coefficients)
+{
+    const uint32_t square = vu1_fp::mul(x, x);
+    uint32_t power = x;
+    uint32_t sum = vu1_fp::mul(power, coefficients[0]);
+    for (size_t n = 1u; n < N; ++n)
+    {
+        power = vu1_fp::mul(power, square);
+        sum = vu1_fp::add(sum, vu1_fp::mul(power, coefficients[n]));
+    }
+    return sum;
+}
+
+uint32_t efu_atan(uint32_t y, uint32_t x)
+{
+    constexpr std::array<uint32_t, 8> coefficients{
+        0x3f7ffff5u, 0xbeaaa61cu, 0x3e4c40a6u, 0xbe0e6c63u,
+        0x3dc577dfu, 0xbd6501c4u, 0x3cb31652u, 0xbb84d7e7u};
+    // Argument reduction: pi/4 + atan((y-x)/(y+x)). Saturation and
+    // signed zero are handled by the same arithmetic for every input.
+    const uint32_t numerator = vu1_fp::flush(vu1_fp::sub(y, x));
+    const uint32_t denominator = vu1_fp::flush(vu1_fp::add(y, x));
+    const uint32_t reduced = vu_scalar_fp::quotient(numerator, denominator);
+    return vu1_fp::add(efu_odd_polynomial(reduced, coefficients), 0x3f490fdau);
+}
+
+uint32_t efu_sin(uint32_t x)
+{
+    constexpr std::array<uint32_t, 5> coefficients{
+        0x3f800000u, 0xbe2aaaa4u, 0x3c08873eu, 0xb94fb222u, 0x362e9c14u};
+    return efu_odd_polynomial(x, coefficients);
+}
+
+uint32_t efu_exp(uint32_t x)
+{
+    constexpr std::array<uint32_t, 6> coefficients{
+        0x3e7fffa8u, 0x3d0007f4u, 0x3b29d3ffu,
+        0x3933e553u, 0x36b63510u, 0x353961acu};
+    std::array<uint32_t, 6> terms{};
+    uint32_t power = x;
+    for (size_t n = 0u; n < terms.size(); ++n)
+    {
+        terms[n] = vu1_fp::mul(power, coefficients[n]);
+        power = vu1_fp::mul(power, x);
+    }
+    // Provisional evaluation order documented by the independent
+    // reference. It is an empirical generic grouping, not an established
+    // silicon schedule. No input-specific result correction is applied.
+    uint32_t sum = vu1_fp::add(
+        vu1_fp::add(terms[0], terms[2]), vu1_fp::add(terms[1], terms[3]));
+    sum = vu1_fp::add(vu1_fp::add(vu1_fp::kOne, sum), terms[4]);
+    sum = vu1_fp::add(sum, terms[5]);
+    sum = vu1_fp::mul(sum, sum);
+    sum = vu1_fp::mul(sum, sum);
+    return vu_scalar_fp::quotient(vu1_fp::kOne, sum);
+}
+
 bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
                 uint32_t fsf, uint32_t& value, uint32_t& latency)
 {
@@ -587,19 +616,11 @@ bool efu_result(const std::array<uint32_t, 4>& source, uint32_t index,
         latency = 18u;
         return true; // ERSQRT
     case 0x7au: value = reciprocal(scalar); latency = 12u; return true; // ERCPR
-    // Transcendentals still use the previous approximate model until the
-    // VU-specific coefficient and evaluation pipeline is audited.
-    case 0x74u:
-        value = to_bits(std::atan2(to_float(source[1]), to_float(source[0])));
-        latency = 54u;
-        return true;
-    case 0x75u:
-        value = to_bits(std::atan2(to_float(source[2]), to_float(source[0])));
-        latency = 54u;
-        return true;
-    case 0x7cu: value = to_bits(std::sin(to_float(scalar))); latency = 29u; return true;
-    case 0x7du: value = to_bits(std::atan(to_float(scalar))); latency = 54u; return true;
-    case 0x7eu: value = to_bits(std::exp(-to_float(scalar))); latency = 44u; return true;
+    case 0x74u: value = efu_atan(source[1], source[0]); latency = 54u; return true;
+    case 0x75u: value = efu_atan(source[2], source[0]); latency = 54u; return true;
+    case 0x7cu: value = efu_sin(scalar); latency = 29u; return true;
+    case 0x7du: value = efu_atan(scalar, vu1_fp::kOne); latency = 54u; return true;
+    case 0x7eu: value = efu_exp(scalar); latency = 44u; return true;
     default: return false;
     }
 }

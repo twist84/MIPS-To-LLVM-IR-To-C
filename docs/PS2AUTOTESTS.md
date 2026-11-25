@@ -1041,3 +1041,19 @@ No special-casing original vectors or changing the expected transcript.
 New word-level tests cover ordinary, exponent-255 and zero inputs.
 EATAN/xy/xz, ESIN and EEXP are still approximate and separately tracked;
 this arithmetic calculation is not a complete original ELF pass.
+
+### EFU transcendental polynomial batch
+
+Use fixed-word coefficients and general polynomial identities documented
+in [ps2-native-recomp vu_ops.hpp](https://github.com/exoteric33/ps2-native-recomp/blob/2a1cbfe7c355d5a3d6830810879b399868d760c1/runtime/include/ps2/vu_ops.hpp)
+(MIT license retained in src/runtime/LICENSE.ps2-native-recomp). Evaluate
+with our signed-digit quotient and truncated Booth/FMAC arithmetic, not
+libm or the reference's fitted root/reciprocal rules. No special-case
+output replacements for zero, saturation, or any other input. EEXP uses
+the reference's explicitly empirical generic term grouping as a
+provisional arithmetic model, not a verified internal silicon schedule.
+Standalone arithmetic predicts 188/208 numerical results matching the
+original EFU probe (128/128 non-transcendental, 31/48 atan variants,
+13/16 sine, 16/16 exponential). Original runtime replay and full CI are
+required before claiming even these numerical counts in the runtime;
+EATAN and ESIN precision/ordering remain open.

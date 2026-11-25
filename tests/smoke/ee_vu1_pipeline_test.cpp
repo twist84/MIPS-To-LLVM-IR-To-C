@@ -280,6 +280,38 @@ int main()
         }
     }
 
+    // Transcendental checks cover known hardware values, without
+    // asserting that every internal polynomial step is characterized.
+    {
+        uint32_t bits = 0u;
+        uint32_t latency = 0u;
+        const std::array<uint32_t, 4> regular{
+            0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u};
+        const std::array<uint32_t, 4> one{
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        const std::array<uint32_t, 4> maximum{
+            0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu};
+        const std::array<uint32_t, 4> zero{};
+        if (!check(ee::c_ee_vu1::efu(one, 0x7du, 2u, bits, latency) &&
+                   bits == 0x3f490fdau && latency == 54u &&
+                   ee::c_ee_vu1::efu(regular, 0x74u, 2u, bits, latency) &&
+                   bits == 0x3f8db70bu && latency == 54u &&
+                   ee::c_ee_vu1::efu(regular, 0x75u, 2u, bits, latency) &&
+                   bits == 0x3f9fe0bau && latency == 54u &&
+                   ee::c_ee_vu1::efu(one, 0x7cu, 2u, bits, latency) &&
+                   bits == 0x3f576aa4u && latency == 29u &&
+                   ee::c_ee_vu1::efu(maximum, 0x7cu, 2u, bits, latency) &&
+                   bits == 0x7fd76aa2u && latency == 29u &&
+                   ee::c_ee_vu1::efu(regular, 0x7eu, 2u, bits, latency) &&
+                   bits == 0x3d4bed7fu && latency == 44u &&
+                   ee::c_ee_vu1::efu(zero, 0x7eu, 2u, bits, latency) &&
+                   bits == 0x3f800000u && latency == 44u,
+                   "EFU polynomial hardware regression"))
+        {
+            return 1;
+        }
+    }
+
     // The EFU producer updates P after ESUM latency. MFP must first
     // observe old P and then new P only after WAITP.
     ee::s_ee_vu1_state p{};
