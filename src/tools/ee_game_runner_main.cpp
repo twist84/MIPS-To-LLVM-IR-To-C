@@ -3889,6 +3889,7 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_lookahead_before = 0u;
     uint64_t horizon_iop_idle_candidates = 0u;
     uint64_t horizon_iop_rpc_barriers = 0u;
+    uint64_t horizon_gs_worker_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
@@ -4944,7 +4945,7 @@ int main(int argc, char** argv)
                 iop_rom0_path == nullptr && iop_kernel != nullptr;
             const uint64_t iop_deadline = iop_scheduled
                 ? iop_clock.next_cycle() : ee::k_ee_no_deadline;
-            const bool barrier =
+            bool barrier =
                 callback_active || irq_callback_active ||
                 current_thread_id == 0u ||
                 hardware.dmac().pending() != 0u ||
@@ -4958,6 +4959,16 @@ int main(int argc, char** argv)
                 (runtime.m_perf_control & 0x80000000u) != 0u ||
                 runtime.m_perf_compat_fault ||
                 runtime.m_timing_observer != nullptr;
+#ifdef EE_ENABLE_WEBGPU
+            // The renderer has no guest event timestamp. Preserve the
+            // existing worker/fault observation cadence while committed
+            // batches are queued or executing. Shadow measurement only.
+            if (!barrier && async_gs && !webgpu_bridge.worker_quiescent())
+            {
+                barrier = true;
+                ++horizon_gs_worker_barriers;
+            }
+#endif
             const uint64_t timer_deadline = host_timers.next_event();
             const uint64_t scanout_deadline = hardware.scanout().next_event_cycle();
             const uint64_t cop0_deadline =
@@ -8966,7 +8977,8 @@ int main(int argc, char** argv)
             "EE horizon: shadow_only=1 normal_before=%llu "
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
             "iop_idle_candidates=%llu iop_rpc_barriers=%llu "
-            "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu unknown=%llu\n",
+            "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu "
+            "gs_worker_barriers=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -8974,6 +8986,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_iop_rpc_barriers),
             static_cast<unsigned long long>(horizon_lookahead_mmio_free),
             static_cast<unsigned long long>(horizon_lookahead_mmio_touched),
+            static_cast<unsigned long long>(horizon_gs_worker_barriers),
             static_cast<unsigned long long>(horizon_unknown));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
