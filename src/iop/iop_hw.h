@@ -182,6 +182,10 @@ public:
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
     uint32_t spu2_dma_cycles_remaining() const;
+    // Conservative interval to the next modeled device transition.
+    // UINT64_MAX means none known; zero requires immediate service.
+    // Does not authorize deferring externally initiated MMIO or DMA.
+    uint64_t idle_event_cycles_remaining() const;
     uint64_t spu2_auto_dma_started() const { return m_spu2_auto_started; }
     uint64_t spu2_auto_dma_completed() const { return m_spu2_auto_completed; }
     uint64_t spu2_auto_dma_bytes() const { return m_spu2_auto_bytes; }
