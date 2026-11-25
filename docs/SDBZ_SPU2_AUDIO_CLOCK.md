@@ -252,3 +252,20 @@ References: https://psx-spx.consoledev.net/soundprocessingunitspu/,
 https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Mixer.cpp,
 https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/ADSR.cpp,
 https://akuhak.github.io/ps2sdk-doxy/iop/spu2_8c_source.html .
+
+### Differential reference check (Batch 29, partial)
+
+A source-data comparison of the 512 ROM coefficients against PCSX2's
+256 four-coefficient interpolation rows produced zero mismatches across
+1024 coefficient selections. This validates table contents and indexing,
+not the timing, decode FIFO state, or bit-exact hardware output. The
+constant positive endpoint is 16318 after individually flooring all four
+products (including the negative coefficient). Integration fixtures also
+check that PMON changes the live cursor and deadline independently of
+voice volume, and that NON voices 1 and 3 see the same generator output.
+
+Actual hardware captures and matched emulator execution traces remain
+required for the full differential pass, in particular reverb address
+boundary semantics, disabled return/mute scope, ADPCM startup and fetch
+phase, Gaussian output alignment, noise clock timing, extreme PMON pitch
+and sweep timing. No hardware differential pass is claimed here.

@@ -1205,6 +1205,71 @@ bool test_spu2_effect_return()
         spu.effect_irq_events() == 0u;
 }
 
+bool test_spu2_voice_modulation_and_noise()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 fixed;
+    iop::c_spu2 modulated;
+    for (iop::c_spu2* spu : {&fixed, &modulated})
+    {
+        // Two looping positive ADPCM blocks; voice 0's post-ADSR output
+        // remains positive even though its stereo volumes are zero.
+        std::vector<uint8_t> data(32u, 0x44u);
+        data[0] = 0u;
+        data[1] = 4u;
+        data[16] = 0u;
+        data[17] = 3u;
+        if (!spu->write(base + 0x1a8u, 2u, 0u) ||
+            !spu->write(base + 0x1aau, 2u, 0x5000u) ||
+            !spu->copy_dma(0u, data, true) ||
+            !spu->write(base + 0x1c2u, 2u, 0x5000u) ||
+            !spu->write(base + 0x1ceu, 2u, 0x5000u) ||
+            !spu->write(base + 6u, 2u, 0x000fu) ||
+            !spu->write(base + 0x14u, 2u, 0x1000u) ||
+            !spu->write(base + 0x16u, 2u, 0x000fu) ||
+            !spu->write(base + 0x180u, 2u, spu == &modulated ? 3u : 1u) ||
+            !spu->write(base + 0x19au, 2u, 0x40u) ||
+            !spu->write(base + 0x19eu, 2u, 0x6000u) ||
+            !spu->write(base + 0x1a0u, 2u, 3u))
+        {
+            return false;
+        }
+        (void)spu->advance_cycles(16u * period);
+    }
+    uint32_t fixed_nax = 0u;
+    uint32_t modulated_nax = 0u;
+    uint32_t voice0_nax = 0u;
+    if (!fixed.read(base + 0x1d6u, 2u, &fixed_nax) ||
+        !modulated.read(base + 0x1d6u, 2u, &modulated_nax) ||
+        modulated_nax <= fixed_nax ||
+        !fixed.read(base + 0x1cau, 2u, &voice0_nax) ||
+        voice0_nax != 0x5001u ||
+        !modulated.read(base + 0x1cau, 2u, &voice0_nax) ||
+        voice0_nax != 0x5001u ||
+        modulated.voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    // NON selects a shared source even when the decoded sample is zero.
+    // Voices 1 and 3 have the same envelope and zero pitch.
+    fixed.reset();
+    if (!fixed.write(base + 0x184u, 2u, 0xau) ||
+        !fixed.write(base + 0x16u, 2u, 0x000fu) ||
+        !fixed.write(base + 0x36u, 2u, 0x000fu) ||
+        !fixed.write(base + 0x19au, 2u, 0x3c00u) ||
+        !fixed.write(base + 0x1a0u, 2u, 0xau))
+    {
+        return false;
+    }
+    (void)fixed.advance_cycles(32u * period);
+    uint16_t first = 0u;
+    uint16_t second = 0u;
+    return fixed.ram_word(0x421u, &first) && first == 2u &&
+        fixed.ram_word(0x621u, &second) && second == first &&
+        fixed.noise_sample(1u) == 0;
+}
+
 bool test_spu2_voice_output_controls()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1214,7 +1279,7 @@ bool test_spu2_voice_output_controls()
     const int16_t constant[4] = {16384, 16384, 16384, 16384};
     const int16_t startup[4] = {0, 16384, 16384, 16384};
     // Exact measured ROM endpoint, including independently rounded products.
-    if (iop::c_spu2::gaussian_sample(constant, 0u) != 16319 ||
+    if (iop::c_spu2::gaussian_sample(constant, 0u) != 16318 ||
         iop::c_spu2::gaussian_sample(startup, 0u) != 13915 ||
         iop::c_spu2::modulated_pitch(0x1000u, -32768) != 0u ||
         iop::c_spu2::modulated_pitch(0x1000u, 16384) != 0x1800u ||
@@ -2455,6 +2520,10 @@ int main()
     if (!test_spu2_effect_return())
     {
         return fail("SPU2 reverb FIR return, signed EVOL and silent headless advancement");
+    }
+    if (!test_spu2_voice_modulation_and_noise())
+    {
+        return fail("SPU2 PMON cursor/deadline and shared NON voice source");
     }
     if (!test_spu2_voice_output_controls())
     {
