@@ -3929,6 +3929,11 @@ int main(int argc, char** argv)
     uint64_t horizon_dmac_sif0_only = 0u;
     uint64_t horizon_dmac_passive_sif0 = 0u;
     uint64_t horizon_entry_masks[32]{};
+    uint64_t horizon_vu_masks[8]{};
+    std::unordered_map<uint32_t, uint32_t> horizon_alu_bounds;
+    uint64_t horizon_alu_candidates = 0u;
+    uint64_t horizon_alu_matched = 0u;
+    uint64_t horizon_alu_mismatch = 0u;
     uint64_t horizon_clock_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
@@ -5035,6 +5040,7 @@ int main(int argc, char** argv)
         const auto horizon_cop0_start = horizon_sample
             ? ee::ee_horizon_cop0_snapshot(cpu, runtime)
             : ee::t_ee_horizon_cop0_snapshot{};
+        uint32_t horizon_alu_slots = 0u;
         if (horizon_sample)
         {
             const bool iop_scheduled = hle_startup &&
@@ -5046,8 +5052,12 @@ int main(int argc, char** argv)
             const bool entry_irq = hardware.dmac().pending() != 0u ||
                 hardware.intc().pending() != 0u ||
                 ee::ee_pending_interrupts(&cpu) != 0u;
-            const bool entry_vu = hardware.dmac().deferred_vif1_pending() ||
-                vif1.cmsar1_running() || vu0.m_running != 0u;
+            const uint32_t vu_mask =
+                static_cast<uint32_t>(hardware.dmac().deferred_vif1_pending()) |
+                (static_cast<uint32_t>(vif1.cmsar1_running()) << 1u) |
+                (static_cast<uint32_t>(vu0.m_running != 0u) << 2u);
+            ++horizon_vu_masks[vu_mask];
+            const bool entry_vu = vu_mask != 0u;
             const bool entry_other = iop_rom0_path != nullptr ||
                 (runtime.m_perf_control & 0x80000000u) != 0u ||
                 runtime.m_perf_compat_fault ||
@@ -5139,6 +5149,29 @@ int main(int argc, char** argv)
             horizon_iop_lookahead = ee::ee_execution_horizon(horizon_start,
                 timer_deadline, scanout_deadline, cop0_deadline,
                 lookahead_deadline, barrier);
+            if (slice == 1u &&
+                ee::ee_horizon_bound_fits(horizon_start, horizon_iop_lookahead.m_cycle, 2u))
+            {
+                // Analyze immutable ELF bytes once per PC. This is only
+                // a source-level candidate, not a certificate that the
+                // current native owner has this exact path.
+                auto cached = horizon_alu_bounds.find(from_pc);
+                if (cached == horizon_alu_bounds.end())
+                {
+                    const auto slots = ee::ee_horizon_alu_exit_slots(from_pc,
+                        [&](uint32_t pc, uint32_t* word)
+                        {
+                            return image.is_executable_address(pc) &&
+                                image.read32_at(pc, word);
+                        });
+                    cached = horizon_alu_bounds.emplace(from_pc, slots).first;
+                }
+                if (ee::ee_horizon_bound_fits(horizon_start,
+                        horizon_iop_lookahead.m_cycle, cached->second))
+                {
+                    horizon_alu_slots = cached->second;
+                }
+            }
         }
         bool hot_expand_budget_reached = false;
         for (;;)
@@ -5451,6 +5484,29 @@ int main(int argc, char** argv)
                 pc_nested_ns);
         }
 
+        if (horizon_alu_slots != 0u)
+        {
+            ++horizon_alu_candidates;
+            uint64_t reached = 0u;
+            if (count == 1u &&
+                (reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
+                 reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_RETURN)) &&
+                ee::ee_reference_compatibility_cycle(runtime, reached) &&
+                reached >= horizon_start && reached - horizon_start == horizon_alu_slots &&
+                runtime.m_guest_instruction_attempts - instructions_before_dispatch ==
+                    horizon_alu_slots &&
+                idle_skip_instructions == idle_before_dispatch &&
+                host_timers.mmio_generation() == horizon_mmio_start &&
+                vu0_control.m_callback_generation == horizon_vu_start &&
+                ee::ee_horizon_cop0_snapshot(cpu, runtime) == horizon_cop0_start)
+            {
+                ++horizon_alu_matched;
+            }
+            else
+            {
+                ++horizon_alu_mismatch;
+            }
+        }
         if (horizon_sample && count != 0u)
         {
             uint64_t reached = 0u;
@@ -9129,6 +9185,17 @@ int main(int argc, char** argv)
         // than updating every overlapping counter on every dispatch.
         uint64_t horizon_dmac_started_channels[ee::c_ee_dmac::k_channel_count]{};
         uint64_t horizon_entry_reasons[5]{};
+        uint64_t horizon_vu_reasons[3]{};
+        for (uint32_t mask = 1u; mask < 8u; ++mask)
+        {
+            for (uint32_t index = 0u; index < 3u; ++index)
+            {
+                if ((mask & (1u << index)) != 0u)
+                {
+                    horizon_vu_reasons[index] += horizon_vu_masks[mask];
+                }
+            }
+        }
         uint32_t largest_dmac_mask = 0u;
         for (uint32_t mask = 1u; mask < horizon_dmac_mask_count; ++mask)
         {
@@ -9171,7 +9238,9 @@ int main(int argc, char** argv)
             "dmac_str0=%llu dmac_str1=%llu dmac_str2=%llu dmac_str3=%llu dmac_str4=%llu "
             "dmac_str5=%llu dmac_str6=%llu dmac_str7=%llu dmac_str8=%llu dmac_str9=%llu "
             "entry_callback=%llu entry_idle=%llu entry_irq=%llu entry_vu=%llu entry_other=%llu "
-            "dmac_top_mask=0x%03x dmac_top_mask_count=%llu\n",
+            "dmac_top_mask=0x%03x dmac_top_mask_count=%llu "
+            "entry_vif1_pending=%llu entry_cmsar1=%llu entry_vu0_running=%llu "
+            "alu_bound_candidates=%llu alu_bound_matched=%llu alu_bound_mismatch=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -9206,7 +9275,13 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_entry_reasons[4]),
             largest_dmac_mask,
             static_cast<unsigned long long>(largest_dmac_mask != 0u ?
-                horizon_dmac_masks[largest_dmac_mask] : 0u));
+                horizon_dmac_masks[largest_dmac_mask] : 0u),
+            static_cast<unsigned long long>(horizon_vu_reasons[0]),
+            static_cast<unsigned long long>(horizon_vu_reasons[1]),
+            static_cast<unsigned long long>(horizon_vu_reasons[2]),
+            static_cast<unsigned long long>(horizon_alu_candidates),
+            static_cast<unsigned long long>(horizon_alu_matched),
+            static_cast<unsigned long long>(horizon_alu_mismatch));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
             std::fprintf(stderr,
