@@ -4792,9 +4792,9 @@ def main():
             states = []
             clocks = []
             checkpoints = []
-            for enabled, quiet in (("0", "0"), ("1", "0"), ("1", "1")):
+            for enabled, quiet in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
                 report = root / f"batch-{enabled}-{quiet}.json"
-                replay = command if enabled == "0" else [
+                replay = command if (enabled, quiet) == ("0", "0") else [
                     arg for arg in command if not arg.startswith("--extra-functions=")
                 ] + ["--no-recompile"]
                 run = subprocess.run(
@@ -4867,10 +4867,10 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo", "cop0_cause",
                         "cop0_epc", "ee_cycles"):
-                assert states[0][key] == states[1][key] == states[2][key], key
-            assert clocks[0] == clocks[1] == clocks[2], clocks
-            assert checkpoints[0] == checkpoints[1], (checkpoints[0], checkpoints[1])
-            assert checkpoints[0] == checkpoints[2], (checkpoints[0], checkpoints[2])
+                assert all(state[key] == states[0][key] for state in states[1:]), key
+            assert all(clock == clocks[0] for clock in clocks[1:]), clocks
+            for checkpoint_trace in checkpoints[1:]:
+                assert checkpoint_trace == checkpoints[0], (checkpoints[0], checkpoint_trace)
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
