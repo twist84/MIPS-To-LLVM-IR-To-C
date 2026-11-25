@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 import importlib.util
 import json
+import subprocess
+import threading
+from types import SimpleNamespace
 from pathlib import Path
 import tempfile
 import unittest
@@ -40,6 +43,74 @@ class AutotestsHarness(unittest.TestCase):
                 run_game.read_live_request(request)
             self.assertEqual(request.read_text.call_count, 1)
             sleep.assert_not_called()
+
+    def test_parallel_execution_keeps_manifest_order(self):
+        cases = [{"name": name} for name in ("a", "b", "c", "d")]
+        prepared = {case["name"]: (None, None, None) for case in cases}
+        barrier = threading.Barrier(2)
+        guard = threading.Lock()
+        active = 0
+        peak = 0
+
+        def worker(case, args, manifest, run_dir, reference):
+            nonlocal active, peak
+            with guard:
+                active += 1
+                peak = max(peak, active)
+            try:
+                barrier.wait(timeout=10)
+                return {"name": case["name"], "status": "PASS", "seconds": 0}
+            finally:
+                with guard:
+                    active -= 1
+
+        with patch.object(at, "run_case", side_effect=worker), patch("builtins.print"):
+            results = at.run_cases(cases, SimpleNamespace(jobs=2), {}, None, prepared)
+        self.assertEqual(peak, 2)
+        self.assertEqual([result["name"] for result in results], ["a", "b", "c", "d"])
+
+        def serial_worker(case, args, manifest, run_dir, reference):
+            return {"name": case["name"], "status": "PASS", "seconds": 0}
+
+        with patch.object(at, "run_case", side_effect=serial_worker), patch("builtins.print"):
+            serial = at.run_cases(cases, SimpleNamespace(jobs=1), {}, None, prepared)
+        self.assertEqual(results, serial)
+
+    def test_suite_lock_excludes_other_processes_and_releases(self):
+        program = (
+            "import sys; from pathlib import Path; "
+            "sys.path.insert(0, sys.argv[1]); "
+            "from run_ps2autotests import suite_lock; "
+            "lock = suite_lock(Path(sys.argv[2])); "
+            "lock.__enter__(); lock.__exit__(None, None, None)"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            command = [sys.executable, "-c", program, str(at.ROOT / "tools"), directory]
+            with at.suite_lock(root):
+                blocked = subprocess.run(command, capture_output=True, text=True, timeout=10)
+                self.assertNotEqual(blocked.returncode, 0)
+                self.assertIn("autotest directory is locked", blocked.stderr)
+            released = subprocess.run(command, capture_output=True, text=True, timeout=10)
+            self.assertEqual(released.returncode, 0, released.stderr)
+
+    def test_reference_preflight_preserves_individual_errors(self):
+        cases = [{"name": "a", "elf": {}, "expected": {}},
+                 {"name": "b", "elf": {}, "expected": {}}]
+        args = SimpleNamespace(cache=Path("cache"))
+        manifest = {"repository": "owner/repo", "revision": "rev"}
+        with patch.object(at, "verified_file",
+                          side_effect=[ValueError("bad blob"), Path("b.elf"), Path("b.expected")]):
+            prepared = at.prepare_references(cases, args, manifest)
+        self.assertEqual(prepared["a"], (None, None, "bad blob"))
+        self.assertEqual(prepared["b"], (Path("b.elf"), Path("b.expected"), None))
+        with tempfile.TemporaryDirectory() as directory:
+            cases[0].update(elf={"git_blob": "x"}, expected={"git_blob": "y"})
+            with patch.object(at.subprocess, "run") as run:
+                result = at.run_case(cases[0], args, manifest, Path(directory), prepared["a"])
+            run.assert_not_called()
+            self.assertEqual(result["status"], "ERROR")
+            self.assertEqual(result["error"], "bad blob")
 
     def test_inventory(self):
         manifest = json.loads(at.MANIFEST.read_text())

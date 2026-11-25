@@ -16,6 +16,21 @@ Configure and build the existing tools with Python/llvmlite installed:
     python tools/run_ps2autotests.py cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr
     python tools/run_ps2autotests.py "cpu/ee/*"
     python tools/run_ps2autotests.py
+    python tools/run_ps2autotests.py --jobs 8 --emit-jobs 1
+    python tools/run_ps2autotests.py "vu/*" --jobs 4
+    python tools/run_ps2autotests.py --jobs 1
+
+The default is four concurrent guest tests with two LLVM emit workers per
+test. Both options accept 1–32; use --jobs 1 for sequential comparison or
+reduce emit workers to limit CPU/memory contention. The harness builds the
+native tools once and verifies selected references before launching
+workers. Reusable per-test caches are retained. Separate harness
+invocations cannot share an active build, output or reference-cache root:
+OS file locks reject conflicts and release on process exit. The lock files
+remain on disk. Completion messages are live; summaries remain in manifest
+order and report suite wall time, parallel execution wall time and summed
+test duration. CPU contention can cause wall-time timeouts; rerun with
+fewer workers to diagnose them.
 
 Each test uses an isolated translation cache and a fresh results folder;
 the normal native live expansion and bounded guest execution are used.
