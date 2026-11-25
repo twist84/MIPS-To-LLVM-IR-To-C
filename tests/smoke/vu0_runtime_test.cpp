@@ -335,7 +335,8 @@ static_assert(offsetof(ee::s_ee_vu0_state, m_q_ready_cycle) == 8616);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending_bits) == 8624);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending) == 8628);
 static_assert(offsetof(ee::s_ee_vu0_state, m_clip_issues) == 8632);
-static_assert(sizeof(ee::s_ee_vu0_state) == 8704);
+static_assert(offsetof(ee::s_ee_vu0_state, m_upper_fmac_issues) == 8696);
+static_assert(sizeof(ee::s_ee_vu0_state) == 8800);
 
 int main()
 {
@@ -448,6 +449,48 @@ int main()
             check(clip_vu.m_vi[i + 1u] == expected[i],
                   "CLIP/FCGET four-cycle history");
         }
+    }
+
+    // Upper arithmetic issues a VF dependency and delayed MAC/status
+    // result independently of the paired lower instruction.
+    {
+        ee::s_ee_cpu_state fmac_cpu{};
+        ee::s_ee_vu0_state fmac_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        fmac_vu.m_vpu_status = 1u;
+        fmac_cpu.m_vu0[1] = {0x400000003f800000ull, 0u};
+        fmac_cpu.m_vu0[2] = {0x40000000bf800000ull, 0u};
+        fmac_cpu.m_vu0[3] = {0x400000003f800000ull, 0u};
+        const auto upper_op = [](uint32_t op, uint32_t fd, uint32_t fs,
+                                 uint32_t ft, uint32_t mask)
+        {
+            return (mask << 21u) | (ft << 16u) | (fs << 11u) | (fd << 6u) | op;
+        };
+        const auto fmor = [](uint32_t dest)
+        {
+            return (0x1bu << 25u) | (dest << 16u);
+        };
+        install_vu0_pair(&fmac_vu, 0, fmor(1), upper_op(0x28, 3, 1, 2, 8));
+        // Reading the unaffected Y lane must not stall on the X result.
+        install_vu0_pair(&fmac_vu, 1, fmor(2), upper_op(0x2a, 4, 3, 2, 4));
+        // An overlapping X dependency stalls until ADD matures at cycle 5.
+        install_vu0_pair(&fmac_vu, 2, fmor(3), upper_op(0x2c, 5, 3, 1, 8));
+        install_vu0_pair(&fmac_vu, 3, fmor(4), make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&fmac_vu, 4, fmor(5), make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &fmac_cpu,
+            &fmac_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              fmac_vu.m_cycle == 11u && fmac_vu.m_running == 0u,
+              "upper FMAC overlap stalls and E flushes");
+        check(fmac_cpu.m_vu0[3].m_lo == 0x4000000000000000ull &&
+              fmac_cpu.m_vu0[4].m_lo == 0x4080000000000000ull &&
+              fmac_cpu.m_vu0[5].m_lo == 0x00000000bf800000ull,
+              "upper ADD/MUL/SUB values and lane masks");
+        check(fmac_vu.m_vi[1] == 0u && fmac_vu.m_vi[2] == 0u &&
+              fmac_vu.m_vi[3] == 8u && fmac_vu.m_vi[4] == 0u &&
+              fmac_vu.m_vi[5] == 0u && fmac_vu.m_mac_flags == 0x80u &&
+              fmac_vu.m_status_flags == 0xc2u,
+              "upper FMAC delayed MAC and sticky status flags");
     }
 
     // VU0 microcode is a 4 KB byte-addressed store of paired
@@ -2493,7 +2536,7 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, make_vu0_iaddiu(1, 0, 1), 0x00000000u);
+        install_vu0_pair(&state, 0, make_vu0_iaddiu(1, 0, 1), 0x00000030u);
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 1,

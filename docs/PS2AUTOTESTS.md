@@ -301,3 +301,16 @@ sequence; original clip ELF added to observational CI. No new pass claimed.
 Performance pilot at fbd2464 remained INCOMPLETE, as expected without a
 validated timing producer. All four workflows passed; six EE/DMA passes
 remain confirmed.
+
+## VU0 upper vector arithmetic
+
+At ec863f8 all four CI workflows passed; upper/clip remains incomplete
+in the original ELF pilot. Add vector, broadcast and I-register forms
+of upper ADD/SUB/MUL using the existing bit-level VU arithmetic helpers.
+Stage results before the lower half runs, then publish vector lanes and
+retire MAC/status after four VU cycles. Upper and lower VF dependencies
+are tracked independently. E drains pending upper results. Same-register
+upper/lower VF write conflicts fail closed pending arbitration audit;
+Q forms, accumulator forms, I-bit immediate pairs and other upper ops
+remain unsupported. This is a microengine regression slice, not a new
+original transcript pass.
