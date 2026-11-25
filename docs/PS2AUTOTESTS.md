@@ -928,3 +928,25 @@ FQC timing, progressive UNPACK and I-bit VU launch handling remain open.
 Regression checks actual small DMA acceptance, NOP/STMASK stalls,
 resume across successive interrupts, masking and oversized rejection.
 No new original match is claimed until execution.
+
+### Confirmed 49/55 and nested conditional branch lowering
+
+PR head `029780c6d62d577159b815ebb6d72f48d90d9117`, tested merge
+`2bc500ac4780c214bc2e139c6a55829929f7af0b`, [run 45652656843](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45652656843),
+[summary artifact 15040013667](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45652656843/artifacts/15040013667).
+**49/55 (89.09%)**: PASS 49, DIFF 3, INCOMPLETE 3, NO_OUTPUT 0,
+ERROR 0. VIF intstall passes. All five workflow job groups succeeded.
+
+The original EE and COP1 branch-delay probes report the second target
+for two consecutive taken branches. The primary web-recomp reference
+rejects nested transfers, and the pinned PCSX2 interpreter recursively
+executes sequential slots; neither establishes precise R5900 behavior
+for all combinations. The LLVM lowering now models a conditional pair
+using a selected next PC for the second branch's slot, sampling both
+conditions before the slot and preserving all architectural GPRs.
+Nontrapping scalar slots only: relocated faulting slots, a third nested
+control transfer, indirect nested transfers and precise relocated BD/EPC
+remain unsupported. Synthetic JIT checks cover both integer outcomes,
+COP1 ordinary/likely taken pairs and actual relocated slot side effects.
+The broader pair semantics are inferred from the next-PC pipeline;
+only the original transcripts can validate their observed cases.

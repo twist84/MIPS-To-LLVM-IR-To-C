@@ -147,6 +147,32 @@ def main():
         run_case(fixture_exe, temp_dir, target, retained, "beq_not_taken",
                  "guest_beq_not_taken_delay_test", check_beq_not_taken, verify_beq_not_taken)
 
+        for mode in ("nested_beq", "nested_bc1t", "nested_bc1tl"):
+            pairs = ((False, False), (False, True), (True, False), (True, True))
+            if mode != "nested_beq":
+                # Both COP1 branches read the same FCC0.
+                pairs = ((True, True),)
+            for outer, inner in pairs:
+                def setup_nested(state):
+                    state.gpr[2].lo = int(not outer)
+                    state.gpr[3].lo = int(not inner)
+                    state.gpr[4].lo = 10
+                    state.gpr[4].hi = 0x4444555566667777
+                    state.fcsr = 0x800000
+
+                def verify_nested(state):
+                    expected_pc = 0x00100024 if inner else (
+                        0x00100018 if outer else 0x0010000c)
+                    require(state.pc == expected_pc,
+                            f"{mode}: nested target 0x{state.pc:08x}")
+                    require(state.gpr[4].lo == (12 if outer else 11),
+                            f"{mode}: wrong relocated delay instruction")
+                    require(state.gpr[4].hi == 0x4444555566667777,
+                            f"{mode}: upper half changed")
+
+                run_case(fixture_exe, temp_dir, target, retained, mode,
+                         "guest_nested_branch_test", setup_nested, verify_nested)
+
         for rt, mode in enumerate(("bc0f", "bc0t", "bc0fl", "bc0tl")):
             for value in (0, 1, 2):
                 condition.value = value

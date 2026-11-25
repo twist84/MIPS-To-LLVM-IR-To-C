@@ -2965,7 +2965,8 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                                 const std::set<uint8_t>& live_out,
                                 uint32_t fallthrough_pc,
                                 bool is_terminator,
-                                bool guarded_loop_header)
+                                bool guarded_loop_header,
+                                const std::map<uint32_t, ee::s_ee_instruction>* insn_map)
 {
     using ee::e_ee_opcode;
     if (block.empty()) return;
@@ -3228,6 +3229,169 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         const auto& ctrl = block[ctrl_idx];
         uint32_t ft = fallthrough_pc ? fallthrough_pc : (ctrl.pc + 8);
         uint32_t target = ctrl.branch_target ? ctrl.branch_target : ctrl.jump_target;
+
+        // Two successive conditional branches use the previous branch's
+        // selected next PC as the second branch's delay instruction.
+        // This is a hardware-observed R5900 behavior, not portable MIPS.
+        const auto pair_branch = [](const ee::s_ee_instruction& ins)
+        {
+            if (ins.valid != ee::e_ee_valid::VALID ||
+                !ins.has_delay_slot)
+            {
+                return false;
+            }
+            switch (ins.opcode)
+            {
+            case e_ee_opcode::OP_BEQ: case e_ee_opcode::OP_BEQL:
+            case e_ee_opcode::OP_BNE: case e_ee_opcode::OP_BNEL:
+            case e_ee_opcode::OP_BLEZ: case e_ee_opcode::OP_BLEZL:
+            case e_ee_opcode::OP_BGTZ: case e_ee_opcode::OP_BGTZL:
+                return true;
+            case e_ee_opcode::OP_REGIMM:
+                return ins.rt <= 3u || (ins.rt >= 0x10u && ins.rt <= 0x13u);
+            case e_ee_opcode::OP_COP1:
+                return ins.rs == 8u && ins.rt <= 3u;
+            default:
+                return false;
+            }
+        };
+        if (delay_idx >= 0 && insn_map != nullptr &&
+            pair_branch(ctrl) && pair_branch(block[delay_idx]))
+        {
+            const auto& inner = block[delay_idx];
+            std::set<uint8_t> all;
+            for (uint8_t reg = 1u; reg < 32u; ++reg)
+            {
+                all.insert(reg);
+            }
+            const auto count = [&](const ee::s_ee_instruction& ins)
+            {
+                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " +
+                    std::to_string(ins.opcode_word) + ")\n";
+            };
+            const auto annul = [&](const ee::s_ee_instruction& ins)
+            {
+                m_out += "  call void @ee_count_reference_annulled_slot(ptr %rt, i32 " +
+                    std::to_string(ins.pc) + ", i32 " +
+                    std::to_string(ins.opcode_word) + ")\n";
+            };
+            const auto write_link = [&](const ee::s_ee_instruction& ins)
+            {
+                if (ins.opcode == e_ee_opcode::OP_REGIMM &&
+                    ins.rt >= 0x10u && ins.rt <= 0x13u)
+                {
+                    const std::string link = newtemp();
+                    m_out += "  " + link + " = add i64 " +
+                        std::to_string(ins.pc + 8u) + ", 0\n";
+                    set_gpr_lo64(31, link);
+                }
+            };
+            // A relocated delay instruction that can fault needs an
+            // explicit BD/EPC representation. Until that is implemented,
+            // lower only nontrapping scalar ALU instructions there.
+            const auto safe_slot = [](const ee::s_ee_instruction& ins)
+            {
+                if (ins.valid != ee::e_ee_valid::VALID ||
+                    ins.flow != ee::e_ee_flow::FLOW_NONE)
+                {
+                    return false;
+                }
+                switch (ins.opcode)
+                {
+                case e_ee_opcode::OP_ADDIU: case e_ee_opcode::OP_DADDIU:
+                case e_ee_opcode::OP_ANDI: case e_ee_opcode::OP_ORI:
+                case e_ee_opcode::OP_XORI: case e_ee_opcode::OP_LUI:
+                case e_ee_opcode::OP_SLTI: case e_ee_opcode::OP_SLTIU:
+                    return true;
+                case e_ee_opcode::OP_SPECIAL:
+                    switch (ins.funct)
+                    {
+                    case 0x00u: case 0x02u: case 0x03u:
+                    case 0x04u: case 0x06u: case 0x07u:
+                    case 0x21u: case 0x23u: case 0x24u:
+                    case 0x25u: case 0x26u: case 0x27u:
+                    case 0x2au: case 0x2bu: case 0x2du: case 0x2fu:
+                        return true;
+                    default:
+                        return false;
+                    }
+                default:
+                    return false;
+                }
+            };
+            const auto dispatch = [&](uint32_t pc, uint32_t reason)
+            {
+                const std::string pc_ptr = state_field(6);
+                const std::string exit_ptr = state_field(7);
+                m_out += "  store i32 " + std::to_string(pc) + ", ptr " + pc_ptr + "\n";
+                m_out += "  store i32 " + std::to_string(reason) + ", ptr " + exit_ptr + "\n";
+                m_out += "  ret i32 " + std::to_string(reason) + "\n";
+            };
+            const std::string prefix = "nested_branch_" + std::to_string(m_temp_counter++);
+            count(ctrl);
+            const std::string outer_cond = make_cond(ctrl);
+            write_link(ctrl);
+            store_dirty_regs(all);
+            m_out += "  br i1 " + outer_cond + ", label %" + prefix +
+                "_outer_taken, label %" + prefix + "_outer_not_taken\n";
+            const auto emit_inner = [&](uint32_t slot_pc, const std::string& label)
+            {
+                reset_tracking();
+                m_out += label + ":\n";
+                const auto slot = insn_map->find(slot_pc);
+                // The next instruction is not necessarily inner.pc+4.
+                // Do not recursively execute a third transfer or invent
+                // the exception PC of an unsupported relocated slot.
+                if (slot == insn_map->end() ||
+                    !safe_slot(slot->second))
+                {
+                    dispatch(inner.pc, 4u);
+                    return;
+                }
+                count(inner);
+                const std::string inner_cond = make_cond(inner);
+                write_link(inner);
+                if (inner.branch_likely)
+                {
+                    store_dirty_regs(all);
+                    m_out += "  br i1 " + inner_cond + ", label %" + label +
+                        "_inner_taken, label %" + label + "_inner_annulled\n";
+                    m_out += label + "_inner_taken:\n";
+                    reset_tracking();
+                    emit_insn(slot->second, false, 0u, true);
+                    store_dirty_regs(all);
+                    m_out += "  br label %" + block_label(inner.branch_target) + "\n";
+                    m_out += label + "_inner_annulled:\n";
+                    reset_tracking();
+                    annul(slot->second);
+                    dispatch(slot_pc + 4u, 3u);
+                }
+                else
+                {
+                    emit_insn(slot->second, false, 0u, true);
+                    store_dirty_regs(all);
+                    m_out += "  br i1 " + inner_cond + ", label %" +
+                        block_label(inner.branch_target) + ", label %" + label +
+                        "_inner_not_taken\n";
+                    m_out += label + "_inner_not_taken:\n";
+                    dispatch(slot_pc + 4u, 3u);
+                }
+            };
+            emit_inner(target, prefix + "_outer_taken");
+            if (ctrl.branch_likely)
+            {
+                reset_tracking();
+                m_out += prefix + "_outer_not_taken:\n";
+                annul(inner);
+                m_out += "  br label %" + block_label(ctrl.pc + 8u) + "\n";
+            }
+            else
+            {
+                emit_inner(ctrl.pc + 8u, prefix + "_outer_not_taken");
+            }
+            return;
+        }
 
         // Do not let an unsupported branch reach make_cond()'s fallback
         // predicate (which is intentionally always true for unconditional
@@ -3497,6 +3661,11 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     header();
     declare_memory_helpers();
 
+    std::map<uint32_t, ee::s_ee_instruction> linear_insn_map;
+    for (const auto& ins : insns)
+    {
+        linear_insn_map.emplace(ins.pc, ins);
+    }
     std::vector<std::vector<ee::s_ee_instruction>> blocks;
     std::vector<ee::s_ee_instruction> cur;
 
@@ -3659,7 +3828,8 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
             (b + 1 < blocks.size() && !blocks[b + 1].empty())
                 ? blocks[b + 1][0].pc : 0;
         emit_block(blocks[b], b == blocks.size() - 1, entry_pc,
-                   touched, touched, fallthrough_pc, b == blocks.size() - 1);
+                   touched, touched, fallthrough_pc, b == blocks.size() - 1,
+                   false, &linear_insn_map);
     }
 
     // A direct target outside this emitted function is a dispatcher exit, not
@@ -5345,6 +5515,17 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
             block_killed_map[bb.start_pc] = block_written_map[bb.start_pc];
         }
         std::set<uint8_t> rbw = block_read_before_write(insns);
+        // A branch pair may consume an instruction outside its CFG block.
+        // Preserve all incoming registers across this uncommon edge.
+        if (insns.size() >= 2u &&
+            insns[insns.size() - 2u].has_delay_slot &&
+            insns.back().has_delay_slot)
+        {
+            for (uint8_t reg = 1u; reg < 32u; ++reg)
+            {
+                rbw.insert(reg);
+            }
+        }
         // The V0 write trace observes the pre-write SSA value even for an
         // instruction which otherwise kills V0 on entry to the block.
         // Keep that old value live across predecessors whenever this block
@@ -5615,7 +5796,7 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
         emit_block(block_insns_vec[i], i == fn.blocks.size() - 1, fn.entry_pc,
                    live_in[bb.start_pc], live_out[bb.start_pc],
                    bb.fallthrough_pc, bb.is_terminator,
-                   loop_headers.count(bb.start_pc) != 0u);
+                   loop_headers.count(bb.start_pc) != 0u, &insn_map);
     }
 
     // External / unresolved targets return to the host dispatcher. Returning

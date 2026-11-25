@@ -1026,6 +1026,21 @@ void function_analyzer::split_into_blocks(
 
                 if (is_conditional(ins))
                 {
+                    // A conditional branch occupying another conditional
+                    // branch's slot can select its own target. Keep that
+                    // guest address discoverable, including for COP1.
+                    const auto nested = insns.find(delay_pc);
+                    if (ins.has_delay_slot && nested != insns.end() &&
+                        nested->second.has_delay_slot &&
+                        is_conditional(nested->second))
+                    {
+                        const uint32_t nested_target = nested->second.branch_target;
+                        if (!is_foreign_entry(nested_target))
+                        {
+                            bb.successors.insert(nested_target);
+                            worklist.push_back(nested_target);
+                        }
+                    }
                     bb.target_pc = ins.branch_target;
                     // Fallthrough: only if it is not another function entry.
                     if (!is_foreign_entry(bb.fallthrough_pc))
