@@ -175,6 +175,44 @@ int main()
         }
     }
 
+    // FDIV exceptions are invisible until the Q result retires.
+    // FSAND must observe them without any intervening upper FMAC.
+    {
+        ee::s_ee_vu1_state state{};
+        state.m_initialized = true;
+        state.m_vf[2][0] = 0x3f800000u;
+        const auto fsand = [](uint32_t it)
+        {
+            return (0x16u << 25u) | (it << 16u) | 0x200430u;
+        };
+        const uint32_t fsset_zero = 0x15u << 25u;
+        if (!check(run(state, {
+                       {special(0x38u, 0u, 2u), k_upper_nop}, // 1 / 0
+                       {fsand(1u), k_upper_nop},
+                       {special(0x3bu), k_upper_nop},
+                       {fsand(2u), k_upper_nop},
+                       {special(0x38u, 2u, 2u), k_upper_nop}, // 1 / 1
+                       {fsand(3u), k_upper_nop},
+                       {k_lower_nop, k_upper_nop},
+                       {k_lower_nop, k_upper_nop},
+                       {k_lower_nop, k_upper_nop},
+                       {k_lower_nop, k_upper_nop},
+                       {k_lower_nop, k_upper_nop},
+                       {fsand(4u), k_upper_nop}, // natural retirement
+                       {fsset_zero, k_upper_nop},
+                       {fsand(5u), k_upper_end},
+                       {k_lower_nop, k_upper_nop}
+                   }, data, issue) &&
+                   state.m_vi[1] == 0u && state.m_vi[2] == 0x820u &&
+                   state.m_vi[3] == 0x820u && state.m_vi[4] == 0x800u &&
+                   state.m_vi[5] == 0u && state.m_q == 0x3f800000u &&
+                   state.m_status == 0u,
+                   "FDIV status visibility before/after WAITQ, natural retirement and FSSET"))
+        {
+            return 1;
+        }
+    }
+
     // Result flags must distinguish an exact finite maximum from overflow;
     // cancellation and multiplication underflow both set MAC Z/U.
     {

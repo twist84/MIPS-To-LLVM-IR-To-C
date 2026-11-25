@@ -299,6 +299,25 @@ int main(int argc, char** argv)
                 (ft << 16u) | (fs << 11u) | ((index >> 2u) << 6u) |
                 0x3cu | (index & 3u);
         };
+        const auto fsand = [](uint32_t it)
+        {
+            return (0x16u << 25u) | (it << 16u) | 0x200430u;
+        };
+        // Independent literal checks in the Python runner: old/current
+        // FDIV causes and sticky flags, without a new FMAC history entry.
+        append(0x15u << 25u);
+        append(scalar(0x38u, 21u, 22u, 0u, 0u));
+        append(scalar(0x3bu, 0u, 0u, 0u, 0u));
+        append(fsand(10u));
+        append(scalar(0x38u, 21u, 0u, 0u, 0u));
+        append(fsand(11u));
+        append(scalar(0x3bu, 0u, 0u, 0u, 0u));
+        append(fsand(12u));
+        append(scalar(0x38u, 21u, 22u, 0u, 0u));
+        append(scalar(0x3bu, 0u, 0u, 0u, 0u));
+        append(fsand(13u));
+        append(0x15u << 25u);
+        append(fsand(14u));
         // Q must be read before a same-pair producer/wait.
         append(scalar(0x38u, 21u, 22u, 0u, 0u),
             upper(0x20u, 26u, 0u, 0u, 15u));

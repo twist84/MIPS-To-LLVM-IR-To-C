@@ -121,6 +121,41 @@ define internal void @vu_scalar_schedule(ptr %current, ptr %ready, ptr %value,
   store i32 %at, ptr %ready, align 4
   ret void
 }
+; FDIV status is a separate retirement event, not an FMAC history
+; entry. Publish Q and I/D together, preserving intervening sticky flags.
+define internal void @vu_q_sync(ptr %q, ptr %ready, ptr %pending,
+    ptr %status, ptr %flags, i32 %now) alwaysinline {
+entry:
+  %r = load i32, ptr %ready, align 4
+  %busy = icmp ne i32 %r, 0
+  %due = icmp uge i32 %now, %r
+  %commit = and i1 %busy, %due
+  br i1 %commit, label %publish, label %done
+publish:
+  %v = load i32, ptr %pending, align 4
+  store i32 %v, ptr %q, align 4
+  %f = load i32, ptr %flags, align 4
+  %old = load i32, ptr %status, align 4
+  %cleared = and i32 %old, -49
+  %merged = or i32 %cleared, %f
+  store i32 %merged, ptr %status, align 4
+  store i32 0, ptr %ready, align 4
+  br label %done
+done:
+  ret void
+}
+
+define internal void @vu_q_wait(ptr %q, ptr %ready, ptr %pending,
+    ptr %status, ptr %flags, ptr %cycle) alwaysinline {
+  %now = load i32, ptr %cycle, align 4
+  %r = load i32, ptr %ready, align 4
+  %stall = icmp ugt i32 %r, %now
+  %elapsed = select i1 %stall, i32 %r, i32 %now
+  store i32 %elapsed, ptr %cycle, align 4
+  call void @vu_q_sync(ptr %q, ptr %ready, ptr %pending,
+      ptr %status, ptr %flags, i32 %elapsed)
+  ret void
+}
 )IR";
 
 constexpr uint32_t k_unknown_pc = 0xffffffffu;
@@ -250,6 +285,8 @@ public:
         if (q)
         {
             init_scalar("q");
+            line("%q_pending_flags = alloca i32, align 4");
+            line("store i32 0, ptr %q_pending_flags, align 4");
         }
         if (flags)
         {
@@ -624,12 +661,28 @@ private:
 
     void sync_scalar(const std::string& name, const std::string& cycle)
     {
-        line("call void @vu_scalar_sync(" + scalar_args(name) + ", i32 " + cycle + ")");
+        if (name == "q")
+        {
+            line("call void @vu_q_sync(" + scalar_args(name) +
+                ", ptr %status, ptr %q_pending_flags, i32 " + cycle + ")");
+        }
+        else
+        {
+            line("call void @vu_scalar_sync(" + scalar_args(name) + ", i32 " + cycle + ")");
+        }
     }
 
     void wait_scalar(const std::string& name)
     {
-        line("call void @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
+        if (name == "q")
+        {
+            line("call void @vu_q_wait(" + scalar_args(name) +
+                ", ptr %status, ptr %q_pending_flags, ptr %cycle)");
+        }
+        else
+        {
+            line("call void @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
+        }
     }
 
     void schedule_scalar(const std::string& name, const std::string& value, uint32_t latency)
@@ -720,13 +773,18 @@ private:
         const auto value = is_sqrt
             ? operation("call i32 @vu_sqrt(i32 " + rhs + ")")
             : fp_binary(is_rsqrt ? "vu_rsqrt" : "vu_div", lhs, rhs);
-        schedule_scalar("q", value, is_rsqrt ? 13u : 7u);
-        const auto old = operation("load i32, ptr %status, align 4");
-        const auto status = operation("call i32 @vu_q_status(i32 " + old +
-            ", i32 " + lhs + ", i32 " + rhs + ", i1 " +
+        // Drain the previous producer before replacing the pending tuple.
+        wait_scalar("q");
+        const auto now = operation("load i32, ptr %cycle, align 4");
+        const auto ready = operation("add i32 " + now + ", " +
+            std::to_string(is_rsqrt ? 13u : 7u));
+        const auto flags = operation("call i32 @vu_q_status(i32 0, i32 " +
+            lhs + ", i32 " + rhs + ", i1 " +
             (is_sqrt ? "true" : "false") + ", i1 " +
             (is_rsqrt ? "true" : "false") + ")");
-        line("store i32 " + status + ", ptr %status, align 4");
+        line("store i32 " + value + ", ptr %q_pending, align 4");
+        line("store i32 " + ready + ", ptr %q_ready, align 4");
+        line("store i32 " + flags + ", ptr %q_pending_flags, align 4");
         return true;
     }
 
@@ -813,7 +871,12 @@ private:
         }
         if (major == 0x14u || major == 0x16u || major == 0x17u)
         {
-            const auto status = operation("and i32 " + read_ring("status") + ", 4095");
+            // FDIV current/sticky flags are visible on Q retirement,
+            // independently of the four-pair FMAC flag history.
+            const auto fmac = operation("and i32 " + read_ring("status") + ", 975");
+            const auto live = operation("load i32, ptr %status, align 4");
+            const auto fdiv = operation("and i32 " + live + ", 3120");
+            const auto status = operation("or i32 " + fmac + ", " + fdiv);
             if (major == 0x14u)
             {
                 store_flag_predicate(it, operation("icmp eq i32 " + status + ", " + immediate));

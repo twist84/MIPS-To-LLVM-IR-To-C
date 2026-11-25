@@ -197,6 +197,8 @@ def main():
                 actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
                           *vi, *vf, mac.value, status.value, clip.value, q.value, p.value, r.value, *acc, acc_overflow.value, *data]
                 assert actual == expected, (case, opt, actual, expected)
+                if case == "q":
+                    assert list(vi[10:15]) == [0, 0, 0x820, 0x800, 0], (opt, list(vi))
     print("VU1 integer LLVM interpreter differential: PASS")
 
 

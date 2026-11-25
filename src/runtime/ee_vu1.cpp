@@ -386,6 +386,7 @@ struct s_flag_pipe
     uint32_t m_stalls = 0u;
     uint32_t m_q_value = 0u;
     uint32_t m_q_ready = 0u;
+    uint32_t m_q_flags = 0u;
     uint32_t m_p_value = 0u;
     uint32_t m_p_ready = 0u;
     bool m_q_pending = false;
@@ -401,6 +402,7 @@ struct s_flag_pipe
         if (m_q_pending && now() >= m_q_ready)
         {
             state.m_q = m_q_value;
+            state.m_status = vu_scalar_fp::update_status(state.m_status, m_q_flags);
             m_q_pending = false;
         }
     }
@@ -417,10 +419,12 @@ struct s_flag_pipe
         }
     }
 
-    void schedule_q(s_ee_vu1_state& state, uint32_t value, uint32_t latency)
+    void schedule_q(s_ee_vu1_state& state, uint32_t value, uint32_t latency,
+                    uint32_t flags)
     {
         wait_q(state);
         m_q_value = value;
+        m_q_flags = flags;
         m_q_ready = now() + latency;
         m_q_pending = true;
     }
@@ -510,9 +514,10 @@ struct s_flag_pipe
         return m_mac_values[mac_slot()];
     }
 
-    uint32_t status() const
+    uint32_t status(const s_ee_vu1_state& state) const
     {
-        return m_status_values[mac_slot()];
+        // The FMAC delay does not hide already retired FDIV flags.
+        return (m_status_values[mac_slot()] & 0x3cfu) | (state.m_status & 0xc30u);
     }
 
     uint32_t clip() const
@@ -699,16 +704,14 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const uint32_t ftf = (lo >> 23u) & 3u;
             const auto result = vu1_fp::div(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
-            pipe.schedule_q(state, result.value, 7u);
-            state.m_status = vu_scalar_fp::update_status(state.m_status, result.current_flags);
+            pipe.schedule_q(state, result.value, 7u, result.current_flags);
             return true;
         }
         case 0x39u: // SQRT
         {
             const uint32_t ftf = (lo >> 23u) & 3u;
             const uint32_t raw = state.m_vf[ft][ftf];
-            pipe.schedule_q(state, vu1_fp::sqrt(raw), 7u);
-            state.m_status = vu_scalar_fp::update_status(state.m_status,
+            pipe.schedule_q(state, vu1_fp::sqrt(raw), 7u,
                 vu_scalar_fp::current_flags(0u, raw, true, false));
             return true;
         }
@@ -718,8 +721,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             const uint32_t ftf = (lo >> 23u) & 3u;
             const auto result = vu1_fp::rsqrt(
                 state.m_vf[fs][fsf], state.m_vf[ft][ftf]);
-            pipe.schedule_q(state, result.value, 13u);
-            state.m_status = vu_scalar_fp::update_status(state.m_status, result.current_flags);
+            pipe.schedule_q(state, result.value, 13u, result.current_flags);
             return true;
         }
         case 0x3bu: pipe.wait_q(state); return true; // WAITQ
@@ -908,7 +910,7 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
         return true;
     case 0x14u: // FSEQ
         store_vi(state, it,
-            (pipe.status() & 0xfffu) ==
+            (pipe.status(state) & 0xfffu) ==
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)) ? 1u : 0u);
         return true;
     case 0x15u: // FSSET sticky flags update after same-cycle upper
@@ -916,11 +918,11 @@ bool lower(s_ee_vu1_state& state, uint32_t lo, uint32_t pc,
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)) & 0xfc0u);
         return true;
     case 0x16u: // FSAND
-        store_vi(state, it, pipe.status() &
+        store_vi(state, it, pipe.status(state) &
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)));
         return true;
     case 0x17u: // FSOR
-        store_vi(state, it, (pipe.status() & 0xfffu) |
+        store_vi(state, it, (pipe.status(state) & 0xfffu) |
             (((lo >> 10u) & 0x800u) | (lo & 0x7ffu)));
         return true;
     case 0x18u: // FMEQ
