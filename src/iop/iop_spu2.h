@@ -31,7 +31,26 @@ public:
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
     // Returns newly latched playback IRQ core bits (zero if none).
-    uint32_t advance_cycles(uint32_t cycles);
+    uint32_t advance_cycles(uint32_t cycles)
+    {
+        if (!m_clock_active)
+        {
+            return 0u;
+        }
+        const uint64_t before = m_clock_cycles;
+        m_clock_cycles += cycles;
+        const uint64_t samples_before = before / k_cycles_per_sample;
+        const uint64_t samples_after = elapsed_samples();
+        if (m_clock_cycles < before || samples_after != samples_before)
+        {
+            m_irq_deadline_valid = false;
+        }
+        if (samples_before == samples_after)
+        {
+            return 0u;
+        }
+        return advance_sample_edges(samples_after - samples_before);
+    }
     // Earliest possible voice/input fetch, mixer-ring or effect IRQ edge.
     // Zero means no pending playback IRQ opportunity.
     uint32_t voice_irq_cycles_remaining() const;
@@ -262,6 +281,7 @@ private:
         int16_t* output);
     void advance_effect(uint32_t core, const int32_t (&input)[2], int16_t (&output)[2]);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
+    uint32_t advance_sample_edges(uint64_t samples);
     void mix_frames(uint64_t samples);
     void write_mixer_rings();
     void count_mixer_irq(uint32_t address, uint32_t words);
