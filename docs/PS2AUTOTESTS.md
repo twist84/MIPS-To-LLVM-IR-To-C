@@ -50,9 +50,13 @@ and per-test run.log, guest.raw, test.out, optional test.diff, runner.json
 and result.json. Default exit is nonzero unless every selected output
 matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
-pilot executes alu, muldiv and fcr via the same built runner; inspect the
-uploaded ps2autotests-pilot artifact for actual outcomes. Guest timeout
-excludes compilation; CI job time bounds the total.
+pilot uses separate EE and VU matrix runners with two tests and one emit
+worker per test; it retains the six previously selected original ELFs.
+Manually dispatch Build and test with autotests_full enabled to run all
+55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
+with transcripts and a summary; these are observational artifacts,
+not an aggregated pass gate. Guest timeout excludes compilation; CI job
+time bounds the total.
 
 The first pilot may stop in PS2SDK startup, TLB setup, scheduling or
 console transport. Do not bypass the original startup, patch expected

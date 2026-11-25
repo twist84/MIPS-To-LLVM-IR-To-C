@@ -112,6 +112,18 @@ class AutotestsHarness(unittest.TestCase):
             self.assertEqual(result["status"], "ERROR")
             self.assertEqual(result["error"], "bad blob")
 
+    def test_ci_full_matrix_covers_inventory(self):
+        import re
+        workflow = (at.ROOT / ".github/workflows/ci.yml").read_text()
+        full, pilot = re.search(r"fromJSON\(inputs\.autotests_full && '([^']+)' \|\| '([^']+)'\)", workflow).groups()
+        tests = json.loads(at.MANIFEST.read_text())["tests"]
+        for selection, expected in ((full, 55), (pilot, 6)):
+            groups = json.loads(selection)
+            names = [case["name"] for group in groups
+                     for case in at.select_tests(tests, group["patterns"].split())]
+            self.assertEqual(len(names), expected)
+            self.assertEqual(len(set(names)), expected)
+
     def test_inventory(self):
         manifest = json.loads(at.MANIFEST.read_text())
         self.assertEqual(len(manifest["tests"]), 55)
