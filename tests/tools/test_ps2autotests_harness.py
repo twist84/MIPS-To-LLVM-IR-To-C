@@ -42,6 +42,20 @@ class AutotestsHarness(unittest.TestCase):
         with self.assertRaises(ValueError):
             at.extract_guest(b"EE KPUTS: \\zz\n")
 
+    def test_minimal_disc_preserves_original_elf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            elf = root / "source.elf"
+            payload = b"\x7fELF\x00\xff"
+            elf.write_bytes(payload)
+            disc = at.prepare_disc(elf, root / "disc")
+            self.assertEqual((disc / "TEST.ELF").read_bytes(), payload)
+            self.assertEqual(elf.read_bytes(), payload)
+            self.assertIn(b"BOOT2 = cdrom0:\\TEST.ELF;1\r\n",
+                          (disc / "SYSTEM.CNF").read_bytes())
+            self.assertEqual({p.name for p in disc.iterdir()},
+                             {"TEST.ELF", "SYSTEM.CNF"})
+
     def test_cache_verification(self):
         data = b"reference"
         entry = {"path": "tests/test.expected", "git_blob": at.blob_hash(data)}

@@ -46,3 +46,19 @@ from independent references, rerun the smallest failing test, expand
 the selection, then establish the full-suite baseline. No score is
 claimed before actual execution. Peer 54/55 is a reported output
 comparison, not a matched timing benchmark.
+
+## Pilot 1 findings (52e3de3, 2026-11-25)
+
+All four workflows and all seven CTest shards passed. The observational
+pilot produced 0/3 exact transcripts. ALU and FCR exhausted 1M dispatches
+in SifGetReg(4), at EPCs 0x001135f4 and 0x00103d54 respectively. The
+runner had no IOP backend: the initial harness invocation omitted
+--disc-folder. MUL/DIV instead stopped after 79 dispatches at relocated
+SDK kernel syscall code (0x80075024, instruction 0x54a0fff8, BNEL).
+Evidence: [pilot artifact](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45612693778/artifacts/15020192710).
+
+Use a minimal per-run extracted disc (unmodified TEST.ELF and SYSTEM.CNF)
+to activate the existing HLE IOP bootstrap with installed SIF services.
+No invented flag, modified executable or bypassed startup. Bound repeated
+zero SMFLAG polls at 1024; optional --trace enables detailed diagnostics.
+The original pilot's 0/3 is not a measured arithmetic discrepancy.

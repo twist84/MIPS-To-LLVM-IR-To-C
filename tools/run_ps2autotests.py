@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -103,6 +104,17 @@ def select_tests(tests, patterns):
         for pattern in patterns)]
 
 
+def prepare_disc(elf, directory):
+    # The original SDK startup initializes SIF and RPC even for pure
+    # arithmetic tests. Use the same modeled IOP services as retail
+    # folder mode, with a minimal disc containing the unmodified ELF.
+    directory.mkdir()
+    shutil.copyfile(elf, directory / "TEST.ELF")
+    (directory / "SYSTEM.CNF").write_bytes(
+        b"BOOT2 = cdrom0:\\TEST.ELF;1\r\nVER = 1.00\r\nVMODE = NTSC\r\n")
+    return directory
+
+
 def run_case(case, args, manifest, run_dir):
     name = case["name"]
     out = run_dir / name
@@ -118,6 +130,7 @@ def run_case(case, args, manifest, run_dir):
             raise ValueError("reference ELF signature is invalid")
         work = args.output / "work" / name
         report = out / "runner.json"
+        disc = prepare_disc(elf, out / "disc")
         command = [sys.executable, str(ROOT / "tools/run_game.py"), str(elf),
                    "--build-dir", str(args.build_dir), "--config", args.config,
                    "--work-dir", str(work), "--functions=all",
@@ -127,7 +140,10 @@ def run_case(case, args, manifest, run_dir):
                    "--timeout-seconds", str(args.timeout_seconds),
                    "--loop-budget=1000000", "--loop-yield-resumes=256",
                    "--hle-startup", "--kseg-ram", "--memcard-discard-writes",
+                   "--disc-folder", str(disc), "--sif-poll-limit=1024",
                    "--report", str(report)]
+        if args.trace:
+            command.append("--trace")
         result["command"] = command
         with (out / "run.log").open("wb") as log:
             completed = subprocess.run(command, cwd=ROOT, stdout=log,
@@ -169,6 +185,7 @@ def main():
     parser.add_argument("--emit-jobs", type=int, default=2)
     parser.add_argument("--timeout-seconds", type=int, default=60,
                         help="guest replay timeout, excluding compilation")
+    parser.add_argument("--trace", action="store_true", help="enable detailed runner diagnostics")
     parser.add_argument("--report-only", action="store_true",
                         help="collect baseline outcomes without gating on nonmatching tests")
     args = parser.parse_args()
