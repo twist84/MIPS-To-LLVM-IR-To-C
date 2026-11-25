@@ -79,15 +79,19 @@ def main():
         ir_text = path.read_text(encoding="utf-8")
 
         # This checks the emitted calls, not only an interpreter-side shim.
-        require(ir_text.count("call void @ee_cop0_write(") == 3,
-                "all three MTC0 instructions must call the runtime helper")
+        require(ir_text.count("call void @ee_cop0_write(") == 1 and
+                ir_text.count("call void @ee_cop0_clock_write(") == 2,
+                "MTC0 Count/Compare use clock-aware helpers; Status uses raw helper")
         for index in (11, 12, 9):
-            require(f"ptr %cpu, i32 {index}, i32 " in ir_text,
+            require((f"ptr %cpu, i32 {index}, i32 " in ir_text or
+                     f"ptr %cpu, ptr %rt, i32 {index}, i32 " in ir_text),
                     f"COP0 register {index} did not use the helper ABI")
 
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
         llvm.add_symbol("ee_cop0_write", helper_address)
+        for name in ("ee_cop0_clock_sync", "ee_cop0_clock_write"):
+            llvm.add_symbol(name, ctypes.cast(getattr(helper_library, name), ctypes.c_void_p).value)
         register_ee_diagnostic_stubs()
 
         module = llvm.parse_assembly(ir_text)

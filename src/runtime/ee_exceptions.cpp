@@ -164,6 +164,73 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
     }
 }
 
+extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
+{
+    if (cpu == nullptr || rt == nullptr ||
+        rt->m_ee_cycle_scheduler.source() == e_ee_cycle_source::UNAVAILABLE)
+    {
+        return;
+    }
+    uint64_t now = rt->m_ee_cycle_scheduler.current_cycle();
+    if (rt->m_ee_cycle_scheduler.source() == e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+    {
+        // Within a translated function the host's last publication can
+        // lag the reached-instruction budget. Observe the same budget
+        // directly at Count/Compare accesses, never host wall time.
+        if (rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+        {
+            return;
+        }
+        now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
+    }
+    if (now < rt->m_cop0_clock_last)
+    {
+        return;
+    }
+    constexpr uint32_t ip7 = 1u << 15u;
+    if (!rt->m_cop0_clock_initialized)
+    {
+        rt->m_cop0_clock_count = cpu->m_cop0[COP0_Count];
+        rt->m_cop0_clock_compare = cpu->m_cop0[COP0_Compare];
+        rt->m_cop0_clock_ip7 = (cpu->m_cop0[COP0_Cause] & ip7) != 0u;
+        rt->m_cop0_clock_initialized = true;
+    }
+    const uint64_t elapsed = now - rt->m_cop0_clock_last;
+    const uint32_t distance = rt->m_cop0_clock_compare - rt->m_cop0_clock_count;
+    // Count increments modulo 2^32. Equality at the starting point does
+    // not raise a new interrupt until the next full wrap.
+    if (elapsed >= (1ull << 32u) || (distance != 0u && elapsed >= distance))
+    {
+        rt->m_cop0_clock_ip7 = true;
+    }
+    rt->m_cop0_clock_count += static_cast<uint32_t>(elapsed);
+    rt->m_cop0_clock_last = now;
+    cpu->m_cop0[COP0_Count] = rt->m_cop0_clock_count;
+    cpu->m_cop0[COP0_Compare] = rt->m_cop0_clock_compare;
+    cpu->m_cop0[COP0_Cause] = (cpu->m_cop0[COP0_Cause] & ~ip7) |
+        (rt->m_cop0_clock_ip7 ? ip7 : 0u);
+}
+
+extern "C" void ee_cop0_clock_write(s_ee_cpu_state* cpu, s_ee_runtime* rt,
+                                     uint32_t reg, uint32_t value)
+{
+    ee_cop0_clock_sync(cpu, rt);
+    ee_cop0_write(cpu, reg, value);
+    if (cpu == nullptr || rt == nullptr || !rt->m_cop0_clock_initialized)
+    {
+        return;
+    }
+    if (reg == COP0_Count)
+    {
+        rt->m_cop0_clock_count = value;
+    }
+    else if (reg == COP0_Compare)
+    {
+        rt->m_cop0_clock_compare = value;
+        rt->m_cop0_clock_ip7 = false;
+    }
+}
+
 namespace
 {
 constexpr uint32_t k_perf_control_mask = 0x800ffbfeu;

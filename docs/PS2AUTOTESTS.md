@@ -396,3 +396,16 @@ worker transaction is explicitly rejected rather than pretending to
 interrupt its unpublished work. Exact mid-pipeline break effects and
 indeterminate macro execution in Stop remain unvalidated. No original
 pass claimed before CI.
+
+## COP0 Count progression
+
+Count and Compare are core-global with IP7, not restored per thread.
+Synchronize before native MFC0/MTC0 Count/Compare and at runner device
+safepoints. Count wraps modulo 2^32, Compare crossing latches IP7,
+Compare write clears it, and Count write reanchors the elapsed interval.
+Validated sources use the published cycle; the existing explicitly
+approximate reference-compatible source uses reached instruction budget
+plus idle units, including access inside a translated block. Unavailable
+source retains static register semantics. This does not calibrate R5900
+cycles, authorize performance counters, or change original test scoring.
+Legacy source emission and RAM fallback timing still require audit.

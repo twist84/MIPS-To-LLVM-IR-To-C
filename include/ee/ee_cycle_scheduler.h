@@ -47,7 +47,7 @@ public:
     );
 
     e_ee_cycle_source source() const { return m_source; }
-    uint64_t current_cycle() const;
+    uint64_t current_cycle() const { return m_current_cycle; }
     uint64_t scheduler_yields() const;
 
 private:

@@ -363,6 +363,16 @@ struct s_ee_runtime
     // context. Appended to preserve the runtime and translated CPU ABI.
     uint32_t m_perf_control = 0u;
     uint32_t m_perf_counter[2]{};
+
+    // Count/Compare/IP7 belong to the core, not a saved thread context.
+    // Compatibility idle units are supplied by the same host event budget
+    // used for timers and scanout. They are not calibrated EE cycles.
+    uint64_t m_cop0_clock_idle = 0u;
+    uint64_t m_cop0_clock_last = 0u;
+    uint32_t m_cop0_clock_count = 0u;
+    uint32_t m_cop0_clock_compare = 0u;
+    bool m_cop0_clock_ip7 = false;
+    bool m_cop0_clock_initialized = false;
 };
 
 // Never infer cycles from these observations or implicitly install
@@ -595,6 +605,11 @@ uint32_t ee_cop0_get_branch_condition(const s_ee_runtime* rt);
 // Other registers retain the existing raw write behavior until their writable
 // masks and side effects are independently audited.
 void ee_cop0_write(s_ee_cpu_state* cpu, uint32_t reg, uint32_t value);
+// Synchronize core-global Count/Compare with the explicitly selected
+// clock. Unavailable clocks preserve legacy static register semantics.
+void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt);
+void ee_cop0_clock_write(s_ee_cpu_state* cpu, s_ee_runtime* rt,
+                         uint32_t reg, uint32_t value);
 
 // MFPS/MTPS/MFPC/MTPC. Return 0 on success, 4 on unavailable semantics.
 uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu, s_ee_runtime* rt,

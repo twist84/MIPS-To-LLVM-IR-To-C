@@ -3452,6 +3452,7 @@ int main(int argc, char** argv)
                 return false;
             }
             cpu = next.m_context;
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             vu0 = next.m_vu0_context;
             next.m_status = 1u;
             current_thread_id = next_id;
@@ -3810,6 +3811,7 @@ int main(int argc, char** argv)
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
+        ee::ee_cop0_clock_sync(&cpu, &runtime);
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
         if (vu0.m_running != 0u &&
             reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
@@ -4472,6 +4474,7 @@ int main(int argc, char** argv)
             }
             idle_cycles += next - now;
             host_timers.set_idle_cycles(idle_cycles);
+            runtime.m_cop0_clock_idle = idle_cycles;
             if (!runtime.m_ee_cycle_scheduler.publish_cycle(next))
             {
                 return 1;
@@ -5275,6 +5278,7 @@ int main(int argc, char** argv)
                 continue;
             }
             cpu = irq_interrupted_cpu;
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             vu0 = irq_interrupted_vu0;
             hardware.intc().bind_cpu(&cpu);
             hardware.dmac().bind_cpu(&cpu);

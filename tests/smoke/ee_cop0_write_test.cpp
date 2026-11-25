@@ -158,6 +158,37 @@ int main()
           runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
           "no mode enables means neither cycle counter counts");
 
+    {
+        ee::s_ee_cpu_state a{};
+        ee::s_ee_cpu_state b{};
+        ee::s_ee_runtime clock{};
+        a.m_cop0[ee::COP0_Count] = 0xfffffffcu;
+        a.m_cop0[ee::COP0_Compare] = 2u;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 0xfffffffcu,
+              "unavailable clock leaves Count unchanged");
+        check(clock.m_ee_cycle_scheduler.install_reference_compatibility_source(),
+              "explicit compatibility source");
+        clock.m_guest_instruction_attempts = 6u;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 2u &&
+              (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
+              "Count wraps and latches Compare at the elapsed budget");
+        ee::ee_cop0_clock_write(&a, &clock, ee::COP0_Compare, 10u);
+        clock.m_guest_instruction_attempts = 9u;
+        clock.m_cop0_clock_idle = 2u;
+        ee::ee_cop0_clock_sync(&b, &clock);
+        check(b.m_cop0[ee::COP0_Count] == 7u &&
+              b.m_cop0[ee::COP0_Compare] == 10u &&
+              (b.m_cop0[ee::COP0_Cause] & k_timer_ip) == 0u,
+              "thread context cannot restore stale timer state");
+        ee::ee_cop0_clock_write(&b, &clock, ee::COP0_Count, 9u);
+        clock.m_guest_instruction_attempts++;
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 10u &&
+              (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
+              "Count write reanchors without double counting");
+    }
     std::printf("ee_cop0_write_test: %d failure(s)\n", s_failures);
     return s_failures != 0 ? 1 : 0;
 }
