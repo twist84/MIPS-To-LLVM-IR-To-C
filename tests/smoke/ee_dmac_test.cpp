@@ -68,6 +68,7 @@ int main()
                                    dmac_ip | intc_ip;
     if (ee::ee_mem_read32(&runtime, d_stat) != 0 ||
         hardware.dmac().pending() != 0 ||
+        hardware.dmac().started_channels() != 0u ||
         (cpu.m_cop0[ee::COP0_Cause] & (dmac_ip | intc_ip)) != 0)
     {
         return fail("reset DMAC status or CPU cause");
@@ -142,7 +143,8 @@ int main()
     ee::ee_mem_write32(&runtime, 0x10009000u, 0x101u);
     if (ee::ee_mem_read32(&runtime, 0x10009000u) != 0x101u ||
         ee::ee_mem_read32(&runtime, 0x10009020u) != 0x10u ||
-        hardware.dmac().status() != ((ch1 | ch8) << 16u))
+        hardware.dmac().status() != ((ch1 | ch8) << 16u) ||
+        hardware.dmac().started_channels() != ch1 || hardware.dmac().pending() != 0u)
     {
         return fail("missing VIF1 consumer falsely completed DMA");
     }
@@ -158,7 +160,8 @@ int main()
     if (ee::ee_mem_read32(&runtime, sif0) != 0x184u ||
         ee::ee_mem_read32(&runtime, sif0 + 0x10u) != 0x00123000u ||
         ee::ee_mem_read32(&runtime, sif0 + 0x20u) != 0x2345u ||
-        hardware.dmac().status() != status_before_sif0)
+        hardware.dmac().status() != status_before_sif0 ||
+        hardware.dmac().started_channels() != (ch1 | (1u << 5u)))
     {
         return fail("SIF0 register bank or unimplemented IOP completion");
     }
@@ -180,6 +183,13 @@ int main()
         hardware.dmac().status() != status_before_sif0)
     {
         return fail("SifSetDChain SIF0 QWC/CHCR reinitialization");
+    }
+
+    // A cleared STR removes only that channel from the active mask.
+    ee::ee_mem_write32(&runtime, 0x10009000u, 0u);
+    if (hardware.dmac().started_channels() != (1u << 5u))
+    {
+        return fail("clearing VIF1 STR did not remove its active bit");
     }
 
     // The SIF mailbox MMIO and SifSetReg/GetReg share one state owner.
@@ -291,6 +301,7 @@ int main()
     hardware.reset();
     if (hardware.dmac().status() != 0 ||
         hardware.dmac().pending() != 0 ||
+        hardware.dmac().started_channels() != 0u ||
         hardware.intc().status() != 0 ||
         ee::ee_mem_read32(&runtime, sif0) != 0u ||
         ee::ee_mem_read32(&runtime, sif0 + 0x20u) != 0u ||
