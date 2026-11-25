@@ -186,6 +186,7 @@ extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
         // directly at Count/Compare accesses, never host wall time.
         if (rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
         {
+            rt->m_perf_compat_fault = true;
             return;
         }
         now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
@@ -250,8 +251,11 @@ bool perf_event_supported(uint32_t control, unsigned index, bool has_clock)
 {
     const uint32_t modes = (control >> (1u + index * 10u)) & 15u;
     const uint32_t event = (control >> (5u + index * 10u)) & 31u;
+    // EE Core User's Manual 7.2.2, table 7-1: event zero is
+    // reserved only for PCR0; PCR1 selects low-order branch issue.
+    // Never silently report zero for an active, unmodeled branch event.
     if ((control & k_perf_cte) == 0u || modes == 0u ||
-        event == 0u || event >= 16u)
+        (event == 0u && index == 0u) || event >= 16u)
     {
         return true;
     }
@@ -360,7 +364,10 @@ bool perf_advance_interval(s_ee_runtime* rt, uint32_t status, uint64_t cycles)
         const uint32_t shift = index * 10u;
         const uint32_t event = (control >> (5u + shift)) & 31u;
         const uint32_t ksu = (status >> 3u) & 3u;
-        const uint32_t mode_mask = ((status & STATUS_EXL) != 0u ? 2u : 0u) |
+        // EE Core User's Manual 7.1.1: K counts kernel mode
+        // *except* while executing an exception handler. EXL is
+        // selected instead of the saved KSU mode, never alongside it.
+        const uint32_t mode_mask = (status & STATUS_EXL) != 0u ? 2u :
             (ksu < 3u ? (1u << (ksu + 2u)) : 0u);
         if (event == 1u && ((control >> shift) & mode_mask) != 0u && cycles != 0u)
         {

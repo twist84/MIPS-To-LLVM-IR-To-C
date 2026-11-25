@@ -3514,6 +3514,9 @@ int main(int argc, char** argv)
         }
         if (next_id != current_thread_id)
         {
+            // Attribute outstanding elapsed budget to the outgoing
+            // privilege mode before replacing its context.
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             s_kernel_thread& current = threads[current_thread_id];
             if (current.m_used && current.m_status != ee_kernel_thread::k_dormant)
             {
@@ -3605,6 +3608,7 @@ int main(int argc, char** argv)
                 handler.m_address, irq_interrupted_cpu.m_pc) &&
             ee::c_ee_sdbz_slot_callback_probe::sample_slots(
                 memory.get(), slot_callback_before);
+        ee::ee_cop0_clock_sync(&cpu, &runtime);
         cpu.m_cop0[12] = (irq_interrupted_cpu.m_cop0[12] & ~0x10001u) | 2u;
         cpu.m_gpr[4] = {irq_callback_cause, 0u};
         cpu.m_gpr[5] = {handler.m_arg, 0u};
@@ -5383,6 +5387,7 @@ int main(int argc, char** argv)
                 enter_irq_callback(irq_callback_handlers[irq_callback_index++]);
                 continue;
             }
+            ee::ee_cop0_clock_sync(&cpu, &runtime);
             cpu = irq_interrupted_cpu;
             ee::ee_cop0_clock_sync(&cpu, &runtime);
             vu0 = irq_interrupted_vu0;

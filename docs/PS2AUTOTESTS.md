@@ -1098,3 +1098,25 @@ operand ordering, which gives better agreement. This is a provisional
 arithmetic choice, not a calibrated internal EFU micro-operation
 schedule. No special-value patch or expected-transcript edit.
 The new complete original runtime replay remains pending.
+
+### Confirmed 54/55 and COP0 privilege-mode accounting audit
+
+[Run 45659705518](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45659705518)
+(head `6f0bc23df9a685298a3d35220cfb8c9a0ce7fbc6`, tested merge
+`3488a26aa181abd1502aec906b7d5f3c981e7afa`, [summary 15043898909](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45659705518/artifacts/15043898909)):
+54/55 exact, one DIFF (EFU), zero incomplete/error/no-output. All five
+workflows passed. COP0 performance is an original transcript pass.
+The compatibility clock is not calibrated R5900 issue timing.
+
+EE Core User's Manual v6.0 sections 7.1.1 and 7.2.1 distinguish
+EXL handler mode from normal kernel/supervisor/user mode; ERL inhibits
+counting. Previously the saved KSU mode could count concurrently with
+EXL. Select exactly one mode, sync the outgoing context before HLE
+thread/IRQ switches, and latch a compatibility timestamp overflow.
+Table 7-1 identifies PCR1 event 0 as low-order branch issue, not a
+reserved event. Reject this active unmodeled event rather than silently
+pretending it never occurs. Tests cover both counters, all four modes,
+EXL overriding saved user mode and ERL inhibition. This audit does not
+implement processor issue/retirement timing, branch/cache/bus event
+sources, or precise level-2 counter overflow exceptions. Those remain
+real accuracy work, not artificial prerequisites for functional cycles.

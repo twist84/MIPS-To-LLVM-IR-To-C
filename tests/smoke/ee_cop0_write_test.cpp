@@ -136,7 +136,7 @@ int main()
     cpu.m_gpr[4].m_lo = 0x8000003eu;
     check(transfer(4u, 4u, 0u) == 4u &&
           runtime.m_perf_control == 0x000ffbfeu,
-          "active cycle event without validated timing fails closed");
+          "active cycle event without any clock fails closed");
     check(runtime.m_ee_cycle_scheduler.install_reference_compatibility_source() &&
           transfer(4u, 0u, 1u) == 0u &&
           transfer(4u, 0u, 3u) == 0u &&
@@ -173,6 +173,48 @@ int main()
           ee::ee_cop0_perf_advance(&runtime, 0u, 9u) &&
           runtime.m_perf_counter[0] == 17u && runtime.m_perf_counter[1] == 0u,
           "no mode enables means neither cycle counter counts");
+
+    // EE manual 7.1.1/7.2.2: the four mode enables are exclusive;
+    // EXL overrides KSU and ERL inhibits counting completely.
+    for (uint32_t mode = 0u; mode < 4u; ++mode)
+    {
+        const uint32_t enable = 1u << (mode + 1u);
+        const uint32_t status_words[] =
+        {
+            ee::STATUS_EXL, 0u, 1u << 3u, 2u << 3u
+        };
+        cpu.m_gpr[4].m_lo = 0x80008020u | enable | (enable << 10u);
+        check(transfer(4u, 0u, 1u) == 0u &&
+              transfer(4u, 0u, 3u) == 0u &&
+              transfer(4u, 4u, 0u) == 0u,
+              "enable isolated performance privilege mode");
+        for (uint32_t actual = 0u; actual < 4u; ++actual)
+        {
+            const uint32_t before = runtime.m_perf_counter[0];
+            check(ee::ee_cop0_perf_advance(&runtime, status_words[actual], 7u) &&
+                  runtime.m_perf_counter[0] == before + (mode == actual ? 7u : 0u) &&
+                  runtime.m_perf_counter[1] == runtime.m_perf_counter[0],
+                  "performance mode selectors are mutually exclusive");
+        }
+        const uint32_t before = runtime.m_perf_counter[0];
+        check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_EXL | (2u << 3u), 3u) &&
+              runtime.m_perf_counter[0] == before + (mode == 0u ? 3u : 0u),
+              "EXL overrides saved user KSU");
+        const uint32_t after = runtime.m_perf_counter[0];
+        check(ee::ee_cop0_perf_advance(&runtime, ee::STATUS_ERL | ee::STATUS_EXL, 9u) &&
+              runtime.m_perf_counter[0] == after,
+              "ERL inhibits all performance modes");
+    }
+    // PCR1 event zero is real hardware branch issue, not the reserved
+    // PCR0 selector. Until issue-slot events exist, reject it explicitly.
+    const uint32_t old_control = runtime.m_perf_control;
+    cpu.m_gpr[4].m_lo = 0x80001000u;
+    check(transfer(4u, 4u, 0u) == 4u &&
+          runtime.m_perf_control == old_control,
+          "unmodeled PCR1 low-order branch issue fails closed");
+    cpu.m_gpr[4].m_lo = 0x80000004u;
+    check(transfer(4u, 4u, 0u) == 0u,
+          "reserved PCR0 event zero remains accepted");
 
     {
         ee::s_ee_cpu_state a{};
