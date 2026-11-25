@@ -283,6 +283,10 @@ public:
     // Only scheduled guest work permits an HLE transport-triggered
     // IOP execution turn; absent modules cannot advance IOP time.
     bool has_guest_work() const;
+    // Relative IOP cycles before any currently modeled autonomous event.
+    // Zero for runnable work or a scheduling barrier. Externally driven
+    // EE/SIF operations must be checked separately by the caller.
+    uint64_t idle_event_cycles_remaining() const;
 
     // Timers use the same bounded virtual-clock domain as sleep_current.
     // Callback return values of zero disarm, otherwise they reschedule by
