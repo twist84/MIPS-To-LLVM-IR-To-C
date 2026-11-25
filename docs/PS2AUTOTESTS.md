@@ -968,3 +968,23 @@ can progress; existing guest IOP/ROM0 SIF wait paths keep precedence.
 Service both scanout edge deadlines while idle. Tests verify no early
 IRQ, no guest CRT mode mutation, and explicit NTSC reconfiguration.
 The original transcript and retail timing still require validation.
+
+### Ordinary versus likely COP1 branch-delay chains
+
+The first nested-branch run 45653824524 passed the original EE branchdelay
+shard. The FPU artifact [15040304281](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45653824524/artifacts/15040304281)
+showed both BC1T and BC1TL printing 2. The pinned original expected
+transcript actually reports BC1T = 4, BC1TL = 2. The integer/likely
+relocated-slot model must not be applied to consecutive ordinary BC1F/T.
+The pinned PCSX2 Interpreter.cpp::_doBranch_shared and FPU.cpp::BC1
+provide the sequential recursion reference: a taken ordinary COP1
+branch executes the next sequential instruction, a further taken branch
+replaces the pending target, and a not-taken slot branch leaves that
+pending target in effect. Lower bounded contiguous ordinary COP1 chains
+in LLVM IR using both FCC0 outcomes and real instruction counts; retain
+candidate target discovery. The first non-branch without a pending
+transfer resumes via the ordinary dispatcher. Mixed control/faulting
+slots and unbounded chains remain fail-closed. Added synthetic JIT
+regressions for four taken branches and mixed taken/not-taken conditions.
+The exact original COP1 transcript remains to be re-run; broader
+unpredictable branch-delay behavior is not claimed hardware-validated.

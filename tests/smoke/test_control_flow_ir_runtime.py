@@ -165,13 +165,37 @@ def main():
                         0x00100018 if outer else 0x0010000c)
                     require(state.pc == expected_pc,
                             f"{mode}: nested target 0x{state.pc:08x}")
-                    require(state.gpr[4].lo == (12 if outer else 11),
-                            f"{mode}: wrong relocated delay instruction")
+                    expected_gpr = 11 if mode == "nested_bc1t" else (
+                        12 if outer else 11)
+                    require(state.gpr[4].lo == expected_gpr,
+                            f"{mode}: wrong selected delay instruction")
                     require(state.gpr[4].hi == 0x4444555566667777,
                             f"{mode}: upper half changed")
 
                 run_case(fixture_exe, temp_dir, target, retained, mode,
                          "guest_nested_branch_test", setup_nested, verify_nested)
+
+        for mode, fcc, expected_pc, expected_gpr in (
+                ("nested_bc1t_chain", True, 0x0010002c, 14),
+                ("nested_bc1t_chain", False, 0x00100010, 10),
+                ("nested_bc1t_mixed", True, 0x00100014, 10),
+                ("nested_bc1t_mixed", False, 0x00100024, 11)):
+            def setup_cop1_chain(state):
+                state.gpr[4].lo = 10
+                state.gpr[4].hi = 0x4444555566667777
+                state.fcsr = 0x800000 if fcc else 0
+
+            def verify_cop1_chain(state):
+                require(state.pc == expected_pc,
+                        f"{mode}/{fcc}: wrong chain target {state.pc:#x}")
+                require(state.gpr[4].lo == expected_gpr,
+                        f"{mode}/{fcc}: wrong sequential slot execution")
+                require(state.gpr[4].hi == 0x4444555566667777,
+                        f"{mode}/{fcc}: upper half changed")
+
+            run_case(fixture_exe, temp_dir, target, retained, mode,
+                     "guest_nested_branch_test", setup_cop1_chain,
+                     verify_cop1_chain)
 
         for rt, mode in enumerate(("bc0f", "bc0t", "bc0fl", "bc0tl")):
             for value in (0, 1, 2):

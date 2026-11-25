@@ -3230,9 +3230,10 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         uint32_t ft = fallthrough_pc ? fallthrough_pc : (ctrl.pc + 8);
         uint32_t target = ctrl.branch_target ? ctrl.branch_target : ctrl.jump_target;
 
-        // Two successive conditional branches use the previous branch's
-        // selected next PC as the second branch's delay instruction.
-        // This is a hardware-observed R5900 behavior, not portable MIPS.
+        // Integer and branch-likely pairs use the preceding selected PC
+        // as the second branch's slot. Ordinary BC1F/T chains have a
+        // distinct observed sequential-slot behavior (see below).
+        // These R5900 cases are not portable MIPS.
         const auto pair_branch = [](const ee::s_ee_instruction& ins)
         {
             if (ins.valid != ee::e_ee_valid::VALID ||
@@ -3329,6 +3330,91 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                 m_out += "  ret i32 " + std::to_string(reason) + "\n";
             };
             const std::string prefix = "nested_branch_" + std::to_string(m_temp_counter++);
+            const auto ordinary_cop1_branch = [&](const ee::s_ee_instruction& ins)
+            {
+                return pair_branch(ins) && ins.opcode == e_ee_opcode::OP_COP1 &&
+                    !ins.branch_likely;
+            };
+            if (ordinary_cop1_branch(ctrl) && ordinary_cop1_branch(inner))
+            {
+                // The original hardware probe distinguishes BC1T (four
+                // consecutive taken branches select the last target) from
+                // BC1TL (the second target). PCSX2's ordinary interpreter
+                // recursively executes sequential slots for taken BC1F/T.
+                // No branch in a contiguous ordinary COP1 chain changes
+                // FCC0, so emit two paths for the sampled condition. Each
+                // path counts only the branches it actually executes.
+                const std::string condition = make_cond(ctrl);
+                store_dirty_regs(all);
+                const std::string taken_label = prefix + "_cop1_taken";
+                const std::string not_taken_label = prefix + "_cop1_not_taken";
+                m_out += "  br i1 " + condition + ", label %" +
+                    taken_label + ", label %" + not_taken_label + "\n";
+
+                const auto emit_cop1_chain = [&](bool fcc, const std::string& label)
+                {
+                    reset_tracking();
+                    m_out += label + ":\n";
+                    uint32_t pc = ctrl.pc;
+                    uint32_t pending_target = 0u;
+                    bool pending = false;
+                    constexpr uint32_t k_max_chain_branches = 64u;
+                    for (uint32_t n = 0u; n < k_max_chain_branches; ++n)
+                    {
+                        const auto it = insn_map->find(pc);
+                        if (it == insn_map->end())
+                        {
+                            dispatch(pc, pending ? 4u : 3u);
+                            return;
+                        }
+                        const auto& ins = it->second;
+                        if (!ordinary_cop1_branch(ins))
+                        {
+                            if (!pending)
+                            {
+                                // No pending transfer: dispatch normally
+                                // at the first instruction outside the
+                                // chain (including another branch type).
+                                dispatch(pc, 3u);
+                                return;
+                            }
+                            if (!safe_slot(ins))
+                            {
+                                dispatch(pc, 4u);
+                                return;
+                            }
+                            emit_insn(ins, false, 0u, true);
+                            store_dirty_regs(all);
+                            dispatch(pending_target, 3u);
+                            return;
+                        }
+                        count(ins);
+                        const bool taken = fcc == ((ins.rt & 1u) != 0u);
+                        if (taken)
+                        {
+                            pending_target = ins.branch_target;
+                            pending = true;
+                        }
+                        else if (pending)
+                        {
+                            // A not-taken ordinary branch in a taken
+                            // branch's slot ends that recursive transfer.
+                            dispatch(pending_target, 3u);
+                            return;
+                        }
+                        pc += 4u;
+                    }
+                    // Refuse an excessively deep pending transfer rather
+                    // than losing its delay state at a dispatcher boundary.
+                    dispatch(pc, pending ? 4u : 3u);
+                };
+
+                const bool taken_fcc = (ctrl.rt & 1u) != 0u;
+                emit_cop1_chain(taken_fcc, taken_label);
+                emit_cop1_chain(!taken_fcc, not_taken_label);
+                return;
+            }
+
             count(ctrl);
             const std::string outer_cond = make_cond(ctrl);
             write_link(ctrl);

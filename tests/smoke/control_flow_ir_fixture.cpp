@@ -78,7 +78,8 @@ int main(int argc, char** argv)
         function_name = "guest_jr_daddu_return_test";
     }
     else if (mode == "nested_beq" || mode == "nested_bc1t" ||
-             mode == "nested_bc1tl")
+             mode == "nested_bc1tl" || mode == "nested_bc1t_chain" ||
+             mode == "nested_bc1t_mixed")
     {
         // Outer target and sequential path have distinct delay effects.
         // The inner target is intentionally an external dispatcher PC.
@@ -86,7 +87,7 @@ int main(int argc, char** argv)
         control_word = mode == "nested_beq" ? make_i(0x04, 2, 0, 4) :
             make_i(0x11, 8, rt, 4);
         delay_word = mode == "nested_beq" ? make_i(0x04, 3, 0, 7) :
-            make_i(0x11, 8, rt, 7);
+            make_i(0x11, 8, mode == "nested_bc1t_mixed" ? 0u : rt, 7);
         function_name = "guest_nested_branch_test";
     }
     else if (mode == "branch_liveness")
@@ -280,13 +281,26 @@ int main(int argc, char** argv)
     insn_map.emplace(control.pc, control);
     insn_map.emplace(delay.pc, delay);
     const bool nested_pair = mode == "nested_beq" || mode == "nested_bc1t" ||
-        mode == "nested_bc1tl";
+        mode == "nested_bc1tl" || mode == "nested_bc1t_chain" ||
+        mode == "nested_bc1t_mixed";
     if (nested_pair)
     {
         // Distinct source operands prove the selected delay instruction
         // actually executes, rather than just taking the inner edge.
-        insn_map.emplace(entry_pc + 8u,
-            ee::decode(entry_pc + 8u, make_i(0x09, 4, 4, 1)));
+        if (mode == "nested_bc1t_chain")
+        {
+            insn_map.emplace(entry_pc + 8u,
+                ee::decode(entry_pc + 8u, make_i(0x11, 8, 1, 7)));
+            insn_map.emplace(entry_pc + 12u,
+                ee::decode(entry_pc + 12u, make_i(0x11, 8, 1, 7)));
+            insn_map.emplace(entry_pc + 16u,
+                ee::decode(entry_pc + 16u, make_i(0x09, 4, 4, 4)));
+        }
+        else
+        {
+            insn_map.emplace(entry_pc + 8u,
+                ee::decode(entry_pc + 8u, make_i(0x09, 4, 4, 1)));
+        }
         insn_map.emplace(entry_pc + 20u,
             ee::decode(entry_pc + 20u, make_i(0x09, 4, 4, 2)));
     }
