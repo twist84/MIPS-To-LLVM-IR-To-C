@@ -330,3 +330,24 @@ the counter/timer path or synthesize any VIF1 completion.
 Next: independent hardware accuracy coverage, starting with the
 existing R5900/COP0/COP1/VU and SPU2 reference/differential tests.
 Keep the proven compatibility behavior separate from hardware claims.
+
+## Batch 8: hardware-backed COP1 control-register coverage
+
+All four workflows passed on `facadd76`. Reference source:
+[ps2autotests fcr.cpp](https://github.com/unknownbrackets/ps2autotests/blob/97469ffbed8631277b94e28d01dabd702aa97ef3/tests/cpu/ee_fpu/fcr.cpp)
+and [fcr.expected](https://github.com/unknownbrackets/ps2autotests/blob/97469ffbed8631277b94e28d01dabd702aa97ef3/tests/cpu/ee_fpu/fcr.expected).
+The existing JIT test sampled read aliases 0, 15, 16, 31 and an all-ones
+write. Add literal console observations for all 32 read aliases in
+initial and flags-written states, plus all eleven FCR31 write groups.
+Exercise the actual decoded/translated instructions at O0/O3, including
+source GPR upper-half preservation, unrelated GPRs, FCSR read-only
+behavior and ACC/latch preservation. The alternate initial FCSR for
+write groups is an additional software control, not a separate console
+measurement. This is test-only coverage; no production lowering,
+runtime ABI or VU1 changes. CTC1 alias writes and physical timing remain
+separate questions. Passing these fixtures will not validate R5900 timing.
+
+Clarification to the combined replay: GPU-authoritative VRAM mode reads
+back GPU state for display diagnostics. Matching PPM bytes are not
+independent CPU-versus-GPU rasterizer proof; the existing independent
+CPU reference and differential fixtures remain necessary.
