@@ -8778,6 +8778,23 @@ int main(int argc, char** argv)
         {
             std::fprintf(stderr, "EE idle loop: pc=0x%08x %s\n",
                          item.first, item.second.reason);
+            const auto& shape = item.second;
+            if (shape.carried_read_register != 0u)
+            {
+                std::fprintf(stderr,
+                    "EE idle loop dependency: header=0x%08x read_pc=0x%08x gpr=%u\n",
+                    item.first, shape.carried_read_pc, shape.carried_read_register);
+            }
+            if (!shape.eligible)
+            {
+                for (size_t i = 0u; i < shape.words.size(); ++i)
+                {
+                    std::fprintf(stderr,
+                        "EE idle loop word: pc=0x%08x word=0x%08x\n",
+                        shape.header_pc + static_cast<uint32_t>(4u * i),
+                        shape.words[i]);
+                }
+            }
         }
     }
     if (profile_pcs && !pc_profile.entries().empty())
