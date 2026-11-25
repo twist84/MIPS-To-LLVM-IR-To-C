@@ -561,7 +561,34 @@ def test_guest_rpc_snapshots_in_cached_probe():
     assert "index < 129u" in runner
 
 
+def test_replay_provenance():
+    env = {"SDBZ_IOP_FAST_QUIET_TURNS": "1", "SDBZ_EE_OPT": "5",
+           "UNRELATED_SECRET": "must-not-be-captured"}
+    with patch.object(SESSION.subprocess, "run", side_effect=[
+        SimpleNamespace(returncode=0, stdout="a" * 40 + "\n"),
+        SimpleNamespace(returncode=0, stdout=" M src/file.cpp\n"),
+    ]) as run:
+        record = SESSION.capture_replay_provenance(ROOT, env, 10, 40)
+    assert record["git_head"] == "a" * 40
+    assert record["tracked_tree_dirty"] is True
+    assert record["max_replay_dispatches"] == 40
+    assert record["max_expansion_dispatches"] == 10
+    assert record["environment"]["SDBZ_IOP_FAST_QUIET_TURNS"] == "1"
+    assert record["environment"]["SDBZ_IOP_COALESCE_IDLE_TURNS"] is None
+    assert "UNRELATED_SECRET" not in record["environment"]
+    assert run.call_args_list[1].args[0][-1] == "--untracked-files=no"
+    with patch.object(SESSION.subprocess, "run", side_effect=OSError("no git")):
+        unavailable = SESSION.capture_replay_provenance(ROOT, {}, None, None)
+    assert unavailable["git_head"] is None
+    assert unavailable["tracked_tree_dirty"] is None
+    with patch.object(SESSION.subprocess, "run", return_value=
+                      SimpleNamespace(returncode=0, stdout="")):
+        clean = SESSION.capture_replay_provenance(ROOT, {}, None, None)
+    assert clean["tracked_tree_dirty"] is False
+
+
 def main():
+    test_replay_provenance()
     # Independent phase limits, legacy fallback, and quick probe routing.
     for limits in (
         ("--max-expansion-dispatches=2000", "--max-replay-dispatches=4000"),
@@ -848,6 +875,8 @@ def main():
             ')\n'
             'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
     assert 'call "%~f0" %*\nexit /b %ERRORLEVEL%' in launcher_text
+    assert "--replay-provenance ^" in launcher_text
+    assert "'first-boot.json','replay-provenance.json'" in launcher_text
 
     # Exercise real CMD backward jumps through all three launcher options.
     # Resolve-only uses a synthetic disc and stops before configuring tools,
