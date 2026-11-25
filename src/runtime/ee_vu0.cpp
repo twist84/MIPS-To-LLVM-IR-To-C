@@ -914,6 +914,99 @@ void vu0_record_lower_fmac(s_ee_vu0_state* vu0, uint32_t reg, uint32_t lanes)
     issue.m_lane_mask = reg != 0 ? lanes : 0u;
 }
 
+// Forward declarations of the shared raw VF accessors below.
+uint32_t vu0_fmac_read_vf(const s_ee_cpu_state* cpu, uint32_t index, uint32_t lane);
+
+uint32_t vu0_clip_result(const s_ee_cpu_state* cpu, uint32_t fs,
+                         uint32_t ft, uint32_t previous)
+{
+    // Compare raw signed magnitudes, not host IEEE floats. A denormal
+    // threshold is treated as the largest denormal; exponent 255 retains
+    // its magnitude rather than collapsing distinct bit patterns.
+    const uint32_t w = vu0_fmac_read_vf(cpu, ft, 3u);
+    const uint32_t limit = (w & 0x7f800000u) != 0u
+        ? w & 0x7fffffffu : 0x007fffffu;
+    uint32_t result = (previous << 6u) & 0x00ffffffu;
+    for (uint32_t lane = 0; lane < 3u; ++lane)
+    {
+        const uint32_t bits = vu0_fmac_read_vf(cpu, fs, lane);
+        if ((bits & 0x7fffffffu) > limit)
+        {
+            result |= ((bits & 0x80000000u) != 0u ? 2u : 1u) << (lane * 2u);
+        }
+    }
+    return result;
+}
+
+void vu0_stall_vf_read(s_ee_vu0_state* vu0, uint32_t reg, uint32_t lanes)
+{
+    if (reg == 0u)
+    {
+        return;
+    }
+    for (const auto& issue : vu0->m_vf_memory_issues)
+    {
+        if (issue.m_register == reg && (issue.m_lane_mask & lanes) != 0u &&
+            issue.m_ready_cycle > vu0->m_cycle)
+        {
+            vu0->m_cycle = issue.m_ready_cycle;
+        }
+    }
+}
+
+void vu0_retire_clip(s_ee_vu0_state* vu0)
+{
+    // Several entries can mature during a dependency stall. Publish them
+    // in issue order so the newest matured history remains visible.
+    for (;;)
+    {
+        s_ee_vu0_state::s_clip_issue* oldest = nullptr;
+        for (auto& issue : vu0->m_clip_issues)
+        {
+            if (issue.m_ready_cycle != 0u && issue.m_ready_cycle <= vu0->m_cycle &&
+                (oldest == nullptr || issue.m_ready_cycle < oldest->m_ready_cycle))
+            {
+                oldest = &issue;
+            }
+        }
+        if (oldest == nullptr)
+        {
+            break;
+        }
+        vu0->m_clip_flags = oldest->m_value;
+        vu0->m_vi[18] = oldest->m_value;
+        *oldest = {};
+    }
+}
+
+uint32_t vu0_latest_clip(const s_ee_vu0_state* vu0)
+{
+    uint64_t latest = 0u;
+    uint32_t value = vu0->m_clip_flags;
+    for (const auto& issue : vu0->m_clip_issues)
+    {
+        if (issue.m_ready_cycle > latest)
+        {
+            latest = issue.m_ready_cycle;
+            value = issue.m_value;
+        }
+    }
+    return value;
+}
+
+bool vu0_issue_clip(s_ee_vu0_state* vu0, uint32_t value)
+{
+    for (auto& issue : vu0->m_clip_issues)
+    {
+        if (issue.m_ready_cycle == 0u)
+        {
+            issue = {vu0->m_cycle + 4u, value, 0u};
+            return true;
+        }
+    }
+    return false;
+}
+
 bool vu0_is_supported_lower_memory(const s_ee_vu0_micro_instruction& instruction)
 {
     using op = e_ee_vu0_micro_opcode;
@@ -1512,10 +1605,14 @@ uint32_t ee_vu0_execute_ialu_callback(
         // Only ordinary 4 KB VU0 data memory is supported. PCSX2 maps
         // addresses with bit 14 set into VU1 registers; those must be handled
         // by the host rather than aliased into the ordinary VU0 data array.
-        // I/D/T flags and non-NOP upper operations remain unsupported.
+        // CLIP has no VF destination and can safely pair with the
+        // supported lower operations. Other upper forms still fail closed.
+        const bool upper_clip = instruction.m_upper_fields.m_operation ==
+            e_ee_vu0_micro_opcode::CLIP;
         if ((instruction.m_flags &
              (EE_VU0_MICRO_FLAG_I | EE_VU0_MICRO_FLAG_D | EE_VU0_MICRO_FLAG_T)) != 0 ||
-            instruction.m_upper_fields.m_operation != e_ee_vu0_micro_opcode::NOP ||
+            (!upper_clip && instruction.m_upper_fields.m_operation !=
+                e_ee_vu0_micro_opcode::NOP) ||
             (!lower_ialu && !lower_branch && !lower_memory && !lower_flag_read && !lower_nop) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
@@ -1556,6 +1653,11 @@ uint32_t ee_vu0_execute_ialu_callback(
                 }
             }
         }
+        if (upper_clip)
+        {
+            vu0_stall_vf_read(vu0, instruction.m_upper_fields.m_fs, 14u);
+            vu0_stall_vf_read(vu0, instruction.m_upper_fields.m_ft, 1u);
+        }
         // PCSX2 only tests IALU read dependencies for VUPIPE_BRANCH.
         // ILW/ISW are VUPIPE_IALU: loads reserve their destination for
         // four cycles, but an adjacent store does not stall on that pipe.
@@ -1579,6 +1681,18 @@ uint32_t ee_vu0_execute_ialu_callback(
             vu0->m_micro_pc = pair_pc;
             return retire_result;
         }
+
+        vu0_retire_clip(vu0);
+        if (upper_clip && vu0->m_cycle > UINT64_MAX - 4u)
+        {
+            vu0->m_micro_pc = pair_pc;
+            return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+        }
+        // Sample upper VF operands before the lower half writes them.
+        const uint32_t clip_result = upper_clip
+            ? vu0_clip_result(cpu, instruction.m_upper_fields.m_fs,
+                instruction.m_upper_fields.m_ft, vu0_latest_clip(vu0))
+            : 0u;
 
         // Match _vu0Exec: VIBackupCycles is aged after lower-pipe stalls and
         // pipe retirement, but before the actual lower-op handler. A stalled
@@ -1659,6 +1773,21 @@ uint32_t ee_vu0_execute_ialu_callback(
             vu0_apply_lower_branch(vu0, branch_action);
         }
 
+        if (upper_clip)
+        {
+            // Lower flag reads in this pair observe only retired history.
+            if (!vu0_issue_clip(vu0, clip_result))
+            {
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+            // A pair with a lower FMAC reservation already owns one slot.
+            // CLIP itself has no VF destination, so do not overwrite it.
+            if (vu0->m_vf_memory_ready_cycle != vu0->m_cycle + 4u)
+            {
+                vu0_record_lower_fmac(vu0, 0u, 0u);
+            }
+        }
+
         ++executed;
 
         // Branch issue/retirement is a two-pair pipeline. A branch in an
@@ -1689,6 +1818,7 @@ uint32_t ee_vu0_execute_ialu_callback(
                 {
                     vu0->m_cycle = vu0->m_vf_memory_ready_cycle;
                 }
+                vu0_retire_clip(vu0);
                 vu0->m_vf_memory_ready_cycle = 0;
                 const uint32_t flush_result = ee_vu0_ialu_flush_all(vu0);
                 if (flush_result != static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE))
@@ -2535,15 +2665,7 @@ extern "C" uint32_t ee_vu0_macro_fmac(
         return complete;
     case 0x1fu: // VCLIPw.xyz fs, ft: six judgement bits per call.
     {
-        const float limit = std::fabs(
-            vu0_fmac_operand(vu0_fmac_read_vf(cpu, ft, 3u)));
-        uint32_t clip = (vu0->m_clip_flags << 6u) & 0x00ffffffu;
-        for (uint32_t lane = 0; lane < 3; ++lane)
-        {
-            const float value = vu0_fmac_operand(vu0_fmac_lane(source, lane));
-            if (value > limit) clip |= 1u << (lane * 2u);
-            if (value < -limit) clip |= 2u << (lane * 2u);
-        }
+        const uint32_t clip = vu0_clip_result(cpu, fs, ft, vu0->m_clip_flags);
         vu0->m_clip_flags = clip;
         vu0->m_vi[18] = clip;
         return complete;

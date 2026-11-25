@@ -334,7 +334,8 @@ static_assert(offsetof(ee::s_ee_vu0_state, m_vf_memory_issue_index) == 8608);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_ready_cycle) == 8616);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending_bits) == 8624);
 static_assert(offsetof(ee::s_ee_vu0_state, m_q_pending) == 8628);
-static_assert(sizeof(ee::s_ee_vu0_state) == 8640);
+static_assert(offsetof(ee::s_ee_vu0_state, m_clip_issues) == 8632);
+static_assert(sizeof(ee::s_ee_vu0_state) == 8704);
 
 int main()
 {
@@ -413,6 +414,40 @@ int main()
               flag_vu.m_vi[3] == 0xa65u && flag_vu.m_vi[0] == 0xdeadbeefu &&
               flag_vu.m_cycle == 8u,
               "VU0 flag reads, VI0 and lower NOP/E completion");
+    }
+
+    // Four consecutive upper CLIP/lower FCGET pairs and six readbacks.
+    // Expected history comes from the original console upper/clip Multi
+    // test, with the real four-cycle delay and no transcript substitution.
+    {
+        ee::s_ee_cpu_state clip_cpu{};
+        ee::s_ee_vu0_state clip_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        clip_vu.m_vpu_status = 1u;
+        clip_cpu.m_vu0[1] = {0x4000000040000000ull, 0x4000000040000000ull};
+        clip_cpu.m_vu0[2] = {0xc0000000c0000000ull, 0xc0000000c0000000ull};
+        clip_cpu.m_vu0[3] = {0xc000000040000000ull, 0xc000000040000000ull};
+        clip_cpu.m_vu0[4] = {0x40000000c0000000ull, 0x40000000c0000000ull};
+        for (uint32_t i = 0; i < 10u; ++i)
+        {
+            const uint32_t fcget = (0x1cu << 25u) | ((i + 1u) << 16u);
+            const uint32_t upper = i < 4u
+                ? (14u << 21u) | ((i + 1u) << 11u) | (7u << 6u) | 0x3fu
+                : make_vu0_upper_nop(i == 8u ? 0x40000000u : 0u);
+            install_vu0_pair(&clip_vu, i, fcget, upper);
+        }
+        const uint32_t expected[] = {0, 0, 0, 0, 0x15, 0x56a, 0xa99,
+                                      0x666, 0x666, 0x666};
+        const uint32_t result = ee::ee_vu0_execute_ialu_callback(
+            &engine, &clip_cpu, &clip_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              clip_vu.m_running == 0u && clip_vu.m_cycle == 14u,
+              "CLIP pair engine stops and flushes at E");
+        for (uint32_t i = 0; i < 10u; ++i)
+        {
+            check(clip_vu.m_vi[i + 1u] == expected[i],
+                  "CLIP/FCGET four-cycle history");
+        }
     }
 
     // VU0 microcode is a 4 KB byte-addressed store of paired

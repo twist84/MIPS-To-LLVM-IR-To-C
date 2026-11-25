@@ -100,10 +100,21 @@ struct alignas(16) s_ee_vu0_state
     uint64_t m_q_ready_cycle;
     uint32_t m_q_pending_bits;
     uint32_t m_q_pending;
+
+    // Upper CLIP results become visible to lower flag reads four VU
+    // cycles after issue. Keep the history of in-flight clip results.
+    struct s_clip_issue
+    {
+        uint64_t m_ready_cycle;
+        uint32_t m_value;
+        uint32_t m_padding;
+    };
+    s_clip_issue m_clip_issues[4];
 };
 
 static_assert(offsetof(s_ee_vu0_state, m_q_ready_cycle) == 8616);
-static_assert(sizeof(s_ee_vu0_state) == 8640);
+static_assert(offsetof(s_ee_vu0_state, m_clip_issues) == 8632);
+static_assert(sizeof(s_ee_vu0_state) == 8704);
 
 // Architectural EE CPU state. GPRs are 128 bits wide in the lifter (i128);
 // the runtime stores them as two 64-bit halves. Scalar instructions may write

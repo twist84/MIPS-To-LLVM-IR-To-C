@@ -51,7 +51,7 @@ and result.json. Default exit is nonzero unless every selected output
 matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
 pilot uses separate EE and VU matrix runners with two tests and one emit
-worker per test; it includes the original six ELFs plus funnel, shuffle, cpcond and performance.
+worker per test; it includes the original six ELFs plus funnel, shuffle, cpcond, performance and clip.
 Manually dispatch Build and test with autotests_full enabled to run all
 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
 with transcripts and a summary; these are observational artifacts,
@@ -284,3 +284,20 @@ reference-compatibility scheduler is not a validated R5900 cycle source;
 active processor-cycle events fail closed rather than interpreting guest
 attempts as cycles. The original performance test is expected to remain
 incomplete until that timing producer is wired. No transcript exemption.
+
+## VU0 upper CLIP and delayed readback
+
+The original upper/clip test pairs consecutive CLIP operations with FCGET
+and checks a four-cycle visibility delay. Share raw signed-magnitude
+CLIP judgement with macro mode, retaining exponent-255 bit patterns
+and treating a denormal W threshold as the largest denormal. Micro CLIP
+reads VF xyz and ft.w with lane-specific FMAC dependencies; its result
+shifts the latest issued history, but FCGET observes only matured flags.
+Keep four pending results and retire them in issue order, including E
+flush. Sample VF operands before lower writes. Other upper operations
+and I/D/T flags remain unsupported. Regression includes original Multi
+sequence; original clip ELF added to observational CI. No new pass claimed.
+
+Performance pilot at fbd2464 remained INCOMPLETE, as expected without a
+validated timing producer. All four workflows passed; six EE/DMA passes
+remain confirmed.
