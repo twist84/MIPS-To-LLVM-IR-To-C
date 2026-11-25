@@ -521,6 +521,22 @@ int main()
               result.guest_pc == 0x00102000u,
               "single-slice dispatch preserves budget, terminal exits and exact ownership");
 
+        check(ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100008u, caller_entry) == 0x00100000u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100010u, callee_entry) == 0x00100010u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100008u, callee_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100004u, caller_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100050u, nullptr) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0u, caller_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr({}, index,
+                  0x00100000u, caller_entry) == 0u,
+              "native owner identity rejects wrong pointers, holes and sentinel");
+
         bool direct_same = true;
         for (uint32_t pc : {0u, 0x00100000u, 0x00100008u, 0x00100010u,
                             0x00100020u, 0x00100030u, 0x00100040u})
