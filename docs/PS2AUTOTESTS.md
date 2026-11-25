@@ -475,3 +475,126 @@ field, so the state ABI is unchanged. Flag readers observe the previous
 values until the four-cycle reservation matures. A synthetic pair test
 covers both setters and E drain; more mixed FDIV/FSSET differential
 coverage remains necessary.
+
+## Full Linux CI baseline (4ea67e5, 2026-11-25 14:46 UTC)
+
+[Workflow run 45637108081](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45637108081),
+[combined summary artifact 15034111577](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45637108081/artifacts/15034111577).
+PR head `4ea67e57ac1b42e50d53d51f46dcdcc6ab3d1f4c`; actual tested checkout is the PR merge commit
+`6fa80c5c366c9d427474c172684642ec00f1f256`.
+All five PR workflows and all eight original-autotest jobs succeeded.
+The following rows are taken from the aggregation job log, not inferred
+from earlier pilots. This replaces cumulative historical counts as the
+current full-suite baseline.
+
+### Recorded outcomes
+
+Revision: `6fa80c5c366c9d427474c172684642ec00f1f256`
+
+**27/55 exact transcripts (49.09%)**
+
+PASS: 27 | DIFF: 12 | INCOMPLETE: 16 | NO_OUTPUT: 0 | ERROR: 0
+
+| Test | Status | Stop | PC | Dispatches |
+|---|---|---|---|---:|
+| cpu/ee/alu | PASS | EXCEPTION | 0x80000180 | 278578 |
+| cpu/ee/branch | PASS | EXCEPTION | 0x80000180 | 113978 |
+| cpu/ee/branchdelay | DIFF | EXCEPTION | 0x80000180 | 2831 |
+| cpu/ee/lsu | PASS | EXCEPTION | 0x80000180 | 67077 |
+| cpu/ee/lsudelay | PASS | EXCEPTION | 0x80000180 | 1947 |
+| cpu/ee/muldiv | PASS | EXCEPTION | 0x80000180 | 435078 |
+| cpu/ee_cop0/performance | INCOMPLETE | UNSUPPORTED | 0x00100728 | 8193 |
+| cpu/ee_fpu/arithmetic | PASS | EXCEPTION | 0x80000180 | 605920 |
+| cpu/ee_fpu/branch | PASS | EXCEPTION | 0x80000180 | 8197 |
+| cpu/ee_fpu/branchdelay | DIFF | EXCEPTION | 0x80000180 | 1981 |
+| cpu/ee_fpu/compare | PASS | EXCEPTION | 0x80000180 | 247981 |
+| cpu/ee_fpu/convert | PASS | EXCEPTION | 0x80000180 | 94875 |
+| cpu/ee_fpu/fcr | PASS | EXCEPTION | 0x80000180 | 27695 |
+| cpu/ee_fpu/muldiv | INCOMPLETE | DISPATCH | 0x00129830 | 1000000 |
+| cpu/ee_fpu/sqrt | PASS | EXCEPTION | 0x80000180 | 120636 |
+| cpu/ee_fpu/transfer | PASS | EXCEPTION | 0x80000180 | 13569 |
+| cpu/ee_simd/arithmetic | PASS | EXCEPTION | 0x80000180 | 277556 |
+| cpu/ee_simd/compare | PASS | EXCEPTION | 0x80000180 | 68679 |
+| cpu/ee_simd/funnel | PASS | EXCEPTION | 0x80000180 | 18953 |
+| cpu/ee_simd/logic | PASS | EXCEPTION | 0x80000180 | 144834 |
+| cpu/ee_simd/muldiv | PASS | EXCEPTION | 0x80000180 | 679774 |
+| cpu/ee_simd/shuffle | PASS | EXCEPTION | 0x80000180 | 237006 |
+| cpu/vu0_macro/integer | PASS | EXCEPTION | 0x80000180 | 38275 |
+| cpu/vu0_macro/transfer | INCOMPLETE | UNSUPPORTED | 0x00100544 | 8545 |
+| dma/dmac/cpcond | PASS | UNSUPPORTED | 0xffffffe0 | 1851 |
+| dma/dmac/tagintr | PASS | UNSUPPORTED | 0xffffffe0 | 2999 |
+| dma/spr/chain | DIFF | UNSUPPORTED | 0xffffffe0 | 5149 |
+| dma/spr/interleave | PASS | UNSUPPORTED | 0xffffffe0 | 141287 |
+| dma/spr/normal | DIFF | UNSUPPORTED | 0xffffffe0 | 10494 |
+| dma/vif/basic | DIFF | UNSUPPORTED | 0xffffffe0 | 3598 |
+| dma/vif/intstall | DIFF | UNSUPPORTED | 0xffffffe0 | 5912 |
+| dma/vif/mskpath3 | DIFF | UNSUPPORTED | 0xffffffe0 | 2186 |
+| dma/vif/stcycl | INCOMPLETE | RETURN | 0x0010ef60 | 1000000 |
+| dma/vif/stmod | DIFF | UNSUPPORTED | 0xffffffe0 | 31166 |
+| dma/vif/unpack | DIFF | UNSUPPORTED | 0xffffffe0 | 26748 |
+| gs/label | INCOMPLETE | EXCEPTION | 0x80000180 | 3449 |
+| gs/signal | INCOMPLETE | EXCEPTION | 0x80000180 | 3470 |
+| kernel/ee/interrupt/dmac_order | PASS | EXCEPTION | 0x80000180 | 10001 |
+| kernel/ee/interrupt/intc_order | INCOMPLETE | EXCEPTION | 0x80000180 | 1276 |
+| kernel/ee/thread/delete | INCOMPLETE | EXCEPTION | 0x80000180 | 1198 |
+| kernel/ee/thread/exit | INCOMPLETE | EXCEPTION | 0x80000180 | 1211 |
+| kernel/ee/thread/resume | INCOMPLETE | EXCEPTION | 0x80000180 | 1856 |
+| kernel/ee/thread/sleep | INCOMPLETE | EXCEPTION | 0x80000180 | 1195 |
+| kernel/ee/thread/stat | INCOMPLETE | EXCEPTION | 0x80000180 | 2081 |
+| kernel/ee/thread/suspend | INCOMPLETE | UNSUPPORTED | 0xffffffe0 | 1785 |
+| kernel/ee/thread/terminate | INCOMPLETE | EXCEPTION | 0x80000180 | 1198 |
+| kernel/ee/thread/wakeup | INCOMPLETE | EXCEPTION | 0x80000180 | 2012 |
+| memory/ee/default | DIFF | UNSUPPORTED | 0xffffffe0 | 2575 |
+| vu/games/triace | PASS | EXCEPTION | 0x80000180 | 6710 |
+| vu/lower/branch | PASS | UNSUPPORTED | 0xffffffe0 | 4322 |
+| vu/lower/efu | INCOMPLETE | HOST_YIELD | 0x001128e0 | 76763 |
+| vu/lower/fdivdelay | DIFF | UNSUPPORTED | 0xffffffe0 | 630717 |
+| vu/lower/integer | PASS | EXCEPTION | 0x80000180 | 162309 |
+| vu/lower/random | DIFF | UNSUPPORTED | 0xffffffe0 | 112360 |
+| vu/upper/clip | PASS | UNSUPPORTED | 0xffffffe0 | 22464 |
+
+### Reproducing CI inspection
+
+From the repository root with authenticated GitHub CLI (Windows CMD):
+
+```bat
+gh pr view 156 --json headRefOid,headRefName,state,mergeable,statusCheckRollup
+gh pr checks 156
+gh run list --commit 4ea67e57ac1b42e50d53d51f46dcdcc6ab3d1f4c --event pull_request --limit 20
+gh run view 45637108081 --json jobs,headSha,status,conclusion
+gh run view 45637108081 --job 139287320007 --log
+gh run download 45637108081 --name ps2autotests-summary --dir build/ci-autotests/45637108081
+type build\ci-autotests\45637108081\summary.md
+```
+
+For a later revision, substitute the new PR head, workflow run and job
+IDs; use `gh run view <run-id> --log-failed` for infrastructure failures.
+Download all shard artifacts with `gh run download <run-id> --pattern "ps2autotests-*"`
+into a separate run-specific directory. Never aggregate the combined
+summary together with the six shard summaries.
+
+### Result-recording contract
+
+Keep the unmodified combined summary.json as the canonical machine-readable
+record: runtime_revision (actual checkout), reference_revision,
+native_tool_sha256, suite_total, selected, counts and results. Record PR
+head, CI run ID/URL, run attempt if available, platform, and UTC timestamp
+alongside it. Each result retains its original name, status, exit_name,
+final_pc, dispatches and all other harness fields. Preserve the per-test
+guest output, diff and runner report as evidence; do not replace them with
+the compact table. Each of the 55 pinned names must appear exactly once.
+Report all five status counts even when zero; a selected run or cumulative
+historical match list is not a full-suite score. Compare two complete
+runs by test name and report both newly passing and regressed names.
+Do not conflate a PASS transcript with a successful guest exit.
+
+### Next failure investigation
+
+VU branch and triace already match at this revision. The remaining VU
+failures are macro transfer (CMSAR1), EFU, FDIV delay and random. VU0
+dual-issue arbitration remains an independently motivated accuracy audit,
+not a proven blocker for these four original ELFs. DMA/VIF and kernel
+lifecycle account for the largest clusters of remaining failures; inspect
+actual guest diffs and stop reports before changing device behavior.
+COP1 muldiv and VIF STCYCL hit the dispatch limit and require targeted
+budget/loop investigation before attributing their failures to arithmetic.
