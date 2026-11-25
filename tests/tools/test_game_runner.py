@@ -4614,6 +4614,7 @@ def main():
                     "--timeout-seconds=10",
                 ],
                 capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="0"),
             )
             assert result.returncode == 0 or result.returncode == 3, (
                 result.stdout, result.stderr
@@ -4629,6 +4630,33 @@ def main():
             assert "guest host loop yield cap reached" not in result.stderr, (
                 result.stdout, result.stderr
             )
+
+            assert "EE horizon:" not in result.stderr, result.stderr
+            shadow_report = root / "timer0-shadow.json"
+            shadow = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--no-recompile",
+                "--functions=entry", "--max-dispatches=16",
+                "--loop-budget=5000", "--loop-yield-resumes=1",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--report", str(shadow_report), "--timeout-seconds=10",
+            ], capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="1"))
+            assert shadow.returncode == result.returncode, shadow.stdout + shadow.stderr
+            observed = json.loads(shadow_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert observed[key] == snapshot[key], key
+            lines = [line for line in shadow.stderr.splitlines()
+                     if line.startswith("EE horizon:")]
+            assert len(lines) == 7 and "shadow_only=1" in lines[0], lines
+            counts = [dict(token.split("=") for token in line.split()[2:])
+                      for line in lines[1:]]
+            assert sum(int(row["samples"]) for row in counts) > 0, lines
+            assert all(int(row["samples"]) == int(row["before"]) + int(row["reached"])
+                       for row in counts), lines
 
         with tempfile.TemporaryDirectory(prefix="ee-native-idle-timer-") as tmp:
             root = Path(tmp)
