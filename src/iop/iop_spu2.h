@@ -9,7 +9,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// Stereo PCM mixer and guest-visible mixer rings; reverb remains unimplemented.
+// Stereo PCM mixer, guest-visible mixer rings and half-rate reverb.
 class c_spu2
 {
 public:
@@ -29,7 +29,7 @@ public:
     // Count elapsed guest cycles, not generated audio frames or host time.
     // Returns newly latched playback IRQ core bits (zero if none).
     uint32_t advance_cycles(uint32_t cycles);
-    // Earliest possible voice/input fetch or mixer-ring IRQ edge.
+    // Earliest possible voice/input fetch, mixer-ring or effect IRQ edge.
     // Zero means no pending playback IRQ opportunity.
     uint32_t voice_irq_cycles_remaining() const;
     uint64_t playback_irq_events() const { return m_playback_irq_events; }
@@ -127,6 +127,14 @@ public:
     // precede the reflection and APF writes. Clocking is external.
     bool process_effect_channel(uint32_t core, uint32_t channel,
         uint64_t step, int16_t input, int16_t* output);
+    uint64_t effect_ticks(uint32_t core) const
+    {
+        return core < 2u ? m_cores[core].m_effect_ticks : 0u;
+    }
+    uint64_t effect_return_frames(uint32_t core) const
+    {
+        return core < 2u ? m_cores[core].m_effect_return_frames : 0u;
+    }
     uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
@@ -182,6 +190,11 @@ private:
         // IIR, COMB1..4, WALL, APF1/2, input L/R coefficients.
         uint16_t m_effect_coefficients[10]{};
         uint64_t m_effect_enable_writes = 0u;
+        uint64_t m_effect_ticks = 0u;
+        uint64_t m_effect_return_frames = 0u;
+        uint32_t m_effect_history_pos = 0u;
+        int16_t m_effect_down[2][64]{};
+        int16_t m_effect_up[2][64]{};
         uint32_t m_irqa = 0x800u;
         uint32_t m_tsa = 0u;
         uint32_t m_endx = 0u;
@@ -201,6 +214,8 @@ private:
     void check_input_irq(uint32_t address, uint32_t words);
     void check_effect_irq(uint32_t address);
     int64_t effect_tap_offset(uint32_t core, uint32_t reg) const;
+    uint32_t effect_irq_cycles_remaining() const;
+    void advance_effect(uint32_t core, const int32_t (&input)[2], int16_t (&output)[2]);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     void mix_frames(uint64_t samples);
     void write_mixer_rings();
@@ -226,6 +241,7 @@ private:
     s_audio_profile_counter m_profile_input_mix{};
     s_audio_profile_counter m_profile_input_dma{};
     s_audio_profile_counter m_profile_rings{};
+    s_audio_profile_counter m_profile_effect{};
     s_audio_profile_counter m_profile_sink{};
     s_audio_profile_counter m_profile_silent_rings{};
 

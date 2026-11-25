@@ -20,6 +20,7 @@ void c_spu2::report_audio_profile() const
         m_profile_input_mix.report("spu2_advance_input");
         m_profile_input_dma.report("spu2_push_input");
         m_profile_rings.report("spu2_write_mixer_rings");
+        m_profile_effect.report("spu2_effect");
         m_profile_sink.report("spu2_pcm_sink");
         m_profile_silent_rings.report("spu2_silent_ring_revolutions");
     }
@@ -96,6 +97,25 @@ int32_t signed_halfword(uint32_t value)
 int16_t clamp_sample(int32_t value)
 {
     return static_cast<int16_t>(std::clamp(value, -32768, 32767));
+}
+
+// Documented SPU half-band 39-tap FIR, represented by its symmetric
+// nonzero even taps and center. The upsampler doubles the gain.
+int16_t resample_effect(const int16_t (&history)[64], uint32_t position, bool up)
+{
+    constexpr int32_t side[10] = {-1, 2, -10, 35, -103, 266, -616, 1332, -2960, 10246};
+    const uint32_t first = (position + 64u - 39u) & 63u;
+    int64_t sum = static_cast<int64_t>(history[(first + 19u) & 63u]) *
+        (up ? 32767 : 16384);
+    for (uint32_t tap = 0u; tap < 10u; ++tap)
+    {
+        const int32_t pair = static_cast<int32_t>(history[(first + tap * 2u) & 63u]) +
+            history[(first + 38u - tap * 2u) & 63u];
+        sum += static_cast<int64_t>(pair) * side[tap] * (up ? 2 : 1);
+    }
+    const int32_t rounded = static_cast<int32_t>(sum >= 0 ? sum >> 15u :
+        -1 - ((-1 - sum) >> 15u));
+    return clamp_sample(rounded);
 }
 
 int32_t master_gain(uint16_t value)
@@ -363,6 +383,108 @@ bool c_spu2::process_effect_channel(uint32_t core, uint32_t channel,
         *output = allpass.m_output;
     }
     return valid;
+}
+
+void c_spu2::advance_effect(uint32_t core, const int32_t (&input)[2],
+    int16_t (&output)[2])
+{
+    if (effect_start(core) < effect_end(core))
+    {
+        c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_effect);
+        s_core& state = m_cores[core];
+        const uint32_t pos = state.m_effect_history_pos;
+        const uint32_t channel = static_cast<uint32_t>(m_mixed_frames & 1u);
+        for (uint32_t c = 0u; c < 2u; ++c)
+        {
+            state.m_effect_down[c][pos] = clamp_sample(input[c]);
+            state.m_effect_up[c][pos] = 0;
+        }
+        int16_t filtered = 0;
+        if (process_effect_channel(core, channel, m_mixed_frames >> 1u,
+            resample_effect(state.m_effect_down[channel], pos, false), &filtered))
+        {
+            ++state.m_effect_ticks;
+            state.m_effect_up[channel][pos] = filtered;
+        }
+        state.m_effect_history_pos = (pos + 1u) & 63u;
+        bool nonzero = false;
+        for (uint32_t c = 0u; c < 2u; ++c)
+        {
+            output[c] = resample_effect(state.m_effect_up[c], state.m_effect_history_pos, true);
+            nonzero |= output[c] != 0;
+        }
+        if (nonzero)
+        {
+            ++state.m_effect_return_frames;
+        }
+    }
+}
+
+uint32_t c_spu2::effect_irq_cycles_remaining() const
+{
+    uint64_t earliest = 0u;
+    // Solve the circular tap address for each physical IRQA alias and
+    // alternating channel. No RAM transaction or IRQ is generated here.
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t start = effect_start(core);
+        const uint32_t end = effect_end(core);
+        if (!effect_enabled(core) || start >= end)
+        {
+            continue;
+        }
+        const uint32_t length = end - start + 1u;
+        for (const s_core& candidate : m_cores)
+        {
+            if ((candidate.m_attr & 0x40u) == 0u || candidate.m_irq)
+            {
+                continue;
+            }
+            for (uint32_t channel = 0u; channel < 2u; ++channel)
+            {
+                const uint32_t shift = channel * 4u;
+                const int64_t same = effect_tap_offset(core, 0x2ecu + shift);
+                const int64_t diff = effect_tap_offset(core, 0x30cu + shift);
+                const int64_t apf1 = effect_tap_offset(core, 0x32cu + shift);
+                const int64_t apf2 = effect_tap_offset(core, 0x334u + shift);
+                const int64_t taps[] = {
+                    effect_tap_offset(core, 0x304u + shift), same, same - 1,
+                    effect_tap_offset(core, 0x328u - shift), diff, diff - 1,
+                    effect_tap_offset(core, 0x2f4u + shift),
+                    effect_tap_offset(core, 0x2fcu + shift),
+                    effect_tap_offset(core, 0x314u + shift),
+                    effect_tap_offset(core, 0x31cu + shift),
+                    apf1, apf1 - effect_tap_offset(core, 0x2e4u),
+                    apf2, apf2 - effect_tap_offset(core, 0x2e8u)};
+                const uint64_t parity = (m_mixed_frames & 1u) ^ channel;
+                const uint64_t step = (m_mixed_frames + parity) >> 1u;
+                for (uint32_t alias = candidate.m_irqa; alias <= end; alias += k_ram_words)
+                {
+                    if (alias < start)
+                    {
+                        continue;
+                    }
+                    for (int64_t tap : taps)
+                    {
+                        int64_t distance = static_cast<int64_t>(alias - start) -
+                            static_cast<int64_t>(step % length) - tap % length;
+                        distance %= length;
+                        if (distance < 0)
+                        {
+                            distance += length;
+                        }
+                        const uint64_t cycles = (static_cast<uint64_t>(distance) * 2u +
+                            parity + 1u) * k_cycles_per_sample - sample_phase();
+                        if (earliest == 0u || cycles < earliest)
+                        {
+                            earliest = cycles;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return static_cast<uint32_t>(std::min<uint64_t>(earliest, 0xffffffffu));
 }
 
 void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
@@ -795,7 +917,11 @@ void c_spu2::mix_frames(uint64_t samples)
     while (samples != 0u)
     {
         const uint32_t offset = static_cast<uint32_t>(m_mixed_frames % k_input_batch);
-        const bool silent = (m_cores[0].m_key_mask | m_cores[1].m_key_mask |
+        const bool effects_valid = effect_start(0u) < effect_end(0u) ||
+            effect_start(1u) < effect_end(1u);
+        const bool effect_writes = (effect_enabled(0u) && effect_start(0u) < effect_end(0u)) ||
+            (effect_enabled(1u) && effect_start(1u) < effect_end(1u));
+        const bool silent = !effects_valid && (m_cores[0].m_key_mask | m_cores[1].m_key_mask |
             m_cores[0].m_input_count | m_cores[1].m_input_count) == 0u;
         if (silent && m_pcm_sink == nullptr && offset == 0u &&
             samples >= k_input_frames)
@@ -813,8 +939,10 @@ void c_spu2::mix_frames(uint64_t samples)
             samples -= frames;
             continue;
         }
+        // Active effect RAM writes must not run behind a batch of future
+        // voice fetches or input reads that could alias the work area.
         const uint32_t count = static_cast<uint32_t>(
-            std::min<uint64_t>(samples, k_input_batch - offset));
+            std::min<uint64_t>(samples, effect_writes ? 1u : k_input_batch - offset));
         for (auto& core : m_mixer_rings)
         {
             for (auto& ring : core)
@@ -858,6 +986,9 @@ void c_spu2::mix_frames(uint64_t samples)
                 for (uint32_t core = 0u; core < 2u; ++core)
                 {
                     bool effect_nonzero = false;
+                    int32_t dry_mix[2]{};
+                    int32_t effect_mix[2]{};
+                    int16_t effect_return[2]{};
                     for (uint32_t channel = 0u; channel < 2u; ++channel)
                     {
                         // MMIX pairs are right/left, whereas PCM is left/right.
@@ -868,15 +999,19 @@ void c_spu2::mix_frames(uint64_t samples)
                         };
                         const int32_t in = input[core][sample][channel];
                         const int32_t ext = external[channel];
-                        const int32_t dry = gate(0x040u, in) +
+                        dry_mix[channel] = gate(0x040u, in) +
                             gate(0x400u, clamp_sample(sum[core][sample][channel])) +
                             gate(0x004u, ext);
-                        const int32_t effect = gate(0x010u, in) +
+                        effect_mix[channel] = gate(0x010u, in) +
                             gate(0x100u, clamp_sample(wet[core][sample][channel])) +
                             gate(0x001u, ext);
-                        effect_nonzero |= effect != 0;
-                        // Reverb return is still silent. The routed effect
-                        // input is ready for the work-area/filter stage.
+                        effect_nonzero |= effect_mix[channel] != 0;
+                    }
+                    advance_effect(core, effect_mix, effect_return);
+                    for (uint32_t channel = 0u; channel < 2u; ++channel)
+                    {
+                        const int32_t dry = dry_mix[channel] + scale_mix(effect_return[channel],
+                            signed_halfword(m_cores[core].m_master[2u + channel]));
                         if (core == 1u && (dry < -32768 || dry > 32767))
                         {
                             ++m_clipped_samples;
@@ -1005,6 +1140,11 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         {
             earliest = cycles;
         }
+    }
+    const uint32_t effect = effect_irq_cycles_remaining();
+    if (effect != 0u && (earliest == 0u || effect < earliest))
+    {
+        earliest = effect;
     }
     // This is an opportunity, not a promised IRQ: address comparison
     // and envelope termination are evaluated only by real advancement.

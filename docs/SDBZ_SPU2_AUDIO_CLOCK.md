@@ -174,3 +174,42 @@ read and write IRQs, full-width intermediate state, saturated actual
 writeback and invalid input. Reference: documented PSX SPU reverb math
 (https://psx-spx.consoledev.net/soundprocessingunitspu/) and PCSX2's SPU2
 compatibility behavior (https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp).
+
+### Guest-clock reverb and stereo return (Batches 21–23)
+
+Each guest 48 kHz sample advances one channel of each valid effect area;
+left at even zero-based sample indices, right at odd, with a shared
+half-rate step. Both input channels enter a 64-sample history; the
+selected channel is downsampled using the documented 39-tap SPU FIR.
+The returned half-rate signal is zero-stuffed per channel, then
+upsampled with doubled (signed-16 saturated) coefficients. Scalar
+64-bit accumulation and floor rounding provide a deterministic baseline,
+not a claim of bit-identical PS2 hardware or PCSX2 SIMD rounding.
+History advances without a host sink and during silent voice/input
+periods. Invalid areas return silence and freeze their FIR history.
+Disabled effects still advance the filter reads/history without RAM
+writes or IRQs; EVOL controls their return, matching the current
+compatibility mixer. Effect-disable output behavior is a differential
+validation item. Active effect RAM writes use single-sample source
+advancement to avoid fetching future voice data ahead of aliased writes.
+
+The idle IRQ deadline solves each of the actual 14 tap addresses for each
+channel and each physical IRQA alias in the logical work area. It uses the
+current sample phase, and does not latch an IRQ until the real transaction.
+EVOL L/R are signed Q15 and are added to the dry sum before the existing
+master scaling, including the Core 0 -> Core 1 AVOL cascade. The effect
+return counter measures nonzero resampled output before EVOL. New runner
+logs report effect ticks, returns and actual IRQ edges; dedicated effect
+profiling includes resampling and filter work. The existing silent-ring
+shortcut is conservatively disabled for valid effect areas (including
+when effects are disabled); performance impact is not yet measured.
+
+Synthetic tests cover idle IRQ9 timing with logical RAM aliasing, re-arming
+on the other channel, signed EVOL, the impulse response center and silent
+headless advancement. The retail run is needed to evaluate performance
+and audible behavior, not to establish bit-exact filter correctness.
+
+References: https://psx-spx.consoledev.net/soundprocessingunitspu/ (reverb
+resampling coefficients), https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp
+and https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Mixer.cpp
+(compatibility behavior and ordering).

@@ -1081,6 +1081,130 @@ bool test_spu2_effect_allpass()
         output == -32768 && spu.effect_irq_events() == 2u;
 }
 
+bool test_spu2_effect_clock()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    // Core 0's logical work area aliases physical RAM at 0xffff8.
+    // Both channels have zero offsets: the first access to ffffb is
+    // step 3, left tick 6 (seven elapsed samples).
+    if (!hw.write(base + 0x2e0u, 2u, 0x1fu) ||
+        !hw.write(base + 0x2e2u, 2u, 0xfff8u) ||
+        !hw.write(base + 0x33cu, 2u, 0x1fu) ||
+        !hw.write(base + 0x59cu, 2u, 0x0fu) ||
+        !hw.write(base + 0x59eu, 2u, 0xfffbu) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x19au, 2u, 0x80u) ||
+        hw.spu2().voice_irq_cycles_remaining() != 7u * period ||
+        !kernel.has_guest_work())
+    {
+        return false;
+    }
+    (void)kernel.run(7u * period - 1u);
+    if (hw.spu2().effect_ticks(0u) != 6u ||
+        hw.spu2().effect_irq_events() != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    uint32_t status = 0u;
+    if (hw.spu2().effect_ticks(0u) != 7u ||
+        hw.spu2().effect_irq_events() != 1u ||
+        hw.spu2().irq_latches() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &status) || (status & irq) == 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 0u)
+    {
+        return false;
+    }
+    // Re-arm core 1; the right channel accesses the same step next.
+    if (!hw.write(iop::c_hw::k_i_stat, 4u, ~irq) ||
+        !hw.write(base + 0x59au, 2u, 0u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period);
+    return hw.spu2().effect_ticks(0u) == 8u &&
+        hw.spu2().effect_irq_events() == 2u &&
+        hw.read(iop::c_hw::k_i_stat, 4u, &status) && (status & irq) != 0u;
+}
+
+bool test_spu2_effect_return()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    std::vector<int16_t> pcm;
+    spu.bind_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    // Seed two independent APF2 delay histories, with no dry sources.
+    // The left and right impulses are returned on alternating ticks.
+    std::vector<uint8_t> data(128u, 0u);
+    data[1] = 0x20u;
+    data[17] = 0x20u;
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xffc0u) ||
+        !spu.copy_dma(0u, data, true) ||
+        !spu.write(base + 0x6e0u, 2u, 0u) ||
+        !spu.write(base + 0x6e2u, 2u, 0xffc0u) ||
+        !spu.write(base + 0x73cu, 2u, 0u) ||
+        !spu.write(base + 0x598u, 2u, 0u) ||
+        !spu.write(base + 0x78cu, 2u, 0x4000u) ||
+        !spu.write(base + 0x78eu, 2u, 0xc000u))
+    {
+        return false;
+    }
+    const uint32_t regs[] = {0x6e8u, 0x6ecu, 0x6f0u, 0x70cu, 0x710u,
+        0x72cu, 0x730u, 0x734u, 0x738u};
+    const uint16_t taps[] = {32u, 16u, 20u, 24u, 28u, 48u, 52u, 32u, 40u};
+    for (uint32_t i = 0u; i < 9u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, taps[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x59au, 2u, 0x80u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(19u * period);
+    (void)spu.advance_cycles(13u * period);
+    // The FIR center (32767) is 19 ticks after each impulse. The
+    // positive and negative signed EVOLs are applied before master gain.
+    if (pcm.size() != 64u || pcm[19u * 2u] != 4094 ||
+        pcm[20u * 2u + 1u] != -4096 ||
+        spu.effect_input_frames(1u) != 0u || spu.effect_ticks(1u) != 32u ||
+        spu.effect_return_frames(1u) == 0u || spu.nonzero_frames() == 0u)
+    {
+        return false;
+    }
+    const uint64_t ticks = spu.effect_ticks(1u);
+    spu.bind_pcm_sink(nullptr, nullptr);
+    (void)spu.advance_cycles(512u * period);
+    if (spu.effect_ticks(1u) != ticks + 512u ||
+        spu.mixed_frames() != 544u || spu.effect_input_frames(1u) != 0u)
+    {
+        return false;
+    }
+    spu.reset();
+    return spu.effect_ticks(1u) == 0u && spu.effect_return_frames(1u) == 0u &&
+        spu.effect_irq_events() == 0u;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -2252,6 +2376,14 @@ int main()
     if (!test_spu2_effect_allpass())
     {
         return fail("SPU2 all-pass cascade, staged aliasing and saturated writeback");
+    }
+    if (!test_spu2_effect_clock())
+    {
+        return fail("SPU2 alternating effect clock, physical alias and idle IRQ9 deadline");
+    }
+    if (!test_spu2_effect_return())
+    {
+        return fail("SPU2 reverb FIR return, signed EVOL and silent headless advancement");
     }
     if (!test_spu2_effect_registers())
     {
