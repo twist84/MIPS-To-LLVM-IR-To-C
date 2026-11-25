@@ -451,3 +451,12 @@ leaves R unchanged in the PCSX2 reference micro path. Regression uses
 raw words from the pinned upstream random sequence, with masked writes,
 zero destination, dependency and E drain checks. The original random ELF
 executes VU1, so this VU0 change alone does not claim its transcript.
+
+### VU0 register-addressed integer memory
+
+ILWR and ISWR use the unmodified VI base in quadword units, not the
+instruction's low immediate-looking opcode bits. Reuse ILW/ISW lane
+semantics (last enabled lane wins for ILWR, zero-extended low VI for
+ISWR), 4 KB wrap, VI0 and four-cycle IALU load reservations. The VU1
+register window still fails closed. Regression checks masking, wrap,
+zero extension and E drain. Macro ILWR behavior is unchanged.

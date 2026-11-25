@@ -1389,6 +1389,8 @@ bool vu0_is_supported_lower_memory(const s_ee_vu0_micro_instruction& instruction
     {
     case op::ILW:
     case op::ISW:
+    case op::ILWR:
+    case op::ISWR:
     case op::LQ:
     case op::SQ:
     case op::LQI:
@@ -1427,7 +1429,8 @@ uint32_t vu0_memory_byte_address(
     const int32_t base = static_cast<int16_t>(vu0_read_ialu_vi(vu0, base_index));
     const int32_t offset = indexed
         ? (operation == op::LQD || operation == op::SQD ? -1 : 0)
-        : vu0_signed_memory_immediate(instruction.m_lower);
+        : (operation == op::ILWR || operation == op::ISWR)
+            ? 0 : vu0_signed_memory_immediate(instruction.m_lower);
     return (static_cast<uint32_t>((base + offset) * 16) & 0xffffu);
 }
 
@@ -1518,7 +1521,7 @@ bool vu0_execute_lower_memory(
         return true;
     }
 
-    if (fields.m_operation == e_ee_vu0_micro_opcode::ILW)
+    if (fields.m_operation == op::ILW || fields.m_operation == op::ILWR)
     {
         // For multiple selected components, PCSX2 overwrites VI in X,Y,Z,W
         // order, leaving the last selected component as the final value.
@@ -1547,7 +1550,7 @@ bool vu0_execute_lower_memory(
         return true;
     }
 
-    if (fields.m_operation == e_ee_vu0_micro_opcode::ISW)
+    if (fields.m_operation == op::ISW || fields.m_operation == op::ISWR)
     {
         const uint16_t value = vu0_read_ialu_vi(vu0, fields.m_it);
         for (uint32_t component = 0; component < 4; ++component)
@@ -2184,7 +2187,7 @@ uint32_t ee_vu0_execute_ialu_callback(
                 return static_cast<uint32_t>(e_ee_vu0_sync_result::UNAVAILABLE);
             }
 
-            // PCSX2 declares a four-cycle IALU reservation for ILW.
+            // PCSX2 declares a four-cycle IALU reservation for ILW/ILWR.
             // LQ/SQ use the separate four-cycle FMAC pipeline. Even SQ
             // contributes an issue, so pending memory work may extend E.
             const auto memory_op = instruction.m_lower_fields.m_operation;

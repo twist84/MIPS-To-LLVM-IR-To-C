@@ -857,6 +857,51 @@ int main()
               "RINIT RGET RNEXT RXOR exact words, VF0 suppresses RNEXT and masks preserved");
     }
 
+    // Register-addressed integer loads/stores ignore the opcode's low
+    // immediate-looking bits and keep the ordinary IALU latency.
+    {
+        ee::s_ee_cpu_state memory_cpu{};
+        ee::s_ee_vu0_state memory_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        memory_vu.m_vpu_status = 1u;
+        memory_vu.m_vi[1] = 0x101u; // wraps to byte 0x10 in VU0 memory
+        memory_vu.m_vi[2] = 0xabcd9876u;
+        memory_vu.m_vi[3] = 0xbeef0000u;
+        for (uint32_t i = 16u; i < 32u; ++i)
+        {
+            memory_vu.m_data_memory[i] = static_cast<uint8_t>(i);
+        }
+        const auto indexed = [](uint32_t table, uint32_t it, uint32_t is, uint32_t mask)
+        {
+            return 0x80000000u | (mask << 21u) | (it << 16u) |
+                (is << 11u) | (15u << 6u) | (0x3cu | table);
+        };
+        const uint32_t nop = 0x8000033cu;
+        install_vu0_pair(&memory_vu, 0, indexed(3, 2, 1, 10), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 1, indexed(2, 3, 1, 11), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 2, indexed(2, 0, 1, 15), make_vu0_upper_nop());
+        install_vu0_pair(&memory_vu, 3, indexed(3, 0, 1, 4),
+            make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&memory_vu, 4, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &memory_cpu,
+            &memory_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              memory_vu.m_running == 0u && memory_vu.m_cycle == 6u,
+              "ILWR reserves four IALU cycles and drains at E");
+        check(memory_vu.m_vi[3] == 0xbeef1d1cu && memory_vu.m_vi[0] == 0u &&
+              memory_vu.m_vi[1] == 0x101u &&
+              memory_vu.m_data_memory[16] == 0x76u &&
+              memory_vu.m_data_memory[17] == 0x98u &&
+              memory_vu.m_data_memory[18] == 0u &&
+              memory_vu.m_data_memory[19] == 0u &&
+              memory_vu.m_data_memory[20] == 0u &&
+              memory_vu.m_data_memory[23] == 0u &&
+              memory_vu.m_data_memory[24] == 0x76u &&
+              memory_vu.m_data_memory[25] == 0x98u &&
+              memory_vu.m_data_memory[28] == 28u,
+              "ILWR last selected halfword, ISWR zero extension, masks and VI0");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {
@@ -2900,8 +2945,8 @@ int main()
         ee::s_ee_vu0_state state{};
         ee::s_ee_vu0_ialu_engine ialu_engine{};
         state.m_vpu_status = 1u;
-        install_vu0_pair(&state, 0, (0x40u << 25) | (15u << 6) | 0x3eu,
-                         make_vu0_upper_nop()); // ILWR remains unsupported.
+        install_vu0_pair(&state, 0, (0x40u << 25) | (31u << 6) | 0x3fu,
+                         make_vu0_upper_nop()); // Unassigned lower encoding.
 
         const uint32_t result = ee::ee_vu0_execute_ialu_callback(
             &ialu_engine, &cpu, &state, 4,
