@@ -4535,12 +4535,19 @@ int main(int argc, char** argv)
                     static_cast<uint32_t>(std::min<uint64_t>(iop_clock.due(), 256u)),
                     1u};
                 uint64_t kernel_before = 0u;
-                if (iop_coalesce && iop_clock.due() > 256u && turns < 63u &&
+                const bool may_coalesce =
+                    iop_coalesce && iop_clock.due() > 256u && turns < 63u;
+                // Both paths share the same ownership gate. The planner
+                // and optional SIF trace read below do not publish events.
+                // Re-evaluate on every physical service turn, never across
+                // an IOP advance, RPC pump or guest checkpoint.
+                const bool may_optimize_idle = (may_coalesce || iop_fast_quiet) &&
                     runtime.m_ee_cycle_scheduler.source() ==
                         ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
                     runtime.m_timing_observer == nullptr &&
                     !hle_iop_reboot_bootstrap_pending &&
-                    (iop_rpc == nullptr || !iop_rpc->scheduler_barrier()))
+                    (iop_rpc == nullptr || !iop_rpc->scheduler_barrier());
+                if (may_coalesce && may_optimize_idle)
                 {
                     // No runnable guest, IRQ, software wake, DMA completion,
                     // SPU2 sample or Timer5 edge may occur in a combined batch.
@@ -4565,12 +4572,7 @@ int main(int argc, char** argv)
                 const bool trace_smflag = trace &&
                     hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
                 bool quiet_advanced = false;
-                if (iop_fast_quiet &&
-                    runtime.m_ee_cycle_scheduler.source() ==
-                        ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
-                    runtime.m_timing_observer == nullptr &&
-                    !hle_iop_reboot_bootstrap_pending &&
-                    (iop_rpc == nullptr || !iop_rpc->scheduler_barrier()))
+                if (iop_fast_quiet && may_optimize_idle)
                 {
                     ++iop_quiet_attempts;
                     quiet_advanced = iop_kernel->try_advance_quiet_cycles(cycles);
