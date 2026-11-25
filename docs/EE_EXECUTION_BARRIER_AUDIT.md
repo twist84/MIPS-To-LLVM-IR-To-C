@@ -13,7 +13,7 @@ provenance changes unless explicitly necessary.
 | P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Started-channel entry observation added; transition audit open |
 | P1-C | Asynchronous GS worker | Idle healthy worker is quiet; queued or executing batch and failed worker are not quiet; drained healthy worker is quiet again; no new fence or guest event. Headless shadow reports zero GS barriers. Any submission after the snapshot requires an independent pre-execution guard. | Entry observation implemented; CI pending |
 | P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | VU callback and COP0 endpoint observations added; pre-access guards open |
-| P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | Open |
+| P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | RPC ownership observation added; debt flush and shared-memory audit open |
 | P1-F | Clock, timer/scanout reprogramming, host continuation | Verify fractional 8:1 accounting and preserved outstanding debt; unknown/overflow/overdue deadlines fail closed; test equal-time events, deadline replacement and continuation before service. | Groundwork present; integration audit open |
 
 ## GS worker observation (P1-C)
@@ -100,7 +100,7 @@ after acknowledgment and after the reply queue becomes empty.
 EE receive-busy and the four pending RPC queues. The shadow IOP
 projection retains the original cadence when this returns true or
 the HLE IOP reboot bootstrap is pending. Directed tests cover a
-pending bind, unmasked completion status, acknowledged-but-busy
+pending bind, completion status with the IRQ mask disabled, acknowledged-but-busy
 receive ownership and a fully released receiver with empty queues.
 This changes no pump, IRQ, RAM store, or IOP service behavior.
 
