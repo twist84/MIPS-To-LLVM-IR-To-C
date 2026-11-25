@@ -46,6 +46,51 @@ def read_report(path):
         return {}
 
 
+# Only capture settings needed for reproducible retail comparisons.
+# Never dump the process environment, credentials, or local file paths.
+PROVENANCE_ENV = (
+    "SDBZ_EE_OPT", "SDBZ_SPEED_PERCENT", "SDBZ_RUNTIME_PROFILE",
+    "SDBZ_PROFILE_HORIZON", "SDBZ_PROFILE_PCS", "SDBZ_NATIVE_ALU_CERTIFICATES",
+    "SDBZ_IOP_COALESCE_IDLE_TURNS", "SDBZ_IOP_FAST_QUIET_TURNS",
+    "SDBZ_IOP_CHECKPOINT_TRACE", "SDBZ_IDLE_SKIP", "SDBZ_IDLE_SKIP_FORWARD_BRANCHES",
+    "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", "SDBZ_VU1_ASYNC", "SDBZ_GS_ASYNC",
+    "SDBZ_EE_DIRECT_DISPATCH", "SDBZ_GS_GPU_VRAM", "SDBZ_GIF_IMAGE_DIGEST",
+    "SDBZ_HOST_AUDIO", "SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT",
+    "SDBZ_PAD0_SCRIPT", "SDBZ_TRACE_BUFFERED", "SDBZ_DISPATCH_TRACE_EVERY",
+    "SDBZ_REPORT_PROGRESS_EVERY", "SDBZ_REPORT_SNAPSHOT_MS",
+    "SDBZ_WINDOW_PUMP_STRIDE", "EE_WEBGPU_WINDOW", "EE_WEBGPU_SNAPSHOT",
+)
+
+
+def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
+    def git(*args):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            return result.stdout.strip() if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    head = git("rev-parse", "HEAD")
+    dirty = git("status", "--porcelain", "--untracked-files=no")
+    return {
+        "schema": "ee-retail-replay-provenance-v1",
+        "git_head": head,
+        "tracked_tree_dirty": None if dirty is None else bool(dirty),
+        "max_expansion_dispatches": expansion_limit,
+        "max_replay_dispatches": replay_limit,
+        "environment": {key: env.get(key) for key in PROVENANCE_ENV},
+        "limitations": [
+            "source_head_not_a_binary_hash",
+            "untracked_files_not_checked",
+            "environment_values_not_effective_runtime_defaults",
+            "live_controller_input_not_recorded",
+        ],
+    }
+
+
 class c_ll_file_progress:
     """Show IR file counts in a terminal or the GUI launch log."""
 
@@ -223,6 +268,8 @@ def main(argv=None):
         "--replay-after-expand", action="store_true",
         help="Legacy mode: restart the guest after each cache miss instead of resuming live",
     )
+    parser.add_argument("--replay-provenance", action="store_true",
+                        help="Record source revision and selected replay environment")
     parser.add_argument("--no-recompile", action="store_true")
     parser.add_argument("--skip-headless-expansion", action="store_true",
                         help="Cached graphics replay: skip the preliminary boot; "
@@ -292,8 +339,10 @@ def main(argv=None):
     boot_log = work / ("quick-probe.log" if args.quick_probe else "boot.log")
     expansion_log = boot_log if args.quick_probe else work / "expansion.log"
     metadata_path = ir_directory(work) / "ee_functions.json"
+    provenance_path = work / ("quick-probe-provenance.json" if args.quick_probe
+                              else "replay-provenance.json")
     if report in (args.elf.resolve(), args.driver.resolve(), catalog_path,
-                  boot_log, expansion_log, metadata_path, work / "translation-cache.json"):
+                  boot_log, expansion_log, metadata_path, provenance_path, work / "translation-cache.json"):
         parser.error("report path must be distinct from inputs, logs, and cache metadata")
     work.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -372,9 +421,20 @@ def main(argv=None):
         path.resolve() for _, path in snapshots if path is not None
     ]
     if len(requested_paths) != len(set(requested_paths)) or any(
-            path in (report, expansion_log, boot_log, catalog_path)
+            path in (report, expansion_log, boot_log, catalog_path, provenance_path)
             for path in requested_paths):
         parser.error("GS snapshot paths must be distinct from diagnostic outputs")
+    if args.replay_provenance:
+        # Replace evidence before executing any replay, never archive an
+        # old revision/settings record from a previous run.
+        provenance_path.unlink(missing_ok=True)
+        provenance = capture_replay_provenance(
+            Path(__file__).resolve().parents[1], os.environ,
+            expansion_limit, replay_limit,
+        )
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2) + "\n", encoding="utf-8",
+        )
     expansion_log.write_text("", encoding="utf-8")
     base = [
         sys.executable, str(args.driver.resolve()), str(args.elf.resolve()),
