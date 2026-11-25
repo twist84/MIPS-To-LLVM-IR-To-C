@@ -658,3 +658,24 @@ transition, including ordinary exit and return; avoid saving a dormant
 CPU context during reschedule. Add status and synthetic guest dispatch
 coverage for failed/valid operations, restart and ID reuse. Interrupt-safe
 termination and additional scheduling behavior remain separate audits.
+
+### Confirmed lifecycle baseline and invalid-state calls
+
+PR head `b998426bbf84deb477ee96db2ae2227d52f2a2fd`, tested merge
+`42d9f98c166fe7c5c00efbc8b0cb3b8432db195a`: [full suite run
+45641696399](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45641696399),
+[summary artifact 15034979929](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45641696399/artifacts/15034979929).
+33/55 exact transcripts (60%): PASS 33, DIFF 13, INCOMPLETE 9,
+NO_OUTPUT 0, ERROR 0. Compared with the 27/55 baseline, spr/normal and
+thread/delete, exit, sleep, stat and terminate now pass, with no lost
+passes. Resume and wakeup now complete but differ on invalid-state calls.
+
+The pinned original thread/resume and thread/suspend transcripts require
+-1 when the requested status transition is not possible. The original
+thread/wakeup transcript requires -1 for self and dormant targets; valid
+ready/wait/suspended cases already agree. Reject these before mutating
+wakeup credits; keep interrupt callback semantics unchanged for active
+threads. The synthetic sleep/wakeup program now obtains a real credit
+from a second guest thread instead of expecting an invalid self wakeup
+to succeed. The self-suspend rescheduling discrepancy remains open;
+no scheduler timing or original ELF/expected output changes are made.

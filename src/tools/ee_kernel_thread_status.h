@@ -67,6 +67,12 @@ inline bool can_terminate(uint32_t status, bool is_current_thread)
         status == k_suspend || status == k_wait_suspend);
 }
 
+inline bool can_wakeup(uint32_t status, bool is_current_thread)
+{
+    return !is_current_thread && (status == k_run || status == k_ready ||
+        status == k_wait || status == k_suspend || status == k_wait_suspend);
+}
+
 inline s_status_transition release_wait(uint32_t current_status)
 {
     s_status_transition result{current_status, false};

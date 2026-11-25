@@ -614,18 +614,22 @@ def make_thread_sleep_wakeup_elf(path):
         0x0000000c,
         0x00408021,  # s0 = thread ID 2
         0x24040001,  # a0 = running thread ID 1
-        0x24030033,  # WakeupThread(1) before sleep: wakeup credit
+        0x24030033,  # WakeupThread(1): self wakeup must fail
         0x0000000c,
-        0x00408821,  # s1 = WakeupThread result 1
-        0x24030032,  # SleepThread consumes the credit, no context switch
+        0x00408821,  # s1 = -1
+        0x24040002,  # a0 = dormant worker ID 2
+        0x24030033,  # WakeupThread(2): dormant target must fail
         0x0000000c,
-        0x00409021,  # s2 = SleepThread result 1
+        0x0040b021,  # s6 = -1
         0x24040002,  # a0 = worker ID 2
         0x24030022,  # StartThread(2), worker is READY at priority 1
         0x0000000c,
         0x24030032,  # SleepThread with no credit: block thread 1
         0x0000000c,  # switch to guest worker entry
-        0x00409821,  # s3 = SleepThread result 1 after wake
+        0x00409021,  # s2 = SleepThread result 1 after wake
+        0x24030032,  # consume worker-granted wakeup credit without blocking
+        0x0000000c,
+        0x00409821,  # s3 = SleepThread result 1
         0x24040001,  # a0 = thread ID 1
         0x24030035,  # CancelWakeupThread(1)
         0x0000000c,
@@ -639,9 +643,12 @@ def make_thread_sleep_wakeup_elf(path):
     )
     worker = (
         0x24040001,  # a0 = sleeping main thread ID 1
-        0x24030033,  # WakeupThread(1)
-        0x0000000c,  # wake and preempt worker with ready main
-        0x24030023,  # ExitThread if worker is scheduled again
+        0x24030034,  # iWakeupThread(1): make main ready, defer reschedule
+        0x0000000c,
+        0x24040001,
+        0x24030033,  # WakeupThread(1): grant credit to ready main
+        0x0000000c,
+        0x24030023,  # ExitThread: return to main
         0x0000000c,
         0x00000008,
         0x00000000,
@@ -3421,21 +3428,24 @@ def main():
             )
             combined = result.stdout + result.stderr
             assert "HLE CreateThread: id=2" in combined, combined
-            assert "HLE WakeupThread: id=1 status=1 wakeups=1" in combined, combined
+            assert "HLE WakeupThread: id=1 invalid status/context, result=-1" in combined, combined
+            assert "HLE WakeupThread: id=2 invalid status/context, result=-1" in combined, combined
+            assert "HLE WakeupThread: id=1 status=2 wakeups=1 released=0" in combined, combined
             assert "HLE SleepThread: id=1 consumed wakeup remaining=0" in combined, combined
             assert "HLE StartThread: id=2" in combined, combined
             assert "HLE SleepThread: id=1 status=4" in combined, combined
             assert "HLE EE thread switch: id=2 pc=0x001000f0" in combined, combined
-            assert "HLE WakeupThread: id=1 status=2 wakeups=0 released=1" in combined, combined
+            assert "HLE iWakeupThread: id=1 status=2 wakeups=0 released=1" in combined, combined
             assert "HLE EE thread switch: id=1" in combined, combined
             assert "HLE CancelWakeupThread: id=1 status=1 wakeups=0" in combined, combined
             assert "HLE WakeupThread: id=99 not found, result=-1" in combined, combined
             state = json.loads(report_path.read_text(encoding="utf-8"))
             registers = state["gpr_lo"]
             assert registers[16] == 2, state  # worker created
-            assert registers[17] == 1, state  # wakeup credit granted
-            assert registers[18] == 1, state  # credit consumed without block
-            assert registers[19] == 1, state  # returned from genuine sleep
+            assert registers[17] == 0xffffffffffffffff, state  # self wakeup rejected
+            assert registers[18] == 1, state  # returned from genuine sleep
+            assert registers[19] == 1, state  # credit consumed without block
+            assert registers[22] == 0xffffffffffffffff, state  # dormant wakeup rejected
             assert registers[20] == 0, state  # no leftover wakeup credit
             assert registers[21] == 0xffffffffffffffff, state # invalid ID
             assert state["final_pc"] != 0x001000f0, state # no worker escape

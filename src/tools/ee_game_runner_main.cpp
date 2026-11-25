@@ -6296,6 +6296,22 @@ int main(int argc, char** argv)
                                     requested_id);
                             }
                         }
+                        else if ((service == 0x33u || service == 0x34u) &&
+                            !ee_kernel_thread::can_wakeup(
+                                threads[requested_id].m_status,
+                                requested_id == current_thread_id && !irq_callback_active))
+                        {
+                            // A normal thread cannot wake itself or a dormant
+                            // target. Preserve interrupt-context wakeup semantics.
+                            cpu.m_gpr[2].m_lo = static_cast<uint64_t>(-1ll);
+                            cpu.m_gpr[2].m_hi = 0u;
+                            if (trace)
+                            {
+                                std::printf("HLE %s: id=%u invalid status/context, result=-1\n",
+                                    service == 0x33u ? "WakeupThread" : "iWakeupThread",
+                                    requested_id);
+                            }
+                        }
                         else
                         {
                             s_kernel_thread& thread = threads[requested_id];
@@ -6388,7 +6404,8 @@ int main(int argc, char** argv)
                             : ee_kernel_thread::resume(
                                 old_status, thread_id == current_thread_id);
                         thread.m_status = next.m_status;
-                        cpu.m_gpr[2].m_lo = thread_id;
+                        cpu.m_gpr[2].m_lo = next.m_changed
+                            ? thread_id : static_cast<uint64_t>(-1ll);
                         cpu.m_gpr[2].m_hi = 0u;
                         if (service == 0x39u && next.m_changed)
                         {
@@ -6402,10 +6419,11 @@ int main(int argc, char** argv)
                         {
                             std::printf(
                                 "HLE %sThread: id=%u old_status=%u "
-                                "new_status=%u changed=%u result=%u\n",
+                                "new_status=%u changed=%u result=%d\n",
                                 service == 0x37u ? "Suspend" : "Resume",
                                 thread_id, old_status, thread.m_status,
-                                next.m_changed ? 1u : 0u, thread_id);
+                                next.m_changed ? 1u : 0u,
+                                next.m_changed ? static_cast<int>(thread_id) : -1);
                         }
                     }
                 }
