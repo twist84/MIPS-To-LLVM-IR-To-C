@@ -3760,6 +3760,14 @@ int main(int argc, char** argv)
         "SDBZ_IOP_FAST_QUIET_TURNS", &iop_fast_quiet_environment);
     const bool iop_fast_quiet = iop_fast_quiet_value != nullptr &&
         std::strcmp(iop_fast_quiet_value, "1") == 0;
+    // Exact checkpoint trace for bounded differential fixtures, not a
+    // performance profile. Disabled by default; no host time is sampled.
+    std::string iop_checkpoint_environment;
+    const char* iop_checkpoint_value = read_host_environment(
+        "SDBZ_IOP_CHECKPOINT_TRACE", &iop_checkpoint_environment);
+    const bool iop_checkpoint_trace = iop_checkpoint_value != nullptr &&
+        std::strcmp(iop_checkpoint_value, "1") == 0;
+    uint64_t iop_checkpoint_executed = 0u;
     uint64_t iop_quiet_attempts = 0u;
     uint64_t iop_quiet_advances = 0u;
     uint64_t iop_quiet_cycles = 0u;
@@ -4587,6 +4595,10 @@ int main(int argc, char** argv)
                     // may have been changed by an unexpected event.
                     return 1;
                 }
+                if (iop_checkpoint_trace)
+                {
+                    iop_checkpoint_executed += progressed.m_executed;
+                }
                 uint32_t current_smflag = 0u;
                 if (trace_smflag && progressed.m_executed != 0u &&
                     hardware.sif().get_reg(4u, &current_smflag) && current_smflag != 0u)
@@ -4638,6 +4650,33 @@ int main(int argc, char** argv)
                     cpu.m_exit_reason = reason;
                     break;
                 }
+            }
+            // Compare at the same EE service checkpoint, not at physical
+            // kernel invocations (which differ when quiet turns are combined).
+            if (iop_checkpoint_trace)
+            {
+                const auto& iop_hw = iop_kernel->hardware();
+                const auto& spu2 = iop_hw.spu2();
+                std::fprintf(stderr,
+                    "IOP checkpoint: dispatch=%llu pc=%08x ee=%llu iop=%llu "
+                    "turns=%llu executed=%llu debt=%llu next=%llu "
+                    "irq=%08x dma=%u spu2=%llu frames=%llu "
+                    "ee_dmac=%08x ee_intc=%08x rpc_pending=%u reason=%u\n",
+                    static_cast<unsigned long long>(dispatched), cpu.m_pc,
+                    static_cast<unsigned long long>(ee_cycle),
+                    static_cast<unsigned long long>(iop_kernel->cycles()),
+                    static_cast<unsigned long long>(iop_clock_turns),
+                    static_cast<unsigned long long>(iop_checkpoint_executed),
+                    static_cast<unsigned long long>(iop_clock.due()),
+                    static_cast<unsigned long long>(iop_clock.next_cycle()),
+                    iop_hw.pending_interrupts(),
+                    iop_hw.spu2_dma_cycles_remaining(),
+                    static_cast<unsigned long long>(spu2.clock_cycles()),
+                    static_cast<unsigned long long>(spu2.mixed_frames()),
+                    hardware.dmac().status(), hardware.intc().pending(),
+                    static_cast<unsigned>(iop_rpc != nullptr &&
+                        iop_rpc->pending_guest_calls() != 0u),
+                    reason);
             }
             if (reason == static_cast<uint32_t>(
                     ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED))
