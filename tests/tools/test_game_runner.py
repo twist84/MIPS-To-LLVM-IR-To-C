@@ -4660,12 +4660,18 @@ def main():
             assert int(horizon["iop_rpc_barriers"]) >= 0, lines
             assert int(horizon["gs_worker_barriers"]) == 0, lines
             assert int(horizon["dmac_started_barriers"]) >= 0, lines
+            assert (int(horizon["mmio_free_direct_touched"]) +
+                    int(horizon["mmio_free_direct_quiet"]) ==
+                    int(horizon["lookahead_mmio_free"])), lines
             assert (int(horizon["lookahead_mmio_free"]) +
                     int(horizon["lookahead_mmio_touched"]) ==
                     int(horizon["normal_before_iop_lookahead"])), lines
             counts = [dict(token.split("=") for token in line.split()[2:])
                       for line in lines[1:]]
-            assert sum(int(row["samples"]) for row in counts) > 0, lines
+            total_samples = sum(int(row["samples"]) for row in counts)
+            assert total_samples > 0, lines
+            assert 0 <= int(horizon["vu_callback_boundaries"]) <= total_samples, lines
+            assert 0 <= int(horizon["cop0_changed_boundaries"]) <= total_samples, lines
             assert all(int(row["samples"]) == int(row["before"]) + int(row["reached"])
                        for row in counts), lines
 
