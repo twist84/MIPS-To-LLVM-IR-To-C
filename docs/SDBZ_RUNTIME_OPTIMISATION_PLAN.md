@@ -416,3 +416,13 @@ Execute 104 records at each existing O0–O3 emitter level, checking all
 four HI/LO halves, MFHI/MFLO results and untouched 128-bit GPR halves.
 Immediate cases define only the low 32 operand bits; chosen high bits
 are test controls. No production changes, new timing claim or replay.
+
+## Batch 12: expand shared VU0 differential sign branches
+
+Extend the shared PCSX2/candidate program with four complementary
+sign-branch predicates on stable negative and zero operands, checking
+taken targets, delay-slot writes, fallthrough and exact executed PCs.
+The 72-pair program has 63 executed pairs; its hash is pinned in CTest.
+The existing manually dispatched VU0 PCSX2 differential will exercise
+the same fixture. Previous 53-pair reference evidence is not a result
+for the new fixture. No production lowering, cache or retail changes.

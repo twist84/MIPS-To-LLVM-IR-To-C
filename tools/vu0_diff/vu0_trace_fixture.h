@@ -11,8 +11,8 @@ constexpr uint32_t k_micro_memory_size = 0x1000u;
 constexpr uint32_t k_upper_nop = 0x000002ffu;
 constexpr uint32_t k_idle_lower = 0x10000000u; // IADDIU VI0, VI0, 0
 constexpr uint32_t k_lower1_marker = 0x80000000u;
-constexpr uint32_t k_step_limit = 80u;
-constexpr uint32_t k_expected_step_count = 53u;
+constexpr uint32_t k_step_limit = 96u;
+constexpr uint32_t k_expected_step_count = 63u;
 
 struct s_pair
 {
@@ -89,14 +89,14 @@ constexpr uint32_t make_branch(
            (immediate & 0x07ffu);
 }
 
-// One deterministic 60-pair fixture. It exercises scalar integer ALU,
+// One deterministic 72-pair fixture. It exercises scalar integer ALU,
 // branches, arithmetic boundaries and ordinary VU0 ILW/ISW memory operations.
 // Selected stores load back through a different lane, with a four-cycle
 // register dependency. Four masked VF LQ/SQ pairs follow the integer
 // memory checks; E and its delay pair terminate the trace. The final
 // vector-memory FMAC reservation is drained at E termination. Indexed
 // LQI/SQI/LQD/SQD pairs follow the masked VF cases.
-constexpr std::array<s_pair, 60> k_program =
+constexpr std::array<s_pair, 72> k_program =
 {{
     { make_iaddiu(1, 0, 5), k_upper_nop },                         //  0
     { make_iaddi(2, 1, -1), k_upper_nop },                         //  1
@@ -144,23 +144,37 @@ constexpr std::array<s_pair, 60> k_program =
     { make_ialu_3r(0x31, 11, 9, 10), k_upper_nop },                // 43 ISUB overflow
     { make_iaddi(10, 10, -1), k_upper_nop },                        // 44 chained write
     { make_ialu_3r(0x30, 9, 11, 0), k_upper_nop },                 // 45 VI0 ignored
-    { make_memory(0x05, 0x9, 9, 0, 1), k_upper_nop },              // 46 ISW X/W
-    { make_memory(0x04, 0x1, 2, 0, 1), k_upper_nop },              // 47 ILW W
-    { make_memory(0x05, 0x6, 2, 0, 2), k_upper_nop },              // 48 ISW Y/Z, waits on ILW
-    { make_memory(0x04, 0x2, 14, 0, 2), k_upper_nop },             // 49 ILW Z
-    { make_memory(0x01, 0xf, 0, 2, 3), k_upper_nop },             // 50 SQ VF2 XYZW to quadword 3
-    { make_memory(0x00, 0xa, 3, 0, 3), k_upper_nop },             // 51 LQ VF3 X/Z from quadword 3
-    { make_memory(0x01, 0xc, 0, 3, 4), k_upper_nop },             // 52 SQ VF3 X/Y, interlocked on prior LQ X
-    { make_memory(0x00, 0xf, 4, 0, 4), k_upper_nop },             // 53 LQ VF4 XYZW from quadword 4
-    { make_indexed_memory(0x3c, 0xf, 5, 1), k_upper_nop },       // 54 LQI VF5, (VI1)++
-    { make_indexed_memory(0x3d, 0x8, 1, 2), k_upper_nop },       // 55 SQI VF2.x, (VI1)++
-    { make_indexed_memory(0x3e, 0x8, 6, 1), k_upper_nop },       // 56 LQD VF6.x, --(VI1)
-    { make_indexed_memory(0x3f, 0x8, 1, 6), k_upper_nop },       // 57 SQD VF6.x, --(VI1), dependent
-    { make_iaddiu(0, 0, 0), k_upper_nop | 0x40000000u },         // 58 E
-    { make_iaddiu(8, 0, 51), k_upper_nop }                       // 59 E delay
+    // Complement the previous sign branch cases with stable negative
+    // VI11 and zero VI0; every delay slot writes a distinct sentinel.
+    { make_branch(0x2c, 0, 11, 2), k_upper_nop },                  // 46 IBLTZ true -> 49
+    { make_iaddiu(8, 0, 0x101), k_upper_nop },                     // 47 delay
+    { make_iaddiu(8, 0, 0x777), k_upper_nop },                     // 48 skipped
+    { make_branch(0x2d, 0, 0, 2), k_upper_nop },                   // 49 IBGTZ false
+    { make_iaddiu(8, 0, 0x102), k_upper_nop },                     // 50 delay
+    { make_iaddiu(8, 0, 0x103), k_upper_nop },                     // 51 fallthrough
+    { make_branch(0x2e, 0, 0, 2), k_upper_nop },                   // 52 IBLEZ true -> 55
+    { make_iaddiu(8, 0, 0x104), k_upper_nop },                     // 53 delay
+    { make_iaddiu(8, 0, 0x777), k_upper_nop },                     // 54 skipped
+    { make_branch(0x2f, 0, 11, 2), k_upper_nop },                  // 55 IBGEZ false
+    { make_iaddiu(8, 0, 0x105), k_upper_nop },                     // 56 delay
+    { make_iaddiu(8, 0, 0x106), k_upper_nop },                     // 57 fallthrough
+    { make_memory(0x05, 0x9, 9, 0, 1), k_upper_nop },              // 58 ISW X/W
+    { make_memory(0x04, 0x1, 2, 0, 1), k_upper_nop },              // 59 ILW W
+    { make_memory(0x05, 0x6, 2, 0, 2), k_upper_nop },              // 60 ISW Y/Z, waits on ILW
+    { make_memory(0x04, 0x2, 14, 0, 2), k_upper_nop },             // 61 ILW Z
+    { make_memory(0x01, 0xf, 0, 2, 3), k_upper_nop },             // 62 SQ VF2 XYZW to quadword 3
+    { make_memory(0x00, 0xa, 3, 0, 3), k_upper_nop },             // 63 LQ VF3 X/Z from quadword 3
+    { make_memory(0x01, 0xc, 0, 3, 4), k_upper_nop },             // 64 SQ VF3 X/Y, interlocked on prior LQ X
+    { make_memory(0x00, 0xf, 4, 0, 4), k_upper_nop },             // 65 LQ VF4 XYZW from quadword 4
+    { make_indexed_memory(0x3c, 0xf, 5, 1), k_upper_nop },       // 66 LQI VF5, (VI1)++
+    { make_indexed_memory(0x3d, 0x8, 1, 2), k_upper_nop },       // 67 SQI VF2.x, (VI1)++
+    { make_indexed_memory(0x3e, 0x8, 6, 1), k_upper_nop },       // 68 LQD VF6.x, --(VI1)
+    { make_indexed_memory(0x3f, 0x8, 1, 6), k_upper_nop },       // 69 SQD VF6.x, --(VI1), dependent
+    { make_iaddiu(0, 0, 0), k_upper_nop | 0x40000000u },         // 70 E
+    { make_iaddiu(8, 0, 51), k_upper_nop }                       // 71 E delay
 }};
 
-static_assert(k_program.size() == 60);
+static_assert(k_program.size() == 72);
 
 inline void install_program(uint8_t* micro_memory, uint32_t memory_size)
 {
