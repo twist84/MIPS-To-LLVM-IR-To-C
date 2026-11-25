@@ -125,9 +125,10 @@ uint32_t c_ee_vif1::command_data_words(
         const uint32_t vn = (code >> 26u) & 3u;
         const uint32_t vl = (code >> 24u) & 3u;
         const uint32_t cl = machine.m_cycle & 0xffu;
-        const uint32_t wl = (machine.m_cycle >> 8u) & 0xffu;
+        const uint32_t raw_wl = (machine.m_cycle >> 8u) & 0xffu;
+        const uint32_t wl = raw_wl != 0u ? raw_wl : 256u;
         uint32_t consumed = count;
-        if (wl > cl && wl != 0u)
+        if (wl > cl)
         {
             consumed = (count / wl) * cl +
                 std::min(count % wl, cl);
@@ -162,7 +163,8 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
         address += machine.m_tops;
     }
     const uint32_t cl = machine.m_cycle & 0xffu;
-    const uint32_t wl = (machine.m_cycle >> 8u) & 0xffu;
+    const uint32_t raw_wl = (machine.m_cycle >> 8u) & 0xffu;
+    const uint32_t wl = raw_wl != 0u ? raw_wl : 256u;
     // Packed V4-5 ignores STMOD. Other formats use the current mode.
     const uint32_t mode = vn == 3u && vl == 3u ? 0u : machine.m_mode;
     // V4-32, unmasked, no row arithmetic and CL == WL consumes one
@@ -1134,16 +1136,26 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
 {
     switch (offset)
     {
-    case 0x00u: return m_machine.m_stat |
+    case 0x00u: return (m_machine.m_stat & ~3u) |
+        (!m_machine.m_pending.empty() ? 1u : 0u) | // VPS: waiting for data
         (m_machine.m_dbf ? 0x80u : 0u) |
         (deferred_busy() ? 0x4u : 0u); // VEW: outstanding VU execution
     case 0x20u: return m_machine.m_err;
     case 0x30u: return m_machine.m_mark;
     case 0x40u: return m_machine.m_cycle;
     case 0x50u: return m_machine.m_mode;
-    case 0x60u: return m_machine.m_num;
+    case 0x60u:
+        // No vectors retire until this transactional UNPACK has all its
+        // required data. NUM is the original eight-bit remaining count.
+        if (!m_machine.m_pending.empty() &&
+            (m_machine.m_pending.front() & 0x60000000u) == 0x60000000u)
+        {
+            return (m_machine.m_pending.front() >> 16u) & 0xffu;
+        }
+        return m_machine.m_num & 0xffu;
     case 0x70u: return m_machine.m_mask;
-    case 0x80u: return m_machine.m_code;
+    case 0x80u: return !m_machine.m_pending.empty() ?
+        m_machine.m_pending.front() : m_machine.m_code;
     case 0x90u: return m_machine.m_itops;
     case 0xa0u: return m_machine.m_base;
     case 0xb0u: return m_machine.m_ofst;

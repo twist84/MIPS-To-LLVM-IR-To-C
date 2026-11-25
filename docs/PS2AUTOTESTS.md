@@ -837,3 +837,16 @@ Vif_Unpack.cpp::writeXYZW writes raw incoming data into ROW for mode 3,
 only for data-selected lanes; V4-5 bypasses MODE. Apply this in the
 common decoder and keep mode 3 off the memcpy fast path. Regression
 checks both VIF units, masked ROW reads and packed V4-5 bypass.
+
+### STCYCL WL=0 and incomplete UNPACK readback
+
+On 72180fb, all 46 changed STCYCL lines are WL=0 cases; UNPACK differs
+only in the WL=0 masked 256-vector fill and header-only register readback.
+PCSX2 `82cac38` Vif_Unpack.cpp decodes WL=0 as 256 (CL remains raw).
+Apply this consistently to payload word counting and destination cycling,
+leaving CYCLE register readback unchanged. Expose committed pending
+header as CODE, VPS=datawait, and the eight-bit NUM when no staged
+vectors have retired. Whole-command transactions do not yet implement
+progressive partial-payload writes or decrement NUM for individually
+retired vectors. Regressions cover both units, mask/column fill through
+vector 255, and header-only NUM 1/255/256 encodings.

@@ -272,6 +272,54 @@ int main()
         }
     }
 
+    // WL=0 encodes 256, not a zero-length write cycle. Check the
+    // fill/mask sequence and CODE/NUM/VPS for a header-only UNPACK.
+    {
+        for (uint32_t unit = 0u; unit < 2u; ++unit)
+        {
+            ee::s_ee_vu0_state vu0{};
+            ee::c_ee_vif1 vif{};
+            if (unit == 0u)
+            {
+                vif.bind_vu0(&vu0);
+            }
+            if (!check(send(vif, {0x01000001u, 0x31000000u,
+                                 1u, 2u, 3u, 4u,
+                                 0x20000000u, 0xaaaaaaaau,
+                                 0x72000000u, 0x11u, 0u, 0u}),
+                       "WL=0 masked 256-vector fill rejected"))
+            {
+                return 1;
+            }
+            const uint8_t* data = unit == 0u ?
+                vu0.m_data_memory : vif.vu1_data();
+            if (!check(lane32(data, 0u, 0u) == 1u &&
+                       lane32(data, 1u, 3u) == 2u &&
+                       lane32(data, 2u, 0u) == 3u &&
+                       lane32(data, 3u, 0u) == 4u &&
+                       lane32(data, 255u, 3u) == 4u &&
+                       vif.read_register(0x40u) == 1u &&
+                       (vif.read_register(0x00u) & 3u) == 0u,
+                       "WL=0 fill sequence or raw cycle readback"))
+            {
+                return 1;
+            }
+            for (const uint32_t num : {1u, 255u, 0u})
+            {
+                const uint32_t code = 0x62000000u | (num << 16u);
+                if (!check(vif.write_register(0x10u, 1u) &&
+                           send(vif, {0u, 0u, 0x01000404u, code}) &&
+                           (vif.read_register(0x00u) & 3u) == 1u &&
+                           vif.read_register(0x80u) == code &&
+                           vif.read_register(0x60u) == num,
+                           "header-only UNPACK VPS/CODE/NUM"))
+                {
+                    return 1;
+                }
+            }
+        }
+    }
+
     // End-to-end aggregate PATH2 transaction: two DIRECT commands,
     // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
     // unrelated texture/VRAM side effects while exercising all limits.
