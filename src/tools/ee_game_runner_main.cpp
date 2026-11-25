@@ -3841,6 +3841,13 @@ int main(int argc, char** argv)
         "SDBZ_IDLE_SKIP", &idle_skip_environment);
     const bool idle_skip = idle_skip_value != nullptr &&
         std::strcmp(idle_skip_value, "0") != 0;
+    // Experimental forward CFG support is independent of the validated
+    // straight-line poll-loop skip path.
+    std::string idle_forward_environment;
+    const char* idle_forward_value = read_host_environment(
+        "SDBZ_IDLE_SKIP_FORWARD_BRANCHES", &idle_forward_environment);
+    const bool idle_forward_branches = idle_forward_value != nullptr &&
+        std::strcmp(idle_forward_value, "1") == 0;
     std::unordered_map<uint32_t, ee::s_idle_loop_shape> idle_loop_shapes;
     // Guarded loop headers observed at HOST_YIELD. Any later native entry
     // at one of them may probe; the one-iteration probe validates itself.
@@ -4244,7 +4251,8 @@ int main(int argc, char** argv)
     // eligible poll loop returns to its header and reads only values that
     // cannot change inside a native slice: RAM/scratchpad and status
     // registers the host updates between slices (never timers).
-    const auto idle_iteration_loops = [&](const ee::s_idle_loop_shape& shape)
+    const auto idle_iteration_loops = [&](const ee::s_idle_loop_shape& shape,
+                                         uint32_t& instruction_count)
     {
         uint64_t gpr[32];
         for (uint32_t i = 0u; i < 32u; ++i)
@@ -4283,7 +4291,7 @@ int main(int argc, char** argv)
                 default: *raw = ee::ee_mem_read64(&runtime, address); break;
                 }
                 return true;
-            }) == ee::e_idle_iteration::loops;
+            }, &instruction_count) == ee::e_idle_iteration::loops;
     };
 
     while (remaining != 0)
@@ -5013,13 +5021,19 @@ int main(int argc, char** argv)
                     out_pc == hit && cpu.m_pc == hit)
                 {
                     const auto shape = idle_loop_shapes.find(hit);
+                    uint32_t per_iteration = 0u;
+                    // A second safepoint inside the path would change
+                    // the point where the unaccelerated slice exhausts.
+                    // Require exactly one budget decrement between visits.
                     if (shape != idle_loop_shapes.end() &&
-                        idle_iteration_loops(shape->second) &&
-                        runtime.m_idle_probe_remaining >= 1u)
+                        runtime.m_idle_probe_remaining >= 1u &&
+                        runtime.m_loop_safepoint_remaining ==
+                            runtime.m_idle_probe_remaining - 1u &&
+                        idle_iteration_loops(shape->second, per_iteration) &&
+                        per_iteration != 0u)
                     {
                         const uint64_t repeats =
                             runtime.m_idle_probe_remaining - 1u;
-                        const uint64_t per_iteration = shape->second.words.size();
                         runtime.m_guest_instruction_attempts += repeats * per_iteration;
                         runtime.m_reference_instruction_slots += repeats * per_iteration;
                         runtime.m_loop_safepoint_remaining = 0u;
@@ -5394,7 +5408,7 @@ int main(int argc, char** argv)
                         }
                         *word = memory->read32(pc);
                         return true;
-                    })).first;
+                    }, idle_forward_branches)).first;
                 if (shape->second.eligible && idle_probe_headers.size() < 4u)
                 {
                     idle_probe_headers.push_back(header);
