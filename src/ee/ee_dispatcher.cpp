@@ -307,6 +307,27 @@ t_ee_translated_entry ee_resolve_dispatch_entry(
     return owner != k_no_dispatch_owner ? table.entries[owner] : nullptr;
 }
 
+uint32_t ee_resolve_dispatch_owner_vaddr(
+    const s_ee_dispatch_table& table,
+    const s_ee_dispatch_index& index,
+    uint32_t guest_pc,
+    t_ee_translated_entry entry)
+{
+    if (guest_pc == 0u || entry == nullptr || table.compiled == nullptr ||
+        table.entries == nullptr || table.entry_count == 0u ||
+        table.entry_count != table.compiled->functions.size())
+    {
+        return 0u;
+    }
+    const size_t owner = find_dispatch_owner_index(
+        index, guest_pc, table.entry_count);
+    if (owner == k_no_dispatch_owner || table.entries[owner] != entry)
+    {
+        return 0u;
+    }
+    return table.compiled->functions[owner].vaddr;
+}
+
 s_ee_dispatch_result ee_dispatch_run_resolved(
     s_ee_cpu_state* cpu,
     s_ee_runtime* runtime,
