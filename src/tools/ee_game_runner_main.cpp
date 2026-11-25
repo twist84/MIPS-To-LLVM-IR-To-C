@@ -3889,6 +3889,8 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_lookahead_before = 0u;
     uint64_t horizon_iop_idle_candidates = 0u;
     uint64_t horizon_iop_rpc_barriers = 0u;
+    uint64_t horizon_lookahead_mmio_free = 0u;
+    uint64_t horizon_lookahead_mmio_touched = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -4934,6 +4936,8 @@ int main(int argc, char** argv)
                 ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY;
         const uint64_t horizon_start = horizon_sample
             ? runtime.m_ee_cycle_scheduler.current_cycle() : 0u;
+        const uint64_t horizon_mmio_start = horizon_sample
+            ? host_timers.mmio_generation() : 0u;
         if (horizon_sample)
         {
             const bool iop_scheduled = hle_startup &&
@@ -5337,6 +5341,14 @@ int main(int argc, char** argv)
                 if (normal_exit && reached < horizon_iop_lookahead.m_cycle)
                 {
                     ++horizon_iop_lookahead_before;
+                    if (host_timers.mmio_generation() == horizon_mmio_start)
+                    {
+                        ++horizon_lookahead_mmio_free;
+                    }
+                    else
+                    {
+                        ++horizon_lookahead_mmio_touched;
+                    }
                 }
             }
         }
@@ -8953,12 +8965,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr,
             "EE horizon: shadow_only=1 normal_before=%llu "
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
-            "iop_idle_candidates=%llu iop_rpc_barriers=%llu unknown=%llu\n",
+            "iop_idle_candidates=%llu iop_rpc_barriers=%llu "
+            "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
             static_cast<unsigned long long>(horizon_iop_idle_candidates),
             static_cast<unsigned long long>(horizon_iop_rpc_barriers),
+            static_cast<unsigned long long>(horizon_lookahead_mmio_free),
+            static_cast<unsigned long long>(horizon_lookahead_mmio_touched),
             static_cast<unsigned long long>(horizon_unknown));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
