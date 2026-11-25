@@ -768,7 +768,6 @@ def main():
         "set \"MAX_EXPANSION_DISPATCHES=40000000\"",
         "set \"MAX_REPLAY_DISPATCHES=40000000\"",
         "set \"BOOT_TIMEOUT_SECONDS=600\"",
-        "set \"SDBZ_RUNTIME_PROFILE=1\"",
         "set \"SDBZ_TRACE_BUFFERED=1\"",
         "set \"SDBZ_REPORT_SNAPSHOT_MS=2000\"",
         "set \"SDBZ_REPORT_PROGRESS_EVERY=8192\"",
@@ -785,6 +784,12 @@ def main():
         "set \"EE_WEBGPU_SNAPSHOT=1\"",
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
+    assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
+    assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
+            '    set "SDBZ_SPEED_PERCENT=100"\n'
+            '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
+            ')\n'
+            'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
     assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
 
     # Exercise real CMD backward jumps through all three launcher options.
