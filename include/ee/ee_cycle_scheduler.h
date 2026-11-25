@@ -46,7 +46,7 @@ public:
         ee_memory& memory
     );
 
-    e_ee_cycle_source source() const;
+    e_ee_cycle_source source() const { return m_source; }
     uint64_t current_cycle() const;
     uint64_t scheduler_yields() const;
 
