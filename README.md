@@ -18,7 +18,17 @@ guest-PC dispatcher.
 - Native host object generation through the external llvmlite validation path.
 - Native object linking, dispatcher glue and runtime helper integration.
 - Regression coverage for instruction semantics, control flow, function
-  discovery, COP1/MMI, and the currently supported VU0 integer/branch slice.
+  discovery, COP1/MMI and VU execution, including hardware-derived COP1 vectors.
+- HLE-first EE/IOP runtime, original game IRX execution, CDVD/SIF/DMA,
+  controller input and guest-cycle device scheduling.
+- Native VU1 microprogram compilation, validated AOT loading with fallback,
+  asynchronous VU1/GS workers and native WebGPU presentation.
+- Guest-clock SPU2 playback, DMA/AutoDMA, voice envelopes, Gaussian
+  interpolation, modulation, noise, reverb and signed mixer gains.
+- Optional 48 kHz stereo PCM output through standalone raudio from the
+  pinned raylib 5.5 checkout; no host device is required for guest audio state.
+- Recoverable EE translation caches, live cache-miss overlays and
+  profile-driven runtime diagnostics.
 
 For the USA SLUS_214.42 ELF, the latest full-image validation discovered
 7,901 functions, emitted and verified 7,901 LLVM modules, generated 7,901
@@ -36,20 +46,25 @@ functions; a general LLVM IR-to-C source backend is not complete.
 
 ## Current validation boundary
 
-The VU0 runtime intentionally implements only lower scalar integer and branch
-operations paired with upper NOP. A deterministic per-pair candidate trace
-producer and a pinned PCSX2 interpreter adapter are now available for live
-differential testing. The candidate trace path passes CTest; the actual
-cross-engine comparison still needs to be run.
+The USA retail SDBZ (`SLUS_214.42`) HLE-first runtime has reached
+interactive training gameplay with native graphics and audible audio,
+without a BIOS dependency. The 2026-11-25 10:48 replay stopped at its
+configured 40-million-dispatch limit, with 16,219 cached EE IR modules,
+396,717 native VU1 invocations and zero interpreter fallbacks or IOP
+guest faults. CPU and GPU display captures were byte-identical; 2,705
+window presentations succeeded. The tester confirmed audio restoration.
 
-The linked full-game library is not yet a complete, playable PS2 executable.
-The native runtime now supports real OpenPS2BIOS ROM0 execution, CDVD reads,
-SIF/DMA handshakes, and selected GIF/GS transfers, but further native function
-coverage, graphics, device behavior and frame presentation are required.
+This is a bounded retail milestone, not a claim of complete game or
+PS2 hardware compatibility. The input was not strictly neutral,
+reverb was disabled on both cores, and full hardware differential
+accuracy, other game modes, sustained play and other titles remain open.
+The original 7,901-module full-image validation above is a distinct
+static-discovery milestone, not the current expanded-cache inventory.
 
-See [SDBZ_NATIVE_BOOT_PLAN.md](SDBZ_NATIVE_BOOT_PLAN.md) for the **current
-verified Super Dragon Ball Z boot checkpoint**, prioritized milestones, and
-acceptance criteria. `RESUME.md` retains earlier recompiler research history.
+See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_20261125.md),
+[SPU2 audio history](docs/SDBZ_SPU2_AUDIO_CLOCK.md),
+[native boot plan](SDBZ_NATIVE_BOOT_PLAN.md) and
+[native WebGPU documentation](docs/NATIVE_WEBGPU.md).
 
 ## Build and test
 
@@ -194,6 +209,31 @@ resolution without building or running the game. Optional
 `EMIT_JOBS` and `SIF_POLL_LIMIT` environment variables adjust the
 native session diagnostics.
 
-This remains a work-in-progress HLE bootstrap, **not a playable game**;
-unknown IOP kernel services and guest execution failures are reported
-rather than silently synthesized.
+## Reproducible retail profiling (Windows)
+
+With an existing compatible EE cache and VU1 AOT library at
+`build/vu1-native-v20`, run the bounded P40 preset. It performs
+`git pull --ff-only`, uses separate 40-million-dispatch budgets and
+enables native asynchronous workers, profiling and WebGPU capture.
+
+```bat
+set "SDBZ_P40_LISTEN="
+set "SDBZ_HOST_AUDIO=0"
+run_sdbz_p40.bat
+```
+
+For listening at the guest speed target with host audio:
+
+```bat
+set "SDBZ_P40_LISTEN=1"
+set "SDBZ_HOST_AUDIO=1"
+set "SDBZ_AUDIO_PROFILE=1"
+set "SDBZ_PROFILE_PCS=1"
+run_sdbz_p40.bat
+```
+
+Keep the EE and VU1 caches unless their translation provenance changes.
+Do not compare uncapped and paced wall times as speedups. A nominally
+neutral scripted preset does not exclude physical controller input.
+Unknown services and guest failures remain explicit; the runner does
+not synthesize hardware progress to force a successful boot.

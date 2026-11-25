@@ -1,5 +1,7 @@
 # SPU2 guest-clock foundation
 
+> **Current status (2026-11-25):** Guest-clock stereo PCM is audible in retail SDBZ. Batches 1–28 below document implementation history, not the current absence of features. Batch 28's ATTR bit 14 mute gate was reverted after a retail silence regression; hardware-accurate mute and full differential validation remain open. See [latest retail validation](SDBZ_RUNTIME_VALIDATION_20261125.md).
+
 Reference: [ps2-web-recomp/SDBZ SPU2](https://github.com/twist84/ps2-web-recomp/blob/SDBZ/runtime/src/iop/spu2.cpp), `kCyclesPerSample = 768`. The nominal sample rate is 48 kHz at 36.864 MHz IOP clock. The reference batches 32 samples per event; this first batch tracks the elapsed sample count and fractional phase, not rendered samples or a hardware-cycle-validated timeline.
 
 The existing attached R3000 interpreter/AOT already advances IOP hardware on retirement. The HLE kernel previously advanced the same hardware a second time after each slice. Attached CPU retirement now owns that advancement; the kernel still advances idle time, handled HLE syscall cycles and detached fixtures. This affects existing DMA and Timer 5 timing, so a fresh retail replay is required.
@@ -286,3 +288,24 @@ observational, do not alter guest state, and can isolate any remaining
 silence in the next retail run. Hardware-accurate mute behavior remains
 open. Existing PMON, NON, Gaussian, reverb and master sweep code stays
 in place; no routing bypass or fabricated PCM is introduced.
+
+### Retail audio restoration (10:48 replay)
+
+At code commit `1f6a12142bd7dfa34ace33fc23cf26db190df421`, the archive
+`sdbz-graphics-pr148-neutral-20261125-104855750.zip` reports 2,939,857
+mixed frames, 1,791,290 nonzero, peak 32766, 10 clipped samples and a
+ready 48 kHz stereo device. The user confirmed audible audio. Both cores
+had ATTR bit 14 set for 2,939,785 mixed frames; final ATTR values were
+0xc000/0xc041. Both core output peaks were 32766, and core 1 external
+input peak was 32766. This supports leaving the unverified mute gate
+inactive, not a claim of the true hardware mute polarity. Both effects
+were disabled, with zero enable writes, wet inputs, returns and effect
+IRQs. Reverb therefore remains unvalidated in active retail use.
+
+Profile: 2324.360 ms inclusive mixer, 1123.813 ms effect processing,
+404.043 ms voice processing. Disabled effect processing is an optimisation
+candidate, but any fast path must preserve history, RAM/IRQ semantics and
+future enable transitions. Host audio dropped 7072 frames and reported
+33152 underrun frames and 539040 prebuffer-silence frames; audible output
+does not establish glitch-free playback. All four CI workflows passed
+on the code commit.
