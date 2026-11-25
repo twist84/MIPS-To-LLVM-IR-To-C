@@ -3255,6 +3255,17 @@ def main():
             assert ("EE watch pair: addr=0x001001fc "
                     "word0=0x00000000 word1=0x00000007") in result.stdout, result.stdout
 
+            # The same compiled module must skip both trace helpers when
+            # disabled, while preserving the guest word and register result.
+            untraced = subprocess.run(
+                args[:-2] + ["--no-recompile"],
+                capture_output=True, text=True, check=False,
+            )
+            assert untraced.returncode == 3, untraced.stdout + untraced.stderr
+            assert "EE guest-store:" not in untraced.stdout, untraced.stdout
+            assert "EE guest-v0-write:" not in untraced.stdout, untraced.stdout
+            assert "addr=0x00100200 old=0x00000000 new=0x00000007" in untraced.stdout, untraced.stdout
+
             rejected = subprocess.run(
                 args[:-2] + ["--watch-word=0x02000000", "--no-recompile"],
                 capture_output=True, text=True, check=False,

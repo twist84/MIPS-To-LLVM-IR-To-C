@@ -101,6 +101,45 @@ void module_builder::declare_memory_helpers()
     m_out += "declare i32 @ee_vu0_get_branch_condition(ptr)\n";
     m_out += "\n";
 
+    // Keep disabled diagnostic calls on the translated fast path. The
+    // external helpers still own filtering, event limits and ring history.
+    // Inspect runtime fields at each write, not once per function: a trace
+    // budget can be consumed in the same translated block.
+    static_assert(sizeof(bool) == 1u, "guest store trace flag ABI");
+    m_out += "define internal void @ee_guard_guest_store_trace(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 %width, i64 %value, i32 %lane, i64 %base, i64 %sp, i64 %fp, i64 %ra) alwaysinline {\n";
+    m_out += "entry:\n";
+    m_out += "  %null = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 %null, label %done, label %check\n";
+    m_out += "check:\n";
+    m_out += "  %enabled_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_guest_store_trace_enabled)) + "\n";
+    m_out += "  %enabled = load i8, ptr %enabled_ptr\n";
+    m_out += "  %active = icmp ne i8 %enabled, 0\n";
+    m_out += "  br i1 %active, label %invoke, label %done\n";
+    m_out += "invoke:\n";
+    m_out += "  call void @ee_trace_guest_store(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i32 %width, i64 %value, i32 %lane, i64 %base, i64 %sp, i64 %fp, i64 %ra)\n";
+    m_out += "  br label %done\n";
+    m_out += "done:\n";
+    m_out += "  ret void\n";
+    m_out += "}\n\n";
+
+    m_out += "define internal void @ee_guard_guest_v0_trace(ptr %rt, i32 %pc, i32 %op, i64 %old, i64 %new) alwaysinline {\n";
+    m_out += "entry:\n";
+    m_out += "  %null = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 %null, label %done, label %check\n";
+    m_out += "check:\n";
+    m_out += "  %remaining_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_guest_v0_trace_remaining)) + "\n";
+    m_out += "  %remaining = load i32, ptr %remaining_ptr\n";
+    m_out += "  %active = icmp ne i32 %remaining, 0\n";
+    m_out += "  br i1 %active, label %invoke, label %done\n";
+    m_out += "invoke:\n";
+    m_out += "  call void @ee_trace_guest_v0_write(ptr %rt, i32 %pc, i32 %op, i64 %old, i64 %new)\n";
+    m_out += "  br label %done\n";
+    m_out += "done:\n";
+    m_out += "  ret void\n";
+    m_out += "}\n\n";
+
     // The trace is a bounded, host-only stream for reference timing
     // calibration. Sequence numbers are reference instruction *slots*,
     // not validated R5900 cycles. Native reached instructions, annulled
@@ -433,7 +472,7 @@ void module_builder::emit_guest_store_trace(
     const std::string sp = src_lo(29);
     const std::string fp = src_lo(30);
     const std::string ra = src_lo(31);
-    m_out += "  call void @ee_trace_guest_store(ptr %rt, i32 " +
+    m_out += "  call void @ee_guard_guest_store_trace(ptr %rt, i32 " +
              std::to_string(ins.pc) + ", i32 " +
              std::to_string(ins.opcode_word) + ", i32 " +
              effective_address + ", i32 " + affected_address + ", i32 " +
@@ -453,7 +492,7 @@ void module_builder::emit_guest_v0_write(
 
     // All values refer to the emitter's live SSA GPR state. This observes
     // the guest V0 assignment without causing a second architectural write.
-    m_out += "  call void @ee_trace_guest_v0_write(ptr %rt, i32 " +
+    m_out += "  call void @ee_guard_guest_v0_trace(ptr %rt, i32 " +
              std::to_string(m_current_guest_insn->pc) + ", i32 " +
              std::to_string(m_current_guest_insn->opcode_word) + ", i64 " +
              old_value + ", i64 " + new_value + ")\n";
