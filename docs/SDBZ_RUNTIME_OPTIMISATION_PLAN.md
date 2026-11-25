@@ -148,3 +148,27 @@ This is host-only work, not EE lowering or a scheduling shortcut. No EE
 or VU1 regeneration is required beyond independently captured VU1 misses.
 Measure the exclusive dispatch-diagnostics cost against the 11:09 baseline
 with equivalent profiler settings before claiming a gain.
+
+### Batch 2 retail result — 2026-11-25 11:23
+
+Archive `sdbz-graphics-pr148-neutral-20261125-112313454.zip`: 40M
+observations and dispatches, 53.187 s native process wall, no compilation
+wait, no IOP guest fault, byte-identical CPU/GPU scanout. VU1 v20 loaded
+84 programs, executed 389797 native runs with no fallbacks or captures.
+PCM: 2115275 nonzero frames; effect cost 354.207 ms / 8183060 core ticks
+(43.29 ns/tick). EE native exclusive 16.440 s, IOP 10.863 s, dispatch
+diagnostics 2.347 s (58.67 ns/observation), versus 2.201 s previously.
+Workload differed (5111 fields, 3644 presentations, 137 Cross candidates,
+zero analog samples outside deadzone). No demonstrated diagnostic speedup;
+retain exact counters and do not claim a regression caused by the patch.
+All four CI workflows for `4fc03fa` passed. No new VU1 build needed.
+
+## Batch 3: inline the empty SIF RPC service path
+
+The IOP service ran 40035980 times in the last replay. Inline the exact
+existing two-queue empty check and pending guest-call count, keeping
+nonempty module-start/reply processing in the same out-of-line implementation.
+Do not skip a pending initializer, change the pump cadence, or combine
+IOP cycle budgets. Existing tests exercise pending starts, blocked and
+accepted DMA5 replies; add a repeated empty-pump regression. This is a
+small host call-overhead reduction, not a measured 10-second saving.

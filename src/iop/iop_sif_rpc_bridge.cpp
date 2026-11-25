@@ -1337,12 +1337,8 @@ void c_sif_rpc_bridge::set_ee_receive_busy(bool busy)
     m_ee_receive_busy = busy;
 }
 
-bool c_sif_rpc_bridge::pump()
+bool c_sif_rpc_bridge::pump_pending()
 {
-    if (m_pending_module_starts.empty() && m_replies.empty())
-    {
-        return false;
-    }
     // A stopped initializer can still be restarted. A deleted or faulted
     // initializer can never return, so complete its LOADFILE call with an error.
     for (auto it = m_pending_module_starts.begin();
@@ -1448,11 +1444,6 @@ bool c_sif_rpc_bridge::pump()
 size_t c_sif_rpc_bridge::pending_replies() const
 {
     return m_replies.size();
-}
-
-size_t c_sif_rpc_bridge::pending_guest_calls() const
-{
-    return m_guest_pending.size();
 }
 
 size_t c_sif_rpc_bridge::pending_module_starts() const

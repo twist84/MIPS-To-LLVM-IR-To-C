@@ -1239,6 +1239,20 @@ int main()
     {
         return fail("IOP scheduler reported work with no runnable module");
     }
+    // Repeated empty pump calls cannot publish a reply or alter
+    // DMA status before SIFCMD initialization.
+    const auto idle_dma_status = dmac.status();
+    for (uint32_t i = 0u; i < 1024u; ++i)
+    {
+        if (rpc.pump() || rpc.pending_replies() != 0u ||
+            rpc.pending_guest_calls() != 0u ||
+            rpc.pending_module_starts() != 0u ||
+            dmac.status() != idle_dma_status || kernel.has_guest_work())
+        {
+            return fail("empty RPC pump produced observable work");
+        }
+    }
+
     // The EE cannot dispatch any LOADFILE command merely because
     // a module exists on the host disc.
     const std::vector<uint32_t> bind = {
