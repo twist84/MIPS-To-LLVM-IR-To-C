@@ -193,7 +193,7 @@ int main()
     }
 
     // Restart transfer through PACKED A+D; a later unsupported
-    // SIGNAL in the same packet must roll back both 8-byte HWREG
+    // FINISH in the same packet must roll back both 8-byte HWREG
     // pixels and the entire GIF/DMA transaction.
     tag(&runtime, 0x400u, 2u, 0u);
     ad(&runtime, 0x410u, 0x52u, trxreg(2u, 1u));
@@ -210,7 +210,7 @@ int main()
     const uint32_t before1 = 0x00151413u;
     tag(&runtime, 0x500u, 2u, 0u);
     ad(&runtime, 0x510u, 0x54u, 0x0807060504030201ull);
-    ad(&runtime, 0x520u, 0x60u, 0x1234ull);
+    ad(&runtime, 0x520u, 0x61u, 0x1234ull);
     dma(&runtime, 0x500u, 3u);
     if (mmio(&runtime, 0x10u) != 0x500u ||
         mmio(&runtime, 0x20u) != 3u ||
@@ -223,7 +223,7 @@ int main()
         !read32(gs, base + 4u, before1) ||
         gif.state().m_active)
     {
-        return fail("rejected SIGNAL leaked HWREG VRAM or parser state");
+        return fail("rejected FINISH leaked HWREG VRAM or parser state");
     }
 
     // Fix only the trailing offending A+D register and retry from

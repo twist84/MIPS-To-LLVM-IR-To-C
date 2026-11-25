@@ -247,7 +247,7 @@ int main()
         return fail("PSMZ16S block permutation, DMA or page boundaries");
     }
 
-    // A rejected late SIGNAL must not commit staged depth pixels,
+    // A rejected late FINISH must not commit staged depth pixels,
     // including the cursor; the same IMAGE can then be retried.
     if (!reg(gs, 0x53u, 0u))
     {
@@ -261,7 +261,7 @@ int main()
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
     events[1].m_byte_offset = 16u;
-    events[1].m_word1 = 0x60u;
+    events[1].m_word1 = 0x61u;
     if (gs.consume(events, 2u, retry.data(), 2u) ||
         gs.state().m_transfer_pixels_written != 0u ||
         !read16(gs, k_base + 5576u, 0x5000u) ||
