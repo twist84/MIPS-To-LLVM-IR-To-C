@@ -58,6 +58,38 @@ bool test_spu2_sample_clock()
     {
         return false;
     }
+    // The clock-only hot path and mixer edge path must agree for
+    // different partitions, including zero, exact and multi-sample steps.
+    {
+        iop::c_hw partitioned{};
+        if (!partitioned.write(spu + 0x760u, 2u, 1u))
+        {
+            return false;
+        }
+        uint32_t left = 4u * period + 17u;
+        uint32_t seed = 0x12345678u;
+        while (left != 0u)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            const uint32_t step = std::min(left, 1u + (seed % 137u));
+            partitioned.advance_cycles(0u);
+            partitioned.advance_cycles(step);
+            left -= step;
+            const uint64_t reached = 4u * period + 17u - left;
+            if (partitioned.spu2().clock_cycles() != reached ||
+                partitioned.spu2().elapsed_samples() != reached / period ||
+                partitioned.spu2().sample_phase() != reached % period)
+            {
+                return false;
+            }
+        }
+        if (partitioned.spu2().mixed_frames() != hw.spu2().mixed_frames() ||
+            partitioned.spu2().playback_irq_events() != hw.spu2().playback_irq_events() ||
+            partitioned.pending_interrupts() != hw.pending_interrupts())
+        {
+            return false;
+        }
+    }
     // Large advance must retain the fractional phase without u32 overflow.
     hw.advance_cycles(0xffffffffu);
     const uint64_t total = uint64_t{4u * period + 17u} + 0xffffffffu;
