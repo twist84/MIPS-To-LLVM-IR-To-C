@@ -86,7 +86,11 @@ the earlier entry/clock barriers; they can overlap.
 `dmac_passive_sif0` counts the narrower exemption.
 `entry_callback`, `entry_idle`, `entry_irq`, `entry_vu`, and
 `entry_other` are independently counted entry states and may overlap.
-Do not sum them as exclusive barrier counts. The prior retail log
+Mask histograms are reduced only at report time to minimize hot-path
+profiling overhead. `dmac_top_mask` and `dmac_top_mask_count` identify
+the most frequent nonzero exact STR mask among otherwise eligible
+entries (zero/count zero means no nonzero mask was observed).
+Do not sum the overlapping counters as exclusive barrier counts. The prior retail log
 did not contain channel attribution, so SIF0 dominance is a hypothesis
 to test, not an established result.
 
