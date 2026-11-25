@@ -4659,11 +4659,22 @@ int main(int argc, char** argv)
             {
                 const auto& iop_hw = iop_kernel->hardware();
                 const auto& spu2 = iop_hw.spu2();
+                const auto device = iop_hw.scheduler_checkpoint();
+                uint32_t ee_mscom = 0u, ee_smcom = 0u;
+                uint32_t ee_msflag = 0u, ee_smflag = 0u;
+                (void)hardware.sif().get_reg(1u, &ee_mscom);
+                (void)hardware.sif().get_reg(2u, &ee_smcom);
+                (void)hardware.sif().get_reg(3u, &ee_msflag);
+                (void)hardware.sif().get_reg(4u, &ee_smflag);
                 std::fprintf(stderr,
                     "IOP checkpoint: dispatch=%llu pc=%08x ee=%llu iop=%llu "
                     "turns=%llu executed=%llu debt=%llu next=%llu "
                     "irq=%08x dma=%u spu2=%llu frames=%llu "
-                    "ee_dmac=%08x ee_intc=%08x rpc_pending=%u reason=%u\n",
+                    "i_stat=%08x i_mask=%08x i_ctrl=%08x icr=%08x icr2=%08x "
+                    "timer_count=%u timer_mode=%08x timer_target=%u timer_rem=%u timer_armed=%u "
+                    "dma4=%u dma7=%u auto4=%u auto7=%u cdvd=%u "
+                    "ee_dmac=%08x ee_intc=%08x mscom=%08x smcom=%08x msflag=%08x smflag=%08x "
+                    "iop_smcom=%08x iop_smflag=%08x rpc_pending=%u reason=%u\n",
                     static_cast<unsigned long long>(dispatched), cpu.m_pc,
                     static_cast<unsigned long long>(ee_cycle),
                     static_cast<unsigned long long>(iop_kernel->cycles()),
@@ -4675,7 +4686,17 @@ int main(int argc, char** argv)
                     iop_hw.spu2_dma_cycles_remaining(),
                     static_cast<unsigned long long>(spu2.clock_cycles()),
                     static_cast<unsigned long long>(spu2.mixed_frames()),
+                    device.m_irq_stat, device.m_irq_mask, device.m_irq_ctrl,
+                    device.m_dma_icr, device.m_dma_icr2,
+                    device.m_timer_count, device.m_timer_mode, device.m_timer_target,
+                    device.m_timer_remainder, static_cast<unsigned>(device.m_timer_armed),
+                    device.m_dma4_remaining, device.m_dma7_remaining,
+                    static_cast<unsigned>(device.m_auto_dma4),
+                    static_cast<unsigned>(device.m_auto_dma7),
+                    static_cast<unsigned>(device.m_cdvd_pending),
                     hardware.dmac().status(), hardware.intc().pending(),
+                    ee_mscom, ee_smcom, ee_msflag, ee_smflag,
+                    iop_hw.sif_smcom(), iop_hw.sif_smflag(),
                     static_cast<unsigned>(iop_rpc != nullptr &&
                         iop_rpc->pending_guest_calls() != 0u),
                     reason);
