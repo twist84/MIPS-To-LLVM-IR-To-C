@@ -32,6 +32,8 @@ set "SDBZ_VU1_ASYNC=1"
 set "SDBZ_GS_ASYNC=1"
 rem Retail-validated experimental mode; regular runner defaults remain unchanged.
 set "SDBZ_GS_GPU_VRAM=1"
+rem Disable byte-wise image hashing, retain committed event/QWC counters.
+set "SDBZ_GIF_IMAGE_DIGEST=0"
 
 set "SDBZ_VU1_AOT=%CD%\build\vu1-native-v20"
 set "SDBZ_VU1_AOT_CAPTURE="

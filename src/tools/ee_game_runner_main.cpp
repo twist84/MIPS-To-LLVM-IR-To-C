@@ -3546,14 +3546,16 @@ int main(int argc, char** argv)
     // and time paused waiting for live cache-miss compilation.
     uint64_t iop_time_ns = 0u;
     double compile_wait_ms = 0.0;
-    // SDBZ_PROFILE_PCS=1: host-only per-entry-PC profile of guest
-    // instructions and native wall time, printed when the runner stops.
+    // SDBZ_PROFILE_PCS=1: reuse the native-boundary clock; rank by
+    // inclusive native time, excluding live compilation and outer-loop work.
+    // Accounted guest attempts include charged idle-loop instructions.
     struct s_pc_profile
     {
         uint64_t m_calls = 0u;
         uint64_t m_dispatches = 0u;
         uint64_t m_instructions = 0u;
-        double m_wall_ms = 0.0;
+        uint64_t m_idle_instructions = 0u;
+        uint64_t m_wall_ns = 0u;
     };
     std::string profile_pcs_environment;
     const char* profile_pcs_value = read_host_environment(
@@ -4511,9 +4513,8 @@ int main(int argc, char** argv)
         std::optional<ee::s_ee_cpu_state> cpu_before_dispatch;
         const uint64_t instructions_before_dispatch =
             runtime.m_guest_instruction_attempts;
-        const auto profile_start = profile_pcs
-            ? std::chrono::steady_clock::now()
-            : std::chrono::steady_clock::time_point{};
+        const uint64_t idle_before_dispatch = idle_skip_instructions;
+        uint64_t pc_native_ns = 0u;
         bool hot_expand_budget_reached = false;
         for (;;)
         {
@@ -4543,7 +4544,7 @@ int main(int argc, char** argv)
             runtime.m_loop_safepoint_remaining = safepoint_budget;
             ee::c_runtime_profile_scope native_profile_scope(
                 ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
-                report_path != nullptr);
+                report_path != nullptr || profile_pcs);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             const auto resolved = slice == 1u && native_resolve != nullptr ?
                 native_targets.resolve(from_pc, [&](uint32_t pc)
@@ -4688,6 +4689,10 @@ int main(int argc, char** argv)
                 return 1;
             }
             const uint64_t native_duration_ns = native_profile_scope.stop();
+            if (profile_pcs)
+            {
+                pc_native_ns += native_duration_ns;
+            }
             if (report_path != nullptr)
             {
                 native_time_ns += native_duration_ns;
@@ -4804,16 +4809,16 @@ int main(int argc, char** argv)
 
         if (profile_pcs)
         {
-            // Host-only attribution of guest instructions and native wall
-            // time to the guest PC each native call was entered at.
+            // Attribute measured boundary durations across retries, not
+            // the time spent compiling, opening libraries or updating reports.
             s_pc_profile& entry = pc_profile[from_pc];
             entry.m_calls += 1u;
             entry.m_dispatches += count;
             entry.m_instructions +=
                 runtime.m_guest_instruction_attempts -
                 instructions_before_dispatch;
-            entry.m_wall_ms += std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - profile_start).count();
+            entry.m_idle_instructions += idle_skip_instructions - idle_before_dispatch;
+            entry.m_wall_ns += pc_native_ns;
         }
 
         dispatched += count;
@@ -8248,23 +8253,36 @@ int main(int argc, char** argv)
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b)
                   {
-                      return a.second.m_instructions > b.second.m_instructions;
+                      if (a.second.m_wall_ns != b.second.m_wall_ns)
+                      {
+                          return a.second.m_wall_ns > b.second.m_wall_ns;
+                      }
+                      return a.first < b.first;
                   });
         uint64_t total_instructions = 0u;
+        uint64_t total_idle_instructions = 0u;
+        uint64_t total_wall_ns = 0u;
         for (const auto& item : ranked)
         {
             total_instructions += item.second.m_instructions;
+            total_idle_instructions += item.second.m_idle_instructions;
+            total_wall_ns += item.second.m_wall_ns;
         }
         std::fprintf(stderr,
             "EE profile: %zu entry PCs, %llu guest instructions "
-            "(host-only attribution to the native entry PC)\n",
-            ranked.size(), static_cast<unsigned long long>(total_instructions));
+            "(ranked by inclusive native boundary time; compilation excluded) "
+            "idle_charged=%llu native_ns=%llu\n",
+            ranked.size(), static_cast<unsigned long long>(total_instructions),
+            static_cast<unsigned long long>(total_idle_instructions),
+            static_cast<unsigned long long>(total_wall_ns));
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
             const s_pc_profile& item = ranked[i].second;
+            const uint64_t non_skipped = item.m_instructions - item.m_idle_instructions;
             std::fprintf(stderr,
                 "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
-                "instructions=%llu (%.1f%%) wall_ms=%.1f ns_per_instruction=%.2f\n",
+                "instructions=%llu (%.1f%%) wall_ms=%.3f ns_per_instruction=%.2f "
+                "idle_charged=%llu non_skipped=%llu ns_per_non_skipped=%.2f native_ns=%llu\n",
                 ranked[i].first,
                 static_cast<unsigned long long>(item.m_calls),
                 static_cast<unsigned long long>(item.m_dispatches),
@@ -8273,11 +8291,18 @@ int main(int argc, char** argv)
                     ? 100.0 * static_cast<double>(item.m_instructions) /
                           static_cast<double>(total_instructions)
                     : 0.0,
-                item.m_wall_ms,
+                static_cast<double>(item.m_wall_ns) / 1.0e6,
                 item.m_instructions != 0u
-                    ? 1.0e6 * item.m_wall_ms /
+                    ? static_cast<double>(item.m_wall_ns) /
                           static_cast<double>(item.m_instructions)
-                    : 0.0);
+                    : 0.0,
+                static_cast<unsigned long long>(item.m_idle_instructions),
+                static_cast<unsigned long long>(non_skipped),
+                non_skipped != 0u
+                    ? static_cast<double>(item.m_wall_ns) /
+                          static_cast<double>(non_skipped)
+                    : 0.0,
+                static_cast<unsigned long long>(item.m_wall_ns));
         }
     }
 

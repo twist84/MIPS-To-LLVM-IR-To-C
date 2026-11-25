@@ -4166,7 +4166,8 @@ def main():
                         "guest_instruction_attempts", "gpr_lo"):
                 assert sampled_state[key] == snapshot[key], key
             direct_report = root / "direct.json"
-            direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1")
+            direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1",
+                              SDBZ_PROFILE_PCS="1", SDBZ_RUNTIME_PROFILE="1")
             direct_run = subprocess.run([
                 sys.executable, str(source / "tools" / "run_game.py"), str(elf),
                 "--build-dir", str(build), "--work-dir", str(root / "out"),
@@ -4181,6 +4182,19 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo", "history"):
                 assert direct_state[key] == snapshot[key], key
+            profile_lines = [line for line in direct_run.stderr.splitlines()
+                             if line.startswith("EE profile: ")]
+            assert profile_lines and "compilation excluded" in profile_lines[0], profile_lines
+            total_native_ns = int(profile_lines[0].split("native_ns=")[1])
+            assert total_native_ns == direct_state["runtime_profile"]["subsystems"]["ee_native_boundary"]["inclusive_ns"]
+            assert "idle_charged=0" in profile_lines[0], profile_lines
+            profile_entries = [line for line in profile_lines if line.startswith("EE profile: pc=")]
+            assert profile_entries, profile_lines
+            times = [int(line.split("native_ns=")[1]) for line in profile_entries]
+            assert times == sorted(times, reverse=True), profile_entries
+            assert sum(times) == total_native_ns, profile_entries
+            attempts = sum(int(line.split("non_skipped=")[1].split()[0]) for line in profile_entries)
+            assert attempts == direct_state["guest_instruction_attempts"], profile_entries
             assert sampled_state["vu1_worker"]["enabled"] is False
             worker_report = root / "worker.json"
             worker_env = dict(env, SDBZ_VU1_ASYNC="1")
