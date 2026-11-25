@@ -3915,6 +3915,7 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_rpc_barriers = 0u;
     uint64_t horizon_gs_worker_barriers = 0u;
     uint64_t horizon_dmac_started_barriers = 0u;
+    uint64_t horizon_clock_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
     uint64_t horizon_vu_callback_boundaries = 0u;
@@ -4988,11 +4989,14 @@ int main(int argc, char** argv)
                 hardware.dmac().deferred_vif1_pending() ||
                 vif1.cmsar1_running() || vu0.m_running != 0u ||
                 iop_rom0_path != nullptr ||
-                (iop_scheduled && (!iop_clock.active() ||
-                    iop_deadline == ee::k_ee_no_deadline)) ||
                 (runtime.m_perf_control & 0x80000000u) != 0u ||
                 runtime.m_perf_compat_fault ||
                 runtime.m_timing_observer != nullptr;
+            if (!barrier && !ee::ee_horizon_checkpoint_ready(runtime, iop_clock, iop_scheduled))
+            {
+                barrier = true;
+                ++horizon_clock_barriers;
+            }
             // D_STAT pending only represents enabled completion IRQs.
             // A started channel may still need service, even without one.
             if (!barrier && hardware.dmac().started_channels() != 0u)
@@ -9037,7 +9041,7 @@ int main(int argc, char** argv)
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
             "iop_idle_candidates=%llu iop_rpc_barriers=%llu "
             "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu "
-            "gs_worker_barriers=%llu dmac_started_barriers=%llu "
+            "gs_worker_barriers=%llu dmac_started_barriers=%llu clock_barriers=%llu "
             "vu_callback_boundaries=%llu cop0_changed_boundaries=%llu "
             "mmio_free_direct_touched=%llu mmio_free_direct_quiet=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
@@ -9049,6 +9053,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_lookahead_mmio_touched),
             static_cast<unsigned long long>(horizon_gs_worker_barriers),
             static_cast<unsigned long long>(horizon_dmac_started_barriers),
+            static_cast<unsigned long long>(horizon_clock_barriers),
             static_cast<unsigned long long>(horizon_vu_callback_boundaries),
             static_cast<unsigned long long>(horizon_cop0_changed_boundaries),
             static_cast<unsigned long long>(horizon_mmio_free_direct_touched),
