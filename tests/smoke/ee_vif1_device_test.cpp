@@ -977,11 +977,16 @@ int main()
             return 1;
         }
 
+        const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
+        deferred.native_execution_begin();
+        const auto bad_start = deferred.begin_deferred(bad.data(), 1u);
+        deferred.native_execution_end();
+        // The pending job may already be finished on the host, but only
+        // the explicit controller checkpoint can publish its result.
         deferred.native_execution_begin();
         deferred.native_execution_end();
-
-        const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
-        if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
+        if (!check(bad_start == result::pending && deferred.deferred_busy() &&
+                deferred_capture.m_calls == 1u &&
                 deferred.wait_deferred() == result::rejected &&
                 deferred_capture.m_calls == 1u &&
                 deferred.diagnostic().m_committed_opcodes[0x14u] == 2u,
