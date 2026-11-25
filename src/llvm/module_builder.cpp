@@ -2131,7 +2131,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         const uint8_t fmt = ins.rs;
         const uint8_t ft = ins.rt;
         const uint8_t fs = ins.rd;
-        const uint8_t fd = ins.sa;
+        const uint8_t fd = static_cast<uint8_t>(ins.sa);
         const uint8_t fp_funct = ins.funct;
 
         if (fmt == static_cast<uint8_t>(ee::e_ee_opcode::COP1_MFC1))
