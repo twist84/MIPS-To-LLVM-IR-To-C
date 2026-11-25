@@ -1,4 +1,5 @@
 #include "ee_sdbz_dma_wait_probe.h"
+#include "../../src/tools/ee_sdbz_slot_callback_probe.h"
 
 #include <cstdint>
 #include <cstring>
@@ -115,7 +116,7 @@ int main()
         std::fputs("M2 SDBZ red-loop snapshot or RAM was altered\n", stderr);
         return 1;
     }
-    using t_probe = ee::c_ee_sdbz_dma_wait_probe;
+    using t_probe = ee::c_ee_sdbz_slot_callback_probe;
     t_probe::s_slot_observation before{}, after{};
     if (!t_probe::is_slot_callback(false, 1u, 0x00102a60u, 0x001025a4u) ||
         t_probe::is_slot_callback(true, 1u, 0x00102a60u, 0x001025a4u) ||

@@ -20,6 +20,7 @@
 #include "ee_reached_isa_inventory.h"
 #include "ee_vsync_flags.h"
 #include "ee_sdbz_dma_wait_probe.h"
+#include "ee_sdbz_slot_callback_probe.h"
 #include "ee_sdbz_pad_return_probe.h"
 #include "ee_sdbz_spawn_probe.h"
 #include "ee_gif.h"
@@ -3378,17 +3379,17 @@ int main(int argc, char** argv)
     constexpr uint32_t k_slot_callback_limit = 16u;
     uint32_t slot_callback_samples = 0u;
     bool slot_callback_armed = false;
-    ee::c_ee_sdbz_dma_wait_probe::s_slot_observation slot_callback_before{};
+    ee::c_ee_sdbz_slot_callback_probe::s_slot_observation slot_callback_before{};
     const auto enter_irq_callback = [&](const s_kernel_interrupt_handler& handler)
     {
         // Observe only the identified VIF1 handler while the retail
         // wait is suspended, with a fixed log bound per replay.
         slot_callback_armed = report_path != nullptr &&
             slot_callback_samples < k_slot_callback_limit &&
-            ee::c_ee_sdbz_dma_wait_probe::is_slot_callback(
+            ee::c_ee_sdbz_slot_callback_probe::is_slot_callback(
                 irq_callback_is_intc, irq_callback_cause,
                 handler.m_address, irq_interrupted_cpu.m_pc) &&
-            ee::c_ee_sdbz_dma_wait_probe::sample_slots(
+            ee::c_ee_sdbz_slot_callback_probe::sample_slots(
                 memory.get(), slot_callback_before);
         cpu.m_cop0[12] = (irq_interrupted_cpu.m_cop0[12] & ~0x10001u) | 2u;
         cpu.m_gpr[4] = {irq_callback_cause, 0u};
@@ -5133,8 +5134,8 @@ int main(int argc, char** argv)
             if (slot_callback_armed)
             {
                 slot_callback_armed = false;
-                ee::c_ee_sdbz_dma_wait_probe::s_slot_observation after{};
-                if (ee::c_ee_sdbz_dma_wait_probe::sample_slots(memory.get(), after))
+                ee::c_ee_sdbz_slot_callback_probe::s_slot_observation after{};
+                if (ee::c_ee_sdbz_slot_callback_probe::sample_slots(memory.get(), after))
                 {
                     ++slot_callback_samples;
                     std::fprintf(stderr,

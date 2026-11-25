@@ -219,3 +219,7 @@ and immutable backed-RAM observations. Callback-boundary correlation
 is not an instruction-level writer trace. No EE or VU1 cache changes;
 collect the new diagnostic in the next combined retail replay rather
 than request a standalone run.
+
+The callback helper lives in `src/tools/ee_sdbz_slot_callback_probe.h`;
+restore the original `include/ee/ee_sdbz_dma_wait_probe.h` byte-for-byte
+because that header is included in the EE translation-cache input hash.
