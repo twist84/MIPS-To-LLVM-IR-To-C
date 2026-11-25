@@ -5,6 +5,8 @@ namespace ee {
 namespace {
 
 const s_ee_exception_info k_exception_table[EX_CODE_COUNT] = {
+    // Legacy common-vector class describes the nested fallback.
+    // Normal interrupt entry is selected separately below.
     { EX_Int,  "Int",  VEC_KIND_COMMON, false, false },
     { EX_Mod,  "Mod",  VEC_KIND_COMMON, true,  false },
     { EX_TLBL, "TLBL", VEC_KIND_TLB,    true,  false },
@@ -44,6 +46,15 @@ extern "C" uint32_t ee_exception_vector(uint32_t status, uint32_t excode)
 
     if (kind == VEC_KIND_DEBUG)
         return VEC_DEBUG;
+
+    // EE Core User's Manual v6.0, section 4.2.5 (printed p.99):
+    // level-1 hardware interrupts have their own vector, not V_COMMON.
+    // The interrupt eligibility helper already masks EXL and ERL.
+    // Preserve the common-vector fallback for explicit nested entry.
+    if (excode == EX_Int && (status & STATUS_EXL) == 0u)
+    {
+        return bev ? 0xBFC00400u : 0x80000200u;
+    }
 
     // TLB refill vector only when not already in exception level.
     if (kind == VEC_KIND_TLB && (status & STATUS_EXL) == 0)

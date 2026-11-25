@@ -364,3 +364,29 @@ result bits, so these are FCSR assertions only; the existing independent
 raw-result fixtures retain that coverage. No extrapolation to all
 flag sequences or hardware timing. Test-only; no EE/VU1 cache changes
 or standalone retail replay required.
+
+## Batch 10: R5900 hardware interrupt vector correction
+
+The EE Core User's Manual v6.0, section 4.2.5, printed p.99
+(https://docs.alexrp.com/mips/ee.pdf), specifies V_INTERRUPT at
+0x80000200 (BEV clear) and 0xBFC00400 (BEV set). The pinned
+PCSX2 interpreter's [cpuException](https://github.com/PCSX2/pcsx2/blob/82cac38b2af19d593dedfd9ddaa63448e7ec493c/pcsx2/R5900.cpp)
+agrees. The runtime previously selected V_COMMON for EX_Int. Correct
+normal interrupt vector selection in the shared runtime helper; the
+legacy exception metadata class retains the common fallback for nested
+entry. EXL/ERL masking, interrupt eligibility, Cause.IP, EPC, ordinary
+exceptions and TLB refill behavior are unchanged. Do not change the
+public lowering header solely to add two vector names; preserve shared
+EE IR provenance. The HLE runner already resolves the IRQ vector via
+that same helper, before restoring the interrupted guest context.
+
+Update actual dispatch and compatibility scanout IRQ fixtures to use
+literal hardware vector addresses, and test BEV/EXL selection and
+unmodified syscall/refill vectors. This is an architectural correction,
+not calibrated timing. Nested TLB BD preservation, COP0 writable
+masks and level-2 handling are separate future changes. A warmed P40
+retail replay is required after CI because real INTC delivery now
+enters a different architectural PC; verify HLE callback delivery,
+VBlank, DMA, audio, no guest fault and unchanged IR/VU1 inventories.
+No generated IR or VU1 regeneration needed; allow normal native relink.
+Stop before Batch 11 until this retail gate is satisfied.

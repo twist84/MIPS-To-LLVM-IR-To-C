@@ -147,7 +147,7 @@ int main()
     compatibility_cpu.m_pc = 0x00175210u;
     check(ee::ee_check_interrupts(
               &compatibility_cpu, &runtime, compatibility_cpu.m_pc, 0u) ==
-              ee::VEC_COMMON_BEV0 &&
+              0x80000200u &&
           compatibility_cpu.m_cop0[14] == 0x00175210u &&
           (compatibility_cpu.m_cop0[12] & ee::STATUS_EXL) != 0u &&
           (compatibility_cpu.m_cop0[13] & 0x00000400u) != 0u,
