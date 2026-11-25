@@ -4722,6 +4722,12 @@ def main():
             assert (0 <= int(horizon["dmac_passive_sif0"]) <=
                     int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), lines
             assert int(horizon["dmac_str7"]) == 0, lines
+            vu_reasons = [int(horizon[key]) for key in
+                          ("entry_vif1_pending", "entry_cmsar1", "entry_vu0_running")]
+            assert max(vu_reasons) <= int(horizon["entry_vu"]) <= sum(vu_reasons), lines
+            assert int(horizon["alu_bound_candidates"]) == (
+                int(horizon["alu_bound_matched"]) + int(horizon["alu_bound_mismatch"])), lines
+            assert int(horizon["alu_bound_matched"]) <= int(horizon["mmio_free_direct_quiet"]), lines
             for key in ("entry_callback", "entry_idle", "entry_irq", "entry_vu",
                         "entry_other", *(f"dmac_str{i}" for i in range(10))):
                 assert 0 <= int(horizon[key]) <= total_samples, lines
@@ -4804,6 +4810,11 @@ def main():
                 assert int(horizon["dmac_started_barriers"]) == 0, horizon_line
                 assert int(horizon["dmac_top_mask"], 16) == 0x20, horizon_line
                 assert int(horizon["dmac_top_mask_count"]) == int(horizon["dmac_sif0_only"]), horizon_line
+                assert int(horizon["alu_bound_matched"]) > 0, horizon_line
+                assert int(horizon["alu_bound_mismatch"]) == 0, horizon_line
+                assert int(horizon["alu_bound_candidates"]) == int(horizon["alu_bound_matched"]), horizon_line
+                assert all(int(horizon[key]) == 0 for key in
+                           ("entry_vif1_pending", "entry_cmsar1", "entry_vu0_running")), horizon_line
                 clock = [line for line in run.stdout.splitlines()
                          if line.startswith("IOP SPU2 clock:")]
                 assert len(clock) == 1, run.stdout
