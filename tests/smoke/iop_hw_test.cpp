@@ -1167,6 +1167,30 @@ bool test_spu2_effect_allpass()
 
 bool test_spu2_effect_clock()
 {
+    // No physical alias of 0x7000 is in the logical work area.
+    // Reprogramming IRQA into the mirrored region must immediately
+    // restore the exact seven-sample deadline.
+    {
+        iop::c_spu2 spu;
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        if (!spu.write(base + 0x2e0u, 2u, 0x1fu) ||
+            !spu.write(base + 0x2e2u, 2u, 0xfff8u) ||
+            !spu.write(base + 0x33cu, 2u, 0x1fu) ||
+            !spu.write(base + 0x59eu, 2u, 0x7000u) ||
+            !spu.write(base + 0x59au, 2u, 0x40u) ||
+            !spu.write(base + 0x19au, 2u, 0x80u) ||
+            spu.voice_irq_cycles_remaining() != 0u ||
+            !spu.write(base + 0x59cu, 2u, 0x0fu) ||
+            !spu.write(base + 0x59eu, 2u, 0xfffbu) ||
+            spu.voice_irq_cycles_remaining() != 7u * period ||
+            spu.advance_cycles(7u * period - 1u) != 0u ||
+            spu.voice_irq_cycles_remaining() != 1u ||
+            spu.advance_cycles(1u) != 2u)
+        {
+            return false;
+        }
+    }
     constexpr uint32_t base = iop::c_spu2::k_base;
     constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
     constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
