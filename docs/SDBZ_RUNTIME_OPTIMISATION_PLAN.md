@@ -223,3 +223,23 @@ than request a standalone run.
 The callback helper lives in `src/tools/ee_sdbz_slot_callback_probe.h`;
 restore the original `include/ee/ee_sdbz_dma_wait_probe.h` byte-for-byte
 because that header is included in the EE translation-cache input hash.
+
+## Batch 6: exact per-PC native profiling cache
+
+All four CI workflows passed for Batch 5 (`06aba24`). The 11:23
+replay executed 40,000,000 direct dispatches with 39,903,773 native
+target cache hits and 100,584 misses (99.75% hit rate). Increasing
+the native target cache is not the priority. The same replay recorded
+17,289 distinct entry PCs, and per-PC profiling currently performs
+an unordered-map access after every dispatch. Cache stable references
+to the exact per-PC counters in a 16K direct-mapped host table, retaining
+the unbounded owning map, full 32-bit PC equality, all five counters
+and the existing final sort and text format. No allocation of cache
+slots when PC profiling is disabled. Tests cover collisions, zero and
+unaligned PCs, full-width keys, rehash, zero-dispatch records and disabled
+collection. No guest clock or native resolver behavior changes.
+
+This reduces outer-runner profiling overhead, not the instruction
+execution inside the measured native scope. Measure with PC profiling
+still enabled; do not claim a reduction in EE native exclusive time
+from this change alone. No EE/VU1 cache regeneration required.

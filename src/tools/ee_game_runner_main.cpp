@@ -3,6 +3,7 @@
 #include "ee_dispatch_index.h"
 #include "ee_native_target_cache.h"
 #include "ee_runtime_profile.h"
+#include "ee_pc_profile.h"
 #include "ee_host_audio.h"
 #include "ee_vu1_aot.h"
 #include "ee_exceptions.h"
@@ -3610,20 +3611,12 @@ int main(int argc, char** argv)
     // SDBZ_PROFILE_PCS=1: reuse the native-boundary clock; rank by
     // inclusive native time, excluding live compilation and outer-loop work.
     // Accounted guest attempts include charged idle-loop instructions.
-    struct s_pc_profile
-    {
-        uint64_t m_calls = 0u;
-        uint64_t m_dispatches = 0u;
-        uint64_t m_instructions = 0u;
-        uint64_t m_idle_instructions = 0u;
-        uint64_t m_wall_ns = 0u;
-    };
     std::string profile_pcs_environment;
     const char* profile_pcs_value = read_host_environment(
         "SDBZ_PROFILE_PCS", &profile_pcs_environment);
     const bool profile_pcs = profile_pcs_value != nullptr &&
         std::strcmp(profile_pcs_value, "0") != 0;
-    std::unordered_map<uint32_t, s_pc_profile> pc_profile;
+    ee::c_ee_pc_profile<> pc_profile(profile_pcs);
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -4875,14 +4868,9 @@ int main(int argc, char** argv)
         {
             // Attribute measured boundary durations across retries, not
             // the time spent compiling, opening libraries or updating reports.
-            s_pc_profile& entry = pc_profile[from_pc];
-            entry.m_calls += 1u;
-            entry.m_dispatches += count;
-            entry.m_instructions +=
-                runtime.m_guest_instruction_attempts -
-                instructions_before_dispatch;
-            entry.m_idle_instructions += idle_skip_instructions - idle_before_dispatch;
-            entry.m_wall_ns += pc_native_ns;
+            pc_profile.record(from_pc, count,
+                runtime.m_guest_instruction_attempts - instructions_before_dispatch,
+                idle_skip_instructions - idle_before_dispatch, pc_native_ns);
         }
 
         dispatched += count;
@@ -8330,10 +8318,11 @@ int main(int argc, char** argv)
                          item.first, item.second.reason);
         }
     }
-    if (profile_pcs && !pc_profile.empty())
+    if (profile_pcs && !pc_profile.entries().empty())
     {
-        std::vector<std::pair<uint32_t, s_pc_profile>> ranked(
-            pc_profile.begin(), pc_profile.end());
+        const auto& entries = pc_profile.entries();
+        std::vector<std::pair<uint32_t, ee::s_pc_profile>> ranked(
+            entries.begin(), entries.end());
         std::sort(ranked.begin(), ranked.end(),
                   [](const auto& a, const auto& b)
                   {
@@ -8361,7 +8350,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(total_wall_ns));
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
-            const s_pc_profile& item = ranked[i].second;
+            const ee::s_pc_profile& item = ranked[i].second;
             const uint64_t non_skipped = item.m_instructions - item.m_idle_instructions;
             std::fprintf(stderr,
                 "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
