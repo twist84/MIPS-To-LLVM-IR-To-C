@@ -4572,11 +4572,12 @@ def main():
                     "--work-dir", str(root / "out"),
                     "--functions=entry",
                     "--max-dispatches=16",
-                    "--hle-startup", "--kseg-ram",
+                    "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
                     "--report", str(report_path),
                     "--timeout-seconds=10",
                 ],
                 capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="0"),
             )
             assert result.returncode == 3, (result.stdout, result.stderr)
             snapshot = json.loads(report_path.read_text(encoding="utf-8"))
@@ -4590,6 +4591,29 @@ def main():
             assert "EE unsupported guest PC:" not in result.stderr, (
                 result.stdout, result.stderr
             )
+
+            shadow_report = root / "vu0-indexed-shadow.json"
+            shadow = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--no-recompile",
+                "--functions=entry", "--max-dispatches=16",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--report", str(shadow_report), "--timeout-seconds=10",
+            ], capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="1"))
+            assert shadow.returncode == result.returncode, shadow.stdout + shadow.stderr
+            observed = json.loads(shadow_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert observed[key] == snapshot[key], key
+            lines = [line for line in shadow.stderr.splitlines()
+                     if line.startswith("EE horizon:")]
+            assert len(lines) == 7, lines
+            horizon = dict(token.split("=") for token in lines[0].split()[2:])
+            assert int(horizon["vu_callback_boundaries"]) > 0, lines
+            assert int(horizon["cop0_changed_boundaries"]) > 0, lines
 
         # A real guest Timer0 COUNT poll must finish *inside* its native CFG.
         # Both the clock source and the device must advance; simply resuming
