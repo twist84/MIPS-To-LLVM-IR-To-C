@@ -293,6 +293,44 @@ false negatives are acceptable. CI tests exercise source/IR digest
 mismatch, malformed/unsafe IR, first-owner overlap, stale pointers,
 cache provenance split, and a real native synthetic certified exit.
 
+## Certificate integration correction and direct quiet IOP service
+
+The first complete native certificate regression at 5d0ab63 reached
+one matching source-bound/native-owner candidate but zero certificates.
+The emitter inserts standalone guest instruction comments (including
+the delay slot), which the strict parser rejected. Standalone comments
+and blank lines are now ignored; inline syntax and actual instructions
+remain subject to the same grammar. The Python fixture includes the
+emitter's comment form and the native integration still requires a
+positive certified match.
+
+`SDBZ_IOP_FAST_QUIET_TURNS=1` (off by default) is a separate
+experimental host optimization. It tries to advance a scheduled
+IOP turn directly only when the kernel is idle, the requested
+nonzero budget is strictly before a finite idle-event deadline,
+cycle arithmetic is representable and no RPC ownership, reboot or
+timing observer is present. It invokes the same hardware
+`advance_cycles` and increments the kernel clock by the same amount.
+The existing RPC pump, EE clock observation, logical turn cap,
+cycle debt consumption and all EE checkpoints remain in place.
+Rejected turns use the unchanged general kernel run path, including
+turns reaching exactly the next event. No IOP time is deferred.
+
+`IOP clock quiet:` reports attempted shortcut calls, successful
+advances, fallbacks and total directly advanced IOP cycles. If both
+optimizations are enabled, `physical_runs` in the coalescing report
+counts service invocations (ordinary runs plus direct quiet advances);
+the actual number of general kernel runs is that value minus
+`advanced`. The `saved_turns` identity still measures coalescing
+alone. Neither counter alone establishes wall-time speedup.
+
+The three-way native fixture compares ordinary scheduling, coalescing,
+and coalescing plus quiet advancement using identical EE state and
+IOP/SPU2 clock output. Directed kernel tests preserve the original
+partitioned-versus-combined comparison and add the direct path,
+including ready-thread rejection, event equality and subsequent
+callback/sample delivery. No guest lowering changes.
+
 ## Remaining activation gates (not implemented)
 
 
