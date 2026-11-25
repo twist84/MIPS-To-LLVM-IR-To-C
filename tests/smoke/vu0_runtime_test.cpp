@@ -902,6 +902,48 @@ int main()
               "ILWR last selected halfword, ISWR zero extension, masks and VI0");
     }
 
+    // FCSET/FSSET use the FMAC retirement slot; lower setters override
+    // the corresponding same-pair upper flag update.
+    {
+        ee::s_ee_cpu_state flag_cpu{};
+        ee::s_ee_vu0_state flag_vu{};
+        ee::s_ee_vu0_ialu_engine engine{};
+        flag_vu.m_vpu_status = 1u;
+        flag_vu.m_clip_flags = 0x123u;
+        flag_vu.m_vi[18] = 0x123u;
+        flag_vu.m_status_flags = 0x430u;
+        flag_vu.m_vi[16] = 0x430u;
+        const uint32_t nop = 0x8000033cu;
+        const uint32_t fcset = (0x11u << 25u) | 0xabcdefu;
+        const uint32_t fsset = (0x15u << 25u) | (1u << 21u) | 0x140u;
+        const auto fcget = [](uint32_t it)
+        {
+            return (0x1cu << 25u) | (it << 16u);
+        };
+        const auto fsor = [](uint32_t it)
+        {
+            return (0x17u << 25u) | (it << 16u);
+        };
+        const uint32_t clip = (14u << 21u) | (7u << 6u) | 0x3fu;
+        const uint32_t add_zero = (8u << 21u) | (2u << 6u) | 0x28u;
+        install_vu0_pair(&flag_vu, 0, fcset, clip);
+        install_vu0_pair(&flag_vu, 1, fsset, add_zero);
+        install_vu0_pair(&flag_vu, 2, fcget(1), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 3, fsor(2), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 4, fcget(3), make_vu0_upper_nop());
+        install_vu0_pair(&flag_vu, 5, fsor(4), make_vu0_upper_nop(0x40000000u));
+        install_vu0_pair(&flag_vu, 6, nop, make_vu0_upper_nop());
+        const auto result = ee::ee_vu0_execute_ialu_callback(&engine, &flag_cpu,
+            &flag_vu, 64u, ee::EE_VU0_EXECUTE_STOP_AT_E, 0u);
+        check(result == static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+              flag_vu.m_running == 0u && flag_vu.m_cycle == 10u,
+              "flag setters retire after four cycles and drain at E");
+        check(flag_vu.m_vi[1] == 0x123u && flag_vu.m_vi[2] == 0x430u &&
+              flag_vu.m_vi[3] == 0xdefu && flag_vu.m_vi[4] == 0x971u &&
+              flag_vu.m_clip_flags == 0xabcdefu && flag_vu.m_status_flags == 0x971u,
+              "FCSET and FSSET replace same-pair flags with delayed visibility");
+    }
+
     // VU0 microcode is a 4 KB byte-addressed store of paired
     // lower/upper 32-bit words. The upper word carries I/E/M/D/T flags.
     {

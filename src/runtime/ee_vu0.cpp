@@ -1110,10 +1110,21 @@ void vu0_retire_upper_fmac(s_ee_vu0_state* vu0)
         {
             break;
         }
+        constexpr uint32_t k_fsset = 0x80000000u;
+        const bool sets_sticky = (oldest->m_product_sticky & k_fsset) != 0u;
         if (oldest->m_mac != 0xffffffffu)
         {
-            vu0->m_status_flags |= oldest->m_product_sticky;
+            if (!sets_sticky)
+            {
+                vu0->m_status_flags |= oldest->m_product_sticky;
+            }
             vu0_macro_update_status(vu0, oldest->m_mac);
+        }
+        if (sets_sticky)
+        {
+            vu0->m_status_flags = (vu0->m_status_flags & 0x3fu) |
+                (oldest->m_product_sticky & 0xfc0u);
+            vu0->m_vi[16] = vu0->m_status_flags;
         }
         *oldest = {};
     }
@@ -1996,6 +2007,8 @@ uint32_t ee_vu0_execute_ialu_callback(
         const auto lower_op = instruction.m_lower_fields.m_operation;
         const bool lower_scalar = !immediate && vu0_is_lower_scalar(lower_op);
         const bool lower_random = !immediate && vu0_is_lower_random(lower_op);
+        const bool lower_fcset = !immediate && lower_op == e_ee_vu0_micro_opcode::FCSET;
+        const bool lower_fsset = !immediate && lower_op == e_ee_vu0_micro_opcode::FSSET;
         const bool lower_load = lower_memory &&
             (lower_op == e_ee_vu0_micro_opcode::LQ ||
              lower_op == e_ee_vu0_micro_opcode::LQI ||
@@ -2013,7 +2026,8 @@ uint32_t ee_vu0_execute_ialu_callback(
             (!upper_clip && !upper_arith && instruction.m_upper_fields.m_operation !=
                 e_ee_vu0_micro_opcode::NOP) || vf_conflict ||
             (!immediate && !lower_ialu && !lower_branch && !lower_memory &&
-                !lower_flag_read && !lower_transfer && !lower_scalar && !lower_random) ||
+                !lower_flag_read && !lower_transfer && !lower_scalar && !lower_random &&
+                !lower_fcset && !lower_fsset) ||
             (lower_scalar && vu0->m_q_pending == 1u) ||
             (lower_memory && (memory_address & 0x4000u) != 0))
         {
@@ -2134,7 +2148,8 @@ uint32_t ee_vu0_execute_ialu_callback(
         vu0_retire_clip(vu0);
         vu0_retire_upper_fmac(vu0);
         vu0_retire_micro_q(vu0);
-        if ((upper_clip || upper_arith) && vu0->m_cycle > UINT64_MAX - 4u)
+        if ((upper_clip || upper_arith || lower_fcset || lower_fsset) &&
+            vu0->m_cycle > UINT64_MAX - 4u)
         {
             vu0->m_micro_pc = pair_pc;
             return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
@@ -2243,10 +2258,19 @@ uint32_t ee_vu0_execute_ialu_callback(
             vu0_apply_lower_branch(vu0, branch_action);
         }
 
-        if (upper_clip)
+        if (lower_fcset || lower_fsset)
         {
-            // Lower flag reads in this pair observe only retired history.
-            if (!vu0_issue_clip(vu0, clip_result))
+            // Flag setters occupy the shared four-cycle FMAC pair slot.
+            vu0_record_lower_fmac(vu0, 0u, 0u);
+        }
+
+        if (upper_clip || lower_fcset)
+        {
+            // The lower FCSET overrides same-pair upper CLIP. Forward the
+            // queued value to later CLIP operations, but not flag reads.
+            const uint32_t next_clip = lower_fcset ?
+                instruction.m_lower & 0xffffffu : clip_result;
+            if (!vu0_issue_clip(vu0, next_clip))
             {
                 return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
             }
@@ -2258,6 +2282,18 @@ uint32_t ee_vu0_execute_ialu_callback(
             }
         }
 
+        if (lower_fsset)
+        {
+            const uint32_t sticky = ((instruction.m_lower & 0x7ffu) |
+                ((instruction.m_lower >> 10u) & 0x800u)) & 0xfc0u;
+            // The lower FSSET overrides same-pair upper sticky updates.
+            upper_sticky = 0x80000000u | sticky;
+            if (!upper_arith && !vu0_issue_upper_fmac(vu0, 0u, 0u,
+                    0xffffffffu, upper_sticky))
+            {
+                return static_cast<uint32_t>(e_ee_vu0_sync_result::FAILED);
+            }
+        }
         if (upper_arith)
         {
             // The lower half has consumed the pre-pair register values.

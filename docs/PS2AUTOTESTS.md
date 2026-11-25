@@ -460,3 +460,15 @@ semantics (last enabled lane wins for ILWR, zero-extended low VI for
 ISWR), 4 KB wrap, VI0 and four-cycle IALU load reservations. The VU1
 register window still fails closed. Regression checks masking, wrap,
 zero extension and E drain. Macro ILWR behavior is unchanged.
+
+### VU0 flag setters
+
+FCSET queues a 24-bit CLIP history replacement in the FMAC pipe, with
+same-pair lower priority over upper CLIP. FSSET replaces sticky bits
+10:6 and 11 (mask 0xfc0) while retaining current flags; same-pair upper
+MAC/current flags still retire. The existing upper FMAC issue sidecar
+encodes explicit FSSET using an otherwise-unused high bit in its sticky
+field, so the state ABI is unchanged. Flag readers observe the previous
+values until the four-cycle reservation matures. A synthetic pair test
+covers both setters and E drain; more mixed FDIV/FSSET differential
+coverage remains necessary.
