@@ -1703,6 +1703,25 @@ def make_ee_timer_poll_elf(path):
     path.write_bytes(image)
 
 
+def make_iop_idle_batch_elf(path):
+    """Accumulate IOP debt in one native CFG, then dispatch twice."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    words = (
+        0x24080000,  # addiu t0,zero,0
+        0x25080001,  # loop: addiu t0,t0,1
+        0x29012000,  # slti at,t0,8192
+        0x1420fffd,  # bne at,zero,loop
+        0x00000000,  # delay slot
+        0x0c04000c,  # jal 0x00100030
+        0x00000000,
+        0x0000000d,  # break
+    )
+    struct.pack_into(f"<{len(words)}I", image, 0x108, *words)
+    struct.pack_into("<II", image, 0x130, 0x03e00008, 0)
+    path.write_bytes(image)
+
+
 def make_spin_elf(path):
     make_elf(path)
     image = bytearray(path.read_bytes())
@@ -4728,6 +4747,62 @@ def main():
             assert state["cop0_epc"] == 0x00100048, state
             assert state["gpr_lo"][16] == 1, state
             assert state["ee_cycles"] - state["guest_instruction_attempts"] >= 2000, state
+
+        # Compare actual runner service with and without quiet IOP batching.
+        with tempfile.TemporaryDirectory(prefix="ee-iop-idle-batch-") as tmp:
+            root = Path(tmp)
+            elf = root / "iop-idle-batch.elf"
+            make_iop_idle_batch_elf(elf)
+            disc = root / "disc"
+            disc.mkdir()
+            (disc / "SYSTEM.CNF").write_text(
+                "BOOT2 = cdrom0:\\\\SLUS_214.42;1\n", encoding="ascii"
+            )
+            command = [
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"),
+                "--functions=entry", "--extra-functions=0x00100030",
+                "--max-dispatches=16", "--loop-budget=10000",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--disc-folder", str(disc), "--timeout-seconds=10",
+            ]
+            states = []
+            clocks = []
+            for enabled in ("0", "1"):
+                report = root / f"batch-{enabled}.json"
+                run = subprocess.run(
+                    command + (["--no-recompile"] if enabled == "1" else []) +
+                    ["--report", str(report)],
+                    capture_output=True, text=True, check=False, timeout=40,
+                    env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
+                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="0"),
+                )
+                assert run.returncode == 3, run.stdout + run.stderr
+                state = json.loads(report.read_text(encoding="utf-8"))
+                assert state["exit_name"] == "EXCEPTION", state
+                assert state["gpr_lo"][8] == 8192, state
+                states.append(state)
+                clock = [line for line in run.stdout.splitlines()
+                         if line.startswith("IOP SPU2 clock:")]
+                assert len(clock) == 1, run.stdout
+                clocks.append(clock[0])
+                lines = [line for line in run.stdout.splitlines()
+                         if line.startswith("IOP clock coalesce:")]
+                if enabled == "0":
+                    assert not lines, lines
+                else:
+                    assert len(lines) == 1, run.stdout
+                    counters = dict(token.split("=") for token in lines[0].split()[3:])
+                    assert int(counters["saved_turns"]) > 0, lines
+                    assert int(counters["combined_batches"]) > 0, lines
+                    assert (int(counters["physical_runs"]) + int(counters["saved_turns"]) ==
+                            int(counters["logical_turns"])), lines
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert states[0][key] == states[1][key], key
+            assert clocks[0] == clocks[1], clocks
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
