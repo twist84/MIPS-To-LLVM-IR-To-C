@@ -127,14 +127,13 @@ class AutotestsHarness(unittest.TestCase):
         self.assertNotIn("ee-ctest-build", workflow)
         self.assertIn("--target ee_recomp ee_game_runner", workflow)
         self.assertIn("--prebuilt-manifest build/autotest-tools.json", workflow)
-        full, pilot = re.search(r"fromJSON\(inputs\.autotests_full && '([^']+)' \|\| '([^']+)'\)", workflow).groups()
+        self.assertNotIn("autotests_full", workflow)
+        groups = json.loads(re.search(r"fromJSON\('([^']+)'\)", workflow).group(1))
         tests = json.loads(at.MANIFEST.read_text())["tests"]
-        for selection, expected in ((full, 55), (pilot, 11)):
-            groups = json.loads(selection)
-            names = [case["name"] for group in groups
-                     for case in at.select_tests(tests, group["patterns"].split())]
-            self.assertEqual(len(names), expected)
-            self.assertEqual(len(set(names)), expected)
+        names = [case["name"] for group in groups
+                 for case in at.select_tests(tests, group["patterns"].split())]
+        self.assertEqual(len(names), 55)
+        self.assertEqual(set(names), {case["name"] for case in tests})
 
     def test_prebuilt_tools_require_matching_revision_and_hashes(self):
         hashes = {"ee_recomp": "a", "ee_game_runner": "b"}
@@ -147,6 +146,26 @@ class AutotestsHarness(unittest.TestCase):
                 at.verify_prebuilt_tools(path, "other", hashes)
             with self.assertRaisesRegex(ValueError, "revision or SHA-256"):
                 at.verify_prebuilt_tools(path, "rev", dict(hashes, ee_recomp="changed"))
+
+    def test_full_summary_requires_complete_consistent_coverage(self):
+        from ci.summarize_ps2autotests import combine, markdown
+        manifest = {"revision": "ref", "tests": [{"name": "a"}, {"name": "b"}]}
+        base = {"runtime_revision": "head", "reference_revision": "ref",
+                "native_tool_sha256": {"ee_recomp": "a", "ee_game_runner": "b"},
+                "suite_total": 2, "selected": 1}
+        a = dict(base, results=[{"name": "a", "status": "PASS"}])
+        b = dict(base, results=[{"name": "b", "status": "DIFF"}])
+        combined = combine([b, a], manifest)
+        self.assertEqual(combined["counts"]["PASS"], 1)
+        self.assertEqual(combined["counts"]["DIFF"], 1)
+        self.assertIn("1/2 exact transcripts", markdown(combined))
+        self.assertEqual([r["name"] for r in combined["results"]], ["a", "b"])
+        with self.assertRaisesRegex(ValueError, "missing original tests"):
+            combine([a], manifest)
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            combine([a, a], manifest)
+        with self.assertRaisesRegex(ValueError, "inconsistent runtime"):
+            combine([a, dict(b, runtime_revision="other")], manifest)
 
     def test_inventory(self):
         manifest = json.loads(at.MANIFEST.read_text())

@@ -48,10 +48,9 @@ their selected count.
 Results: build/autotests/runs/<UTC timestamp>/{summary.json,summary.md}
 and per-test run.log, guest.raw, test.out, optional test.diff, runner.json
 and result.json. Default exit is nonzero unless every selected output
-matches. --report-only explicitly makes the initial pilot observational,
-rather than turning unimplemented services into an all-PR gate. The CI
-pilot uses separate EE and VU matrix runners with two tests and one emit
-worker per test; it includes the original six ELFs plus funnel, shuffle, cpcond, performance and clip.
+matches. --report-only makes the CI suite observational rather than
+turning unimplemented services into an all-PR gate. Each matrix runner
+uses two guest workers and one emit worker per test.
 The standalone **Original ps2autotests** workflow builds only
 `ee_recomp` and `ee_game_runner` (and their CMake dependencies), once
 per workflow. It distributes the two executables and a revision/SHA-256
@@ -59,11 +58,15 @@ manifest, preserving executable permissions with tar. Each shard installs
 llvmlite independently and verifies the tools using `--prebuilt-manifest`;
 it does not rebuild them or depend on the CTest build. Local harness runs
 continue to rebuild by default.
-Manually dispatch Original ps2autotests with autotests_full enabled to run
-all 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
-with transcripts and a summary; these are observational artifacts,
-not an aggregated pass gate. Guest timeout excludes compilation; CI job
-time bounds the total.
+Every push to main, PR to main and manual dispatch runs all 55 original
+ELFs in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
+with transcripts and a summary. A final job verifies exact manifest
+coverage, matching revision/tool hashes and reports a combined score,
+per-test status, stop PC and reason. The combined summary is published
+in the GitHub Actions job summary and ps2autotests-summary artifact.
+Missing or duplicate tests and inconsistent provenance fail aggregation;
+nonmatching transcripts remain observational. Guest timeout excludes
+compilation; CI job time bounds the total.
 
 The first pilot may stop in PS2SDK startup, TLB setup, scheduling or
 console transport. Do not bypass the original startup, patch expected
