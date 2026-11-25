@@ -367,6 +367,9 @@ int main(int argc, char** argv)
     {
         return 1;
     }
+    std::fputs("VU1 AOT synchronous profile: ", stdout);
+    backend.write_json(stdout);
+    std::fputc('\n', stdout);
     // Native libraries and mutable capture/counter state are exclusively
     // owned by the persistent worker, not the main thread's TLS binding.
     auto owned = std::make_unique<ee::c_ee_vu1_aot>();
@@ -385,6 +388,9 @@ int main(int argc, char** argv)
     {
         return 1;
     }
+    std::fputs("VU1 AOT worker profile: ", stdout);
+    worker.write_aot_json(stdout);
+    std::fputc('\n', stdout);
     std::puts("VU1 AOT native dispatch, scalar pipelines, PATH1 rollback and worker parity: PASS");
     return 0;
 }

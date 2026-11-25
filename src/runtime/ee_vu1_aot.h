@@ -80,6 +80,16 @@ private:
         std::vector<uint8_t> m_code;
         std::vector<s_code_range> m_ranges;
         t_vu1_aot_entry m_entry = nullptr;
+        // Host diagnostics only; ownership follows the AOT backend.
+        size_t m_library_index = 0u;
+        uint64_t m_code_hash = 0u;
+        uint64_t m_attempts = 0u;
+        uint64_t m_attempted_pairs = 0u;
+        uint64_t m_native_runs = 0u;
+        uint64_t m_native_pairs = 0u;
+        uint64_t m_profiled_attempts = 0u;
+        uint64_t m_profiled_pairs = 0u;
+        uint64_t m_compiled_exclusive_ns = 0u;
     };
     std::array<std::vector<s_program>, 2048> m_programs;
     std::vector<void*> m_libraries;

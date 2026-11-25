@@ -218,6 +218,15 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
             return reject("empty VU1 AOT dynamic code guard");
         }
     }
+    program.m_library_index = m_libraries.size();
+    // Identity of the embedded, validated code bytes (not a native
+    // library hash). Stable across optimization levels and AOT ABIs.
+    program.m_code_hash = UINT64_C(14695981039346656037);
+    for (uint8_t byte : program.m_code)
+    {
+        program.m_code_hash ^= byte;
+        program.m_code_hash *= UINT64_C(1099511628211);
+    }
     m_programs[start >> 3u].push_back(std::move(program));
     m_libraries.push_back(library);
     return true;
@@ -370,7 +379,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
     std::vector<uint8_t>& path1, s_ee_vu1_issue& issue)
 {
     pc &= 0x3ff8u;
-    const auto& candidates = m_programs[pc >> 3u];
+    auto& candidates = m_programs[pc >> 3u];
     auto reason = e_vu1_aot_fallback::invalid_state;
     // A compiled entry assumes initialized constant registers. If a
     // caller supplies a noncanonical state, the interpreter owns it.
@@ -379,7 +388,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
     {
         reason = candidates.empty() ? e_vu1_aot_fallback::no_entry :
             e_vu1_aot_fallback::code_mismatch;
-        for (const auto& program : candidates)
+        for (auto& program : candidates)
         {
             const bool matches = program.m_steps != 0u ?
                 exact_match(code, pc, program.m_code) :
@@ -416,8 +425,26 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             uint32_t steps = 0u;
             uint32_t cycles = 0u;
             uint32_t last_pc = 0u;
+            const bool profiled = g_runtime_profile.m_enabled;
+            const auto& compiled = g_runtime_profile.m_counters[
+                static_cast<size_t>(e_runtime_profile_id::vu1_compiled)];
+            const uint64_t before = profiled ? compiled.m_exclusive_ns : 0u;
             c_runtime_profile_scope scope(e_runtime_profile_id::vu1_compiled,
                 0u, &steps);
+            const auto finish_attempt = [&]()
+            {
+                // Reuse the existing completed scope; do not add clock
+                // reads or include nested XGKICK time in the program cost.
+                scope.stop();
+                ++program.m_attempts;
+                program.m_attempted_pairs += steps;
+                if (profiled)
+                {
+                    ++program.m_profiled_attempts;
+                    program.m_profiled_pairs += steps;
+                    program.m_compiled_exclusive_ns += compiled.m_exclusive_ns - before;
+                }
+            };
             steps = program.m_entry(next.m_vi.data(), &next.m_i,
                 &next.m_tpc, top, itop, vf.data(), &next.m_q, &next.m_mac,
                 &next.m_status, data_ptr, &cycles, &last_pc, next.m_acc.data(), &next.m_clip, native_kick, &kick,
@@ -436,6 +463,7 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             {
                 path1.resize(path1_before);
                 reason = e_vu1_aot_fallback::native_rejected;
+                finish_attempt();
                 break;
             }
             std::memcpy(next.m_vf.data(), vf.data(), sizeof(vf));
@@ -451,6 +479,9 @@ bool c_ee_vu1_aot::try_run(s_ee_vu1_state& state, const t_vu1_code& code,
             issue.m_upper = word(code.data() + issue.m_pc + 4u);
             ++m_native_runs;
             m_native_pairs += steps;
+            finish_attempt();
+            ++program.m_native_runs;
+            program.m_native_pairs += steps;
             return true;
         }
     }
@@ -492,6 +523,29 @@ void c_ee_vu1_aot::write_json(FILE* output) const
             std::fprintf(output, "%s{\"pc\":%u,\"count\":%llu}",
                 first ? "" : ",", index * 8u,
                 static_cast<unsigned long long>(m_fallback_pcs[index]));
+            first = false;
+        }
+    }
+    std::fputs("],\"program_profiles\":[", output);
+    first = true;
+    for (size_t index = 0u; index < m_programs.size(); ++index)
+    {
+        for (const auto& program : m_programs[index])
+        {
+            std::fprintf(output,
+                "%s{\"pc\":%zu,\"library_index\":%zu,\"code_fnv1a64\":\"%016llx\","
+                "\"attempts\":%llu,\"attempted_pairs\":%llu,\"native_runs\":%llu,"
+                "\"native_pairs\":%llu,\"profiled_attempts\":%llu,\"profiled_pairs\":%llu,"
+                "\"compiled_exclusive_ns\":%llu}",
+                first ? "" : ",", index * 8u, program.m_library_index,
+                static_cast<unsigned long long>(program.m_code_hash),
+                static_cast<unsigned long long>(program.m_attempts),
+                static_cast<unsigned long long>(program.m_attempted_pairs),
+                static_cast<unsigned long long>(program.m_native_runs),
+                static_cast<unsigned long long>(program.m_native_pairs),
+                static_cast<unsigned long long>(program.m_profiled_attempts),
+                static_cast<unsigned long long>(program.m_profiled_pairs),
+                static_cast<unsigned long long>(program.m_compiled_exclusive_ns));
             first = false;
         }
     }

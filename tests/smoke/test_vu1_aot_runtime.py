@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end capture, IR lifting, object generation and VU1 native dispatch."""
 import importlib.util
+import json
 import os
 import platform
 from pathlib import Path
@@ -43,6 +44,39 @@ entry:
                     str(library)], check=True)
 
 
+def verify_program_profiles(stdout):
+    def read_profile(label):
+        prefix = f"VU1 AOT {label} profile: "
+        report = json.loads(next(line[len(prefix):] for line in stdout.splitlines()
+                                 if line.startswith(prefix)))
+        rows = report["program_profiles"]
+        assert len(rows) == report["programs"] == 3
+        assert sorted(row["library_index"] for row in rows) == list(range(3))
+        assert all(len(row["code_fnv1a64"]) == 16 for row in rows)
+        for key in ("native_runs", "native_pairs"):
+            assert sum(row[key] for row in rows) == report[key]
+        assert all(row["attempts"] >= row["native_runs"] and
+                   row["attempted_pairs"] >= row["native_pairs"] and
+                   row["profiled_attempts"] <= row["attempts"] and
+                   row["profiled_pairs"] <= row["attempted_pairs"]
+                   for row in rows)
+        return report, rows
+
+    sync, sync_rows = read_profile("synchronous")
+    assert sync["native_runs"] == 6
+    assert sum(row["attempts"] for row in sync_rows) == 8
+    assert all(row["profiled_attempts"] == row["profiled_pairs"] ==
+               row["compiled_exclusive_ns"] == 0 for row in sync_rows)
+    worker, worker_rows = read_profile("worker")
+    assert worker["native_runs"] == 3
+    assert sum(row["attempts"] for row in worker_rows) == 3
+    assert all(row["profiled_attempts"] == row["attempts"] and
+               row["profiled_pairs"] == row["attempted_pairs"] for row in worker_rows)
+    assert sum(row["compiled_exclusive_ns"] for row in worker_rows) > 0
+    assert {(row["pc"], row["code_fnv1a64"]) for row in sync_rows} == {
+        (row["pc"], row["code_fnv1a64"]) for row in worker_rows}
+
+
 def main():
     fixture, recomp, builder = map(Path, sys.argv[1:])
     clang = shutil.which("clang")
@@ -75,6 +109,7 @@ def main():
                                     check=True, capture_output=True, text=True)
             assert "VU1 AOT directory:" in replay.stderr, replay.stderr
             assert "fnv1a64=" in replay.stderr, replay.stderr
+            verify_program_profiles(replay.stdout)
             other = "native" if march == "generic" else "generic"
             refused = subprocess.run(command[:-1] + [other],
                                      capture_output=True, text=True)
