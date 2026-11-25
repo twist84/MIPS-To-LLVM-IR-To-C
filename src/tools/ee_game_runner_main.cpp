@@ -3924,6 +3924,14 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_rpc_barriers = 0u;
     uint64_t horizon_gs_worker_barriers = 0u;
     uint64_t horizon_dmac_started_barriers = 0u;
+    uint64_t horizon_dmac_started_channels[ee::c_ee_dmac::k_channel_count]{};
+    uint64_t horizon_dmac_sif0_only = 0u;
+    uint64_t horizon_dmac_passive_sif0 = 0u;
+    uint64_t horizon_entry_callback = 0u;
+    uint64_t horizon_entry_idle = 0u;
+    uint64_t horizon_entry_irq = 0u;
+    uint64_t horizon_entry_vu = 0u;
+    uint64_t horizon_entry_other = 0u;
     uint64_t horizon_clock_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
@@ -5036,29 +5044,62 @@ int main(int argc, char** argv)
                 iop_rom0_path == nullptr && iop_kernel != nullptr;
             const uint64_t iop_deadline = iop_scheduled
                 ? iop_clock.next_cycle() : ee::k_ee_no_deadline;
-            bool barrier =
-                callback_active || irq_callback_active ||
-                current_thread_id == 0u ||
-                hardware.dmac().pending() != 0u ||
+            const bool entry_callback = callback_active || irq_callback_active;
+            const bool entry_idle = current_thread_id == 0u;
+            const bool entry_irq = hardware.dmac().pending() != 0u ||
                 hardware.intc().pending() != 0u ||
-                ee::ee_pending_interrupts(&cpu) != 0u ||
-                hardware.dmac().deferred_vif1_pending() ||
-                vif1.cmsar1_running() || vu0.m_running != 0u ||
-                iop_rom0_path != nullptr ||
+                ee::ee_pending_interrupts(&cpu) != 0u;
+            const bool entry_vu = hardware.dmac().deferred_vif1_pending() ||
+                vif1.cmsar1_running() || vu0.m_running != 0u;
+            const bool entry_other = iop_rom0_path != nullptr ||
                 (runtime.m_perf_control & 0x80000000u) != 0u ||
                 runtime.m_perf_compat_fault ||
                 runtime.m_timing_observer != nullptr;
+            // These independent observations can overlap; do not sum
+            // them as exclusive blocking reasons.
+            horizon_entry_callback += entry_callback;
+            horizon_entry_idle += entry_idle;
+            horizon_entry_irq += entry_irq;
+            horizon_entry_vu += entry_vu;
+            horizon_entry_other += entry_other;
+            bool barrier = entry_callback || entry_idle || entry_irq ||
+                entry_vu || entry_other;
             if (!barrier && !ee::ee_horizon_checkpoint_ready(runtime, iop_clock, iop_scheduled))
             {
                 barrier = true;
                 ++horizon_clock_barriers;
             }
             // D_STAT pending only represents enabled completion IRQs.
-            // A started channel may still need service, even without one.
-            if (!barrier && hardware.dmac().started_channels() != 0u)
+            // Count the original STR mask at otherwise eligible entries.
+            // An idle HLE SIF0 receiver can remain armed indefinitely;
+            // only its external producer can make guest-visible progress.
+            if (!barrier)
             {
-                barrier = true;
-                ++horizon_dmac_started_barriers;
+                const uint32_t started = hardware.dmac().started_channels();
+                for (uint32_t channel = 0u; channel < ee::c_ee_dmac::k_channel_count;
+                     ++channel)
+                {
+                    horizon_dmac_started_channels[channel] +=
+                        (started >> channel) & 1u;
+                }
+                if (started == (1u << 5u))
+                {
+                    ++horizon_dmac_sif0_only;
+                }
+                const bool passive_sif0 = started == (1u << 5u) &&
+                    iop_scheduled && iop_rpc != nullptr &&
+                    !hle_iop_reboot_bootstrap_pending &&
+                    !iop_rpc->scheduler_barrier() &&
+                    hardware.dmac().sif0_receive_armed_only();
+                if (passive_sif0)
+                {
+                    ++horizon_dmac_passive_sif0;
+                }
+                else if (started != 0u)
+                {
+                    barrier = true;
+                    ++horizon_dmac_started_barriers;
+                }
             }
 #ifdef EE_ENABLE_WEBGPU
             // The renderer has no guest event timestamp. Preserve the
@@ -9099,7 +9140,11 @@ int main(int argc, char** argv)
             "lookahead_mmio_free=%llu lookahead_mmio_touched=%llu "
             "gs_worker_barriers=%llu dmac_started_barriers=%llu clock_barriers=%llu "
             "vu_callback_boundaries=%llu cop0_changed_boundaries=%llu "
-            "mmio_free_direct_touched=%llu mmio_free_direct_quiet=%llu unknown=%llu\n",
+            "mmio_free_direct_touched=%llu mmio_free_direct_quiet=%llu unknown=%llu "
+            "dmac_sif0_only=%llu dmac_passive_sif0=%llu "
+            "dmac_str0=%llu dmac_str1=%llu dmac_str2=%llu dmac_str3=%llu dmac_str4=%llu "
+            "dmac_str5=%llu dmac_str6=%llu dmac_str7=%llu dmac_str8=%llu dmac_str9=%llu "
+            "entry_callback=%llu entry_idle=%llu entry_irq=%llu entry_vu=%llu entry_other=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -9114,7 +9159,24 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_cop0_changed_boundaries),
             static_cast<unsigned long long>(horizon_mmio_free_direct_touched),
             static_cast<unsigned long long>(horizon_mmio_free_direct_quiet),
-            static_cast<unsigned long long>(horizon_unknown));
+            static_cast<unsigned long long>(horizon_unknown),
+            static_cast<unsigned long long>(horizon_dmac_sif0_only),
+            static_cast<unsigned long long>(horizon_dmac_passive_sif0),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[0]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[1]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[2]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[3]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[4]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[5]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[6]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[7]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[8]),
+            static_cast<unsigned long long>(horizon_dmac_started_channels[9]),
+            static_cast<unsigned long long>(horizon_entry_callback),
+            static_cast<unsigned long long>(horizon_entry_idle),
+            static_cast<unsigned long long>(horizon_entry_irq),
+            static_cast<unsigned long long>(horizon_entry_vu),
+            static_cast<unsigned long long>(horizon_entry_other));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
             std::fprintf(stderr,
