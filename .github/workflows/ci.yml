@@ -8,11 +8,6 @@ on:
     branches:
       - main
   workflow_dispatch:
-    inputs:
-      autotests_full:
-        description: Run all 55 original console tests in parallel shards
-        type: boolean
-        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -114,35 +109,3 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
-  autotests-pilot:
-    name: "Original ps2autotests (${{ matrix.group }}; observational)"
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJSON(inputs.autotests_full && '[{"group":"ee","patterns":"cpu/ee/* cpu/ee_cop0/*"},{"group":"fpu","patterns":"cpu/ee_fpu/*"},{"group":"simd","patterns":"cpu/ee_simd/*"},{"group":"dma","patterns":"dma/*"},{"group":"kernel","patterns":"kernel/* gs/* memory/*"},{"group":"vu","patterns":"cpu/vu0_macro/* vu/*"}]' || '[{"group":"ee","patterns":"cpu/ee/alu cpu/ee/muldiv cpu/ee_fpu/fcr cpu/ee_simd/funnel cpu/ee_simd/shuffle dma/dmac/cpcond cpu/ee_cop0/performance"},{"group":"vu","patterns":"cpu/vu0_macro/transfer vu/lower/integer vu/lower/efu vu/upper/clip"}]') }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
-        with:
-          name: ee-ctest-build
-          path: .
-      - name: Restore build and Python environment
-        run: tar -xzf ee-ctest-build.tar.gz
-      - name: Compare original console transcripts
-        run: |
-          read -r -a patterns <<< "$AUTOTEST_PATTERNS"
-          .venv/bin/python tools/run_ps2autotests.py "${patterns[@]}" \
-            --jobs 2 --emit-jobs 1 --report-only --build-dir build
-        env:
-          AUTOTEST_PATTERNS: ${{ matrix.patterns }}
-      - name: Upload pilot transcripts and stop reports
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: ps2autotests-${{ matrix.group }}
-          path: build/autotests/runs/
-          if-no-files-found: warn
-          retention-days: 7

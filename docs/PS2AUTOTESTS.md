@@ -52,8 +52,15 @@ matches. --report-only explicitly makes the initial pilot observational,
 rather than turning unimplemented services into an all-PR gate. The CI
 pilot uses separate EE and VU matrix runners with two tests and one emit
 worker per test; it includes the original six ELFs plus funnel, shuffle, cpcond, performance and clip.
-Manually dispatch Build and test with autotests_full enabled to run all
-55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
+The standalone **Original ps2autotests** workflow builds only
+`ee_recomp` and `ee_game_runner` (and their CMake dependencies), once
+per workflow. It distributes the two executables and a revision/SHA-256
+manifest, preserving executable permissions with tar. Each shard installs
+llvmlite independently and verifies the tools using `--prebuilt-manifest`;
+it does not rebuild them or depend on the CTest build. Local harness runs
+continue to rebuild by default.
+Manually dispatch Original ps2autotests with autotests_full enabled to run
+all 55 in six nonoverlapping groups. Each shard uploads ps2autotests-<group>
 with transcripts and a summary; these are observational artifacts,
 not an aggregated pass gate. Guest timeout excludes compilation; CI job
 time bounds the total.

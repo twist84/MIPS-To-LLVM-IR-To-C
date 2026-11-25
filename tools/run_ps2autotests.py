@@ -258,6 +258,8 @@ def main():
     parser.add_argument("--output", type=Path, default=ROOT / "build/autotests")
     parser.add_argument("--build-dir", type=Path, default=ROOT / "build")
     parser.add_argument("--config", default="Release")
+    parser.add_argument("--prebuilt-manifest", type=Path,
+                        help="use prebuilt native tools only if revision and SHA-256 match")
     parser.add_argument("--max-dispatches", type=int, default=1000000)
     parser.add_argument("--auto-expand", type=int, default=128)
     parser.add_argument("--emit-opt", type=int, choices=range(6), default=0)
@@ -294,6 +296,13 @@ def main():
         return 2
 
 
+def verify_prebuilt_tools(path, revision, tool_hashes):
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    if (manifest.get("runtime_revision") != revision or
+            manifest.get("native_tool_sha256") != tool_hashes):
+        raise ValueError("prebuilt autotest tools do not match revision or SHA-256")
+
+
 def execute_suite(args, manifest, cases):
     suite_start = time.monotonic()
     verified_file(args.cache, manifest["license"], manifest["repository"], manifest["revision"])
@@ -307,17 +316,23 @@ def execute_suite(args, manifest, cases):
     # before recording results. This does not touch retail caches.
     build_command = ["cmake", "--build", str(args.build_dir), "--config", args.config,
                      "--target", "ee_recomp", "ee_game_runner"]
-    with (run_dir / "native-build.log").open("wb") as log:
-        build = subprocess.run(build_command, cwd=ROOT, stdout=log,
-                               stderr=subprocess.STDOUT, check=False)
-    if build.returncode:
-        print(f"Native build failed: {run_dir / 'native-build.log'}", file=sys.stderr)
-        return 2
+    if args.prebuilt_manifest is None:
+        with (run_dir / "native-build.log").open("wb") as log:
+            build = subprocess.run(build_command, cwd=ROOT, stdout=log,
+                                   stderr=subprocess.STDOUT, check=False)
+        if build.returncode:
+            print(f"Native build failed: {run_dir / 'native-build.log'}", file=sys.stderr)
+            return 2
     from run_game import native_executable
     tool_hashes = {}
     for name in ("ee_recomp", "ee_game_runner"):
         executable = native_executable(args.build_dir, name, args.config)
         tool_hashes[name] = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if args.prebuilt_manifest is not None:
+        verify_prebuilt_tools(args.prebuilt_manifest, revision, tool_hashes)
+        (run_dir / "native-build.log").write_text(
+            "Verified prebuilt tools against the exact source revision and SHA-256.\n",
+            encoding="utf-8")
     prepared = prepare_references(cases, args, manifest)
     execution_start = time.monotonic()
     workers = min(args.jobs, len(cases))

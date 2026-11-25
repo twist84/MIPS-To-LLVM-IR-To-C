@@ -121,7 +121,12 @@ class AutotestsHarness(unittest.TestCase):
 
     def test_ci_full_matrix_covers_inventory(self):
         import re
-        workflow = (at.ROOT / ".github/workflows/ci.yml").read_text()
+        workflow = (at.ROOT / ".github/workflows/ps2autotests.yml").read_text()
+        ctest_workflow = (at.ROOT / ".github/workflows/ci.yml").read_text()
+        self.assertNotIn("autotests_full", ctest_workflow)
+        self.assertNotIn("ee-ctest-build", workflow)
+        self.assertIn("--target ee_recomp ee_game_runner", workflow)
+        self.assertIn("--prebuilt-manifest build/autotest-tools.json", workflow)
         full, pilot = re.search(r"fromJSON\(inputs\.autotests_full && '([^']+)' \|\| '([^']+)'\)", workflow).groups()
         tests = json.loads(at.MANIFEST.read_text())["tests"]
         for selection, expected in ((full, 55), (pilot, 11)):
@@ -130,6 +135,18 @@ class AutotestsHarness(unittest.TestCase):
                      for case in at.select_tests(tests, group["patterns"].split())]
             self.assertEqual(len(names), expected)
             self.assertEqual(len(set(names)), expected)
+
+    def test_prebuilt_tools_require_matching_revision_and_hashes(self):
+        hashes = {"ee_recomp": "a", "ee_game_runner": "b"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "tools.json"
+            path.write_text(json.dumps({"runtime_revision": "rev",
+                                        "native_tool_sha256": hashes}), encoding="utf-8")
+            at.verify_prebuilt_tools(path, "rev", hashes)
+            with self.assertRaisesRegex(ValueError, "revision or SHA-256"):
+                at.verify_prebuilt_tools(path, "other", hashes)
+            with self.assertRaisesRegex(ValueError, "revision or SHA-256"):
+                at.verify_prebuilt_tools(path, "rev", dict(hashes, ee_recomp="changed"))
 
     def test_inventory(self):
         manifest = json.loads(at.MANIFEST.read_text())
