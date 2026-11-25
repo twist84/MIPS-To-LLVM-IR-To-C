@@ -1765,6 +1765,48 @@ uint32_t c_hw::cache_control() const
     return m_cache_control;
 }
 
+uint64_t c_hw::idle_event_cycles_remaining() const
+{
+    constexpr uint64_t none = UINT64_MAX;
+    if (pending_interrupts() != 0u || m_cdvd_ncmd_pending)
+    {
+        return 0u;
+    }
+    // AutoDMA may refill at a sample batch boundary. Do not attempt
+    // to look past its externally initiated transfer state.
+    if (m_spu2_auto[0u].m_active || m_spu2_auto[1u].m_active)
+    {
+        return 0u;
+    }
+    uint64_t next = none;
+    const uint32_t dma = spu2_dma_cycles_remaining();
+    if (dma != 0u)
+    {
+        next = dma;
+    }
+    // Even with IRQs disabled the mixer can write guest sound RAM.
+    // Stop at the next sample, not only at a predicted voice IRQ.
+    if (m_spu2.clock_active())
+    {
+        next = std::min(next, static_cast<uint64_t>(
+            c_spu2::k_cycles_per_sample - m_spu2.sample_phase()));
+    }
+    // Mirror the modeled Timer5 compare condition. A counter already
+    // past target must reach rollover before a later compare is possible.
+    // Stop at rollover as well; partitioning across it is not assumed
+    // equivalent to one large advance in the current device model.
+    constexpr uint32_t shifts[4] = {0u, 3u, 4u, 8u};
+    const uint32_t shift = shifts[(m_timer5_mode >> 13u) & 3u];
+    uint64_t ticks = (uint64_t{1u} << 32u) - m_timer5_count;
+    if ((m_timer5_mode & 0x08u) != 0u &&
+        m_timer5_target != 0u && m_timer5_count < m_timer5_target)
+    {
+        ticks = m_timer5_target - m_timer5_count;
+    }
+    next = std::min(next, (ticks << shift) - m_timer5_remainder);
+    return next;
+}
+
 void c_hw::advance_cycles(uint32_t cycles)
 {
     if (cycles == 0u)
