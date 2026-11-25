@@ -390,3 +390,29 @@ enters a different architectural PC; verify HLE callback delivery,
 VBlank, DMA, audio, no guest fault and unchanged IR/VU1 inventories.
 No generated IR or VU1 regeneration needed; allow normal native relink.
 Stop before Batch 11 until this retail gate is satisfied.
+
+### Batch 10 retail validation — 2026-11-25 12:06
+
+Archive `sdbz-graphics-pr148-neutral-20261125-120640867.zip`:
+40M dispatches, 49.406 s process wall, 44.451 s profiled, 0 compile
+wait, no IOP fault, 4006 fields and 2886/2886 successful presents.
+3419 explicitly logged transitions to the corrected 0x80000200 IRQ
+vector and 3474 HLE INTC entries/returns; general exceptions still
+use 0x80000180. All 16 sampled DMAC1 slot callbacks completed, no red
+loop. VU1 v20: 84 programs, 411642/411642 worker jobs, zero fallback,
+capture or host failure. PCM 1858699 nonzero frames. Both display PPMs
+are byte-identical in GPU-authoritative mode (not independent raster
+validation). EE cache contains 16250 modules; no compilation wait or
+VU1 rebuild needed. EE native exclusive 16.208 s, IOP 8.912 s.
+Retail gate passed for normal BEV=0 interrupt delivery; BEV=1 is
+covered by synthetic regression rather than this retail replay.
+
+## Batch 11: literal R5900 scalar division hardware vectors
+
+Add all 26 literal console records for each of DIV/DIVU/DIV1/DIVU1
+from [ps2autotests muldiv.expected](https://github.com/unknownbrackets/ps2autotests/blob/97469ffbed8631277b94e28d01dabd702aa97ef3/tests/cpu/ee/muldiv.expected),
+expanding symbolic memory operands from the pinned shared.h/muldiv.cpp.
+Execute 104 records at each existing O0–O3 emitter level, checking all
+four HI/LO halves, MFHI/MFLO results and untouched 128-bit GPR halves.
+Immediate cases define only the low 32 operand bits; chosen high bits
+are test controls. No production changes, new timing claim or replay.
