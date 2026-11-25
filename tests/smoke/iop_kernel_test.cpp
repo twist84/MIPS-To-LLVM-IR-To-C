@@ -176,8 +176,10 @@ int main()
     {
         auto baseline = std::make_unique<iop::c_kernel>();
         auto combined = std::make_unique<iop::c_kernel>();
+        auto fast = std::make_unique<iop::c_kernel>();
         uint32_t baseline_callbacks = 0u;
         uint32_t combined_callbacks = 0u;
+        uint32_t fast_callbacks = 0u;
         const auto configure = [](iop::c_kernel& kernel, uint32_t& callbacks)
         {
             auto& hw = kernel.hardware();
@@ -187,28 +189,36 @@ int main()
                 kernel.schedule_hle_event(600u, [&callbacks]() { ++callbacks; });
         };
         if (!configure(*baseline, baseline_callbacks) ||
-            !configure(*combined, combined_callbacks))
+            !configure(*combined, combined_callbacks) ||
+            !configure(*fast, fast_callbacks))
         {
             return fail("IOP combined idle configuration");
         }
         (void)baseline->run(1u, 128u);
         (void)combined->run(1u, 128u);
-        const auto equal = [&]()
+        (void)fast->run(1u, 128u);
+        const auto same_as_baseline = [&](iop::c_kernel& candidate, uint32_t callbacks)
         {
             auto& left = baseline->hardware();
-            auto& right = combined->hardware();
+            auto& right = candidate.hardware();
             uint32_t left_count = 0u;
             uint32_t right_count = 0u;
             return left.read(iop::c_hw::k_timer5_count, 4u, &left_count) &&
                 right.read(iop::c_hw::k_timer5_count, 4u, &right_count) &&
                 left_count == right_count &&
-                baseline->cycles() == combined->cycles() &&
+                baseline->cycles() == candidate.cycles() &&
                 baseline->idle_event_cycles_remaining() ==
-                    combined->idle_event_cycles_remaining() &&
+                    candidate.idle_event_cycles_remaining() &&
                 left.pending_interrupts() == right.pending_interrupts() &&
                 left.spu2().clock_cycles() == right.spu2().clock_cycles() &&
                 left.spu2().elapsed_samples() == right.spu2().elapsed_samples() &&
-                baseline_callbacks == combined_callbacks;
+                left.spu2().sample_phase() == right.spu2().sample_phase() &&
+                baseline_callbacks == callbacks;
+        };
+        const auto equal = [&]()
+        {
+            return same_as_baseline(*combined, combined_callbacks) &&
+                same_as_baseline(*fast, fast_callbacks);
         };
         if (combined->idle_event_cycles_remaining() != 599u)
         {
@@ -216,19 +226,22 @@ int main()
         }
         const auto first = baseline->run(256u, 128u);
         const auto second = baseline->run(256u, 128u);
-        const bool batch = combined->try_advance_quiet_cycles(512u);
-        if (first.m_executed != 0u || second.m_executed != 0u || !batch ||
+        const auto batch = combined->run(512u, 128u);
+        if (first.m_executed != 0u || second.m_executed != 0u ||
+            batch.m_executed != 0u || batch.m_stop != second.m_stop ||
+            !fast->try_advance_quiet_cycles(512u) ||
             !equal() || baseline_callbacks != 0u)
         {
             return fail("IOP combined idle before HLE and SPU2 events");
         }
         (void)baseline->run(87u, 128u);
-        if (combined->try_advance_quiet_cycles(87u) ||
-            combined->cycles() != 513u)
+        if (fast->try_advance_quiet_cycles(87u) ||
+            fast->cycles() != 513u)
         {
             return fail("IOP quiet advance accepted event equality");
         }
         (void)combined->run(87u, 128u);
+        (void)fast->run(87u, 128u);
         if (!equal() || baseline_callbacks != 0u ||
             combined->idle_event_cycles_remaining() != 0u)
         {
@@ -236,6 +249,7 @@ int main()
         }
         (void)baseline->run(168u, 128u);
         (void)combined->run(168u, 128u);
+        (void)fast->run(168u, 128u);
         if (!equal() || baseline_callbacks != 1u ||
             combined->hardware().spu2().elapsed_samples() != 1u)
         {
