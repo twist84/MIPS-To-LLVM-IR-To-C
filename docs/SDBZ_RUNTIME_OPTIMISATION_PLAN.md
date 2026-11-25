@@ -271,3 +271,62 @@ candidate host CPU improvement, not a measured GPU speedup. Batch 7
 completes the current optimisation pass; run a combined warmed-cache
 P40 replay to measure Batches 3–7 and collect Batch 5 callback evidence
 before claiming retail validation.
+
+### Combined Batches 3–7 retail validation — 2026-11-25 11:52
+
+Archive `sdbz-graphics-pr148-neutral-20261125-115241025.zip`.
+40M dispatches and observations, zero timing-observer failure or IOP
+guest fault, CPU/GPU display PPMs byte-identical within the run, 5192/5192
+GS worker batches completed with no failures or backpressure. VU1 v20:
+84 programs, 423320 native runs, 475652611 native pairs, no fallbacks
+or captures. All 16250 EE IR names and SHA-256 hashes match the 11:23
+cache exactly; only the native provenance input ee_gs_worker.h changed.
+
+| Metric | 11:23 | 11:52 |
+| --- | ---: | ---: |
+| Native process wall (s) | 53.187 | 49.062 |
+| Compilation wait (s) | 0 | 0 |
+| EE native exclusive (s) | 16.440 | 16.110 |
+| IOP service exclusive (s) | 10.863 | 8.786 |
+| Dispatch diagnostics exclusive (s) | 2.347 | 2.238 |
+| GS worker copy/preflight (ms) | 664.620 | 488.428 |
+| GS worker event bytes | 1784735872 | 1863763168 |
+| GS worker image bytes | 1752776640 | 1239653952 |
+| Copy ns per combined byte | 0.18788 | 0.15738 |
+| GS transaction exclusive (ms) | 1209.749 | 1006.235 |
+| GS transaction events | 55772996 | 58242599 |
+| GS transaction ns/event | 21.69 | 17.28 |
+| SPU2 effect ns/core tick | 43.29 | 43.05 |
+| Nonzero PCM frames | 2115275 | 1745464 |
+| EE reference cycles | 25152636707 | 19132270071 |
+| Guest fields | 5111 | 3888 |
+| Window presentations | 3644 | 2813 |
+| Cross-low candidates | 137 | 137 |
+| Analog samples outside deadzone | 0 | 358 |
+
+The process wall is 7.76% shorter, but 23.9% fewer guest cycles
+and different live controller input preclude a controlled whole-run
+speedup claim. IOP cost per EE reference cycle actually rose from
+0.432 to 0.459 ns. Worker copy per combined byte fell about 16.2%,
+and GS transaction cost per event fell about 20.4%; batch composition
+and overlap differ, so these are encouraging observational comparisons,
+not isolated causal benchmarks. The 11:09 baseline wall was 48.734 s.
+No standalone replay is required to continue hardware differential work.
+
+### Batch 5 producer correlation closed for this replay
+
+All 16 captured completed real DMAC1 callbacks at 0x00102a60 returning
+to 0x001025a4 left the selector unchanged, and changed the opposite
+slot from 1 to 0 with the active slot unchanged at 1. Nine observations
+had selector 1 and seven selector 0. The first was at dispatch
+10346560 and the last at 14317732. Each returned result 0. This agrees
+with the earlier original ELF pending-count decrement audit, and
+demonstrates the callback-level completion producer for these samples.
+No red-loop snapshot was observed. The command wait still executed
+273049227 native guest instructions (1540.488 ms), and the idle-loop
+analyser correctly continues to reject internal branches. Do not skip
+the counter/timer path or synthesize any VIF1 completion.
+
+Next: independent hardware accuracy coverage, starting with the
+existing R5900/COP0/COP1/VU and SPU2 reference/differential tests.
+Keep the proven compatibility behavior separate from hardware claims.
