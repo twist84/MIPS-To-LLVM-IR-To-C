@@ -777,6 +777,33 @@ def main():
             ROOT / "scripts" / parent
         ).read_text(encoding="utf-8"), (parent, child)
 
+    shell_script = ROOT / "scripts" / "build.sh"
+    assert shell_script.is_file()
+    assert not (ROOT / "build.sh").exists()
+    if os.name != "nt":
+        # Check POSIX syntax and root discovery without invoking the legacy
+        # compiler or touching the real checkout's build outputs.
+        with tempfile.TemporaryDirectory(prefix="ee-shell-launcher-") as directory:
+            checkout = Path(directory) / "checkout with spaces"
+            scripts = checkout / "scripts"
+            scripts.mkdir(parents=True)
+            launcher = scripts / "build.sh"
+            launcher.write_bytes(shell_script.read_bytes())
+            fake_compiler = checkout / "fake-compiler"
+            fake_compiler.write_text(
+                '#!/bin/sh\n[ "$PWD" = "$EXPECTED_ROOT" ]\n',
+                encoding="utf-8",
+            )
+            fake_compiler.chmod(0o755)
+            subprocess.run(["sh", "-n", str(launcher)], check=True)
+            subprocess.run(
+                ["sh", str(launcher)], cwd=directory,
+                env=dict(os.environ, CXX="./fake-compiler",
+                         EXPECTED_ROOT=str(checkout.resolve())),
+                check=True, timeout=30,
+            )
+            assert (checkout / "build" / "recompiled").is_dir()
+
     # Keep the reproducible P40 retail profiling preset identical to the
     # manually validated replay environment, and propagate launcher failure.
     preset = (ROOT / "scripts" / "run_sdbz_p40.bat").read_text(encoding="utf-8")

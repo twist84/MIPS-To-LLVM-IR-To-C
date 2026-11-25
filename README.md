@@ -71,7 +71,7 @@ See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_202
 | Path | Contents |
 | --- | --- |
 | `src/`, `include/` | Recompiler, runtime, and native tools |
-| `scripts/` | Windows batch build, replay, profiling, and diagnostic entry points |
+| `scripts/` | Windows and Linux build scripts, replay, profiling, and diagnostic entry points |
 | `tools/` | Python tooling and GUI launcher |
 | `tests/` | Regression tests and fixtures |
 | `docs/` | Architecture, plans, research, validation, and development records |
@@ -80,8 +80,7 @@ See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_202
 Run the Windows commands in this README from the repository root.
 The batch files also resolve the root from their own path when launched
 from elsewhere (including Explorer). Build output and extracted game
-files remain in their existing root-relative locations. The Linux
-`build.sh` entry point is unchanged.
+files remain in their existing root-relative locations. The Linux entry point is now `./scripts/build.sh` (or `sh scripts/build.sh`).
 
 ## Build and test
 
