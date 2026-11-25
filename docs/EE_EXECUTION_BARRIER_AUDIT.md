@@ -88,6 +88,30 @@ and requires observed VU and COP0 activity; the timer fixture verifies
 the partition and bounds. CI pending. Actual pre-access safepoints remain
 open and are a prerequisite to deferral/chaining.
 
+## SIF/RPC ownership (P1-E)
+
+The HLE RPC pump can write module results and reply payloads directly
+to EE RAM before raising DMA5; these stores bypass the timer MMIO
+generation. A DMA5 completion bit remains significant regardless of
+the interrupt mask. The receive handler can retain ownership even
+after acknowledgment and after the reply queue becomes empty.
+
+`c_sif_rpc_bridge::scheduler_barrier()` combines raw DMA5 completion,
+EE receive-busy and the four pending RPC queues. The shadow IOP
+projection retains the original cadence when this returns true or
+the HLE IOP reboot bootstrap is pending. Directed tests cover a
+pending bind, unmasked completion status, acknowledged-but-busy
+receive ownership and a fully released receiver with empty queues.
+This changes no pump, IRQ, RAM store, or IOP service behavior.
+
+The genuine hardware SIF0/SIF1 transports pump on start callbacks,
+and are used by the ROM0 path, already excluded from lookahead.
+For HLE, a syscall can initiate SIF1 directly and the IOP reply
+pump can publish RAM asynchronously with respect to EE dispatch
+boundaries (but synchronously on the runner thread). Do not enable
+deferral until pre-access debt flushes and callback ordering are
+proved. HLE reboot and all reply ownership states remain conservative.
+
 ## Activation gates (not implemented)
 
 P2: baseline-versus-experimental deterministic event traces must match
