@@ -150,3 +150,17 @@ At code head `4ec5d1e`, [ROM0](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/a
 [original suite](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45690274885) succeeded.
 Remaining CI pending when recorded. No production changes in this evidence
 commit; no new replay needed solely for this documentation.
+
+## Batch 8: read-only COP0 registers and defined Wired writes
+
+EE Core User's Manual v6.0 pp. 64, 68–69 and 77 specifies read-only
+Random, BadVAddr and PRId, and resetting Random to 47 on Wired writes.
+Protect these registers in the shared guest write helper; hardware fault
+entry can still update BadVAddr. For defined Wired values 0–47, reset Random
+to 47. Out-of-range Wired behavior is undefined; preserve legacy raw storage
+without inventing a reset. Do not install a cycle-based Random progression,
+change the existing processor-revision initialization, or enable TLBWR.
+Host tests exercise all 48 defined Wired values, read-only writes and real
+fault entry. Generated LLVM tests cover MTC0/MFC0 and sign extension before
+and after a Wired write. No new lowering or runtime layout changes. Retail
+regression validation is required because guest COP0 behavior changed.

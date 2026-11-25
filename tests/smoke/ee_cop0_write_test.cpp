@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -100,6 +101,39 @@ int main()
         ee::ee_interrupt_clear(&probe, 0xffffffffu);
         check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
               "out of range IRQ line is ignored");
+    }
+
+    {
+        ee::s_ee_cpu_state probe{};
+        probe.m_cop0[ee::COP0_Random] = 17u;
+        probe.m_cop0[ee::COP0_BadVAddr] = 0x87654321u;
+        probe.m_cop0[ee::COP0_PRId] = 0x00002e20u;
+        for (uint32_t value : {0u, 0xffffffffu, 0x12345678u})
+        {
+            ee::ee_cop0_write(&probe, ee::COP0_Random, value);
+            ee::ee_cop0_write(&probe, ee::COP0_BadVAddr, value);
+            ee::ee_cop0_write(&probe, ee::COP0_PRId, value);
+            check(probe.m_cop0[ee::COP0_Random] == 17u &&
+                  probe.m_cop0[ee::COP0_BadVAddr] == 0x87654321u &&
+                  probe.m_cop0[ee::COP0_PRId] == 0x00002e20u,
+                  "guest writes preserve read-only Random, BadVAddr and PRId");
+        }
+        for (uint32_t wired = 0u; wired < 48u; ++wired)
+        {
+            probe.m_cop0[ee::COP0_Random] = wired;
+            ee::ee_cop0_write(&probe, ee::COP0_Wired, wired);
+            check(probe.m_cop0[ee::COP0_Wired] == wired &&
+                  probe.m_cop0[ee::COP0_Random] == 47u,
+                  "defined Wired writes reset Random to 47");
+        }
+        probe.m_cop0[ee::COP0_Random] = 17u;
+        ee::ee_cop0_write(&probe, ee::COP0_Wired, 48u);
+        check(probe.m_cop0[ee::COP0_Wired] == 48u &&
+              probe.m_cop0[ee::COP0_Random] == 17u,
+              "undefined Wired value retains legacy storage without invented reset");
+        ee::ee_raise_exception(&probe, nullptr, ee::EX_AdEL, 0x1000u, 0u, 0x123u);
+        check(probe.m_cop0[ee::COP0_BadVAddr] == 0x123u,
+              "architectural fault still updates read-only BadVAddr");
     }
 
     // The existing explicit timer-tick helper is only a synthetic fixture:

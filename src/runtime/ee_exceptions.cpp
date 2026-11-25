@@ -171,7 +171,9 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
         return;
     }
 
-    if (reg == COP0_Cause)
+    // Section 3.2, pp. 64, 69, 75, 77: these registers are read-only.
+    if (reg == COP0_Cause || reg == COP0_Random ||
+        reg == COP0_BadVAddr || reg == COP0_PRId)
     {
         return;
     }
@@ -180,6 +182,12 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
     if (reg == COP0_Compare)
     {
         ee_interrupt_clear(cpu, INT_TIMER);
+    }
+    else if (reg == COP0_Wired && value < 48u)
+    {
+        // A defined Wired write resets Random to the upper bound. Its
+        // subsequent cycle-driven decrement remains unimplemented.
+        cpu->m_cop0[COP0_Random] = 47u;
     }
 }
 
