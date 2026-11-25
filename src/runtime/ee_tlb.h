@@ -27,6 +27,7 @@ enum class e_ee_tlb_lookup_status : uint8_t
     PAGE_INVALID,
     PAGE_NOT_DIRTY,
     SCRATCHPAD_UNMODELED,
+    RESERVED_ENTRY_BITS,
     RESERVED_CACHE_MODE,
     MULTIPLE_MATCHES
 };
@@ -155,8 +156,12 @@ public:
 
             // S belongs to EntryLo0, not to each independent PFN.
             // Scratchpad translation needs a separately audited mapping.
-            if ((entry.m_entry_lo0 & 0x80000000u) != 0u ||
-                (entry.m_entry_lo1 & 0x80000000u) != 0u)
+            if ((entry.m_entry_lo0 & 0x7c000000u) != 0u ||
+                (entry.m_entry_lo1 & 0xfc000000u) != 0u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::RESERVED_ENTRY_BITS;
+            }
+            else if ((entry.m_entry_lo0 & 0x80000000u) != 0u)
             {
                 result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
             }

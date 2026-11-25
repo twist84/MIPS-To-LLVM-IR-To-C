@@ -47,7 +47,8 @@ inline constexpr s_ee_address_route ee_classify_address(
             return {route::PRIVILEGE_ERROR};
         }
         const uint32_t cache = address < 0xa0000000u ? config & 7u : 2u;
-        if (cache != 2u && cache != 3u && cache != 7u)
+        // Config.K0 permits mode 0; EntryLo.C does not (manual p. 78).
+        if (cache != 0u && cache != 2u && cache != 3u && cache != 7u)
         {
             return {route::RESERVED_CACHE_MODE};
         }

@@ -39,3 +39,13 @@ The classifier does not determine physical bus validity or model cache
 contents. Directed tests cover 256 combinations of mode, exception level,
 segment and boundary, plus eight Config.K0 values. No guest path uses
 this classifier yet; no new retail replay required.
+
+## Batch 3: distinguish Config.K0 and EntryLo.C
+
+The manual's Config table (printed p. 78) explicitly permits K0=0
+(cached without writeback or write allocation), unlike EntryLo.C=0.
+The classifier preserves that distinction. The TLB lookup rejects nonzero
+reserved EntryLo fields separately from EntryLo0.S scratchpad selection;
+EntryLo1 bit 31 is reserved, not a second scratchpad selector. Existing raw
+TLB register storage remains unchanged. Neither classifier simulates the
+instruction/data cache enable bits, cache contents, or bus effects yet.

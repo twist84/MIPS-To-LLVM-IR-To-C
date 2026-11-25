@@ -268,8 +268,11 @@ int main()
                    tlb.lookup(virt, 0u, false).m_status == status::RESERVED_CACHE_MODE &&
                    tlb.write(0u, 0u, virt, lo | 0x80000000u, lo) &&
                    tlb.lookup(virt + 0x1000u, 0u, false).m_status ==
-                       status::SCRATCHPAD_UNMODELED,
-                   "reserved cache modes and scratchpad cannot yield RAM mappings"))
+                       status::SCRATCHPAD_UNMODELED &&
+                   tlb.write(0u, 0u, virt, lo, lo | 0x80000000u) &&
+                   tlb.lookup(virt + 0x1000u, 0u, false).m_status ==
+                       status::RESERVED_ENTRY_BITS,
+                   "reserved cache/entry bits and scratchpad cannot yield RAM mappings"))
         {
             return 1;
         }
@@ -334,7 +337,7 @@ int main()
         {
             const auto k0 = ee::ee_classify_address(0x9fc00000u, 0u, cache);
             const auto k1 = ee::ee_classify_address(0xbfc00000u, 0u, cache);
-            const bool supported = cache == 2u || cache == 3u || cache == 7u;
+            const bool supported = cache == 0u || cache == 2u || cache == 3u || cache == 7u;
             if (!check(k0.m_route == (supported ? route::DIRECT_PHYSICAL :
                                        route::RESERVED_CACHE_MODE) &&
                        (!supported || (k0.m_physical_address == 0x1fc00000u &&
