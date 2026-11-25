@@ -5,6 +5,7 @@ import ctypes
 import faulthandler
 import pathlib
 import re
+import random
 import subprocess
 import sys
 import tempfile
@@ -365,6 +366,127 @@ def check_sync(sync_state, mode, pc, label):
             f"got {sync_state['calls']}")
 
 
+def check_vector_fmac_differential(fixture, temp_dir, target, library):
+    ir_path = temp_dir / "vector-fmac-diff.ll"
+    subprocess.run([str(fixture), str(ir_path), "ir_vmul"], check=True)
+    ir = ir_path.read_text(encoding="utf-8")
+    require("call { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } @vu_fmac4" in ir,
+            "missing four-lane FMAC lowering")
+    ir += """
+define i32 @test_vector_fmac(ptr %cpu, ptr %rt, i32 %pc, i32 %fs,
+                            i32 %ft, i32 %fd, i32 %mask, i32 %kind,
+                            i32 %source, i32 %bc, i32 %acc) {
+entry:
+  %to_acc = icmp ne i32 %acc, 0
+  %status = call i32 @ee_vu0_ir_fmac(ptr %cpu, ptr %rt, i32 %pc,
+      i32 %fs, i32 %ft, i32 %fd, i32 %mask, i32 %kind,
+      i32 %source, i32 %bc, i1 %to_acc)
+  ret i32 %status
+}
+"""
+    machine = target.create_target_machine(opt=2)
+    module = llvm.parse_assembly(ir)
+    module.triple = llvm.get_default_triple()
+    module.data_layout = str(machine.target_data)
+    module.verify()
+    engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+    engine.add_module(module)
+    engine.finalize_object()
+    address = engine.get_function_address("test_vector_fmac")
+    require(address != 0, "vector FMAC test wrapper missing")
+    vector = ctypes.CFUNCTYPE(
+        ctypes.c_uint32, ctypes.POINTER(EEState), ctypes.c_void_p,
+        *([ctypes.c_uint32] * 9)
+    )(address)
+    scalar = library.ee_vu0_macro_fmac
+    scalar.argtypes = [ctypes.POINTER(EEState), ctypes.c_void_p,
+                       ctypes.c_uint32, ctypes.c_uint32]
+    scalar.restype = ctypes.c_uint32
+
+    rng = random.Random(0x565530)
+    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x8080002c,
+             0x3f800000, 0x3fffffff, 0xbf800000, 0x40000000,
+             0x7f800000, 0x7fffffff, 0xffffffff, 0x16a08bd5, 0x03f4fe21]
+
+    def bits():
+        return rng.choice(edges) if rng.randrange(3) else rng.getrandbits(32)
+
+    def quad():
+        return U128(bits() | (bits() << 32), bits() | (bits() << 32))
+
+    # (opcode, kind, source, broadcast, to_acc)
+    modes = []
+    for kind, op in enumerate([0x28, 0x2c, 0x2a, 0x29, 0x2d, 0x2b, 0x2f]):
+        modes.append((op, kind, 0, 0, False))
+        if kind < 5:
+            modes.append((op, kind, 0, 0, True))
+    for kind, base in enumerate([0, 4, 0x18, 8, 0xc, 0x10, 0x14]):
+        for bc in range(4):
+            modes.append((base + bc, kind, 1, bc, False))
+            if kind < 5:
+                modes.append((base + bc, kind, 1, bc, True))
+    for kind, q_op, i_op in [(0, 0x20, 0x22), (1, 0x24, 0x26),
+                             (2, 0x1c, 0x1e), (3, 0x21, 0x23),
+                             (4, 0x25, 0x27), (5, None, 0x1d),
+                             (6, None, 0x1f)]:
+        for source, op in [(2, q_op), (3, i_op)]:
+            if op is not None:
+                modes.append((op, kind, source, 0, False))
+                if kind < 5:
+                    modes.append((op, kind, source, 0, True))
+    modes += [(0x2e, 2, 4, 0, True), (0x2e, 4, 4, 0, False)]
+
+    count = 0
+    for op, kind, source, bc, acc in modes:
+        for mask in range(16):
+            # Exercise VF0, source/destination aliasing and mixed flags.
+            fs = rng.choice([0, 1, 2, 3])
+            ft = rng.choice([0, 1, 2, 3])
+            fd = rng.choice([0, fs, ft, 3])
+            encoded_fd = op >> 2 if acc else fd
+            funct = (0x3c | (op & 3)) if acc else op
+            word = (0x4a000000 | (mask << 21) | (ft << 16) |
+                    (fs << 11) | (encoded_fd << 6) | funct)
+            cb, cpu = aligned_instance(EEState)
+            vb, vu = aligned_instance(VU0State)
+            rb, ref_cpu = aligned_instance(EEState)
+            rvb, ref_vu = aligned_instance(VU0State)
+            for i in range(4):
+                cpu.vu0[i] = quad()
+            vu.acc = quad()
+            vu.q = quad()
+            vu.vi[21] = bits()
+            vu.mac_flags = rng.randrange(0x10000)
+            vu.status_flags = rng.randrange(0x1000)
+            vu.acc_overflow_mask = rng.randrange(16)
+            vu.vi[16] = vu.status_flags
+            vu.vi[17] = vu.mac_flags
+            ctypes.memmove(ctypes.addressof(ref_cpu), ctypes.addressof(cpu),
+                           ctypes.sizeof(EEState))
+            ctypes.memmove(ctypes.addressof(ref_vu), ctypes.addressof(vu),
+                           ctypes.sizeof(VU0State))
+            rt, sync, control, state, _ = make_runtime(vu)
+            ref_rt, ref_sync, ref_control, ref_state, _ = make_runtime(ref_vu)
+            status = vector(ctypes.pointer(cpu), ctypes.byref(rt), ENTRY_PC,
+                            fs, ft, encoded_fd, mask, kind, source, bc, int(acc))
+            expected = scalar(ctypes.pointer(ref_cpu), ctypes.byref(ref_rt),
+                              word, ENTRY_PC)
+            label = f"opcode={word:08x} mask={mask:x} kind={kind} source={source}"
+            require(status == expected == 0, f"{label}: operation failed")
+            require(bytes(cpu.vu0) == bytes(ref_cpu.vu0),
+                    f"{label}: VF result differs")
+            require(bytes(vu.acc) == bytes(ref_vu.acc) and
+                    vu.acc_overflow_mask == ref_vu.acc_overflow_mask and
+                    vu.mac_flags == ref_vu.mac_flags and
+                    vu.status_flags == ref_vu.status_flags and
+                    vu.vi[16] == ref_vu.vi[16] and vu.vi[17] == ref_vu.vi[17],
+                    f"{label}: ACC or flag result differs")
+            require(state["calls"] == ref_state["calls"] == [(1, ENTRY_PC)],
+                    f"{label}: synchronization differs")
+            count += 1
+    print(f"VU0 SIMD FMAC scalar differential: {count} cases passed", flush=True)
+
+
 def main():
     faulthandler.enable()
     require(
@@ -381,6 +503,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-vu0-transfer-") as directory:
         temp_dir = pathlib.Path(directory)
+        check_vector_fmac_differential(fixture, temp_dir, target, runtime_library)
 
         def vf_words(cpu, index):
             v = cpu.vu0[index]

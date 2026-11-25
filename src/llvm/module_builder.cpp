@@ -3,6 +3,7 @@
 #include "ee_cop1_add_ir.h"
 #include "ee_cop1_mul_ir.h"
 #include "ee_vu_fmac_ir.h"
+#include "../runtime/ee_vu_fmac4_ir.h"
 #include "ee_vu0_macro_ir.h"
 #include "ee_runtime.h"
 #include <cstddef>
@@ -3548,6 +3549,7 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
     {
         m_out += make_vu0_macro_ir();
         m_out += k_vu_fmac_ir;
+        m_out += k_vu_fmac4_ir;
         m_out += k_vu_q_status_ir;
         m_out += k_vu_fixed_ir;
     }
@@ -5498,6 +5500,7 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
     {
         m_out += make_vu0_macro_ir();
         m_out += k_vu_fmac_ir;
+        m_out += k_vu_fmac4_ir;
         m_out += k_vu_q_status_ir;
         m_out += k_vu_fixed_ir;
     }

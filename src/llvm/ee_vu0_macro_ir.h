@@ -84,7 +84,7 @@ fail:
   ret ptr null
 }
 
-define internal <4 x i32> @ee_vu0_ir_read_vf(ptr %cpu, i32 %index) {
+define internal <4 x i32> @ee_vu0_ir_read_vf(ptr %cpu, i32 %index) alwaysinline {
 entry:
   %is_zero = icmp eq i32 %index, 0
   br i1 %is_zero, label %vf0, label %read
@@ -97,12 +97,20 @@ read:
   ret <4 x i32> %bits
 }
 
-define internal i32 @ee_vu0_ir_order(i32 %x) alwaysinline {
-  %negative = icmp slt i32 %x, 0
-  %neg = xor i32 %x, -1
-  %pos = xor i32 %x, -2147483648
-  %key = select i1 %negative, i32 %neg, i32 %pos
-  ret i32 %key
+; Lane order is x,y,z,w; guest mask/flag bits are 8,4,2,1.
+define internal i32 @ee_vu0_ir_pack_mask(<4 x i1> %lanes) alwaysinline {
+  %reversed = shufflevector <4 x i1> %lanes, <4 x i1> poison, <4 x i32> <i32 3, i32 2, i32 1, i32 0>
+  %packed = bitcast <4 x i1> %reversed to i4
+  %bits = zext i4 %packed to i32
+  ret i32 %bits
+}
+
+define internal <4 x i32> @ee_vu0_ir_order(<4 x i32> %x) alwaysinline {
+  %negative = icmp slt <4 x i32> %x, zeroinitializer
+  %neg = xor <4 x i32> %x, <i32 -1, i32 -1, i32 -1, i32 -1>
+  %pos = xor <4 x i32> %x, <i32 -2147483648, i32 -2147483648, i32 -2147483648, i32 -2147483648>
+  %key = select <4 x i1> %negative, <4 x i32> %neg, <4 x i32> %pos
+  ret <4 x i32> %key
 }
 
 ; kind: ADD SUB MUL MADD MSUB MAX MINI = 0..6
@@ -141,85 +149,92 @@ prepare:
   %mac_old = load i32, ptr %mac_ptr
   %latch_ptr = getelementptr i8, ptr %vu, i64 OFF_LATCH
   %latch_old = load i32, ptr %latch_ptr
-  br label %lane
-lane:
-  %n = phi i32 [0, %prepare], [%next, %merge]
-  %out = phi <4 x i32> [%dest_old, %prepare], [%out_next, %merge]
-  %mac = phi i32 [%mac_old, %prepare], [%mac_next, %merge]
-  %latch = phi i32 [%latch_old, %prepare], [%latch_next, %merge]
-  %sticky = phi i32 [0, %prepare], [%sticky_next, %merge]
-  %shift = sub i32 3, %n
-  %bit = shl i32 1, %shift
-  %groups = shl i32 4369, %shift
-  %keep = xor i32 %groups, -1
-  %cleared = and i32 %mac, %keep
-  %selected = and i32 %mask, %bit
-  %active = icmp ne i32 %selected, 0
-  %masked_mac = select i1 %flags, i32 %cleared, i32 %mac
-  br i1 %active, label %check_outer, label %merge
-check_outer:
-  %w = icmp eq i32 %n, 3
-  %skip = and i1 %outer, %w
-  br i1 %skip, label %merge, label %calculate
-calculate:
-  %n1 = add i32 %n, 1
-  %n2 = add i32 %n, 2
-  %cross_a = urem i32 %n1, 3
-  %cross_b = urem i32 %n2, 3
-  %a_lane = select i1 %outer, i32 %cross_a, i32 %n
-  %bc_lane = select i1 %is_bc, i32 %bc, i32 %n
-  %b_lane = select i1 %outer, i32 %cross_b, i32 %bc_lane
-  %av = extractelement <4 x i32> %a, i32 %a_lane
-  %bv = extractelement <4 x i32> %b, i32 %b_lane
-  %rhs = select i1 %use_scalar, i32 %scalar, i32 %bv
+  ; Broadcast and outer-product permutations are formed once for all lanes.
+  %a_outer = shufflevector <4 x i32> %a, <4 x i32> poison, <4 x i32> <i32 1, i32 2, i32 0, i32 3>
+  %b_outer = shufflevector <4 x i32> %b, <4 x i32> poison, <4 x i32> <i32 2, i32 0, i32 1, i32 3>
+  %av = select i1 %outer, <4 x i32> %a_outer, <4 x i32> %a
+  %bc_word = extractelement <4 x i32> %b, i32 %bc
+  %bc_insert = insertelement <4 x i32> poison, i32 %bc_word, i32 0
+  %bc_vector = shufflevector <4 x i32> %bc_insert, <4 x i32> poison, <4 x i32> zeroinitializer
+  %scalar_insert = insertelement <4 x i32> poison, i32 %scalar, i32 0
+  %scalar_vector = shufflevector <4 x i32> %scalar_insert, <4 x i32> poison, <4 x i32> zeroinitializer
+  %b_bc = select i1 %is_bc, <4 x i32> %bc_vector, <4 x i32> %b
+  %b_permuted = select i1 %outer, <4 x i32> %b_outer, <4 x i32> %b_bc
+  %rhs = select i1 %use_scalar, <4 x i32> %scalar_vector, <4 x i32> %b_permuted
+  %lane_bits = add <4 x i32> zeroinitializer, <i32 8, i32 4, i32 2, i32 1>
+  %mask_insert = insertelement <4 x i32> poison, i32 %mask, i32 0
+  %mask_vector = shufflevector <4 x i32> %mask_insert, <4 x i32> poison, <4 x i32> zeroinitializer
+  %selected_bits = and <4 x i32> %mask_vector, %lane_bits
+  %selected = icmp ne <4 x i32> %selected_bits, zeroinitializer
+  ; Outer products do not compute W. A selected W keeps its old MAC bits;
+  ; an unselected W clears its MAC group exactly like the scalar path.
+  %eligible = select i1 %outer, <4 x i1> <i1 true, i1 true, i1 true, i1 false>, <4 x i1> <i1 true, i1 true, i1 true, i1 true>
+  %active = and <4 x i1> %selected, %eligible
   br i1 %flags, label %arithmetic, label %minmax
 minmax:
-  %ak = call i32 @ee_vu0_ir_order(i32 %av)
-  %bk = call i32 @ee_vu0_ir_order(i32 %rhs)
-  %ge = icmp uge i32 %ak, %bk
-  %le = icmp ule i32 %ak, %bk
-  %pick = select i1 %max, i1 %ge, i1 %le
-  %extreme = select i1 %pick, i32 %av, i32 %rhs
-  %extreme_out = insertelement <4 x i32> %out, i32 %extreme, i32 %n
-  br label %merge
+  %ak = call <4 x i32> @ee_vu0_ir_order(<4 x i32> %av)
+  %bk = call <4 x i32> @ee_vu0_ir_order(<4 x i32> %rhs)
+  %ge = icmp uge <4 x i32> %ak, %bk
+  %le = icmp ule <4 x i32> %ak, %bk
+  %pick = select i1 %max, <4 x i1> %ge, <4 x i1> %le
+  %extreme = select <4 x i1> %pick, <4 x i32> %av, <4 x i32> %rhs
+  %extreme_out = select <4 x i1> %active, <4 x i32> %extreme, <4 x i32> %dest_old
+  br label %commit
 arithmetic:
-  %accv = extractelement <4 x i32> %acc, i32 %n
-  %latch_bit = and i32 %latch_old, %bit
-  %latched = icmp ne i32 %latch_bit, 0
-  %tuple = call { i32, i1, i1, i32 } @vu_fmac(i32 %kind, i32 %accv, i32 %av, i32 %rhs, i1 %latched)
-  %bits = extractvalue { i32, i1, i1, i32 } %tuple, 0
-  %overflow = extractvalue { i32, i1, i1, i32 } %tuple, 1
-  %underflow = extractvalue { i32, i1, i1, i32 } %tuple, 2
-  %product_sticky = extractvalue { i32, i1, i1, i32 } %tuple, 3
-  %exp = and i32 %bits, 2139095040
-  %zero = icmp eq i32 %exp, 0
-  %sign = icmp slt i32 %bits, 0
-  %z = select i1 %zero, i32 1, i32 0
-  %s = select i1 %sign, i32 16, i32 0
-  %u = select i1 %underflow, i32 256, i32 0
-  %o = select i1 %overflow, i32 4096, i32 0
+  %latch_insert = insertelement <4 x i32> poison, i32 %latch_old, i32 0
+  %latch_vector = shufflevector <4 x i32> %latch_insert, <4 x i32> poison, <4 x i32> zeroinitializer
+  %latch_bits = and <4 x i32> %latch_vector, %lane_bits
+  %latched = icmp ne <4 x i32> %latch_bits, zeroinitializer
+  ; Inactive lanes cannot contribute Booth work or sticky flags.
+  %safe_a = select <4 x i1> %active, <4 x i32> %av, <4 x i32> zeroinitializer
+  %safe_b = select <4 x i1> %active, <4 x i32> %rhs, <4 x i32> zeroinitializer
+  %tuple = call { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } @vu_fmac4(i32 %kind, <4 x i32> %acc, <4 x i32> %safe_a, <4 x i32> %safe_b, <4 x i1> %latched)
+  %bits = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %tuple, 0
+  %overflow = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %tuple, 1
+  %underflow = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %tuple, 2
+  %product_sticky = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %tuple, 3
+  %exp = and <4 x i32> %bits, <i32 2139095040, i32 2139095040, i32 2139095040, i32 2139095040>
+  %zero = icmp eq <4 x i32> %exp, zeroinitializer
+  %sign = icmp slt <4 x i32> %bits, zeroinitializer
+  %z_active = and <4 x i1> %zero, %active
+  %s_active = and <4 x i1> %sign, %active
+  %u_active = and <4 x i1> %underflow, %active
+  %o_active = and <4 x i1> %overflow, %active
+  %z = call i32 @ee_vu0_ir_pack_mask(<4 x i1> %z_active)
+  %s_bits = call i32 @ee_vu0_ir_pack_mask(<4 x i1> %s_active)
+  %u_bits = call i32 @ee_vu0_ir_pack_mask(<4 x i1> %u_active)
+  %o_bits = call i32 @ee_vu0_ir_pack_mask(<4 x i1> %o_active)
+  %s = shl i32 %s_bits, 4
+  %u = shl i32 %u_bits, 8
+  %o = shl i32 %o_bits, 12
   %zs = or i32 %z, %s
   %uo = or i32 %u, %o
-  %all = or i32 %zs, %uo
-  %lane_flags = shl i32 %all, %shift
+  %lane_flags = or i32 %zs, %uo
+  %selected_w = extractelement <4 x i1> %selected, i32 3
+  %preserve_w = and i1 %outer, %selected_w
+  %keep = select i1 %preserve_w, i32 -61167, i32 -65536
+  %cleared = and i32 %mac_old, %keep
   %new_mac = or i32 %cleared, %lane_flags
-  %not_bit = xor i32 %bit, -1
-  %latch_clear = and i32 %latch, %not_bit
-  %latch_set = select i1 %overflow, i32 %bit, i32 0
-  %updated_latch = or i32 %latch_clear, %latch_set
-  %new_latch = select i1 %to_acc, i32 %updated_latch, i32 %latch
-  %new_sticky = or i32 %sticky, %product_sticky
-  %new_out = insertelement <4 x i32> %out, i32 %bits, i32 %n
-  br label %merge
-merge:
-  %out_next = phi <4 x i32> [%out, %lane], [%out, %check_outer], [%extreme_out, %minmax], [%new_out, %arithmetic]
-  %mac_next = phi i32 [%masked_mac, %lane], [%mac, %check_outer], [%mac, %minmax], [%new_mac, %arithmetic]
-  %latch_next = phi i32 [%latch, %lane], [%latch, %check_outer], [%latch, %minmax], [%new_latch, %arithmetic]
-  %sticky_next = phi i32 [%sticky, %lane], [%sticky, %check_outer], [%sticky, %minmax], [%new_sticky, %arithmetic]
-  %next = add i32 %n, 1
-  %done = icmp eq i32 %next, 4
-  br i1 %done, label %commit, label %lane
+  %active_mask = call i32 @ee_vu0_ir_pack_mask(<4 x i1> %active)
+  %not_active = xor i32 %active_mask, -1
+  %latch_clear = and i32 %latch_old, %not_active
+  %updated_latch = or i32 %latch_clear, %o_bits
+  %new_latch = select i1 %to_acc, i32 %updated_latch, i32 %latch_old
+  %sticky_active = select <4 x i1> %active, <4 x i32> %product_sticky, <4 x i32> zeroinitializer
+  %sticky0 = extractelement <4 x i32> %sticky_active, i32 0
+  %sticky1 = extractelement <4 x i32> %sticky_active, i32 1
+  %sticky2 = extractelement <4 x i32> %sticky_active, i32 2
+  %sticky3 = extractelement <4 x i32> %sticky_active, i32 3
+  %sticky01 = or i32 %sticky0, %sticky1
+  %sticky23 = or i32 %sticky2, %sticky3
+  %new_sticky = or i32 %sticky01, %sticky23
+  %new_out = select <4 x i1> %active, <4 x i32> %bits, <4 x i32> %dest_old
+  br label %commit
 commit:
+  %out_next = phi <4 x i32> [%extreme_out, %minmax], [%new_out, %arithmetic]
+  %mac_next = phi i32 [%mac_old, %minmax], [%new_mac, %arithmetic]
+  %latch_next = phi i32 [%latch_old, %minmax], [%new_latch, %arithmetic]
+  %sticky_next = phi i32 [0, %minmax], [%new_sticky, %arithmetic]
   br i1 %to_acc, label %write_acc, label %check_vf
 write_acc:
   store <4 x i32> %out_next, ptr %acc_ptr, align 4
