@@ -12,7 +12,7 @@ provenance changes unless explicitly necessary.
 | P1-A | Timer/delegated EE MMIO | Accepted and rejected accesses advance the generation; passive queries do not; MMIO-free plus touched equals lookahead candidates. Enumerate direct helpers separately. | Observation implemented; direct helpers open |
 | P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Started-channel entry observation added; transition audit open |
 | P1-C | Asynchronous GS worker | Idle healthy worker is quiet; queued or executing batch and failed worker are not quiet; drained healthy worker is quiet again; no new fence or guest event. Headless shadow reports zero GS barriers. Any submission after the snapshot requires an independent pre-execution guard. | Entry observation implemented; CI pending |
-| P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | Open |
+| P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | VU callback and COP0 endpoint observations added; pre-access guards open |
 | P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | Open |
 | P1-F | Clock, timer/scanout reprogramming, host continuation | Verify fractional 8:1 accounting and preserved outstanding debt; unknown/overflow/overdue deadlines fail closed; test equal-time events, deadline replacement and continuation before service. | Groundwork present; integration audit open |
 
@@ -57,6 +57,36 @@ deferral, distinguish dormant channels using proved producer/consumer
 dependencies, and cover transitions/completion/faults and native accesses.
 The new classifications can reduce the earlier shadow candidate counts;
 do not compare them as performance measurements.
+
+## Direct-helper observations (P1-D)
+
+The translated VU synchronization/start/control callbacks bypass EE timer
+MMIO. Install counting wrappers only for opt-in shadow runs; the original
+callbacks and return values remain unchanged, including failed or no-op
+calls. The existing host service call is not wrapped. The runner observes
+the generation before and after each measured native boundary.
+
+COP0 Count/Compare, Status, Cause, EPC, ErrorEPC, core clock anchor and
+latch, and performance control/fault are compared at the same endpoints,
+before subsequent device service. A changed clock anchor can expose a
+Count synchronization even when Compare is unchanged. BC0 already
+uses the instrumented MMIO reads of D_PCR/D_STAT. Endpoint equality is
+not proof of no COP0 access: a write restored within a block, an unchanged
+read, or an unaudited register can be invisible. VU operations that
+never invoke these callbacks are also not covered by the generation.
+
+`vu_callback_boundaries` and `cop0_changed_boundaries` count all valid
+shadow observations, including exceptions; these can overlap.
+`mmio_free_direct_touched` and `mmio_free_direct_quiet` partition only
+MMIO-free projected normal exits, according to either observation.
+Their sum must equal `lookahead_mmio_free`. Quiet is observational,
+not a safety guarantee. No runtime ABI or translated IR changes.
+
+Directed snapshot tests exercise register, clock and performance changes.
+The native COP2 fixture compares shadow on/off architectural reports
+and requires observed VU and COP0 activity; the timer fixture verifies
+the partition and bounds. CI pending. Actual pre-access safepoints remain
+open and are a prerequisite to deferral/chaining.
 
 ## Activation gates (not implemented)
 
