@@ -111,6 +111,9 @@ public:
         uint64_t step, int16_t input, s_effect_reflections* result);
     bool commit_effect_reflections(uint32_t core, uint64_t step,
         const s_effect_reflections& reflections);
+    // Four read-only comb taps feed the wide all-pass accumulator.
+    bool calculate_effect_comb(uint32_t core, uint32_t channel,
+        uint64_t step, int32_t* result);
     uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }

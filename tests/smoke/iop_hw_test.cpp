@@ -858,6 +858,94 @@ bool test_spu2_effect_reflections()
     return true;
 }
 
+bool test_spu2_effect_comb()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    const int16_t words[16] = {1001, -1001, -1001, 1001, 7, -7, -9, 9,
+        -32768, 0, 0, 0, 0, 0, 0, -9};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    constexpr uint32_t regs[4] = {0x2f4u, 0x2fcu, 0x314u, 0x31cu};
+    constexpr uint16_t gains[4] = {0x4000u, 0xc000u, 0x2000u, 0x8000u};
+    for (uint32_t core = 0u; core < 2u; ++core)
+    {
+        const uint32_t bank = base + core * 0x400u;
+        if (!spu.write(bank + 0x2e0u, 2u, 0u) ||
+            !spu.write(bank + 0x2e2u, 2u, 0xfff0u) ||
+            !spu.write(bank + 0x33cu, 2u, 0u))
+        {
+            return false;
+        }
+        for (uint32_t tap = 0u; tap < 4u; ++tap)
+        {
+            if (!spu.write(base + 0x776u + core * 0x28u + tap * 2u, 2u,
+                    core == 0u ? gains[tap] : 0x8000u) ||
+                !spu.write(bank + regs[tap], 2u, 0u) ||
+                !spu.write(bank + regs[tap] + 2u, 2u,
+                    core == 0u ? tap * 2u : 8u) ||
+                !spu.write(bank + regs[tap] + 4u, 2u, 0u) ||
+                !spu.write(bank + regs[tap] + 6u, 2u, tap * 2u + 1u))
+            {
+                return false;
+            }
+        }
+    }
+    int32_t sum = 0;
+    // Independently floor each Q15 product (including negative fractions).
+    if (!spu.calculate_effect_comb(0u, 0u, 16u, &sum) || sum != 1010 ||
+        !spu.calculate_effect_comb(0u, 1u, 0u, &sum) || sum != -1013 ||
+        !spu.calculate_effect_comb(1u, 0u, 0u, &sum) || sum != 131072 ||
+        spu.irq_latches() != 0u)
+    {
+        return false;
+    }
+    // Negative offset wraps to the end of the same work area.
+    if (!spu.write(base + 0x31cu, 2u, 0xffffu) ||
+        !spu.write(base + 0x31eu, 2u, 0xffffu) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1010)
+    {
+        return false;
+    }
+    // Zero gain still reads the programmed tap. Only an enabled effect
+    // can latch the other core's IRQ; no data is written by comb filters.
+    uint16_t word = 0u;
+    if (!spu.write(base + 0x77cu, 2u, 0u) ||
+        !spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xffffu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1001 ||
+        spu.irq_latches() != 0u ||
+        !spu.write(base + 0x19au, 2u, 0x80u) ||
+        !spu.calculate_effect_comb(0u, 0u, 0u, &sum) || sum != 1001 ||
+        spu.irq_latches() != 2u || spu.effect_irq_events() != 1u ||
+        !spu.ram_word(0xffffu, &word) || word != static_cast<uint16_t>(-9))
+    {
+        return false;
+    }
+    // Invalid requests leave the output and IRQ counters unchanged.
+    if (spu.calculate_effect_comb(2u, 0u, 0u, &sum) ||
+        spu.calculate_effect_comb(0u, 2u, 0u, &sum) ||
+        spu.calculate_effect_comb(0u, 0u, 0u, nullptr) ||
+        !spu.write(base + 0x2e0u, 2u, 1u) ||
+        spu.calculate_effect_comb(0u, 0u, 0u, &sum))
+    {
+        return false;
+    }
+    return sum == 1001 && spu.effect_irq_events() == 1u;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -2021,6 +2109,10 @@ int main()
     if (!test_spu2_effect_reflections())
     {
         return fail("SPU2 IIR same/cross reflections, feedback and staged writeback");
+    }
+    if (!test_spu2_effect_comb())
+    {
+        return fail("SPU2 four-tap comb accumulator, rounding and read IRQs");
     }
     if (!test_spu2_effect_registers())
     {

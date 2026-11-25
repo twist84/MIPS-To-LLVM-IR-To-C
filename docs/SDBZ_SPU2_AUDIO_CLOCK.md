@@ -127,3 +127,24 @@ complete filter pipeline and sample-clock integration are ready.
 
 Register reference: https://akuhak.github.io/ps2sdk-doxy/iop/spu2regs_8h_source.html
 Algorithm reference: https://psx-spx.consoledev.net/soundprocessingunitspu/
+
+### Four-tap comb accumulator (Batch 19)
+
+Each channel reads four independent wrapped RAM taps selected by the native
+SPU2 address register pairs (left 0x2f4, 0x2fc, 0x314, 0x31c; right +4),
+weighted by that core's four signed Q15 COMB coefficients. Each product is
+floor-rounded independently and accumulated in signed 32-bit precision,
+without premature saturation. All four reads occur even for zero gain; IRQ
+comparisons use the existing enabled-effect policy. The comb stage does not
+write RAM and must run before the staged reflection/APF writebacks.
+
+The DMA-seeded fixture checks both channels, independent coefficient banks,
+negative fractional rounding, wide accumulation (131072), signed offset and
+step wrap, disabled effects, cross-core IRQ on a zero-gain tap, invalid
+requests and unchanged RAM. Filter clock integration is still deferred.
+
+References: PS2SDK libspu2 register mapping
+(https://ps2dev.github.io/ps2sdk/s__sra_8c_source.html) and the PCSX2 SPU2
+reverb model (https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp).
+The rounding choice follows that compatibility model, not a new bit-exact
+hardware validation.

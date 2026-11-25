@@ -269,6 +269,37 @@ bool c_spu2::commit_effect_reflections(uint32_t core, uint64_t step,
     return valid;
 }
 
+bool c_spu2::calculate_effect_comb(uint32_t core, uint32_t channel,
+    uint64_t step, int32_t* result)
+{
+    bool valid = core < 2u && channel < 2u && result != nullptr &&
+        effect_start(core) < effect_end(core);
+    if (valid)
+    {
+        constexpr uint32_t left_regs[4] = {0x2f4u, 0x2fcu, 0x314u, 0x31cu};
+        const uint16_t* coeff = m_cores[core].m_effect_coefficients;
+        int32_t sum = 0;
+        for (uint32_t tap = 0u; tap < 4u && valid; ++tap)
+        {
+            int16_t sample = 0;
+            const int64_t offset = effect_tap_offset(core, left_regs[tap] + channel * 4u);
+            // Even a zero coefficient does not suppress a RAM read or IRQ.
+            valid = read_effect_sample(core, step, offset, &sample);
+            if (valid)
+            {
+                sum += scale_mix(sample, signed_halfword(coeff[1u + tap]));
+            }
+        }
+        if (valid)
+        {
+            // Four independently rounded Q15 products fit in int32_t.
+            // Do not saturate before the following all-pass stages.
+            *result = sum;
+        }
+    }
+    return valid;
+}
+
 void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
 {
     // Reference SDBZ envelope clock. Counter is retained across phase and
