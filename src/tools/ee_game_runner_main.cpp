@@ -3924,14 +3924,11 @@ int main(int argc, char** argv)
     uint64_t horizon_iop_rpc_barriers = 0u;
     uint64_t horizon_gs_worker_barriers = 0u;
     uint64_t horizon_dmac_started_barriers = 0u;
-    uint64_t horizon_dmac_started_channels[ee::c_ee_dmac::k_channel_count]{};
+    constexpr uint32_t horizon_dmac_mask_count = 1u << ee::c_ee_dmac::k_channel_count;
+    uint64_t horizon_dmac_masks[horizon_dmac_mask_count]{};
     uint64_t horizon_dmac_sif0_only = 0u;
     uint64_t horizon_dmac_passive_sif0 = 0u;
-    uint64_t horizon_entry_callback = 0u;
-    uint64_t horizon_entry_idle = 0u;
-    uint64_t horizon_entry_irq = 0u;
-    uint64_t horizon_entry_vu = 0u;
-    uint64_t horizon_entry_other = 0u;
+    uint64_t horizon_entry_masks[32]{};
     uint64_t horizon_clock_barriers = 0u;
     uint64_t horizon_lookahead_mmio_free = 0u;
     uint64_t horizon_lookahead_mmio_touched = 0u;
@@ -5057,13 +5054,13 @@ int main(int argc, char** argv)
                 runtime.m_timing_observer != nullptr;
             // These independent observations can overlap; do not sum
             // them as exclusive blocking reasons.
-            horizon_entry_callback += entry_callback;
-            horizon_entry_idle += entry_idle;
-            horizon_entry_irq += entry_irq;
-            horizon_entry_vu += entry_vu;
-            horizon_entry_other += entry_other;
-            bool barrier = entry_callback || entry_idle || entry_irq ||
-                entry_vu || entry_other;
+            const uint32_t entry_mask = static_cast<uint32_t>(entry_callback) |
+                (static_cast<uint32_t>(entry_idle) << 1u) |
+                (static_cast<uint32_t>(entry_irq) << 2u) |
+                (static_cast<uint32_t>(entry_vu) << 3u) |
+                (static_cast<uint32_t>(entry_other) << 4u);
+            ++horizon_entry_masks[entry_mask];
+            bool barrier = entry_mask != 0u;
             if (!barrier && !ee::ee_horizon_checkpoint_ready(runtime, iop_clock, iop_scheduled))
             {
                 barrier = true;
@@ -5076,12 +5073,7 @@ int main(int argc, char** argv)
             if (!barrier)
             {
                 const uint32_t started = hardware.dmac().started_channels();
-                for (uint32_t channel = 0u; channel < ee::c_ee_dmac::k_channel_count;
-                     ++channel)
-                {
-                    horizon_dmac_started_channels[channel] +=
-                        (started >> channel) & 1u;
-                }
+                ++horizon_dmac_masks[started];
                 if (started == (1u << 5u))
                 {
                     ++horizon_dmac_sif0_only;
@@ -9133,6 +9125,40 @@ int main(int argc, char** argv)
         constexpr const char* names[horizon_sources] = {
             "barrier", "timer", "scanout", "cop0", "iop", "none"
         };
+        // Reduce the fixed-size mask histograms only once, rather
+        // than updating every overlapping counter on every dispatch.
+        uint64_t horizon_dmac_started_channels[ee::c_ee_dmac::k_channel_count]{};
+        uint64_t horizon_entry_reasons[5]{};
+        uint32_t largest_dmac_mask = 0u;
+        for (uint32_t mask = 1u; mask < horizon_dmac_mask_count; ++mask)
+        {
+            if (horizon_dmac_masks[mask] > horizon_dmac_masks[largest_dmac_mask] ||
+                largest_dmac_mask == 0u)
+            {
+                if (horizon_dmac_masks[mask] != 0u)
+                {
+                    largest_dmac_mask = mask;
+                }
+            }
+            for (uint32_t channel = 0u; channel < ee::c_ee_dmac::k_channel_count;
+                 ++channel)
+            {
+                if ((mask & (1u << channel)) != 0u)
+                {
+                    horizon_dmac_started_channels[channel] += horizon_dmac_masks[mask];
+                }
+            }
+        }
+        for (uint32_t mask = 1u; mask < 32u; ++mask)
+        {
+            for (uint32_t reason_index = 0u; reason_index < 5u; ++reason_index)
+            {
+                if ((mask & (1u << reason_index)) != 0u)
+                {
+                    horizon_entry_reasons[reason_index] += horizon_entry_masks[mask];
+                }
+            }
+        }
         std::fprintf(stderr,
             "EE horizon: shadow_only=1 normal_before=%llu "
             "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
@@ -9144,7 +9170,8 @@ int main(int argc, char** argv)
             "dmac_sif0_only=%llu dmac_passive_sif0=%llu "
             "dmac_str0=%llu dmac_str1=%llu dmac_str2=%llu dmac_str3=%llu dmac_str4=%llu "
             "dmac_str5=%llu dmac_str6=%llu dmac_str7=%llu dmac_str8=%llu dmac_str9=%llu "
-            "entry_callback=%llu entry_idle=%llu entry_irq=%llu entry_vu=%llu entry_other=%llu\n",
+            "entry_callback=%llu entry_idle=%llu entry_irq=%llu entry_vu=%llu entry_other=%llu "
+            "dmac_top_mask=0x%03x dmac_top_mask_count=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
             static_cast<unsigned long long>(horizon_iop_lookahead_before),
@@ -9172,11 +9199,14 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(horizon_dmac_started_channels[7]),
             static_cast<unsigned long long>(horizon_dmac_started_channels[8]),
             static_cast<unsigned long long>(horizon_dmac_started_channels[9]),
-            static_cast<unsigned long long>(horizon_entry_callback),
-            static_cast<unsigned long long>(horizon_entry_idle),
-            static_cast<unsigned long long>(horizon_entry_irq),
-            static_cast<unsigned long long>(horizon_entry_vu),
-            static_cast<unsigned long long>(horizon_entry_other));
+            static_cast<unsigned long long>(horizon_entry_reasons[0]),
+            static_cast<unsigned long long>(horizon_entry_reasons[1]),
+            static_cast<unsigned long long>(horizon_entry_reasons[2]),
+            static_cast<unsigned long long>(horizon_entry_reasons[3]),
+            static_cast<unsigned long long>(horizon_entry_reasons[4]),
+            largest_dmac_mask,
+            static_cast<unsigned long long>(largest_dmac_mask != 0u ?
+                horizon_dmac_masks[largest_dmac_mask] : 0u));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
             std::fprintf(stderr,
