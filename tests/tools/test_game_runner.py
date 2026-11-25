@@ -4789,8 +4789,8 @@ def main():
             ]
             states = []
             clocks = []
-            for enabled in ("0", "1"):
-                report = root / f"batch-{enabled}.json"
+            for enabled, quiet in (("0", "0"), ("1", "0"), ("1", "1")):
+                report = root / f"batch-{enabled}-{quiet}.json"
                 replay = command if enabled == "0" else [
                     arg for arg in command if not arg.startswith("--extra-functions=")
                 ] + ["--no-recompile"]
@@ -4800,7 +4800,8 @@ def main():
                     env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
                              SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1",
                              SDBZ_EE_DIRECT_DISPATCH="1",
-                             SDBZ_NATIVE_ALU_CERTIFICATES="1"),
+                             SDBZ_NATIVE_ALU_CERTIFICATES="1",
+                             SDBZ_IOP_FAST_QUIET_TURNS=quiet),
                 )
                 assert run.returncode == 3, run.stdout + run.stderr
                 state = json.loads(report.read_text(encoding="utf-8"))
@@ -4828,6 +4829,17 @@ def main():
                          if line.startswith("IOP SPU2 clock:")]
                 assert len(clock) == 1, run.stdout
                 clocks.append(clock[0])
+                quiet_lines = [line for line in run.stdout.splitlines()
+                               if line.startswith("IOP clock quiet:")]
+                if quiet == "1":
+                    assert len(quiet_lines) == 1, run.stdout
+                    counts = dict(token.split("=") for token in quiet_lines[0].split()[3:])
+                    assert int(counts["advanced"]) > 0, quiet_lines
+                    assert int(counts["cycles"]) > 0, quiet_lines
+                    assert int(counts["attempts"]) == (
+                        int(counts["advanced"]) + int(counts["fallback"])), quiet_lines
+                else:
+                    assert not quiet_lines, quiet_lines
                 lines = [line for line in run.stdout.splitlines()
                          if line.startswith("IOP clock coalesce:")]
                 if enabled == "0":
@@ -4842,8 +4854,8 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo", "cop0_cause",
                         "cop0_epc", "ee_cycles"):
-                assert states[0][key] == states[1][key], key
-            assert clocks[0] == clocks[1], clocks
+                assert states[0][key] == states[1][key] == states[2][key], key
+            assert clocks[0] == clocks[1] == clocks[2], clocks
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
