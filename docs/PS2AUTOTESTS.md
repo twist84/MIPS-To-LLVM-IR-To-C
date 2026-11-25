@@ -703,3 +703,32 @@ startup-context validation, and test an actual worker query and return to
 the root. The allocation failure is a plausible shared cause of zero DMA
 addresses and overlapping SPR chain buffers; exact effects on each test
 must be confirmed by execution. No original binaries or transcripts changed.
+
+### Self-suspend at the EE scheduling boundary
+
+The original thread/suspend transcript (run 45642745870, kernel artifact
+15036466734) matches the immediate self-SuspendThread status 08 but the
+subsequent status after rescheduling is 08 instead of 01. The guest
+continues executing until the scheduler excludes its current owner and
+later stops at the worker return sentinel. Track the transient self-suspend
+only for the ordinary syscall on the running thread. Preserve immediate
+status readback, restore RUN at actual scheduling/IRQ-return boundaries,
+and clear the marker on restart/dormancy/explicit resume. External
+suspension and WAIT/DORMANT are not converted to RUN. The synthetic guest
+calls SuspendThread, ReferThreadStatus, RotateThreadReadyQueue and
+ReferThreadStatus, requiring ID/08/01. The exact original transcript
+remains the acceptance criterion; this does not generate synthetic IRQs.
+
+### Full-suite heap correction result (794e630)
+
+Actual tested merge `4bbc5ba46189d4973dca22d18470ffeb66017d2b`;
+[run 45644589028](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45644589028),
+[summary artifact 15037646903](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45644589028/artifacts/15037646903).
+**39/55 exact (70.91%)**: PASS 39, DIFF 11, INCOMPLETE 5,
+NO_OUTPUT 0, ERROR 0. Newly passing: memory/ee/default, dma/spr/chain,
+vu/lower/random and vu/lower/fdivdelay. No lost passes. EFU, VIF STCYCL,
+GS label and GS signal now finish but retain differences. VIF1 basic
+normal/chain DMA payloads now match; both direct FIFOs and VIF0 DMA
+still need work. GS SIGLBLID access and GIF SIGNAL/LABEL commands are
+unimplemented, independent of allocation. The guest allocator correction
+also resolved the whitespace differences without any transcript changes.

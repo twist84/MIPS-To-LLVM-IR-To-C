@@ -931,6 +931,39 @@ def make_thread_suspend_resume_elf(path):
     path.write_bytes(image)
 
 
+def make_self_suspend_elf(path):
+    """Self-suspension is visible until an explicit guest reschedule."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    image.extend(bytes(max(0, 0x400 - len(image))))
+    struct.pack_into("<I", image, 52 + 16, 0x300)
+    struct.pack_into("<I", image, 52 + 20, 0x300)
+    instructions = (
+        0x24040001,  # self ID
+        0x24030037,  # SuspendThread(1)
+        0x0000000c,
+        0x00408021,  # s0 = ID
+        0x24040001,
+        0x24050000,  # no status buffer
+        0x24030030,  # ReferThreadStatus
+        0x0000000c,
+        0x00408821,  # s1 = SUSPEND
+        0x24040000,  # priority zero
+        0x2403002b,  # RotateThreadReadyQueue: real scheduler entry
+        0x0000000c,
+        0x24040001,
+        0x24050000,
+        0x24030030,
+        0x0000000c,
+        0x00409021,  # s2 = RUN
+        0x00000008,
+        0x00000000,
+    )
+    for index, word in enumerate(instructions):
+        struct.pack_into("<I", image, 0x108 + index * 4, word)
+    path.write_bytes(image)
+
+
 def make_thread_priority_elf(path):
     """Exercise EE thread-priority return values and per-thread state."""
     make_elf(path)
@@ -3661,6 +3694,23 @@ def main():
             assert regs[22] == 0xffffffffffffffff, state # invalid ID
             assert "HLE EE thread switch: id=2" not in combined, combined
             assert state["final_pc"] != 0x001000f0, state
+
+        with tempfile.TemporaryDirectory(prefix="ee-native-self-suspend-") as tmp:
+            root = Path(tmp)
+            elf = root / "kernel-self-suspend.elf"
+            make_self_suspend_elf(elf)
+            report_path = root / "self-suspend.json"
+            result = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--max-dispatches=100",
+                "--trace", "--report", str(report_path), "--hle-startup",
+            ], capture_output=True, text=True, check=False)
+            combined = result.stdout + result.stderr
+            assert "HLE EE self-suspend reconciled: id=1" in combined, combined
+            state = json.loads(report_path.read_text(encoding="utf-8"))
+            assert state["gpr_lo"][16:19] == [1, 8, 1], state
+            assert state["final_pc"] == 0, state
 
         with tempfile.TemporaryDirectory(prefix="ee-native-thread-lifecycle-") as tmp:
             root = Path(tmp)

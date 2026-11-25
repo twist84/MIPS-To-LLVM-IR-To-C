@@ -3360,6 +3360,7 @@ int main(int argc, char** argv)
     {
         bool m_used = false;
         uint32_t m_status = 16u; // dormant; 1=run, 2=ready, 4=wait, 8=suspend, 12=wait+suspend
+        bool m_self_suspend_pending = false;
         uint64_t m_order = 0u;
         bool m_has_context = false;
         uint32_t m_wait_semaphore = 0u;
@@ -3394,6 +3395,7 @@ int main(int argc, char** argv)
     const auto make_thread_dormant = [](s_kernel_thread& thread)
     {
         thread.m_status = ee_kernel_thread::k_dormant;
+        thread.m_self_suspend_pending = false;
         thread.m_has_context = false;
         thread.m_wait_type = 0u;
         thread.m_wait_semaphore = 0u;
@@ -3403,6 +3405,24 @@ int main(int argc, char** argv)
     const auto schedule_threads = [&]() -> bool
     {
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::thread_schedule);
+        // A self-suspend reports SUSPEND until a real scheduling boundary,
+        // but the thread still owns the running CPU. Reconcile that owner
+        // before selecting the next runnable thread. Never release another
+        // thread's suspension or override an actual WAIT/DORMANT transition.
+        s_kernel_thread& running = threads[current_thread_id];
+        if (running.m_self_suspend_pending)
+        {
+            running.m_self_suspend_pending = false;
+            if (running.m_status == ee_kernel_thread::k_suspend)
+            {
+                running.m_status = ee_kernel_thread::k_run;
+                if (trace)
+                {
+                    std::printf("HLE EE self-suspend reconciled: id=%u\n",
+                                current_thread_id);
+                }
+            }
+        }
         uint32_t next_id = 0u;
         for (uint32_t id = 1u; id < 256u; ++id)
         {
@@ -5329,7 +5349,9 @@ int main(int argc, char** argv)
             // A genuine interrupt-safe SignalSema may have promoted an EE
             // waiter to READY. The kernel must finish restoring interrupted
             // EE/VU0 state before scheduling the newly runnable thread.
-            if ((reschedule_requested || current_thread_id == 0u) && !schedule_threads())
+            if ((reschedule_requested || current_thread_id == 0u ||
+                 threads[current_thread_id].m_self_suspend_pending) &&
+                !schedule_threads())
             {
                 reason = static_cast<uint32_t>(
                     ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED);
@@ -5887,6 +5909,7 @@ int main(int argc, char** argv)
                             break;
                         }
                         thread->m_context = {};
+                        thread->m_self_suspend_pending = false;
                         thread->m_wait_semaphore = 0u;
                         thread->m_wait_type = 0u;
                         thread->m_wakeups = 0u;
@@ -6405,6 +6428,13 @@ int main(int argc, char** argv)
                             : ee_kernel_thread::resume(
                                 old_status, thread_id == current_thread_id);
                         thread.m_status = next.m_status;
+                        if (next.m_changed && thread_id == current_thread_id)
+                        {
+                            thread.m_self_suspend_pending =
+                                service == 0x37u &&
+                                old_status == ee_kernel_thread::k_run &&
+                                !irq_callback_active;
+                        }
                         cpu.m_gpr[2].m_lo = next.m_changed
                             ? thread_id : static_cast<uint64_t>(-1ll);
                         cpu.m_gpr[2].m_hi = 0u;
@@ -6972,6 +7002,13 @@ int main(int argc, char** argv)
                             if (semaphore.m_waiters.empty())
                             {
                                 ++semaphore.m_count;
+                                // An ordinary signal is a scheduling boundary
+                                // for a still-executing self-suspended owner.
+                                if (service == 0x42u &&
+                                    threads[current_thread_id].m_self_suspend_pending)
+                                {
+                                    reschedule_requested = true;
+                                }
                             }
                             else
                             {
