@@ -115,6 +115,52 @@ int main()
             return 1;
         }
     }
+    // Each combined batch must be exactly the concatenation of legacy
+    // turns and end strictly before the predicted autonomous event.
+    {
+        const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
+        const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
+        const auto unknown = ee::ee_iop_service_batch(1024u, 64u, UINT64_MAX);
+        const auto exact = ee::ee_iop_service_batch(1024u, 64u, 512u);
+        const auto before = ee::ee_iop_service_batch(1024u, 64u, 513u);
+        const auto tail = ee::ee_iop_service_batch(257u, 64u, 258u);
+        const auto capped = ee::ee_iop_service_batch(UINT64_MAX, 64u, 100000u);
+        const auto last = ee::ee_iop_service_batch(1024u, 1u, 10000u);
+        if (!check(empty.m_cycles == 0u && empty.m_turns == 0u &&
+                exhausted.m_cycles == 0u && exhausted.m_turns == 0u &&
+                unknown.m_cycles == 256u && unknown.m_turns == 1u &&
+                exact.m_cycles == 256u && exact.m_turns == 1u &&
+                before.m_cycles == 512u && before.m_turns == 2u &&
+                tail.m_cycles == 257u && tail.m_turns == 2u &&
+                capped.m_cycles == 16384u && capped.m_turns == 64u &&
+                last.m_cycles == 256u && last.m_turns == 1u,
+                "IOP idle batch planning at exact event, tail and service cap"))
+        {
+            return 1;
+        }
+        for (uint32_t due = 1u; due < 1400u; due += 17u)
+        {
+            for (uint32_t interval = 0u; interval < 1400u; interval += 19u)
+            {
+                for (uint32_t limit = 1u; limit <= 6u; ++limit)
+                {
+                    const auto batch = ee::ee_iop_service_batch(due, limit, interval);
+                    uint32_t expected = 0u;
+                    for (uint32_t turn = 0u; turn < batch.m_turns; ++turn)
+                    {
+                        expected += std::min(due - expected, 256u);
+                    }
+                    if (!check(batch.m_cycles == expected &&
+                            batch.m_turns >= 1u && batch.m_turns <= limit &&
+                            (batch.m_turns == 1u || batch.m_cycles < interval),
+                            "IOP batch split or crossed an event"))
+                    {
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
     ee::s_ee_runtime runtime{};
     ee::c_ee_hw_bus bus{};
     ee::s_ee_cpu_state cpu{};
