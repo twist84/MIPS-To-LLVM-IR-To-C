@@ -4,8 +4,8 @@
 
 | Priority | Work | Acceptance evidence |
 | --- | --- | --- |
-| 1 | VU EFU arithmetic: resolve EATAN cancellation and ESIN rounding/evaluation order | 55/55 original exact transcripts, independent vectors and no fitted input-specific results |
-| 2 | R5900 issue model: documented pairing/resource stalls, dependencies, forwarding and completion/retirement | Measured microbenchmarks and independent cycle traces; keep manual-cache-hit profile distinct from hardware-validated timing |
+| 1 | [VU EFU arithmetic (#158)](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/issues/158): original transcript target achieved in PR #170; independent vectors and retail regression pending | 55/55 exact transcripts and 208/208 direct words verified; independent vectors and no fitted input-specific results |
+| 2 | [R5900 issue model (#159)](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/issues/159): documented pairing/resource stalls, dependencies, forwarding and completion/retirement | Measured microbenchmarks and independent cycle traces; keep manual-cache-hit profile distinct from hardware-validated timing |
 | 3 | COP0 performance accounting: cycle events, instruction/branch events and overflow/exception semantics | Counter deltas and exception state validated against hardware; no invented timing or counters |
 | 4 | EE memory and TLB/cache behavior | Measured access/cache/translation behavior, exception paths and ordering |
 | 5 | Precise exceptions and interrupts, including nested delay-slot EPC/BD and retirement | Original and directed exception vectors with exact state and resume behavior |

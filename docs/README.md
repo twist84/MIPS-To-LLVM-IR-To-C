@@ -2,6 +2,12 @@
 
 **Baseline (2026-11-25):** [`130d305`](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/commit/130d3054e5ef978e5dfd4408b00422fa43184eea), squash merge of [PR #156](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/pull/156). The repository layout cleanup in PR #157 is separate from this runtime baseline.
 
+## Latest candidate validation
+
+[PR #170](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/pull/170) head `e2870d8` verified **55/55 exact original transcripts (100%)**, zero DIFF/INCOMPLETE/NO_OUTPUT/ERROR, and **208/208 direct EFU words** in [run 45676297801](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297801). All five workflows passed; [CTest](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45676297753) passed 174/174 across seven shards. This is the tested PR revision, not a claim of a new main or retail baseline. Independent EFU vectors, clean guest termination and calibrated timing remain separate validation objectives.
+
+The table below retains the merged PR #156 baseline and earlier retail evidence.
+
 ## Verified evidence
 
 | Boundary | Result |
@@ -23,6 +29,7 @@ From the root, use `scripts\build.bat` (host build), `scripts\build.bat --test` 
 
 - [Project README and launch commands](../README.md)
 - [Original ps2autotests: execution, provenance and results](PS2AUTOTESTS.md)
+- [EFU coefficient and nanocode accuracy investigation](VU_EFU_ACCURACY.md)
 - [Latest retail evidence and limitations](SDBZ_RUNTIME_VALIDATION_20261125.md)
 - [Parallel CTest workflow](CI_PARALLEL_CTEST_SHARDS.md)
 - [Live translation-cache recovery](SDBZ_LIVE_CACHE_MISS_RESUME.md)

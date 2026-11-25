@@ -29,6 +29,19 @@ jobs:
       - name: Build only required targets
         run: cmake --build build --parallel 2 --target ee_recomp ee_game_runner
 
+      - name: Diagnose direct EFU arithmetic (observational)
+        shell: bash
+        run: |
+          cmake --build build --parallel 2 --target ee_vu1_efu_probe
+          python3 tools/probe_vu_efu.py --probe build/ee_vu1_efu_probe --report-only | tee build/efu-direct-probe.txt
+
+      - name: Upload direct EFU report
+        uses: actions/upload-artifact@v4
+        with:
+          name: efu-direct-probe
+          path: build/efu-direct-probe.txt
+          if-no-files-found: error
+
       - name: Package revision-pinned tools
         run: |
           python3 - <<'PY'
