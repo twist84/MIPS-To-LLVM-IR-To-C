@@ -40,6 +40,8 @@ struct s_irx_module
     uint32_t m_entry = 0u;
     uint32_t m_gp = 0u;
     std::vector<s_irx_export> m_exports;
+    // Host capture provenance only; not the guest's registered module name.
+    std::string m_source_name;
 };
 
 // The registered IOP kernel/IRX libraries will supply import targets.
