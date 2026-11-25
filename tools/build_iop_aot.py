@@ -5,7 +5,7 @@
    loaded IRX writes NAME@BASE.bin (relocated, linked .text) and .json.
 2. This script: iop_recomp (C++) translates each module to LLVM IR
    (NAME@BASE.ll + NAME@BASE.table.ll), clang compiles the IR, and lld links
-   OUT/modules/EXPORT_NAME.dll (.so elsewhere) -- one library per module.
+   OUT/modules/IRX_NAME.dll (.so elsewhere) -- one library per module.
    Multiple captured variants of one name receive collision suffixes.
    Modules are built in parallel.
 3. Run the game with SDBZ_IOP_AOT=OUT/modules. The runtime loads every
@@ -88,7 +88,18 @@ def prepare_captures(capture, destination):
         export = metadata.get("export_library")
         if not isinstance(export, str) or not export:
             export = recover_export_library(text, metadata)
-        name = safe_module_name(export or metadata["name"])
+        # Older captures did not record the LOADFILE filename. These two
+        # exact internal titles correspond to the observed SDBZ disc IRXs.
+        # This is a naming fallback only, never an activation identity.
+        legacy_names = {
+            "CRI_ADX_Driver": "CRI_ADXI",
+            "ARIKA_IOP_Control_Driver": "ARKD_DVD",
+        }
+        source = metadata.get("source_name")
+        if not isinstance(source, str):
+            source = ""
+        name = safe_module_name(source or legacy_names.get(metadata["name"])
+                                or export or metadata["name"])
         base = metadata["base"]
         digest = metadata["hash"]
         if (not isinstance(base, int) or not 0 <= base <= 0xffffffff or
