@@ -10,7 +10,7 @@ provenance changes unless explicitly necessary.
 | Batch | Audit scope | Explicit success criteria | Status |
 | --- | --- | --- | --- |
 | P1-A | Timer/delegated EE MMIO | Accepted and rejected accesses advance the generation; passive queries do not; MMIO-free plus touched equals lookahead candidates. Enumerate direct helpers separately. | Observation implemented; direct helpers open |
-| P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Entry checks present; transition audit open |
+| P1-B | DMAC, INTC, deferred VIF1, VU0/VU1 | Pending IRQ/DMA, running VUs and deferred work prevent optimistic lookahead; directed tests cover start, completion, cancellation, error and state changes inside native execution. Prove no unobserved publication path. | Started-channel entry observation added; transition audit open |
 | P1-C | Asynchronous GS worker | Idle healthy worker is quiet; queued or executing batch and failed worker are not quiet; drained healthy worker is quiet again; no new fence or guest event. Headless shadow reports zero GS barriers. Any submission after the snapshot requires an independent pre-execution guard. | Entry observation implemented; CI pending |
 | P1-D | Direct runtime helpers, COP0, exceptions | Enumerate memory/device callbacks and COP0 writes that bypass timer MMIO; prove a barrier before guest-visible access, trap or interrupt changes; test Count/Compare, Status, ERET and both delay-slot states. | Open |
 | P1-E | SIF DMA/RPC, HLE and shared memory | Pending calls/replies/binds/module starts and runnable IOP prevent extended idle lookahead; new requests flush debt before observing shared state; differential tests cover both directions, ordering, faults and callback re-entry. | Open |
@@ -40,6 +40,23 @@ Directed worker regression holds consumer work until the producer has
 observed nonquiescence, adds a queued batch, releases the consumer and
 checks drain, plus failure rejection. The existing headless timer
 shadow-on/off fixture requires zero GS worker barriers.
+
+## DMAC started-channel observation (P1-B)
+
+`pending()` is masked completion IRQ status, not channel activity.
+`started_channels()` reads CHCR.STR for all nine modeled channels,
+including IPU, SPR and both SIF directions; it does not invent channel 7.
+The shadow profiler counts otherwise-unblocked started channels in
+`dmac_started_barriers`, before the GS worker check. Tests distinguish
+unmasked/no-IRQ VIF1 and SIF0 starts, clearing an individual STR bit,
+and reset. The query changes no guest register, timer or service cadence.
+A permanently armed receive channel can be inactive in practice, so this
+is a deliberately conservative upper bound on required barriers, not an
+assertion that each started DMA will progress immediately. Before enabling
+deferral, distinguish dormant channels using proved producer/consumer
+dependencies, and cover transitions/completion/faults and native accesses.
+The new classifications can reduce the earlier shadow candidate counts;
+do not compare them as performance measurements.
 
 ## Activation gates (not implemented)
 
