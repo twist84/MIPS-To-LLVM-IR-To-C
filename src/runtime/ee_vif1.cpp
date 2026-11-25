@@ -806,6 +806,27 @@ bool c_ee_vif1::publish(s_transaction& tx)
     return true;
 }
 
+bool c_ee_vif1::run_cmsar1(uint32_t address)
+{
+    if (deferred_busy())
+    {
+        return false;
+    }
+
+    // CMSAR1 starts VU1 directly with the current TOP/ITOP, not TOPS/ITOPS.
+    // Do not toggle DBF, consume pending VIF words or count an MSCAL.
+    s_transaction tx(*this);
+    tx.m_next = m_machine;
+    auto& next = tx.m_next;
+    if (!c_ee_vu1::run(next.m_vu1->m_state, next.m_vu1->m_code,
+            next.m_vu1->m_data, (address & 0x7ffu) * 8u,
+            next.m_top, next.m_itop, tx.m_path1, &tx.m_issue))
+    {
+        tx.m_rejection = e_reject::unsupported_vu_execution;
+    }
+    return publish(tx);
+}
+
 bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 {
     // A direct FIFO/MMIO transfer is a synchronous observation point,

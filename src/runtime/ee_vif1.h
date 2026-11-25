@@ -122,6 +122,10 @@ public:
     bool deferred_busy() const;
     void cancel_deferred();
 
+    // Direct COP2 CMSAR1 launch, independent of VIF MSCAL bookkeeping.
+    // The caller must first retire any outstanding VIF1 DMA transaction.
+    bool run_cmsar1(uint32_t address);
+
     uint32_t read_register(uint32_t offset) const;
     bool write_register(uint32_t offset, uint32_t value);
     const uint8_t* vu1_data() const;

@@ -650,18 +650,39 @@ uint32_t runner_vu0_sync(
         : static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
 }
 
-// FBRST's VU1 reset/break bits complete immediately when the runner has no
-// VU1 work in flight.  VU0 force-break is representable by its visible halted
-// state.  A VU0 reset or CMSAR1 VU1 launch requires an engine and is rejected
-// by this callback before the runtime commits the CTC2 register write.
+struct s_runner_vu0_control
+{
+    ee::c_ee_vif1* m_vif1;
+    ee::c_ee_dmac* m_dmac;
+};
+
+// CMSAR1 uses the resident VU1 engine, but is not a VIF command.
 uint32_t runner_vu0_control(
-    void*, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
     uint32_t register_index, uint32_t value, uint32_t
 )
 {
     if (cpu == nullptr || vu0 == nullptr)
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::INVALID_ARGUMENT);
+    }
+    if (register_index == 31u)
+    {
+        auto* context = static_cast<s_runner_vu0_control*>(user);
+        if (context == nullptr)
+        {
+            return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        const auto pending = context->m_dmac->service_deferred_vif1(true);
+        if (pending == ee::c_ee_dmac::e_deferred_vif1::rejected ||
+            pending == ee::c_ee_dmac::e_deferred_vif1::pending ||
+            !context->m_vif1->run_cmsar1(value))
+        {
+            return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
+        }
+        // The bounded synchronous VU1 engine completed the program.
+        vu0->m_vpu_status &= ~0xff00u;
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE);
     }
     if (register_index != 28u)
     {
@@ -3124,6 +3145,8 @@ int main(int argc, char** argv)
     runtime.m_user = memory.get();
     runtime.m_vu0_state = &vu0;
     runtime.m_vu0_sync = runner_vu0_sync;
+    s_runner_vu0_control vu0_control{&vif1, &hardware.dmac()};
+    runtime.m_vu0_control_user = &vu0_control;
     runtime.m_vu0_control = runner_vu0_control;
     // The timers share the hardware MMIO bus but own their clocked state
     // in this host runner, leaving cached translated IR unchanged.

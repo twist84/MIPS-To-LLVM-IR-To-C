@@ -181,3 +181,13 @@ Prioritize independent blockers by evidence:
 Next: host handshake retry regression, then ISA and device batches.
 No exceptions added to exact-output grading. The 19/55 result is for
 this archive only, not yet a cross-platform full-suite result.
+
+### Batch A: direct CMSAR1 dispatch
+
+CTC2 register 31 routes to the resident VU1 interpreter using the low
+11-bit microinstruction address and current TOP/ITOP, after retiring
+outstanding deferred VIF1 DMA through the DMAC. No MSCAL is synthesized
+or VIF double-buffer state changed. Unsupported programs reject
+transactionally. This uses the existing synchronous VU1 model; it does
+not establish asynchronous VU1 busy-bit timing, cycle accuracy, VU0
+VCALLMS support or new exact autotest matches.

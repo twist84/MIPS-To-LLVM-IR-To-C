@@ -508,6 +508,24 @@ int main()
         return 1;
     }
 
+    // CMSAR1 runs the same resident program without synthesizing MSCAL.
+    const uint32_t cmsar_stat = vif1.read_register(0x00u);
+    const uint32_t cmsar_top = vif1.read_register(0xe0u);
+    const uint32_t cmsar_tops = vif1.read_register(0xc0u);
+    const uint32_t cmsar_code = vif1.read_register(0x80u);
+    const auto cmsar_calls = capture.m_calls;
+    if (!check(vif1.run_cmsar1(0x800u) &&
+               capture.m_calls == cmsar_calls + 1u &&
+               vif1.read_register(0x00u) == cmsar_stat &&
+               vif1.read_register(0xe0u) == cmsar_top &&
+               vif1.read_register(0xc0u) == cmsar_tops &&
+               vif1.read_register(0x80u) == cmsar_code &&
+               vif1.diagnostic().m_committed_opcodes[0x14u] == 1u,
+               "CMSAR1 did not execute resident VU1 or changed VIF state"))
+    {
+        return 1;
+    }
+
     // Detached VU execution must not expose partial VIF state or GIF
     // output, even if the worker finishes before the controller polls.
     {
