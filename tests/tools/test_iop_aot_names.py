@@ -58,6 +58,26 @@ def main():
         assert "CRI_ADXI@000513b0" in stems
         assert sum(s.casefold().startswith("cri_adxi@00060000") for s in stems) == 2
         assert "ARKD_DVD" in stems
+        # Some IRXs have only internal display titles in old captures.
+        # The captured LOADFILE name is authoritative when present.
+        unnamed = root / "unnamed"
+        unnamed.mkdir()
+        capture(unnamed, "adx", "CRI_ADX_Driver", 0x513b0,
+                binary=b"\0" * 16)
+        capture(unnamed, "arkd", "ARIKA_IOP_Control_Driver", 0x67570,
+                binary=b"\0" * 16)
+        capture(unnamed, "named", "verbose_title", 0x80000,
+                export="OTHERLIB", binary=b"\0" * 16)
+        named = unnamed / "named.json"
+        metadata = json.loads(named.read_text())
+        metadata["source_name"] = "ORIGINAL"
+        named.write_text(json.dumps(metadata))
+        repaired = root / "repaired"
+        assert prepare_captures(unnamed, repaired) == 3
+        assert {p.stem for p in repaired.glob("*.json")} == {
+            "CRI_ADXI", "ARKD_DVD", "ORIGINAL"}
+        assert json.loads((repaired / "CRI_ADXI.json").read_text())["base"] == 0x513b0
+        assert json.loads((repaired / "ARKD_DVD.json").read_text())["base"] == 0x67570
     print("IOP AOT export names: PASS")
 
 
