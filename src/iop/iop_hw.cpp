@@ -1684,7 +1684,10 @@ void c_hw::advance_cycles(uint32_t cycles)
     {
         advance_spu2_dma(cycles);
     }
-    m_spu2.advance_cycles(cycles);
+    if (m_spu2.advance_cycles(cycles) != 0u)
+    {
+        (void)raise_interrupt(c_spu2::k_irq_line);
+    }
     // All Timer 5 divisors are powers of two. Keep the exact quotient
     // and fractional remainder without a variable 64-bit division.
     constexpr uint32_t shifts[4] = {0u, 3u, 4u, 8u};

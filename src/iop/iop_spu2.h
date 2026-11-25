@@ -7,7 +7,7 @@ namespace iop
 {
 // Guest-visible 16-bit SPU2 register bank from ps2-web-recomp/SDBZ.
 // Register/transfer state, guest-cycle sample clock and ADPCM voice cursors.
-// No voice mixer, AutoDMA completion or playback IRQ yet.
+// No voice mixer, AutoDMA completion or mixer-ring IRQ yet.
 class c_spu2
 {
 public:
@@ -23,7 +23,12 @@ public:
 
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
-    void advance_cycles(uint32_t cycles);
+    // Returns newly latched playback IRQ core bits (zero if none).
+    uint32_t advance_cycles(uint32_t cycles);
+    // Earliest possible voice fetch edge while a core can latch IRQ.
+    // Zero means no pending playback IRQ opportunity.
+    uint32_t voice_irq_cycles_remaining() const;
+    uint64_t playback_irq_events() const { return m_playback_irq_events; }
     // Decode one PS2 16-byte ADPCM block (8 little-endian halfwords).
     // History is shared between consecutive blocks of a voice.
     static void decode_adpcm_block(const uint16_t* words, int16_t* samples,
@@ -110,6 +115,7 @@ private:
 
     static uint32_t voice_address(const s_core& core, uint32_t voice, uint32_t field);
     void decode_voice_block(s_voice& voice, uint32_t slot);
+    void check_voice_irq(uint32_t address);
     void start_voice(s_core& core, uint32_t index);
     static void update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2);
     void advance_voices(uint64_t samples);
@@ -126,6 +132,7 @@ private:
     uint64_t m_decoded_blocks = 0u;
     uint64_t m_voice_starts = 0u;
     uint64_t m_voice_end_events = 0u;
+    uint64_t m_playback_irq_events = 0u;
     s_core m_cores[2]{};
     // 2 MiB of SPU2 sound RAM, allocated on the heap (not the IOP stack).
     std::vector<uint16_t> m_ram;

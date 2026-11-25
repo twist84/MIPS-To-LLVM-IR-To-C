@@ -545,6 +545,85 @@ bool test_authentic_spu2_dma()
     return true;
 }
 
+bool test_spu2_playback_irq()
+{
+    iop::c_kernel kernel;
+    if (!kernel.attach_hle_hardware())
+    {
+        return false;
+    }
+    auto& hw = kernel.hardware();
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
+    uint32_t value = 0u;
+    // Default sound RAM is zero-filled (valid unfiltered ADPCM blocks).
+    // First block ends at RAM wrap; lookahead starts at word zero.
+    if (!hw.write(base + 0x19cu, 2u, 15u) ||
+        !hw.write(base + 0x19eu, 2u, 0xffffu) ||
+        !hw.write(base + 0x59cu, 2u, 0u) ||
+        !hw.write(base + 0x59eu, 2u, 2u) ||
+        !hw.write(base + 0x19au, 2u, 0x40u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x1c0u, 2u, 15u) ||
+        !hw.write(base + 0x1c2u, 2u, 0xfff8u) ||
+        !hw.write(base + 4u, 2u, 0x1000u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u) ||
+        !kernel.has_guest_work() ||
+        hw.spu2().voice_irq_cycles_remaining() != period)
+    {
+        return false;
+    }
+    (void)kernel.run(period - 1u);
+    if (hw.spu2().irq_latches() != 0u ||
+        hw.spu2().voice_irq_cycles_remaining() != 1u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || value != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    if (hw.spu2().irq_latches() != 1u ||
+        hw.spu2().playback_irq_events() != 1u ||
+        hw.spu2().decoded_blocks() != 2u ||
+        hw.spu2().voice_irq_cycles_remaining() != 27u * period ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u ||
+        !hw.write(iop::c_hw::k_i_stat, 4u, ~irq))
+    {
+        return false;
+    }
+    (void)kernel.run(27u * period - 1u);
+    if (hw.spu2().irq_latches() != 1u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) != 0u)
+    {
+        return false;
+    }
+    (void)kernel.run(1u);
+    // The core-one edge reasserts shared IRQ9 even though core zero
+    // remained latched. No speculative read of lookahead raised it.
+    if (hw.spu2().irq_latches() != 3u ||
+        hw.spu2().playback_irq_events() != 2u ||
+        hw.spu2().voice_irq_cycles_remaining() != 0u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u ||
+        !hw.write(iop::c_hw::k_i_stat, 4u, ~irq) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)kernel.run(28u * period);
+    if (hw.spu2().playback_irq_events() != 2u ||
+        !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) != 0u ||
+        !hw.write(base + 0x59au, 2u, 0u) ||
+        !hw.write(base + 0x59au, 2u, 0x40u) ||
+        !hw.write(base + 0x1a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)kernel.run(28u * period);
+    return hw.spu2().playback_irq_events() == 3u &&
+        hw.spu2().irq_latches() == 3u &&
+        hw.read(iop::c_hw::k_i_stat, 4u, &value) && (value & irq) != 0u;
+}
+
 bool test_spu2_irq_edges_and_spdif()
 {
     iop::c_kernel kernel;
@@ -1267,6 +1346,10 @@ int main()
     if (!test_guest_sio2_controller())
     {
         return fail("guest SIO2 PIO/DMA11/12 transport or IRQ17 fidelity");
+    }
+    if (!test_spu2_playback_irq())
+    {
+        return fail("SPU2 playback IRQ timing, cross-core latch or idle deadline");
     }
     if (!test_spu2_irq_edges_and_spdif())
     {

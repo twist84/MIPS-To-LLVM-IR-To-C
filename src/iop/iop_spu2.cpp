@@ -17,6 +17,7 @@ void c_spu2::reset()
     m_decoded_blocks = 0u;
     m_voice_starts = 0u;
     m_voice_end_events = 0u;
+    m_playback_irq_events = 0u;
     for (s_core& core : m_cores)
     {
         core = s_core{};
@@ -154,6 +155,23 @@ void c_spu2::decode_voice_block(s_voice& voice, uint32_t slot)
         (address + 8u) & (k_ram_words - 1u);
 }
 
+void c_spu2::check_voice_irq(uint32_t address)
+{
+    // The reference raises IRQ on the consumed block, not speculative
+    // lookahead. Either core may observe the shared sound RAM access.
+    for (s_core& candidate : m_cores)
+    {
+        const uint32_t distance = (candidate.m_irqa - address) &
+            (k_ram_words - 1u);
+        if ((candidate.m_attr & 0x40u) != 0u &&
+            !candidate.m_irq && distance < 8u)
+        {
+            candidate.m_irq = true;
+            ++m_playback_irq_events;
+        }
+    }
+}
+
 void c_spu2::start_voice(s_core& core, uint32_t index)
 {
     s_voice& voice = core.m_voices[index];
@@ -169,6 +187,7 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
     ++m_voice_starts;
     decode_voice_block(voice, 0u);
     decode_voice_block(voice, 1u);
+    check_voice_irq(voice.m_block[0]);
 }
 
 void c_spu2::advance_voices(uint64_t samples)
@@ -217,6 +236,9 @@ void c_spu2::advance_voices(uint64_t samples)
                             voice.m_envelope.m_level = 0;
                         }
                     }
+                    // As in the reference, the next block becomes the
+                    // visible cursor even at a non-repeating end.
+                    check_voice_irq(voice.m_block[0]);
                     if (voice.m_phase != e_voice_phase::off)
                     {
                         decode_voice_block(voice, 1u);
@@ -242,22 +264,77 @@ void c_spu2::advance_voices(uint64_t samples)
     }
 }
 
-void c_spu2::advance_cycles(uint32_t cycles)
+uint32_t c_spu2::voice_irq_cycles_remaining() const
 {
-    if (!m_clock_active)
+    if (!m_clock_active ||
+        (((m_cores[0].m_attr & 0x40u) == 0u || m_cores[0].m_irq) &&
+         ((m_cores[1].m_attr & 0x40u) == 0u || m_cores[1].m_irq)))
     {
-        return;
+        return 0u;
     }
-    const uint64_t before = m_clock_cycles;
-    m_clock_cycles += cycles;
-    if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask) != 0u)
+    constexpr uint32_t block_length = 28u << 12u;
+    uint32_t earliest = 0u;
+    for (const s_core& core : m_cores)
     {
-        const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
-        if (samples != 0u)
+        if (core.m_key_mask == 0u)
         {
-            advance_voices(samples);
+            continue;
+        }
+        for (uint32_t index = 0u; index < 24u; ++index)
+        {
+            if ((core.m_key_mask & (1u << index)) == 0u)
+            {
+                continue;
+            }
+            const s_voice& voice = core.m_voices[index];
+            uint32_t samples = 0u;
+            if (voice.m_pending)
+            {
+                samples = 1u;
+            }
+            else
+            {
+                const uint32_t pitch = std::min<uint32_t>(
+                    core.m_registers[index * 8u + 2u], 0x3fffu);
+                if (pitch != 0u)
+                {
+                    samples = (block_length - voice.m_position + pitch - 1u) / pitch;
+                }
+            }
+            if (samples != 0u)
+            {
+                const uint32_t cycles = samples * k_cycles_per_sample - sample_phase();
+                if (earliest == 0u || cycles < earliest)
+                {
+                    earliest = cycles;
+                }
+            }
         }
     }
+    // This is an opportunity, not a promised IRQ: address comparison
+    // and envelope termination are evaluated only by real advancement.
+    return earliest;
+}
+
+uint32_t c_spu2::advance_cycles(uint32_t cycles)
+{
+    uint32_t raised = 0u;
+    if (m_clock_active)
+    {
+        const uint64_t before = m_clock_cycles;
+        m_clock_cycles += cycles;
+        if ((m_cores[0].m_key_mask | m_cores[1].m_key_mask) != 0u)
+        {
+            const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
+            if (samples != 0u)
+            {
+                const uint32_t prior = irq_latches();
+                advance_voices(samples);
+                raised = irq_latches() & ~prior;
+            }
+        }
+    }
+    return raised;
 }
 
 uint32_t c_spu2::set_hi(uint32_t address, uint32_t value)

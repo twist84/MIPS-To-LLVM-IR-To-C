@@ -8738,6 +8738,10 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(spu2.decoded_blocks()),
             static_cast<unsigned long long>(spu2.voice_end_events()),
             spu2.active_voice_mask(0u), spu2.active_voice_mask(1u));
+        std::printf(
+            "IOP SPU2 playback IRQ: events=%llu latches=0x%x next_fetch_cycles=%u\n",
+            static_cast<unsigned long long>(spu2.playback_irq_events()),
+            spu2.irq_latches(), spu2.voice_irq_cycles_remaining());
     }
     if (report_path != nullptr &&
         !write_report(report_path, image, cpu, entry, dispatched,

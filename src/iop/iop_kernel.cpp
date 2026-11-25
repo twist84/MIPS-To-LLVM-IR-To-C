@@ -866,6 +866,7 @@ bool c_kernel::has_guest_work() const
     }
     return !m_alarms.empty() || !m_hle_events.empty() ||
            m_hardware.spu2_dma_cycles_remaining() != 0u ||
+           m_hardware.spu2().voice_irq_cycles_remaining() != 0u ||
            (m_irq_lookup && m_interrupt_thread_id == 0u &&
             m_hardware.next_pending_interrupt() >= 0);
 }
@@ -1767,16 +1768,21 @@ s_kernel_run_result c_kernel::run(
             // actual transfer-completion event after the copied
             // guest data has entered sound/IOP RAM. A blocked guest
             // thread must not freeze that device deadline.
-            const uint32_t dma_left =
-                m_hardware.spu2_dma_cycles_remaining();
-            if (dma_left != 0u)
+            const uint32_t device_deadlines[] =
             {
-                const uint64_t deadline =
-                    dma_left <=
-                        std::numeric_limits<uint64_t>::max() - m_cycles
-                        ? m_cycles + dma_left
-                        : std::numeric_limits<uint64_t>::max();
-                next_wake = std::min(next_wake, deadline);
+                m_hardware.spu2_dma_cycles_remaining(),
+                m_hardware.spu2().voice_irq_cycles_remaining()
+            };
+            for (const uint32_t left : device_deadlines)
+            {
+                if (left != 0u)
+                {
+                    const uint64_t deadline =
+                        left <= std::numeric_limits<uint64_t>::max() - m_cycles
+                            ? m_cycles + left
+                            : std::numeric_limits<uint64_t>::max();
+                    next_wake = std::min(next_wake, deadline);
+                }
             }
             if (next_wake ==
                 std::numeric_limits<uint64_t>::max())
