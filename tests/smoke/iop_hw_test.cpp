@@ -4,6 +4,7 @@
 
 #include <array>
 #include <chrono>
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <cstdio>
@@ -107,6 +108,89 @@ bool test_spu2_sample_clock()
         idle.hardware().spu2().elapsed_samples() == 1u &&
         idle.hardware().spu2().sample_phase() == 3u &&
         idle.cpu().cycles() == 0u;
+}
+
+bool test_spu2_adpcm_reference_blocks()
+{
+    // Independent byte-oriented recurrence from the pinned PCSX2
+    // SPU2/Mixer.cpp XA_decode_block. All arithmetic below uses
+    // mathematical floor division rather than the candidate's shifts.
+    constexpr int32_t coefficients[5][2] =
+    {
+        {0, 0}, {60, 0}, {115, -52}, {98, -55}, {122, -60}
+    };
+    constexpr int32_t histories[][2] =
+    {
+        {0, 0}, {32767, -32768}, {-32768, 32767}, {12345, -23456}
+    };
+    const auto floor_div = [](int32_t value, int32_t divisor)
+    {
+        const int32_t quotient = value / divisor;
+        return quotient - (value < 0 && value % divisor != 0 ? 1 : 0);
+    };
+    const uint8_t payload[2][14] =
+    {
+        {0x87u, 0xf1u, 0x20u, 0x6du, 0xc3u, 0x45u, 0x9au,
+         0x55u, 0xaau, 0x7fu, 0x80u, 0x00u, 0xfeu, 0x18u},
+        {0x88u, 0x77u, 0x88u, 0x77u, 0xf0u, 0x0fu, 0x01u,
+         0x10u, 0x55u, 0xaau, 0x9bu, 0xceu, 0x23u, 0x46u}
+    };
+    for (uint32_t filter = 0u; filter < 5u; ++filter)
+    {
+        for (uint32_t shift = 0u; shift < 16u; ++shift)
+        {
+            for (const auto& history : histories)
+            {
+                int32_t candidate1 = history[0], candidate2 = history[1];
+                int32_t reference1 = candidate1, reference2 = candidate2;
+                // Decode two adjacent blocks without resetting histories.
+                for (uint32_t block = 0u; block < 2u; ++block)
+                {
+                    const uint32_t current_shift = block == 0u ? shift : (shift + 7u) & 15u;
+                    const uint32_t current_filter = block == 0u ? filter : (filter + 2u) % 5u;
+                    uint16_t words[8]{};
+                    words[0] = static_cast<uint16_t>(
+                        (block == 0u ? 0x0400u : 0x0300u) |
+                        (current_filter << 4u) | current_shift);
+                    for (uint32_t i = 0u; i < 7u; ++i)
+                    {
+                        words[i + 1u] = static_cast<uint16_t>(
+                            payload[block][i * 2u] |
+                            (static_cast<uint16_t>(payload[block][i * 2u + 1u]) << 8u));
+                    }
+                    int16_t actual[28]{};
+                    iop::c_spu2::decode_adpcm_block(words, actual, candidate1, candidate2);
+                    uint32_t sample_index = 0u;
+                    for (uint8_t byte : payload[block])
+                    {
+                        for (uint32_t half = 0u; half < 2u; ++half)
+                        {
+                            const int32_t nibble = half == 0u ? byte % 16u : byte / 16u;
+                            const int32_t signed_nibble = nibble < 8 ? nibble : nibble - 16;
+                            const int32_t residual = floor_div(signed_nibble * 4096,
+                                static_cast<int32_t>(1u << current_shift));
+                            const int32_t prediction = floor_div(
+                                reference1 * coefficients[current_filter][0] +
+                                reference2 * coefficients[current_filter][1] + 32, 64);
+                            const int32_t expected = std::clamp(
+                                residual + prediction, -32768, 32767);
+                            if (actual[sample_index++] != expected)
+                            {
+                                return false;
+                            }
+                            reference2 = reference1;
+                            reference1 = expected;
+                        }
+                    }
+                    if (candidate1 != reference1 || candidate2 != reference2)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
 }
 
 bool test_spu2_adpcm_voice_progression()
@@ -2708,6 +2792,10 @@ int main()
     if (!test_spu2_envelopes())
     {
         return fail("SPU2 ADSR, fixed/swept volumes or release timing");
+    }
+    if (!test_spu2_adpcm_reference_blocks())
+    {
+        return fail("SPU2 ADPCM reference predictors, shifts and chained histories");
     }
     if (!test_spu2_adpcm_voice_progression())
     {

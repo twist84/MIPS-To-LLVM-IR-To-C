@@ -426,3 +426,18 @@ The 72-pair program has 63 executed pairs; its hash is pinned in CTest.
 The existing manually dispatched VU0 PCSX2 differential will exercise
 the same fixture. Previous 53-pair reference evidence is not a result
 for the new fixture. No production lowering, cache or retail changes.
+
+## Batch 13: SPU2 ADPCM predictor differential coverage
+
+Add a byte-oriented reference recurrence in the IOP hardware smoke test
+for all five defined ADPCM predictors and 16 encoded shifts, with four
+initial histories and two chained blocks (640 blocks, 17920 samples).
+The pinned PCSX2 source and SDBZ compatibility source agree in this
+range. Reserved filter IDs 5–15 differ between references; retain the
+existing SDBZ behavior until independently verified. No production
+SPU2 behavior or timing is changed. This is source-level differential
+coverage, not physical PCM validation; active reverb, decode FIFO timing,
+reserved filters and mute polarity remain open. No standalone retail
+replay required for Batches 11–13. The expanded VU0 trace still needs
+its independent PCSX2 run and the combined PR head needs all four CI
+workflows before acceptance.

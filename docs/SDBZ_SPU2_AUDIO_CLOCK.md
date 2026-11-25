@@ -309,3 +309,22 @@ future enable transitions. Host audio dropped 7072 frames and reported
 33152 underrun frames and 539040 prebuffer-silence frames; audible output
 does not establish glitch-free playback. All four CI workflows passed
 on the code commit.
+
+### Batch 13: ADPCM decoder source-reference differential
+
+The pinned [PCSX2 XA_decode_block](https://github.com/PCSX2/pcsx2/blob/82cac38b2af19d593dedfd9ddaa63448e7ec493c/pcsx2/SPU2/Mixer.cpp)
+and [SDBZ ps2-web-recomp SPU2](https://github.com/twist84/ps2-web-recomp/blob/SDBZ/runtime/src/iop/spu2.cpp)
+agree on five defined predictor pairs and residual/prediction rounding.
+The candidate now has a byte-oriented test recurrence with mathematical
+floor division, checking all 5 filters, all 16 encoded shifts, four
+initial history pairs and two chained blocks (640 blocks, 17920 sample
+comparisons plus final histories). Includes mixed-sign nibbles, saturation
+and changing predictors across the block boundary. This is source-level
+compatibility validation, not a run of the PCSX2 SPU2 interpreter or
+physical hardware PCM capture.
+
+Reserved filter IDs 5–15 differ: PCSX2's 16-entry table initializes
+these to zero, while the SDBZ compatibility implementation clamps to
+filter 4. Preserve the existing SDBZ behavior rather than promote an
+unverified emulator assumption to hardware accuracy. Decode FIFO timing,
+active reverb, IRQ timing and mute polarity still need independent evidence.
