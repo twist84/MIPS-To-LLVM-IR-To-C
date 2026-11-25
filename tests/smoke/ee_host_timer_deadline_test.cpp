@@ -189,6 +189,49 @@ int main()
         runtime.m_cop0_clock_count = 0u;
         runtime.m_cop0_clock_compare = 0u;
     }
+    // Snapshot comparisons detect scheduler-visible endpoint differences,
+    // including an unchanged Compare value with a different clock anchor.
+    {
+        ee::s_ee_runtime probe_runtime{};
+        ee::s_ee_cpu_state probe_cpu{};
+        const auto initial = ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime);
+        if (!check(ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime) == initial,
+                "passive COP0 snapshot changed state"))
+        {
+            return 1;
+        }
+        for (uint32_t reg : {ee::COP0_Status, ee::COP0_Cause, ee::COP0_Count,
+                ee::COP0_Compare, ee::COP0_EPC, ee::COP0_ErrorEPC})
+        {
+            probe_cpu.m_cop0[reg] = 1u;
+            if (!check(ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime) != initial,
+                    "COP0 register change escaped snapshot"))
+            {
+                return 1;
+            }
+            probe_cpu.m_cop0[reg] = 0u;
+        }
+        probe_runtime.m_cop0_clock_last = 1u;
+        if (!check(ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime) != initial,
+                "COP0 synchronization anchor change escaped snapshot"))
+        {
+            return 1;
+        }
+        probe_runtime.m_cop0_clock_last = 0u;
+        probe_runtime.m_cop0_clock_ip7 = true;
+        if (!check(ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime) != initial,
+                "COP0 timer latch escaped snapshot"))
+        {
+            return 1;
+        }
+        probe_runtime.m_cop0_clock_ip7 = false;
+        probe_runtime.m_perf_control = 1u;
+        if (!check(ee::ee_horizon_cop0_snapshot(probe_cpu, probe_runtime) != initial,
+                "performance control change escaped snapshot"))
+        {
+            return 1;
+        }
+    }
     ee::c_ee_host_timers timers(&runtime, &bus);
     constexpr uint64_t no_event = std::numeric_limits<uint64_t>::max();
 
