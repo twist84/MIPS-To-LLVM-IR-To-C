@@ -3755,6 +3755,14 @@ int main(int argc, char** argv)
         "SDBZ_IOP_COALESCE_IDLE_TURNS", &iop_coalesce_environment);
     const bool iop_coalesce = iop_coalesce_value != nullptr &&
         std::strcmp(iop_coalesce_value, "1") == 0;
+    std::string iop_fast_quiet_environment;
+    const char* iop_fast_quiet_value = read_host_environment(
+        "SDBZ_IOP_FAST_QUIET_TURNS", &iop_fast_quiet_environment);
+    const bool iop_fast_quiet = iop_fast_quiet_value != nullptr &&
+        std::strcmp(iop_fast_quiet_value, "1") == 0;
+    uint64_t iop_quiet_attempts = 0u;
+    uint64_t iop_quiet_advances = 0u;
+    uint64_t iop_quiet_cycles = 0u;
     uint64_t iop_clock_runs = 0u;
     uint64_t iop_coalesced_batches = 0u;
     bool guest_rpc_idle_diagnostic_reported = false;
@@ -4535,8 +4543,26 @@ int main(int argc, char** argv)
                 uint32_t prior_smflag = 0u;
                 const bool trace_smflag = trace &&
                     hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
-                const iop::s_kernel_run_result progressed =
-                    iop_kernel->run(cycles, 128u);
+                bool quiet_advanced = false;
+                if (iop_fast_quiet &&
+                    runtime.m_ee_cycle_scheduler.source() ==
+                        ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
+                    runtime.m_timing_observer == nullptr &&
+                    !hle_iop_reboot_bootstrap_pending &&
+                    (iop_rpc == nullptr || !iop_rpc->scheduler_barrier()))
+                {
+                    ++iop_quiet_attempts;
+                    quiet_advanced = iop_kernel->try_advance_quiet_cycles(cycles);
+                    if (quiet_advanced)
+                    {
+                        ++iop_quiet_advances;
+                        iop_quiet_cycles += cycles;
+                    }
+                }
+                // Both idle and budget_exhausted are accepted scheduled
+                // service outcomes. The fast path has no guest execution.
+                const iop::s_kernel_run_result progressed = quiet_advanced
+                    ? iop::s_kernel_run_result{} : iop_kernel->run(cycles, 128u);
                 if (batch.m_turns > 1u &&
                     (progressed.m_executed != 0u ||
                         iop_kernel->cycles() - kernel_before != cycles ||
@@ -9689,6 +9715,15 @@ int main(int argc, char** argv)
         }
     }
 
+    if (iop_fast_quiet)
+    {
+        std::printf("IOP clock quiet: enabled=1 attempts=%llu advanced=%llu "
+            "fallback=%llu cycles=%llu\n",
+            static_cast<unsigned long long>(iop_quiet_attempts),
+            static_cast<unsigned long long>(iop_quiet_advances),
+            static_cast<unsigned long long>(iop_quiet_attempts - iop_quiet_advances),
+            static_cast<unsigned long long>(iop_quiet_cycles));
+    }
     if (iop_coalesce)
     {
         std::printf("IOP clock coalesce: enabled=1 logical_turns=%llu physical_runs=%llu "
