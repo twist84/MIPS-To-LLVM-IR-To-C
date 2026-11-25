@@ -4658,6 +4658,7 @@ def main():
                     int(horizon["normal_before_without_iop"])), lines
             assert int(horizon["iop_idle_candidates"]) >= 0, lines
             assert int(horizon["iop_rpc_barriers"]) >= 0, lines
+            assert int(horizon["gs_worker_barriers"]) == 0, lines
             assert (int(horizon["lookahead_mmio_free"]) +
                     int(horizon["lookahead_mmio_touched"]) ==
                     int(horizon["normal_before_iop_lookahead"])), lines
