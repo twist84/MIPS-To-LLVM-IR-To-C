@@ -93,3 +93,8 @@ The Q producer now stages its I/D and sticky events alongside the pending result
 ### Exact Booth multiplication fast path
 
 The shared EE/VU LLVM multiplier computes the 48-bit full significand product first. Its original correction subtracts only 0 or 32768; when the low 23 product bits are at least 32768, both corrected and uncorrected products have the same value after shifting right by 23. The IR branches around the unchanged correction tree in that case, preserving operand order, normalization, O/U flags and extended exponent behavior. The cold correction helper is kept out of line. A directed and randomized O0/O3 comparison against unconditional correction exercises result bits and O/U flags. VU1 AOT version 14 forces regeneration to measure the optimized code, although its state layout and arithmetic contract are unchanged. Retail performance remains to be measured.
+
+
+### VU1 integer FMAC SIMD
+
+Multi-lane VU1 FMAC uses explicit four-lane integer LLVM IR for alignment, normalization, multiplication and per-lane result/exception/sticky tuples. The original Booth correction is called only for nonzero lanes near a truncation boundary; masked lanes cannot invoke it or commit results. Broadcast, Q/I, cross-product and ACC paths share the vector lowering; single-lane operations retain scalar IR. Scalar/vector tuple differential tests exercise all five operation kinds with directed, boundary and randomized inputs at O0/O3, alongside the existing interpreter/program differential. AOT version 15 forces regeneration for measurement, without a layout change. Retail performance remains to be measured.

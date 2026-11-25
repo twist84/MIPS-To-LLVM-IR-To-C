@@ -5,6 +5,7 @@
 #include "../llvm/ee_cop1_add_ir.h"
 #include "../llvm/ee_cop1_mul_ir.h"
 #include "../llvm/ee_vu_fmac_ir.h"
+#include "../llvm/ee_vu_fmac4_ir.h"
 
 #include <utility>
 #include <bitset>
@@ -258,6 +259,7 @@ public:
         m_ir += llvm::k_ee_cop1_add_ir;
         m_ir += llvm::k_ee_cop1_mul_ir;
         m_ir += llvm::k_vu_fmac_ir;
+        m_ir += llvm::k_vu_fmac4_ir;
         m_ir += llvm::k_vu_q_status_ir;
         m_ir += llvm::k_vu_fixed_ir;
         m_ir += k_fp_ir;
@@ -1313,57 +1315,136 @@ private:
             op == 0x22u || op == 0x23u || op == 0x26u || op == 0x27u;
         const uint32_t write_mask = cross ? 0xeu : mask;
         std::array<std::string, 4> values{};
-        // Stage all lane results and exception tuples before lower execution.
-        // Scalar Booth helpers remain in generated IR; no host callbacks.
-        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        // Stage all active lanes before lower execution. Single-lane FMAC
+        // keeps scalar lowering; multi-lane FMAC uses integer vectors.
+        if (flags && (write_mask & (write_mask - 1u)) != 0u)
         {
-            if ((write_mask & (8u >> lane)) == 0u)
+            const uint32_t kind = (cross && special) || mul ? 2u :
+                madd ? 3u : (msub || cross) ? 4u :
+                std::string(helper) == "vu_sub" ? 1u : 0u;
+            const bool mac = kind >= 3u;
+            auto lhs = vf_vector(fs);
+            std::string rhs;
+            if (cross)
             {
-                continue;
+                lhs = operation("shufflevector <4 x i32> " + lhs +
+                    ", <4 x i32> poison, <4 x i32> <i32 1, i32 2, i32 0, i32 0>");
+                rhs = operation("shufflevector <4 x i32> " + vf_vector(ft) +
+                    ", <4 x i32> poison, <4 x i32> <i32 2, i32 0, i32 1, i32 0>");
             }
-            const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);
-            if (conversion)
+            else if (op <= 0x1bu)
             {
-                constexpr uint32_t fractions[]{0u, 4u, 12u, 15u};
-                values[lane] = fp_binary(op <= 0x13u ? "vu_from_fixed" : "vu_to_fixed",
-                    lhs, std::to_string(fractions[op & 3u]));
+                rhs = splat(vf(ft, funct & 3u));
             }
-            else if (abs)
+            else if (uses_q || uses_i)
             {
-                values[lane] = operation("and i32 " + lhs + ", 2147483647");
+                rhs = splat(operation(uses_q ? "load i32, ptr %q, align 4" :
+                    "load i32, ptr %i, align 4"));
             }
             else
             {
-                const auto rhs = cross ? vf(ft, (lane + 2u) % 3u) :
-                    op <= 0x1bu ? vf(ft, funct & 3u) :
-                    uses_q ? operation("load i32, ptr %q, align 4") : uses_i ?
-                    operation("load i32, ptr %i, align 4") : vf(ft, lane);
-                if (flags)
+                rhs = vf_vector(ft);
+            }
+            if (write_mask != 15u)
+            {
+                std::string active = "<";
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
                 {
-                    const uint32_t kind = (cross && special) || mul ? 2u :
-                        madd ? 3u : (msub || cross) ? 4u :
-                        std::string(helper) == "vu_sub" ? 1u : 0u;
-                    const bool mac = kind >= 3u;
-                    const auto acc_value = mac ? acc(lane) : std::string("0");
-                    std::string latched = "false";
-                    if (mac)
+                    if (lane != 0u)
                     {
-                        const auto latch = operation("load i32, ptr %acc_overflow, align 4");
-                        const auto bit = operation("and i32 " + latch + ", " + std::to_string(8u >> lane));
-                        latched = operation("icmp ne i32 " + bit + ", 0");
+                        active += ", ";
                     }
-                    const auto tuple = operation("call { i32, i1, i1, i32 } @vu_fmac(i32 " +
-                        std::to_string(kind) + ", i32 " + acc_value + ", i32 " + lhs +
-                        ", i32 " + rhs + ", i1 " + latched + ")");
-                    const std::string type = "extractvalue { i32, i1, i1, i32 } ";
-                    values[lane] = operation(type + tuple + ", 0");
-                    m_upper_overflow[lane] = operation(type + tuple + ", 1");
-                    m_upper_underflow[lane] = operation(type + tuple + ", 2");
-                    m_upper_sticky[lane] = operation(type + tuple + ", 3");
+                    active += (write_mask & (8u >> lane)) != 0u ? "i1 true" : "i1 false";
+                }
+                active += ">";
+                // Inactive lanes cannot enter the Booth correction path.
+                lhs = operation("select <4 x i1> " + active + ", <4 x i32> " +
+                    lhs + ", <4 x i32> zeroinitializer");
+            }
+            const auto acc_value = mac ?
+                operation("load <4 x i32>, ptr %acc, align 4") :
+                std::string("zeroinitializer");
+            std::string latched = "zeroinitializer";
+            if (mac)
+            {
+                const auto latch = splat(operation("load i32, ptr %acc_overflow, align 4"));
+                const auto bits = operation("and <4 x i32> " + latch +
+                    ", <i32 8, i32 4, i32 2, i32 1>");
+                latched = operation("icmp ne <4 x i32> " + bits + ", zeroinitializer");
+            }
+            const std::string type = "{ <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> }";
+            const auto result = operation("call " + type + " @vu_fmac4(i32 " +
+                std::to_string(kind) + ", <4 x i32> " + acc_value +
+                ", <4 x i32> " + lhs + ", <4 x i32> " + rhs +
+                ", <4 x i1> " + latched + ")");
+            const auto bits = operation("extractvalue " + type + " " + result + ", 0");
+            const auto over = operation("extractvalue " + type + " " + result + ", 1");
+            const auto under = operation("extractvalue " + type + " " + result + ", 2");
+            const auto sticky = operation("extractvalue " + type + " " + result + ", 3");
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((write_mask & (8u >> lane)) != 0u)
+                {
+                    const auto index = ", i32 " + std::to_string(lane);
+                    values[lane] = operation("extractelement <4 x i32> " + bits + index);
+                    m_upper_overflow[lane] = operation("extractelement <4 x i1> " + over + index);
+                    m_upper_underflow[lane] = operation("extractelement <4 x i1> " + under + index);
+                    m_upper_sticky[lane] = operation("extractelement <4 x i32> " + sticky + index);
+                }
+            }
+        }
+        else
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            {
+                if ((write_mask & (8u >> lane)) == 0u)
+                {
+                    continue;
+                }
+                const auto lhs = vf(fs, cross ? (lane + 1u) % 3u : lane);
+                if (conversion)
+                {
+                    constexpr uint32_t fractions[]{0u, 4u, 12u, 15u};
+                    values[lane] = fp_binary(op <= 0x13u ? "vu_from_fixed" : "vu_to_fixed",
+                        lhs, std::to_string(fractions[op & 3u]));
+                }
+                else if (abs)
+                {
+                    values[lane] = operation("and i32 " + lhs + ", 2147483647");
                 }
                 else
                 {
-                    values[lane] = fp_binary(helper, lhs, rhs);
+                    const auto rhs = cross ? vf(ft, (lane + 2u) % 3u) :
+                        op <= 0x1bu ? vf(ft, funct & 3u) :
+                        uses_q ? operation("load i32, ptr %q, align 4") : uses_i ?
+                        operation("load i32, ptr %i, align 4") : vf(ft, lane);
+                    if (flags)
+                    {
+                        const uint32_t kind = (cross && special) || mul ? 2u :
+                            madd ? 3u : (msub || cross) ? 4u :
+                            std::string(helper) == "vu_sub" ? 1u : 0u;
+                        const bool mac = kind >= 3u;
+                        const auto acc_value = mac ? acc(lane) : std::string("0");
+                        std::string latched = "false";
+                        if (mac)
+                        {
+                            const auto latch = operation("load i32, ptr %acc_overflow, align 4");
+                            const auto bit = operation("and i32 " + latch + ", " + std::to_string(8u >> lane));
+                            latched = operation("icmp ne i32 " + bit + ", 0");
+                        }
+                        const auto tuple = operation("call { i32, i1, i1, i32 } @vu_fmac(i32 " +
+                            std::to_string(kind) + ", i32 " + acc_value + ", i32 " + lhs +
+                            ", i32 " + rhs + ", i1 " + latched + ")");
+                        const std::string type = "extractvalue { i32, i1, i1, i32 } ";
+                        values[lane] = operation(type + tuple + ", 0");
+                        m_upper_overflow[lane] = operation(type + tuple + ", 1");
+                        m_upper_underflow[lane] = operation(type + tuple + ", 2");
+                        m_upper_sticky[lane] = operation(type + tuple + ", 3");
+                    }
+                    else
+                    {
+                        values[lane] = fp_binary(helper, lhs, rhs);
+                    }
                 }
             }
         }

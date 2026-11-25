@@ -33,6 +33,32 @@ define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) 
   store i32 %sticky, ptr %p3
   ret void
 }
+
+define void @test_fmac4(i32 %op, ptr %in, ptr %out) {
+  %acc = load <4 x i32>, ptr %in, align 4
+  %ap = getelementptr i32, ptr %in, i32 4
+  %bp = getelementptr i32, ptr %in, i32 8
+  %lp = getelementptr i32, ptr %in, i32 12
+  %a = load <4 x i32>, ptr %ap, align 4
+  %b = load <4 x i32>, ptr %bp, align 4
+  %l = load <4 x i32>, ptr %lp, align 4
+  %latch = icmp ne <4 x i32> %l, zeroinitializer
+  %r = call { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } @vu_fmac4(i32 %op, <4 x i32> %acc, <4 x i32> %a, <4 x i32> %b, <4 x i1> %latch)
+  %bits = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %r, 0
+  %o = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %r, 1
+  %u = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %r, 2
+  %s = extractvalue { <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> } %r, 3
+  %oi = zext <4 x i1> %o to <4 x i32>
+  %ui = zext <4 x i1> %u to <4 x i32>
+  %p1 = getelementptr i32, ptr %out, i32 4
+  %p2 = getelementptr i32, ptr %out, i32 8
+  %p3 = getelementptr i32, ptr %out, i32 12
+  store <4 x i32> %bits, ptr %out, align 4
+  store <4 x i32> %oi, ptr %p1, align 4
+  store <4 x i32> %ui, ptr %p2, align 4
+  store <4 x i32> %s, ptr %p3, align 4
+  ret void
+}
 """
     # Literal hardware cancellation/multiplier vectors and modeled MAC
     # priority controls. The latter require additional console validation.
@@ -66,6 +92,35 @@ define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) 
         for args, expected in cases:
             function(*args, out)
             assert tuple(out) == expected, (opt, args, tuple(out), expected)
+        vector_address = engine.get_function_address("test_fmac4")
+        assert vector_address
+        word = ctypes.c_uint32
+        ptr = ctypes.POINTER(word)
+        vector = ctypes.CFUNCTYPE(None, word, ptr, ptr)(vector_address)
+        vector_out = (word * 16)()
+        rng = random.Random(0x5900)
+        edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x0080008b,
+                 0x008000ea, 0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000,
+                 0x3fffffff, 0xbf800000, 0x7f800000, 0x7fffffff, 0xffffffff]
+        for op in range(5):
+            for i in range(4096):
+                words = [rng.choice(edges) if i < 1024 else rng.getrandbits(32)
+                         for _ in range(12)]
+                if 1024 <= i < 2048:
+                    for lane in range(4):
+                        a = rng.randrange(1, 1 << 23, 2)
+                        rem = rng.choice((0, 1, 32767, 32768, 32769))
+                        b = (pow(a, -1, 1 << 23) * rem) & 0x7fffff
+                        words[4 + lane] = 0x3f800000 | a
+                        words[8 + lane] = 0x3f800000 | b
+                words.extend((i >> lane) & 1 for lane in range(4))
+                vector(op, (word * 16)(*words), vector_out)
+                for lane in range(4):
+                    function(op, words[lane], words[4 + lane], words[8 + lane],
+                             words[12 + lane], out)
+                    actual = tuple(vector_out[4 * field + lane] for field in range(4))
+                    assert actual == tuple(out), (opt, op, lane, words, actual, tuple(out))
+        print(f"VU1 FMAC SIMD: 81920 lane tuples at O{opt} match scalar IR")
 
 
 def verify_minmax(ir):
