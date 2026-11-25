@@ -161,7 +161,8 @@ int main()
         ee::ee_mem_read32(&runtime, sif0 + 0x10u) != 0x00123000u ||
         ee::ee_mem_read32(&runtime, sif0 + 0x20u) != 0x2345u ||
         hardware.dmac().status() != status_before_sif0 ||
-        hardware.dmac().started_channels() != (ch1 | (1u << 5u)))
+        hardware.dmac().started_channels() != (ch1 | (1u << 5u)) ||
+        hardware.dmac().sif0_receive_armed_only())
     {
         return fail("SIF0 register bank or unimplemented IOP completion");
     }
@@ -191,6 +192,45 @@ int main()
     {
         return fail("clearing VIF1 STR did not remove its active bit");
     }
+
+    // Passive receive readiness is narrower than STR: a real FIFO
+    // callback, unacknowledged raw completion or residual data blocks it.
+    if (!hardware.dmac().sif0_receive_armed_only())
+    {
+        return fail("empty HLE SIF0 receiver not recognized");
+    }
+    uint32_t starts = 0u;
+    hardware.dmac().bind_sif0_start(&starts, [](void* user)
+    {
+        ++*static_cast<uint32_t*>(user);
+    });
+    if (hardware.dmac().sif0_receive_armed_only() || starts != 0u)
+    {
+        return fail("genuine SIF0 transport or query side effect");
+    }
+    hardware.dmac().bind_sif0_start(nullptr, nullptr);
+    if (!hardware.dmac().raise(5u) ||
+        hardware.dmac().sif0_receive_armed_only())
+    {
+        return fail("raw SIF0 completion misclassified as passive");
+    }
+    hardware.dmac().acknowledge(5u);
+    if (!hardware.dmac().sif0_receive_armed_only())
+    {
+        return fail("acknowledged SIF0 receiver not recognized");
+    }
+    ee::ee_mem_write32(&runtime, sif0, 0u);
+    if (hardware.dmac().sif0_receive_armed_only())
+    {
+        return fail("stopped SIF0 misclassified as armed");
+    }
+    ee::ee_mem_write32(&runtime, sif0, 0x100u);
+    if (hardware.dmac().sif0_receive_armed_only())
+    {
+        return fail("normal SIF0 mode misclassified as HLE chain readiness");
+    }
+    ee::ee_mem_write32(&runtime, sif0, 0u);
+    ee::ee_mem_write32(&runtime, sif0, 0x184u);
 
     // The SIF mailbox MMIO and SifSetReg/GetReg share one state owner.
     constexpr uint32_t mscom = ee::c_ee_sif::k_mscom_address;
