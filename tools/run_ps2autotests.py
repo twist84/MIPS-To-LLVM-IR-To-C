@@ -260,7 +260,8 @@ def main():
     parser.add_argument("--config", default="Release")
     parser.add_argument("--prebuilt-manifest", type=Path,
                         help="use prebuilt native tools only if revision and SHA-256 match")
-    parser.add_argument("--max-dispatches", type=int, default=1000000)
+    parser.add_argument("--max-dispatches", type=int, default=2000000,
+                        help="uniform guest dispatch limit per original ELF")
     parser.add_argument("--auto-expand", type=int, default=128)
     parser.add_argument("--emit-opt", type=int, choices=range(6), default=0)
     parser.add_argument("--jobs", type=int, default=4,
