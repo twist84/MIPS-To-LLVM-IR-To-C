@@ -2866,6 +2866,19 @@ int main(int argc, char** argv)
                             name.push_back(std::isalnum(
                                 static_cast<unsigned char>(ch)) ? ch : '_');
                         }
+                        // Use validated guest export identities for host
+                        // naming; the load base is still the linked image base.
+                        std::string export_library;
+                        if (!module.m_exports.empty())
+                        {
+                            for (unsigned char ch : module.m_exports.front().m_library)
+                            {
+                                const bool safe = (ch >= 'A' && ch <= 'Z') ||
+                                    (ch >= 'a' && ch <= 'z') ||
+                                    (ch >= '0' && ch <= '9') || ch == '_';
+                                export_library.push_back(safe ? static_cast<char>(ch) : '_');
+                            }
+                        }
                         char stem[128];
                         std::snprintf(stem, sizeof(stem), "%s/%s@%08x",
                                       capture_storage.c_str(), name.c_str(), module.m_base);
@@ -2882,11 +2895,12 @@ int main(int argc, char** argv)
                                 "{\"name\": \"%s\", \"base\": %u, "
                                 "\"text_size\": %u, \"entry\": %u, "
                                 "\"gp\": %u, \"hash\": \"%016llx\", "
-                                "\"exports\": [",
+                                "\"export_library\": \"%s\", \"exports\": [",
                                 name.c_str(), module.m_base, module.m_text_size,
                                 module.m_entry, module.m_gp,
                                 static_cast<unsigned long long>(
-                                    iop::iop_aot_hash(text.data(), text.size())));
+                                    iop::iop_aot_hash(text.data(), text.size())),
+                                export_library.c_str());
                             for (size_t index = 0; index < module.m_exports.size();
                                  ++index)
                             {
