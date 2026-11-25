@@ -331,6 +331,35 @@ partitioned-versus-combined comparison and add the direct path,
 including ready-thread rejection, event equality and subsequent
 callback/sample delivery. No guest lowering changes.
 
+## Cached native certificate identity
+
+The shadow identity lookup now uses a bounded, exact-PC cache keyed
+by guest PC, callable pointer and source slot bound. A cache miss
+checks the original first owner and compares the linked certificate's
+words against immutable ELF bytes. A hit reuses only that exact result.
+Negative results for a known pointer are cached, but null targets
+are never cached because a later overlay may resolve them. Full
+replacement clears the proof cache before unloading any native
+module. Appending an overlay cannot displace an already resolved
+first owner. No allocation is made when horizon profiling or direct
+dispatch is disabled.
+
+`alu_identity_hits` and `alu_identity_misses` count proof lookups;
+they do not imply an actual scheduling optimization. Directed tests
+cover colliding PC keys, changed pointers and slot bounds, disabled
+and null entries, failed owner identity, and replacement invalidation.
+
+Before enabling a live chain, validate the linked certificate coverage
+and direct quiet IOP fast-path counters. A useful chain must preserve
+the runner's per-boundary host continuations (interrupt delivery,
+thread scheduling, VU/GS worker publication, diagnostic and window
+service), not merely the native exit reason. The compatibility clock
+and IOP fractional remainder must account for every original boundary;
+at the dispatch budget limit the last EE slice's IOP time is still
+unserviced under the baseline cadence. A chain must not pay that final
+interval early. Reject or fall back before executing a path that
+cannot prove these requirements.
+
 ## Remaining activation gates (not implemented)
 
 
