@@ -373,6 +373,11 @@ struct s_ee_runtime
     uint32_t m_cop0_clock_compare = 0u;
     bool m_cop0_clock_ip7 = false;
     bool m_cop0_clock_initialized = false;
+
+    // Separate accounting cursor for explicitly approximate performance
+    // counting; the validated producer continues using explicit deltas.
+    uint64_t m_perf_compat_last = 0u;
+    bool m_perf_compat_fault = false;
 };
 
 // Never infer cycles from these observations or implicitly install
@@ -622,7 +627,8 @@ void ee_cop0_clock_write(s_ee_cpu_state* cpu, s_ee_runtime* rt,
 uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu, s_ee_runtime* rt,
                                uint32_t instruction_word);
 // A validated timing producer must call this in architectural order, with
-// the status for the elapsed interval. No diagnostic slot/attempt fallback.
+// the status for the elapsed interval. The HLE compatibility source is
+// accounted separately at COP0 accesses and architectural safepoints.
 // False means unsupported event/overflow or unavailable timing; no mutation.
 bool ee_cop0_perf_advance(s_ee_runtime* rt, uint32_t status, uint64_t cycles);
 

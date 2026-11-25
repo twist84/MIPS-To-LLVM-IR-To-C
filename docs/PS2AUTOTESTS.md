@@ -1057,3 +1057,25 @@ original EFU probe (128/128 non-transcendental, 31/48 atan variants,
 13/16 sine, 16/16 exponential). Original runtime replay and full CI are
 required before claiming even these numerical counts in the runtime;
 EATAN and ESIN precision/ordering remain open.
+
+### Verified 53/55 and compatibility performance accounting
+
+PR head `5a1e360135f040d258ffcc4ddbe7d83b68d680e1`, tested merge
+`9f869afe747ec2b93c7d96393a94266fca2f0f76`, [run 45658279578](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45658279578),
+[summary artifact 15044296892](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45658279578/artifacts/15044296892).
+53/55 exact, one DIFF (EFU), one INCOMPLETE (COP0 performance).
+The COP2 control-register corrections now pass the complete transfer
+transcript, with no previous exact matches lost.
+
+The existing COP0 implementation refused active processor-cycle events
+unless an independently validated R5900 producer was installed. Enable
+processor-cycle accounting on the explicitly approximate HLE reference
+clock, using its existing reached-guest-instruction and scheduled idle
+budget, not host time or invented per-test increments. Synchronize at
+register accesses, exception entry, MTC0 Status, ERET and device
+safepoints. Preserve separate validated-source explicit-delta API;
+unsupported event types and level-2 overflow still fail closed. This
+is compatibility accounting, not calibrated hardware-cycle precision.
+Original performance test checks only changed/unchanged counters, not
+exact cycle magnitudes. Unit coverage checks elapsed intervals, stop,
+idle and repeated reads. Original ELF validation remains pending.

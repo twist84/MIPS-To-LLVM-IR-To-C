@@ -2156,6 +2156,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             }
             else
             {
+                if (cp0_reg == 12u)
+                {
+                    // Account elapsed time in the previous privilege mode.
+                    m_out += "  call void @ee_cop0_clock_sync(ptr %cpu, ptr %rt)\n";
+                }
                 m_out += "  call void @ee_cop0_write(ptr %cpu, i32 " +
                          std::to_string(cp0_reg) + ", i32 " + v32 + ")\n";
             }
@@ -2176,6 +2181,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             if (fn == static_cast<uint8_t>(ee::e_ee_opcode::COP0_ERET))
             {
                 // Full exception return: clear EXL, PC <- EPC, exit DISPATCH.
+                m_out += "  call void @ee_cop0_clock_sync(ptr %cpu, ptr %rt)\n";
                 std::string epc = newtemp();
                 m_out += "  " + epc + " = call i32 @ee_exception_return(ptr %cpu)\n";
                 m_out += "  ret i32 3\n"; // EE_EXIT_DISPATCH

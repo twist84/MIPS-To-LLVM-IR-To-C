@@ -64,7 +64,7 @@ extern "C" uint32_t ee_exception_vector(uint32_t status, uint32_t excode)
 }
 
 extern "C" uint32_t ee_raise_exception(s_ee_cpu_state* cpu,
-                                       s_ee_runtime* /*rt*/,
+                                       s_ee_runtime* rt,
                                        uint32_t excode,
                                        uint32_t pc,
                                        uint32_t in_bd_slot,
@@ -72,6 +72,8 @@ extern "C" uint32_t ee_raise_exception(s_ee_cpu_state* cpu,
 {
     if (!cpu) return 0;
 
+    // Charge the elapsed interval before entering exception level.
+    ee_cop0_clock_sync(cpu, rt);
     uint32_t& status = cpu->m_cop0[COP0_Status];
     uint32_t& cause  = cpu->m_cop0[COP0_Cause];
     uint32_t& epc    = cpu->m_cop0[COP0_EPC];
@@ -164,6 +166,11 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
     }
 }
 
+namespace
+{
+bool perf_compat_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt);
+}
+
 extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
 {
     if (cpu == nullptr || rt == nullptr ||
@@ -182,6 +189,9 @@ extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
             return;
         }
         now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
+        // This path does not turn the reference budget into a validated
+        // hardware clock. Faults are observed by the runner/next transfer.
+        (void)perf_compat_sync(cpu, rt);
     }
     if (now < rt->m_cop0_clock_last)
     {
@@ -236,7 +246,7 @@ namespace
 constexpr uint32_t k_perf_control_mask = 0x800ffbfeu;
 constexpr uint32_t k_perf_cte = 0x80000000u;
 
-bool perf_event_supported(uint32_t control, unsigned index, bool validated)
+bool perf_event_supported(uint32_t control, unsigned index, bool has_clock)
 {
     const uint32_t modes = (control >> (1u + index * 10u)) & 15u;
     const uint32_t event = (control >> (5u + index * 10u)) & 31u;
@@ -245,7 +255,35 @@ bool perf_event_supported(uint32_t control, unsigned index, bool validated)
     {
         return true;
     }
-    return event == 1u && validated;
+    return event == 1u && has_clock;
+}
+
+// Common counter update with transactional overflow rejection. Only the
+// processor-cycle event is implemented; no other events are synthesized.
+bool perf_advance_interval(s_ee_runtime* rt, uint32_t status, uint64_t cycles);
+
+bool perf_compat_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
+{
+    if (rt->m_ee_cycle_scheduler.source() != e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+    {
+        return true;
+    }
+    if (rt->m_perf_compat_fault ||
+        rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+    {
+        rt->m_perf_compat_fault = true;
+        return false;
+    }
+    const uint64_t now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
+    if (now < rt->m_perf_compat_last ||
+        !perf_advance_interval(rt, cpu->m_cop0[COP0_Status],
+                               now - rt->m_perf_compat_last))
+    {
+        rt->m_perf_compat_fault = true;
+        return false;
+    }
+    rt->m_perf_compat_last = now;
+    return true;
 }
 }
 
@@ -255,6 +293,10 @@ extern "C" uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu,
 {
     if (cpu == nullptr || rt == nullptr || (word >> 26u) != 0x10u ||
         ((word >> 11u) & 31u) != 25u || (word & 0x7c0u) != 0u)
+    {
+        return 4u;
+    }
+    if (!perf_compat_sync(cpu, rt))
     {
         return 4u;
     }
@@ -286,10 +328,10 @@ extern "C" uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu,
     else if (selector == 0u)
     {
         const uint32_t control = value & k_perf_control_mask;
-        const bool validated = rt->m_ee_cycle_scheduler.source() ==
-            e_ee_cycle_source::VALIDATED_R5900;
-        if (!perf_event_supported(control, 0u, validated) ||
-            !perf_event_supported(control, 1u, validated))
+        const bool has_clock = rt->m_ee_cycle_scheduler.source() !=
+            e_ee_cycle_source::UNAVAILABLE;
+        if (!perf_event_supported(control, 0u, has_clock) ||
+            !perf_event_supported(control, 1u, has_clock))
         {
             return 4u;
         }
@@ -299,14 +341,10 @@ extern "C" uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu,
     return 0u;
 }
 
-extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
-                                     uint32_t status, uint64_t cycles)
+namespace
 {
-    if (rt == nullptr || rt->m_ee_cycle_scheduler.source() !=
-        e_ee_cycle_source::VALIDATED_R5900)
-    {
-        return false;
-    }
+bool perf_advance_interval(s_ee_runtime* rt, uint32_t status, uint64_t cycles)
+{
     const uint32_t control = rt->m_perf_control;
     if ((control & k_perf_cte) == 0u || (status & STATUS_ERL) != 0u)
     {
@@ -339,6 +377,17 @@ extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
     rt->m_perf_counter[0] = next[0];
     rt->m_perf_counter[1] = next[1];
     return true;
+}
+}
+
+extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
+                                     uint32_t status, uint64_t cycles)
+{
+    // Only a validated producer can supply externally authored deltas.
+    // The compatibility path is restricted to its real existing budget.
+    return rt != nullptr && rt->m_ee_cycle_scheduler.source() ==
+        e_ee_cycle_source::VALIDATED_R5900 &&
+        perf_advance_interval(rt, status, cycles);
 }
 
 // ---- Interrupts ----------------------------------------------------------

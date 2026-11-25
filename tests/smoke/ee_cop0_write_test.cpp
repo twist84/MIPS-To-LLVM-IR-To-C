@@ -138,9 +138,25 @@ int main()
           runtime.m_perf_control == 0x000ffbfeu,
           "active cycle event without validated timing fails closed");
     check(runtime.m_ee_cycle_scheduler.install_reference_compatibility_source() &&
-          transfer(4u, 4u, 0u) == 4u &&
+          transfer(4u, 0u, 1u) == 0u &&
+          transfer(4u, 0u, 3u) == 0u &&
+          transfer(4u, 4u, 0u) == 0u &&
           !ee::ee_cop0_perf_advance(&runtime, 0u, 100u),
-          "compatibility clock is not validated performance timing");
+          "compatibility source enables only its own approximate budget");
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    runtime.m_guest_instruction_attempts = 23u;
+    check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u &&
+          runtime.m_perf_counter[1] == 0u &&
+          transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u,
+          "elapsed compatibility budget is charged exactly once");
+    runtime.m_cop0_clock_idle = 7u;
+    ee::ee_cop0_clock_sync(&cpu, &runtime);
+    check(runtime.m_perf_counter[0] == 30u &&
+          transfer(4u, 0u, 0u) == 0u,
+          "idle units use same clock and stop accounts old control");
+    runtime.m_guest_instruction_attempts += 19u;
+    check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 30u,
+          "disabled compatibility counter remains unchanged");
     runtime.m_ee_cycle_scheduler.reset();
     check(runtime.m_ee_cycle_scheduler.install_validated_source(), "explicit validated test source");
     check(transfer(4u, 0u, 1u) == 0u && transfer(4u, 0u, 3u) == 0u &&

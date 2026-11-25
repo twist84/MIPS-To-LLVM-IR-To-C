@@ -3906,6 +3906,11 @@ int main(int argc, char** argv)
     const auto service_devices = [&]() -> e_device_service
     {
         ee::ee_cop0_clock_sync(&cpu, &runtime);
+        if (runtime.m_perf_compat_fault)
+        {
+            std::fprintf(stderr, "EE COP0 compatibility performance event/overflow unsupported\n");
+            return e_device_service::failed;
+        }
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
         if (vif1.cmsar1_running() &&
             reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
