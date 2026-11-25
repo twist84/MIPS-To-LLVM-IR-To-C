@@ -3886,6 +3886,9 @@ int main(int argc, char** argv)
     uint64_t horizon_unknown = 0u;
     uint64_t horizon_normal_before = 0u;
     uint64_t horizon_without_iop_before = 0u;
+    uint64_t horizon_iop_lookahead_before = 0u;
+    uint64_t horizon_iop_idle_candidates = 0u;
+    uint64_t horizon_iop_rpc_barriers = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -4925,6 +4928,7 @@ int main(int argc, char** argv)
         // that MMIO cannot change a deadline while it executes.
         ee::s_ee_execution_horizon horizon{};
         ee::s_ee_execution_horizon horizon_without_iop{};
+        ee::s_ee_execution_horizon horizon_iop_lookahead{};
         const bool horizon_sample = profile_horizon &&
             runtime.m_ee_cycle_scheduler.source() ==
                 ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY;
@@ -4959,6 +4963,34 @@ int main(int argc, char** argv)
             horizon_without_iop = ee::ee_execution_horizon(horizon_start,
                 timer_deadline, scanout_deadline, cop0_deadline,
                 ee::k_ee_no_deadline, barrier);
+
+            uint64_t lookahead_deadline = iop_deadline;
+            if (iop_scheduled && !barrier && iop_clock.due() == 0u)
+            {
+                const bool rpc_pending = iop_rpc != nullptr &&
+                    (iop_rpc->pending_guest_calls() != 0u ||
+                     iop_rpc->pending_module_starts() != 0u ||
+                     iop_rpc->pending_replies() != 0u ||
+                     iop_rpc->pending_binds() != 0u);
+                if (rpc_pending)
+                {
+                    ++horizon_iop_rpc_barriers;
+                }
+                else
+                {
+                    const uint64_t interval = iop_kernel->idle_event_cycles_remaining();
+                    const uint64_t projected = iop_clock.cycle_after_iop(interval);
+                    if (interval != 0u && projected != ee::k_ee_no_deadline &&
+                        projected > iop_deadline)
+                    {
+                        lookahead_deadline = projected;
+                        ++horizon_iop_idle_candidates;
+                    }
+                }
+            }
+            horizon_iop_lookahead = ee::ee_execution_horizon(horizon_start,
+                timer_deadline, scanout_deadline, cop0_deadline,
+                lookahead_deadline, barrier);
         }
         bool hot_expand_budget_reached = false;
         for (;;)
@@ -5301,6 +5333,10 @@ int main(int argc, char** argv)
                 if (normal_exit && reached < horizon_without_iop.m_cycle)
                 {
                     ++horizon_without_iop_before;
+                }
+                if (normal_exit && reached < horizon_iop_lookahead.m_cycle)
+                {
+                    ++horizon_iop_lookahead_before;
                 }
             }
         }
@@ -8916,9 +8952,13 @@ int main(int argc, char** argv)
         };
         std::fprintf(stderr,
             "EE horizon: shadow_only=1 normal_before=%llu "
-            "normal_before_without_iop=%llu unknown=%llu\n",
+            "normal_before_without_iop=%llu normal_before_iop_lookahead=%llu "
+            "iop_idle_candidates=%llu iop_rpc_barriers=%llu unknown=%llu\n",
             static_cast<unsigned long long>(horizon_normal_before),
             static_cast<unsigned long long>(horizon_without_iop_before),
+            static_cast<unsigned long long>(horizon_iop_lookahead_before),
+            static_cast<unsigned long long>(horizon_iop_idle_candidates),
+            static_cast<unsigned long long>(horizon_iop_rpc_barriers),
             static_cast<unsigned long long>(horizon_unknown));
         for (size_t i = 0u; i < horizon_sources; ++i)
         {
