@@ -49,6 +49,41 @@ int main()
     CHECK(stats.discarded == 2u && stats.underrun == 5u);
     CHECK(stats.depth == 0u && stats.max_depth == 4u && stats.callbacks == 5u);
 
+    ee::c_ee_pcm_queue<8u, 4u> buffered;
+    CHECK(buffered.push(first, 2u) == 2u);
+    CHECK(buffered.pop(out, 2u) == 0u);
+    CHECK(out[0] == 0 && out[3] == 0);
+    CHECK(buffered.stats().depth == 2u);
+    CHECK(buffered.push(first + 4u, 2u) == 2u);
+    CHECK(buffered.pop(out, 3u) == 3u);
+    for (int i = 0; i < 6; ++i)
+    {
+        CHECK(out[i] == first[i]);
+    }
+    CHECK(buffered.pop(out, 3u) == 1u);
+    CHECK(out[0] == 4 && out[1] == -4 && out[2] == 0 && out[5] == 0);
+    CHECK(buffered.push(first, 4u) == 4u);
+    // A callback larger than the normal prebuffer target waits for its
+    // full request, instead of immediately causing another underrun.
+    CHECK(buffered.pop(out, 5u) == 0u);
+    CHECK(buffered.push(first + 8u, 1u) == 1u);
+    CHECK(buffered.pop(out, 5u) == 5u);
+    for (int i = 0; i < 10; ++i)
+    {
+        CHECK(out[i] == first[i]);
+    }
+    CHECK(buffered.push(first, 2u) == 2u);
+    buffered.discard_pending();
+    CHECK(buffered.push(first, 2u) == 2u);
+    CHECK(buffered.pop(out, 2u) == 0u);
+    const auto buffered_stats = buffered.stats();
+    CHECK(buffered_stats.prebuffer_silence == 9u);
+    CHECK(buffered_stats.rebuffer_events == 1u);
+    CHECK(buffered_stats.underrun == 2u);
+    CHECK(buffered_stats.discarded == 2u && buffered_stats.depth == 2u);
+    CHECK(buffered_stats.queued == buffered_stats.consumed +
+        buffered_stats.discarded + buffered_stats.depth);
+
     ee::c_ee_pcm_queue<64u> concurrent;
     constexpr uint32_t k_frames = 100000u;
     std::atomic<bool> failed{false};

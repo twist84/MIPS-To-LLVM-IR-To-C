@@ -16,7 +16,8 @@ namespace ee
 struct c_ee_host_audio::s_impl
 {
     static std::atomic<s_impl*> m_active;
-    c_ee_pcm_queue<> m_queue;
+    // 85 ms capacity, 43 ms startup/recovery target at 48 kHz.
+    c_ee_pcm_queue<4096u, 2048u> m_queue;
     iop::c_hw* m_hardware = nullptr;
     AudioStream m_stream{};
     bool m_ready = false;
@@ -144,7 +145,8 @@ void c_ee_host_audio::report() const
     std::printf(
         "IOP host audio: status=%s produced=%llu queued=%llu consumed=%llu "
         "dropped=%llu underrun=%llu discarded=%llu callbacks=%llu depth=%u "
-        "max_depth=%u shutdown_depth=%u stream_rate=48000 stream_channels=2 "
+        "max_depth=%u shutdown_depth=%u prebuffer_silence=%llu rebuffer_events=%llu "
+        "prebuffer_target=2048 stream_rate=48000 stream_channels=2 "
         "stream_bits=16 device_rate=%u device_channels=%u\n",
         m_status,
         static_cast<unsigned long long>(stats.produced),
@@ -156,6 +158,8 @@ void c_ee_host_audio::report() const
         static_cast<unsigned long long>(stats.callbacks),
         stats.depth, stats.max_depth,
         m_impl != nullptr ? m_impl->m_paused_depth : 0u,
+        static_cast<unsigned long long>(stats.prebuffer_silence),
+        static_cast<unsigned long long>(stats.rebuffer_events),
         m_impl != nullptr ? m_impl->m_device_rate : 0u,
         m_impl != nullptr ? m_impl->m_device_channels : 0u);
 }

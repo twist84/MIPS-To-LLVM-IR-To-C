@@ -17,6 +17,8 @@ struct s_pcm_queue_stats
     uint64_t underrun;
     uint64_t discarded;
     uint64_t callbacks;
+    uint64_t prebuffer_silence;
+    uint64_t rebuffer_events;
     uint32_t depth;
     uint32_t max_depth;
 };
@@ -24,10 +26,11 @@ struct s_pcm_queue_stats
 // Single producer (guest thread), single consumer (audio callback).
 // Publish samples before advancing the write index; publish the read index
 // only after copying samples out. The producer never waits for the consumer.
-template<uint32_t k_capacity = 4096u>
+template<uint32_t k_capacity = 4096u, uint32_t k_prebuffer = 0u>
 class c_ee_pcm_queue
 {
     static_assert(k_capacity > 0u && (k_capacity & (k_capacity - 1u)) == 0u);
+    static_assert(k_prebuffer <= k_capacity);
     static_assert(std::atomic<uint64_t>::is_always_lock_free,
                   "Host audio requires lock-free 64-bit atomics");
 
@@ -62,6 +65,24 @@ public:
     {
         const uint64_t read = m_read.load(std::memory_order_relaxed);
         const uint64_t write = m_write.load(std::memory_order_acquire);
+        if constexpr (k_prebuffer != 0u)
+        {
+            if (m_buffering)
+            {
+                // Do not drain short producer bursts while recovering.
+                // Cap the callback-size requirement at queue capacity.
+                const uint32_t threshold = std::max(k_prebuffer,
+                    std::min(frames, k_capacity));
+                if (write - read < threshold)
+                {
+                    std::memset(samples, 0, sizeof(int16_t) * 2u * frames);
+                    m_prebuffer_silence += frames;
+                    ++m_callbacks;
+                    return 0u;
+                }
+                m_buffering = false;
+            }
+        }
         const uint32_t count = static_cast<uint32_t>(
             std::min<uint64_t>(frames, write - read));
         const uint32_t slot = static_cast<uint32_t>(read) & (k_capacity - 1u);
@@ -84,6 +105,14 @@ public:
         m_read.store(read + count, std::memory_order_release);
         m_consumed += count;
         m_underrun += frames - count;
+        if constexpr (k_prebuffer != 0u)
+        {
+            if (count < frames)
+            {
+                m_buffering = true;
+                ++m_rebuffer_events;
+            }
+        }
         ++m_callbacks;
         return count;
     }
@@ -95,6 +124,7 @@ public:
         const uint64_t read = m_read.load(std::memory_order_relaxed);
         m_discarded += write - read;
         m_read.store(write, std::memory_order_relaxed);
+        m_buffering = k_prebuffer != 0u;
     }
 
     // Only inspect after the audio callback has stopped or while paused.
@@ -102,6 +132,7 @@ public:
     {
         return {m_produced, m_produced - m_dropped, m_consumed,
             m_dropped, m_underrun, m_discarded, m_callbacks,
+            m_prebuffer_silence, m_rebuffer_events,
             static_cast<uint32_t>(m_write.load(std::memory_order_relaxed) -
                 m_read.load(std::memory_order_relaxed)), m_max_depth};
     }
@@ -117,5 +148,8 @@ private:
     uint64_t m_underrun = 0u;
     uint64_t m_callbacks = 0u;
     uint64_t m_discarded = 0u;
+    uint64_t m_prebuffer_silence = 0u;
+    uint64_t m_rebuffer_events = 0u;
+    bool m_buffering = k_prebuffer != 0u;
 };
 }
