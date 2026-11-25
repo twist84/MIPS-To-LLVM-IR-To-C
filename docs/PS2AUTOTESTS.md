@@ -111,3 +111,20 @@ The later Linux pilot at 1620cf5 reached FILEIO BIND for all three
 selected tests. Rebuild both native tools before each suite invocation
 and record their SHA-256 in summary.json, so a source-only pull cannot
 silently reuse an older native executable. No retail cache deletion.
+
+## FILEIO console RPC (pilot 4)
+
+Pilot 3 at 1620cf5 reached FILEIO BIND (server 0x80000001) for all
+three selected original ELFs. Artifact: https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45614539023/artifacts/15020604277.
+Add a scoped built-in FILEIO BIND and method 3 console-write backend
+when a sector source is attached and no guest implementation owns the
+server. The reference is PS2SDK's synchronous _fio_write_arg at
+https://github.com/ps2dev/ps2sdk/blob/d4b9943bd4a58dbe69800bf4ec9d81640df5bc5b/common/include/fileio-common.h
+and the server's fileio_rpc_write in iop/fs/fileio/src/fileio.c.
+Validate stdout/stderr, signed-size range, physical RAM aliases and
+inline unaligned prefix; stage exact bytes during DMA preparation,
+emit only after commit, return actual byte count, queue normal SIF0
+reply. The shorter three-word legacy form is also accepted. The harness
+collects losslessly escaped FILEIO records alongside KPUTS. No generic
+file open/read/seek success, arbitrary RPC success or bypass of startup.
+The original ELFs have not yet demonstrated a complete transcript.

@@ -22,7 +22,7 @@ class AutotestsHarness(unittest.TestCase):
 
     def test_fragmented_byte_output(self):
         log = (b"EE KPUTS: -- TEST BE\nruntime: diagnostic\n"
-               b"EE KPUTS: GIN\\x0afoo\\x5cx41\\x22\\xff\n"
+               b"EE FILEIO: GIN\\x0afoo\\x5cx41\\x22\\xff\n"
                b"EE KPUTS: \\x0d\\x0a-- TEST END\\x0a\n")
         self.assertEqual(at.extract_guest(log), b'-- TEST BEGIN\nfoo\\x41"\xff\r\n-- TEST END\n')
         expected = b'-- TEST BEGIN\nfoo\\x41"\xff\n-- TEST END\n'

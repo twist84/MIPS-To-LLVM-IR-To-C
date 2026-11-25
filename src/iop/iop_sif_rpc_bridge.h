@@ -35,6 +35,7 @@ class c_sif_rpc_bridge
 public:
     static constexpr uint32_t k_rpc_data_destination = 0xdeadbef0u;
     static constexpr uint32_t k_loadfile_server = 0x80000006u;
+    static constexpr uint32_t k_fileio_server = 0x80000001u;
     static constexpr uint32_t k_iop_heap_server = 0x80000003u;
     static constexpr uint32_t k_cdvd_init_server = 0x80000592u;
     static constexpr uint32_t k_cdvd_s_server = 0x80000593u;
@@ -76,6 +77,7 @@ public:
         bool m_cdvd_lookup_found = false;
         bool m_guest_rpc = false;
         bool m_deferred_bind = false;
+        std::vector<uint8_t> m_fileio_console_bytes;
         std::vector<uint8_t> m_guest_rpc_bytes;
         std::vector<uint8_t> m_cdvd_bytes;
         std::string m_guest_path;

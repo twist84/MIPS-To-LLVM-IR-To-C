@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = Path(__file__).with_name("ps2autotests_manifest.json")
 BEGIN = b"-- TEST BEGIN"
 END = b"-- TEST END"
-PREFIX = b"EE KPUTS: "
+PREFIXES = (b"EE KPUTS: ", b"EE FILEIO: ")
 ESCAPE = re.compile(rb"\\x([0-9a-fA-F]{2})")
 
 
@@ -56,15 +56,16 @@ def normalized_lines(data):
 
 
 def extract_guest(log):
-    # KPUTS escapes every backslash, quote and nonprintable byte as
+    # KPUTS and FILEIO escape every backslash, quote and nonprintable byte as
     # \xNN. Decode individual records before concatenation: one printf
     # can be split across messages, or several lines can share a message.
     chunks = []
     for line in log.splitlines():
-        if line.startswith(PREFIX):
-            payload = line[len(PREFIX):]
+        prefix = next((p for p in PREFIXES if line.startswith(p)), None)
+        if prefix is not None:
+            payload = line[len(prefix):]
             if re.search(rb"\\(?!x[0-9a-fA-F]{2})", payload):
-                raise ValueError("malformed KPUTS byte escape")
+                raise ValueError("malformed console byte escape")
             chunks.append(ESCAPE.sub(lambda m: bytes([int(m[1], 16)]), payload))
     return b"".join(chunks)
 
