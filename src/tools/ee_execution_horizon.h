@@ -3,6 +3,7 @@
 #include "ee_runtime.h"
 #include "ee_exceptions.h"
 #include "ee_iop_clock.h"
+#include "ee_idle_loop_skip.h"
 
 #include <array>
 #include <cstdint>
@@ -73,6 +74,59 @@ inline bool ee_horizon_checkpoint_ready(const s_ee_runtime& runtime,
         (!iop_scheduled ||
             (iop_clock.anchored_at(published) && iop_clock.due() == 0u &&
                 iop_clock.next_cycle() != k_ee_no_deadline));
+}
+
+// A deliberately narrow source-level pre-execution candidate. The
+// straight-line path ends at a JAL/JR/JALR (all return to the native
+// dispatcher), including its mandatory delay slot. Reject memory,
+// COP0/COP2, traps, conditional control flow, and any unknown encoding.
+// The result is advisory until native ownership and code provenance are
+// established; source bytes alone cannot certify a loaded native entry.
+template<typename t_read>
+uint32_t ee_horizon_alu_exit_slots(uint32_t pc, const t_read& read)
+{
+    constexpr uint32_t max_slots = 32u;
+    uint32_t slots = 0u;
+    if (pc != 0u && (pc & 3u) == 0u)
+    {
+        for (uint32_t i = 0u; i < max_slots; ++i)
+        {
+            uint32_t word = 0u;
+            if (!read(pc, &word))
+            {
+                break;
+            }
+            const uint32_t op = word >> 26u;
+            const uint32_t funct = word & 63u;
+            const bool indirect = op == 0u &&
+                ((funct == 8u && (word & 0x001fffc0u) == 0u) ||
+                 (funct == 9u && (word & 0x001f07c0u) == 0u));
+            if (op == 3u || indirect)
+            {
+                uint32_t delay = 0u;
+                if (i + 2u <= max_slots && pc <= UINT32_MAX - 4u &&
+                    read(pc + 4u, &delay) &&
+                    idle_loop_detail::decode(delay).kind == idle_loop_detail::e_kind::alu)
+                {
+                    slots = i + 2u;
+                }
+                break;
+            }
+            if (idle_loop_detail::decode(word).kind != idle_loop_detail::e_kind::alu ||
+                pc > UINT32_MAX - 4u)
+            {
+                break;
+            }
+            pc += 4u;
+        }
+    }
+    return slots;
+}
+
+inline bool ee_horizon_bound_fits(uint64_t now, uint64_t deadline, uint32_t slots)
+{
+    return slots != 0u && deadline != k_ee_no_deadline &&
+        deadline > now && slots < deadline - now;
 }
 
 // Count advances modulo 2^32 in the existing compatibility model.
