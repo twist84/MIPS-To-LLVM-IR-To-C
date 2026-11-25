@@ -4658,6 +4658,9 @@ def main():
                     int(horizon["normal_before_without_iop"])), lines
             assert int(horizon["iop_idle_candidates"]) >= 0, lines
             assert int(horizon["iop_rpc_barriers"]) >= 0, lines
+            assert (int(horizon["lookahead_mmio_free"]) +
+                    int(horizon["lookahead_mmio_touched"]) ==
+                    int(horizon["normal_before_iop_lookahead"])), lines
             counts = [dict(token.split("=") for token in line.split()[2:])
                       for line in lines[1:]]
             assert sum(int(row["samples"]) for row in counts) > 0, lines
