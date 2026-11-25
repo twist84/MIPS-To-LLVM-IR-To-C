@@ -43,29 +43,8 @@ entry:
   %pair1 = insertvalue { i32, i32 } %pair0, i32 %carry, 1
   ret { i32, i32 } %pair1
 }
-define internal { i32, i1, i1 } @ee_cop1_mul_bits(i32 %lhs, i32 %rhs) {
+define internal i64 @ee_cop1_mul_correct(i32 %ma, i32 %mb, i64 %full) noinline {
 entry:
-  %ea_shift = lshr i32 %lhs, 23
-  %eb_shift = lshr i32 %rhs, 23
-  %ea = and i32 %ea_shift, 255
-  %eb = and i32 %eb_shift, 255
-  %a_zero = icmp eq i32 %ea, 0
-  %b_zero = icmp eq i32 %eb, 0
-  %zero = or i1 %a_zero, %b_zero
-  %sign_xor = xor i32 %lhs, %rhs
-  %sign = and i32 %sign_xor, -2147483648
-  br i1 %zero, label %flush, label %multiply
-flush:
-  %zero_pair = insertvalue { i32, i1, i1 } zeroinitializer, i32 %sign, 0
-  ret { i32, i1, i1 } %zero_pair
-multiply:
-  %fa = and i32 %lhs, 8388607
-  %fb = and i32 %rhs, 8388607
-  %ma = or i32 %fa, 8388608
-  %mb = or i32 %fb, 8388608
-  %ma64 = zext i32 %ma to i64
-  %mb64 = zext i32 %mb to i64
-  %full = mul i64 %ma64, %mb64
   %code_shift0 = shl i32 %mb, 1
   %code0 = and i32 %code_shift0, 7
   %booth0 = call { i32, i32 } @ee_cop1_booth_row(i32 %ma, i32 %code0, i32 0)
@@ -136,6 +115,42 @@ multiply:
   %lost = and i32 %different, 32768
   %lost64 = zext i32 %lost to i64
   %product = sub i64 %full, %lost64
+  ret i64 %product
+}
+define internal { i32, i1, i1 } @ee_cop1_mul_bits(i32 %lhs, i32 %rhs) {
+entry:
+  %ea_shift = lshr i32 %lhs, 23
+  %eb_shift = lshr i32 %rhs, 23
+  %ea = and i32 %ea_shift, 255
+  %eb = and i32 %eb_shift, 255
+  %a_zero = icmp eq i32 %ea, 0
+  %b_zero = icmp eq i32 %eb, 0
+  %zero = or i1 %a_zero, %b_zero
+  %sign_xor = xor i32 %lhs, %rhs
+  %sign = and i32 %sign_xor, -2147483648
+  br i1 %zero, label %flush, label %multiply
+flush:
+  %zero_pair = insertvalue { i32, i1, i1 } zeroinitializer, i32 %sign, 0
+  ret { i32, i1, i1 } %zero_pair
+multiply:
+  %fa = and i32 %lhs, 8388607
+  %fb = and i32 %rhs, 8388607
+  %ma = or i32 %fa, 8388608
+  %mb = or i32 %fb, 8388608
+  %ma64 = zext i32 %ma to i64
+  %mb64 = zext i32 %mb to i64
+  %full = mul i64 %ma64, %mb64
+  ; Subtracting at most 2^15 cannot cross a 2^23 truncation boundary
+  ; unless the low 23 bits are strictly below 2^15. Keep the original
+  ; asymmetric Booth calculation off the common path.
+  %low23 = and i64 %full, 8388607
+  %needs_correction = icmp ult i64 %low23, 32768
+  br i1 %needs_correction, label %correct, label %normalize
+correct:
+  %corrected = call i64 @ee_cop1_mul_correct(i32 %ma, i32 %mb, i64 %full)
+  br label %normalize
+normalize:
+  %product = phi i64 [ %full, %multiply ], [ %corrected, %correct ]
   %shifted = lshr i64 %product, 23
   %sig = trunc i64 %shifted to i32
   %wide = icmp ugt i32 %sig, 16777215

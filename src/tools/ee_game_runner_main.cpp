@@ -3871,7 +3871,7 @@ int main(int argc, char** argv)
                 return e_intc_service::failed;
             }
 
-            const ee::s_ee_u128 acknowledge{1u << cause, 0u};
+            const ee::s_ee_u128 acknowledge{uint64_t{1} << cause, 0u};
             if (!ee::c_ee_intc::mmio_write(
                     &hardware.intc(), ee::c_ee_intc::k_stat_address,
                     4u, &acknowledge))

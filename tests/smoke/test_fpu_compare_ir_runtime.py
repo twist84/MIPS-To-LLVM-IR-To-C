@@ -4,6 +4,8 @@
 import ctypes
 import math
 import pathlib
+import random
+import re
 import struct
 import subprocess
 import sys
@@ -280,6 +282,82 @@ def run_arithmetic_cases(fixture, temp_dir, target, mode, cases, opt=0):
         require(state.fcsr == expected_fcsr,
                 prefix + f"FCSR got 0x{state.fcsr:08x}, "
                          f"expected 0x{expected_fcsr:08x}")
+
+
+def verify_mul_correction_fast_path(fixture, temp_dir, target):
+    """Compare every result bit and O/U flag against unconditional correction."""
+    path = temp_dir / "mul_fast_path.ll"
+    subprocess.run([str(fixture), str(path), "mul_s"], check=True)
+    ir = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"define internal \{ i32, i1, i1 \} @ee_cop1_mul_bits\([^\n]*\) \{\n.*?\n\}",
+        ir, re.S)
+    require(match is not None, "missing shared multiplication helper")
+    reference = match.group(0).replace("@ee_cop1_mul_bits(", "@test_mul_reference(", 1)
+    guard = "br i1 %needs_correction, label %correct, label %normalize"
+    require(guard in reference, "missing Booth correction guard")
+    # The original behavior always evaluates the unchanged correction tree.
+    reference = reference.replace(guard, "br i1 true, label %correct, label %normalize")
+    ir += "\n" + reference + "\n"
+    for name, callee in (("test_mul_fast", "ee_cop1_mul_bits"),
+                         ("test_mul_slow", "test_mul_reference")):
+        ir += f"""
+define i64 @{name}(i32 %a, i32 %b) {{
+entry:
+  %r = call {{ i32, i1, i1 }} @{callee}(i32 %a, i32 %b)
+  %bits = extractvalue {{ i32, i1, i1 }} %r, 0
+  %o = extractvalue {{ i32, i1, i1 }} %r, 1
+  %u = extractvalue {{ i32, i1, i1 }} %r, 2
+  %bits64 = zext i32 %bits to i64
+  %o64 = zext i1 %o to i64
+  %u64 = zext i1 %u to i64
+  %o_shift = shl i64 %o64, 32
+  %u_shift = shl i64 %u64, 33
+  %flags = or i64 %o_shift, %u_shift
+  %out = or i64 %bits64, %flags
+  ret i64 %out
+}}
+"""
+    # Directed residues 0, 32767, 32768 and 8388607, in both orders:
+    # (2^23 + 1) * (2^23 + n) has residue n modulo 2^23.
+    edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x00800001,
+             0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000, 0x3fffffff,
+             0x7f800000, 0x7fffffff, 0xffffffff]
+    pairs = [(a, b) for a in edges for b in edges]
+    rng = random.Random(0x5900)
+    pairs.extend((rng.getrandbits(32), rng.getrandbits(32)) for _ in range(100000))
+    # Exercise thousands of values exactly around the guard threshold.
+    for _ in range(2048):
+        a = rng.randrange(1, 1 << 23, 2)
+        residue = rng.choice((0, 1, 32767, 32768, 32769, 8388607))
+        b = (pow(a, -1, 1 << 23) * residue) & 0x7fffff
+        lhs, rhs = 0x3f800000 | a, 0x3f800000 | b
+        pairs.extend(((lhs, rhs), (rhs, lhs)))
+
+    signature = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint32, ctypes.c_uint32)
+    for opt in (0, 3):
+        module = llvm.parse_assembly(ir)
+        module.verify()
+        machine = target.create_target_machine(opt=opt)
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(machine.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+        engine.add_module(module)
+        engine.finalize_object()
+        addresses = [engine.get_function_address(name)
+                     for name in ("test_mul_fast", "test_mul_slow")]
+        require(all(addresses), "missing multiplication comparison entry")
+        fast, slow = map(signature, addresses)
+        for a, b in pairs:
+            got, expected = fast(a, b), slow(a, b)
+            if got != expected:
+                raise AssertionError((opt, hex(a), hex(b), hex(got), hex(expected)))
+        # Physical console asymmetry: a nonzero correction really matters.
+        require(fast(0x3f800000, 0x3fffffff) == 0x3ffffffe,
+                "Booth correction lost at exact truncation boundary")
+        require(fast(0x3fffffff, 0x3f800000) == 0x3fffffff,
+                "operand order lost")
+    print(f"MUL fast path: {len(pairs)} pairs at O0/O3 match unconditional correction")
 
 
 def run_accumulator_cases(fixture, temp_dir, target, mode, cases, opt=0):
@@ -1405,6 +1483,7 @@ def main():
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases, opt)
             run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases, opt)
+        verify_mul_correction_fast_path(fixture, temp_dir, target)
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases, opt)
         for opt in (0, 3):
