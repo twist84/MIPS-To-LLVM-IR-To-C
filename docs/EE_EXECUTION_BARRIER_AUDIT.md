@@ -395,6 +395,21 @@ This does not authorize removing any worker completion checkpoints.
 No guest IR lowering changes. Measure paired retail wall time before
 adopting the opt-out as a performance preset.
 
+## IOP clock hot-path simplification
+
+At 1e87910 all five workflows passed, including the VIF1
+overlap-instrumentation mode regression. The SPU2 common clock-only
+advance now inlines into its caller, reusing the before/after sample
+quotients; only a sample transition calls the unchanged mixer/IRQ
+edge operation out of line. Inactive clocks, deadline invalidation,
+fractional phase, and multi-sample advances retain the original
+semantics. The idle hardware horizon also reads the two ordinary
+DMA countdowns directly after rejecting AutoDMA, avoiding the
+general refill-aware query. Added partitioned versus multi-sample
+clock coverage with exact sample phase, mixed frames and IRQ state.
+These are host-only changes, independent of EE IR generation.
+No measured wall-time improvement claimed.
+
 ## Remaining activation gates (not implemented)
 
 
