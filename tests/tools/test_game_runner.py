@@ -4652,6 +4652,12 @@ def main():
             lines = [line for line in shadow.stderr.splitlines()
                      if line.startswith("EE horizon:")]
             assert len(lines) == 7 and "shadow_only=1" in lines[0], lines
+            horizon = dict(token.split("=") for token in lines[0].split()[2:])
+            assert (int(horizon["normal_before"]) <=
+                    int(horizon["normal_before_iop_lookahead"]) <=
+                    int(horizon["normal_before_without_iop"])), lines
+            assert int(horizon["iop_idle_candidates"]) >= 0, lines
+            assert int(horizon["iop_rpc_barriers"]) >= 0, lines
             counts = [dict(token.split("=") for token in line.split()[2:])
                       for line in lines[1:]]
             assert sum(int(row["samples"]) for row in counts) > 0, lines
