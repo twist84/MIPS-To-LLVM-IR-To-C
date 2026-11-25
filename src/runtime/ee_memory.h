@@ -54,6 +54,16 @@ public:
     // guest addresses unchanged. Used by the guest MMIO/VU dispatcher.
     uint32_t translate_direct_address(uint32_t addr) const;
 
+    // The guest bus dispatcher has already translated the address and
+    // excluded hardware apertures. Check the actual allocation once.
+    // This is intentionally not a guest-address or scratchpad mapper.
+    uint8_t* physical_ram_span(uint32_t physical, size_t len)
+    {
+        const size_t offset = static_cast<size_t>(physical);
+        return m_data != nullptr && offset <= m_size && len <= m_size - offset
+            ? m_data + offset : nullptr;
+    }
+
     // Direct-RAM fast path (Phase 7 optimisation). Marks a guest address
     // range as safe for direct host pointer access, bypassing bounds checks.
     // Accesses outside this range still go through the checked helpers.

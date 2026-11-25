@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 namespace
 {
@@ -100,6 +101,63 @@ int main()
         memory.contains(0x32000000u, 4))
     {
         return fail("direct alias write or out-of-range RAM validation");
+    }
+
+
+    // All widths take the direct physical RAM path without invoking the
+    // installed device callbacks, including unaligned host-safe transfers.
+    // Exercise both enabled aliases and ordinary physical addresses.
+    const uint32_t fast_reads = io.m_reads;
+    const uint32_t fast_writes = io.m_writes;
+    const ee::s_ee_u128 fast_quad{0x8123456789abcdefull, 0xfedcba9876543210ull};
+    for (uint32_t alias : {0u, 0x20000000u, 0x30000000u, 0x80000000u, 0xa0000000u})
+    {
+        const uint32_t base = alias + 0x101u;
+        ee::ee_mem_write8(&runtime, base, 0xabu);
+        ee::ee_mem_write16(&runtime, base + 1u, 0x89efu);
+        ee::ee_mem_write32(&runtime, base + 3u, 0xfedcba98u);
+        ee::ee_mem_write64(&runtime, base + 7u, fast_quad.m_lo);
+        ee::ee_mem_write128(&runtime, base + 15u, &fast_quad);
+        ee::s_ee_u128 loaded{};
+        ee::ee_mem_read128(&runtime, base + 15u, &loaded);
+        if (ee::ee_mem_read8(&runtime, base) != 0xabu ||
+            ee::ee_mem_read16(&runtime, base + 1u) != 0x89efu ||
+            ee::ee_mem_read32(&runtime, base + 3u) != 0xfedcba98u ||
+            ee::ee_mem_read64(&runtime, base + 7u) != fast_quad.m_lo ||
+            loaded.m_lo != fast_quad.m_lo || loaded.m_hi != fast_quad.m_hi ||
+            memory.read64(0x110u) != fast_quad.m_lo ||
+            memory.read64(0x118u) != fast_quad.m_hi)
+        {
+            return fail("direct RAM fast path width, alias or byte order");
+        }
+    }
+
+    // Scratchpad is a separate mapping and must retain checked fallback.
+    ee::ee_mem_write128(&runtime, 0x70000010u, &fast_quad);
+    ee::s_ee_u128 scratch{};
+    ee::ee_mem_read128(&runtime, 0x70000010u, &scratch);
+    if (scratch.m_lo != fast_quad.m_lo || scratch.m_hi != fast_quad.m_hi ||
+        memory.read64(0x10u) != 0u)
+    {
+        return fail("scratchpad fast-path isolation");
+    }
+    // Verify exact end-of-allocation access and reject partial spans.
+    ee::ee_mem_write128(&runtime, 0x80000ff0u, &fast_quad);
+    ee::ee_mem_write128(&runtime, 0x80000ff8u, &fast_quad);
+    ee::ee_mem_write64(&runtime, 0x80000ffcu, 0u);
+    ee::s_ee_u128 tail{};
+    ee::ee_mem_read128(&runtime, 0x80000ff0u, &tail);
+    if (tail.m_lo != fast_quad.m_lo || tail.m_hi != fast_quad.m_hi ||
+        ee::ee_mem_read64(&runtime, 0x80000ffcu) != 0u)
+    {
+        return fail("direct RAM tail bounds");
+    }
+    ee::ee_mem_read128(&runtime, 0x80000ff8u, &tail);
+    if (tail.m_lo != 0u || tail.m_hi != 0u ||
+        ee::ee_mem_read32(nullptr, 0x101u) != 0u ||
+        io.m_reads != fast_reads || io.m_writes != fast_writes)
+    {
+        return fail("partial RAM reads or spurious device callbacks");
     }
 
     // Direct-mapped KSEG device address translates to the same physical
