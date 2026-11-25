@@ -4884,6 +4884,7 @@ int main(int argc, char** argv)
             runtime.m_guest_instruction_attempts;
         const uint64_t idle_before_dispatch = idle_skip_instructions;
         uint64_t pc_native_ns = 0u;
+        uint64_t pc_nested_ns = 0u;
         bool hot_expand_budget_reached = false;
         for (;;)
         {
@@ -5067,6 +5068,7 @@ int main(int argc, char** argv)
             if (profile_pcs)
             {
                 pc_native_ns += native_duration_ns;
+                pc_nested_ns += native_profile_scope.child_ns();
             }
             if (report_path != nullptr)
             {
@@ -5190,7 +5192,8 @@ int main(int argc, char** argv)
             // the time spent compiling, opening libraries or updating reports.
             pc_profile.record(from_pc, count,
                 runtime.m_guest_instruction_attempts - instructions_before_dispatch,
-                idle_skip_instructions - idle_before_dispatch, pc_native_ns);
+                idle_skip_instructions - idle_before_dispatch, pc_native_ns,
+                pc_nested_ns);
         }
 
         dispatched += count;
@@ -8814,18 +8817,22 @@ int main(int argc, char** argv)
         uint64_t total_instructions = 0u;
         uint64_t total_idle_instructions = 0u;
         uint64_t total_wall_ns = 0u;
+        uint64_t total_nested_ns = 0u;
         for (const auto& item : ranked)
         {
             total_instructions += item.second.m_instructions;
             total_idle_instructions += item.second.m_idle_instructions;
             total_wall_ns += item.second.m_wall_ns;
+            total_nested_ns += item.second.m_nested_ns;
         }
         std::fprintf(stderr,
             "EE profile: %zu entry PCs, %llu guest instructions "
             "(ranked by inclusive native boundary time; compilation excluded) "
-            "idle_charged=%llu native_ns=%llu\n",
+            "idle_charged=%llu nested_profile=%u nested_ns=%llu native_ns=%llu\n",
             ranked.size(), static_cast<unsigned long long>(total_instructions),
             static_cast<unsigned long long>(total_idle_instructions),
+            ee::g_runtime_profile.m_enabled ? 1u : 0u,
+            static_cast<unsigned long long>(total_nested_ns),
             static_cast<unsigned long long>(total_wall_ns));
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
@@ -8834,7 +8841,8 @@ int main(int argc, char** argv)
             std::fprintf(stderr,
                 "EE profile: pc=0x%08x calls=%llu dispatches=%llu "
                 "instructions=%llu (%.1f%%) wall_ms=%.3f ns_per_instruction=%.2f "
-                "idle_charged=%llu non_skipped=%llu ns_per_non_skipped=%.2f native_ns=%llu\n",
+                "idle_charged=%llu non_skipped=%llu ns_per_non_skipped=%.2f "
+                "nested_ns=%llu native_ns=%llu\n",
                 ranked[i].first,
                 static_cast<unsigned long long>(item.m_calls),
                 static_cast<unsigned long long>(item.m_dispatches),
@@ -8854,6 +8862,7 @@ int main(int argc, char** argv)
                     ? static_cast<double>(item.m_wall_ns) /
                           static_cast<double>(non_skipped)
                     : 0.0,
+                static_cast<unsigned long long>(item.m_nested_ns),
                 static_cast<unsigned long long>(item.m_wall_ns));
         }
     }
