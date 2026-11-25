@@ -236,6 +236,9 @@ def compile_jit(fixture, temp_dir, mode, target):
     ir_text = ir_path.read_text(encoding="utf-8")
     if mode.startswith("ir_v"):
         require("call i32 @ee_vu0_ir_" in ir_text, "missing direct VU0 IR lowering")
+        if mode in ("ir_vmul", "ir_vadd", "ir_vmula_madd"):
+            require("call i32 @ee_vu0_ir_fmac_s" in ir_text,
+                    "guest FMAC did not select an opcode-shape helper")
         require("call i32 @ee_vu0_macro_fmac(" not in ir_text and
                 "call i32 @ee_vu0_macro_scalar(" not in ir_text,
                 "translated arithmetic escaped to a runtime opcode helper")
@@ -383,6 +386,33 @@ entry:
       i32 %source, i32 %bc, i1 %to_acc)
   ret i32 %status
 }
+define void @test_fixed4(ptr %out, ptr %input, i32 %fraction, i32 %to_float) {
+entry:
+  %x = load <4 x i32>, ptr %input, align 4
+  %itof = icmp ne i32 %to_float, 0
+  br i1 %itof, label %from, label %to
+from:
+  %f = call <4 x i32> @ee_vu0_ir_from_fixed4(<4 x i32> %x, i32 %fraction)
+  br label %done
+to:
+  %t = call <4 x i32> @ee_vu0_ir_to_fixed4(<4 x i32> %x, i32 %fraction)
+  br label %done
+done:
+  %result = phi <4 x i32> [%f, %from], [%t, %to]
+  store <4 x i32> %result, ptr %out, align 4
+  ret void
+}
+define i32 @test_fixed_scalar(i32 %x, i32 %fraction, i32 %to_float) {
+entry:
+  %itof = icmp ne i32 %to_float, 0
+  br i1 %itof, label %from, label %to
+from:
+  %f = call i32 @vu_from_fixed(i32 %x, i32 %fraction)
+  ret i32 %f
+to:
+  %t = call i32 @vu_to_fixed(i32 %x, i32 %fraction)
+  ret i32 %t
+}
 """
     machine = target.create_target_machine(opt=2)
     module = llvm.parse_assembly(ir)
@@ -485,6 +515,29 @@ entry:
                     f"{label}: synchronization differs")
             count += 1
     print(f"VU0 SIMD FMAC scalar differential: {count} cases passed", flush=True)
+    # Compare every vector conversion lane to the prior exact scalar IR,
+    # including signed extrema, exponent 255, denormals and all scales.
+    vec_address = engine.get_function_address("test_fixed4")
+    scalar_address = engine.get_function_address("test_fixed_scalar")
+    require(vec_address and scalar_address, "fixed-point test wrappers missing")
+    vector_fixed = ctypes.CFUNCTYPE(
+        None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32
+    )(vec_address)
+    scalar_fixed = ctypes.CFUNCTYPE(
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32
+    )(scalar_address)
+    fixed_count = 0
+    for fraction in (0, 4, 12, 15):
+        for to_float in (0, 1):
+            for trial in range(256):
+                values = (ctypes.c_uint32 * 4)(*(bits() for _ in range(4)))
+                output = (ctypes.c_uint32 * 4)()
+                vector_fixed(output, values, fraction, to_float)
+                expected = [scalar_fixed(x, fraction, to_float) for x in values]
+                require(list(output) == expected,
+                        f"fixed4 mismatch frac={fraction} to_float={to_float} input={list(values)}")
+                fixed_count += 4
+    print(f"VU0 fixed-point scalar differential: {fixed_count} lanes passed", flush=True)
 
 
 def main():
@@ -578,6 +631,25 @@ def main():
         require(result == EE_EXIT_DISPATCH and
                 vf_words(cpu, 2) == (0x7f800001, 0x7f800001, 0x7f800000, 0x7fffffff),
                 "direct VABS preserves raw mantissa")
+
+        def init_move(cpu, vu0):
+            set_vf(cpu, 1, (0x80000000, 0x01234567, 0xffffffff, 0x76543210))
+            set_vf(cpu, 2, (1, 2, 3, 4))
+            vu0.mac_flags = 0x1234
+            vu0.status_flags = 0x456
+
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmove_mask", init_move)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 2) == (0x80000000, 2, 0xffffffff, 4)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "masked VMOVE preserves disabled lanes and flags")
+        result, cpu, vu0, sync, _, keep = run_guest(
+            fixture, temp_dir, target, "ir_vmr32_alias", init_move)
+        require(result == EE_EXIT_DISPATCH and
+                vf_words(cpu, 1) == (0x01234567, 0xffffffff, 0x76543210, 0x80000000)
+                and vu0.mac_flags == 0x1234 and vu0.status_flags == 0x456,
+                "aliasing VMR32 uses the original four lanes")
 
         def init_mac(cpu, vu0):
             set_vf(cpu, 1, (0x7fffffff, 0, 0, 0))

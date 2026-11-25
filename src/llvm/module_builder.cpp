@@ -3547,7 +3547,7 @@ void module_builder::emit_function(const std::vector<ee::s_ee_instruction>& insn
         m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos ||
         m_out.find("call i32 @ee_vu0_ir_misc(") != std::string::npos)
     {
-        m_out += make_vu0_macro_ir();
+        append_vu0_macro_ir(m_out);
         m_out += k_vu_fmac_ir;
         m_out += k_vu_fmac4_ir;
         m_out += k_vu_q_status_ir;
@@ -5498,7 +5498,7 @@ void module_builder::emit_function_cfg(const ee::s_ee_function& fn,
         m_out.find("call i32 @ee_vu0_ir_q(") != std::string::npos ||
         m_out.find("call i32 @ee_vu0_ir_misc(") != std::string::npos)
     {
-        m_out += make_vu0_macro_ir();
+        append_vu0_macro_ir(m_out);
         m_out += k_vu_fmac_ir;
         m_out += k_vu_fmac4_ir;
         m_out += k_vu_q_status_ir;
