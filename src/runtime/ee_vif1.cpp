@@ -79,6 +79,7 @@ void c_ee_vif1::bind_path3(const c_ee_gif_path3* path3)
 
 void c_ee_vif1::reset()
 {
+    m_cmsar1.reset();
     cancel_deferred();
     const bool was_masked = m_machine.m_path3_masked;
     m_machine = {};
@@ -550,6 +551,13 @@ void c_ee_vif1::reject_packet(e_reject reason, uint32_t code)
 
 bool c_ee_vif1::prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc)
 {
+    // Concurrent VIF/DIRECT/MSCAL arbitration with a direct VU1 launch
+    // is not modeled yet. Do not replace an executing resident pipeline.
+    if (cmsar1_running())
+    {
+        reject_packet(e_reject::unsupported_vu_execution, m_machine.m_code);
+        return false;
+    }
     // Bound residual command words independently of aggregate DMA size.
     constexpr size_t k_max_pending_words =
         static_cast<size_t>(k_max_graphics_batch_qwc) * 4u + 0x40000u + 0x400u;
@@ -912,11 +920,13 @@ bool c_ee_vif1::control_vu_break_reset(uint32_t value)
     }
     if ((value & 0x200u) != 0u)
     {
+        m_cmsar1.reset();
         m_machine.m_vu_debug_stopped = false;
         m_machine.m_stat &= ~4u;
     }
     else if ((value & 0x100u) != 0u)
     {
+        m_cmsar1.reset();
         m_machine.m_vu_debug_stopped = true;
     }
     return true;
@@ -924,7 +934,7 @@ bool c_ee_vif1::control_vu_break_reset(uint32_t value)
 
 bool c_ee_vif1::run_cmsar1(uint32_t address)
 {
-    if (m_vu0 != nullptr || deferred_busy())
+    if (m_vu0 != nullptr || deferred_busy() || cmsar1_running())
     {
         return false;
     }
@@ -942,6 +952,52 @@ bool c_ee_vif1::run_cmsar1(uint32_t address)
         tx.m_rejection = e_reject::unsupported_vu_execution;
     }
     return publish(tx);
+}
+
+bool c_ee_vif1::start_cmsar1(uint32_t address)
+{
+    if (m_vu0 != nullptr || deferred_busy() || cmsar1_running())
+    {
+        return false;
+    }
+    m_cmsar1 = c_ee_vu1::begin_execution(m_machine.m_vu1->m_state,
+                                         (address & 0x7ffu) * 8u);
+    if (m_cmsar1 == nullptr)
+    {
+        return false;
+    }
+    m_machine.m_vu_debug_stopped = false;
+    return true;
+}
+
+e_ee_vu1_slice c_ee_vif1::service_cmsar1(uint32_t pair_budget)
+{
+    if (!cmsar1_running())
+    {
+        return e_ee_vu1_slice::completed;
+    }
+    // Stage one bounded slice, including PATH1 and resident effects.
+    // A rejected slice is not published; execution then fails closed.
+    s_transaction tx(*this);
+    tx.m_next = m_machine;
+    auto& next = tx.m_next;
+    const auto result = c_ee_vu1::run_slice(*m_cmsar1,
+        next.m_vu1->m_state, next.m_vu1->m_code, next.m_vu1->m_data,
+        next.m_top, next.m_itop, pair_budget, tx.m_path1, &tx.m_issue);
+    if (result == e_ee_vu1_slice::rejected)
+    {
+        tx.m_rejection = e_reject::unsupported_vu_execution;
+    }
+    if (!publish(tx))
+    {
+        m_cmsar1.reset();
+        return e_ee_vu1_slice::rejected;
+    }
+    if (result == e_ee_vu1_slice::completed)
+    {
+        m_cmsar1.reset();
+    }
+    return result;
 }
 
 bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
@@ -1181,7 +1237,7 @@ uint32_t c_ee_vif1::read_register(uint32_t offset) const
         (!m_machine.m_pending.empty() ?
             ((m_machine.m_stat & 0x400u) != 0u ? 2u : 1u) : 0u) | // VPS
         (m_machine.m_dbf ? 0x80u : 0u) |
-        (deferred_busy() ? 0x4u : 0u); // VEW: outstanding VU execution
+        ((deferred_busy() || cmsar1_running()) ? 0x4u : 0u); // VEW
     case 0x20u: return m_machine.m_err;
     case 0x30u: return m_machine.m_mark;
     case 0x40u: return m_machine.m_cycle;

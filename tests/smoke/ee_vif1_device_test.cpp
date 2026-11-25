@@ -898,6 +898,42 @@ int main()
         return 1;
     }
 
+    // A direct launch can legally have no E-bit yet. Keep running across
+    // bounded slices, then honor a later E-bit and its trailing pair.
+    {
+        ee::c_ee_vif1 direct{};
+        const ee::s_ee_u128 zero{};
+        const ee::s_ee_u128 end_pair{
+            (uint64_t{0x400002ffu} << 32u) | nop_lower,
+            (uint64_t{nop_upper} << 32u) | nop_lower};
+        if (!check(direct.start_cmsar1(0xffffu) &&
+                   direct.cmsar1_running() &&
+                   (direct.read_register(0x00u) & 4u) != 0u &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::pending &&
+                   direct.service_cmsar1(3u) == ee::e_ee_vu1_slice::pending &&
+                   direct.cmsar1_running(),
+                   "CMSAR1 no-E launch must survive bounded slices") ||
+            !check(!send(direct, {0u, 0u, 0u, 0u}) &&
+                   direct.cmsar1_running(),
+                   "direct launch rejected conflicting VIF DMA") ||
+            !check(ee::c_ee_vif1::mmio_write(&direct,
+                       ee::c_ee_vif1::k_vu1_code_base + 24u, 8u, &end_pair) &&
+                   ee::c_ee_vif1::mmio_write(&direct,
+                       ee::c_ee_vif1::k_vu1_code_base + 32u, 8u, &zero) &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::pending &&
+                   direct.service_cmsar1(1u) == ee::e_ee_vu1_slice::completed &&
+                   !direct.cmsar1_running() &&
+                   (direct.read_register(0x00u) & 4u) == 0u,
+                   "CMSAR1 preserves E-bit delay across slice boundary") ||
+            !check(direct.start_cmsar1(0u) &&
+                   direct.control_vu_break_reset(0x200u) &&
+                   !direct.cmsar1_running(),
+                   "VU1 FBRST reset stops direct launch"))
+        {
+            return 1;
+        }
+    }
+
     // Detached VU execution must not expose partial VIF state or GIF
     // output, even if the worker finishes before the controller polls.
     {

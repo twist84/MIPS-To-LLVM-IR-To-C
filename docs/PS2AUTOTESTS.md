@@ -988,3 +988,27 @@ slots and unbounded chains remain fail-closed. Added synthetic JIT
 regressions for four taken branches and mixed taken/not-taken conditions.
 The exact original COP1 transcript remains to be re-run; broader
 unpredictable branch-delay behavior is not claimed hardware-validated.
+
+### Confirmed 52/55 and direct CMSAR1 launch
+
+PR head `60f1f7b39734f3fb82879295fd911f2762542745`, tested merge
+`6e5a884e83ed26407fae4a0d93b23594a1d1f171`, [run 45654669440](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45654669440),
+[summary artifact 15042192323](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45654669440/artifacts/15042192323).
+All five workflows passed. **52/55 exact (94.55%)**: PASS 52, DIFF 1,
+INCOMPLETE 2, NO_OUTPUT 0, ERROR 0. EE branchdelay, FPU branchdelay and
+kernel intc_order all newly match. Outstanding cpu/ee_cop0/performance,
+cpu/vu0_macro/transfer and vu/lower/efu.
+
+CMSAR1 previously required a synchronous E-bit before returning to EE.
+Direct launch now starts a resident VU1 pipeline and advances bounded
+slices on the existing reached-EE-instruction compatibility budget.
+Preserve PC/NPC, VI branch history, flag/dependency/Q/P pipelines and
+E-bit delay state between slices. Commit resident and PATH1 effects per
+successful slice. Reflect VPU_STAT busy until a real E-bit completes or
+FBRST stops the launch. No special-casing zero code or original ELFs.
+Synchronous VIF/AOT runs retain their existing completion contract.
+Concurrent direct-launch/VIF DMA arbitration, long-run clock rollover,
+precise cycle budgets and second CMSAR1 wait remain fail-closed or
+approximate; this is not calibrated timing. New synthetic test covers
+address wrap, non-ending slices, E-bit across a boundary and FBRST.
+Original transfer transcript remains pending CI validation.

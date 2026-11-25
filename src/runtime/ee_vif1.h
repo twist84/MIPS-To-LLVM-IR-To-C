@@ -142,6 +142,9 @@ public:
     // Direct COP2 CMSAR1 launch, independent of VIF MSCAL bookkeeping.
     // The caller must first retire any outstanding VIF1 DMA transaction.
     bool run_cmsar1(uint32_t address);
+    bool start_cmsar1(uint32_t address);
+    bool cmsar1_running() const { return m_cmsar1 != nullptr; }
+    e_ee_vu1_slice service_cmsar1(uint32_t pair_budget);
     bool control_vu_break_reset(uint32_t value);
 
     uint32_t read_register(uint32_t offset) const;
@@ -279,6 +282,8 @@ private:
 
     s_ee_vu0_state* m_vu0 = nullptr;
     s_machine m_machine{};
+    // Direct COP2 launch owns the resident VU1 pipeline independently of DMA.
+    std::shared_ptr<s_ee_vu1_execution> m_cmsar1;
     // Host-only transaction storage. Never part of committed VIF state.
     std::vector<uint32_t> m_pending_scratch;
     std::vector<uint8_t> m_path1_scratch;

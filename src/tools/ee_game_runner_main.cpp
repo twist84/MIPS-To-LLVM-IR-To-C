@@ -639,7 +639,45 @@ struct s_runner_vu0_control
     ee::s_ee_vu0_scheduler m_scheduler{};
     uint64_t m_last_attempt = 0u;
     uint64_t m_next_attempt = 0u;
+    uint64_t m_cmsar1_last_attempt = 0u;
 };
+
+bool runner_service_cmsar1(s_runner_vu0_control& context, ee::s_ee_vu0_state& vu0)
+{
+    if (!context.m_vif1->cmsar1_running())
+    {
+        return true;
+    }
+    const uint64_t now = context.m_runtime->m_guest_instruction_attempts;
+    if (now < context.m_cmsar1_last_attempt)
+    {
+        return false;
+    }
+    // Use reached EE instructions as the existing approximate compatibility
+    // budget, not wall time or native dispatch count. Bound each host turn.
+    const uint32_t pairs = static_cast<uint32_t>(
+        std::min<uint64_t>(now - context.m_cmsar1_last_attempt, 4096u));
+    if (pairs == 0u)
+    {
+        return true;
+    }
+    const auto result = context.m_vif1->service_cmsar1(pairs);
+    context.m_cmsar1_last_attempt += pairs;
+    if (result == ee::e_ee_vu1_slice::rejected)
+    {
+        return false;
+    }
+    if (result == ee::e_ee_vu1_slice::completed)
+    {
+        vu0.m_vpu_status &= ~0x100u;
+    }
+    else
+    {
+        vu0.m_vpu_status |= 0x100u;
+    }
+    vu0.m_vi[29] = vu0.m_vpu_status;
+    return true;
+}
 
 uint32_t runner_vu0_execute(
     void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
@@ -680,12 +718,16 @@ uint32_t runner_vu0_sync(
     {
         return static_cast<uint32_t>(result::INVALID_ARGUMENT);
     }
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context != nullptr && !runner_service_cmsar1(*context, *vu0))
+    {
+        return static_cast<uint32_t>(result::FAILED);
+    }
     // Preserve the hot halted macro path used by retail code.
     if ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
     {
         return static_cast<uint32_t>(result::COMPLETE);
     }
-    auto* context = static_cast<s_runner_vu0_control*>(user);
     if (context == nullptr)
     {
         return static_cast<uint32_t>(result::UNAVAILABLE);
@@ -758,12 +800,15 @@ uint32_t runner_vu0_control(
         const auto pending = context->m_dmac->service_deferred_vif1(true);
         if (pending == ee::c_ee_dmac::e_deferred_vif1::rejected ||
             pending == ee::c_ee_dmac::e_deferred_vif1::pending ||
-            !context->m_vif1->run_cmsar1(value))
+            !context->m_vif1->start_cmsar1(value))
         {
             return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
         }
-        // The bounded synchronous VU1 engine completed the program.
-        vu0->m_vpu_status &= ~0xff00u;
+        // CMSAR1 accepts the launch, not completion. Subsequent EE
+        // execution advances the resident pipeline until a real E-bit.
+        context->m_cmsar1_last_attempt = context->m_runtime->m_guest_instruction_attempts;
+        vu0->m_vpu_status = (vu0->m_vpu_status & ~0xff00u) | 0x100u;
+        vu0->m_vi[29] = vu0->m_vpu_status;
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE);
     }
     if (register_index != 28u)
@@ -3862,6 +3907,13 @@ int main(int argc, char** argv)
     {
         ee::ee_cop0_clock_sync(&cpu, &runtime);
         ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::device_service);
+        if (vif1.cmsar1_running() &&
+            reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
+            !runner_service_cmsar1(vu0_control, vu0))
+        {
+            std::fprintf(stderr, "VU1 CMSAR1 slice rejected\n");
+            return e_device_service::failed;
+        }
         if (vu0.m_running != 0u &&
             reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED) &&
             runtime.m_guest_instruction_attempts >= vu0_control.m_next_attempt)

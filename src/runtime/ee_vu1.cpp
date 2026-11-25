@@ -979,6 +979,47 @@ bool c_ee_vu1::efu(const std::array<uint32_t, 4>& source, uint32_t index,
     return component < 4u && efu_result(source, index, component, value, latency);
 }
 
+struct s_ee_vu1_execution
+{
+    explicit s_ee_vu1_execution(const s_ee_vu1_state& state, uint32_t address)
+        : m_pc(address & 0x3ff8u), m_npc((m_pc + 8u) & 0x3fffu),
+          m_previous_vi(state.m_vi)
+    {
+        m_pipe.start(state);
+    }
+
+    uint32_t m_pc;
+    uint32_t m_npc;
+    std::array<uint16_t, 16> m_previous_vi;
+    bool m_previous_lower = false;
+    bool m_ending = false;
+    int32_t m_fsset = -1;
+    s_flag_pipe m_pipe{};
+    s_ee_vu1_dependency m_dependencies{};
+};
+
+static void initialize_vu1(s_ee_vu1_state& state)
+{
+    if (!state.m_initialized)
+    {
+        state = {};
+        state.m_vf[0][3] = 0x3f800000u;
+        state.m_initialized = true;
+    }
+}
+
+std::shared_ptr<s_ee_vu1_execution> c_ee_vu1::begin_execution(
+    s_ee_vu1_state& state, uint32_t address)
+{
+    if ((address & 7u) != 0u)
+    {
+        return {};
+    }
+    initialize_vu1(state);
+    state.m_tpc = address & 0x3ff8u;
+    return std::make_shared<s_ee_vu1_execution>(state, address);
+}
+
 bool c_ee_vu1::run(
     s_ee_vu1_state& state,
     std::array<uint8_t, k_memory_size>& code,
@@ -992,12 +1033,7 @@ bool c_ee_vu1::run(
     }
     *issue = {};
     c_runtime_profile_scope profile_scope(e_runtime_profile_id::vu1_run, 0u, &issue->m_steps);
-    if (!state.m_initialized)
-    {
-        state = {};
-        state.m_vf[0][3] = 0x3f800000u;
-        state.m_initialized = true;
-    }
+    initialize_vu1(state);
 
     if (g_vu1_aot != nullptr)
     {
@@ -1007,20 +1043,38 @@ bool c_ee_vu1::run(
             return true;
         }
     }
-    uint32_t pc = address & 0x3ff8u;
-    uint32_t npc = (pc + 8u) & 0x3fffu;
-    std::array<uint16_t, 16> previous_vi = state.m_vi;
-    bool previous_lower = false;
-    bool ending = false;
-    int32_t fsset = -1;
-    s_flag_pipe pipe{};
-    s_ee_vu1_dependency dependencies{};
-    // This bounded host-only cache survives MSCAL/MSCNT calls. Each
-    // lookup checks the current staged microinstruction's exact bits.
-    static thread_local c_ee_vu1_decode_cache decode_cache;
-    pipe.start(state);
+    s_ee_vu1_execution execution(state, address);
+    return run_slice(execution, state, code, data, top, itop,
+                     k_max_steps, path1_bytes, issue) ==
+        e_ee_vu1_slice::completed;
+}
 
-    for (uint32_t step = 0u; step < k_max_steps; ++step)
+e_ee_vu1_slice c_ee_vu1::run_slice(
+    s_ee_vu1_execution& execution, s_ee_vu1_state& state,
+    std::array<uint8_t, k_memory_size>& code,
+    std::array<uint8_t, k_memory_size>& data,
+    uint32_t top, uint32_t itop, uint32_t pair_budget,
+    std::vector<uint8_t>& path1_bytes, s_ee_vu1_issue* issue)
+{
+    if (issue == nullptr || pair_budget == 0u || pair_budget > k_max_steps ||
+        execution.m_pipe.now() > 0x7f000000u)
+    {
+        return e_ee_vu1_slice::rejected;
+    }
+    *issue = {};
+    auto& pc = execution.m_pc;
+    auto& npc = execution.m_npc;
+    auto& previous_vi = execution.m_previous_vi;
+    auto& previous_lower = execution.m_previous_lower;
+    auto& ending = execution.m_ending;
+    auto& fsset = execution.m_fsset;
+    auto& pipe = execution.m_pipe;
+    auto& dependencies = execution.m_dependencies;
+    const uint32_t slice_start = pipe.now();
+    // The decode cache remains thread-local and checks the exact words.
+    static thread_local c_ee_vu1_decode_cache decode_cache;
+
+    for (uint32_t step = 0u; step < pair_budget; ++step)
     {
         const uint32_t lo = read32(code.data() + pc);
         const uint32_t hi = read32(code.data() + pc + 4u);
@@ -1032,7 +1086,7 @@ bool c_ee_vu1::run(
         // D/T debug interrupts require guest-visible delivery, not NOPs.
         if ((hi & 0x18000000u) != 0u)
         {
-            return false;
+            return e_ee_vu1_slice::rejected;
         }
 
         ++pipe.m_t;
@@ -1047,7 +1101,7 @@ bool c_ee_vu1::run(
         s_upper_write pending{};
         if (!upper(state, hi, pending))
         {
-            return false;
+            return e_ee_vu1_slice::rejected;
         }
 
         const auto before = state.m_vi;
@@ -1067,7 +1121,7 @@ bool c_ee_vu1::run(
                        previous_lower ? previous_vi : state.m_vi,
                        path1_bytes, target, branched, pipe, fsset, *issue))
             {
-                return false;
+                return e_ee_vu1_slice::rejected;
             }
             if (branched)
             {
@@ -1119,21 +1173,22 @@ bool c_ee_vu1::run(
         previous_vi = before;
         previous_lower = (hi & 0x80000000u) == 0u &&
             !branch_delay_exempt(lo);
-        issue->m_cycles = pipe.now() - 16u;
+        issue->m_cycles = pipe.now() - slice_start;
 
         if (ending)
         {
             pipe.wait_q(state);
             pipe.wait_p(state);
-            issue->m_cycles = pipe.now() - 16u;
+            issue->m_cycles = pipe.now() - slice_start;
             state.m_tpc = pc;
-            return true;
+            return e_ee_vu1_slice::completed;
         }
         if ((hi & 0x40000000u) != 0u)
         {
             ending = true; // E-bit takes effect AFTER the delay-slot pair.
         }
     }
-    return false; // Real E-bit never reached within bounded execution.
+    state.m_tpc = pc;
+    return e_ee_vu1_slice::pending; // Keep branch, flag, Q/P and E-bit state.
 }
 } // namespace ee
