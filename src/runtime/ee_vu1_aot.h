@@ -9,7 +9,7 @@
 namespace ee
 {
 // ABI changes invalidate native VU1 libraries, never the EE IR cache.
-inline constexpr uint32_t k_vu1_aot_abi = 19u; // Rebuild captured libraries for reader-driven flag history.
+inline constexpr uint32_t k_vu1_aot_abi = 20u; // Rebuild captured libraries for full-width VU memory transfers.
 using t_vu1_aot_kick = uint32_t (*)(void*, uint32_t);
 using t_vu1_aot_efu = uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
 using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,

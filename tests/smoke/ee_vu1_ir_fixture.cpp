@@ -165,6 +165,15 @@ int main(int argc, char** argv)
             append(special(0x35u, 1u, 2u, 15u), k_upper);
             append(special(0x37u, 1u, 3u, 5u), k_upper);
             append(special(0x35u, 0u, 0u, 15u), k_upper);
+            // Full SQ at the last quadword must read the old VF2
+            // before same-pair upper writeback. Full LQ to VF2 then
+            // observes the stored quadword, except for upper X writeback.
+            append((1u << 25u) | (15u << 21u) | (2u << 11u) | 0x7ffu,
+                upper(0x28u, 2u, 2u, 3u, 15u));
+            append((15u << 21u) | (2u << 16u) | 0x7ffu,
+                upper(0x28u, 2u, 2u, 3u, 8u));
+            append((15u << 21u) | (20u << 16u) | 0x7ffu, k_upper);
+            append((15u << 21u) | 0x7ffu, k_upper); // VF0 remains constant
             append(special(0x37u, 0u, 3u, 8u), k_upper);
             append((5u << 25u) | (9u << 21u) | (1u << 16u) |
                 0x7ffu, k_upper); // ISW zero-extends 0xfffe

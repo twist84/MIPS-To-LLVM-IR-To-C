@@ -1113,6 +1113,16 @@ private:
 
     void store_vector(uint32_t source, uint32_t mask, const std::string& address)
     {
+        if (mask == 15u)
+        {
+            // VU data addresses wrap in quadwords, not individual lanes.
+            // VF and VU data are disjoint buffers in the native ABI.
+            const auto value = vf_vector(source);
+            line("store <4 x i32> " + value + ", ptr " +
+                data_pointer(address, 0u) + ", align 1");
+            m_writes_data = true;
+            return;
+        }
         for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
             if ((mask & (8u >> lane)) != 0u)
@@ -1152,6 +1162,16 @@ private:
 
     void load_vector(uint32_t target, uint32_t mask, const std::string& address)
     {
+        if (target != 0u && mask == 15u)
+        {
+            // A full quadword is contiguous even at the last wrapped
+            // address (0x3ff0). Do not assume host data alignment.
+            const auto value = operation("load <4 x i32>, ptr " +
+                data_pointer(address, 0u) + ", align 1");
+            line("store <4 x i32> " + value + ", ptr " +
+                vf_pointer(target, 0u) + ", align 4");
+            return;
+        }
         std::array<std::string, 4> values{};
         if (target != 0u)
         {

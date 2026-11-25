@@ -198,6 +198,13 @@ def main():
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
             ir = path.read_text(encoding="utf-8")
+            if case == "stores":
+                # The full-width memory path must be explicit in the
+                # emitted IR, not dependent on backend scalar combining.
+                assert any("load <4 x i32>, ptr " in line and line.endswith(", align 1")
+                           for line in ir.splitlines())
+                assert any("store <4 x i32> " in line and line.endswith(", align 1")
+                           for line in ir.splitlines())
             if case == "acc":
                 verify_fmac(ir)
                 verify_minmax(ir)
