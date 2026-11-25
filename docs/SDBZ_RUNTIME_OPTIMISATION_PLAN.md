@@ -243,3 +243,31 @@ This reduces outer-runner profiling overhead, not the instruction
 execution inside the measured native scope. Measure with PC profiling
 still enabled; do not claim a reduction in EE native exclusive time
 from this change alone. No EE/VU1 cache regeneration required.
+
+## Batch 7: avoid repeated GS worker image discovery
+
+All four CI workflows passed for Batch 6 (`69804d3`). The 11:23
+replay's runner profile recorded 977.002 ms GIF consume exclusive,
+1209.749 ms GS transaction exclusive, 1593.706 ms WebGPU submit CPU
+and 1270.590 ms present CPU. The asynchronous GS observer completed
+6915 batches (55,772,996 events / 1,784,735,872 event bytes and
+1,752,776,640 image bytes); submit preparation/copy was 664.620 ms,
+worker execution 1631.513 ms, fence 222.558 ms, no backpressure.
+These worker statistics are not additive to exclusive runner totals.
+
+During existing IMAGE preflight validation, retain up to 128 nonempty
+IMAGE event indices in a bounded stack list. The owned event array
+is still copied in full; then compact only the recorded IMAGE payloads
+in their original order. A dense batch above the index capacity uses
+the original full scan. No-image batches avoid the second scan entirely.
+All original validation, byte limits, event offsets, failure propagation,
+fences, publication and copy ownership remain unchanged. Test zero,
+sparse, exactly 128 and 129 nonempty images, interleaved registers,
+zero-QWC image events, out-of-order source offsets and exact byte counts.
+
+No guest lowering or VU1 provenance changes. Host runtime provenance
+may require the normal native relink, not IR regeneration. This is a
+candidate host CPU improvement, not a measured GPU speedup. Batch 7
+completes the current optimisation pass; run a combined warmed-cache
+P40 replay to measure Batches 3–7 and collect Batch 5 callback evidence
+before claiming retail validation.
