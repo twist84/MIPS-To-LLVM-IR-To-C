@@ -1380,6 +1380,8 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         return 0u;
     }
     constexpr uint32_t block_length = 28u << 12u;
+    const uint32_t sample_remainder = sample_phase();
+    const uint32_t next_sample = k_cycles_per_sample - sample_remainder;
     uint32_t earliest = 0u;
     for (const s_core& core : m_cores)
     {
@@ -1387,16 +1389,17 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         {
             continue;
         }
-        for (uint32_t index = 0u; index < 24u; ++index)
+        const uint32_t pmon = static_cast<uint32_t>(core.m_registers[0x180u / 2u]) |
+            (static_cast<uint32_t>(core.m_registers[0x182u / 2u]) << 16u);
+        for (uint32_t index = 0u, active = core.m_key_mask & 0x00ffffffu;
+            active != 0u; ++index, active >>= 1u)
         {
-            if ((core.m_key_mask & (1u << index)) == 0u)
+            if ((active & 1u) == 0u)
             {
                 continue;
             }
             const s_voice& voice = core.m_voices[index];
             uint32_t samples = 0u;
-            const uint32_t pmon = static_cast<uint32_t>(core.m_registers[0x180u / 2u]) |
-                (static_cast<uint32_t>(core.m_registers[0x182u / 2u]) << 16u);
             if (voice.m_pending || (index != 0u && (pmon & (1u << index)) != 0u))
             {
                 // Modulation may alter the next sample's cursor step.
@@ -1411,9 +1414,16 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
                     samples = (block_length - voice.m_position + pitch - 1u) / pitch;
                 }
             }
+            // Every candidate below (including effect taps and mixer
+            // rings) is evaluated at a sample boundary. Nothing can
+            // shorten a deadline already at the very next sample.
+            if (samples == 1u)
+            {
+                return next_sample;
+            }
             if (samples != 0u)
             {
-                const uint32_t cycles = samples * k_cycles_per_sample - sample_phase();
+                const uint32_t cycles = samples * k_cycles_per_sample - sample_remainder;
                 if (earliest == 0u || cycles < earliest)
                 {
                     earliest = cycles;
@@ -1438,7 +1448,7 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
             if (distance < state.m_input_count)
             {
                 const uint32_t cycles = (distance + 1u) * k_cycles_per_sample -
-                    sample_phase();
+                    sample_remainder;
                 if (earliest == 0u || cycles < earliest)
                 {
                     earliest = cycles;
@@ -1463,7 +1473,7 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         const uint32_t distance = (target + k_input_frames - next_tick) %
             k_input_frames;
         const uint32_t cycles = (next_tick - phase + distance) *
-            k_cycles_per_sample - sample_phase();
+            k_cycles_per_sample - sample_remainder;
         if (earliest == 0u || cycles < earliest)
         {
             earliest = cycles;
