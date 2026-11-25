@@ -4771,9 +4771,11 @@ def main():
             clocks = []
             for enabled in ("0", "1"):
                 report = root / f"batch-{enabled}.json"
+                replay = command if enabled == "0" else [
+                    arg for arg in command if not arg.startswith("--extra-functions=")
+                ] + ["--no-recompile"]
                 run = subprocess.run(
-                    command + (["--no-recompile"] if enabled == "1" else []) +
-                    ["--report", str(report)],
+                    replay + ["--report", str(report)],
                     capture_output=True, text=True, check=False, timeout=40,
                     env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
                              SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="0"),
