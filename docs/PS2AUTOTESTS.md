@@ -62,3 +62,18 @@ to activate the existing HLE IOP bootstrap with installed SIF services.
 No invented flag, modified executable or bypassed startup. Bound repeated
 zero SMFLAG polls at 1024; optional --trace enables detailed diagnostics.
 The original pilot's 0/3 is not a measured arithmetic discrepancy.
+
+## Relocated kernel callback branch-likely support
+
+MUL/DIV's original SDK installs a RAM syscall handler at 0x80075000
+through SetSyscall; the actual callback stopped on BNEL at 0x80075024.
+Implement BEQL/BNEL, BLEZL/BGTZL and non-link REGIMM BLTZL/BGEZL in the
+bounded RAM callback interpreter. Taken branches execute the delay
+instruction; false branches annul it without consuming the actual
+instruction budget, and emit a separate reference-slot observation
+consistent with the native LLVM path. Tests cover all six predicates,
+both directions and suppression of an unsupported annulled opcode.
+No guest ELF changes or unknown syscall bypasses. Runtime provenance
+may require a native relink; no IR or VU1 lowering changed. Pilot 2
+will execute the original three ELFs with the corrected IOP mount and
+RAM callback path; the score is not yet known.
