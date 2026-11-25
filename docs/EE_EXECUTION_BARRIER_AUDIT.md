@@ -251,6 +251,48 @@ enabling chaining. The synthetic native coalescing replay requires
 a positive matched bound and zero mismatches; smoke tests reject
 unsafe operations and equal deadlines. All changes are host-side.
 
+## Native owner and linked IR certificate (P3 groundwork)
+
+The optional `ee_game_resolve_owner` library export validates the
+exact nonzero guest PC and callable pointer against the dispatch
+table's original first-owner index. Both chunked/full and plain
+data-dispatch overlay libraries expose it. A null/unknown target,
+incorrect pointer, legacy module without the export, or sentinel
+PC zero cannot certify an owner. Replacements refresh the exports
+and clear overlay identity alongside native target invalidation.
+
+`SDBZ_NATIVE_ALU_CERTIFICATES=1` enables certificate extraction at
+link time. It reads the IR for each native object only when its SHA256
+matches the verified object manifest. A narrow parser requires the
+canonical entry PC switch and one unguarded straight-line LLVM block
+with only exact instruction-count calls, integer ALU, and GPR/PC/exit
+state accesses. The block must return normally, with 2..32 contiguous
+guest instruction records ending in a JAL/JR/JALR and delay slot.
+It rejects unknown IR, helper calls, branches, invalid CPU fields,
+unavailable/mismatched IR, duplicate native owner VAs and entry aliases.
+This relies on the existing verified emitter/object provenance, not
+on treating arbitrary untrusted IR as safe.
+
+The linked library optionally exports `ee_game_alu_words`, returning
+the embedded exact opcode sequence only for the correct first owner
+and callable target. The runner additionally checks the source-level
+opcode whitelist, strict deadline, source words and native execution
+observations. `alu_owner_known` / `alu_owner_matched` record loaded-owner
+coverage; `alu_certified` / `alu_certified_matched` are narrower subsets.
+These remain shadow-only; no host service or native boundary is skipped.
+The instruction counter helper can invoke a timing observer or append
+trace data, so the future live path must separately guard diagnostic
+observers and all host continuations.
+
+Certificate mode and script are host-link inputs, not guest lowering
+inputs. Enabling it needs a DLL relink, not new EE IR/object emission.
+Missing certificate export or absent per-entry certificate falls back
+to ordinary dispatch. The parser intentionally rejects many legal
+native paths (including multi-block CFGs and guarded loop headers);
+false negatives are acceptable. CI tests exercise source/IR digest
+mismatch, malformed/unsafe IR, first-owner overlap, stale pointers,
+cache provenance split, and a real native synthetic certified exit.
+
 ## Remaining activation gates (not implemented)
 
 
