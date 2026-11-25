@@ -1021,13 +1021,14 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 }
 
 bool c_ee_vif1::enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend,
-    bool detailed_profile)
+    bool detailed_profile, bool native_overlap_profile)
 {
     if (m_vu0 != nullptr || m_worker != nullptr)
     {
         return false;
     }
     m_worker = std::make_unique<c_ee_vu1_worker>(std::move(backend), detailed_profile);
+    m_native_overlap_profile = native_overlap_profile;
     return true;
 }
 
@@ -1193,7 +1194,7 @@ void c_ee_vif1::write_worker_json(FILE* output) const
 {
     const auto& p = m_worker_profile;
     std::fprintf(output,
-        "{\"enabled\":%s,\"pending\":%s,"
+        "{\"enabled\":%s,\"pending\":%s,\"native_overlap_profile\":%s,"
         "\"submitted_jobs\":%llu,\"collected_jobs\":%llu,"
         "\"rejected_jobs\":%llu,\"discarded_jobs\":%llu,\"host_failures\":%llu,"
         "\"attempted_pairs\":%llu,\"worker_execution_ns\":%llu,"
@@ -1207,6 +1208,7 @@ void c_ee_vif1::write_worker_json(FILE* output) const
         "\"ee_native_completed_at_exit\":%llu}",
         m_worker != nullptr ? "true" : "false",
         m_deferred != nullptr ? "true" : "false",
+        m_native_overlap_profile ? "true" : "false",
         static_cast<unsigned long long>(p.m_submitted),
         static_cast<unsigned long long>(p.m_collected),
         static_cast<unsigned long long>(p.m_rejected),
