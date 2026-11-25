@@ -410,6 +410,36 @@ clock coverage with exact sample phase, mixed frames and IRQ state.
 These are host-only changes, independent of EE IR generation.
 No measured wall-time improvement claimed.
 
+## IOP host hot paths and exact checkpoint comparison
+
+All five workflows passed at db9f4f42, including ordinary DMA4/DMA7
+overlap, cancellation, rearm and the AutoDMA idle barrier. The mode-zero
+Timer5 fast path now uses unit-rate unsigned wrap for advancement and
+the same rollover deadline, with all prescaled/compare modes left on the
+existing path. Directed tests cover wrap, target writes while disabled,
+prescaler remainder, mode reset and compare IRQ delivery. The shared
+ownership check for coalescing and quiet service is evaluated once per
+physical turn and never reused across hardware advance or RPC pump.
+
+`SDBZ_IOP_CHECKPOINT_TRACE=1` emits a deterministic stderr line after
+each scheduled IOP checkpoint. It records EE/IOP timestamps, logical
+turns, cumulative executed IOP instructions, debt/next deadline, masked
+and raw IOP IRQ state, Timer5 count/mode/target/remainder/armed state,
+ordinary DMA deadlines, AutoDMA/CDVD activity, SPU2 clocks and frames,
+EE DMA/INTC, SIF flags and RPC pending state. It uses passive reads:
+in particular, I_CTRL and Timer5 MODE are not read through guest MMIO.
+A directed test verifies that masked and read-clear latches survive
+the diagnostic. The bounded synthetic native fixture compares the
+complete checkpoint lines and final architectural state for all four
+combinations of quiet service and coalescing.
+
+This is a checkpoint comparison, not a complete ordered event trace;
+two different intermediate event orders can still yield the same
+snapshot. It does not authorize cross-native deferral or chaining.
+Tracing is disabled by default and should not be enabled in performance
+benchmarks. No EE guest lowering or runtime ABI changes. Final CI
+and matched retail wall time remain unverified.
+
 ## Remaining activation gates (not implemented)
 
 
