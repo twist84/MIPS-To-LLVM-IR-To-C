@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 namespace
@@ -156,6 +157,75 @@ int main()
                 iop::c_spu2::k_cycles_per_sample - 1u)
         {
             return fail("IOP lookahead SPU2 sample phase");
+        }
+    }
+
+    // Before a known event, combining complete idle service turns must
+    // leave device clocks, software events and guest-visible state equal.
+    // The event itself is serviced with the original cadence.
+    {
+        auto baseline = std::make_unique<iop::c_kernel>();
+        auto combined = std::make_unique<iop::c_kernel>();
+        uint32_t baseline_callbacks = 0u;
+        uint32_t combined_callbacks = 0u;
+        const auto configure = [](iop::c_kernel& kernel, uint32_t& callbacks)
+        {
+            auto& hw = kernel.hardware();
+            return hw.write(iop::c_hw::k_timer5_mode, 4u, 0x2058u) &&
+                hw.write(iop::c_hw::k_timer5_target, 4u, 10000u) &&
+                hw.write(iop::c_spu2::k_base + 0x19au, 2u, 0u) &&
+                kernel.schedule_hle_event(600u, [&callbacks]() { ++callbacks; });
+        };
+        if (!configure(*baseline, baseline_callbacks) ||
+            !configure(*combined, combined_callbacks))
+        {
+            return fail("IOP combined idle configuration");
+        }
+        (void)baseline->run(1u, 128u);
+        (void)combined->run(1u, 128u);
+        const auto equal = [&]()
+        {
+            auto& left = baseline->hardware();
+            auto& right = combined->hardware();
+            uint32_t left_count = 0u;
+            uint32_t right_count = 0u;
+            return left.read(iop::c_hw::k_timer5_count, 4u, &left_count) &&
+                right.read(iop::c_hw::k_timer5_count, 4u, &right_count) &&
+                left_count == right_count &&
+                baseline->cycles() == combined->cycles() &&
+                baseline->idle_event_cycles_remaining() ==
+                    combined->idle_event_cycles_remaining() &&
+                left.pending_interrupts() == right.pending_interrupts() &&
+                left.spu2().clock_cycles() == right.spu2().clock_cycles() &&
+                left.spu2().elapsed_samples() == right.spu2().elapsed_samples() &&
+                baseline_callbacks == combined_callbacks;
+        };
+        if (combined->idle_event_cycles_remaining() != 599u)
+        {
+            return fail("IOP combined idle initial event");
+        }
+        const auto first = baseline->run(256u, 128u);
+        const auto second = baseline->run(256u, 128u);
+        const auto batch = combined->run(512u, 128u);
+        if (first.m_executed != 0u || second.m_executed != 0u ||
+            batch.m_executed != 0u || batch.m_stop != second.m_stop ||
+            !equal() || baseline_callbacks != 0u)
+        {
+            return fail("IOP combined idle before HLE and SPU2 events");
+        }
+        (void)baseline->run(87u, 128u);
+        (void)combined->run(87u, 128u);
+        if (!equal() || baseline_callbacks != 0u ||
+            combined->idle_event_cycles_remaining() != 0u)
+        {
+            return fail("IOP combined idle reached exact HLE boundary");
+        }
+        (void)baseline->run(168u, 128u);
+        (void)combined->run(168u, 128u);
+        if (!equal() || baseline_callbacks != 1u ||
+            combined->hardware().spu2().elapsed_samples() != 1u)
+        {
+            return fail("IOP combined idle subsequent event delivery");
         }
     }
 
