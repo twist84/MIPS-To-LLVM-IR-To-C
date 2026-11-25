@@ -1713,12 +1713,16 @@ def make_iop_idle_batch_elf(path):
         0x29012000,  # slti at,t0,8192
         0x1420fffd,  # bne at,zero,loop
         0x00000000,  # delay slot
-        0x0c04000c,  # jal 0x00100030
+        0x3c091000,  # lui t1,0x1000
+        0x3529c000,  # ori t1,t1,0xc000
+        0x240a0184,  # addiu t2,zero,0x184: arm HLE SIF0
+        0xad2a0000,  # sw t2,0(t1)
+        0x0c04000e,  # jal 0x00100038
         0x00000000,
         0x0000000d,  # break
     )
     struct.pack_into(f"<{len(words)}I", image, 0x108, *words)
-    struct.pack_into("<II", image, 0x130, 0x03e00008, 0)
+    struct.pack_into("<II", image, 0x138, 0x03e00008, 0)
     path.write_bytes(image)
 
 
@@ -4715,6 +4719,12 @@ def main():
             total_samples = sum(int(row["samples"]) for row in counts)
             assert total_samples > 0, lines
             assert int(horizon["clock_barriers"]) <= total_samples, lines
+            assert (0 <= int(horizon["dmac_passive_sif0"]) <=
+                    int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), lines
+            assert int(horizon["dmac_str7"]) == 0, lines
+            for key in ("entry_callback", "entry_idle", "entry_irq", "entry_vu",
+                        "entry_other", *(f"dmac_str{i}" for i in range(10))):
+                assert 0 <= int(horizon[key]) <= total_samples, lines
             assert 0 <= int(horizon["vu_callback_boundaries"]) <= total_samples, lines
             assert 0 <= int(horizon["cop0_changed_boundaries"]) <= total_samples, lines
             assert all(int(row["samples"]) == int(row["before"]) + int(row["reached"])
@@ -4762,7 +4772,7 @@ def main():
                 sys.executable, str(source / "tools" / "run_game.py"),
                 str(elf), "--build-dir", str(build),
                 "--work-dir", str(root / "out"),
-                "--functions=entry", "--extra-functions=0x00100030",
+                "--functions=entry", "--extra-functions=0x00100038",
                 "--max-dispatches=16", "--loop-budget=10000",
                 "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
                 "--disc-folder", str(disc), "--timeout-seconds=10",
@@ -4778,13 +4788,20 @@ def main():
                     replay + ["--report", str(report)],
                     capture_output=True, text=True, check=False, timeout=40,
                     env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
-                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="0"),
+                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1"),
                 )
                 assert run.returncode == 3, run.stdout + run.stderr
                 state = json.loads(report.read_text(encoding="utf-8"))
                 assert state["exit_name"] == "EXCEPTION", state
                 assert state["gpr_lo"][8] == 8192, state
                 states.append(state)
+                horizon_line = next(line for line in run.stderr.splitlines()
+                                    if line.startswith("EE horizon: shadow_only="))
+                horizon = dict(token.split("=") for token in horizon_line.split()[2:])
+                assert int(horizon["dmac_passive_sif0"]) > 0, horizon_line
+                assert (int(horizon["dmac_passive_sif0"]) <=
+                        int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), horizon_line
+                assert int(horizon["dmac_started_barriers"]) == 0, horizon_line
                 clock = [line for line in run.stdout.splitlines()
                          if line.startswith("IOP SPU2 clock:")]
                 assert len(clock) == 1, run.stdout
