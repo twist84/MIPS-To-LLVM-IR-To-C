@@ -96,7 +96,10 @@ class VU0State(ctypes.Structure):
         ("q_ready_cycle", ctypes.c_uint64),
         ("q_pending_bits", ctypes.c_uint32),
         ("q_pending", ctypes.c_uint32),
-        ("_tail_padding", ctypes.c_uint64),
+        ("clip_issues", ctypes.c_uint64 * 8),
+        ("upper_fmac_issues", ctypes.c_uint64 * 12),
+        ("q_pending_flags", ctypes.c_uint32),
+        ("_tail_padding", ctypes.c_uint32),
     ]
 
 
@@ -115,7 +118,10 @@ assert VU0State.vi_backup_register.offset == 8528
 assert VU0State.vi_backup_old_value.offset == 8532
 assert VU0State.acc_overflow_mask.offset == 8612
 assert VU0State.q_ready_cycle.offset == 8616
-assert ctypes.sizeof(VU0State) == 8640
+assert VU0State.clip_issues.offset == 8632
+assert VU0State.upper_fmac_issues.offset == 8696
+assert VU0State.q_pending_flags.offset == 8792
+assert ctypes.sizeof(VU0State) == 8800
 
 
 class Runtime(ctypes.Structure):
@@ -799,8 +805,10 @@ def main():
         result, cpu, vu0, sync, control, keep = run_guest(
             fixture, temp_dir, target, "ctc2_fbrst", init_fbrst
         )
-        require(vu0.vi[28] == 0x00000c0c,
-                "CTC2 FBRST must store only mask 0x0c0c")
+        require(vu0.vi[28] == 0x00000c00 and vu0.fbrst == 0x00000c00,
+                "CTC2 FBRST VU0 reset clears its debug enables only")
+        require((vu0.vpu_status & 0xff) == 0 and vu0.running == 0,
+                "CTC2 FBRST VU0 reset exits debug stop")
         require(control["calls"] == [(28, 0x00000c0f, ENTRY_PC)],
                 "CTC2 FBRST must forward action bits and guest PC")
         check_sync(sync, 0, ENTRY_PC, "CTC2 FBRST")
