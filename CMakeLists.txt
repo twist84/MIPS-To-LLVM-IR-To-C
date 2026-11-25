@@ -394,6 +394,11 @@ add_executable(ee_pcm_queue_test tests/smoke/ee_pcm_queue_test.cpp)
 target_link_libraries(ee_pcm_queue_test PRIVATE Threads::Threads)
 add_test(NAME ee_pcm_queue COMMAND ee_pcm_queue_test)
 
+add_executable(ee_frame_pacer_test tests/smoke/ee_frame_pacer_test.cpp)
+target_include_directories(ee_frame_pacer_test PRIVATE ${CMAKE_SOURCE_DIR}/src/tools)
+target_link_libraries(ee_frame_pacer_test PRIVATE Threads::Threads)
+add_test(NAME ee_frame_pacer COMMAND ee_frame_pacer_test)
+
 # Original native WebGPU compute renderer, extracted from ps2-web-recomp:SDBZ.
 # No Emscripten, browser host, game code, or SDL; headless builds unchanged.
 option(EE_ENABLE_WEBGPU "Enable native wgpu-native GS rendering" OFF)

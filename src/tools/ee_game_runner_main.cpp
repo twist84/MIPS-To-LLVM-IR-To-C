@@ -33,6 +33,7 @@
 #ifdef EE_ENABLE_RAYLIB_WINDOW
 #include "ee_raylib_window.h"
 #include "ee_window_pump_gate.h"
+#include "ee_frame_pacer.h"
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
@@ -3633,6 +3634,7 @@ int main(int argc, char** argv)
         std::printf("GS host window pump stride: %u (all observed field advances serviced)\n",
             window_pump_stride);
     }
+    ee::c_ee_frame_pacer frame_pacer(gs_webgpu_window && speed_percent != 0u);
     uint64_t paced_field = 0u;
     uint64_t pace_cycle = 0u;
     uint64_t sample_cycle = 0u;
@@ -3777,7 +3779,7 @@ int main(int argc, char** argv)
                     {
                         {
                             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::frame_pacing_sleep);
-                            std::this_thread::sleep_until(target);
+                            frame_pacer.wait_until(target);
                         }
                         now = t_clock::now();
                     }
@@ -8751,6 +8753,22 @@ int main(int argc, char** argv)
     }
     graphics_probe.set_gpu_progress(
         webgpu_bridge.active(), webgpu_bridge.rendered_primitives());
+#endif
+#ifdef EE_ENABLE_RAYLIB_WINDOW
+    if (gs_webgpu_window && speed_percent != 0u)
+    {
+        std::printf("EE frame pacer: calls=%llu high_res_calls=%llu fallback_calls=%llu "
+            "timer_failures=%llu requested_ns=%llu waited_ns=%llu "
+            "overshoot_ns=%llu max_overshoot_ns=%llu\n",
+            static_cast<unsigned long long>(frame_pacer.calls()),
+            static_cast<unsigned long long>(frame_pacer.high_res_calls()),
+            static_cast<unsigned long long>(frame_pacer.fallback_calls()),
+            static_cast<unsigned long long>(frame_pacer.timer_failures()),
+            static_cast<unsigned long long>(frame_pacer.requested_ns()),
+            static_cast<unsigned long long>(frame_pacer.waited_ns()),
+            static_cast<unsigned long long>(frame_pacer.overshoot_ns()),
+            static_cast<unsigned long long>(frame_pacer.max_overshoot_ns()));
+    }
 #endif
     host_audio.shutdown();
     host_audio.report();
