@@ -589,10 +589,10 @@ bool test_spu2_mixer_rings()
     (void)kernel.run(period);
     if (hw.spu2().mixer_ring_batches() != 1u ||
         hw.spu2().mixer_irq_events() != 1u ||
-        !hw.spu2_ram_word(0x420u, &word) || word != 7168u ||
-        !hw.spu2_ram_word(0x1020u, &word) || word != 7167u ||
-        !hw.spu2_ram_word(0x820u, &word) || word != 7166u ||
-        !hw.spu2_ram_word(0x1420u, &word) || word != 7167u ||
+        !hw.spu2_ram_word(0x420u, &word) || word != 6087u ||
+        !hw.spu2_ram_word(0x1020u, &word) || word != 6086u ||
+        !hw.spu2_ram_word(0x820u, &word) || word != 6085u ||
+        !hw.spu2_ram_word(0x1420u, &word) || word != 6086u ||
         !hw.read(iop::c_hw::k_i_stat, 4u, &value) || (value & irq) == 0u)
     {
         return false;
@@ -675,7 +675,7 @@ bool test_spu2_voice_routing()
     };
     const uint16_t expected[] =
     {
-        7167u, 0u, 0u, 7167u, 0u, 7167u, 7167u, 0u
+        6086u, 0u, 0u, 6086u, 0u, 6086u, 6086u, 0u
     };
     for (uint32_t i = 0u; i < 8u; ++i)
     {
@@ -1205,6 +1205,77 @@ bool test_spu2_effect_return()
         spu.effect_irq_events() == 0u;
 }
 
+bool test_spu2_voice_output_controls()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    uint32_t value = 0u;
+    const int16_t constant[4] = {16384, 16384, 16384, 16384};
+    const int16_t startup[4] = {0, 16384, 16384, 16384};
+    // Exact measured ROM endpoint, including independently rounded products.
+    if (iop::c_spu2::gaussian_sample(constant, 0u) != 16319 ||
+        iop::c_spu2::gaussian_sample(startup, 0u) != 13915 ||
+        iop::c_spu2::modulated_pitch(0x1000u, -32768) != 0u ||
+        iop::c_spu2::modulated_pitch(0x1000u, 16384) != 0x1800u ||
+        iop::c_spu2::modulated_pitch(0x3fffu, 32767) != 0x3fffu)
+    {
+        return false;
+    }
+    // MVOLX is read-only and independent per channel and core.
+    if (!spu.write(base + 0x760u, 2u, 0u) ||
+        !spu.write(base + 0x762u, 2u, 0u) ||
+        !spu.write(base + 0x770u, 2u, 0x1234u) ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 0u ||
+        !spu.write(base + 0x760u, 2u, 0x8000u) ||
+        !spu.write(base + 0x762u, 2u, 0x9000u) ||
+        !spu.write(base + 0x19au, 2u, 0x3c00u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period - 1u);
+    if (spu.noise_sample(0u) != 0 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 0u)
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(1u);
+    if (spu.noise_sample(0u) != 1 || spu.noise_sample(1u) != 0 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 14336u ||
+        !spu.read(base + 0x772u, 2u, &value) || value != static_cast<uint16_t>(-14336) ||
+        !spu.read(base + 0x798u, 2u, &value) || value != 0x7ffeu)
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(2u * period);
+    if (spu.noise_sample(0u) != 7 ||
+        !spu.read(base + 0x770u, 2u, &value) || value != 32767u ||
+        !spu.read(base + 0x772u, 2u, &value) || value != 0x8000u)
+    {
+        return false;
+    }
+    // Mute gates only the output; AutoDMA and guest sample clock advance.
+    spu.reset();
+    const uint8_t input[] = {0u, 0x40u, 0u, 0x40u};
+    if (!spu.write(base + 0x59au, 2u, 0x4000u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period);
+    if (spu.nonzero_frames() != 0u || spu.input_frames_consumed() != 1u)
+    {
+        return false;
+    }
+    if (!spu.write(base + 0x59au, 2u, 0u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(period);
+    return spu.nonzero_frames() == 1u && spu.input_frames_consumed() == 2u;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1364,8 +1435,8 @@ bool test_spu2_mmix()
     (void)spu.advance_cycles(32u * period);
     return pcm.size() == 64u && pcm[0] == 0 && pcm[1] == 0 &&
         spu.effect_input_frames(1u) == 34u &&
-        spu.ram_word(0x1880u, &word) && word == 7167u &&
-        spu.ram_word(0x1c80u, &word) && word == 7167u;
+        spu.ram_word(0x1880u, &word) && word == 6086u &&
+        spu.ram_word(0x1c80u, &word) && word == 6086u;
 }
 
 bool test_spu2_pcm_mixer()
@@ -1398,8 +1469,8 @@ bool test_spu2_pcm_mixer()
         return false;
     }
     hw.advance_cycles(period);
-    if (pcm.size() != 64u || pcm[0] != 7164 || pcm[1] != 0 ||
-        pcm[2] != 14332 || pcm[3] != 0 ||
+    if (pcm.size() != 64u || pcm[0] != 6083 || pcm[1] != 0 ||
+        pcm[2] != 12171 || pcm[3] != 0 ||
         hw.spu2().nonzero_frames() != 32u ||
         hw.spu2().pcm_peak() == 0u)
     {
@@ -2384,6 +2455,10 @@ int main()
     if (!test_spu2_effect_return())
     {
         return fail("SPU2 reverb FIR return, signed EVOL and silent headless advancement");
+    }
+    if (!test_spu2_voice_output_controls())
+    {
+        return fail("SPU2 Gaussian ROM, PMON arithmetic, noise, master sweep and mute");
     }
     if (!test_spu2_effect_registers())
     {

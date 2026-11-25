@@ -37,6 +37,10 @@ public:
     // History is shared between consecutive blocks of a voice.
     static void decode_adpcm_block(const uint16_t* words, int16_t* samples,
                                    int32_t& history1, int32_t& history2);
+    // Documented four-tap Gaussian ROM and pitch modulation arithmetic.
+    static int16_t gaussian_sample(const int16_t (&samples)[4], uint32_t fraction);
+    static uint32_t modulated_pitch(uint16_t pitch, int16_t previous);
+    int16_t noise_sample(uint32_t core) const;
     uint64_t decoded_blocks() const { return m_decoded_blocks; }
     uint64_t voice_starts() const { return m_voice_starts; }
     uint64_t voice_end_events() const { return m_voice_end_events; }
@@ -173,6 +177,7 @@ private:
         int32_t m_history1 = 0;
         int32_t m_history2 = 0;
         int16_t m_samples[2][28]{};
+        int16_t m_previous_sample = 0;
         bool m_loop_written = false;
         bool m_pending = false;
         bool m_started = false;
@@ -187,6 +192,9 @@ private:
         uint16_t m_registers[0x200]{};
         // Reference master-volume window at 0x760 and 0x788.
         uint16_t m_master[8]{};
+        s_envelope m_master_volume[2]{};
+        uint32_t m_noise_counter = 0u;
+        uint16_t m_noise = 0u;
         // IIR, COMB1..4, WALL, APF1/2, input L/R coefficients.
         uint16_t m_effect_coefficients[10]{};
         uint64_t m_effect_enable_writes = 0u;
@@ -208,6 +216,9 @@ private:
         bool m_irq = false;
     };
 
+    static void advance_master_volume(s_core& core);
+    static int16_t advance_noise(s_core& core);
+    void advance_silent_controls(uint64_t samples);
     static uint32_t voice_address(const s_core& core, uint32_t voice, uint32_t field);
     void decode_voice_block(s_voice& voice, uint32_t slot);
     void check_voice_irq(uint32_t address);

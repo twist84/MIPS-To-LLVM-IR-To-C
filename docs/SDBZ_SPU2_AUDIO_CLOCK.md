@@ -213,3 +213,42 @@ References: https://psx-spx.consoledev.net/soundprocessingunitspu/ (reverb
 resampling coefficients), https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Reverb.cpp
 and https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Mixer.cpp
 (compatibility behavior and ordering).
+
+### Voice and output controls (Batches 24–28)
+
+PMON selects the previous voice's same-frame post-ADSR sample, before
+stereo volume and routing, for the pitch multiplier. Voice zero ignores
+PMON. Inactive voices supply zero; IRQ prediction conservatively stops
+at the next sample for an active modulated voice. NON selects shared
+per-core signed noise instead of interpolated ADPCM; the ordinary voice
+cursor still advances. The noise clock uses ATTR bits 8–13 and the
+Dr. Hell compatibility counter and feedback polynomial, even during
+silent guest periods. Reset clears noise state.
+
+Gaussian interpolation uses the documented 512 hardware ROM values,
+fraction bits 4–11, and separately floor-rounded Q15 products. The
+existing block cursor is the center-left sample of a four-point window;
+the previous block's final sample is retained across rollover. Key-on
+starts with one zero predecessor. Exact hardware decode FIFO alignment,
+IRQ fetch granularity and signed extreme pitch semantics remain to be
+validated; this is not a claim of complete native FIFO reproduction.
+
+MVOLX L/R (0x770/0x772 and 0x798/0x79a) expose the live signed master gain,
+ignore writes, and update fixed volume immediately. Sweep mode retains
+its level, advances on every sample (including headless silence), and
+supports signed phase, direction, exponential modes and rate timing.
+ATTR bit 14 is modeled as active-high core output mute per PS2SDK
+control convention; it does not gate internal voices, DMA, effects or
+IRQ progression. PCSX2 currently bypasses this mute bit, so the exact
+core scope and polarity remain hardware differential validation items.
+Other SPDIF output modes and inactive-voice hardware fetch behavior
+are not completed by these changes.
+
+Regression expectations for the old linear interpolation fixtures
+were updated for the measured ROM. New synthetic checks cover the ROM
+endpoint, PMON scaling, fast noise clock and core isolation, signed
+master sweeps, read-only current volume and mute without stopping DMA.
+References: https://psx-spx.consoledev.net/soundprocessingunitspu/,
+https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/Mixer.cpp,
+https://github.com/PCSX2/pcsx2/blob/master/pcsx2/SPU2/ADSR.cpp,
+https://akuhak.github.io/ps2sdk-doxy/iop/spu2_8c_source.html .

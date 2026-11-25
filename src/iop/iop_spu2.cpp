@@ -57,6 +57,8 @@ void c_spu2::reset()
         }
         core.m_master[0] = 0x3fffu;
         core.m_master[1] = 0x3fffu;
+        core.m_master_volume[0].m_level = 0x7ffe;
+        core.m_master_volume[1].m_level = 0x7ffe;
         core.m_master[4] = 0x7fffu;
         core.m_master[5] = 0x7fffu;
         core.m_master[6] = 0x7fffu;
@@ -116,13 +118,6 @@ int16_t resample_effect(const int16_t (&history)[64], uint32_t position, bool up
     const int32_t rounded = static_cast<int32_t>(sum >= 0 ? sum >> 15u :
         -1 - ((-1 - sum) >> 15u));
     return clamp_sample(rounded);
-}
-
-int32_t master_gain(uint16_t value)
-{
-    // Same fixed master gain rule as the SDBZ reference. Master sweep
-    // mode still uses its reference full-scale fallback.
-    return (value & 0x8000u) != 0u ? 0x7fff : signed_halfword(value * 2u);
 }
 
 int32_t scale_mix(int32_t value, int32_t gain)
@@ -512,6 +507,177 @@ void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
     }
 }
 
+int16_t c_spu2::gaussian_sample(const int16_t (&samples)[4], uint32_t fraction)
+{
+    // Hardware coefficient ROM measured/documented in PSX-SPX.
+    static constexpr int16_t gauss[512] =
+    {
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        -1, -1, -1, -1, -1, -1, -1, -1,
+        0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0000, 0x0001,
+        0x0001, 0x0001, 0x0001, 0x0002, 0x0002, 0x0002, 0x0003, 0x0003,
+        0x0003, 0x0004, 0x0004, 0x0005, 0x0005, 0x0006, 0x0007, 0x0007,
+        0x0008, 0x0009, 0x0009, 0x000a, 0x000b, 0x000c, 0x000d, 0x000e,
+        0x000f, 0x0010, 0x0011, 0x0012, 0x0013, 0x0015, 0x0016, 0x0018,
+        0x0019, 0x001b, 0x001c, 0x001e, 0x0020, 0x0021, 0x0023, 0x0025,
+        0x0027, 0x0029, 0x002c, 0x002e, 0x0030, 0x0033, 0x0035, 0x0038,
+        0x003a, 0x003d, 0x0040, 0x0043, 0x0046, 0x0049, 0x004d, 0x0050,
+        0x0054, 0x0057, 0x005b, 0x005f, 0x0063, 0x0067, 0x006b, 0x006f,
+        0x0074, 0x0078, 0x007d, 0x0082, 0x0087, 0x008c, 0x0091, 0x0096,
+        0x009c, 0x00a1, 0x00a7, 0x00ad, 0x00b3, 0x00ba, 0x00c0, 0x00c7,
+        0x00cd, 0x00d4, 0x00db, 0x00e3, 0x00ea, 0x00f2, 0x00fa, 0x0101,
+        0x010a, 0x0112, 0x011b, 0x0123, 0x012c, 0x0135, 0x013f, 0x0148,
+        0x0152, 0x015c, 0x0166, 0x0171, 0x017b, 0x0186, 0x0191, 0x019c,
+        0x01a8, 0x01b4, 0x01c0, 0x01cc, 0x01d9, 0x01e5, 0x01f2, 0x0200,
+        0x020d, 0x021b, 0x0229, 0x0237, 0x0246, 0x0255, 0x0264, 0x0273,
+        0x0283, 0x0293, 0x02a3, 0x02b4, 0x02c4, 0x02d6, 0x02e7, 0x02f9,
+        0x030b, 0x031d, 0x0330, 0x0343, 0x0356, 0x036a, 0x037e, 0x0392,
+        0x03a7, 0x03bc, 0x03d1, 0x03e7, 0x03fc, 0x0413, 0x042a, 0x0441,
+        0x0458, 0x0470, 0x0488, 0x04a0, 0x04b9, 0x04d2, 0x04ec, 0x0506,
+        0x0520, 0x053b, 0x0556, 0x0572, 0x058e, 0x05aa, 0x05c7, 0x05e4,
+        0x0601, 0x061f, 0x063e, 0x065c, 0x067c, 0x069b, 0x06bb, 0x06dc,
+        0x06fd, 0x071e, 0x0740, 0x0762, 0x0784, 0x07a7, 0x07cb, 0x07ef,
+        0x0813, 0x0838, 0x085d, 0x0883, 0x08a9, 0x08d0, 0x08f7, 0x091e,
+        0x0946, 0x096f, 0x0998, 0x09c1, 0x09eb, 0x0a16, 0x0a40, 0x0a6c,
+        0x0a98, 0x0ac4, 0x0af1, 0x0b1e, 0x0b4c, 0x0b7a, 0x0ba9, 0x0bd8,
+        0x0c07, 0x0c38, 0x0c68, 0x0c99, 0x0ccb, 0x0cfd, 0x0d30, 0x0d63,
+        0x0d97, 0x0dcb, 0x0e00, 0x0e35, 0x0e6b, 0x0ea1, 0x0ed7, 0x0f0f,
+        0x0f46, 0x0f7f, 0x0fb7, 0x0ff1, 0x102a, 0x1065, 0x109f, 0x10db,
+        0x1116, 0x1153, 0x118f, 0x11cd, 0x120b, 0x1249, 0x1288, 0x12c7,
+        0x1307, 0x1347, 0x1388, 0x13c9, 0x140b, 0x144d, 0x1490, 0x14d4,
+        0x1517, 0x155c, 0x15a0, 0x15e6, 0x162c, 0x1672, 0x16b9, 0x1700,
+        0x1747, 0x1790, 0x17d8, 0x1821, 0x186b, 0x18b5, 0x1900, 0x194b,
+        0x1996, 0x19e2, 0x1a2e, 0x1a7b, 0x1ac8, 0x1b16, 0x1b64, 0x1bb3,
+        0x1c02, 0x1c51, 0x1ca1, 0x1cf1, 0x1d42, 0x1d93, 0x1de5, 0x1e37,
+        0x1e89, 0x1edc, 0x1f2f, 0x1f82, 0x1fd6, 0x202a, 0x207f, 0x20d4,
+        0x2129, 0x217f, 0x21d5, 0x222c, 0x2282, 0x22da, 0x2331, 0x2389,
+        0x23e1, 0x2439, 0x2492, 0x24eb, 0x2545, 0x259e, 0x25f8, 0x2653,
+        0x26ad, 0x2708, 0x2763, 0x27be, 0x281a, 0x2876, 0x28d2, 0x292e,
+        0x298b, 0x29e7, 0x2a44, 0x2aa1, 0x2aff, 0x2b5c, 0x2bba, 0x2c18,
+        0x2c76, 0x2cd4, 0x2d33, 0x2d91, 0x2df0, 0x2e4f, 0x2eae, 0x2f0d,
+        0x2f6c, 0x2fcc, 0x302b, 0x308b, 0x30ea, 0x314a, 0x31aa, 0x3209,
+        0x3269, 0x32c9, 0x3329, 0x3389, 0x33e9, 0x3449, 0x34a9, 0x3509,
+        0x3569, 0x35c9, 0x3629, 0x3689, 0x36e8, 0x3748, 0x37a8, 0x3807,
+        0x3867, 0x38c6, 0x3926, 0x3985, 0x39e4, 0x3a43, 0x3aa2, 0x3b00,
+        0x3b5f, 0x3bbd, 0x3c1b, 0x3c79, 0x3cd7, 0x3d35, 0x3d92, 0x3def,
+        0x3e4c, 0x3ea9, 0x3f05, 0x3f62, 0x3fbd, 0x4019, 0x4074, 0x40d0,
+        0x412a, 0x4185, 0x41df, 0x4239, 0x4292, 0x42eb, 0x4344, 0x439c,
+        0x43f4, 0x444c, 0x44a3, 0x44fa, 0x4550, 0x45a6, 0x45fc, 0x4651,
+        0x46a6, 0x46fa, 0x474e, 0x47a1, 0x47f4, 0x4846, 0x4898, 0x48e9,
+        0x493a, 0x498a, 0x49d9, 0x4a29, 0x4a77, 0x4ac5, 0x4b13, 0x4b5f,
+        0x4bac, 0x4bf7, 0x4c42, 0x4c8d, 0x4cd7, 0x4d20, 0x4d68, 0x4db0,
+        0x4df7, 0x4e3e, 0x4e84, 0x4ec9, 0x4f0e, 0x4f52, 0x4f95, 0x4fd7,
+        0x5019, 0x505a, 0x509a, 0x50da, 0x5118, 0x5156, 0x5194, 0x51d0,
+        0x520c, 0x5247, 0x5281, 0x52ba, 0x52f3, 0x532a, 0x5361, 0x5397,
+        0x53cc, 0x5401, 0x5434, 0x5467, 0x5499, 0x54ca, 0x54fa, 0x5529,
+        0x5558, 0x5585, 0x55b2, 0x55de, 0x5609, 0x5632, 0x565b, 0x5684,
+        0x56ab, 0x56d1, 0x56f6, 0x571b, 0x573e, 0x5761, 0x5782, 0x57a3,
+        0x57c3, 0x57e2, 0x57ff, 0x581c, 0x5838, 0x5853, 0x586d, 0x5886,
+        0x589e, 0x58b5, 0x58cb, 0x58e0, 0x58f4, 0x5907, 0x5919, 0x592a,
+        0x593a, 0x5949, 0x5958, 0x5965, 0x5971, 0x597c, 0x5986, 0x598f,
+        0x5997, 0x599e, 0x59a4, 0x59a9, 0x59ad, 0x59b0, 0x59b2, 0x59b3,
+    };
+    const uint32_t phase = (fraction >> 4u) & 0xffu;
+    const int32_t sum =
+        floor_shift(gauss[255u - phase] * samples[0], 15u) +
+        floor_shift(gauss[511u - phase] * samples[1], 15u) +
+        floor_shift(gauss[256u + phase] * samples[2], 15u) +
+        floor_shift(gauss[phase] * samples[3], 15u);
+    return clamp_sample(sum);
+}
+
+uint32_t c_spu2::modulated_pitch(uint16_t pitch, int16_t previous)
+{
+    const int32_t value = scale_mix(static_cast<int32_t>(pitch), 32768 + previous);
+    return static_cast<uint32_t>(std::clamp(value, 0, 0x3fff));
+}
+
+int16_t c_spu2::noise_sample(uint32_t core) const
+{
+    return core < 2u ? static_cast<int16_t>(signed_halfword(m_cores[core].m_noise)) : 0;
+}
+
+int16_t c_spu2::advance_noise(s_core& core)
+{
+    // Shared per-core generator, clocked even with no allocated voices.
+    const uint32_t clock = (core.m_attr >> 8u) & 0x3fu;
+    constexpr uint32_t fraction[4] = {0u, 84u, 140u, 180u};
+    const uint32_t increment = fraction[clock & 3u];
+    const uint32_t limit = (0x8000u >> (clock >> 2u)) << 16u;
+    uint64_t next = static_cast<uint64_t>(core.m_noise_counter) + 0x10000u + increment;
+    if ((next & 0xffffu) >= 210u)
+    {
+        next += 0x10000u - increment;
+    }
+    if (next >= limit)
+    {
+        next %= limit;
+        const uint32_t bits = core.m_noise;
+        const uint32_t feedback = 1u ^ (((bits >> 10u) ^ (bits >> 11u) ^
+            (bits >> 12u) ^ (bits >> 15u)) & 1u);
+        core.m_noise = static_cast<uint16_t>((bits << 1u) | feedback);
+    }
+    core.m_noise_counter = static_cast<uint32_t>(next);
+    return static_cast<int16_t>(signed_halfword(core.m_noise));
+}
+
+void c_spu2::advance_master_volume(s_core& core)
+{
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        const uint16_t reg = core.m_master[channel];
+        if ((reg & 0x8000u) == 0u)
+        {
+            continue;
+        }
+        s_envelope& volume = core.m_master_volume[channel];
+        const bool decrease = (reg & 0x2000u) != 0u;
+        const bool exponential = (reg & 0x4000u) != 0u;
+        const bool negative = (reg & 0x1000u) != 0u;
+        const uint32_t rate = reg & 0x7fu;
+        const int32_t shift = static_cast<int32_t>(rate >> 2u);
+        uint32_t increment = 0x8000u >> std::max(0, shift - 11);
+        int32_t delta = (decrease ? -8 + static_cast<int32_t>(rate & 3u) :
+            7 - static_cast<int32_t>(rate & 3u)) * (1 << std::max(0, 11 - shift));
+        if (exponential && !decrease && volume.m_level > 0x6000)
+        {
+            increment >>= 2u;
+        }
+        if (exponential && decrease)
+        {
+            delta = floor_shift(delta * volume.m_level, 15u);
+        }
+        else if (negative)
+        {
+            delta = -delta;
+        }
+        if (rate != 0x7fu)
+        {
+            increment = std::max(1u, increment);
+        }
+        volume.m_counter += increment;
+        if (volume.m_counter >= 0x8000u)
+        {
+            volume.m_counter = 0u;
+            const int32_t low = decrease && (!negative || exponential) ? 0 : -32768;
+            const int32_t high = decrease && negative && !exponential ? 0 : 32767;
+            volume.m_level = std::clamp(volume.m_level + delta, low, high);
+        }
+    }
+}
+
+void c_spu2::advance_silent_controls(uint64_t samples)
+{
+    for (uint64_t sample = 0u; sample < samples; ++sample)
+    {
+        for (s_core& core : m_cores)
+        {
+            (void)advance_noise(core);
+            advance_master_volume(core);
+        }
+    }
+}
+
 void c_spu2::update_envelope(s_voice& voice, uint16_t adsr1, uint16_t adsr2)
 {
     s_envelope& env = voice.m_envelope;
@@ -625,6 +791,7 @@ void c_spu2::start_voice(s_core& core, uint32_t index)
     voice.m_position = 0u;
     voice.m_history1 = 0;
     voice.m_history2 = 0;
+    voice.m_previous_sample = 0;
     voice.m_phase = e_voice_phase::attack;
     voice.m_envelope = {};
     core.m_endx &= ~(1u << index);
@@ -642,15 +809,23 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
     for (uint32_t core_index = 0u; core_index < 2u; ++core_index)
     {
         s_core& core = m_cores[core_index];
+        int16_t noise[k_input_batch]{};
+        for (uint32_t sample = 0u; sample < samples; ++sample)
+        {
+            noise[sample] = advance_noise(core);
+        }
         if (core.m_key_mask == 0u)
         {
             continue;
         }
+        int16_t previous[k_input_batch]{};
         const auto voice_mask = [&core](uint32_t offset)
         {
             return static_cast<uint32_t>(core.m_registers[offset / 2u]) |
                 (static_cast<uint32_t>(core.m_registers[offset / 2u + 1u] & 0xffu) << 16u);
         };
+        const uint32_t pitch_mask = voice_mask(0x180u) & 0xfffffeu;
+        const uint32_t noise_mask = voice_mask(0x184u);
         const uint32_t dry_mask[2] = {voice_mask(0x188u), voice_mask(0x190u)};
         const uint32_t wet_mask[2] = {voice_mask(0x18cu), voice_mask(0x194u)};
         for (uint32_t index = 0u; index < 24u; ++index)
@@ -658,6 +833,7 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
             const uint32_t bit = 1u << index;
             if ((core.m_key_mask & bit) == 0u)
             {
+                std::fill_n(previous, samples, int16_t{0});
                 continue;
             }
             s_voice& voice = core.m_voices[index];
@@ -666,7 +842,7 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
                 start_voice(core, index);
             }
             const uint16_t* regs = &core.m_registers[index * 8u];
-            const uint32_t pitch = std::min<uint32_t>(regs[2], 0x3fffu);
+            const uint32_t fixed_pitch = std::min<uint32_t>(regs[2], 0x3fffu);
             // Envelope release may stop on any sample, so retire the
             // cursor and ADSR in reference order, not an aggregate pitch
             // advance followed by a delayed envelope update.
@@ -674,12 +850,18 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
             {
                 const uint32_t index_in_block = voice.m_position >> 12u;
                 const uint32_t fraction = voice.m_position & 0xfffu;
-                const int32_t first = voice.m_samples[0][index_in_block];
-                const int32_t second = index_in_block == 27u ?
-                    voice.m_samples[1][0] : voice.m_samples[0][index_in_block + 1u];
-                const int32_t interpolated = floor_shift(
-                    first * static_cast<int32_t>(0x1000u - fraction) +
-                    second * static_cast<int32_t>(fraction), 12u);
+                const auto decoded = [&](uint32_t index)
+                {
+                    return voice.m_samples[index / 28u][index % 28u];
+                };
+                const int16_t window[4] = {
+                    index_in_block == 0u ? voice.m_previous_sample : decoded(index_in_block - 1u),
+                    decoded(index_in_block), decoded(index_in_block + 1u),
+                    decoded(index_in_block + 2u)};
+                const int32_t interpolated = (noise_mask & bit) != 0u ? noise[sample] :
+                    gaussian_sample(window, fraction);
+                const uint32_t pitch = (pitch_mask & bit) != 0u ?
+                    modulated_pitch(regs[2], previous[sample]) : fixed_pitch;
                 voice.m_position += pitch;
                 if (voice.m_position >= block_length)
                 {
@@ -687,6 +869,7 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
                     const uint8_t flags = voice.m_flags[0];
                     voice.m_block[0] = voice.m_block[1];
                     voice.m_flags[0] = voice.m_flags[1];
+                    voice.m_previous_sample = voice.m_samples[0][27u];
                     std::copy_n(voice.m_samples[1], 28u, voice.m_samples[0]);
                     if ((flags & 1u) != 0u)
                     {
@@ -719,10 +902,12 @@ void c_spu2::advance_voices(uint32_t samples, int32_t (&dry)[2][k_input_batch][2
                 if (voice.m_phase == e_voice_phase::off)
                 {
                     core.m_key_mask &= ~bit;
+                    std::fill_n(previous + sample, samples - sample, int16_t{0});
                     break;
                 }
                 const int32_t enveloped = floor_shift(
                     interpolated * voice.m_envelope.m_level, 15u);
+                previous[sample] = clamp_sample(enveloped);
                 if (index == 1u || index == 3u)
                 {
                     const uint32_t ring = index == 1u ? 2u : 3u;
@@ -934,6 +1119,7 @@ void c_spu2::mix_frames(uint64_t samples)
             c_audio_profile_scope profile(m_audio_profile_enabled, m_profile_silent_rings);
             std::fill_n(m_ram.begin(), 0x2000u, 0u);
             count_mixer_irq(0u, 0x2000u);
+            advance_silent_controls(frames);
             m_mixed_frames += frames;
             m_mixer_ring_batches += frames / k_input_batch;
             samples -= frames;
@@ -952,6 +1138,7 @@ void c_spu2::mix_frames(uint64_t samples)
         }
         if (silent && m_pcm_sink == nullptr)
         {
+            advance_silent_controls(count);
             m_mixed_frames += count;
         }
         else
@@ -1008,6 +1195,7 @@ void c_spu2::mix_frames(uint64_t samples)
                         effect_nonzero |= effect_mix[channel] != 0;
                     }
                     advance_effect(core, effect_mix, effect_return);
+                    advance_master_volume(m_cores[core]);
                     for (uint32_t channel = 0u; channel < 2u; ++channel)
                     {
                         const int32_t dry = dry_mix[channel] + scale_mix(effect_return[channel],
@@ -1016,8 +1204,11 @@ void c_spu2::mix_frames(uint64_t samples)
                         {
                             ++m_clipped_samples;
                         }
-                        const int16_t output = clamp_sample(scale_mix(clamp_sample(dry),
-                            master_gain(m_cores[core].m_master[channel])));
+                        // ATTR bit 14 is the PS2SDK mute control. Keep
+                        // internal voices, effects, rings and IRQs running.
+                        const int16_t output = (m_cores[core].m_attr & 0x4000u) != 0u ? 0 :
+                            clamp_sample(scale_mix(clamp_sample(dry),
+                                m_cores[core].m_master_volume[channel].m_level));
                         if (core == 0u)
                         {
                             // Tap the core 0 output before core 1 AVOL.
@@ -1070,8 +1261,11 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
             }
             const s_voice& voice = core.m_voices[index];
             uint32_t samples = 0u;
-            if (voice.m_pending)
+            const uint32_t pmon = static_cast<uint32_t>(core.m_registers[0x180u / 2u]) |
+                (static_cast<uint32_t>(core.m_registers[0x182u / 2u]) << 16u);
+            if (voice.m_pending || (index != 0u && (pmon & (1u << index)) != 0u))
             {
+                // Modulation may alter the next sample's cursor step.
                 samples = 1u;
             }
             else
@@ -1569,7 +1763,11 @@ bool c_spu2::read16(uint32_t offset, uint16_t* value)
         {
             *value = m_cores[bank].m_master[field / 2u];
         }
-        else if (field >= 0x14u)
+        else if (field < 0x14u)
+        {
+            *value = static_cast<uint16_t>(m_cores[bank].m_master_volume[(field - 0x10u) / 2u].m_level);
+        }
+        else
         {
             *value = m_cores[bank].m_effect_coefficients[(field - 0x14u) / 2u];
         }
@@ -1621,6 +1819,10 @@ bool c_spu2::write16(uint32_t offset, uint16_t value)
         if (field < 0x10u)
         {
             m_cores[bank].m_master[field / 2u] = value;
+            if (field < 4u && (value & 0x8000u) == 0u)
+            {
+                m_cores[bank].m_master_volume[field / 2u].m_level = signed_halfword(value * 2u);
+            }
         }
         else if (field >= 0x14u)
         {
