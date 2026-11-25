@@ -4791,6 +4791,7 @@ def main():
             ]
             states = []
             clocks = []
+            checkpoints = []
             for enabled, quiet in (("0", "0"), ("1", "0"), ("1", "1")):
                 report = root / f"batch-{enabled}-{quiet}.json"
                 replay = command if enabled == "0" else [
@@ -4803,7 +4804,8 @@ def main():
                              SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1",
                              SDBZ_EE_DIRECT_DISPATCH="1",
                              SDBZ_NATIVE_ALU_CERTIFICATES="1",
-                             SDBZ_IOP_FAST_QUIET_TURNS=quiet),
+                             SDBZ_IOP_FAST_QUIET_TURNS=quiet,
+                             SDBZ_IOP_CHECKPOINT_TRACE="1"),
                 )
                 assert run.returncode == 3, run.stdout + run.stderr
                 state = json.loads(report.read_text(encoding="utf-8"))
@@ -4834,6 +4836,12 @@ def main():
                          if line.startswith("IOP SPU2 clock:")]
                 assert len(clock) == 1, run.stdout
                 clocks.append(clock[0])
+                checkpoint_trace = [
+                    line for line in run.stderr.splitlines()
+                    if line.startswith("IOP checkpoint:")
+                ]
+                assert len(checkpoint_trace) > 1, run.stderr
+                checkpoints.append(checkpoint_trace)
                 quiet_lines = [line for line in run.stdout.splitlines()
                                if line.startswith("IOP clock quiet:")]
                 if quiet == "1":
@@ -4861,6 +4869,8 @@ def main():
                         "cop0_epc", "ee_cycles"):
                 assert states[0][key] == states[1][key] == states[2][key], key
             assert clocks[0] == clocks[1] == clocks[2], clocks
+            assert checkpoints[0] == checkpoints[1], (checkpoints[0], checkpoints[1])
+            assert checkpoints[0] == checkpoints[2], (checkpoints[0], checkpoints[2])
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
