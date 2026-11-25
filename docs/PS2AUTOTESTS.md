@@ -1079,3 +1079,22 @@ is compatibility accounting, not calibrated hardware-cycle precision.
 Original performance test checks only changed/unchanged counters, not
 exact cycle magnitudes. Unit coverage checks elapsed intervals, stop,
 idle and repeated reads. Original ELF validation remains pending.
+
+### EFU observed residuals and arctangent operand order
+
+The original VU artifact [15042409671](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45658279578/artifacts/15042409671)
+confirms 188/208 numerical outputs match after the earlier polynomial
+batch. All eight algebraic instructions and EEXP are exact on the
+original vectors. The remaining differences are 17 EATAN-family
+outputs and three ESIN outputs. The EATAN polynomial in the pinned
+[PCSX2 VUops.cpp](https://github.com/PCSX2/pcsx2/blob/82cac38b2af19d593dedfd9ddaa63448e7ec493c/pcsx2/VUops.cpp)
+expresses its terms as coefficient times odd power. Our asymmetric
+Booth model makes that ordering observable. A standalone calculation
+with coefficient-first arctangent terms matches 44/48 original atan
+words (up from 31/48), predicting 201/208 total. The remaining four atan
+words all have reduced argument -1 (cancellation close to zero); the
+three ESIN differences are for 3, pi and 3*pi/2. Keep sine's existing
+operand ordering, which gives better agreement. This is a provisional
+arithmetic choice, not a calibrated internal EFU micro-operation
+schedule. No special-value patch or expected-transcript edit.
+The new complete original runtime replay remains pending.

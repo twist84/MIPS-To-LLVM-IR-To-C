@@ -298,6 +298,12 @@ int main()
                    bits == 0x3f8db70bu && latency == 54u &&
                    ee::c_ee_vu1::efu(regular, 0x75u, 2u, bits, latency) &&
                    bits == 0x3f9fe0bau && latency == 54u &&
+                   ee::c_ee_vu1::efu(maximum, 0x7du, 2u, bits, latency) &&
+                   bits == 0x3fc90fd9u && latency == 54u &&
+                   ee::c_ee_vu1::efu(zero, 0x74u, 2u, bits, latency) &&
+                   bits == 0x7fc90fd7u && latency == 54u &&
+                   ee::c_ee_vu1::efu(zero, 0x75u, 2u, bits, latency) &&
+                   bits == 0x7fc90fd7u && latency == 54u &&
                    ee::c_ee_vu1::efu(one, 0x7cu, 2u, bits, latency) &&
                    bits == 0x3f576aa4u && latency == 29u &&
                    ee::c_ee_vu1::efu(maximum, 0x7cu, 2u, bits, latency) &&
