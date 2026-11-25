@@ -439,11 +439,9 @@ std::string module_builder::load_gpr_temp(uint8_t reg)
     if (reg == 0) return "0";
     auto it = m_cur_lo.find(reg);
     if (it != m_cur_lo.end()) return it->second;
-    std::string lo = newtemp(); std::string hi = newtemp();
+    const std::string lo = newtemp();
     m_out += "  " + lo + " = load i64, ptr " + gptr_lo(reg) + "\n";
-    m_out += "  " + hi + " = load i64, ptr " + gptr_hi(reg) + "\n";
     m_cur_lo[reg] = lo;
-    m_cur_hi[reg] = hi;
     return lo;
 }
 
@@ -456,8 +454,12 @@ std::string module_builder::src_lo(uint8_t reg)
 std::string module_builder::src_hi(uint8_t reg)
 {
     if (reg == 0) return "0";
-    load_gpr_temp(reg);
-    return m_cur_hi[reg];
+    const auto it = m_cur_hi.find(reg);
+    if (it != m_cur_hi.end()) return it->second;
+    const std::string hi = newtemp();
+    m_out += "  " + hi + " = load i64, ptr " + gptr_hi(reg) + "\n";
+    m_cur_hi[reg] = hi;
+    return hi;
 }
 
 void module_builder::emit_guest_store_trace(
@@ -540,7 +542,8 @@ void module_builder::set_gpr_temp(uint8_t reg, const std::string& lo,
     }
     m_cur_lo[reg] = lo;
     m_cur_hi[reg] = hi;
-    m_dirty_regs.insert(reg);
+    m_dirty_lo.insert(reg);
+    m_dirty_hi.insert(reg);
 }
 
 // Write only the low 64 bits of a GPR; preserve the existing upper 64.
@@ -548,16 +551,15 @@ void module_builder::set_gpr_temp(uint8_t reg, const std::string& lo,
 void module_builder::set_gpr_lo64(uint8_t reg, const std::string& lo)
 {
     if (reg == 0) return;
-    // Ensure hi is loaded into the tracking map so it is not lost on store-back.
-    std::string hi = src_hi(reg);
+    // Do not load or dirty hi just to preserve it. If an earlier packed
+    // instruction has produced a dirty hi, leave that SSA value intact.
     if (reg == 2 && m_current_guest_insn != nullptr)
     {
         const std::string old_value = src_lo(reg);
         emit_guest_v0_write(old_value, lo);
     }
     m_cur_lo[reg] = lo;
-    m_cur_hi[reg] = hi;
-    m_dirty_regs.insert(reg);
+    m_dirty_lo.insert(reg);
 }
 
 // Sign-extend a 32-bit (or low-32-of-64) result into the full low 64 bits,
@@ -583,14 +585,17 @@ void module_builder::set_gpr_lo32_sext(uint8_t reg, const std::string& val)
 
 void module_builder::store_dirty_regs(const std::set<uint8_t>& live_out)
 {
-    for (uint8_t r : m_dirty_regs)
+    for (uint8_t r : m_dirty_lo)
     {
         if (live_out.count(r) == 0) continue;
-        auto lit = m_cur_lo.find(r);
-        auto hit = m_cur_hi.find(r);
-        if (lit == m_cur_lo.end() || hit == m_cur_hi.end()) continue;
-        m_out += "  store i64 " + lit->second + ", ptr " + gptr_lo(r) + "\n";
-        m_out += "  store i64 " + hit->second + ", ptr " + gptr_hi(r) + "\n";
+        m_out += "  store i64 " + m_cur_lo.at(r) + ", ptr " + gptr_lo(r) + "\n";
+    }
+    // A successor's scalar overwrite kills only its low half. Until CFG
+    // liveness has separate half masks, never drop a dirty upper half on
+    // an edge, at an exception boundary or before an architectural helper.
+    for (uint8_t r : m_dirty_hi)
+    {
+        m_out += "  store i64 " + m_cur_hi.at(r) + ", ptr " + gptr_hi(r) + "\n";
     }
 }
 
@@ -598,7 +603,8 @@ void module_builder::reset_tracking()
 {
     m_cur_lo.clear();
     m_cur_hi.clear();
-    m_dirty_regs.clear();
+    m_dirty_lo.clear();
+    m_dirty_hi.clear();
 }
 
 // ---- Block reads/writes (computed from actual instructions) ----
@@ -1046,7 +1052,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         // temps) so the host sees correct architectural state at the exit.
         {
             std::set<uint8_t> all;
-            for (uint8_t r : m_dirty_regs) all.insert(r);
+            for (uint8_t r : m_dirty_lo) all.insert(r);
             store_dirty_regs(all);
         }
         char pcbuf[32];
@@ -1085,7 +1091,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         m_out += "  " + bits + " = and i32 " + address + ", " +
                  std::to_string(width - 1u) + "\n";
         m_out += "  " + misaligned + " = icmp ne i32 " + bits + ", 0\n";
-        std::set<uint8_t> dirty(m_dirty_regs.begin(), m_dirty_regs.end());
+        std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
         store_dirty_regs(dirty);
         reset_tracking();
         m_out += "  br i1 " + misaligned + ", label %" + fault +
@@ -1105,7 +1111,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     const auto emit_checked_exception =
         [&](const std::string& condition, uint32_t excode)
     {
-        const std::set<uint8_t> dirty(m_dirty_regs.begin(), m_dirty_regs.end());
+        const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
         store_dirty_regs(dirty);
         reset_tracking();
         const std::string suffix = std::to_string(m_temp_counter++);
@@ -1975,7 +1981,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             const std::string overflow = newtemp();
             const std::string suffix = std::to_string(m_temp_counter++);
             m_out += "  " + overflow + " = icmp ne i64 " + result + ", " + wide + "\n";
-            const std::set<uint8_t> dirty(m_dirty_regs.begin(), m_dirty_regs.end());
+            const std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
             store_dirty_regs(dirty);
             reset_tracking();
             m_out += "  br i1 " + overflow + ", label %word_overflow_" + suffix +
@@ -2788,7 +2794,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         // block-local GPR cache before crossing that boundary, then invalidate
         // it so later guest instructions reload any GPR changed by QMFC2/CFC2.
         std::set<uint8_t> dirty;
-        for (uint8_t reg : m_dirty_regs)
+        for (uint8_t reg : m_dirty_lo)
             dirty.insert(reg);
         store_dirty_regs(dirty);
         reset_tracking();
