@@ -223,7 +223,8 @@ public:
         m_module_loaded = std::move(callback);
     }
     s_module_load_result load_module(
-        const std::vector<uint8_t>& bytes
+        const std::vector<uint8_t>& bytes,
+        const std::string& source_name = {}
     );
     const s_kernel_module* module(uint32_t id) const;
     const std::map<uint32_t, s_kernel_module>& modules() const;
