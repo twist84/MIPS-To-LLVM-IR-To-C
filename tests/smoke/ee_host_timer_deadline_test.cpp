@@ -1,4 +1,5 @@
 #include "ee_host_timers.h"
+#include "ee_iop_clock.h"
 
 #include <cstdio>
 #include <limits>
@@ -25,6 +26,85 @@ bool write_timer(ee::c_ee_host_timers& timers, uint32_t index,
 
 int main()
 {
+    using t_iop_clock = ee::c_ee_iop_clock;
+    using e_result = t_iop_clock::e_result;
+    {
+        t_iop_clock clock;
+        if (!check(!clock.active() && clock.next_cycle() == t_iop_clock::k_no_deadline,
+                "unanchored IOP clock has no usable deadline") ||
+            !check(clock.observe(100u) == e_result::accepted &&
+                clock.active() && clock.due() == 0u && clock.next_cycle() == 108u,
+                "IOP clock initial anchor") ||
+            !check(clock.observe(107u) == e_result::accepted &&
+                clock.due() == 0u && clock.next_cycle() == 108u,
+                "fractional IOP deadline") ||
+            !check(clock.observe(106u) == e_result::nonmonotonic &&
+                clock.next_cycle() == 108u,
+                "nonmonotonic IOP timestamp changed state") ||
+            !check(clock.observe(109u) == e_result::accepted &&
+                clock.due() == 1u && clock.next_cycle() == 109u,
+                "IOP debt is immediately due") ||
+            !check(!clock.consume(2u) && clock.due() == 1u &&
+                clock.consume(1u) && clock.next_cycle() == 116u,
+                "IOP debt consumption lost fractional remainder"))
+        {
+            return 1;
+        }
+
+        // A large EE slice may leave a backlog after 64 turns of 256.
+        // Later boundaries must preserve that debt, even at the same cycle.
+        const uint64_t cycle = 109u + 8u * 20000u;
+        if (!check(clock.observe(cycle) == e_result::accepted &&
+                clock.due() == 20000u &&
+                clock.consume(64u * 256u) && clock.due() == 3616u &&
+                clock.next_cycle() == cycle &&
+                clock.observe(cycle) == e_result::accepted &&
+                clock.due() == 3616u && clock.consume(3616u) &&
+                clock.next_cycle() == cycle + 7u,
+                "IOP backlog across bounded service turns"))
+        {
+            return 1;
+        }
+
+        // Compare partitioned elapsed budgets against one large advance.
+        t_iop_clock partitioned;
+        t_iop_clock combined;
+        (void)partitioned.observe(0u);
+        (void)combined.observe(0u);
+        uint64_t elapsed = 0u;
+        uint64_t consumed = 0u;
+        for (uint32_t i = 0u; i < 1024u; ++i)
+        {
+            elapsed += i % 37u;
+            if (partitioned.observe(elapsed) != e_result::accepted)
+            {
+                return 1;
+            }
+            const uint64_t work = partitioned.due() / 2u;
+            if (!partitioned.consume(work))
+            {
+                return 1;
+            }
+            consumed += work;
+        }
+        if (!check(combined.observe(elapsed) == e_result::accepted &&
+                combined.due() == consumed + partitioned.due() &&
+                combined.consume(consumed) &&
+                combined.next_cycle() == partitioned.next_cycle(),
+                "IOP partitioned and combined debt disagree"))
+        {
+            return 1;
+        }
+        t_iop_clock near_limit;
+        if (!check(near_limit.observe(t_iop_clock::k_no_deadline - 3u) ==
+                e_result::accepted && near_limit.next_cycle() == t_iop_clock::k_no_deadline &&
+                near_limit.observe(t_iop_clock::k_no_deadline) == e_result::accepted &&
+                near_limit.due() == 0u,
+                "IOP deadline overflow must not wrap"))
+        {
+            return 1;
+        }
+    }
     ee::s_ee_runtime runtime{};
     ee::c_ee_hw_bus bus{};
     ee::s_ee_cpu_state cpu{};
