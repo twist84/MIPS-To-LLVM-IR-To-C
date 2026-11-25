@@ -62,3 +62,15 @@ PTEBase/current ASID. Do not modify state or manufacture Random/EntryLo
 values. Sections 4.2.6–4.2.9 and 3.2 specify these fields. Directed tests
 cover the composed route, all BEV/EXL combinations, load/store distinctions
 and rejected unsupported decisions. The active HLE memory path is unchanged.
+
+## Batch 5: special scratchpad TLB mapping
+
+Section 5.2.5 (p. 125) and section 6.4 specify a single aligned 16 KiB
+SPRAM region, MASK=0, equal V/D in both halves, ignored PFN/C, uncached
+attribute and 14-bit offset. The strict resolver now classifies valid
+SPRAM separately from bus addresses and checks the entire region.
+Malformed entries fail closed; overlapping entries remain ambiguous.
+Tests cover both halves, boundaries, ASID, permissions, malformed
+alignment/V/D and overlapping RAM. This supersedes earlier deferral of
+well-formed SPRAM lookup; raw TLB register readback and active guest
+memory behavior are unchanged.

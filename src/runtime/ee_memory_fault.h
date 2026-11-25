@@ -12,6 +12,7 @@ namespace ee
 enum class e_ee_access_status : uint8_t
 {
     PHYSICAL,
+    SCRATCHPAD,
     ADDRESS_ERROR,
     TLB_REFILL,
     TLB_INVALID,
@@ -24,6 +25,7 @@ struct s_ee_access_decision
     e_ee_access_status m_status = e_ee_access_status::UNMODELED;
     uint32_t m_physical_address = 0u;
     uint32_t m_cache_mode = 0u;
+    uint32_t m_scratchpad_offset = 0u;
 };
 
 inline s_ee_access_decision ee_resolve_access(const c_ee_tlb& tlb,
@@ -50,6 +52,8 @@ inline s_ee_access_decision ee_resolve_access(const c_ee_tlb& tlb,
     {
     case lookup::TRANSLATED:
         return {result::PHYSICAL, mapping.m_physical_address, mapping.m_cache_mode};
+    case lookup::SCRATCHPAD_MAPPED:
+        return {result::SCRATCHPAD, 0u, 2u, mapping.m_scratchpad_offset};
     case lookup::NO_MATCH:
         return {result::TLB_REFILL};
     case lookup::PAGE_INVALID:

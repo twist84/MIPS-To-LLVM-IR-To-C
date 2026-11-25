@@ -269,7 +269,7 @@ int main()
                    tlb.lookup(virt, 0u, false).m_status == status::RESERVED_CACHE_MODE &&
                    tlb.write(0u, 0u, virt, lo | 0x80000000u, lo) &&
                    tlb.lookup(virt + 0x1000u, 0u, false).m_status ==
-                       status::SCRATCHPAD_UNMODELED &&
+                       status::SCRATCHPAD_MAPPED &&
                    tlb.write(0u, 0u, virt, lo, lo | 0x80000000u) &&
                    tlb.lookup(virt + 0x1000u, 0u, false).m_status ==
                        status::RESERVED_ENTRY_BITS,
@@ -446,6 +446,62 @@ int main()
         if (!check(!ee::ee_plan_memory_fault(access::UNMODELED, false, bad, 0u, 0u, 0u).m_valid &&
                    !ee::ee_plan_memory_fault(access::PHYSICAL, false, bad, 0u, 0u, 0u).m_valid,
                    "nonfault and unmodeled outcomes cannot enter exception handler"))
+        {
+            return 1;
+        }
+    }
+
+    // Scratchpad mapping has special 16 KiB matching and permissions.
+    {
+        ee::c_ee_tlb tlb{};
+        constexpr uint32_t virt = 0x70000000u;
+        constexpr uint32_t asid = 7u;
+        constexpr uint32_t lo0 = 0x80004006u; // S, ignored PFN/C, V/D
+        constexpr uint32_t lo1 = 0x0000803eu; // ignored PFN/C, V/D
+        if (!check(tlb.write(0u, 0u, virt | asid, lo0, lo1),
+                   "valid scratchpad entry"))
+        {
+            return 1;
+        }
+        for (uint32_t offset : {0u, 0xfffu, 0x1000u, 0x1fffu,
+                                0x2000u, 0x3000u, 0x3fffu})
+        {
+            const auto hit = tlb.lookup(virt + offset, asid, true);
+            const auto resolved = ee::ee_resolve_access(tlb, virt + offset,
+                                                         0u, 3u, asid, true);
+            if (!check(hit.m_status == status::SCRATCHPAD_MAPPED &&
+                       hit.m_scratchpad_offset == offset && hit.m_page_size == 0x4000u &&
+                       hit.m_cache_mode == 2u &&
+                       resolved.m_status == ee::e_ee_access_status::SCRATCHPAD &&
+                       resolved.m_scratchpad_offset == offset &&
+                       resolved.m_physical_address == 0u,
+                       "full scratchpad region uses a distinct non-bus target"))
+            {
+                return 1;
+            }
+        }
+        if (!check(tlb.lookup(virt + 0x4000u, asid, false).m_status == status::NO_MATCH &&
+                   tlb.lookup(virt + 0x2000u, asid + 1u, false).m_status == status::NO_MATCH &&
+                   tlb.write(0u, 0u, virt | asid, lo0 & ~4u, lo1 & ~4u) &&
+                   tlb.lookup(virt + 0x3000u, asid, true).m_status == status::PAGE_NOT_DIRTY &&
+                   tlb.write(0u, 0u, virt | asid, lo0 & ~2u, lo1 & ~2u) &&
+                   tlb.lookup(virt + 0x3000u, asid, false).m_status == status::PAGE_INVALID &&
+                   tlb.write(0u, 0u, virt | asid, lo0, lo1 & ~4u) &&
+                   tlb.lookup(virt + 0x2000u, asid, false).m_status ==
+                       status::SCRATCHPAD_UNMODELED &&
+                   tlb.write(0u, 0u, virt | asid | 0x2000u, lo0, lo1) &&
+                   tlb.lookup(virt + 0x2000u, asid, false).m_status ==
+                       status::SCRATCHPAD_UNMODELED,
+                   "scratchpad ASID, boundary, permissions and malformed entry"))
+        {
+            return 1;
+        }
+        if (!check(tlb.write(0u, 0u, virt | asid, lo0, lo1) &&
+                   tlb.write(1u, 0u, (virt + 0x2000u) | asid, 0x1eu, 0x1eu) &&
+                   tlb.lookup(virt + 0x2000u, asid, false).m_status == status::MULTIPLE_MATCHES &&
+                   !ee::ee_plan_memory_fault(ee::e_ee_access_status::SCRATCHPAD, false,
+                                             virt, 0u, 0u, asid).m_valid,
+                   "overlapping RAM mapping ambiguous; scratchpad is not a fault"))
         {
             return 1;
         }

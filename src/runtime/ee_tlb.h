@@ -26,6 +26,7 @@ enum class e_ee_tlb_lookup_status : uint8_t
     NO_MATCH,
     PAGE_INVALID,
     PAGE_NOT_DIRTY,
+    SCRATCHPAD_MAPPED,
     SCRATCHPAD_UNMODELED,
     RESERVED_ENTRY_BITS,
     RESERVED_CACHE_MODE,
@@ -40,6 +41,7 @@ struct s_ee_tlb_lookup
     uint32_t m_page_size = 0u;
     uint32_t m_cache_mode = 0u;
     bool m_odd_page = false;
+    uint32_t m_scratchpad_offset = 0u;
 };
 
 class c_ee_tlb
@@ -133,7 +135,10 @@ public:
             {
                 continue;
             }
-            const uint32_t mask = entry.m_page_mask | 0x1fffu;
+            const bool scratchpad = (entry.m_entry_lo0 & 0x80000000u) != 0u;
+            // A scratchpad entry covers a single aligned 16 KiB region,
+            // despite a zero MASK field (manual section 5.2.5).
+            const uint32_t mask = scratchpad ? 0x3fffu : (entry.m_page_mask | 0x1fffu);
             const bool global = (entry.m_entry_lo0 & entry.m_entry_lo1 & 1u) != 0u;
             if (((virtual_address ^ entry.m_entry_hi) & ~mask) != 0u ||
                 (!global && (asid & 0xffu) != (entry.m_entry_hi & 0xffu)))
@@ -148,8 +153,8 @@ public:
             }
 
             result.m_entry_index = i;
-            result.m_page_size = (mask + 1u) / 2u;
-            result.m_odd_page = (virtual_address & result.m_page_size) != 0u;
+            result.m_page_size = scratchpad ? 0x4000u : (mask + 1u) / 2u;
+            result.m_odd_page = !scratchpad && (virtual_address & result.m_page_size) != 0u;
             const uint32_t lo = result.m_odd_page ?
                 entry.m_entry_lo1 : entry.m_entry_lo0;
             result.m_cache_mode = (lo >> 3u) & 7u;
@@ -161,6 +166,12 @@ public:
             {
                 result.m_status = e_ee_tlb_lookup_status::RESERVED_ENTRY_BITS;
             }
+            else if (scratchpad && (entry.m_page_mask != 0u ||
+                         (entry.m_entry_hi & 0x2000u) != 0u ||
+                         ((entry.m_entry_lo0 ^ entry.m_entry_lo1) & 6u) != 0u))
+            {
+                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
+            }
             else if ((lo & 2u) == 0u)
             {
                 result.m_status = e_ee_tlb_lookup_status::PAGE_INVALID;
@@ -169,9 +180,11 @@ public:
             {
                 result.m_status = e_ee_tlb_lookup_status::PAGE_NOT_DIRTY;
             }
-            else if ((entry.m_entry_lo0 & 0x80000000u) != 0u)
+            else if (scratchpad)
             {
-                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
+                result.m_cache_mode = 2u;
+                result.m_scratchpad_offset = virtual_address & 0x3fffu;
+                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_MAPPED;
             }
             else if (result.m_cache_mode != 2u && result.m_cache_mode != 3u &&
                      result.m_cache_mode != 7u)
