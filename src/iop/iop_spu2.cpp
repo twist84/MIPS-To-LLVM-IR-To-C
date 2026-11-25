@@ -64,6 +64,7 @@ void c_spu2::report_signal_path() const
 
 void c_spu2::reset()
 {
+    m_irq_deadline_valid = false;
     m_clock_active = false;
     m_clock_cycles = 0u;
     m_decoded_blocks = 0u;
@@ -228,6 +229,10 @@ void c_spu2::check_effect_irq(uint32_t address)
     const uint32_t prior = irq_latches();
     check_input_irq(address, 1u);
     const uint32_t raised = irq_latches() & ~prior;
+    if (raised != 0u)
+    {
+        m_irq_deadline_valid = false;
+    }
     m_effect_irq_events += (raised & 1u) + ((raised >> 1u) & 1u);
 }
 
@@ -1104,6 +1109,7 @@ bool c_spu2::push_input(uint32_t core, const uint8_t* data, uint32_t bytes)
     {
         return false;
     }
+    m_irq_deadline_valid = false;
     s_core& state = m_cores[core];
     const uint32_t frames = bytes / 4u;
     const uint32_t base = 0x2000u + core * 0x400u;
@@ -1393,6 +1399,33 @@ void c_spu2::mix_frames(uint64_t samples)
 
 uint32_t c_spu2::voice_irq_cycles_remaining() const
 {
+    if (!m_irq_deadline_cache_enabled)
+    {
+        return compute_voice_irq_cycles_remaining();
+    }
+    const uint32_t phase = sample_phase();
+    if (m_irq_deadline_valid && phase >= m_irq_deadline_phase)
+    {
+        const uint32_t elapsed = phase - m_irq_deadline_phase;
+        if (m_irq_deadline_remaining == 0u)
+        {
+            return 0u;
+        }
+        if (m_irq_deadline_remaining > elapsed)
+        {
+            return m_irq_deadline_remaining - elapsed;
+        }
+    }
+    const uint32_t remaining = compute_voice_irq_cycles_remaining();
+    m_irq_deadline_phase = phase;
+    m_irq_deadline_remaining = remaining;
+    // A saturated result cannot safely be decremented with phase.
+    m_irq_deadline_valid = remaining != 0xffffffffu;
+    return remaining;
+}
+
+uint32_t c_spu2::compute_voice_irq_cycles_remaining() const
+{
     if (!m_clock_active ||
         (((m_cores[0].m_attr & 0x40u) == 0u || m_cores[0].m_irq) &&
          ((m_cores[1].m_attr & 0x40u) == 0u || m_cores[1].m_irq)))
@@ -1516,6 +1549,11 @@ uint32_t c_spu2::advance_cycles(uint32_t cycles)
     {
         const uint64_t before = m_clock_cycles;
         m_clock_cycles += cycles;
+        if (m_clock_cycles < before ||
+            elapsed_samples() != before / k_cycles_per_sample)
+        {
+            m_irq_deadline_valid = false;
+        }
         const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
         if (samples != 0u)
         {
@@ -1576,6 +1614,7 @@ bool c_spu2::copy_dma(
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t halfwords = static_cast<uint32_t>(data.size() / 2u);
     s_core& selected = m_cores[core];
@@ -1625,6 +1664,7 @@ bool c_spu2::read(uint32_t address, uint32_t width, uint32_t* value)
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t offset = address - k_base;
     uint16_t low = 0u;
@@ -1653,6 +1693,7 @@ bool c_spu2::write(uint32_t address, uint32_t width, uint32_t value)
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t offset = address - k_base;
     if (!write16(offset, static_cast<uint16_t>(value)))
