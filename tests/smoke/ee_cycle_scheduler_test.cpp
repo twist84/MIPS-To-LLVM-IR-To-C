@@ -162,6 +162,36 @@ int main()
           (compatibility_cpu.m_cop0[12] & ee::STATUS_EXL) == 0u,
           "real INTC acknowledgement and ERET resume interrupted instruction");
 
+    // Reference HLE boot schedules real field deadlines without
+    // fabricating a guest SetGsCrt call or touching CRT mode registers.
+    ee::c_ee_hw_bus boot_hardware{};
+    ee::c_ee_vsync_flags boot_flags{};
+    ee::ee_memory boot_memory(0x1000u);
+    ee::s_ee_cpu_state boot_cpu{};
+    boot_hardware.bind_cpu(&boot_cpu);
+    timeline.reset();
+    const uint64_t boot_field = ee::c_ee_scanout_clock::k_ee_clock_hz / 50u;
+    check(timeline.install_reference_compatibility_source() &&
+          boot_hardware.start_hle_scanout(0u) &&
+          boot_hardware.gs_crt_mode() == 0u &&
+          boot_hardware.scanout().next_field_cycle() == boot_field &&
+          boot_hardware.start_hle_scanout(1u) &&
+          boot_hardware.scanout().next_field_cycle() == boot_field &&
+          timeline.publish_cycle(boot_field - 1u) &&
+          timeline.service_scanout(boot_hardware, boot_flags, boot_memory) ==
+              result::NO_DUE_FIELD &&
+          boot_hardware.intc().status() == 0u,
+          "HLE boot schedules a PAL field without early IRQ or CRT writes");
+    check(timeline.publish_cycle(boot_field) &&
+          timeline.service_scanout(boot_hardware, boot_flags, boot_memory) ==
+              result::FIELDS_DELIVERED &&
+          boot_hardware.intc().status() == 4u &&
+          boot_hardware.scanout().fields_started() == 1u &&
+          boot_hardware.set_gs_crt(1u, 2u, 0u, boot_field) &&
+          boot_hardware.scanout().next_field_cycle() == boot_field + 4920115ull &&
+          boot_hardware.gs_crt_mode() == 2u,
+          "HLE boot IRQ is real and guest NTSC mode supersedes boot timing");
+
     std::printf("ee_cycle_scheduler_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }

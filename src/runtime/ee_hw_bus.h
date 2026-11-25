@@ -203,6 +203,15 @@ public:
     // SetGsCrt configures the GS display circuit.  Presentation and vblank
     // are not modelled here, but retaining this hardware configuration lets
     // GS setup code observe a coherent boot-time display state.
+    // HLE startup skips ROM0 but the reference system starts its PAL
+    // VBlank event schedule before any guest SetGsCrt. Establish only
+    // the clock; the guest-visible CRT configuration remains untouched.
+    bool start_hle_scanout(uint64_t current_ee_cycle)
+    {
+        return m_scanout.enabled() ||
+            m_scanout.configure(0u, 3u, 0u, current_ee_cycle);
+    }
+
     bool set_gs_crt(uint32_t interlace, uint32_t mode, uint32_t ffmd,
                     uint64_t current_ee_cycle = 0u)
     {

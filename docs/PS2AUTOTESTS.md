@@ -950,3 +950,21 @@ remain unsupported. Synthetic JIT checks cover both integer outcomes,
 COP1 ordinary/likely taken pairs and actual relocated slot side effects.
 The broader pair semantics are inferred from the next-PC pipeline;
 only the original transcripts can validate their observed cases.
+
+### INTC ordering: HLE boot scanout and interrupt-driven idle
+
+The original intc_order run from 45652656843 stopped at WaitSema
+(EPC 0x00104ce4, dispatch 1276), with no runnable peer, 29,373
+compatibility units and zero configured fields. [Kernel evidence artifact
+15040753380](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45652656843/artifacts/15040753380).
+The primary reference schedules VBlank at boot (runtime/src/system.cpp)
+with Options::pal default true (runtime/include/ps2/system.hpp).
+Enable that PAL event cadence on the existing explicitly approximate
+HLE compatibility clock, without inventing CRT register writes, guest
+instructions, callbacks or semaphore signals. Explicit SetGsCrt still
+supersedes the startup clock. WaitSema with no READY peer can enter the
+bounded idle scheduler when an enabled registered modeled IRQ source
+can progress; existing guest IOP/ROM0 SIF wait paths keep precedence.
+Service both scanout edge deadlines while idle. Tests verify no early
+IRQ, no guest CRT mode mutation, and explicit NTSC reconfiguration.
+The original transcript and retail timing still require validation.

@@ -3230,6 +3230,16 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "EE compatibility clock installation failed\n");
             return 1;
         }
+        // ps2-web-recomp starts the PAL field schedule at boot even
+        // before SetGsCrt (system.cpp::boot, Options::pal = true).
+        // Only the explicitly enabled compatibility clock owns this
+        // bootstrap schedule; a later guest SetGsCrt supersedes it.
+        if (!hardware.start_hle_scanout(
+                runtime.m_ee_cycle_scheduler.current_cycle()))
+        {
+            std::fprintf(stderr, "EE HLE startup scanout initialization failed\n");
+            return 1;
+        }
         // ps2-web-recomp runs guest execution against an event budget.
         // Preserve real safepoints for due GS fields; do not derive time
         // from host dispatches, loop visits, or wall-clock duration.
@@ -4503,7 +4513,7 @@ int main(int argc, char** argv)
             uint64_t next = std::min(now + k_idle_slice, host_timers.next_event());
             if (hardware.scanout().enabled())
             {
-                next = std::min(next, hardware.scanout().next_field_cycle());
+                next = std::min(next, hardware.scanout().next_event_cycle());
             }
             // The preceding service has already handled all due events.
             // A device with no future deadline must not stall idle time.
@@ -6957,12 +6967,69 @@ int main(int argc, char** argv)
                                     // WaitSema succeed on re-entry.
                                     continue;
                                 }
-                                std::fprintf(stderr,
-                                    "WaitSema HLE refused blocking wait: "
-                                    "id=%u current_thread=%u count=0 "
-                                    "(no runnable peer)\n",
-                                    semaphore_id, current_thread_id);
-                                break;
+                                // No runnable peer does not imply a
+                                // deadlock: a registered, enabled device
+                                // interrupt may signal the semaphore
+                                // while the kernel is idle. Preserve the
+                                // special IOP RPC waits above, and use
+                                // the ordinary bounded idle scheduler
+                                // only when a modeled producer exists.
+                                const uint32_t status_word = cpu.m_cop0[12];
+                                const bool irq_enabled =
+                                    (status_word & (ee::STATUS_IE | ee::STATUS_EIE |
+                                        ee::STATUS_ERL)) ==
+                                        (ee::STATUS_IE | ee::STATUS_EIE);
+                                const uint32_t intc_mask = hardware.intc().mask();
+                                const uint32_t intc_pending = hardware.intc().pending();
+                                const bool scheduled_timer =
+                                    host_timers.next_event() !=
+                                        std::numeric_limits<uint64_t>::max();
+                                const bool intc_producer =
+                                    (status_word & (1u << (ee::CAUSE_IP_SHIFT + ee::INT_INTC))) != 0u &&
+                                    std::any_of(intc_handlers.begin(), intc_handlers.end(),
+                                        [&](const s_kernel_interrupt_handler& handler)
+                                        {
+                                            if (handler.m_cause >= 32u)
+                                            {
+                                                return false;
+                                            }
+                                            const uint32_t bit = 1u << handler.m_cause;
+                                            return (intc_mask & bit) != 0u &&
+                                                ((intc_pending & bit) != 0u ||
+                                                 (handler.m_cause ==
+                                                    ee::c_ee_scanout_clock::k_intc_vblank_start &&
+                                                  hardware.scanout().enabled()) ||
+                                                 (handler.m_cause >= 9u &&
+                                                  handler.m_cause <= 12u && scheduled_timer));
+                                        });
+                                const bool dmac_producer =
+                                    std::any_of(dmac_handlers.begin(), dmac_handlers.end(),
+                                        [&](const s_kernel_interrupt_handler& handler)
+                                        {
+                                            return handler.m_cause < 10u &&
+                                                (hardware.dmac().pending() &
+                                                    (1u << handler.m_cause)) != 0u;
+                                        });
+                                const bool idle_wait = !other_ready &&
+                                    !callback_active && !irq_callback_active &&
+                                    current_thread_id != 0u && irq_enabled &&
+                                    runtime.m_ee_cycle_scheduler.source() ==
+                                        ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY &&
+                                    (intc_producer || dmac_producer);
+                                if (!idle_wait)
+                                {
+                                    std::fprintf(stderr,
+                                        "WaitSema HLE refused blocking wait: "
+                                        "id=%u current_thread=%u count=0 "
+                                        "(no runnable peer or modeled IRQ producer)\n",
+                                        semaphore_id, current_thread_id);
+                                    break;
+                                }
+                                if (trace)
+                                {
+                                    std::printf("HLE WaitSema idle: id=%u thread=%u\n",
+                                                semaphore_id, current_thread_id);
+                                }
                             }
                             semaphore.m_waiters.push_back(current_thread_id);
                             threads[current_thread_id].m_status = 4u;
