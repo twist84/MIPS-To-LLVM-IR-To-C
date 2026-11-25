@@ -936,6 +936,8 @@ int main()
 
     // Detached VU execution must not expose partial VIF state or GIF
     // output, even if the worker finishes before the controller polls.
+    // Both overlap instrumentation modes must preserve publication.
+    for (bool overlap_profile : {true, false})
     {
         using result = ee::c_ee_vif1::e_deferred_result;
         ee::c_ee_vif1 deferred{};
@@ -947,7 +949,8 @@ int main()
             0x4a030000u, vi1_two, nop_upper,
             0x80000efcu, 0x400002ffu, nop_lower, nop_upper, 0u,
             0x14000000u, 0x10000000u, 0x14000000u, 0u});
-        if (!check(deferred.enable_deferred(), "enable deferred worker") ||
+        if (!check(deferred.enable_deferred({}, false, overlap_profile),
+                   "enable deferred worker") ||
             !check(ee::c_ee_vif1::mmio_write(
                 &deferred, ee::c_ee_vif1::k_vu1_data_base + 32u,
                 16u, &kick_tag) &&
@@ -973,6 +976,9 @@ int main()
         {
             return 1;
         }
+
+        deferred.native_execution_begin();
+        deferred.native_execution_end();
 
         const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
         if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
