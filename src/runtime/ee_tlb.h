@@ -161,10 +161,6 @@ public:
             {
                 result.m_status = e_ee_tlb_lookup_status::RESERVED_ENTRY_BITS;
             }
-            else if ((entry.m_entry_lo0 & 0x80000000u) != 0u)
-            {
-                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
-            }
             else if ((lo & 2u) == 0u)
             {
                 result.m_status = e_ee_tlb_lookup_status::PAGE_INVALID;
@@ -172,6 +168,10 @@ public:
             else if (write_access && (lo & 4u) == 0u)
             {
                 result.m_status = e_ee_tlb_lookup_status::PAGE_NOT_DIRTY;
+            }
+            else if ((entry.m_entry_lo0 & 0x80000000u) != 0u)
+            {
+                result.m_status = e_ee_tlb_lookup_status::SCRATCHPAD_UNMODELED;
             }
             else if (result.m_cache_mode != 2u && result.m_cache_mode != 3u &&
                      result.m_cache_mode != 7u)

@@ -1,6 +1,7 @@
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
 #include "ee_address_route.h"
+#include "ee_memory_fault.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 
@@ -354,6 +355,97 @@ int main()
                    ee::ee_classify_address(0x70000000u, 0u, 3u).m_route ==
                        route::TLB_MAPPED,
                    "HLE aliases and scratchpad are not unconditional architectural mappings"))
+        {
+            return 1;
+        }
+    }
+
+    {
+        using access = ee::e_ee_access_status;
+        ee::c_ee_tlb tlb{};
+        constexpr uint32_t virt = 0x34566000u;
+        constexpr uint32_t physical_base = 0x12345000u;
+        constexpr uint32_t asid = 0x57u;
+        constexpr uint32_t lo = ((physical_base >> 12u) << 6u) | (3u << 3u);
+        if (!check(ee::ee_resolve_access(tlb, 0xbfc00000u, 2u << 3u,
+                                       3u, asid, false).m_status == access::ADDRESS_ERROR &&
+                   ee::ee_resolve_access(tlb, virt, 0u, 3u, asid, false).m_status ==
+                       access::TLB_REFILL &&
+                   tlb.write(0u, 0u, virt | asid, lo, lo | 2u) &&
+                   ee::ee_resolve_access(tlb, virt, 0u, 3u, asid, false).m_status ==
+                       access::TLB_INVALID &&
+                   ee::ee_resolve_access(tlb, virt + 0x1000u, 0u, 3u, asid, true).m_status ==
+                       access::TLB_MODIFIED,
+                   "combined routing preserves privilege, refill, invalid and modified"))
+        {
+            return 1;
+        }
+        const auto translated = ee::ee_resolve_access(
+            tlb, virt + 0x1123u, 0u, 3u, asid, false);
+        const auto erl_direct = ee::ee_resolve_access(tlb, virt, ee::STATUS_ERL,
+                                                       3u, asid, false);
+        if (!check(translated.m_status == access::PHYSICAL &&
+                   translated.m_physical_address == physical_base + 0x123u &&
+                   translated.m_cache_mode == 3u &&
+                   erl_direct.m_status == access::PHYSICAL &&
+                   erl_direct.m_physical_address == virt &&
+                   erl_direct.m_cache_mode == 2u,
+                   "physical bus address is separate from memory backing"))
+        {
+            return 1;
+        }
+        if (!check(tlb.write(1u, 0u, virt | asid, lo | 6u, lo | 6u) &&
+                   ee::ee_resolve_access(tlb, virt, 0u, 3u, asid, false).m_status ==
+                       access::UNMODELED,
+                   "duplicate mapping cannot become a fabricated TLB fault"))
+        {
+            return 1;
+        }
+        constexpr uint32_t bad = 0x92345678u;
+        for (uint32_t flags : {0u, ee::STATUS_EXL, ee::STATUS_BEV,
+                              ee::STATUS_EXL | ee::STATUS_BEV})
+        {
+            for (bool write : {false, true})
+            {
+                const uint32_t common = (flags & ee::STATUS_BEV) != 0u
+                    ? ee::VEC_COMMON_BEV1 : ee::VEC_COMMON_BEV0;
+                const uint32_t refill = (flags & ee::STATUS_EXL) != 0u ? common :
+                    ((flags & ee::STATUS_BEV) != 0u ? ee::VEC_TLB_REFILL_BEV1 :
+                                                     ee::VEC_TLB_REFILL_BEV0);
+                for (access kind : {access::TLB_REFILL, access::TLB_INVALID,
+                                    access::TLB_MODIFIED, access::ADDRESS_ERROR})
+                {
+                    const auto plan = ee::ee_plan_memory_fault(
+                        kind, write, bad, flags, 0xabcdef01u, 0x76543f57u);
+                    if (kind == access::TLB_MODIFIED && !write)
+                    {
+                        if (!check(!plan.m_valid, "modified fault requires a store"))
+                        {
+                            return 1;
+                        }
+                        continue;
+                    }
+                    const bool tlb_fault = kind != access::ADDRESS_ERROR;
+                    const uint32_t expected_code = kind == access::ADDRESS_ERROR ?
+                        (write ? ee::EX_AdES : ee::EX_AdEL) :
+                        (kind == access::TLB_MODIFIED ? ee::EX_Mod :
+                            (write ? ee::EX_TLBS : ee::EX_TLBL));
+                    if (!check(plan.m_valid && plan.m_code == expected_code &&
+                               plan.m_bad_vaddr == bad &&
+                               plan.m_vector == (kind == access::TLB_REFILL ? refill : common) &&
+                               plan.m_update_tlb_registers == tlb_fault &&
+                               (!tlb_fault || (plan.m_entry_hi == 0x92344057u &&
+                                               plan.m_context == 0xabc91a20u)),
+                               "fault vector and COP0 register update plan"))
+                    {
+                        return 1;
+                    }
+                }
+            }
+        }
+        if (!check(!ee::ee_plan_memory_fault(access::UNMODELED, false, bad, 0u, 0u, 0u).m_valid &&
+                   !ee::ee_plan_memory_fault(access::PHYSICAL, false, bad, 0u, 0u, 0u).m_valid,
+                   "nonfault and unmodeled outcomes cannot enter exception handler"))
         {
             return 1;
         }

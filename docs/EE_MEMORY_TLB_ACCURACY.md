@@ -49,3 +49,16 @@ reserved EntryLo fields separately from EntryLo0.S scratchpad selection;
 EntryLo1 bit 31 is reserved, not a second scratchpad selector. Existing raw
 TLB register storage remains unchanged. Neither classifier simulates the
 instruction/data cache enable bits, cache contents, or bus effects yet.
+
+## Batch 4: unified access and fault decision
+
+Combine segment and TLB classification without performing a memory access.
+Distinguish privilege errors, refill, invalid and modified. Unsupported
+attributes or ambiguous matches remain unmodeled. For a well-formed entry,
+V/D permission checks precede scratchpad/cache selection (manual section 5.2).
+Add a pure fault plan with the correct common/refill vector under BEV/EXL,
+Cause.ExcCode, BadVAddr, and Context.BadVPN2/EntryHi.VPN2 updates preserving
+PTEBase/current ASID. Do not modify state or manufacture Random/EntryLo
+values. Sections 4.2.6–4.2.9 and 3.2 specify these fields. Directed tests
+cover the composed route, all BEV/EXL combinations, load/store distinctions
+and rejected unsupported decisions. The active HLE memory path is unchanged.
