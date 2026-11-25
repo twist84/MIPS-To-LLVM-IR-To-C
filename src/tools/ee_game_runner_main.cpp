@@ -2545,6 +2545,9 @@ int main(int argc, char** argv)
         gif_path3.set_image_payload_digest(false);
         std::puts("GIF image payload digest: disabled (event and QWC counters retained)");
     }
+    ee::c_ee_vif1 vif0{};
+    vif0.bind_vu0(&vu0);
+    hardware.bind_vif0(&vif0);
     ee::c_ee_vif1 vif1{};
     ee::c_ee_gs_state gs_state{};
     hardware.bind_gs(&gs_state);
@@ -2558,11 +2561,12 @@ int main(int argc, char** argv)
 
     struct s_graphics_dma_routes
     {
+        ee::c_ee_vif1* m_vif0 = nullptr;
         ee::c_ee_vif1* m_vif1 = nullptr;
         ee::c_ee_gif_path3* m_path3 = nullptr;
         bool m_rejection_logged = false;
     };
-    s_graphics_dma_routes graphics_dma{&vif1, &gif_path3, false};
+    s_graphics_dma_routes graphics_dma{&vif0, &vif1, &gif_path3, false};
     hardware.bind_device_transfer(
         &graphics_dma,
         [](void* user, uint32_t channel, const uint8_t* data,
@@ -2571,7 +2575,11 @@ int main(int argc, char** argv)
             s_graphics_dma_routes* routes =
                 static_cast<s_graphics_dma_routes*>(user);
             bool accepted = false;
-            if (channel == 1u)
+            if (channel == 0u)
+            {
+                accepted = routes->m_vif0->consume(data, qwc);
+            }
+            else if (channel == 1u)
             {
                 accepted = routes->m_vif1->consume(data, qwc);
                 if (!accepted && !routes->m_rejection_logged)

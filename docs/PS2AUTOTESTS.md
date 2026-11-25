@@ -783,3 +783,22 @@ ERROR 0. Newly passing gs/label and gs/signal. No previous exact
 transcripts lost. Native WebGPU Linux smoke exposed a remaining
 rollback fixture using SIGNAL as its invalid command; update it to
 still-unsupported FINISH without removing the rollback/retry assertions.
+
+### VIF0 command and DMA transport
+
+Head `9597f97f166fcde8e3d6fc8d1bd06d01d4e500de`, tested merge
+`908c8c2af89b700d7ec66b87c9b3e34608ea75e2`, [run 45647631828](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45647631828),
+[summary artifact 15038027885](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45647631828/artifacts/15038027885).
+All five workflows passed; 42/55 exact, 9 DIFF, 4 INCOMPLETE, no lost passes.
+The original VIF1 direct FIFO path now transfers real quadwords.
+
+VIF0 uses an independent instance of the common VIF parser, with its
+transactional scratch buffers seeded from the live EE VU0 data/micro
+banks and published only after acceptance. Address wrap is 256 data
+quadwords / 512 microinstruction pairs; VIF1 TOPS addressing is not
+applied. Route VIF0 registers/FIFO and channel 0 normal/source-chain
+DMA, using the existing validated chain walker. VIF0 launches, IRQ
+stalls, partial command readback and other UNPACK edge semantics remain
+incomplete; unsupported commands still fail closed, and the shared
+walker retains its existing TTE packing limitation. Regression checks
+FIFO, normal DMA, REFE, VU0 wrap, MPG, reset and transaction rollback.

@@ -150,8 +150,9 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
         num = 256u;
     }
 
-    uint32_t address = code & 0x3ffu;
-    if ((code & 0x8000u) != 0u)
+    const uint32_t address_mask = machine.m_vif0 ? 0xffu : 0x3ffu;
+    uint32_t address = code & address_mask;
+    if (!machine.m_vif0 && (code & 0x8000u) != 0u)
     {
         address += machine.m_tops;
     }
@@ -165,8 +166,8 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
         machine.m_mode != 1u && machine.m_mode != 2u && cl == wl &&
         host_little_endian())
     {
-        const uint32_t start = address & 0x3ffu;
-        const uint32_t first = std::min(num, 0x400u - start);
+        const uint32_t start = address & address_mask;
+        const uint32_t first = std::min(num, address_mask + 1u - start);
         std::memcpy(machine.m_vu1->m_data.data() + start * 16u,
                     words, first * 16u);
         if (first < num)
@@ -217,7 +218,7 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
         }
 
         uint8_t* destination = machine.m_vu1->m_data.data() +
-            (address & 0x3ffu) * 16u;
+            (address & address_mask) * 16u;
         const uint32_t mask_row = std::min(cycle, 3u);
         for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
@@ -284,6 +285,18 @@ bool c_ee_vif1::execute(
     bool accepted = true;
     machine.m_code = code;
 
+    // VIF0 has no VU1 double-buffer or GIF PATH2/PATH3 control. Until
+    // its launch/IRQ scheduling is implemented, do not execute those
+    // commands using the unrelated VU1 micro engine.
+    if (machine.m_vif0 &&
+        (op == 0x02u || op == 0x03u || op == 0x06u ||
+         op == 0x11u || op == 0x13u || op == 0x14u ||
+         op == 0x15u || op == 0x17u || op == 0x50u || op == 0x51u))
+    {
+        *reject = e_reject::unsupported_command;
+        return false;
+    }
+
     if ((code & 0x80000000u) != 0u && (machine.m_err & 1u) == 0u)
     {
         *reject = e_reject::irq_requires_resume;
@@ -301,7 +314,7 @@ bool c_ee_vif1::execute(
             machine.m_tops = machine.m_base;
             break;
         case 0x03u: machine.m_base = imm & 0x3ffu; break; // BASE
-        case 0x04u: machine.m_itops = imm & 0x3ffu; break; // ITOP
+        case 0x04u: machine.m_itops = imm & (machine.m_vif0 ? 0xffu : 0x3ffu); break; // ITOP
         case 0x05u: machine.m_mode = imm & 3u; break; // STMOD
         case 0x07u: machine.m_mark = imm; break; // MARK
         case 0x10u: // FLUSHE
@@ -322,7 +335,8 @@ bool c_ee_vif1::execute(
             c_runtime_profile_scope profile_scope(e_runtime_profile_id::vif1_mpg, count);
             for (uint32_t i = 0u; i < count; ++i)
             {
-                const uint32_t offset = ((imm + i) * 8u) & 0x3fffu;
+                const uint32_t offset = ((imm + i) * 8u) &
+                    (machine.m_vif0 ? 0xfffu : 0x3fffu);
                 std::memcpy(machine.m_vu1->m_code.data() + offset,
                             words + i * 2u, 8u);
             }
@@ -521,6 +535,16 @@ bool c_ee_vif1::prepare(s_transaction& tx, const uint8_t* data, uint32_t qwc)
     }
     auto& next = tx.m_next;
     next = m_machine;
+    next.m_vif0 = m_vu0 != nullptr;
+    if (next.m_vif0)
+    {
+        // The EE memory aperture and COP2 operate on this same live VU0.
+        // Use the transaction's private buffers only as staging storage.
+        std::memcpy(next.m_vu1->m_data.data(), m_vu0->m_data_memory,
+                    sizeof(m_vu0->m_data_memory));
+        std::memcpy(next.m_vu1->m_code.data(), m_vu0->m_micro_memory,
+                    sizeof(m_vu0->m_micro_memory));
+    }
     if (next.m_pending.size() + static_cast<size_t>(qwc) * 4u >
         k_max_pending_words)
     {
@@ -789,6 +813,13 @@ bool c_ee_vif1::publish(s_transaction& tx)
     // staged vector becomes committed, including an incomplete command.
     m_machine.m_pending.swap(m_pending_scratch);
     m_machine = std::move(next);
+    if (m_vu0 != nullptr)
+    {
+        std::memcpy(m_vu0->m_data_memory, m_machine.m_vu1->m_data.data(),
+                    sizeof(m_vu0->m_data_memory));
+        std::memcpy(m_vu0->m_micro_memory, m_machine.m_vu1->m_code.data(),
+                    sizeof(m_vu0->m_micro_memory));
+    }
     tx.m_committed = true;
     // A successful packet clears only the latest failure, not the
     // lifetime evidence of a previously rejected VU1/GIF command.
@@ -827,7 +858,7 @@ bool c_ee_vif1::control_vu_break_reset(uint32_t value)
 
 bool c_ee_vif1::run_cmsar1(uint32_t address)
 {
-    if (deferred_busy())
+    if (m_vu0 != nullptr || deferred_busy())
     {
         return false;
     }
@@ -870,7 +901,7 @@ bool c_ee_vif1::consume(const uint8_t* data, uint32_t qwc)
 bool c_ee_vif1::enable_deferred(std::unique_ptr<c_ee_vu1_aot> backend,
     bool detailed_profile)
 {
-    if (m_worker != nullptr)
+    if (m_vu0 != nullptr || m_worker != nullptr)
     {
         return false;
     }
@@ -1167,8 +1198,13 @@ bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
 bool c_ee_vif1::dma_transfer(void* user, uint32_t channel,
                              const uint8_t* data, uint32_t qwc)
 {
-    return user != nullptr && channel == 1u &&
-        static_cast<c_ee_vif1*>(user)->consume(data, qwc);
+    if (user == nullptr)
+    {
+        return false;
+    }
+    auto* vif = static_cast<c_ee_vif1*>(user);
+    return channel == (vif->m_vu0 != nullptr ? 0u : 1u) &&
+        vif->consume(data, qwc);
 }
 
 bool c_ee_vif1::mmio_read(void* user, uint32_t address,
@@ -1179,14 +1215,21 @@ bool c_ee_vif1::mmio_read(void* user, uint32_t address,
         return false;
     }
     c_ee_vif1* vif1 = static_cast<c_ee_vif1*>(user);
+    const uint32_t register_base = vif1->m_vu0 != nullptr ?
+        k_vif0_register_base : k_register_base;
     if (width == 4u && (address & 3u) == 0u &&
-        address >= k_register_base && address < k_register_base + 0x400u)
+        address >= register_base && address < register_base + 0x400u)
     {
-        value->m_lo = vif1->read_register(address - k_register_base);
+        value->m_lo = vif1->read_register(address - register_base);
         value->m_hi = 0u;
         return true;
     }
 
+    // VU0 memory is already routed directly by ee_memory.
+    if (vif1->m_vu0 != nullptr)
+    {
+        return false;
+    }
     const uint8_t* source = nullptr;
     uint32_t offset = 0u;
     if (address >= k_vu1_code_base &&
@@ -1233,15 +1276,19 @@ bool c_ee_vif1::mmio_write(void* user, uint32_t address,
         return false;
     }
     c_ee_vif1* vif1 = static_cast<c_ee_vif1*>(user);
-    if (address >= k_register_base &&
-        address < k_register_base + 0x400u && width == 4u &&
+    const uint32_t register_base = vif1->m_vu0 != nullptr ?
+        k_vif0_register_base : k_register_base;
+    const uint32_t fifo_base = vif1->m_vu0 != nullptr ?
+        k_vif0_fifo_base : k_fifo_base;
+    if (address >= register_base &&
+        address < register_base + 0x400u && width == 4u &&
         (address & 3u) == 0u)
     {
         return vif1->write_register(
-            address - k_register_base,
+            address - register_base,
             static_cast<uint32_t>(value->m_lo));
     }
-    if (address >= k_fifo_base && address < k_fifo_base + 0x1000u &&
+    if (address >= fifo_base && address < fifo_base + 0x1000u &&
         width == 16u && (address & 15u) == 0u)
     {
         uint8_t quad[16]{};
@@ -1254,7 +1301,7 @@ bool c_ee_vif1::mmio_write(void* user, uint32_t address,
         return vif1->consume(quad, 1u);
     }
 
-    if (vif1->deferred_busy())
+    if (vif1->m_vu0 != nullptr || vif1->deferred_busy())
     {
         return false;
     }

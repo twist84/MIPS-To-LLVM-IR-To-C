@@ -802,25 +802,29 @@ bool c_ee_dmac::transfer_device_normal(uint32_t channel_index)
 // partial payload, nor a refusing VIF consumer may retire STR, advance
 // MADR/TADR/ASR, or publish D_STAT channel 1. TTE delivers the high
 // 64 tag bits as a qword with its first eight bytes zeroed.
-bool c_ee_dmac::transfer_vif1_source_chain()
+bool c_ee_dmac::transfer_vif_source_chain(uint32_t channel_index)
 {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dmac_vif1_chain);
     using reject = e_vif1_chain_reject;
-    m_vif1_chain_last_reject = reject::none;
-    s_spr_channel& current = m_device_channels[1u];
+    reject vif0_reject = reject::none;
+    reject& last_reject = channel_index == 1u ?
+        m_vif1_chain_last_reject : vif0_reject;
+    last_reject = reject::none;
+    s_spr_channel& current = m_device_channels[channel_index];
     if (m_memory == nullptr ||
-        (m_device_transfer == nullptr && m_deferred_vif1 == nullptr))
+        (m_device_transfer == nullptr &&
+         !(channel_index == 1u && m_deferred_vif1 != nullptr)))
     {
-        m_vif1_chain_last_reject = reject::missing_memory_or_sink;
+        last_reject = reject::missing_memory_or_sink;
         return false;
     }
     if ((current.m_chcr & k_chcr_str) == 0u ||
         ((current.m_chcr >> 2u) & 3u) != 1u ||
-        (current.m_chcr & 1u) == 0u ||
+        (channel_index == 1u && (current.m_chcr & 1u) == 0u) ||
         current.m_qwc != 0u ||
         ((current.m_chcr >> 4u) & 3u) != 0u)
     {
-        m_vif1_chain_last_reject = reject::invalid_start_state;
+        last_reject = reject::invalid_start_state;
         return false;
     }
 
@@ -873,7 +877,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
         uint32_t tag_host_address = 0u;
         if (!resolve(tag_address, &tag_host_address))
         {
-            m_vif1_chain_last_reject = reject::invalid_tag_address;
+            last_reject = reject::invalid_tag_address;
             return false;
         }
         const uint32_t depth = (next.m_chcr >> 4u) & 3u;
@@ -881,7 +885,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
                 depth >= 1u ? next.m_asr[0] : 0u,
                 depth >= 2u ? next.m_asr[1] : 0u))
         {
-            m_vif1_chain_last_reject = reject::cyclic_chain;
+            last_reject = reject::cyclic_chain;
             return false;
         }
         s_ee_u128 tag{};
@@ -916,12 +920,12 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             next_tag_address = external;
             break;
         case 4u: // REFS: STADR stall control is not modeled
-            m_vif1_chain_last_reject = reject::unsupported_tag;
+            last_reject = reject::unsupported_tag;
             return false;
         case 5u: // CALL: save the post-payload return tag address
             if (asp >= 2u)
             {
-                m_vif1_chain_last_reject = reject::unsupported_tag;
+                last_reject = reject::unsupported_tag;
                 return false;
             }
             next.m_asr[asp] = static_cast<uint32_t>(next_tag_address);
@@ -945,7 +949,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             tag_terminal = true;
             break;
         default:
-            m_vif1_chain_last_reject = reject::unsupported_tag;
+            last_reject = reject::unsupported_tag;
             return false;
         }
 
@@ -955,7 +959,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             static_cast<size_t>(qwc) + extra >
                 k_max_packet_qwc - packet.size() / 16u)
         {
-            m_vif1_chain_last_reject = reject::chain_qwc_limit;
+            last_reject = reject::chain_qwc_limit;
             return false;
         }
 
@@ -971,7 +975,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
              ((data_address & 0x80000000ull) == 0u &&
               payload_end > 0x02000000ull)))
         {
-            m_vif1_chain_last_reject = reject::invalid_payload_span;
+            last_reject = reject::invalid_payload_span;
             return false;
         }
         if (tte)
@@ -993,7 +997,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             uint32_t mapped = 0u;
             if (!resolve(address, &mapped))
             {
-                m_vif1_chain_last_reject = reject::invalid_payload_span;
+                last_reject = reject::invalid_payload_span;
                 return false;
             }
             size_t span = static_cast<size_t>(payload_end - address);
@@ -1009,7 +1013,7 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             const uint8_t* bytes = m_memory->read_span(mapped, span);
             if (bytes == nullptr)
             {
-                m_vif1_chain_last_reject = reject::invalid_payload_span;
+                last_reject = reject::invalid_payload_span;
                 return false;
             }
             packet.insert(packet.end(), bytes, bytes + span);
@@ -1027,14 +1031,14 @@ bool c_ee_dmac::transfer_vif1_source_chain()
     }
     if (!terminal)
     {
-        m_vif1_chain_last_reject = reject::chain_tag_limit;
+        last_reject = reject::chain_tag_limit;
         return false;
     }
     next.m_qwc = 0u;
     next.m_chcr &= ~k_chcr_str;
     if (!packet.empty())
     {
-        if (m_deferred_vif1 != nullptr)
+        if (channel_index == 1u && m_deferred_vif1 != nullptr)
         {
             const auto submitted = submit_deferred_vif1(packet.data(),
                 static_cast<uint32_t>(packet.size() / 16u), next, true);
@@ -1044,20 +1048,20 @@ bool c_ee_dmac::transfer_vif1_source_chain()
             }
             if (submitted != e_deferred_vif1::completed)
             {
-                m_vif1_chain_last_reject = reject::rejected_by_sink;
+                last_reject = reject::rejected_by_sink;
                 return false;
             }
         }
-        else if (!m_device_transfer(m_device_user, 1u, packet.data(),
+        else if (!m_device_transfer(m_device_user, channel_index, packet.data(),
             static_cast<uint32_t>(packet.size() / 16u)))
         {
-            m_vif1_chain_last_reject = reject::rejected_by_sink;
+            last_reject = reject::rejected_by_sink;
             return false;
         }
     }
 
-    m_device_channels[1u] = next;
-    return raise(1u);
+    m_device_channels[channel_index] = next;
+    return raise(channel_index);
 }
 
 bool c_ee_dmac::transfer_gif_source_chain()
@@ -1868,9 +1872,9 @@ bool c_ee_dmac::write_spr_channel(uint32_t address, uint32_t value)
                 {
                     (void)transfer_gif_source_chain();
                 }
-                else if (channel_index == 1u && mode == 1u)
+                else if (channel_index <= 1u && mode == 1u)
                 {
-                    (void)transfer_vif1_source_chain();
+                    (void)transfer_vif_source_chain(channel_index);
                 }
                 else
                 {

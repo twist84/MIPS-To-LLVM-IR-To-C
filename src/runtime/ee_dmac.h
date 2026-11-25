@@ -231,7 +231,7 @@ private:
     bool write_spr_channel(uint32_t address, uint32_t value);
     bool transfer_device_normal(uint32_t channel);
     bool transfer_gif_source_chain();
-    bool transfer_vif1_source_chain();
+    bool transfer_vif_source_chain(uint32_t channel_index);
     bool transfer_spr_normal(uint32_t channel);
     bool transfer_spr_interleave(uint32_t channel);
     bool transfer_from_spr_chain();

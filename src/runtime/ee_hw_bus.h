@@ -45,6 +45,11 @@ public:
         m_dmac.bind_device_transfer(user, callback);
     }
 
+    void bind_vif0(c_ee_vif1* vif0)
+    {
+        m_vif0 = vif0;
+    }
+
     void bind_vif1(c_ee_vif1* vif1)
     {
         m_vif1 = vif1;
@@ -76,6 +81,10 @@ public:
     {
         m_intc.reset();
         m_dmac.reset();
+        if (m_vif0 != nullptr)
+        {
+            m_vif0->reset();
+        }
         if (m_vif1 != nullptr)
         {
             m_vif1->reset();
@@ -332,6 +341,8 @@ public:
             return true;
         }
         return c_ee_ipu::mmio_read(&bus->m_ipu, address, width, value) ||
+               (bus->m_vif0 != nullptr &&
+                c_ee_vif1::mmio_read(bus->m_vif0, address, width, value)) ||
                (bus->m_vif1 != nullptr &&
                 c_ee_vif1::mmio_read(bus->m_vif1, address, width, value)) ||
                c_ee_intc::mmio_read(&bus->m_intc, address, width, value) ||
@@ -432,6 +443,8 @@ public:
             return true;
         }
         return c_ee_ipu::mmio_write(&bus->m_ipu, address, width, value) ||
+               (bus->m_vif0 != nullptr &&
+                c_ee_vif1::mmio_write(bus->m_vif0, address, width, value)) ||
                (bus->m_vif1 != nullptr &&
                 c_ee_vif1::mmio_write(bus->m_vif1, address, width, value)) ||
                c_ee_intc::mmio_write(&bus->m_intc, address, width, value) ||
@@ -454,6 +467,7 @@ private:
 
     c_ee_intc m_intc;
     c_ee_dmac m_dmac;
+    c_ee_vif1* m_vif0 = nullptr;
     c_ee_vif1* m_vif1 = nullptr;
     c_ee_gs_state* m_gs = nullptr;
     c_ee_sif m_sif;

@@ -22,6 +22,8 @@ namespace ee
 class c_ee_vif1
 {
 public:
+    static constexpr uint32_t k_vif0_register_base = 0x10003800u;
+    static constexpr uint32_t k_vif0_fifo_base = 0x10004000u;
     static constexpr uint32_t k_register_base = 0x10003c00u;
     static constexpr uint32_t k_fifo_base = 0x10005000u;
     static constexpr uint32_t k_vu1_code_base = 0x11008000u;
@@ -76,6 +78,9 @@ public:
         std::array<uint64_t, 128u> m_committed_opcodes{};
     };
 
+    // A separate controller instance may decode VIF0's common commands.
+    // It snapshots and commits the live VU0 memory, never VU1's residency.
+    void bind_vu0(s_ee_vu0_state* vu0) { m_vu0 = vu0; }
     void bind_path2(c_ee_gif_path3* path2);
     void bind_path1(c_ee_gif_path3* path1);
     void bind_path3(const c_ee_gif_path3* path3);
@@ -146,6 +151,7 @@ private:
     // explicit ownership handoff without lending MMIO pointers to a worker.
     struct s_machine
     {
+        bool m_vif0 = false;
         uint32_t m_stat = 0u;
         uint32_t m_err = 0u;
         uint32_t m_mark = 0u;
@@ -252,6 +258,7 @@ private:
                         s_ee_vu1_issue* vu_issue,
                         e_reject* reject);
 
+    s_ee_vu0_state* m_vu0 = nullptr;
     s_machine m_machine{};
     // Host-only transaction storage. Never part of committed VIF state.
     std::vector<uint32_t> m_pending_scratch;

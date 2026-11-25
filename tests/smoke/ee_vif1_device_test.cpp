@@ -86,6 +86,91 @@ int main()
     path2.bind_event_sink(&capture, capture_gif);
     vif1.bind_path2(&path2);
 
+    // VIF0 FIFO, DMA0 normal/chain and EE/COP2 share the same live
+    // 4 KiB VU0 banks. No VIF1 register or VU1 memory is modified.
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 vif0{};
+        vif0.bind_vu0(&vu0);
+        ee::c_ee_hw_bus bus;
+        ee::ee_memory memory(0x10000u);
+        bus.bind_memory(&memory);
+        bus.bind_vif0(&vif0);
+        bus.bind_device_transfer(&vif0, ee::c_ee_vif1::dma_transfer);
+        ee::s_ee_runtime runtime{};
+        runtime.m_user = &memory;
+        runtime.m_vu0_state = &vu0;
+        runtime.m_mmio_user = &bus;
+        runtime.m_mmio_read = ee::c_ee_hw_bus::mmio_read;
+        runtime.m_mmio_write = ee::c_ee_hw_bus::mmio_write;
+        constexpr uint32_t fifo = ee::c_ee_vif1::k_vif0_fifo_base;
+        constexpr uint32_t regs = ee::c_ee_vif1::k_vif0_register_base;
+        constexpr uint32_t d0 = ee::c_ee_dmac::k_vif0_base;
+        constexpr uint32_t vu_data = 0x11004000u;
+        // S32, two vectors, wrapping qword 255 -> 0.
+        const ee::s_ee_u128 packet{0x600200ff01000101ull,
+                                  0x5566778811223344ull};
+        ee::ee_mem_write128(&runtime, fifo, &packet);
+        if (!check(ee::ee_mem_read32(&runtime, regs + 0x40u) == 0x101u &&
+                   ee::ee_mem_read32(&runtime, vu_data + 0xff0u) == 0x11223344u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u,
+                   "VIF0 FIFO or VU0 wrap"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&runtime, vu_data + 0x20u, 0xdeadbeefu);
+        ee::ee_mem_write128(&runtime, 0x100u, &packet);
+        ee::ee_mem_write32(&runtime, d0 + 0x10u, 0x100u);
+        ee::ee_mem_write32(&runtime, d0 + 0x20u, 1u);
+        ee::ee_mem_write32(&runtime, d0, 0x101u);
+        if (!check(ee::ee_mem_read32(&runtime, d0 + 0x10u) == 0x110u &&
+                   ee::ee_mem_read32(&runtime, d0 + 0x20u) == 0u &&
+                   (ee::ee_mem_read32(&runtime, d0) & 0x100u) == 0u &&
+                   (bus.dmac().status() & 1u) != 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data + 0x20u) == 0xdeadbeefu,
+                   "VIF0 normal DMA or unrelated VU0 memory overwritten"))
+        {
+            return 1;
+        }
+        const ee::s_ee_u128 tag{0x0000010000000001ull, 0u}; // REFE 1 QWC
+        ee::ee_mem_write128(&runtime, 0x200u, &tag);
+        ee::ee_mem_write32(&runtime, vu_data, 0u);
+        ee::ee_mem_write32(&runtime, d0 + 0x30u, 0x200u);
+        ee::ee_mem_write32(&runtime, d0 + 0x20u, 0u);
+        ee::ee_mem_write32(&runtime, d0, 0x105u);
+        if (!check(ee::ee_mem_read32(&runtime, d0 + 0x30u) == 0x210u &&
+                   (ee::ee_mem_read32(&runtime, d0) & 0x100u) == 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u,
+                   "VIF0 REFE source chain"))
+        {
+            return 1;
+        }
+        // A VU0 MPG wraps within its 4 KiB micro memory, not VU1's.
+        if (!check(send(vif0, {0x4a010200u, 0x12345678u, 0x9abcdef0u, 0u}) &&
+                   ee::ee_mem_read32(&runtime, 0x11000000u) == 0x12345678u &&
+                   ee::ee_mem_read32(&runtime, 0x11000004u) == 0x9abcdef0u,
+                   "VIF0 MPG micro memory wrap"))
+        {
+            return 1;
+        }
+        // Do not let VIF0 execute a VU1-only command or commit a prefix.
+        const uint32_t old_cycle = vif0.read_register(0x40u);
+        if (!check(!send(vif0, {0x01000404u, 0x14000000u, 0u, 0u}) &&
+                   vif0.read_register(0x40u) == old_cycle,
+                   "VIF0 unsupported launch must roll back"))
+        {
+            return 1;
+        }
+        ee::ee_mem_write32(&runtime, regs + 0x10u, 1u);
+        if (!check(vif0.read_register(0x40u) == 0u &&
+                   ee::ee_mem_read32(&runtime, vu_data) == 0x55667788u &&
+                   ee::ee_mem_read32(&runtime, 0x11000000u) == 0x12345678u,
+                   "VIF0 reset destroyed VU0 residency"))
+        {
+            return 1;
+        }
+    }
+
     // End-to-end aggregate PATH2 transaction: two DIRECT commands,
     // each with a legal 0x8000-qword GIF packet. Empty GIFtags avoid
     // unrelated texture/VRAM side effects while exercising all limits.
