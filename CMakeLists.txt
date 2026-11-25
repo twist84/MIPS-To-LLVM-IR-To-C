@@ -1087,6 +1087,10 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_permute_ir_runtime.py
                 $<TARGET_FILE:ee_mmi_word_ir_fixture> mmi2)
+    add_test(NAME mmi3_permute_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_permute_ir_runtime.py
+                $<TARGET_FILE:ee_mmi_word_ir_fixture> mmi3)
     add_test(NAME mmi_divbw_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_mmi_divbw_ir_runtime.py

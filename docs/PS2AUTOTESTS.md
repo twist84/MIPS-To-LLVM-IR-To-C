@@ -233,7 +233,7 @@ writes and non-NOP upper execution are not enabled by this change.
 Archive `20261125T130858470210Z.zip` records 20 PASS, 11 DIFF,
 24 INCOMPLETE, zero NO_OUTPUT/ERROR; cumulative per-test wall time
 708.531 seconds. This is before the parallel harness. The funnel test
-stops at MFSA (0x00100978), shuffle at PEXCH (0x00102188).
+stops at MTSA (0x00100978, 0x01c00029), shuffle at PEXCH (0x00102188).
 The pinned upstream funnel transcript exposes a four-bit byte count:
 MTSA(16) reads zero, MTSAB(15) reads 15, MTSAH(7) reads 14.
 Implement MFSA/MTSA while retaining the existing internal bit-count SA
