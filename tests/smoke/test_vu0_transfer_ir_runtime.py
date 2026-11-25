@@ -159,6 +159,10 @@ def aligned_instance(struct_type):
     address = ctypes.addressof(backing)
     aligned = (address + 15) & ~15
     value = ctypes.cast(aligned, ctypes.POINTER(struct_type)).contents
+    # Casting an integer address does not retain the allocation. Callers
+    # commonly return the CPU view after the local backing leaves scope.
+    # Keep the buffer alive for as long as the typed view is reachable.
+    value._aligned_backing = backing
     return backing, value
 
 

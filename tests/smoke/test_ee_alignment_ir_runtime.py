@@ -219,10 +219,12 @@ def main():
 
         result, cpu, original = execute(
             fixture, directory, target, "ee_lq_zero", 0x43)
-        require(result == EE_EXIT_DISPATCH and
-                PAIRS == [("read", 0x40)] and READS == [(8, 0x40), (8, 0x48)] and
-                cpu.gpr[0].lo == 0 and cpu.gpr[0].hi == 0,
-                "LQ GPR0 must still read both lanes and discard the result")
+        require(result == EE_EXIT_DISPATCH,
+                f"LQ GPR0 unexpected exit: {result}")
+        require(PAIRS == [("read", 0x40)] and READS == [(8, 0x40), (8, 0x48)],
+                f"LQ GPR0 must still read both lanes: {PAIRS}, {READS}")
+        require(cpu.gpr[0].lo == 0 and cpu.gpr[0].hi == 0,
+                f"LQ GPR0 changed backing: {cpu.gpr[0].lo:#x}, {cpu.gpr[0].hi:#x}")
         result, cpu, original = execute(
             fixture, directory, target, "ee_sq_zero", 0x43)
         require(result == EE_EXIT_DISPATCH and
