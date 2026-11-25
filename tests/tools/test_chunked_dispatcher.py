@@ -35,6 +35,7 @@ bb_0x100000:
   %t3 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 0, i32 31, i32 0
   %t4 = load i64, ptr %t3
   call void @ee_count_guest_instruction(ptr %rt, i32 1048576, i32 65011720)
+  ; 0x00100004: nop
   call void @ee_count_guest_instruction(ptr %rt, i32 1048580, i32 0)
   %t5 = trunc i64 %t4 to i32
   %t6 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6
