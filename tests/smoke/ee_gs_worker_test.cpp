@@ -202,11 +202,42 @@ int main()
         }
     }
 
+    // Hold the executing consumer so both active and queued work are
+    // observed deterministically, independently of host thread timing.
+    {
+        std::atomic<bool> release{false};
+        ee::c_ee_gs_worker blocked(&release,
+            [](void* user, const ee::s_ee_gif_event*, size_t,
+                const uint8_t*, uint32_t)
+            {
+                auto& gate = *static_cast<std::atomic<bool>*>(user);
+                while (!gate.load(std::memory_order_acquire))
+                {
+                    std::this_thread::yield();
+                }
+            });
+        const bool initially_quiet = blocked.quiescent();
+        const bool first = blocked.submit(events.data(), 1u, nullptr, 0u) ==
+            result::accepted;
+        const bool active_or_queued = !blocked.quiescent();
+        const bool second = blocked.submit(events.data(), 1u, nullptr, 0u) ==
+            result::accepted;
+        const bool queued = !blocked.quiescent();
+        release.store(true, std::memory_order_release);
+        const bool drained = blocked.drain();
+        if (!check(initially_quiet && first && active_or_queued && second &&
+                queued && drained && blocked.quiescent(),
+                "worker quiescence includes active and queued work"))
+        {
+            return 1;
+        }
+    }
+
     s_capture failed{};
     failed.m_throw = true;
     ee::c_ee_gs_worker failing(&failed, consume);
     if (!check(failing.submit(events.data(), 1u, nullptr, 0u) == result::accepted &&
-            !failing.drain() && !failing.healthy() &&
+            !failing.drain() && !failing.healthy() && !failing.quiescent() &&
             failing.submit(events.data(), 1u, nullptr, 0u) == result::failed,
             "renderer exception was not surfaced"))
     {
