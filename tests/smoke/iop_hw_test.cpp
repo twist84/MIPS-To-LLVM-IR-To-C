@@ -602,6 +602,53 @@ bool test_authentic_spu2_dma()
         return false;
     }
 
+    // The idle horizon must select the earlier ordinary DMA deadline,
+    // including when both channels are armed or one is cancelled.
+    hw.reset();
+    if (!kernel.attach_hle_hardware() ||
+        !hw.write(dma4, 4u, source) ||
+        !hw.write(dma4 + 4u, 4u, 0x00010004u) ||
+        !cpu.write32(0xbf8010c8u, 0x01000001u) ||
+        hw.spu2_dma_cycles_remaining() != 65u ||
+        hw.idle_event_cycles_remaining() != 65u ||
+        !hw.write(dma7, 4u, dest) ||
+        !hw.write(dma7 + 4u, 4u, 0x00010002u) ||
+        !cpu.write32(0xbf801508u, 0x01000000u) ||
+        hw.spu2_dma_cycles_remaining() != 64u ||
+        hw.idle_event_cycles_remaining() != 64u ||
+        !hw.write(dma7 + 8u, 4u, 0u) ||
+        hw.spu2_dma_cycles_remaining() != 65u ||
+        hw.idle_event_cycles_remaining() != 65u ||
+        !cpu.write32(0xbf801508u, 0x01000000u))
+    {
+        return false;
+    }
+    hw.advance_cycles(63u);
+    if (hw.spu2_dma_cycles_remaining() != 1u ||
+        hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!hw.write(iop::c_hw::k_i_stat, 4u,
+                  ~(1u << iop::c_hw::k_dma_irq)) ||
+        hw.spu2_dma_cycles_remaining() != 1u ||
+        hw.idle_event_cycles_remaining() != 1u ||
+        !hw.read(dma7 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        !hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) == 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (hw.spu2_dma_cycles_remaining() != 0u ||
+        !hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u)
+    {
+        return false;
+    }
+
     // Small AutoDMA fits in the input ring immediately, and completes
     // after 32 cycles, without changing TSA.
     hw.reset();
@@ -609,7 +656,8 @@ bool test_authentic_spu2_dma()
         !hw.write(spu2 + 0x1b0u, 2u, 1u) ||
         !hw.write(dma4, 4u, source) ||
         !hw.write(dma4 + 4u, 4u, 0x00010004u) ||
-        !cpu.write32(0xbf8010c8u, 0x01000001u))
+        !cpu.write32(0xbf8010c8u, 0x01000001u) ||
+        hw.idle_event_cycles_remaining() != 0u)
     {
         return false;
     }
