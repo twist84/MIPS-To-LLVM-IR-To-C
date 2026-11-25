@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 
 namespace
 {
@@ -204,6 +205,57 @@ int main()
                "interpreter rejects unknown timing at first committed step"))
     {
         return 1;
+    }
+
+    // Original PS2SDK relocated syscall uses BNEL. Cover both
+    // outcomes for all six non-link likely branches, checking annul
+    // accounting, pre-delay condition and unsupported slot suppression.
+    const uint32_t likely_opcodes[] =
+    {
+        0x50800002u, // BEQL a0,zero,+2
+        0x54800002u, // BNEL a0,zero,+2
+        0x58800002u, // BLEZL a0,+2
+        0x5c800002u, // BGTZL a0,+2
+        0x04820002u, // BLTZL a0,+2
+        0x04830002u  // BGEZL a0,+2
+    };
+    const int64_t taken_inputs[] = {0, 1, -1, 1, -1, 0};
+    const int64_t annul_inputs[] = {1, 0, 1, 0, 0, -1};
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        for (bool taken : {false, true})
+        {
+            write32(memory, k_ram_address, likely_opcodes[i]);
+            write32(memory, k_ram_address + 4u,
+                taken ? 0x25080001u : 0x70000000u);
+            write32(memory, k_ram_address + 8u, 0x24090001u);
+            write32(memory, k_ram_address + 12u, 0x03e00008u);
+            write32(memory, k_ram_address + 16u, 0x00000000u);
+            cpu = {};
+            cpu.m_gpr[4].m_lo = static_cast<uint64_t>(
+                taken ? taken_inputs[i] : annul_inputs[i]);
+            cpu.m_gpr[31].m_lo = k_return_address;
+            ee::s_ee_runtime likely_runtime{};
+            likely_runtime.m_instruction_trace = issue_stream;
+            likely_runtime.m_instruction_trace_capacity = 64u;
+            const auto execution = ee::ee_execute_ram_callback(
+                &cpu, &memory, k_ram_address, k_return_address, 4u, &likely_runtime);
+            if (!check(execution.m_result == ee::e_ee_ram_result::RETURNED &&
+                       execution.m_instructions == 4u &&
+                       cpu.m_gpr[8].m_lo == (taken ? 1u : 0u) &&
+                       cpu.m_gpr[9].m_lo == (taken ? 0u : 1u),
+                       "branch-likely architectural path") ||
+                !check(likely_runtime.m_guest_instruction_attempts == 4u &&
+                       likely_runtime.m_reference_instruction_slots == (taken ? 4u : 5u) &&
+                       likely_runtime.m_instruction_trace_count == (taken ? 4u : 5u) &&
+                       issue_stream[1].m_pc == k_ram_address + 4u &&
+                       issue_stream[1].m_kind == (taken ? 2u : 1u) &&
+                       issue_stream[1].m_attempt == (taken ? 2u : 1u),
+                       "branch-likely annulled reference slot"))
+            {
+                return 1;
+            }
+        }
     }
 
     std::puts("ee_ram_interpreter_test: PASS");

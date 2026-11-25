@@ -150,7 +150,7 @@ int main()
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
     events[1].m_byte_offset = 16u;
-    events[1].m_word1 = 0x60u; // unsupported SIGNAL
+    events[1].m_word1 = 0x61u; // unsupported FINISH
     if (gs.consume(events, 2u, retry.data(), 2u) ||
         gs.state().m_transfer_pixels_written != 0u ||
         !read8(gs, k_base + 2761u, 0x11u) ||

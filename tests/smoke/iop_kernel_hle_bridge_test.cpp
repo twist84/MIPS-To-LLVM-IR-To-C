@@ -1267,7 +1267,16 @@ int main()
     {
         return fail("earlier alarm insertion or cancellation changed idle timing");
     }
-    const iop::s_kernel_run_result cancelled_run = kernel.run(100u, 1u);
+    // A stale future hint is not itself a deadline. A short budget
+    // ending before the cancelled alarm must still report idle.
+    const iop::s_kernel_run_result short_cancelled_run = kernel.run(10u, 1u);
+    if (short_cancelled_run.m_stop != iop::e_kernel_stop::idle ||
+        short_cancelled_run.m_executed != 0u ||
+        kernel.cycles() != alarm_start + 45u || kernel.has_guest_work())
+    {
+        return fail("cancelled alarm hint produced a phantom idle deadline");
+    }
+    const iop::s_kernel_run_result cancelled_run = kernel.run(90u, 1u);
     if (cancelled_run.m_stop != iop::e_kernel_stop::idle ||
         cancelled_run.m_executed != 0u ||
         kernel.cycles() != alarm_start + 135u || kernel.has_guest_work())

@@ -492,7 +492,7 @@ bool test_ordering_and_rollback()
     events[3].m_word0 = trxpos(1u, 0u, 2u, 0u);
     events[4].m_word1 = 0x53u;
     events[4].m_word0 = 2u;
-    events[5].m_word1 = 0x60u; // unsupported SIGNAL
+    events[5].m_word1 = 0x61u; // unsupported FINISH
 
     // A failed trailing event must roll back the IMAGE, both copies,
     // register changes and their diagnostic counters in one unit.

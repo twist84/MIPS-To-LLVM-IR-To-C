@@ -90,11 +90,15 @@ void native_codegen::touched_regs(const std::vector<s_lifted_op>& ops,
             if (op.rs != 0) seen[op.rs] = true;
             seen[op.rt] = true;
             break;
+        case LOP_MFSA:
         case LOP_MFHI:
         case LOP_MFLO:
         case LOP_MFHI1:
         case LOP_MFLO1:
             seen[op.rd] = true;
+            break;
+        case LOP_MTSA:
+            if (op.rs != 0) seen[op.rs] = true;
             break;
         case LOP_MTHI:
         case LOP_MTLO:
@@ -297,6 +301,17 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
     case K::LOP_MTHI1:
         out_ += "    g_cpu.m_hi1 = g_cpu.m_gpr[" + std::to_string(op.rs) + "].m_lo;\n";
         break;
+    case K::LOP_MFSA:
+        if (op.rd != 0)
+        {
+            out_ += "    g_cpu.m_gpr[" + std::to_string(op.rd) +
+                    "].m_lo = (g_cpu.m_sa >> 3u) & 15u;\n";
+        }
+        break;
+    case K::LOP_MTSA:
+        out_ += "    g_cpu.m_sa = ((uint32_t)g_cpu.m_gpr[" +
+                std::to_string(op.rs) + "].m_lo & 15u) << 3u;\n";
+        break;
     case K::LOP_MTSAB:
     case K::LOP_MTSAH:
     {
@@ -445,6 +460,8 @@ void native_codegen::emit_op_body(const s_lifted_op& op)
     case K::LOP_MMI_PACKED_HALF:
     case K::LOP_MMI_INTERLEAVE:
     case K::LOP_MMI_PERMUTE:
+    case K::LOP_BC0:
+    case K::LOP_COP0_PERF:
         // The legacy source generator cannot implement precise exceptions
         // or the newly decoded packed MMI operations. Fail closed.
         out_ += "    #error Checked EE op requires LLVM lowering\n";

@@ -100,10 +100,13 @@ int main(int argc, char** argv)
             export_completions ? k_completion_option : k_output_option))
         : std::string{};
 
-    if ((profile_argc != 4 && profile_argc != 8 && profile_argc != 12 &&
+    const bool manual_profile = profile_argc == 3 &&
+        std::string(argv[2]) == "--manual-cache-hit";
+    if ((!manual_profile && profile_argc != 4 && profile_argc != 8 && profile_argc != 12 &&
          profile_argc != 14 && profile_argc != 16 &&
          profile_argc != 19) ||
-        (ordered_waw_overlap && !explicit_throughput) ||
+        (manual_profile && explicit_throughput) ||
+        (ordered_waw_overlap && !explicit_throughput && !manual_profile) ||
         (export_any && (output_path.empty() || output_path == argv[1])))
     {
         std::fprintf(stderr,
@@ -122,11 +125,15 @@ int main(int argc, char** argv)
             "[--ordered-waw-overlap] "
             "[--packed-mmi-latency=<explicit-positive-value>] "
             "[--candidate-events=<path>|--candidate-completions=<path>]\n"
-            "Diagnostic only. Supplied latencies are NOT verified R5900 cycles.\n");
+            "or: ee_issue_trace_candidate <trace.csv> --manual-cache-hit "
+            "[--ordered-waw-overlap] [--packed-mmi-latency=<value>] "
+            "[--candidate-events=<path>|--candidate-completions=<path>]\n"
+            "Diagnostic only. Manual cache-hit latencies are NOT a validated R5900 clock.\n");
         return 2;
     }
 
-    ee::s_ee_issue_replay_profile profile{};
+    ee::s_ee_issue_replay_profile profile = manual_profile
+        ? ee::ee_manual_cache_hit_profile() : ee::s_ee_issue_replay_profile{};
     if (explicit_packed)
     {
         const std::string value = packed_arg.substr(
@@ -138,8 +145,9 @@ int main(int argc, char** argv)
             return 2;
         }
     }
-    if (!parse_latency(argv[2], &profile.m_integer_latency) ||
-        !parse_latency(argv[3], &profile.m_load_latency))
+    if (!manual_profile &&
+        (!parse_latency(argv[2], &profile.m_integer_latency) ||
+         !parse_latency(argv[3], &profile.m_load_latency)))
     {
         std::fprintf(stderr, "positive, explicit latency values required\n");
         return 2;
@@ -376,7 +384,7 @@ int main(int argc, char** argv)
     std::printf(
         "candidate_issue_cycles=%llu reached=%llu annulled=%llu "
         "events=%llu profile_integer=%u profile_load=%u "
-        "throughput_mode=%s ordered_waw_overlap=%s "
+        "profile_source=%s throughput_mode=%s ordered_waw_overlap=%s "
         "last_candidate_completion=%llu max_candidate_completion=%llu "
         "(EXPERIMENTAL; NOT validated R5900 cycles; NO GS events)\n",
         static_cast<unsigned long long>(replay.candidate_cycles()),
@@ -384,6 +392,7 @@ int main(int argc, char** argv)
         static_cast<unsigned long long>(replay.annulled_slots()),
         static_cast<unsigned long long>(event_count),
         profile.m_integer_latency, profile.m_load_latency,
+        manual_profile ? "ee_manual_v6_cache_hit" : "caller",
         profile.m_require_throughput ? "explicit" : "unconfigured",
         profile.m_allow_ordered_waw_overlap ? "enabled" : "disabled",
         static_cast<unsigned long long>(

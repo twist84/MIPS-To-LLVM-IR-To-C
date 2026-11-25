@@ -9,6 +9,8 @@ import tempfile
 
 import llvmlite.binding as llvm
 
+from division_hardware_vectors import HARDWARE_DIVISION
+
 
 class U128(ctypes.Structure):
     _fields_ = [("lo", ctypes.c_uint64), ("hi", ctypes.c_uint64)]
@@ -150,6 +152,36 @@ def run_case(fixture, temp_dir, opt_level, case, target_machine):
     require(state.gpr[4].hi == 0xABCDABCDABCDABCD
             and state.gpr[5].hi == 0x1234123412341234,
             prefix + "division unexpectedly changed source upper halves")
+    # Run all hardware vectors through existing signed/unsigned fixtures.
+    if variant in (0, 3):
+        op = ("div" if variant == 0 else "divu") + ("" if primary else "1")
+        for index, (rs, rt, hi0, lo0, hi1, lo1) in enumerate(HARDWARE_DIVISION[op]):
+            backing, state = make_aligned_state()
+            _ = backing
+            state.hi, state.lo = 0x0123456789ABCDEF, 0x123456789ABCDEF0
+            state.hi1, state.lo1 = 0x23456789ABCDEF01, 0x456789ABCDEF0123
+            state.gpr[4].lo = rs & 0xFFFFFFFFFFFFFFFF
+            state.gpr[4].hi = rs >> 64
+            state.gpr[5].lo = rt & 0xFFFFFFFFFFFFFFFF
+            state.gpr[5].hi = rt >> 64
+            state.gpr[6].hi = 0x1111111122222222
+            state.gpr[7].hi = 0x3333333344444444
+            label = f"O{opt_level} {op} console vector {index}"
+            require(guest_fn(ctypes.pointer(state), None) == 3 and
+                    state.pc == 0x0011000C and state.exit_reason == 3,
+                    label + ": bad exit")
+            require((state.hi, state.lo, state.hi1, state.lo1) ==
+                    (hi0, lo0, hi1, lo1), label + ": HI/LO mismatch")
+            require((state.gpr[6].lo, state.gpr[7].lo) ==
+                    ((hi0, lo0) if primary else (hi1, lo1)),
+                    label + ": MFHI/MFLO mismatch")
+            require(state.gpr[4].lo == (rs & 0xFFFFFFFFFFFFFFFF) and
+                    state.gpr[4].hi == rs >> 64 and
+                    state.gpr[5].lo == (rt & 0xFFFFFFFFFFFFFFFF) and
+                    state.gpr[5].hi == rt >> 64 and
+                    state.gpr[6].hi == 0x1111111122222222 and
+                    state.gpr[7].hi == 0x3333333344444444,
+                    label + ": register preservation mismatch")
     return engine, module
 
 

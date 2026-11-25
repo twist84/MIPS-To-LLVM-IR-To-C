@@ -88,16 +88,6 @@ e_ee_scheduled_event_result c_ee_cycle_scheduler::service_scanout(
         : e_ee_scheduled_event_result::FIELDS_DELIVERED;
 }
 
-e_ee_cycle_source c_ee_cycle_scheduler::source() const
-{
-    return m_source;
-}
-
-uint64_t c_ee_cycle_scheduler::current_cycle() const
-{
-    return m_current_cycle;
-}
-
 uint64_t c_ee_cycle_scheduler::scheduler_yields() const
 {
     return m_scheduler_yields;

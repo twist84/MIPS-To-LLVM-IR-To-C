@@ -12,7 +12,7 @@ TOOL_ARGS = sys.argv[1:]
 sys.argv = [sys.argv[0]]
 
 EXPECTED_PROGRAM_SHA256 = (
-    "8bb00e2dc77cb4096a6e91f05f49245918a19430f51f940d8ec4838873768cad"
+    "dcdea3b75c30dc0275e3a40d6466c411838cda40733841cb33646d3de11bc65f"
 )
 EXPECTED_PAIR_PCS = [
     0, 8, 16, 24, 32, 40, 48, 56, 64,
@@ -20,7 +20,8 @@ EXPECTED_PAIR_PCS = [
     168, 176, 192, 200, 208, 216, 224, 232, 240, 248,
     256, 264, 280, 288,
     296, 304, 312, 320, 328, 336, 344, 352, 360, 368, 376,
-    384, 392, 400, 408, 416, 424, 432, 440, 448, 456, 464, 472,
+    392, 400, 408, 416, 424, 440, 448, 456,
+    464, 472, 480, 488, 496, 504, 512, 520, 528, 536, 544, 552, 560, 568,
 ]
 
 
@@ -135,6 +136,18 @@ class VU0CandidateTraceTests(unittest.TestCase):
             self.assertEqual(steps[33]["state"]["vi"][11], 0xc001)
             self.assertEqual(steps[38]["state"]["vi"][0], 0)
 
+            # Both sign predicates and their delay/fallthrough paths.
+            self.assertEqual(steps[39]["state"]["branch"], 1)
+            self.assertEqual(steps[39]["state"]["branch_pc"], 392)
+            self.assertEqual(steps[40]["state"]["vi"][8], 0x101)
+            self.assertEqual(steps[41]["state"]["branch"], 0)
+            self.assertEqual(steps[43]["state"]["vi"][8], 0x103)
+            self.assertEqual(steps[44]["state"]["branch"], 1)
+            self.assertEqual(steps[44]["state"]["branch_pc"], 440)
+            self.assertEqual(steps[45]["state"]["vi"][8], 0x104)
+            self.assertEqual(steps[46]["state"]["branch"], 0)
+            self.assertEqual(steps[48]["state"]["vi"][8], 0x106)
+
             final = steps[-1]["state"]
             self.assertEqual(final["vi"][1], 5)
             self.assertEqual(final["vi"][3], 0x333)
@@ -151,38 +164,38 @@ class VU0CandidateTraceTests(unittest.TestCase):
             self.assertEqual(final["vi"][14], 0x7fef)
             self.assertEqual(final["vi"][15], 18)
             self.assertEqual(final["vi"][2], 0x7fef)
-            self.assertEqual(final["vi"][26], 480)
+            self.assertEqual(final["vi"][26], 576)
             self.assertEqual(final["vi"][29], 0)
-            self.assertEqual(final["micro_pc"], 480)
-            self.assertEqual(final["tpc"], 60)
+            self.assertEqual(final["micro_pc"], 576)
+            self.assertEqual(final["tpc"], 72)
             # PCSX2 does not stall an ISW on ILW's IALU destination.
-            self.assertEqual(steps[40]["state"]["cycle"], 41)
-            self.assertEqual(steps[41]["state"]["cycle"], 42)
+            self.assertEqual(steps[50]["state"]["cycle"], 51)
+            self.assertEqual(steps[51]["state"]["cycle"], 52)
             # PCSX2 flushes the four-cycle lower FMAC pipeline at E,
             # including the final LQ destination reservation.
-            self.assertEqual(final["cycle"], 61)
+            self.assertEqual(final["cycle"], 71)
             self.assertNotEqual(
                 steps[38]["state"]["data_sha256"],
-                steps[39]["state"]["data_sha256"],
+                steps[49]["state"]["data_sha256"],
             )
             self.assertEqual(
-                steps[39]["state"]["data_sha256"],
-                steps[40]["state"]["data_sha256"],
+                steps[49]["state"]["data_sha256"],
+                steps[50]["state"]["data_sha256"],
             )
             self.assertNotEqual(
-                steps[40]["state"]["data_sha256"],
-                steps[41]["state"]["data_sha256"],
+                steps[50]["state"]["data_sha256"],
+                steps[51]["state"]["data_sha256"],
             )
             self.assertEqual(
-                steps[41]["state"]["data_sha256"],
-                steps[42]["state"]["data_sha256"],
+                steps[51]["state"]["data_sha256"],
+                steps[52]["state"]["data_sha256"],
             )
             self.assertEqual(
-                steps[44]["state"]["vf"][3],
+                steps[54]["state"]["vf"][3],
                 [0x11223344, 0x05060708, 0x99aabbcc, 0x0d0e0f10],
             )
             self.assertEqual(
-                steps[46]["state"]["vf"][4],
+                steps[56]["state"]["vf"][4],
                 [0x11223344, 0x05060708, 0, 0],
             )
             self.assertEqual(final["vi"][1], 5)

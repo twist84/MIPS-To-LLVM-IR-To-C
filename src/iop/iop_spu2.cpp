@@ -422,6 +422,55 @@ bool c_spu2::process_effect_channel(uint32_t core, uint32_t channel,
     return valid;
 }
 
+bool c_spu2::read_disabled_effect(uint32_t core, uint32_t channel,
+    uint64_t step, int16_t* output)
+{
+    // Called only for a valid work area with ATTR effect writes disabled.
+    // No tap access can raise an effect IRQ in that state. Reflections
+    // and the downsampled input only contribute to discarded writebacks.
+    const uint16_t* coeff = m_cores[core].m_effect_coefficients;
+    const int32_t gain2 = signed_halfword(coeff[7u]);
+    bool valid = false;
+    if (gain2 == 0)
+    {
+        // APF2 output is exactly its old delay tap, independent of
+        // the comb accumulator, APF1, reflections and excitation.
+        valid = read_effect_sample(core, step,
+            effect_tap_offset(core, 0x334u + channel * 4u) -
+            effect_tap_offset(core, 0x2e8u), output);
+    }
+    else if (coeff[6u] == 0u)
+    {
+        // APF1 output is its old delay tap. Preserve the same signed
+        // Q15 rounding and final clamp in the second stage.
+        int16_t first = 0;
+        int16_t second = 0;
+        valid = read_effect_sample(core, step,
+            effect_tap_offset(core, 0x32cu + channel * 4u) -
+            effect_tap_offset(core, 0x2e4u), &first) &&
+            read_effect_sample(core, step,
+                effect_tap_offset(core, 0x334u + channel * 4u) -
+                effect_tap_offset(core, 0x2e8u), &second);
+        if (valid)
+        {
+            const int32_t state = first - scale_mix(second, gain2);
+            *output = clamp_sample(second + scale_mix(state, gain2));
+        }
+    }
+    else
+    {
+        int32_t comb = 0;
+        s_effect_allpass allpass{};
+        valid = calculate_effect_comb(core, channel, step, &comb) &&
+            calculate_effect_allpass(core, channel, step, comb, &allpass);
+        if (valid)
+        {
+            *output = allpass.m_output;
+        }
+    }
+    return valid;
+}
+
 void c_spu2::advance_effect(uint32_t core, const int32_t (&input)[2],
     int16_t (&output)[2])
 {
@@ -431,23 +480,50 @@ void c_spu2::advance_effect(uint32_t core, const int32_t (&input)[2],
         s_core& state = m_cores[core];
         const uint32_t pos = state.m_effect_history_pos;
         const uint32_t channel = static_cast<uint32_t>(m_mixed_frames & 1u);
+        const uint64_t bit = uint64_t{1} << pos;
         for (uint32_t c = 0u; c < 2u; ++c)
         {
+            // Keep input history even when no reflection is written,
+            // so enabling effects never loses earlier excitation.
             state.m_effect_down[c][pos] = clamp_sample(input[c]);
             state.m_effect_up[c][pos] = 0;
+            state.m_effect_up_nonzero[c] &= ~bit;
         }
         int16_t filtered = 0;
-        if (process_effect_channel(core, channel, m_mixed_frames >> 1u,
-            resample_effect(state.m_effect_down[channel], pos, false), &filtered))
+        const bool fast = m_effect_fast_path && !effect_enabled(core);
+        const bool valid = fast ?
+            read_disabled_effect(core, channel, m_mixed_frames >> 1u, &filtered) :
+            process_effect_channel(core, channel, m_mixed_frames >> 1u,
+                resample_effect(state.m_effect_down[channel], pos, false), &filtered);
+        if (valid)
         {
             ++state.m_effect_ticks;
+            if (fast)
+            {
+                ++state.m_effect_fast_ticks;
+            }
             state.m_effect_up[channel][pos] = filtered;
+            if (filtered != 0)
+            {
+                state.m_effect_up_nonzero[channel] |= bit;
+            }
         }
         state.m_effect_history_pos = (pos + 1u) & 63u;
         bool nonzero = false;
         for (uint32_t c = 0u; c < 2u; ++c)
         {
-            output[c] = resample_effect(state.m_effect_up[c], state.m_effect_history_pos, true);
+            // A zero occupancy mask proves the entire 64-word history
+            // is zero, including all 39 FIR taps. Never infer this from
+            // the current input, EVOL, or a previous zero output.
+            if (m_effect_fast_path && state.m_effect_up_nonzero[c] == 0u)
+            {
+                output[c] = 0;
+                ++state.m_effect_zero_fir_skips;
+            }
+            else
+            {
+                output[c] = resample_effect(state.m_effect_up[c], state.m_effect_history_pos, true);
+            }
             nonzero |= output[c] != 0;
         }
         if (nonzero)

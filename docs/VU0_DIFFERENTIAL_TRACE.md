@@ -112,7 +112,7 @@ subset:
 }
 ```
 
-The shared fixture provides a deterministic 60-pair program, 53 of whose pairs execute. The
+The shared fixture provides a deterministic 72-pair program, 63 of whose pairs execute. The
 candidate producer executes one runtime pair per exact-cycle callback and
 writes a trace. The pinned PCSX2 adapter executes one interpreter pair through
 vu0Exec(&VU0) and writes the same format when VU0_TRACE_OUTPUT is set. The
@@ -141,14 +141,14 @@ malformed/incompatible traces.
 The repository now contains all pieces needed to produce both sides of the
 trace:
 
-- A shared deterministic 60-pair microprogram fixture, including ILW/ISW,
+- A shared deterministic 72-pair microprogram fixture, including ILW/ISW,
   masked LQ/SQ, and indexed LQI/SQI/LQD/SQD.
 - The in-tree candidate trace executable, built as `ee_vu0_trace_candidate`.
 - A pinned PCSX2 GoogleTest adapter that captures one pair after each
   `vu0Exec(&VU0)` call when `VU0_TRACE_OUTPUT` is set.
 - The JSONL comparator and regression tests, including executed-PC comparison.
 
-CTest validates the candidate trace path and its expected 53 executed pairs.
+CTest validates the candidate trace path and its expected 63 executed pairs.
 To run the real cross-engine comparison, use either
 `tools/vu0_diff/run_differential.py` with a PCSX2 checkout and its dependencies,
 or trigger the manual GitHub Actions workflow named **VU0 PCSX2 differential**.
@@ -178,3 +178,13 @@ store. PCSX2 and the candidate matched after every one of the 53 executed
 pairs, finishing at cycle 61 and micro-PC 0x1e0. Only lower memory VF
 lane interlocks are verified; upper-vector dependencies and VU1-mapped
 memory accesses remain out of scope.
+
+## Expanded sign-branch trace (Batch 12)
+
+The 72-pair fixture adds IBLTZ on a stable negative VI11, IBGTZ on
+zero VI0, IBLEZ on zero VI0, and IBGEZ on negative VI11. Distinct delay
+and fallthrough sentinels verify both paths, with the exact 63 executed
+PCs and program SHA-256 pinned by the candidate CTest. The original
+53-pair PCSX2 result above remains historical; the expanded trace has
+not yet been compared against the pinned PCSX2 interpreter. The expected
+71-cycle end state is a candidate regression, not measured hardware.

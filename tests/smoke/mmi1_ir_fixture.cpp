@@ -67,11 +67,15 @@ int main(int argc, char** argv)
         make_mmi(4, 5, 21, 22, 0x28), // PEXTUH $s5, $a0, $a1
         make_mmi(4, 5, 22, 18, 0x28), // PEXTUW $s6, $a0, $a1
         make_regimm(25, 0x18, 0),    // MTSAB $t9, 0
+        0x00000828u,                 // MFSA $at (byte units)
+        0x00200029u,                 // MTSA $at (round trip)
         make_mmi(4, 5, 23, 27, 0x28), // QFSRV $s7, $a0, $a1
         0x00000000u,                 // NOP: satisfy the SA read hazard window
         0x00000000u,
         0x00000000u,
         make_regimm(26, 0x19, 0),    // MTSAH $k0, 0
+        0x00000828u,                 // MFSA $at
+        0x00200029u,                 // MTSA $at
         make_mmi(4, 5, 24, 27, 0x28), // QFSRV $t8, $a0, $a1
         make_mmi(4, 5, 4,  2, 0x28), // PCEQW $a0, $a0, $a1 (rd aliases rs)
         make_mmi(29, 30, 25, 0x0e, 0x09), // PCPYLD $t9, $sp, $fp
@@ -83,7 +87,10 @@ int main(int argc, char** argv)
         make_mmi(29, 30, 30, 0x0e, 0x29), // PCPYUD $fp, $sp, $fp (aliases rt)
         make_mmi(29, 30, 29, 0x0e, 0x29), // PCPYUD $sp, $sp, $fp (aliases rs)
         make_mmi(0, 30, 2, 0x0e, 0x29),   // PCPYUD $v0, $zero, $fp
-        make_mmi(29, 30, 0, 0x0e, 0x29)   // PCPYUD $zero, $sp, $fp (discard)
+        make_mmi(29, 30, 0, 0x0e, 0x29),  // PCPYUD $zero, $sp, $fp (discard)
+        0x00a00029u,                     // MTSA $a1 (mask to low four bits)
+        0x00000028u,                     // MFSA $zero (discard)
+        0x00000828u                      // MFSA $at (preserve high half)
     };
 
     std::map<uint32_t, ee::s_ee_instruction> insn_map;

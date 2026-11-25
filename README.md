@@ -237,3 +237,7 @@ Do not compare uncapped and paced wall times as speedups. A nominally
 neutral scripted preset does not exclude physical controller input.
 Unknown services and guest failures remain explicit; the runner does
 not synthesize hardware progress to force a successful boot.
+
+## Original console test suite
+
+Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. The default is four parallel tests; override with `--jobs 8 --emit-jobs 1` or use `--jobs 1` for sequential validation. The standalone Original ps2autotests workflow builds only `ee_recomp` and `ee_game_runner` plus their dependencies, independently of CTest. All 55 original ELFs run on every invocation in six parallel groups, with one combined exact-transcript summary. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Latest complete CI: **54/55 exact transcripts (98.18%)** at PR head `6f0bc23` ([run 45659705518](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45659705518)); 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. Remaining: VU EFU. Clean guest termination is tracked separately. Synthetic vectors are not counted as complete ELF passes.

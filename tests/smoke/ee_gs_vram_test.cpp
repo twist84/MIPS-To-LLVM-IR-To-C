@@ -152,7 +152,7 @@ int main()
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
     events[1].m_byte_offset = 16u;
-    events[1].m_word1 = 0x60u; // GS SIGNAL: not implemented
+    events[1].m_word1 = 0x61u; // GS FINISH: not implemented
     if (gs.consume(events, 2u, packet.data(), 2u) ||
         read32(gs, k_second_base) != 0u ||
         gs.state().m_transfer_pixels_written != 0u ||
@@ -245,7 +245,7 @@ int main()
             return fail("GPU readback source or split transfer cache");
         }
         // A rejected register write must not invalidate committed data.
-        if (write_register(gs, 0x60u, 0u) ||
+        if (write_register(gs, 0x61u, 0u) ||
             !gs.read_image(result.data(), 1u) || source.m_calls != 2u)
         {
             return fail("rejected GS event invalidated GPU readback");

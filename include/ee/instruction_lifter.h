@@ -65,7 +65,11 @@ enum e_lift_op_kind
     LOP_MMI_PACKED_MAC,
     LOP_MMI_PACKED_HALF,
     LOP_MMI_INTERLEAVE,
-    LOP_MMI_PERMUTE
+    LOP_MMI_PERMUTE,
+    LOP_MFSA,
+    LOP_MTSA,
+    LOP_BC0,
+    LOP_COP0_PERF
 };
 
 struct s_lifted_op

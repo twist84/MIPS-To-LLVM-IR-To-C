@@ -609,6 +609,12 @@ bool c_ee_gs_state::dma_download(
     return static_cast<c_ee_gs_state*>(user)->read_image(data, qwc);
 }
 
+void c_ee_gs_state::bind_signal_irq(void* user, t_signal_irq callback)
+{
+    m_signal_user = user;
+    m_signal_irq = callback;
+}
+
 void c_ee_gs_state::reset()
 {
     m_state = {};
@@ -1559,14 +1565,36 @@ bool c_ee_gs_state::write_register(
             }
         }
         break;
+    case 0x60u: // SIGNAL
+    case 0x62u: // LABEL
+    {
+        // ID and mask occupy the low and high 32-bit halves of the A+D
+        // payload. Update only the selected SIGLBLID lane.
+        if (reg == 0x60u && state.m_signal_pending)
+        {
+            // A second SIGNAL stalls GIF until CSR acknowledgement.
+            // No resumable partial GIF transaction exists yet.
+            trace_rejection(__func__, __LINE__);
+            return false;
+        }
+        const uint32_t shift = reg == 0x60u ? 0u : 32u;
+        const uint64_t mask = (value >> 32u) << shift;
+        state.m_siglblid = (state.m_siglblid & ~mask) |
+            ((static_cast<uint64_t>(static_cast<uint32_t>(value)) << shift) & mask);
+        if (reg == 0x60u)
+        {
+            state.m_signal_pending = true;
+        }
+        break;
+    }
     case 0x3fu: // TEXFLUSH invalidates the renderer cache on GIF commit.
         return true;
     case 0x0eu: // GS ignores direct writes to these unmapped registers
     case 0x0fu:
         return true;
     default:
-        // Reject SIGNAL, FINISH, LABEL and unknown
-        // hardware operations; HWREG executes inside consume().
+        // Reject FINISH and unknown hardware operations;
+        // HWREG executes inside consume().
         trace_rejection(__func__, __LINE__);
         return false;
     }
@@ -1907,7 +1935,13 @@ bool c_ee_gs_state::consume(
         m_gpu_readback_valid = false;
         m_gpu_clut_valid = false;
     }
+    const bool signal_edge = !m_state.m_signal_pending && next.m_signal_pending;
     m_state = std::move(next);
+    // Publish IRQ only after complete validation/commit, never during staging.
+    if (signal_edge && m_signal_irq != nullptr)
+    {
+        m_signal_irq(m_signal_user);
+    }
     // Return scratch before invoking an external observer. A callback
     // can synchronously start another transaction on this same GS.
     scratch.finish();

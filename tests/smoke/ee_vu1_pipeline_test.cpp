@@ -235,6 +235,89 @@ int main()
         }
     }
 
+    // Hardware word-level EFU checks for the shared interpreter/AOT
+    // arithmetic. Exercise normal inputs, full-range exponent 255, and
+    // zero denominators without host IEEE infinity or NaN conversion.
+    {
+        struct s_efu_case
+        {
+            uint32_t m_index;
+            uint32_t m_latency;
+            uint32_t m_regular;
+            uint32_t m_max;
+            uint32_t m_zero;
+        };
+        const std::array<uint32_t, 4> regular{
+            0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u};
+        const std::array<uint32_t, 4> maximum{
+            0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu};
+        const std::array<uint32_t, 4> zero{};
+        const s_efu_case cases[] =
+        {
+            {0x70u, 11u, 0x41600000u, 0x7fffffffu, 0u},
+            {0x71u, 18u, 0x3d924925u, 0u, 0x7fffffffu},
+            {0x72u, 18u, 0x406f7750u, 0x5fb504f3u, 0u},
+            {0x73u, 24u, 0x3e88d677u, 0x1f3504f3u, 0x7fffffffu},
+            {0x76u, 12u, 0x41200000u, 0x7fffffffu, 0u},
+            {0x78u, 12u, 0x3fddb3d7u, 0x5fb504f3u, 0u},
+            {0x79u, 18u, 0x3f13cd3au, 0x1f3504f3u, 0x7fffffffu},
+            {0x7au, 12u, 0x3eaaaaabu, 0u, 0x7fffffffu}
+        };
+        for (const auto& test : cases)
+        {
+            uint32_t bits = 0u;
+            uint32_t latency = 0u;
+            if (!check(ee::c_ee_vu1::efu(regular, test.m_index, 2u, bits, latency) &&
+                       bits == test.m_regular && latency == test.m_latency &&
+                       ee::c_ee_vu1::efu(maximum, test.m_index, 2u, bits, latency) &&
+                       bits == test.m_max && latency == test.m_latency &&
+                       ee::c_ee_vu1::efu(zero, test.m_index, 2u, bits, latency) &&
+                       bits == test.m_zero && latency == test.m_latency,
+                       "EFU full-range FMAC/root/quotient arithmetic"))
+            {
+                return 1;
+            }
+        }
+    }
+
+    // Transcendental checks cover known hardware values, without
+    // asserting that every internal polynomial step is characterized.
+    {
+        uint32_t bits = 0u;
+        uint32_t latency = 0u;
+        const std::array<uint32_t, 4> regular{
+            0x3f800000u, 0x40000000u, 0x40400000u, 0x40800000u};
+        const std::array<uint32_t, 4> one{
+            0x3f800000u, 0x3f800000u, 0x3f800000u, 0x3f800000u};
+        const std::array<uint32_t, 4> maximum{
+            0x7fffffffu, 0x7fffffffu, 0x7fffffffu, 0x7fffffffu};
+        const std::array<uint32_t, 4> zero{};
+        if (!check(ee::c_ee_vu1::efu(one, 0x7du, 2u, bits, latency) &&
+                   bits == 0x3f490fdau && latency == 54u &&
+                   ee::c_ee_vu1::efu(regular, 0x74u, 2u, bits, latency) &&
+                   bits == 0x3f8db70bu && latency == 54u &&
+                   ee::c_ee_vu1::efu(regular, 0x75u, 2u, bits, latency) &&
+                   bits == 0x3f9fe0bau && latency == 54u &&
+                   ee::c_ee_vu1::efu(maximum, 0x7du, 2u, bits, latency) &&
+                   bits == 0x3fc90fd9u && latency == 54u &&
+                   ee::c_ee_vu1::efu(zero, 0x74u, 2u, bits, latency) &&
+                   bits == 0x7fc90fd7u && latency == 54u &&
+                   ee::c_ee_vu1::efu(zero, 0x75u, 2u, bits, latency) &&
+                   bits == 0x7fc90fd7u && latency == 54u &&
+                   ee::c_ee_vu1::efu(one, 0x7cu, 2u, bits, latency) &&
+                   bits == 0x3f576aa4u && latency == 29u &&
+                   ee::c_ee_vu1::efu(maximum, 0x7cu, 2u, bits, latency) &&
+                   bits == 0x7fd76aa2u && latency == 29u &&
+                   ee::c_ee_vu1::efu(regular, 0x7eu, 2u, bits, latency) &&
+                   bits == 0x3d4bed7fu && latency == 44u &&
+                   ee::c_ee_vu1::efu(zero, 0x7eu, 2u, bits, latency) &&
+                   bits == 0x3f800000u && latency == 44u,
+                   "EFU polynomial hardware regression"))
+        {
+            return 1;
+        }
+    }
+
     // The EFU producer updates P after ESUM latency. MFP must first
     // observe old P and then new P only after WAITP.
     ee::s_ee_vu1_state p{};

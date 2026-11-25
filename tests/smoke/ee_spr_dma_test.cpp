@@ -128,6 +128,34 @@ int main()
         return fail("fromSPR ACK did not lower IP3");
     }
 
+    // The original hardware accepts neither channel's MADR.SPR bit.
+    // It reads back clear and the transfer still targets physical RAM.
+    program_channel(&runtime, k_to_spr, 0x80000100u, 2u, 0x3ff0u);
+    if (ee::ee_mem_read32(&runtime, k_to_spr + 0x10u) != 0x100u)
+    {
+        return fail("toSPR MADR.SPR bit retained");
+    }
+    ee::ee_mem_write32(&runtime, k_to_spr, ee::c_ee_dmac::k_chcr_str);
+    program_channel(&runtime, k_from_spr, 0x80000400u, 2u, 0x3ff0u);
+    if (ee::ee_mem_read32(&runtime, k_from_spr + 0x10u) != 0x400u)
+    {
+        return fail("fromSPR MADR.SPR bit retained");
+    }
+    ee::ee_mem_write32(&runtime, k_from_spr, ee::c_ee_dmac::k_chcr_str);
+    if (!same(read_quad(&runtime, 0x400u), first) ||
+        !same(read_quad(&runtime, 0x410u), second) ||
+        ee::ee_mem_read32(&runtime, k_to_spr + 0x10u) != 0x120u ||
+        ee::ee_mem_read32(&runtime, k_from_spr + 0x10u) != 0x420u ||
+        ee::ee_mem_read32(&runtime, k_to_spr + 0x20u) != 0u ||
+        ee::ee_mem_read32(&runtime, k_from_spr + 0x20u) != 0u ||
+        (ee::ee_mem_read32(&runtime, k_to_spr) & ee::c_ee_dmac::k_chcr_str) != 0u ||
+        (ee::ee_mem_read32(&runtime, k_from_spr) & ee::c_ee_dmac::k_chcr_str) != 0u ||
+        (hardware.dmac().status() & (k_channel8 | k_channel9)) != (k_channel8 | k_channel9))
+    {
+        return fail("MADR.SPR mask transfer did not copy and complete both directions");
+    }
+    ee::ee_mem_write32(&runtime, k_d_stat, k_channel8 | k_channel9);
+
     // Invalid length: entire RAM range must be backed before transferring.
     // Neither the last valid RAM quad nor any channel state may advance.
     write_quad(&runtime, 0x1ff0u, sentinel);

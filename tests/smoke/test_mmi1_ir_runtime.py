@@ -150,6 +150,7 @@ def run_opt_level(fixture_exe, temp_dir, opt_level, byte_shift, half_shift):
     rhs = pack_lanes(rhs_words, 32)
     state.gpr[4].lo, state.gpr[4].hi = split_u128(lhs)
     state.gpr[5].lo, state.gpr[5].hi = split_u128(rhs)
+    state.gpr[1].hi = 0x1234ABCD
     state.gpr[25].lo = byte_shift // 8
     state.gpr[26].lo = half_shift // 16
     # Distinct lower and upper doublewords prove PCPYLD operand ordering
@@ -220,6 +221,9 @@ def run_opt_level(fixture_exe, temp_dir, opt_level, byte_shift, half_shift):
                 prefix + f"GPR{register}: got ({actual.hi:016x}:{actual.lo:016x}), "
                 f"expected ({expected_hi:016x}:{expected_lo:016x})")
 
+    require(state.gpr[1].lo == 15 and state.gpr[1].hi == 0x1234ABCD,
+            prefix + "MTSA/MFSA must expose four-bit byte SA and preserve high GPR")
+    require(state.sa == 120, prefix + "internal SA must remain a bit count")
     require(state.gpr[0].lo == 0 and state.gpr[0].hi == 0,
             prefix + "PCPYUD must discard writes to GPR zero")
     # This lane set checks INT_MIN saturation in both ABS variants, word

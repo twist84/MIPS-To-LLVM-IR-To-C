@@ -3,6 +3,8 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
+#include <vector>
 
 namespace
 {
@@ -229,16 +231,44 @@ int main()
     }
 
     dmac.acknowledge(6u);
-    command20(ee_ram, k_source, 0x80000002u, 0x00182000u);
+    // Older PS2SDK publishes the uncached EE command buffer alias.
+    command20(ee_ram, k_source, 0x80000002u, 0x20182000u);
     if (!transport.set_dma(k_list, 1u, &dma_id) ||
         dma_id != 4u ||
         commands.ee_receive_address() != 0x00182000u ||
         !kernel.cpu().read32(
             iop::c_sifcmd_bridge::k_command_buffer + 8u, &iop_word) ||
         iop_word != 0x80000002u ||
+        !kernel.cpu().read32(
+            iop::c_sifcmd_bridge::k_command_buffer + 16u, &iop_word) ||
+        iop_word != 0x20182000u ||
         (dmac.status() & (1u << 6u)) == 0u)
     {
-        return fail("terminal 20-byte INIT_CMD not delivered");
+        return fail("terminal 20-byte INIT_CMD uncached address not delivered");
+    }
+
+    // Validate both receive CIDs without modifying command state.
+    // Only normalize the EE uncached RDRAM mirror, not an arbitrary
+    // segment whose masked address happens to be inside RAM.
+    for (uint32_t cid : {0x80000000u, 0x80000002u})
+    {
+        std::vector<uint32_t> words{20u, 0u, cid, 0u, 0x20118f40u};
+        iop::c_sifcmd_bridge::s_command prepared{};
+        if (!commands.prepare_command(words, 20u, &prepared) ||
+            prepared.m_value != 0x00118f40u ||
+            commands.ee_receive_address() != 0x00182000u)
+        {
+            return fail("uncached command receiver normalization");
+        }
+        for (uint32_t invalid : {0u, 0x20000000u, 0x20118f41u,
+                                 0x22000000u, 0x40118f40u, 0x70118f40u})
+        {
+            words[4] = invalid;
+            if (commands.prepare_command(words, 20u, &prepared))
+            {
+                return fail("invalid receive alias accepted");
+            }
+        }
     }
 
     // A terminal descriptor does not authorize an empty command or
@@ -254,7 +284,7 @@ int main()
         command_rejection.m_packet_dest != 0u ||
         command_rejection.m_packet_cid != 0x80000002u ||
         command_rejection.m_packet_opt != 0u ||
-        command_rejection.m_packet_arg != 0x00182000u ||
+        command_rejection.m_packet_arg != 0x20182000u ||
         commands.ee_receive_address() != 0x00182000u ||
         dmac.status() != 0u)
     {

@@ -213,12 +213,12 @@ int main()
 
     const auto before = gs.state();
     // Rejection is transactional even if the batch contains a complete
-    // sprite pair before the unsupported SIGNAL. Nothing may leak.
+    // sprite pair before the unsupported FINISH. Nothing may leak.
     packet.clear();
     tag(packet, 3u, 0u, 1u, 0xeu, true, 6u);
     ad(packet, 0x05u, xyz0);
     ad(packet, 0x05u, xyz1);
-    ad(packet, 0x60u, 1u); // Unsupported SIGNAL, fail closed
+    ad(packet, 0x61u, 1u); // Unsupported FINISH, fail closed
     if (!check(!feed(gif, packet) &&
                gs.state().m_committed_gif_batches == before.m_committed_gif_batches &&
                gs.state().m_tag_count == before.m_tag_count &&

@@ -207,7 +207,7 @@ int main()
         return fail("PSMT8H continued DMA, page crossing or padding");
     }
 
-    // A failed combined IMAGE/SIGNAL event must not change VRAM or
+    // A failed combined IMAGE/FINISH event must not change VRAM or
     // advance the transfer cursor; retrying the IMAGE must succeed.
     if (!reg(gs, 0x53u, 0u))
     {
@@ -221,7 +221,7 @@ int main()
     events[1].m_type = ee::e_ee_gif_event_type::packed;
     events[1].m_register = 0xeu;
     events[1].m_byte_offset = 16u;
-    events[1].m_word1 = 0x60u;
+    events[1].m_word1 = 0x61u;
     if (gs.consume(events, 2u, retry.data(), 2u) ||
         gs.state().m_transfer_pixels_written != 0u ||
         !read8(gs, k_base + 2763u, 0x31u) ||

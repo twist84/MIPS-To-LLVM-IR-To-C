@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <initializer_list>
 
 namespace
 {
@@ -45,6 +46,8 @@ int main()
                    resume(k_suspend, true), k_run, true) && passed;
     passed = check("resume wait-suspended",
                    resume(k_wait_suspend, false), k_wait, true) && passed;
+    passed = check("resume running", resume(k_run, true),
+                   k_run, false) && passed;
     passed = check("resume dormant", resume(k_dormant, false),
                    k_dormant, false) && passed;
     passed = check("resume non-suspended ready", resume(k_ready, false),
@@ -64,6 +67,22 @@ int main()
                    k_dormant, false) && passed;
     passed = check("release suspended", release_wait(k_suspend),
                    k_suspend, false) && passed;
+
+    for (uint32_t status : {k_run, k_ready, k_wait, k_suspend, k_wait_suspend, k_dormant, 0u})
+    {
+        const bool deletable = status == k_dormant;
+        const bool terminable = status == k_ready || status == k_wait ||
+            status == k_suspend || status == k_wait_suspend;
+        if (can_delete(status, false) != deletable ||
+            can_terminate(status, false) != terminable ||
+            can_wakeup(status, false) != (terminable || status == k_run) ||
+            can_wakeup(status, true) ||
+            can_delete(status, true) || can_terminate(status, true))
+        {
+            std::fprintf(stderr, "invalid lifecycle transition for status %u\n", status);
+            passed = false;
+        }
+    }
 
     if (passed)
     {
