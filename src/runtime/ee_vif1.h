@@ -125,6 +125,7 @@ public:
     // Direct COP2 CMSAR1 launch, independent of VIF MSCAL bookkeeping.
     // The caller must first retire any outstanding VIF1 DMA transaction.
     bool run_cmsar1(uint32_t address);
+    bool control_vu_break_reset(uint32_t value);
 
     uint32_t read_register(uint32_t offset) const;
     bool write_register(uint32_t offset, uint32_t value);
@@ -162,6 +163,7 @@ private:
         uint32_t m_row[4]{};
         uint32_t m_col[4]{};
         bool m_dbf = false;
+        bool m_vu_debug_stopped = false;
         std::vector<uint32_t> m_pending;
         c_ee_vu1_resident_slot m_vu1{};
         uint32_t m_commands = 0u;

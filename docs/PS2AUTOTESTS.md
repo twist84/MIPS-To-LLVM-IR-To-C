@@ -383,3 +383,16 @@ with instruction attempts to manufacture transcript passes. FBRST needs
 reset/break semantics, and EFU requires a guest float-formatting/loop
 investigation. Publish stop PC, reason, dispatch count and output line
 count in CI for non-PASS results without changing transcript judgement.
+
+## COP2 FBRST control
+
+VU manual v6.0 sections 1.3 and 5.1.3 distinguish Ready, Run and Stop,
+independent FB/RS strobes and DE/TE settings. Apply reset after break,
+clear the selected unit's debug enables and status on reset, and set its
+force-break stop bit otherwise. VU0 cancels pending modeled execution
+reservations; committed VF/VI data and memories survive. VU1 debug stop
+prevents VIF launches and CMSAR1 or reset releases it. A pending VU1
+worker transaction is explicitly rejected rather than pretending to
+interrupt its unpublished work. Exact mid-pipeline break effects and
+indeterminate macro execution in Stop remain unvalidated. No original
+pass claimed before CI.

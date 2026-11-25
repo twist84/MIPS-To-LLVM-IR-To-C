@@ -2471,7 +2471,50 @@ extern "C" uint32_t ee_vu0_ctc2(
             }
         }
 
-        ee_vu0_write_vi(vu0, vi_index, value & 0x00000c0cu);
+        // VU manual 1.3 and 5.1.3: break/reset are write strobes.
+        // Reset takes precedence and clears that unit's debug enables.
+        uint32_t fbrst = value & 0x00000c0cu;
+        if ((value & 2u) != 0u)
+        {
+            fbrst &= ~0xffu;
+            vu0->m_vpu_status &= ~0xffu;
+        }
+        else if ((value & 1u) != 0u)
+        {
+            vu0->m_vpu_status = (vu0->m_vpu_status & ~0x0fu) | 8u;
+        }
+        if ((value & 3u) != 0u)
+        {
+            // Stop the modeled execution pipeline without erasing VF,
+            // VI data registers, microprogram memory or data memory.
+            vu0->m_running = 0u;
+            vu0->m_e_bit = 0u;
+            vu0->m_m_bit = 0u;
+            vu0->m_branch = 0u;
+            vu0->m_take_delay_branch = 0u;
+            vu0->m_vi_backup_cycles = 0u;
+            for (auto& issue : vu0->m_ialu) issue = {};
+            vu0->m_ialu_read_pos = vu0->m_ialu_write_pos = vu0->m_ialu_count = 0u;
+            for (auto& issue : vu0->m_vf_memory_issues) issue = {};
+            for (auto& issue : vu0->m_clip_issues) issue = {};
+            for (auto& issue : vu0->m_upper_fmac_issues) issue = {};
+            vu0->m_vf_memory_ready_cycle = 0u;
+            vu0->m_vf_memory_issue_index = 0u;
+            vu0->m_q_pending = 0u;
+            vu0->m_q_ready_cycle = 0u;
+            vu0->m_vpu_status &= ~0x10u;
+        }
+        if ((value & 0x200u) != 0u)
+        {
+            fbrst &= ~0xff00u;
+            vu0->m_vpu_status &= ~0xff00u;
+        }
+        else if ((value & 0x100u) != 0u)
+        {
+            vu0->m_vpu_status = (vu0->m_vpu_status & ~0x0f00u) | 0x800u;
+        }
+        vu0->m_vi[29] = vu0->m_vpu_status;
+        ee_vu0_write_vi(vu0, vi_index, fbrst);
         return sync_result;
     }
 

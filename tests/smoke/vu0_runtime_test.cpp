@@ -1190,8 +1190,24 @@ int main()
     check(control.m_calls == control_calls_before_fbrst + 1 &&
           control.m_last_register == 28 && control.m_last_value == 0x00000c0fu,
           "CTC2 FBRST forwards reset/break bits to the host");
-    check(ee::ee_vu0_read_vi(&vu0, 28) == 0x00000c0cu,
-          "CTC2 FBRST stores only the documented mask");
+    check(ee::ee_vu0_read_vi(&vu0, 28) == 0x00000c00u,
+          "CTC2 FBRST reset clears only the affected unit debug enables");
+    cpu.m_gpr[8].m_lo = 0x0000030fu;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          ee::ee_vu0_read_vi(&vu0, 28) == 0u &&
+          (vu0.m_vpu_status & 0xffffu) == 0u,
+          "both resets dominate force break and clear their debug status");
+    cpu.m_gpr[8].m_lo = 0x00000001u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          (vu0.m_vpu_status & 0xfu) == 8u && vu0.m_running == 0u,
+          "VU0 force break sets its own debug stop status");
+    cpu.m_gpr[8].m_lo = 0x00000002u;
+    check(ee::ee_vu0_ctc2(&cpu, &runtime, 8, 28, write_mode, 0x00100060u) ==
+          static_cast<uint32_t>(e_ee_vu0_sync_result::COMPLETE) &&
+          (vu0.m_vpu_status & 0xffu) == 0u,
+          "VU0 reset exits debug stop");
 
     cpu.m_gpr[8].m_lo = 0x12345678u;
     const uint32_t control_calls_before_cmsar = control.m_calls;

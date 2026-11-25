@@ -770,17 +770,24 @@ uint32_t runner_vu0_control(
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
-    if ((value & 0x00000001u) != 0u)
+    auto* context = static_cast<s_runner_vu0_control*>(user);
+    if (context == nullptr)
     {
         return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
-    if ((value & 0x00000100u) != 0u)
+    // A worker owns a transactional VU1 run until publication. We cannot
+    // interrupt it mid-pair or silently publish its uncommitted effects.
+    if ((value & 0x300u) != 0u &&
+        !context->m_vif1->control_vu_break_reset(value))
     {
-        vu0->m_vpu_status &= ~1u;
-        vu0->m_running = 0u;
-        vu0->m_e_bit = 0u;
-        vu0->m_m_bit = 0u;
+        return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::UNAVAILABLE);
     }
+    if ((value & 3u) != 0u)
+    {
+        context->m_next_attempt = 0u;
+        context->m_last_attempt = context->m_runtime->m_guest_instruction_attempts;
+    }
+    // The architectural FBRST/status updates are owned by ee_vu0_ctc2.
     return static_cast<uint32_t>(ee::e_ee_vu0_sync_result::COMPLETE);
 }
 

@@ -366,7 +366,8 @@ bool c_ee_vif1::execute(
         case 0x15u: // MSCALF (PATH3 idle checked before execution)
         case 0x17u: // MSCNT
         {
-            if (op == 0x17u && !machine.m_vu1->m_state.m_initialized)
+            if (machine.m_vu_debug_stopped ||
+                (op == 0x17u && !machine.m_vu1->m_state.m_initialized))
             {
                 *reject = e_reject::unsupported_vu_execution;
                 accepted = false;
@@ -614,7 +615,7 @@ bool c_ee_vif1::advance(s_transaction& tx, c_ee_vu1_worker* worker)
         // IRQ and uninitialized MSCNT retain the synchronous rejection
         // path. Following MPG, UNPACK, FLUSH and MSCNT cannot run until
         // the preceding worker result has been collected.
-        if (worker != nullptr && vu_start &&
+        if (worker != nullptr && vu_start && !next.m_vu_debug_stopped &&
             ((code & 0x80000000u) == 0u || (next.m_err & 1u) != 0u) &&
             (opcode != 0x17u || next.m_vu1->m_state.m_initialized))
         {
@@ -806,6 +807,24 @@ bool c_ee_vif1::publish(s_transaction& tx)
     return true;
 }
 
+bool c_ee_vif1::control_vu_break_reset(uint32_t value)
+{
+    if (deferred_busy())
+    {
+        return false;
+    }
+    if ((value & 0x200u) != 0u)
+    {
+        m_machine.m_vu_debug_stopped = false;
+        m_machine.m_stat &= ~4u;
+    }
+    else if ((value & 0x100u) != 0u)
+    {
+        m_machine.m_vu_debug_stopped = true;
+    }
+    return true;
+}
+
 bool c_ee_vif1::run_cmsar1(uint32_t address)
 {
     if (deferred_busy())
@@ -818,6 +837,7 @@ bool c_ee_vif1::run_cmsar1(uint32_t address)
     s_transaction tx(*this);
     tx.m_next = m_machine;
     auto& next = tx.m_next;
+    next.m_vu_debug_stopped = false;
     if (!c_ee_vu1::run(next.m_vu1->m_state, next.m_vu1->m_code,
             next.m_vu1->m_data, (address & 0x7ffu) * 8u,
             next.m_top, next.m_itop, tx.m_path1, &tx.m_issue))
