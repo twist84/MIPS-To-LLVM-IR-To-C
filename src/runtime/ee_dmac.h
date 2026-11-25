@@ -209,6 +209,19 @@ public:
         return (m_status & 0x03ffu) & ((m_status >> 16u) & 0x03ffu);
     }
 
+    // HLE SIF0 receive readiness is not an autonomous FIFO transfer.
+    // A caller must separately establish HLE mode, no RPC ownership,
+    // and a safe IOP deadline. Do not exempt any genuine FIFO engine,
+    // residual destination quadwords or unacknowledged completion.
+    bool sif0_receive_armed_only() const
+    {
+        return m_sif0_start == nullptr &&
+            (m_sif0_channel.m_chcr & 0x10du) == 0x104u &&
+            m_sif0_channel.m_qwc == 0u &&
+            !m_sif0_chain_end &&
+            (m_status & (1u << 5u)) == 0u;
+    }
+
     // CHCR.STR is independent of D_STAT.CIS & CIM. A started
     // channel can wait for an external producer, consumer or unmask
     // without any pending interrupt. This is a conservative snapshot,
