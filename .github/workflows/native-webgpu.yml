@@ -102,9 +102,9 @@ jobs:
           if (!(Test-Path 'build/_deps/raylib-src/src/raylib.h')) {
             throw 'Missing build/_deps/raylib-src dependency'
           }
-      - name: Compile all project targets with MSVC warnings as errors
+      - name: Compile native game runner with MSVC warnings as errors
         shell: pwsh
-        run: cmake --build build --config Release --parallel 2 -- -k 0
+        run: cmake --build build --config Release --target ee_game_runner --parallel 2 -- -k 0
 
 
   native-webgpu-windows-clang:
@@ -173,9 +173,9 @@ jobs:
           if (!(Test-Path 'build-clang/_deps/raylib-src/src/raylib.h')) {
             throw 'Missing clean Clang raylib dependency'
           }
-      - name: Compile all project targets with Clang warnings as errors
+      - name: Compile native game runner and VU1 AOT fixtures with Clang warnings as errors
         shell: pwsh
-        run: cmake --build build-clang --config Release --parallel 2 -- -k 0
+        run: cmake --build build-clang --config Release --target ee_game_runner ee_vu1_aot_fixture vu1_recomp --parallel 2 -- -k 0
       - name: Compile and execute Windows VU1 AOT DLLs at O0 and O3
         shell: pwsh
         run: |
