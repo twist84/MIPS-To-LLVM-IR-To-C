@@ -359,21 +359,24 @@ add_test(NAME ee_reached_isa_inventory COMMAND ee_reached_isa_inventory_test)
 add_executable(ee_game_runner src/tools/ee_game_runner_main.cpp)
 target_link_libraries(ee_game_runner PRIVATE ee_core iop_cpu ${CMAKE_DL_LIBS})
 
-# Standalone pinned raudio, downloaded to build/_deps like raylib.
-# No device is opened by headless/default test runs.
+# Fetch raylib once, also for headless builds. SOURCE_SUBDIR prevents
+# configuring its graphics/GLFW dependencies until the window is requested.
 include(FetchContent)
-FetchContent_Declare(raudio
-    GIT_REPOSITORY https://github.com/raysan5/raudio.git
-    GIT_TAG 811c150fe97a2abb8ec67857dc52e022bfaa4e43
-    GIT_CONFIG core.autocrlf=false)
-FetchContent_MakeAvailable(raudio)
+FetchContent_Declare(raylib
+    GIT_REPOSITORY https://github.com/raysan5/raylib.git
+    GIT_TAG c1ab645ca298a2801097931d1079b10ff7eb9df8
+    GIT_CONFIG core.autocrlf=false
+    SOURCE_SUBDIR ee_source_only)
+FetchContent_MakeAvailable(raylib)
 include(cmake/prepare_raudio.cmake)
-ee_prepare_raudio("${raudio_SOURCE_DIR}" "${raudio_BINARY_DIR}" EE_RAUDIO_SOURCE)
+set(EE_RAUDIO_DIR "${raylib_BINARY_DIR}/ee_raudio")
+ee_prepare_raudio("${raylib_SOURCE_DIR}" "${EE_RAUDIO_DIR}" EE_RAUDIO_SOURCE)
 add_library(ee_raudio STATIC "${EE_RAUDIO_SOURCE}")
 set_target_properties(ee_raudio PROPERTIES C_EXTENSIONS ON)
 target_compile_definitions(ee_raudio PRIVATE RAUDIO_STANDALONE
     SUPPORT_MODULE_RAUDIO AUDIO_DEVICE_SAMPLE_RATE=48000)
-target_include_directories(ee_raudio PUBLIC "${raudio_SOURCE_DIR}/src")
+target_include_directories(ee_raudio PUBLIC "${EE_RAUDIO_DIR}"
+    PRIVATE "${raylib_SOURCE_DIR}/src")
 target_link_libraries(ee_raudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
 if(WIN32)
     target_compile_definitions(ee_raudio PRIVATE _CRT_SECURE_NO_WARNINGS)
@@ -490,17 +493,13 @@ if(EE_ENABLE_WEBGPU)
     target_compile_definitions(ee_game_runner PRIVATE EE_ENABLE_WEBGPU=1)
     target_link_libraries(ee_game_runner PRIVATE ee_webgpu_native)
     if(EE_ENABLE_RAYLIB_WINDOW)
-        include(FetchContent)
-        # Pin raylib 5.5 to a specific commit under build/_deps.
+        # The separately compiled raudio from this same checkout is
+        # the sole audio implementation; only configure graphics here.
         set(BUILD_EXAMPLES OFF CACHE BOOL "Build raylib examples" FORCE)
-        # The standalone audio library is the sole raudio implementation.
         set(CUSTOMIZE_BUILD ON CACHE BOOL "Customize raylib modules" FORCE)
-        set(USE_AUDIO OFF CACHE BOOL "Disable raylib audio" FORCE)
+        set(USE_AUDIO OFF CACHE BOOL "Disable duplicate raylib audio" FORCE)
         set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "Disable duplicate raudio" FORCE)
-        FetchContent_Declare(raylib
-            GIT_REPOSITORY https://github.com/raysan5/raylib.git
-            GIT_TAG c1ab645ca298a2801097931d1079b10ff7eb9df8)
-        FetchContent_MakeAvailable(raylib)
+        add_subdirectory("${raylib_SOURCE_DIR}" "${raylib_BINARY_DIR}")
         target_sources(ee_game_runner PRIVATE
             src/runtime/ee_raylib_window.cpp
             src/runtime/ee_raylib_win32.cpp)

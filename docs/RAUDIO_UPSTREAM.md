@@ -1,16 +1,10 @@
 # raudio source provenance
 
-Upstream: https://github.com/raysan5/raudio
-Revision: 811c150fe97a2abb8ec67857dc52e022bfaa4e43
+Upstream: https://github.com/raysan5/raylib
+Revision: c1ab645ca298a2801097931d1079b10ff7eb9df8 (raylib 5.5)
 
-CMake FetchContent downloads the upstream checkout into build/_deps/raudio-src. The upstream LICENSE, src/raudio.h and src/external/miniaudio.h are used verbatim. No upstream source is tracked in this repository. cmake/prepare_raudio.cmake generates a patched translation unit under build/_deps/raudio-build without changing the fetched checkout.
-Only the raw PCM audio device/stream implementation is built; compressed
-file-format loading flags are not enabled. Additional upstream decoders
-are therefore not required. miniaudio's license is retained in its header.
+CMake FetchContent downloads raylib once into build/_deps/raylib-src, including headless configurations. Headless builds do not configure or link raylib graphics or GLFW. Window builds disable the library's own audio module and use the same separately compiled standalone audio target.
 
-The generated copy of src/raudio.c is modified locally: stream play/pause/resume and callback
-assignment synchronize with the mixer; untracking precedes converter
-destruction; device callback shutdown precedes mutex destruction; start
-failure releases its mutex; the null backend is rejected; standalone logs
-terminate with a newline; device format accessors expose the negotiated
-sample rate and channel count. The upstream license notice is retained.
+cmake/prepare_raudio.cmake generates an audio-only header from the pinned raylib.h and a patched raudio.c under build/_deps/raylib-build/ee_raudio. The checkout, upstream license and external/miniaudio.h remain intact. Compressed audio file-format flags are not enabled. The generated header retains the upstream license notice.
+
+Raylib already synchronizes stream control and callback assignment and untracks buffers before converter destruction. Local patches reject the null backend, release the mixer mutex on device-start failure, join the device callback before destroying its mutex, terminate standalone logs with a newline, expose the negotiated device format and free standalone file allocations without requiring raylib's file utility implementation.

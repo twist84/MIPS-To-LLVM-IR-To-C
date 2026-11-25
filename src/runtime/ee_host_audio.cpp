@@ -82,7 +82,7 @@ void c_ee_host_audio::start(iop::c_hw* hardware)
         return;
     }
     m_impl->m_stream = LoadAudioStream(48000u, 16u, 2u);
-    if (!IsAudioStreamReady(m_impl->m_stream))
+    if (!IsAudioStreamValid(m_impl->m_stream))
     {
         CloseAudioDevice();
         s_impl::m_active.store(nullptr, std::memory_order_release);
@@ -105,7 +105,7 @@ void c_ee_host_audio::pause()
     if (m_impl != nullptr && m_impl->m_ready && !m_impl->m_paused)
     {
         m_impl->m_hardware->bind_spu2_pcm_sink(nullptr, nullptr);
-        // The vendored stream control synchronizes with the mixing thread.
+        // The raylib stream control synchronizes with the mixing thread.
         // No queue storage is touched until any in-flight callback finishes.
         PauseAudioStream(m_impl->m_stream);
         m_impl->m_paused = true;
