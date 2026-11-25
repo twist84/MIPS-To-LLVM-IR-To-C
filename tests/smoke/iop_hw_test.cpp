@@ -768,6 +768,96 @@ bool test_spu2_effect_ram()
         spu.irq_latches() == 0u && spu.ram_word(0xffffu, &word) && word == 0u;
 }
 
+bool test_spu2_effect_reflections()
+{
+    iop::c_spu2 spu;
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    // Sixteen-word work area: the left same-path predecessor wraps.
+    if (!spu.write(base + 0x2e0u, 2u, 0u) ||
+        !spu.write(base + 0x2e2u, 2u, 0xfff0u) ||
+        !spu.write(base + 0x33cu, 2u, 0u))
+    {
+        return false;
+    }
+    const int16_t words[16] = {0, 0, 2000, 400, 0, 0, 4000, -200,
+        0, 0, 3000, -400, 0, 0, -1000, 200};
+    std::vector<uint8_t> data;
+    for (int16_t sample : words)
+    {
+        const uint16_t bits = static_cast<uint16_t>(sample);
+        data.push_back(static_cast<uint8_t>(bits));
+        data.push_back(static_cast<uint8_t>(bits >> 8u));
+    }
+    if (!spu.write(base + 0x1a8u, 2u, 0u) ||
+        !spu.write(base + 0x1aau, 2u, 0xfff0u) ||
+        !spu.copy_dma(0u, data, true))
+    {
+        return false;
+    }
+    const uint32_t regs[8] = {0x2ecu, 0x2f0u, 0x304u, 0x308u,
+        0x30cu, 0x310u, 0x324u, 0x328u};
+    const uint16_t offsets[8] = {0u, 4u, 2u, 6u, 8u, 12u, 10u, 14u};
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (!spu.write(base + regs[i], 2u, 0u) ||
+            !spu.write(base + regs[i] + 2u, 2u, offsets[i]))
+        {
+            return false;
+        }
+    }
+    if (!spu.write(base + 0x774u, 2u, 0x4000u) ||
+        !spu.write(base + 0x77eu, 2u, 0x4000u) ||
+        !spu.write(base + 0x784u, 2u, 0x4000u) ||
+        !spu.write(base + 0x786u, 2u, 0x4000u))
+    {
+        return false;
+    }
+    iop::c_spu2::s_effect_reflections left{}, right{};
+    uint16_t word = 0u;
+    // At half gains: left SAME=850, DIFF=-100; right SAME=950, DIFF=300.
+    if (!spu.calculate_effect_reflections(0u, 0u, 16u, 1000, &left) ||
+        !spu.calculate_effect_reflections(0u, 1u, 0u, -1000, &right) ||
+        left.m_offset[0] != 0 || left.m_offset[1] != 8 ||
+        right.m_offset[0] != 4 || right.m_offset[1] != 12 ||
+        left.m_sample[0] != 850 || left.m_sample[1] != -100 ||
+        right.m_sample[0] != 950 || right.m_sample[1] != 300 ||
+        !spu.commit_effect_reflections(0u, 0u, left) ||
+        !spu.ram_word(0xfff0u, &word) || word != 0u)
+    {
+        return false;
+    }
+    // Real reflection reads and writes compare cross-core IRQ addresses.
+    if (!spu.write(base + 0x59cu, 2u, 0u) ||
+        !spu.write(base + 0x59eu, 2u, 0xfffeu) ||
+        !spu.write(base + 0x59au, 2u, 0x40u) ||
+        !spu.write(base + 0x19au, 2u, 0x80u) ||
+        !spu.calculate_effect_reflections(0u, 0u, 0u, 1000, &left) ||
+        spu.irq_latches() != 2u || spu.effect_irq_events() != 1u ||
+        !spu.ram_word(0xfff0u, &word) || word != 0u ||
+        !spu.commit_effect_reflections(0u, 0u, left) ||
+        !spu.commit_effect_reflections(0u, 0u, right) ||
+        !spu.ram_word(0xfff0u, &word) || word != 850u ||
+        !spu.ram_word(0xfff8u, &word) || word != static_cast<uint16_t>(-100) ||
+        !spu.ram_word(0xfff4u, &word) || word != 950u ||
+        !spu.ram_word(0xfffcu, &word) || word != 300u)
+    {
+        return false;
+    }
+    // Negative coefficient and signed 32-bit tap offset; -1 wraps.
+    if (!spu.write(base + 0x774u, 2u, 0x8000u) ||
+        !spu.write(base + 0x304u, 2u, 0xffffu) ||
+        !spu.write(base + 0x306u, 2u, 0xffffu) ||
+        !spu.calculate_effect_reflections(0u, 0u, 0u, 1000, &left) ||
+        left.m_sample[0] != -200 ||
+        spu.calculate_effect_reflections(2u, 0u, 0u, 0, &left) ||
+        spu.calculate_effect_reflections(0u, 2u, 0u, 0, &left) ||
+        spu.calculate_effect_reflections(0u, 0u, 0u, 0, nullptr))
+    {
+        return false;
+    }
+    return true;
+}
+
 bool test_spu2_effect_registers()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -1927,6 +2017,10 @@ int main()
     if (!test_spu2_effect_ram())
     {
         return fail("SPU2 shared effect RAM, saturation and cross-core IRQ latches");
+    }
+    if (!test_spu2_effect_reflections())
+    {
+        return fail("SPU2 IIR same/cross reflections, feedback and staged writeback");
     }
     if (!test_spu2_effect_registers())
     {

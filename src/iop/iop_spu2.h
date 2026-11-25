@@ -100,6 +100,17 @@ public:
         int16_t* sample);
     bool write_effect_sample(uint32_t core, uint64_t step, int64_t offset,
         int32_t sample);
+    // Staged reflection results keep the filter reads ahead of writeback,
+    // including when later comb/APF taps alias these destinations.
+    struct s_effect_reflections
+    {
+        int64_t m_offset[2]{};
+        int32_t m_sample[2]{};
+    };
+    bool calculate_effect_reflections(uint32_t core, uint32_t channel,
+        uint64_t step, int16_t input, s_effect_reflections* result);
+    bool commit_effect_reflections(uint32_t core, uint64_t step,
+        const s_effect_reflections& reflections);
     uint64_t effect_irq_events() const { return m_effect_irq_events; }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
@@ -173,6 +184,7 @@ private:
     void check_voice_irq(uint32_t address);
     void check_input_irq(uint32_t address, uint32_t words);
     void check_effect_irq(uint32_t address);
+    int64_t effect_tap_offset(uint32_t core, uint32_t reg) const;
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
     void mix_frames(uint64_t samples);
     void write_mixer_rings();

@@ -106,3 +106,24 @@ re-arming one core, invalid addresses and reset. These helpers are not called
 by the mixer yet: no dummy tap reads or writes, effect deadlines or synthetic
 IRQ events are introduced by this batch. Guest-clock activation, silent-tail
 handling and scheduler deadlines must be added with real filter processing.
+
+### IIR reflections (Batch 18)
+
+The IIR stage accepts one channel's already-downsampled signed input and a
+half-rate work-area step. Native SPU2 tap registers are assembled high halfword
+first, interpreted as signed 32-bit halfword offsets; hardware behavior of
+extreme register values remains to be verified. The IIR uses signed Q15 input,
+wall and alpha gains with explicit floor rounding through the existing wide
+multiply helper. The previous destination is one word earlier, and the DIFF
+source is selected from the opposite channel. Both reflection values are staged
+before writeback, so future comb and APF reads can observe the old RAM contents.
+Disabled effects calculate but do not write back or latch effect IRQs.
+
+The synthetic fixture seeds known RAM via DMA and verifies exact signed left and
+right values, cross-channel selection, wraparound, negative coefficient and tap,
+read-before-write ordering, disabled writeback and cross-core read IRQ. This is
+not yet a bit-exact hardware claim. Filter scheduling remains inactive until the
+complete filter pipeline and sample-clock integration are ready.
+
+Register reference: https://akuhak.github.io/ps2sdk-doxy/iop/spu2regs_8h_source.html
+Algorithm reference: https://psx-spx.consoledev.net/soundprocessingunitspu/

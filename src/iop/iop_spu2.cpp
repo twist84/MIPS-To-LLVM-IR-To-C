@@ -203,6 +203,72 @@ bool c_spu2::write_effect_sample(uint32_t core, uint64_t step, int64_t offset,
     return result;
 }
 
+int64_t c_spu2::effect_tap_offset(uint32_t core, uint32_t reg) const
+{
+    const uint16_t* regs = m_cores[core].m_registers;
+    const uint32_t bits = (static_cast<uint32_t>(regs[reg / 2u]) << 16u) |
+        regs[reg / 2u + 1u];
+    // Native SPU2 offsets are halfword units, not PS1 eight-byte units.
+    return static_cast<int64_t>(bits) -
+        ((bits & 0x80000000u) != 0u ? 0x100000000ll : 0ll);
+}
+
+bool c_spu2::calculate_effect_reflections(uint32_t core, uint32_t channel,
+    uint64_t step, int16_t input, s_effect_reflections* result)
+{
+    bool valid = core < 2u && channel < 2u && result != nullptr &&
+        effect_start(core) < effect_end(core);
+    if (valid)
+    {
+        const uint16_t* coeff = m_cores[core].m_effect_coefficients;
+        const int32_t excitation = scale_mix(input, signed_halfword(coeff[8u + channel]));
+        const int32_t wall = signed_halfword(coeff[5u]);
+        const int32_t alpha = signed_halfword(coeff[0u]);
+        const uint32_t channel_offset = channel * 4u;
+        // The DIFF source pair is crossed; destinations stay in channel order.
+        const uint32_t source_regs[2] = {0x304u + channel_offset,
+            0x328u - channel_offset};
+        const uint32_t dest_regs[2] = {0x2ecu + channel_offset,
+            0x30cu + channel_offset};
+        s_effect_reflections next{};
+        for (uint32_t path = 0u; path < 2u && valid; ++path)
+        {
+            int16_t delayed = 0;
+            int16_t previous = 0;
+            const int64_t dest = effect_tap_offset(core, dest_regs[path]);
+            valid = read_effect_sample(core, step,
+                effect_tap_offset(core, source_regs[path]), &delayed) &&
+                read_effect_sample(core, step, dest - 1, &previous);
+            if (valid)
+            {
+                const int32_t delta = excitation + scale_mix(delayed, wall) - previous;
+                next.m_offset[path] = dest;
+                next.m_sample[path] = previous + scale_mix(delta, alpha);
+            }
+        }
+        if (valid)
+        {
+            *result = next;
+        }
+    }
+    return valid;
+}
+
+bool c_spu2::commit_effect_reflections(uint32_t core, uint64_t step,
+    const s_effect_reflections& reflections)
+{
+    bool valid = core < 2u && effect_start(core) < effect_end(core);
+    if (valid && effect_enabled(core))
+    {
+        for (uint32_t path = 0u; path < 2u && valid; ++path)
+        {
+            valid = write_effect_sample(core, step, reflections.m_offset[path],
+                reflections.m_sample[path]);
+        }
+    }
+    return valid;
+}
+
 void c_spu2::s_envelope::step(uint32_t rate, bool decrease, bool exponential)
 {
     // Reference SDBZ envelope clock. Counter is retained across phase and
