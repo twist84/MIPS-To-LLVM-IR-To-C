@@ -1798,6 +1798,12 @@ uint64_t c_hw::idle_event_cycles_remaining() const
         next = std::min(next, static_cast<uint64_t>(
             c_spu2::k_cycles_per_sample - m_spu2.sample_phase()));
     }
+    // Mode zero has a unit divisor and cannot compare or raise an IRQ.
+    // Mode/count writes reset the prescaler remainder.
+    if (m_timer5_mode == 0u)
+    {
+        return std::min(next, (uint64_t{1u} << 32u) - m_timer5_count);
+    }
     // Mirror the modeled Timer5 compare condition. A counter already
     // past target must reach rollover before a later compare is possible.
     // Stop at rollover as well; partitioning across it is not assumed
@@ -1834,6 +1840,13 @@ void c_hw::advance_cycles(uint32_t cycles)
         {
             (void)raise_interrupt(c_spu2::k_irq_line);
         }
+    }
+    // The unconfigured unit-rate counter only wraps modulo 2^32.
+    // No prescaler remainder or compare state can survive a mode-zero write.
+    if (m_timer5_mode == 0u)
+    {
+        m_timer5_count += cycles;
+        return;
     }
     // All Timer 5 divisors are powers of two. Keep the exact quotient
     // and fractional remainder without a variable 64-bit division.
