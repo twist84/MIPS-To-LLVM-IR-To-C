@@ -850,3 +850,16 @@ vectors have retired. Whole-command transactions do not yet implement
 progressive partial-payload writes or decrement NUM for individually
 retired vectors. Regressions cover both units, mask/column fill through
 vector 255, and header-only NUM 1/255/256 encodings.
+
+### Confirmed MSKPATH3 result (c83d36b)
+
+Tested merge `a325a6ef53cfbaf1b7db8106d1b9e6fcb00c7197`;
+[run 45649294594](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45649294594),
+[summary artifact 15038942974](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45649294594/artifacts/15038942974).
+44/55 exact (80.00%): PASS 44, DIFF 7, INCOMPLETE 4, NO_OUTPUT 0,
+ERROR 0. Newly passing dma/vif/mskpath3; no lost passes. Four workflows
+passed; Build and test failed in ee_vif1_device (fast-2, job 139330000471)
+because a worker rollback fixture used now-supported MSKPATH3 as its
+invalid command. Replace both legacy rejection triggers with reserved
+opcode 0x09, retaining the existing rollback assertions. No original
+ELFs or expected transcripts modified.

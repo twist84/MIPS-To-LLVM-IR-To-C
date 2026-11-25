@@ -800,7 +800,7 @@ int main()
             return 1;
         }
 
-        const auto bad = pack_words({0x14000000u, 0x06000000u, 0u, 0u});
+        const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
         if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
                 deferred.wait_deferred() == result::rejected &&
                 deferred_capture.m_calls == 1u &&
@@ -867,7 +867,7 @@ int main()
         bus.bind_vif1(&deferred);
         auto& dma = bus.dmac();
         const ee::s_ee_u128 start_command{0x14000000u, 0u};
-        const ee::s_ee_u128 bad_command{0x0600000014000000ull, 0u};
+        const ee::s_ee_u128 bad_command{0x0900000014000000ull, 0u};
         const ee::s_ee_u128 end_tag{1u | (uint64_t{7u} << 28u), 0u};
         dma_memory.write128(0x100u, &start_command);
         dma_memory.write128(0x200u, &end_tag);
