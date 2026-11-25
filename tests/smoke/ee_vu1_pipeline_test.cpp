@@ -318,6 +318,28 @@ int main()
         }
     }
 
+    // EATAN nanocode: cancellation occurs for flushed zero operands,
+    // including signed zero and denormals. These are raw console results,
+    // not mathematical atan(0) or special-case output replacements.
+    {
+        const uint32_t inputs[] =
+        {
+            0x00000000u, 0x80000000u, 0x00000001u, 0x00001337u
+        };
+        for (const uint32_t input : inputs)
+        {
+            uint32_t bits = 0u;
+            uint32_t latency = 0u;
+            if (!check(ee::c_ee_vu1::efu({0u, 0u, input, 0u},
+                       0x7du, 2u, bits, latency) &&
+                       bits == 0x33e60000u && latency == 54u,
+                       "EATAN documented nanocode cancellation"))
+            {
+                return 1;
+            }
+        }
+    }
+
     // ESIN uses the S4 coefficient documented in the VU User's Manual.
     // Raw console results from pinned ps2autotests vu/lower/efu.expected.
     {

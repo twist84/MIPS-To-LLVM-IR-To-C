@@ -557,11 +557,21 @@ uint32_t efu_atan(uint32_t y, uint32_t x)
     const uint32_t numerator = vu1_fp::flush(vu1_fp::sub(y, x));
     const uint32_t denominator = vu1_fp::flush(vu1_fp::add(y, x));
     const uint32_t reduced = vu_scalar_fp::quotient(numerator, denominator);
-    // PCSX2's EATAN polynomial uses coefficient * odd power. Keeping
-    // that operand order in the integer Booth model agrees with the
-    // hardware's saturated argument and unit-magnitude readbacks.
-    // The residual near-zero cancellation remains uncharacterized.
-    return vu1_fp::add(efu_odd_polynomial<true>(reduced, coefficients), 0x3f490fdau);
+    // VU User's Manual v6.0, p. 355: the EFU nanocode first multiplies
+    // T1 by t, then accumulates odd powers times T2 through T7.
+    // Add 1 * pi/4 before the final t^15 * T8 term. Both operand order
+    // and the multiplication of the documented constant are observable
+    // with the asymmetric Booth multiplier (1 * 0x3f490fdb is 0x3f490fda).
+    const uint32_t square = vu1_fp::mul(reduced, reduced);
+    uint32_t power = vu1_fp::mul(square, reduced);
+    uint32_t sum = vu1_fp::mul(coefficients[0], reduced);
+    for (size_t n = 1u; n < coefficients.size() - 1u; ++n)
+    {
+        sum = vu1_fp::add(sum, vu1_fp::mul(power, coefficients[n]));
+        power = vu1_fp::mul(power, square);
+    }
+    sum = vu1_fp::add(sum, vu1_fp::mul(vu1_fp::kOne, 0x3f490fdbu));
+    return vu1_fp::add(sum, vu1_fp::mul(power, coefficients.back()));
 }
 
 uint32_t efu_sin(uint32_t x)

@@ -84,3 +84,34 @@ blindly: the implementation's existing word matches the hardware at that
 argument. Inserting pi/4 before the last polynomial term with the existing
 one-guard-bit adder gives `33e70000` at reduced argument -1, close to but
 not equal to the hardware's `33e60000`. It is not a justified fix.
+
+### Batch 2 verification
+
+[CI run 45675443215](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45675443215)
+at PR head `34b19e7` confirms 204/208 direct EFU words, ESIN 16/16,
+zero existing-model latency differences and 54/55 exact original ELF
+transcripts. All five workflows passed.
+
+## Batch 3 — documented EATAN nanocode order
+
+The [VU User's Manual v6.0](https://studylib.net/doc/25815876/vuusersmanual.158394566),
+p. 355, describes the EATAN internal operation order. Use coefficient-first
+for the initial product, square-first for the cube, then power-first for
+subsequent odd terms. The constant term is a multiply by one accumulated
+before the final odd term, not a literal addition after the polynomial.
+The existing asymmetric Booth model computes `mul(1, 3f490fdb)` as
+`3f490fda` and `mul(-1, bb84d7e7)` as `3b84d7e6`, explaining the
+previous constant and cancellation discrepancies without any input-specific
+replacement.
+
+A standalone integer transcription of the actual FMAC/quotient algorithms
+reproduced the previous 44/48 arctangent words and predicts 48/48 using
+this documented sequence (including EATANxy and EATANxz). Combined with
+the verified ESIN correction this predicts 208/208 direct words and
+55/55 original transcripts; actual native CI results remain pending.
+The implementation still uses the existing separate truncated multiply
+and add primitives, and this is not a claim of independent validation
+of internal accumulator precision or hardware timing. The existing
+54-cycle model latency is unchanged. Add the four cancellation words to
+the VU1 pipeline regression. Independent console inputs and a matched
+retail replay remain required for broader validation.
