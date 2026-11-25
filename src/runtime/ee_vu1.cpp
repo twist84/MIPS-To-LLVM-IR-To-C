@@ -566,8 +566,10 @@ uint32_t efu_atan(uint32_t y, uint32_t x)
 
 uint32_t efu_sin(uint32_t x)
 {
+    // Sony VU User's Manual v6.0, p. 143: S4 is 0xb94fb21f.
+    // Preserve the original polynomial and FMAC operand ordering.
     constexpr std::array<uint32_t, 5> coefficients{
-        0x3f800000u, 0xbe2aaaa4u, 0x3c08873eu, 0xb94fb222u, 0x362e9c14u};
+        0x3f800000u, 0xbe2aaaa4u, 0x3c08873eu, 0xb94fb21fu, 0x362e9c14u};
     return efu_odd_polynomial<false>(x, coefficients);
 }
 

@@ -56,3 +56,31 @@ positive/negative ESIN across multiple magnitudes; distinguish intermediate
 product rounding, retained accumulator bits and evaluation ordering before
 changing the shared implementation. No arithmetic behavior or latencies
 are changed in this diagnostic commit.
+
+## Batch 2 — ESIN coefficient audit
+
+The [Sony VU User's Manual v6.0, ESIN, p. 143](https://studylib.net/doc/25815876/vuusersmanual.158394566)
+lists S4 as `b94fb21f`; the previous peer-derived implementation used
+`b94fb222`. All other ESIN coefficients agree. A standalone integer
+calculation transcribing the existing one-guard-bit adder and asymmetric
+Booth multiplier reproduced the baseline 13/16 and, changing only S4
+to the documented word, predicted 16/16. This is a source-based correction
+rather than fitting a coefficient to the test cases.
+
+| Input | Previous | Console / predicted |
+| --- | --- | --- |
+| 3 | 3e126228 | 3e126230 |
+| pi | 3b565be0 | 3b565de0 |
+| 3*pi/2 | bf1a9964 | bf1a9934 |
+
+No evaluation order or latency changed. Add direct raw-word regression cases
+for these three inputs, while retaining all original ELF and direct probe
+checks. Expected overall arithmetic result is 204/208; actual CI and retail
+validation are required before claiming that result in the runtime.
+
+The same manual documents EATAN's pi/4 as `3f490fdb`, whereas the console
+readback at reduced argument zero is `3f490fda`. Do not change the constant
+blindly: the implementation's existing word matches the hardware at that
+argument. Inserting pi/4 before the last polynomial term with the existing
+one-guard-bit adder gives `33e70000` at reduced argument -1, close to but
+not equal to the hardware's `33e60000`. It is not a justified fix.

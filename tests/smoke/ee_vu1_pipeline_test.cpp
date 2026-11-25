@@ -318,6 +318,34 @@ int main()
         }
     }
 
+    // ESIN uses the S4 coefficient documented in the VU User's Manual.
+    // Raw console results from pinned ps2autotests vu/lower/efu.expected.
+    {
+        struct s_sine_case
+        {
+            uint32_t m_input;
+            uint32_t m_expected;
+        };
+        const s_sine_case cases[] =
+        {
+            {0x40400000u, 0x3e126230u}, // 3
+            {0x40490fdbu, 0x3b565de0u}, // pi
+            {0x4096cbe4u, 0xbf1a9934u}  // 3*pi/2
+        };
+        for (const auto& test : cases)
+        {
+            uint32_t bits = 0u;
+            uint32_t latency = 0u;
+            if (!check(ee::c_ee_vu1::efu({0u, 0u, test.m_input, 0u},
+                       0x7cu, 2u, bits, latency) &&
+                       bits == test.m_expected && latency == 29u,
+                       "ESIN documented polynomial coefficient"))
+            {
+                return 1;
+            }
+        }
+    }
+
     // The EFU producer updates P after ESUM latency. MFP must first
     // observe old P and then new P only after WAITP.
     ee::s_ee_vu1_state p{};
