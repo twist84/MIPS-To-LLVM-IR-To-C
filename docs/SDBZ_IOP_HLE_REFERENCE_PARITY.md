@@ -953,7 +953,7 @@ check. Both MSVC and fresh Clang builds are retained. No EE, IOP,
 RPC, guest timing, or shader behavior was altered.
 
 **Next validation:** after new CI passes, re-run the existing
-`run_ps2_game.bat` from the current PR branch and inspect a
+`scripts\run_ps2_game.bat` from the current PR branch and inspect a
 matched final traced log bundle, including `first-boot.json`.
 Do not attribute ARKD registration or a genuine DMA5/EE semaphore
 wake to this host-only fix before observed runtime evidence.
@@ -1512,7 +1512,7 @@ The ARKD guest worker is thread 11 (entry `0x8824c`) and calls `WaitSema(0)` fro
 
 Add side-effect-free bounded IOP semaphore traces for genuine create, WaitSema acquire/block and SignalSema increment/wakeup, recording guest thread, ID, caller RA and IOP cycles; log the exact guest RPC queue token, method, queue, handler entry, and genuine return. Add real CDVDMAN read acceptance/completion diagnostics only if a later trace reaches a disc-read path. This will distinguish worker scheduling, incorrect semaphore-object use, absent CDVD/event producer, and genuine handler return. **Never** fabricate a wakeup, timer, DMA completion, guest handler return, or SIF0 reply.
 
-Retain existing draft PR #145 and squash-merge-only policy. Run four required CI workflows on the new head, then request a fresh matched `run_ps2_game.bat --full` retail replay. CI is not proof the ARKD method returns.
+Retain existing draft PR #145 and squash-merge-only policy. Run four required CI workflows on the new head, then request a fresh matched `scripts\run_ps2_game.bat --full` retail replay. CI is not proof the ARKD method returns.
 
 
 ## 2026-11-20 — 08:47:39 full retail replay: ARKD semaphore wakeup is real
@@ -1628,7 +1628,7 @@ original-IOP opcode window to 129 aligned 32-bit words and add the
 sampled thread's 32 GPR values and real frame-pointer locals.
 No synthetic semaphore signal, guest return, MMIO completion or
 RPC reply. This supports a faster long-probe workflow
-(`set MAX_DISPATCHES=4000000`, then `run_ps2_game.bat`) with
+(`set MAX_DISPATCHES=4000000`, then `scripts\run_ps2_game.bat`) with
 current `quick-probe.log`/`quick-probe.json` as the authoritative
 outputs, while old full logs remain preserved.
 
@@ -1701,7 +1701,7 @@ git pull --ff-only
 git rev-parse HEAD
 set "MAX_DISPATCHES=4000000"
 set "BOOT_TIMEOUT_SECONDS=300"
-run_ps2_game.bat --quick
+scripts\run_ps2_game.bat --quick
 ```
 Upload current `quick-probe.log`, `quick-probe.json` and any matching
 expansion logs; don't confuse preserved full logs with the quick probe.
@@ -2368,7 +2368,7 @@ SQRT fail-closed behavior.
 The decoder classification changed; the user's
 preserved IR cache needs verification/rebuild
 from the updated guest-lowering sources by
-`run_ps2_game.bat --quick`. Avoid forcibly
+`scripts\run_ps2_game.bat --quick`. Avoid forcibly
 reusing stale IR against changed COP2 semantics.
 No successful game frame has been established.
 

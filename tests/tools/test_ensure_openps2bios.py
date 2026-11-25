@@ -127,7 +127,7 @@ class TestOpenPS2BIOSBootstrap(unittest.TestCase):
 
     def test_batch_keeps_manual_override_and_irx_mode(self):
         script = (
-            Path(__file__).resolve().parents[2] / "run_sdbz_native.bat"
+            Path(__file__).resolve().parents[2] / "scripts" / "run_sdbz_native.bat"
         ).read_text(encoding="utf-8")
         self.assertIn(
             "if not defined SDBZ_IOP_ROM0 if not defined IOP_IRX "

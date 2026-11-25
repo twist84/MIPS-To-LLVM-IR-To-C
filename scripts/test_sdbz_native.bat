@@ -6,7 +6,7 @@ rem Builds ONLY the required host tools, not all 8,046 SDBZ guest modules.
 rem Does not run the game, patch guest RAM, or synthesize EE/GS events.
 rem Run "test_sdbz_native.bat quick" to skip the already-passed long
 rem game_runner_end_to_end test and recheck only the two fast tests.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if errorlevel 1 exit /b 1
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

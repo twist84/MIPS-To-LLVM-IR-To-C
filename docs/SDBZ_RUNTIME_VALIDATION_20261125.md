@@ -68,5 +68,5 @@ Keep further R5900/COP0/COP1/VU accuracy and device differential audits
 separate from claimed performance gains.
 
 See [audio history](SDBZ_SPU2_AUDIO_CLOCK.md),
-[native boot plan](../SDBZ_NATIVE_BOOT_PLAN.md) and
+[native boot plan](SDBZ_NATIVE_BOOT_PLAN.md) and
 [cache-miss recovery](SDBZ_LIVE_CACHE_MISS_RESUME.md).

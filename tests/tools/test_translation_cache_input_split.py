@@ -135,7 +135,7 @@ def verify_preservation_when_host_only_inputs_change():
             raise AssertionError("modified relocated host header was accepted")
         cache.write_text(json.dumps(original_cache), encoding="utf-8")
 
-        # This is the exact fallback used by run_ps2_game.bat:
+        # This is the exact fallback used by scripts/run_ps2_game.bat:
         # the saved DLL needs a host relink, but valid IR/objects remain.
         run_game.validate_preserved_translation(
             cache, next_host, next_guest, 0, metadata_path, object_dir

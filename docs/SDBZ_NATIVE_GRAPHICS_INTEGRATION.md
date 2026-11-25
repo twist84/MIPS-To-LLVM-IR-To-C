@@ -113,7 +113,7 @@ set "MAX_DISPATCHES=4000000"
 set "BOOT_TIMEOUT_SECONDS=300"
 set "EE_WEBGPU_SNAPSHOT=1"
 set "EE_WEBGPU_WINDOW=1"
-run_ps2_game.bat --full
+scripts\run_ps2_game.bat --full
 ```
 
 The launcher forcibly disables both optional graphics flags for --quick;
@@ -216,7 +216,7 @@ run:
 
 ```bat
 git pull --ff-only
-run_ps2_game.bat --full --neutral
+scripts\run_ps2_game.bat --full --neutral
 ```
 
 Inspect the generated neutral ZIP's stopped `first-boot.json`:
@@ -257,7 +257,7 @@ the raylib window. Windows CMD, after pulling PR #148:
 ~~~bat
 set "SDBZ_GS_FIELD_PROBE=build\gs-field-probe.jsonl"
 set "EE_WEBGPU_SNAPSHOT=1"
-run_ps2_game.bat --full --neutral
+scripts\run_ps2_game.bat --full --neutral
 set "SDBZ_GS_FIELD_PROBE="
 ~~~
 
@@ -320,7 +320,7 @@ save for the USA executable.
 ~~~bat
 set "SDBZ_MEMCARD=C:\PS2\memcards\Mcd001-working.ps2"
 set "EE_WEBGPU_WINDOW=1"
-run_ps2_game.bat --full --neutral
+scripts\run_ps2_game.bat --full --neutral
 ~~~
 
 The guest's MCMAN and MCSERV modules communicate with the card through

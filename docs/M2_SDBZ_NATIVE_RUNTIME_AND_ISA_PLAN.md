@@ -51,7 +51,7 @@ Work order is driven by **R evidence + ability to unlock initialization/renderin
 
 ### M2.0 — Reproducible diagnosis and instruction-coverage inventory
 
-1. Pin/record revision, ELF SHA-256, CLI options, report schema and batch timestamp. The user runs `git pull` then `run_ps2_game.bat` which **configures/builds**; never presume an old EXE based on familiar output. Confirm whether `EE_WEBGPU_SNAPSHOT=1` was actually forwarded into the final runner.
+1. Pin/record revision, ELF SHA-256, CLI options, report schema and batch timestamp. The user runs `git pull` then `scripts\run_ps2_game.bat` which **configures/builds**; never presume an old EXE based on familiar output. Confirm whether `EE_WEBGPU_SNAPSHOT=1` was actually forwarded into the final runner.
 2. Implement a deterministic, bounded **ELF instruction inventory** (not naive linear sweep through data), using function/CFG discovery and the actual decoder. Summarize by opcode/family: encountered in executable discovered blocks, `VALID`/`UNSUPPORTED`/`INVALID`, LLVM lowered, covered by tests. Separately ingest **reached** opcode evidence from an optional bounded guest instruction trace. Report each count's sampling/coverage limitations.
 3. Provide counters/exportable JSON for unique hot PCs, hottest transitions, repeated state deltas and last relevant syscall/interrupt/DMA/RPC without adding millions of trace lines. Never change host guest timing while instrumenting.
 4. Add synthetic fixture tests for classification, correct detection of a previously unseen opcode, and stable JSON schema. Keep per-step aggregate output short; detailed traces belong in diagnostic files.
@@ -108,7 +108,7 @@ All new instructions must remain **fail closed** until *decode, lift, runtime ef
 
 1. Run targeted unit/IR/native tests for every changed family (e.g. `tests/decoder/decoder_test.cpp`, `tests/smoke/mmi_ops_test.cpp`, existing VU0 and GIF/GS/IOP/DMAC test families); add new fixtures for observed cases.
 2. Run full CTest, native WebGPU Windows/Linux smoke, SIF DMA acceptance, ROM0 execution and CI on the **exact new commit**. Record workflow URLs and whether jobs truly completed. No green claim from an in-progress run.
-3. Preserve `run_ps2_game.bat` startup, `build/_deps/wgpu-native`, live in-place `[current/discovered]` IR progress, native artifact cache integrity and independent compiled-guest DLL linking. No unrelated framework replacement.
+3. Preserve `scripts\run_ps2_game.bat` startup, `build/_deps/wgpu-native`, live in-place `[current/discovered]` IR progress, native artifact cache integrity and independent compiled-guest DLL linking. No unrelated framework replacement.
 4. Before requesting a local test, finish all possible source, ELF-free fixture and CI work. Ask for a new matched five-file boot batch **only** when there is a concrete instrumentation/fix checkpoint; when graphics is enabled also request CPU display, upload and WebGPU PPMs and confirm the final runner includes `--gs-webgpu-snapshot`.
 5. Compare exactly the same metrics with 07:27. A change is progress only if a real awaited state transitions, a new game phase is reached, actual committed draw/transfer events change, or a verified framebuffer becomes nonempty. Raising `--max-dispatches` alone is **not** success.
 6. Keep this plan and `docs/GAME_BOOT_PROGRESS.md` updated with commit, tests, unknowns, next actionable blocker, and whether M2 remains partial.
@@ -139,7 +139,7 @@ All new instructions must remain **fail closed** until *decode, lift, runtime ef
 ```bat
 git pull
 set EE_WEBGPU_SNAPSHOT=1
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 Collect the newest matching `boot`, `expansion`, `first-boot`, `iop-disc-catalog`, `translation-cache` diagnostics and the three PPMs. A PPM without confirmed final runner flags and matching timestamps is not evidence.

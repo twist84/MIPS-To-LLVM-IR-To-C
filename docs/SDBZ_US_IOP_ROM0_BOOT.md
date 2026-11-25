@@ -34,7 +34,7 @@ References:
 ## Running with automatically managed OpenPS2BIOS
 
 No BIOS data is bundled with this project. By default,
-\`run_sdbz_native.bat\` checks the official
+\`scripts\run_sdbz_native.bat\` checks the official
 [TamaribaEmu/OpenPS2BIOS releases](https://github.com/TamaribaEmu/OpenPS2BIOS/releases)
 for its latest **stable** release and downloads the matching 4 MiB ROM0
 image to \`build/openps2bios/rom0.bin\`. It verifies the downloaded bytes
@@ -47,14 +47,14 @@ A missing or corrupted cache is never executed. No Sony ROM is downloaded.
 **Standard run (no manual ROM path):**
 
 \`\`\`bat
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 \`\`\`
 
 **Manual override (takes precedence, no automatic download):**
 
 \`\`\`bat
 set "SDBZ_IOP_ROM0=C:\path\to\your\bios-rom0.bin"
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 \`\`\`
 
 Explicit \`IOP_IRX\` / \`IOP_IRX_LIST\` compatibility mode skips the

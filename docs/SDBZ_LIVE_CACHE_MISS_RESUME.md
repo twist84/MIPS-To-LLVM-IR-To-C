@@ -53,7 +53,7 @@ set "EXPANSION_PER_PASS=512"
 set "MAX_DISPATCHES=6000000"
 set "EE_WEBGPU_SNAPSHOT=1"
 set "EE_WEBGPU_WINDOW=1"
-run_ps2_game.bat --full
+scripts\run_ps2_game.bat --full
 ```
 
 `EXPANSION_PER_PASS` ranges from 1 to 1024 (default 128). The expansion

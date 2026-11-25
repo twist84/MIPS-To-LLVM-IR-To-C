@@ -53,7 +53,7 @@ Consequently **this milestone does not claim a real-game boot advance**.
    transport and verified wake/acknowledgement transitions.
 4. Implement LOADFILE server \`0x80000006\` via real SIF RPC requests,
    forwarding resolved module paths through the existing IRX loader.
-5. Replay \`run_sdbz_native.bat --no-recompile\` with the real US ELF,
+5. Replay \`scripts\run_sdbz_native.bat --no-recompile\` with the real US ELF,
    saving the boot trace and reporting the next observed guest PC.
 
 Reference: \`ps2-web-recomp\` branch \`SDBZ\`, especially

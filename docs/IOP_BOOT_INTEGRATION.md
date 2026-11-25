@@ -119,7 +119,7 @@ The new `iop_kernel` CTest covers failed-import rollback, actual IRX
 module loading/entry execution, guest register and stack setup, thread
 priorities, round-robin scheduling, explicit syscalls, and unsupported
 service traps. The standalone kernel is deliberately **not** invoked by
-`run_sdbz_native.bat` yet, so current US boot logs are expected to remain
+`scripts\run_sdbz_native.bat` yet, so current US boot logs are expected to remain
 at the same `0x001750B4` SIF wait.
 
 
@@ -145,7 +145,7 @@ instructions call both imported `sifman` functions. The check verifies
 that SMFLAG stays zero until those guest instructions run, then observes
 the published bits from the EE side and EE-only clear/ack behaviour.
 The bridge remains a separate opt-in component, not a synthetic IOP boot
-inside `run_sdbz_native.bat`.
+inside `scripts\run_sdbz_native.bat`.
 
 To progress SDBZ beyond `0x001750B4`, load and schedule authentic
 IOP boot services/modules at a defined source of EE cycles, then install
@@ -235,7 +235,7 @@ A Windows launcher example:
 ```bat
 set "IOP_IRX_LIST=PS2_GAME\\iop-modules.txt"
 set "IOP_QUANTUM=256"
-run_sdbz_native.bat
+scripts\run_sdbz_native.bat
 ```
 
 Example `PS2_GAME/iop-modules.txt` contents:
@@ -291,7 +291,7 @@ Example manual use:
 python tools\analyze_iop_module_paths.py PS2_GAME\SLUS_214.42 --json build\sdbz\iop-module-paths.json
 ```
 
-`run_sdbz_native.bat` generates this JSON automatically on each
+`scripts\run_sdbz_native.bat` generates this JSON automatically on each
 local boot unless `SDBZ_IOP_DISCOVERY=0` is set. This scans the user's
 own ELF and **does not require uploading or committing game data**.
 The CI test generates a non-copyrighted synthetic ELF to verify

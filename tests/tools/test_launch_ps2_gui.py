@@ -229,7 +229,7 @@ def test_game_tab_command_and_environment():
         env = {"EXPANSION_PER_PASS": "99", "SDBZ_DISC_ROOT": "stale", "SDBZ_PAD0_SCRIPT": "1:1:cross", "SDBZ_TRACE_IPU": "1", "SDBZ_IOP_AOT_VERIFY": "1"}
         command = GUI.Launcher.game_command(instance, env)
         assert command[:4] == [
-            "cmd.exe", "/d", "/c", "run_ps2_game.bat"
+            "cmd.exe", "/d", "/c", r"scripts\run_ps2_game.bat"
         ], command
         assert "--full" in command and "--replay-after-expand" in command
         assert env["EXPANSION_PER_PASS"] == "128"
@@ -678,7 +678,7 @@ def test_direct_commands():
 
 
 def test_batch_route():
-    batch = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    batch = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert '--max-expansion-dispatches=%MAX_EXPANSION_DISPATCHES%' in batch
     assert '--max-replay-dispatches=%MAX_REPLAY_DISPATCHES%' in batch
     assert '--watch-word=%SDBZ_WATCH_WORD%' in batch

@@ -420,7 +420,7 @@ if("${EE_WEBGPU_ROOT}" STREQUAL "")
 endif()
 if(EE_ENABLE_WEBGPU)
     if(WIN32)
-        # A direct CMake configure (not only run_ps2_game.bat) must also
+        # A direct CMake configure (not only scripts/run_ps2_game.bat) must also
         # provision the pinned SDK. Existing complete installs are reused.
         find_package(Python3 COMPONENTS Interpreter REQUIRED)
         execute_process(

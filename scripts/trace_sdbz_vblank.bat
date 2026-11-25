@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 rem Capture only the genuine original-game VBlank polling guest PCs.
 rem This is a read-only cached replay: no 8k-function IR regeneration,

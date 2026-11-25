@@ -5,10 +5,10 @@ rem Keep Windows CRLF checkout endings for cmd.exe backward GOTO labels.
 rem Boot the repo's extracted PS2_GAME disc through the BIOS-free HLE path.
 rem BOOT2 in SYSTEM.CNF chooses the executable; no region/ELF is hardcoded.
 rem Never switch branches, fetch ROM0, or require an ISO.
-cd /d "%~dp0"
+cd /d "%~dp0.."
 if errorlevel 1 exit /b 1
 
-rem Usage: run_ps2_game.bat [--full^|--quick^|--matched^|--recover-cache] [--cross^|--neutral]
+rem Usage: scripts\run_ps2_game.bat [--full^|--quick^|--matched^|--recover-cache] [--cross^|--neutral]
 rem --recover-cache reconstructs known IR without a game replay. Optional
 rem --accept-new-ir explicitly permits changed lowering IR hashes; this never
 rem deletes or overwrites the previous guest cache.
@@ -82,7 +82,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: scripts\run_ps2_game.bat [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready

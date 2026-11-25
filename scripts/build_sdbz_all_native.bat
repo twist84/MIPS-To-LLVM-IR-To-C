@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
@@ -42,5 +42,5 @@ python tools\run_game.py PS2_GAME\SLUS_214.42 ^
     --link-only
 if errorlevel 1 exit /b %errorlevel%
 
-call probe_sdbz_all_native.bat
+call "%~dp0probe_sdbz_all_native.bat"
 exit /b %ERRORLEVEL%

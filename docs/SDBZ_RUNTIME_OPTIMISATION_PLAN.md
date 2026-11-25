@@ -45,7 +45,7 @@ set "SDBZ_HOST_AUDIO=0"
 set "SDBZ_RUNTIME_PROFILE=1"
 set "SDBZ_PROFILE_PCS=1"
 set "SDBZ_AUDIO_PROFILE=1"
-run_sdbz_p40.bat
+scripts\run_sdbz_p40.bat
 ```
 
 Listening control: set SDBZ_P40_LISTEN and SDBZ_HOST_AUDIO to 1.

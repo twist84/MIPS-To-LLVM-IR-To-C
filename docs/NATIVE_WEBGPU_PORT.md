@@ -23,12 +23,12 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DEE_ENABLE_WEBGPU=ON -D
 cmake --build build --target ee_game_runner ee_webgpu_native_smoke
 ~~~
 
-For the normal `run_ps2_game.bat` workflow:
+For the normal `scripts\run_ps2_game.bat` workflow:
 
 ~~~bat
 set "EE_WEBGPU_ROOT=C:\Dev\wgpu-native"
 set "EE_WEBGPU_SNAPSHOT=1"
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ~~~
 
 The launcher configures the optional GPU target and produces

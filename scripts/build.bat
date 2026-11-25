@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-cd /d "%~dp0"
+cd /d "%~dp0.."
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
@@ -34,7 +34,7 @@ ctest --test-dir build -C Release --output-on-failure -R "^(iop_cpu|iop_hw|sif_d
 if errorlevel 1 exit /b %errorlevel%
 
 echo === Running the real OpenPS2BIOS / SDBZ probe ===
-call run_sdbz_cdvd.bat
+call "%~dp0run_sdbz_cdvd.bat"
 set "RUN_RESULT=%ERRORLEVEL%"
 
 echo.

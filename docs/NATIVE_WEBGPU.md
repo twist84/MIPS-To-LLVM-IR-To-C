@@ -75,7 +75,7 @@ From a Windows command prompt in the repository root:
 ```bat
 git pull
 set EE_WEBGPU_SNAPSHOT=1
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 When WebGPU is enabled, the launcher automatically downloads and
@@ -122,7 +122,7 @@ ctest --test-dir build -C Release -R ee_webgpu_native_smoke --output-on-failure
 ```
 
 Disable the opt-in by clearing `EE_WEBGPU_SNAPSHOT` or setting it to 0,
-then rerun `run_ps2_game.bat`. The launcher explicitly configures
+then rerun `scripts\run_ps2_game.bat`. The launcher explicitly configures
 `-DEE_ENABLE_WEBGPU=OFF` for that mode, even if CMake previously cached
 the GPU-enabled build.
 
@@ -138,7 +138,7 @@ On Windows, in the normal extracted-disc workflow:
 ```bat
 git pull
 set EE_WEBGPU_WINDOW=1
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 The launcher enables `EE_ENABLE_WEBGPU` and `EE_ENABLE_RAYLIB_WINDOW`.

@@ -187,7 +187,7 @@ LLVM guest modules unchanged until a genuine guest translation change is needed.
 
 ### Extracted-folder boot — 18 November 2026
 
-The first local `run_ps2_game.bat` trace resolved `PS2_GAME/SLUS_214.42`
+The first local `scripts\run_ps2_game.bat` trace resolved `PS2_GAME/SLUS_214.42`
 via `SYSTEM.CNF` and mounted 428,680 virtual ISO9660 sectors without
 ROM0. Its first expansion pass emitted 128 additional native functions
 (1 to 129 total) over only 76 replays, due to batched jump-table siblings.
@@ -248,7 +248,7 @@ allowing the correct HLE command implementation to be prioritized.
 ### HLE IOP reboot request — 18 November 2026, 12:27 local trace
 
 The standard user workflow is `git pull` followed by
-`run_ps2_game.bat`. That wrapper rebuilds the native host runner and
+`scripts\run_ps2_game.bat`. That wrapper rebuilds the native host runner and
 reuses verified translated EE objects. The previous CDVDFSV CdInit RPC
 blocker cleared: 293 LLVM-verified EE functions, 6,543 dispatches and
 944,530 guest instruction attempts were reached, with 0 runtime IRX

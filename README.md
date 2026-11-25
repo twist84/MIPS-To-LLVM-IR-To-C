@@ -63,7 +63,7 @@ static-discovery milestone, not the current expanded-cache inventory.
 
 See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_20261125.md),
 [SPU2 audio history](docs/SDBZ_SPU2_AUDIO_CLOCK.md),
-[native boot plan](SDBZ_NATIVE_BOOT_PLAN.md) and
+[native boot plan](docs/SDBZ_NATIVE_BOOT_PLAN.md) and
 [native WebGPU documentation](docs/NATIVE_WEBGPU.md).
 
 ## Build and test
@@ -75,7 +75,7 @@ ctest --test-dir build --output-on-failure
 ~~~
 
 For full-image validation and the PCSX2 differential workflow, see
-FULL_GAME_NATIVE_LINK_VALIDATION.md and tools/vu0_diff/README.md.
+docs/FULL_GAME_NATIVE_LINK_VALIDATION.md and tools/vu0_diff/README.md.
 
 ## Live translation-cache miss recovery
 
@@ -116,7 +116,7 @@ dispatch budgets, timeouts, custom Cross pulses and trace settings.
 shows separate tabbed forms for `run_boot_session.py`, `run_game.py`, and
 `ee_game_runner.exe`. Each tool retains its own inputs. Hover over a
 field for help or use **Show --help** for the selected tool’s CLI help.
-New forms start with the full-replay defaults from `run_ps2_game.bat`.
+New forms start with the full-replay defaults from `scripts\run_ps2_game.bat`.
 Use **Apply batch defaults** to reload those values for the selected tool.
 For repeatable IRX options and extra arguments, enter one item per line
 and leave paths with spaces unquoted.
@@ -165,7 +165,7 @@ Place the original, extracted game disc files under `PS2_GAME/` at the
 repository root, including `SYSTEM.CNF`. Run:
 
 ```bat
-run_ps2_game.bat
+scripts\run_ps2_game.bat
 ```
 
 The script reads the `BOOT2 = cdrom0:\\...;1` entry from
@@ -177,12 +177,12 @@ It neither requires a raw ISO nor downloads/executes ROM0, and does not
 change your Git branch. Logs and the JSON report go to
 `build/ps2-game-hle/`. `PS2_GAME/` is gitignored.
 
-With a verified translation cache, `run_ps2_game.bat` stops after the
+With a verified translation cache, `scripts\run_ps2_game.bat` stops after the
 bounded coverage probe and writes `quick-probe.json` and `quick-probe.log`.
-Run `run_ps2_game.bat --full` for the full dispatch trace, IOP catalog, and
+Run `scripts\run_ps2_game.bat --full` for the full dispatch trace, IOP catalog, and
 GS snapshots. Cold builds and explicit WebGPU requests also use the full path.
 The cached quick probe defaults to 100,000 EE dispatches, whereas the full
-retail diagnostic run defaults to 500,000. Use `run_ps2_game.bat --quick`
+retail diagnostic run defaults to 500,000. Use `scripts\run_ps2_game.bat --quick`
 to **force a non-traced probe** even when the preserved guest translation
 cache cannot be reused after pulling changes. The script still rebuilds
 or relinks guest IR as required; it simply avoids the large final trace.
@@ -193,7 +193,7 @@ at real guest failures; a longer run does not imply that a pending RPC
 has completed. Cached probes now include bounded outstanding-IOP-RPC
 thread/PC checkpoints and final instruction/register samples without
 the large per-dispatch full trace. For a long cached probe, use
-`set MAX_DISPATCHES=4000000` and `run_ps2_game.bat --quick`; inspect the
+`set MAX_DISPATCHES=4000000` and `scripts\run_ps2_game.bat --quick`; inspect the
 **current** `quick-probe.log` and `quick-probe.json`, not preserved
 `boot.log` or `first-boot.json`. Override the per-pass ceiling or
 subprocess timeout for a full traced run with:
@@ -201,7 +201,7 @@ subprocess timeout for a full traced run with:
 ```bat
 set MAX_DISPATCHES=1000000
 set BOOT_TIMEOUT_SECONDS=180
-run_ps2_game.bat --full
+scripts\run_ps2_game.bat --full
 ```
 
 You may run `set PS2_GAME_RESOLVE_ONLY=1` first to verify the BOOT2
@@ -219,7 +219,7 @@ enables native asynchronous workers, profiling and WebGPU capture.
 ```bat
 set "SDBZ_P40_LISTEN="
 set "SDBZ_HOST_AUDIO=0"
-run_sdbz_p40.bat
+scripts\run_sdbz_p40.bat
 ```
 
 For listening at the guest speed target with host audio:
@@ -229,7 +229,7 @@ set "SDBZ_P40_LISTEN=1"
 set "SDBZ_HOST_AUDIO=1"
 set "SDBZ_AUDIO_PROFILE=1"
 set "SDBZ_PROFILE_PCS=1"
-run_sdbz_p40.bat
+scripts\run_sdbz_p40.bat
 ```
 
 Keep the EE and VU1 caches unless their translation provenance changes.
@@ -240,4 +240,4 @@ not synthesize hardware progress to force a successful boot.
 
 ## Original console test suite
 
-Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. The default is four parallel tests; override with `--jobs 8 --emit-jobs 1` or use `--jobs 1` for sequential validation. The standalone Original ps2autotests workflow builds only `ee_recomp` and `ee_game_runner` plus their dependencies, independently of CTest. All 55 original ELFs run on every invocation in six parallel groups, with one combined exact-transcript summary. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Latest complete CI: **54/55 exact transcripts (98.18%)** at PR head `6f0bc23` ([run 45659705518](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45659705518)); 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. Remaining: VU EFU. Clean guest termination is tracked separately. Synthetic vectors are not counted as complete ELF passes.
+Run `python tools/run_ps2autotests.py --list` to enumerate the pinned 55 original ELF tests. The default is four parallel tests; override with `--jobs 8 --emit-jobs 1` or use `--jobs 1` for sequential validation. The standalone Original ps2autotests workflow builds only `ee_recomp` and `ee_game_runner` plus their dependencies, independently of CTest. All 55 original ELFs run on every invocation in six parallel groups, with one combined exact-transcript summary. See [ps2autotests validation](docs/PS2AUTOTESTS.md) for execution and exact-output comparison. Latest complete pre-merge CI: **54/55 exact transcripts (98.18%)** at PR head `8bbc80d` ([run 45663177559](https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/45663177559)); 1 DIFF, zero INCOMPLETE/NO_OUTPUT/ERROR. Remaining: VU EFU. Clean guest termination is tracked separately. Synthetic vectors are not counted as complete ELF passes.

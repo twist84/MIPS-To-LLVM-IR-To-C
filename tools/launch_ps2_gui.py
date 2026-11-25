@@ -1027,7 +1027,7 @@ class Launcher(ttk.Frame):
         Tooltip(self.help_button, OPTION_HELP["Show --help"])
         defaults_button = ttk.Button(self.direct, text="Apply batch defaults", command=self.apply_batch_defaults)
         defaults_button.grid(row=3, column=2, sticky="e", pady=(6, 0))
-        Tooltip(defaults_button, "Apply the full-replay defaults from run_ps2_game.bat to this tool.")
+        Tooltip(defaults_button, "Apply the full-replay defaults from scripts/run_ps2_game.bat to this tool.")
         self.mode.trace_add("write", self.change_mode)
         self.window.trace_add("write", self.update_fields)
         self.cache_miss_resume.trace_add("write", self.update_fields)
@@ -1425,7 +1425,7 @@ class Launcher(ttk.Frame):
                    SDBZ_SPEED_PERCENT=str(SPEEDS[self.speed.get()]),
                    EE_WEBGPU_ASPECT=DISPLAY_ASPECTS[self.fields["display_aspect"].get()],
                    EE_WEBGPU_DEINTERLACE=DEINTERLACE_MODES[self.fields["deinterlace"].get()])
-        return ["cmd.exe", "/d", "/c", "run_ps2_game.bat", *args]
+        return ["cmd.exe", "/d", "/c", r"scripts\run_ps2_game.bat", *args]
 
     def toggle_launch(self):
         if self.process is None:

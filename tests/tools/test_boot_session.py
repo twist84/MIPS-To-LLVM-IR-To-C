@@ -277,7 +277,7 @@ def test_ll_counter():
 def test_windows_launcher_preserves_guest_cache():
     # The Windows launcher must try a safe host-only relink before any
     # checkout-triggered cache miss falls back to recompiling all guest IR.
-    launcher = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     # Progress is always enabled, including --quick (which is what the
     # retail boot user runs); do not duplicate it in --full arguments.
     assert 'python tools\\run_boot_session.py "%GAME_ELF%" ^\n    --ll-progress ^' in launcher
@@ -756,8 +756,8 @@ def main():
 
     # Keep the reproducible P40 retail profiling preset identical to the
     # manually validated replay environment, and propagate launcher failure.
-    preset = (ROOT / "run_sdbz_p40.bat").read_text(encoding="utf-8")
-    assert 'cd /d "%~dp0"' in preset
+    preset = (ROOT / "scripts" / "run_sdbz_p40.bat").read_text(encoding="utf-8")
+    assert 'cd /d "%~dp0.."' in preset
     assert "git pull --ff-only\nif errorlevel 1 exit /b 1" in preset
     assert preset.index("git pull --ff-only") < preset.index('set "SDBZ_EE_OPT=5"')
     assert [line for line in preset.splitlines() if line.startswith('set "')] == [
@@ -790,14 +790,14 @@ def main():
             '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
             ')\n'
             'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
-    assert preset.endswith("call run_ps2_game.bat --full --neutral %*\nexit /b %ERRORLEVEL%\n")
+    assert preset.endswith('call "%~dp0run_ps2_game.bat" --full --neutral %*\nexit /b %ERRORLEVEL%\n')
 
     # Exercise real CMD backward jumps through all three launcher options.
     # Resolve-only uses a synthetic disc and stops before configuring tools,
     # modifying caches, emitting IR or launching a game.
     if os.name == "nt":
         for filename in ("run_ps2_game.bat", "run_sdbz_p40.bat"):
-            data = (ROOT / filename).read_bytes()
+            data = (ROOT / "scripts" / filename).read_bytes()
             assert b"\r\n" in data and b"\n" not in data.replace(b"\r\n", b""), filename
         with tempfile.TemporaryDirectory(prefix="ee-cmd-launcher-") as directory:
             disc = Path(directory)
@@ -808,7 +808,7 @@ def main():
             env = dict(os.environ, SDBZ_DISC_ROOT=str(disc),
                        PS2_GAME_RESOLVE_ONLY="1", SDBZ_EE_OPT="5")
             resolved = subprocess.run(
-                ["cmd.exe", "/d", "/c", "call run_ps2_game.bat --full --neutral --overwrite-ir"],
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --full --neutral --overwrite-ir"],
                 cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
             )
             assert resolved.returncode == 0, resolved.stdout + resolved.stderr

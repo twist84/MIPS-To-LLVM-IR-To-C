@@ -360,7 +360,7 @@ def test_existing_cache_uses_only_safe_relink():
 
 
 def test_matched_launcher_never_falls_back_to_guest_rebuild():
-    launcher = (ROOT / "run_ps2_game.bat").read_text(encoding="utf-8")
+    launcher = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--matched" (' in launcher
     assert 'if /I "%REQUESTED_SESSION_MODE%"=="matched" (' in launcher
     assert 'python tools\\run_known_replays.py ^' in launcher
