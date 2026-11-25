@@ -788,6 +788,22 @@ def main():
                 include_args, compile_flags
             )
 
+        certificate_count = None
+        if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
+            from native_alu_certificate import verified_bounds, build_certificate_source
+            bounds = verified_bounds(args.functions_json.resolve(), functions, object_manifest)
+            certificate_count = len(bounds)
+            certificate_source = args.output.with_suffix(args.output.suffix + ".alu-certificate.cpp")
+            certificate_object = args.output.with_suffix(args.output.suffix + ".alu-certificate.o")
+            certificate_source.write_text(build_certificate_source(bounds), encoding="utf-8")
+            subprocess.run(
+                [args.cxx, *runtime_flags, *include_args, "-c", str(certificate_source),
+                 "-o", str(certificate_object)], check=True,
+            )
+            dispatch_objects.append(certificate_object)
+            print(f"link_native_objects: {certificate_count} verified ALU entry certificates",
+                  flush=True)
+
         runtime_objects = cached_runtime_objects(
             cache_base, required_sources, source_root, args.cxx,
             include_args, runtime_flags
@@ -858,6 +874,7 @@ def main():
             "library_size_bytes": len(linked_data),
             "library_sha256": hashlib.sha256(linked_data).hexdigest(),
             "dispatcher_entry": "ee_game_run",
+            "alu_certificate_count": certificate_count,
             "dispatch_glue": dispatch_source.name,
             "dispatch_object": dispatch_object.name,
             "dispatch_chunk_objects": [path.name for path in dispatch_objects[1:]],
