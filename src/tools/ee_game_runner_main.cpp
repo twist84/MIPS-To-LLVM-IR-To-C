@@ -3891,10 +3891,22 @@ int main(int argc, char** argv)
     }
     const bool async_vu1 = vu1_async_value != nullptr &&
         std::strcmp(vu1_async_value, "1") == 0;
+    std::string vu1_overlap_environment;
+    const char* vu1_overlap_value = read_host_environment(
+        "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", &vu1_overlap_environment);
+    if (vu1_overlap_value != nullptr && *vu1_overlap_value != '\0' &&
+        std::strcmp(vu1_overlap_value, "0") != 0 &&
+        std::strcmp(vu1_overlap_value, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_VU1_NATIVE_OVERLAP_PROFILE (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool vu1_native_overlap_profile = vu1_overlap_value == nullptr ||
+        std::strcmp(vu1_overlap_value, "0") != 0;
     if (async_vu1)
     {
         if (!vif1.enable_deferred(std::move(vu1_aot),
-                ee::g_runtime_profile.m_enabled))
+                ee::g_runtime_profile.m_enabled, vu1_native_overlap_profile))
         {
             std::fprintf(stderr, "failed to enable deferred VU1 worker\n");
             return 1;
@@ -5344,7 +5356,7 @@ int main(int argc, char** argv)
             {
                 cpu_before_dispatch.emplace(cpu);
             }
-            if (async_vu1)
+            if (async_vu1 && vu1_native_overlap_profile)
             {
                 vif1.native_execution_begin();
             }
@@ -5405,7 +5417,7 @@ int main(int argc, char** argv)
                     }
                 }
             }
-            if (async_vu1)
+            if (async_vu1 && vu1_native_overlap_profile)
             {
                 vif1.native_execution_end();
             }
