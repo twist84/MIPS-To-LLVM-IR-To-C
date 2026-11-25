@@ -404,6 +404,18 @@ int main()
                   &compiled.functions[2],
               "dispatch index maps PC zero to the first entry/zero owner");
 
+        const ee::t_ee_translated_entry overlapping_entries[] =
+        {
+            caller_entry, callee_entry, null_return_entry, host_yield_entry
+        };
+        const ee::s_ee_dispatch_table overlapping{
+            &compiled, overlapping_entries, 4u};
+        check(ee::ee_resolve_dispatch_owner_vaddr(overlapping, index,
+                  0x00100008u, caller_entry) == compiled.functions[0].vaddr &&
+              ee::ee_resolve_dispatch_owner_vaddr(overlapping, index,
+                  0x00100008u, callee_entry) == 0u,
+              "native identity uses first owner at overlapping PC");
+
         // An indexed table dispatches the same way as an unindexed one.
         ee::s_recompiled_elf calls{};
         calls.functions.push_back(
