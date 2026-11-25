@@ -90,6 +90,12 @@ public:
         m_mask_user = user;
         m_mask_callback = callback;
     }
+    using t_interrupt = void (*)(void*);
+    void bind_interrupt(void* user, t_interrupt callback)
+    {
+        m_interrupt_user = user;
+        m_interrupt_callback = callback;
+    }
     void reset();
     bool consume(const uint8_t* data, uint32_t qwc);
     const s_diagnostic& diagnostic() const
@@ -216,6 +222,7 @@ private:
         s_ee_vu1_issue m_issue{};
         e_reject m_rejection = e_reject::none;
         uint32_t m_rejected_code = 0u;
+        bool m_interrupt = false;
         bool m_committed = false;
         bool m_active = false;
     };
@@ -277,6 +284,8 @@ private:
     const c_ee_gif_path3* m_path3 = nullptr;
     void* m_mask_user = nullptr;
     t_path3_mask m_mask_callback = nullptr;
+    void* m_interrupt_user = nullptr;
+    t_interrupt m_interrupt_callback = nullptr;
     // Host timing only. Neither timestamps nor overlap advance guest cycles.
     struct s_worker_profile
     {

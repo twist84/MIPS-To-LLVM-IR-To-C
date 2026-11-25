@@ -48,6 +48,13 @@ public:
     void bind_vif0(c_ee_vif1* vif0)
     {
         m_vif0 = vif0;
+        if (m_vif0 != nullptr)
+        {
+            m_vif0->bind_interrupt(&m_intc, [](void* user)
+            {
+                (void)static_cast<c_ee_intc*>(user)->raise(4u);
+            });
+        }
     }
 
     void bind_vif1(c_ee_vif1* vif1)
@@ -55,6 +62,10 @@ public:
         m_vif1 = vif1;
         if (m_vif1 != nullptr)
         {
+            m_vif1->bind_interrupt(&m_intc, [](void* user)
+            {
+                (void)static_cast<c_ee_intc*>(user)->raise(5u);
+            });
             m_vif1->bind_path3_mask(&m_dmac, [](void* user, bool masked)
             {
                 static_cast<c_ee_dmac*>(user)->set_gif_path3_mask(masked);

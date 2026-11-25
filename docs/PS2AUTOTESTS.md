@@ -893,3 +893,16 @@ previous passes lost. Progressive partial-payload UNPACK remains open.
 | dma/vif/intstall | DIFF | UNSUPPORTED | 0xffffffe0 | 5121 |
 | kernel/ee/interrupt/intc_order | INCOMPLETE | EXCEPTION | 0x80000180 | 1276 |
 | vu/lower/efu | DIFF | UNSUPPORTED | 0xffffffe0 | 254357 |
+
+### Non-stalling VIF MARK interrupt
+
+The pinned original dma/vif/intstall hardware transcript reports MARK
+with I-bit as STAT=0x840 and the later STMASK committed on both units.
+The pinned PCSX2 Vif_Codes.cpp and Vif0_Dma.cpp/Vif1_Dma.cpp likewise
+set MRK for MARK and distinguish its non-stalling interrupt from VIS.
+Commit MARK/MRK/INT and INTC VIF0/1 delivery only after the VIF transaction
+is accepted; ERR.MII masks I-bit delivery, FBRST.STC clears INT, and
+writing MARK clears MRK. Regressions cover both units, subsequent command
+execution, masking, acknowledgement and rollback. NOP/STMASK IRQ stalls
+still require resumable command processing and DMA transport; no full
+original intstall match is claimed before CI.

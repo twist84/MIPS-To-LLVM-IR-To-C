@@ -171,6 +171,56 @@ int main()
         }
     }
 
+    // A MARK interrupt delivers INTC without stalling later commands.
+    // ERR.MII masks the IRQ, not MARK itself. Rejected transactions
+    // must not leak their staged IRQ to the bus.
+    {
+        ee::s_ee_vu0_state vu0{};
+        ee::c_ee_vif1 units[2]{};
+        ee::c_ee_hw_bus bus;
+        units[0].bind_vu0(&vu0);
+        bus.bind_vif0(&units[0]);
+        bus.bind_vif1(&units[1]);
+        for (uint32_t i = 0u; i < 2u; ++i)
+        {
+            auto& vif = units[i];
+            const uint32_t irq = 1u << (4u + i);
+            if (!check(send(vif, {0x8700beefu, 0x20000000u, 0x12345678u, 0u}) &&
+                       vif.read_register(0x30u) == 0xbeefu &&
+                       vif.read_register(0x70u) == 0x12345678u &&
+                       vif.read_register(0x00u) == 0x840u &&
+                       (bus.intc().status() & irq) != 0u,
+                       "VIF MARK interrupt stopped decoding or missed INTC"))
+            {
+                return 1;
+            }
+            const ee::s_ee_u128 acknowledge{irq, 0u};
+            if (!check(ee::c_ee_intc::mmio_write(&bus.intc(),
+                           ee::c_ee_intc::k_stat_address, 4u, &acknowledge) &&
+                       vif.write_register(0x10u, 8u) &&
+                       vif.read_register(0x00u) == 0x40u &&
+                       vif.write_register(0x30u, 0u) &&
+                       vif.read_register(0x00u) == 0u &&
+                       vif.write_register(0x20u, 1u) &&
+                       send(vif, {0x87001234u, 0u, 0u, 0u}) &&
+                       vif.read_register(0x00u) == 0x40u &&
+                       (bus.intc().status() & irq) == 0u,
+                       "VIF MARK acknowledgement or ERR.MII masking"))
+            {
+                return 1;
+            }
+            if (!check(vif.write_register(0x10u, 1u) &&
+                       !send(vif, {0x8700beefu, 0x09000000u, 0u, 0u}) &&
+                       vif.read_register(0x30u) == 0u &&
+                       vif.read_register(0x00u) == 0u &&
+                       (bus.intc().status() & irq) == 0u,
+                       "rejected VIF transaction leaked MARK or IRQ"))
+            {
+                return 1;
+            }
+        }
+    }
+
     // VIF1 MSKPATH3 must change GIF_STAT.M3P and gate actual DMA.
     {
         ee::c_ee_vif1 mask_vif{};

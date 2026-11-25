@@ -312,7 +312,10 @@ bool c_ee_vif1::execute(
         return false;
     }
 
-    if ((code & 0x80000000u) != 0u && (machine.m_err & 1u) == 0u)
+    // MARK raises INT without stopping command decoding. Other unmasked
+    // I-bit commands still require a resumable stall/DMA transport.
+    if (op != 0x07u && (code & 0x80000000u) != 0u &&
+        (machine.m_err & 1u) == 0u)
     {
         *reject = e_reject::irq_requires_resume;
         accepted = false;
@@ -331,7 +334,14 @@ bool c_ee_vif1::execute(
         case 0x03u: machine.m_base = imm & 0x3ffu; break; // BASE
         case 0x04u: machine.m_itops = imm & (machine.m_vif0 ? 0xffu : 0x3ffu); break; // ITOP
         case 0x05u: machine.m_mode = imm & 3u; break; // STMOD
-        case 0x07u: machine.m_mark = imm; break; // MARK
+        case 0x07u: // MARK
+            machine.m_mark = imm;
+            machine.m_stat |= 0x40u; // MRK
+            if ((code & 0x80000000u) != 0u && (machine.m_err & 1u) == 0u)
+            {
+                machine.m_stat |= 0x800u; // INT, without VIS
+            }
+            break;
         case 0x10u: // FLUSHE
         case 0x11u: // FLUSH
         case 0x13u: // FLUSHA
@@ -477,6 +487,7 @@ void c_ee_vif1::s_transaction::acquire()
     m_issue = {};
     m_rejection = e_reject::none;
     m_rejected_code = 0u;
+    m_interrupt = false;
     m_committed = false;
     m_active = true;
 }
@@ -612,6 +623,11 @@ bool c_ee_vif1::record_command(s_transaction& tx, uint32_t code, uint32_t words)
         tx.m_rejection = e_reject::pending_limit;
         tx.m_rejected_code = code;
         return false;
+    }
+    if (((code >> 24u) & 0xffu) == 0x87u &&
+        (tx.m_next.m_err & 1u) == 0u)
+    {
+        tx.m_interrupt = true;
     }
     tx.m_index += 1u + words;
     return true;
@@ -856,6 +872,10 @@ bool c_ee_vif1::publish(s_transaction& tx)
     m_diagnostic.m_mpg_uploads = m_machine.m_mpg_uploads;
     m_diagnostic.m_unpack_commands = m_machine.m_unpack_commands;
     m_diagnostic.m_direct_qwc = m_machine.m_direct_qwc;
+    if (tx.m_interrupt && m_interrupt_callback != nullptr)
+    {
+        m_interrupt_callback(m_interrupt_user);
+    }
     if (mask_changed && m_mask_callback != nullptr)
     {
         m_mask_callback(m_mask_user, m_machine.m_path3_masked);
@@ -1215,7 +1235,10 @@ bool c_ee_vif1::write_register(uint32_t offset, uint32_t value)
         }
         return true;
     case 0x20u: m_machine.m_err = value; return true;
-    case 0x30u: m_machine.m_mark = value; return true;
+    case 0x30u:
+        m_machine.m_mark = value & 0xffffu;
+        m_machine.m_stat &= ~0x40u; // Writing MARK acknowledges MRK.
+        return true;
     default:
         if (offset >= 0x100u && offset < 0x140u &&
             (offset & 0xfu) == 0u)
