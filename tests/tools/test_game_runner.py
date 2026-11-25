@@ -2546,6 +2546,24 @@ def main():
             for key in ("final_pc", "dispatches", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert states[0][key] == states[1][key], (key, states)
+            # A refreshed canonical source can have current IR provenance
+            # while a native profile still carries older lowering fingerprints.
+            # Rebuild the profile using only authenticated shared IR and the
+            # full incremental object verifier, not a stale-cache relabel.
+            variant_cache_path = variant / "translation-cache.json"
+            stale_profile = json.loads(variant_cache_path.read_text(encoding="utf-8"))
+            stale_profile["ir_sources"]["include/ee/ee_cycle_scheduler.h"] = "0" * 64
+            variant_cache_path.write_text(json.dumps(stale_profile), encoding="utf-8")
+            repaired = subprocess.run(prepare, capture_output=True, text=True)
+            assert repaired.returncode == 0, repaired.stdout + repaired.stderr
+            assert "Optimized profile lowering provenance is stale" in repaired.stdout
+            assert "reused 2/2" in repaired.stdout, repaired.stdout
+            repaired_cache = json.loads(variant_cache_path.read_text(encoding="utf-8"))
+            assert repaired_cache["ir_sources"] == variant_cache["ir_sources"]
+            assert repaired_cache["ir_hashes"] == variant_cache["ir_hashes"]
+            assert metadata_path.read_bytes() == original_map
+            assert original_cache.read_bytes() == original_bytes
+
             warm = subprocess.run([*prepare, "--defer-warm-validation"],
                                   capture_output=True, text=True, check=False)
             assert warm.returncode == 0, warm.stdout + warm.stderr

@@ -28,13 +28,40 @@ def verify_modules(work, metadata, hashes):
 
 
 def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
-                    *, verified_ir_hashes=None):
+                    *, ir_sources, verified_ir_hashes=None):
     metadata = shared_ir.ir_directory(work) / "ee_functions.json"
     cache = work / "translation-cache.json"
     try:
         run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
                                             verified_ir_hashes=verified_ir_hashes)
     except ValueError:
+        # The canonical shared source may have been refreshed independently
+        # while this native profile still records the old lowering inputs.
+        # It is safe to build a NEW native library from the authenticated
+        # current IR, not to relabel the old library or accept stale IR.
+        snapshot = shared_ir.read_json(cache)
+        if (verified_ir_hashes is not None and
+                shared_ir.active(metadata) and
+                snapshot.get("schema") == run_game.CACHE_SCHEMA and
+                snapshot.get("emit_opt") == opt and
+                isinstance(snapshot.get("ir_sources"), dict) and
+                snapshot["ir_sources"].get("ELF") == ir_sources.get("ELF") and
+                snapshot["ir_sources"] != ir_sources):
+            shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
+            print("Optimized profile lowering provenance is stale; "
+                  "revalidating native objects against current shared IR",
+                  flush=True)
+            # The ordinary incremental emitter authenticates every candidate
+            # object against its IR hash, object hash, LLVM and target identity.
+            # Never use the direct relink path for this recovery.
+            root = Path(__file__).resolve().parents[1]
+            run_game.build_linked_library(
+                root, work, metadata, work / "objects", library,
+                opt, emit_jobs=jobs)
+            run_game.write_translation_cache(
+                cache, inputs, opt, metadata, library, ir_sources)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            return
         result = run_game.main([
             str(elf), "--build-dir", str(build), "--config", config,
             "--work-dir", str(work), f"--emit-opt={opt}", f"--emit-jobs={jobs}",
@@ -299,7 +326,7 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
         elif shared_ir.ir_directory(work) != metadata_path.parent:
             raise ValueError("optimized profile references another shared IR store")
         refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
-                        verified_ir_hashes=fresh_hashes)
+                        ir_sources=ir_sources, verified_ir_hashes=fresh_hashes)
         snapshot = shared_ir.read_json(cache)
         remove_verified_duplicates(work, metadata_path, snapshot["ir_hashes"])
         print(f"Reusing verified O{opt} EE cache: {work}", flush=True)
