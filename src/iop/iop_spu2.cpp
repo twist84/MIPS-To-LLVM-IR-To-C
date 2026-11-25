@@ -39,6 +39,7 @@ void c_spu2::reset()
     m_nonzero_frames = 0u;
     m_pcm_peak = 0u;
     m_clipped_samples = 0u;
+    m_effect_input_frames[0] = m_effect_input_frames[1] = 0u;
     m_mixer_ring_batches = 0u;
     m_mixer_irq_events = 0u;
     m_pcm_pending = 0u;
@@ -59,6 +60,8 @@ void c_spu2::reset()
         core.m_master[6] = 0x7fffu;
         core.m_master[7] = 0x7fffu;
     }
+    m_cores[0].m_registers[0x198u / 2u] = 0x0ff0u;
+    m_cores[1].m_registers[0x198u / 2u] = 0x0ffcu;
     std::fill(m_ram.begin(), m_ram.end(), 0u);
     m_spdif_out = 0u;
     m_spdif_mode = 0u;
@@ -581,23 +584,59 @@ void c_spu2::mix_frames(uint64_t samples)
                     }
                 }
             }
-            advance_input(count, sum);
+            int32_t input[2][k_input_batch][2]{};
+            advance_input(count, input);
+            const uint16_t mmix[2] = {
+                static_cast<uint16_t>(m_cores[0].m_registers[0x198u / 2u] & 0x0ff0u),
+                static_cast<uint16_t>(m_cores[1].m_registers[0x198u / 2u] & 0x0fffu)};
             for (uint32_t sample = 0u; sample < count; ++sample)
             {
                 int16_t pcm[2]{};
-                for (uint32_t channel = 0u; channel < 2u; ++channel)
+                int32_t external[2]{};
+                for (uint32_t core = 0u; core < 2u; ++core)
                 {
-                    const int32_t core0 = scale_mix(sum[0u][sample][channel],
-                        master_gain(m_cores[0u].m_master[channel]));
-                    const int32_t core1 = scale_mix(sum[1u][sample][channel],
-                        master_gain(m_cores[1u].m_master[channel]));
-                    m_mixer_rings[1u][channel][offset + sample] = clamp_sample(core0);
-                    const int32_t mixed = core0 + core1;
-                    if (mixed < -32768 || mixed > 32767)
+                    bool effect_nonzero = false;
+                    for (uint32_t channel = 0u; channel < 2u; ++channel)
                     {
-                        ++m_clipped_samples;
+                        // MMIX pairs are right/left, whereas PCM is left/right.
+                        const uint32_t shift = 1u - channel;
+                        const auto gate = [&](uint32_t right_bit, int32_t value)
+                        {
+                            return (mmix[core] & (right_bit << shift)) != 0u ? value : 0;
+                        };
+                        const int32_t in = input[core][sample][channel];
+                        const int32_t ext = external[channel];
+                        const int32_t dry = gate(0x040u, in) +
+                            gate(0x400u, clamp_sample(sum[core][sample][channel])) +
+                            gate(0x004u, ext);
+                        const int32_t effect = gate(0x010u, in) +
+                            gate(0x100u, clamp_sample(wet[core][sample][channel])) +
+                            gate(0x001u, ext);
+                        effect_nonzero |= effect != 0;
+                        // Reverb return is still silent. The routed effect
+                        // input is ready for the work-area/filter stage.
+                        if (core == 1u && (dry < -32768 || dry > 32767))
+                        {
+                            ++m_clipped_samples;
+                        }
+                        const int16_t output = clamp_sample(scale_mix(clamp_sample(dry),
+                            master_gain(m_cores[core].m_master[channel])));
+                        if (core == 0u)
+                        {
+                            // Tap the core 0 output before core 1 AVOL.
+                            m_mixer_rings[1u][channel][offset + sample] = output;
+                            external[channel] = scale_mix(output,
+                                signed_halfword(m_cores[1].m_master[4u + channel]));
+                        }
+                        else
+                        {
+                            pcm[channel] = output;
+                        }
                     }
-                    pcm[channel] = clamp_sample(mixed);
+                    if (effect_nonzero)
+                    {
+                        ++m_effect_input_frames[core];
+                    }
                 }
                 emit_pcm(pcm[0], pcm[1]);
             }

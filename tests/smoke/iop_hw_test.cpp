@@ -688,6 +688,92 @@ bool test_spu2_voice_routing()
         spu.active_voice_mask(1u) == (1u << 23u);
 }
 
+bool test_spu2_mmix()
+{
+    constexpr uint32_t base = iop::c_spu2::k_base;
+    constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+    iop::c_spu2 spu;
+    std::vector<int16_t> pcm;
+    spu.bind_pcm_sink(&pcm, [](void* user, const int16_t* data, uint32_t frames)
+    {
+        auto& output = *static_cast<std::vector<int16_t>*>(user);
+        output.insert(output.end(), data, data + frames * 2u);
+    });
+    uint32_t value = 0u;
+    if (!spu.read(base + 0x198u, 2u, &value) || value != 0xff0u ||
+        !spu.read(base + 0x598u, 2u, &value) || value != 0xffcu)
+    {
+        return false;
+    }
+    const uint8_t input[] = {0x00u, 0x40u, 0x00u, 0x40u};
+    // Core 0 input dry L / wet R; core 1 external dry L.
+    // Other gates are closed. Core 1 AVOL is a signed Q15 gain.
+    if (!spu.write(base + 0x198u, 2u, 0x090u) ||
+        !spu.write(base + 0x598u, 2u, 0x008u) ||
+        !spu.write(base + 0x790u, 2u, 0x4000u) ||
+        !spu.push_input(0u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    uint16_t word = 0u;
+    if (pcm.size() != 64u || pcm[0] != 8190 || pcm[1] != 0 ||
+        !spu.ram_word(0x820u, &word) || word != 16382u ||
+        spu.effect_input_frames(0u) != 1u || spu.effect_input_frames(1u) != 0u)
+    {
+        return false;
+    }
+
+    // Route the core 0 output into core 1's effect input only.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x002u) ||
+        !spu.push_input(0u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    if (pcm.size() != 64u || pcm[0] != 0 || pcm[1] != 0 ||
+        spu.effect_input_frames(1u) != 1u)
+    {
+        return false;
+    }
+
+    // Core 1's own input bypasses AVOL. Closing the dry gate must
+    // not stop AutoDMA consumption or the pre-effect signal.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x060u) ||
+        !spu.push_input(1u, input, sizeof(input)))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    if (pcm.size() != 64u || pcm[0] != 0 || pcm[1] != 16382 ||
+        spu.effect_input_frames(1u) != 2u ||
+        spu.input_frames_consumed() != 3u)
+    {
+        return false;
+    }
+
+    // Voice gates are independent of per-voice VMIX and tap writeback.
+    pcm.clear();
+    if (!spu.write(base + 0x598u, 2u, 0x200u) ||
+        !spu.write(base + 0x5aau, 2u, 0x5000u) ||
+        !spu.write(base + 0x5acu, 2u, 0u) ||
+        !spu.write(base + 0x5acu, 2u, 0x4444u) ||
+        !spu.write(base + 0x5c2u, 2u, 0x5000u) ||
+        !spu.write(base + 0x400u, 2u, 0x3fffu) ||
+        !spu.write(base + 0x406u, 2u, 0x000fu) ||
+        !spu.write(base + 0x5a0u, 2u, 1u))
+    {
+        return false;
+    }
+    (void)spu.advance_cycles(32u * period);
+    return pcm.size() == 64u && pcm[0] == 0 && pcm[1] == 0 &&
+        spu.effect_input_frames(1u) == 34u &&
+        spu.ram_word(0x1880u, &word) && word == 7167u &&
+        spu.ram_word(0x1c80u, &word) && word == 7167u;
+}
+
 bool test_spu2_pcm_mixer()
 {
     constexpr uint32_t base = iop::c_spu2::k_base;
@@ -718,8 +804,8 @@ bool test_spu2_pcm_mixer()
         return false;
     }
     hw.advance_cycles(period);
-    if (pcm.size() != 64u || pcm[0] != 7166 || pcm[1] != 0 ||
-        pcm[2] != 14334 || pcm[3] != 0 ||
+    if (pcm.size() != 64u || pcm[0] != 7164 || pcm[1] != 0 ||
+        pcm[2] != 14332 || pcm[3] != 0 ||
         hw.spu2().nonzero_frames() != 32u ||
         hw.spu2().pcm_peak() == 0u)
     {
@@ -772,7 +858,7 @@ bool test_spu2_pcm_mixer()
         return false;
     }
     (void)kernel.run(32u * period);
-    return pcm.size() == 64u && pcm[0] == 16382 && pcm[1] == -16383 &&
+    return pcm.size() == 64u && pcm[0] == 16380 && pcm[1] == -16383 &&
         pcm[2] == 0 && pcm[3] == 0 &&
         input_hw.spu2().mixed_frames() == 32u &&
         input_hw.spu2().nonzero_frames() == 1u &&
@@ -1680,6 +1766,10 @@ int main()
     if (!test_spu2_voice_routing())
     {
         return fail("SPU2 independent dry/wet voice routing");
+    }
+    if (!test_spu2_mmix())
+    {
+        return fail("SPU2 MMIX source gates and core cascade");
     }
     if (!test_spu2_pcm_mixer())
     {

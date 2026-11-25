@@ -81,6 +81,10 @@ public:
     uint64_t nonzero_frames() const { return m_nonzero_frames; }
     uint32_t pcm_peak() const { return m_pcm_peak; }
     uint64_t clipped_samples() const { return m_clipped_samples; }
+    uint64_t effect_input_frames(uint32_t core) const
+    {
+        return core < 2u ? m_effect_input_frames[core] : 0u;
+    }
     uint64_t mixer_ring_batches() const { return m_mixer_ring_batches; }
     uint64_t mixer_irq_events() const { return m_mixer_irq_events; }
     uint32_t input_frames(uint32_t core) const;
@@ -189,6 +193,7 @@ private:
     uint64_t m_nonzero_frames = 0u;
     uint32_t m_pcm_peak = 0u;
     uint64_t m_clipped_samples = 0u;
+    uint64_t m_effect_input_frames[2]{};
     uint64_t m_mixer_ring_batches = 0u;
     uint64_t m_mixer_irq_events = 0u;
     // Per-core input L/R, voice 1/3, dry L/R and wet L/R.
