@@ -132,3 +132,19 @@ are established. Dispatch diagnostics consume a repeatable ~2.18–2.20 s
 across all three runs and are a separate safe host-side optimisation
 candidate. Do not conflate GPU sampled compute time with exclusive
 runner CPU time or sum overlapping worker durations.
+
+## Batch 2: exact dispatch-diagnostic hot path
+
+Pack the complete ordered PC pair into one unsigned 64-bit key for the
+edge map and direct-mapped cache. Keep the existing slot hash, admission
+capacity, cache miss accounting, exact visits, and lexicographic tie
+ordering. Compare the state fields with a grouped XOR/OR reduction rather
+than a serial short-circuit comparison; no padding is compared and all
+16 fields remain significant. History and state-change observation still
+run at every original boundary. The smoke test exercises full-width keys,
+collision/rejection accounting, chronological wrap, and each state field.
+
+This is host-only work, not EE lowering or a scheduling shortcut. No EE
+or VU1 regeneration is required beyond independently captured VU1 misses.
+Measure the exclusive dispatch-diagnostics cost against the 11:09 baseline
+with equivalent profiler settings before claiming a gain.

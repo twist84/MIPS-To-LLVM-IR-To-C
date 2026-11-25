@@ -69,22 +69,27 @@ struct s_ee_hot_loop_state
 
     bool operator==(const s_ee_hot_loop_state& other) const
     {
-        return m_thread_id == other.m_thread_id &&
-            m_cop0_status == other.m_cop0_status &&
-            m_cop0_cause == other.m_cop0_cause &&
-            m_intc_status == other.m_intc_status &&
-            m_intc_mask == other.m_intc_mask &&
-            m_dmac_status == other.m_dmac_status &&
-            m_dmac_pending == other.m_dmac_pending &&
-            m_gif_chcr == other.m_gif_chcr &&
-            m_gif_madr == other.m_gif_madr &&
-            m_gif_qwc == other.m_gif_qwc &&
-            m_gif_tadr == other.m_gif_tadr &&
-            m_gif_write_sequence == other.m_gif_write_sequence &&
-            m_gif_reject == other.m_gif_reject &&
-            m_gs_fields == other.m_gs_fields &&
-            m_gs_csr == other.m_gs_csr &&
-            m_iop_rpc_sequence == other.m_iop_rpc_sequence;
+        // Fieldwise XOR reduction permits grouped comparisons on the
+        // common unchanged-state path without inspecting struct padding.
+        const uint32_t changed32 =
+            (m_thread_id ^ other.m_thread_id) |
+            (m_cop0_status ^ other.m_cop0_status) |
+            (m_cop0_cause ^ other.m_cop0_cause) |
+            (m_intc_status ^ other.m_intc_status) |
+            (m_intc_mask ^ other.m_intc_mask) |
+            (m_dmac_status ^ other.m_dmac_status) |
+            (m_dmac_pending ^ other.m_dmac_pending) |
+            (m_gif_chcr ^ other.m_gif_chcr) |
+            (m_gif_madr ^ other.m_gif_madr) |
+            (m_gif_qwc ^ other.m_gif_qwc) |
+            (m_gif_tadr ^ other.m_gif_tadr) |
+            (m_gif_reject ^ other.m_gif_reject);
+        const uint64_t changed64 =
+            (m_gif_write_sequence ^ other.m_gif_write_sequence) |
+            (m_gs_fields ^ other.m_gs_fields) |
+            (m_gs_csr ^ other.m_gs_csr) |
+            (m_iop_rpc_sequence ^ other.m_iop_rpc_sequence);
+        return (static_cast<uint64_t>(changed32) | changed64) == 0u;
     }
 
     bool operator!=(const s_ee_hot_loop_state& other) const
@@ -134,7 +139,7 @@ public:
         m_pc_cache_misses += count_cached(m_pcs, m_pc_cache[pc_slot], from_pc,
             m_pc_capacity, m_untracked_pc_samples) ? 1u : 0u;
         m_edge_cache_misses += count_cached(m_edges, m_edge_cache[edge_slot],
-            std::make_pair(from_pc, to_pc), m_edge_capacity,
+            edge_key(from_pc, to_pc), m_edge_capacity,
             m_untracked_edge_samples) ? 1u : 0u;
         if (!m_has_state)
         {
@@ -204,8 +209,8 @@ public:
         {
             std::fprintf(output,
                 "%s{\"from_pc\": %u, \"to_pc\": %u, \"visits\": %llu}",
-                i ? ", " : "", edges[i].first.first,
-                edges[i].first.second,
+                i ? ", " : "", static_cast<uint32_t>(edges[i].first >> 32u),
+                static_cast<uint32_t>(edges[i].first),
                 static_cast<unsigned long long>(edges[i].second));
         }
         std::fputs("],\n    \"latest_state\": ", output);
@@ -244,12 +249,19 @@ private:
         s_ee_hot_loop_state m_after;
     };
 
+    // Unsigned packed order is identical to lexicographic (from, to)
+    // order, including zero, unaligned and full-width guest addresses.
+    // A cache hit now compares one scalar key instead of two PC fields.
+    static constexpr uint64_t edge_key(uint32_t from_pc, uint32_t to_pc)
+    {
+        return (static_cast<uint64_t>(from_pc) << 32u) | to_pc;
+    }
+
     struct s_edge_hash
     {
-        size_t operator()(const std::pair<uint32_t, uint32_t>& key) const
+        size_t operator()(uint64_t value) const
         {
-            // Mix both aligned guest PCs before bucket selection.
-            uint64_t value = (static_cast<uint64_t>(key.first) << 32u) | key.second;
+            // Mix both guest PCs before bucket selection.
             value ^= value >> 33u;
             value *= 0xff51afd7ed558ccdull;
             value ^= value >> 33u;
@@ -349,9 +361,9 @@ private:
     bool m_has_state = false;
     s_ee_hot_loop_state m_last_state{};
     std::unordered_map<uint32_t, uint64_t> m_pcs;
-    std::unordered_map<std::pair<uint32_t, uint32_t>, uint64_t, s_edge_hash> m_edges;
+    std::unordered_map<uint64_t, uint64_t, s_edge_hash> m_edges;
     std::vector<s_counter_cache_entry<uint32_t>> m_pc_cache;
-    std::vector<s_counter_cache_entry<std::pair<uint32_t, uint32_t>>> m_edge_cache;
+    std::vector<s_counter_cache_entry<uint64_t>> m_edge_cache;
     uint64_t m_pc_cache_misses = 0u;
     uint64_t m_edge_cache_misses = 0u;
     c_bounded_diagnostic_history<s_change, k_change_capacity> m_changes;
