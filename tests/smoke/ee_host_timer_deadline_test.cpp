@@ -276,6 +276,29 @@ int main()
     {
         return 1;
     }
+    // The host-only MMIO generation includes timer and ordinary bus
+    // callbacks, not elapsed device time or passive deadline queries.
+    const uint64_t generation = timers.mmio_generation();
+    timers.service();
+    (void)timers.next_event();
+    if (!check(timers.mmio_generation() == generation,
+            "passive timer service advanced MMIO generation") ||
+        !check(ee::c_ee_host_timers::mmio_read(&timers,
+            0x10000000u, 4u, &read) &&
+            timers.mmio_generation() == generation + 1u,
+            "timer read did not advance MMIO generation") ||
+        !check(write_timer(timers, 0u, 0x20u, 42u) &&
+            timers.mmio_generation() == generation + 2u,
+            "timer write did not advance MMIO generation"))
+    {
+        return 1;
+    }
+    (void)ee::c_ee_host_timers::mmio_read(&timers, 0xffffffffu, 4u, &read);
+    if (!check(timers.mmio_generation() == generation + 3u,
+            "delegated MMIO attempt was not observed"))
+    {
+        return 1;
+    }
     std::puts("EE host timer deadline: PASS");
     return 0;
 }
