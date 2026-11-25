@@ -12,6 +12,7 @@
 #include "ee_hw_bus.h"
 #include "ee_host_timers.h"
 #include "ee_iop_clock.h"
+#include "ee_execution_horizon.h"
 #include "ee_hot_expand_protocol.h"
 #include "ee_kernel_thread_status.h"
 #include "ee_irq_syscall_services.h"
@@ -3832,6 +3833,20 @@ int main(int argc, char** argv)
     const bool profile_pcs = profile_pcs_value != nullptr &&
         std::strcmp(profile_pcs_value, "0") != 0;
     ee::c_ee_pc_profile<> pc_profile(profile_pcs);
+    // Observe the existing schedule without changing guest execution.
+    std::string horizon_environment;
+    const char* horizon_value = read_host_environment(
+        "SDBZ_PROFILE_HORIZON", &horizon_environment);
+    const bool profile_horizon = horizon_value != nullptr &&
+        std::strcmp(horizon_value, "1") == 0;
+    constexpr size_t horizon_sources = static_cast<size_t>(
+        ee::e_ee_horizon_source::count);
+    uint64_t horizon_samples[horizon_sources]{};
+    uint64_t horizon_before[horizon_sources]{};
+    uint64_t horizon_reached[horizon_sources]{};
+    uint64_t horizon_unknown = 0u;
+    uint64_t horizon_normal_before = 0u;
+    uint64_t horizon_without_iop_before = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
     // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
     std::string idle_skip_environment;
@@ -4866,6 +4881,46 @@ int main(int argc, char** argv)
         const uint64_t idle_before_dispatch = idle_skip_instructions;
         uint64_t pc_native_ns = 0u;
         uint64_t pc_nested_ns = 0u;
+        // Shadow measurement of known deadlines at the existing
+        // native boundary. Does not prove the next block is pure or
+        // that MMIO cannot change a deadline while it executes.
+        ee::s_ee_execution_horizon horizon{};
+        ee::s_ee_execution_horizon horizon_without_iop{};
+        const bool horizon_sample = profile_horizon &&
+            runtime.m_ee_cycle_scheduler.source() ==
+                ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY;
+        const uint64_t horizon_start = horizon_sample
+            ? runtime.m_ee_cycle_scheduler.current_cycle() : 0u;
+        if (horizon_sample)
+        {
+            const bool iop_scheduled = hle_startup &&
+                iop_rom0_path == nullptr && iop_kernel != nullptr;
+            const uint64_t iop_deadline = iop_scheduled
+                ? iop_clock.next_cycle() : ee::k_ee_no_deadline;
+            const bool barrier =
+                callback_active || irq_callback_active ||
+                current_thread_id == 0u ||
+                hardware.dmac().pending() != 0u ||
+                hardware.intc().pending() != 0u ||
+                ee::ee_pending_interrupts(&cpu) != 0u ||
+                hardware.dmac().deferred_vif1_pending() ||
+                vif1.cmsar1_running() || vu0.m_running != 0u ||
+                iop_rom0_path != nullptr ||
+                (iop_scheduled && (!iop_clock.active() ||
+                    iop_deadline == ee::k_ee_no_deadline)) ||
+                (runtime.m_perf_control & 0x80000000u) != 0u ||
+                runtime.m_perf_compat_fault ||
+                runtime.m_timing_observer != nullptr;
+            const uint64_t timer_deadline = host_timers.next_event();
+            const uint64_t scanout_deadline = hardware.scanout().next_event_cycle();
+            const uint64_t cop0_deadline =
+                ee::ee_cop0_compare_deadline(runtime, horizon_start);
+            horizon = ee::ee_execution_horizon(horizon_start, timer_deadline,
+                scanout_deadline, cop0_deadline, iop_deadline, barrier);
+            horizon_without_iop = ee::ee_execution_horizon(horizon_start,
+                timer_deadline, scanout_deadline, cop0_deadline,
+                ee::k_ee_no_deadline, barrier);
+        }
         bool hot_expand_budget_reached = false;
         for (;;)
         {
@@ -5175,6 +5230,40 @@ int main(int argc, char** argv)
                 runtime.m_guest_instruction_attempts - instructions_before_dispatch,
                 idle_skip_instructions - idle_before_dispatch, pc_native_ns,
                 pc_nested_ns);
+        }
+
+        if (horizon_sample && count != 0u)
+        {
+            uint64_t reached = 0u;
+            if (!ee::ee_reference_compatibility_cycle(runtime, reached) ||
+                reached < horizon_start)
+            {
+                ++horizon_unknown;
+            }
+            else
+            {
+                const auto source = static_cast<size_t>(horizon.m_source);
+                ++horizon_samples[source];
+                if (reached < horizon.m_cycle)
+                {
+                    ++horizon_before[source];
+                }
+                else
+                {
+                    ++horizon_reached[source];
+                }
+                const bool normal_exit =
+                    reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
+                    reason == static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_RETURN);
+                if (normal_exit && reached < horizon.m_cycle)
+                {
+                    ++horizon_normal_before;
+                }
+                if (normal_exit && reached < horizon_without_iop.m_cycle)
+                {
+                    ++horizon_without_iop_before;
+                }
+            }
         }
 
         dispatched += count;
@@ -8779,6 +8868,26 @@ int main(int argc, char** argv)
                         shape.words[i]);
                 }
             }
+        }
+    }
+    if (profile_horizon)
+    {
+        constexpr const char* names[horizon_sources] = {
+            "barrier", "timer", "scanout", "cop0", "iop", "none"
+        };
+        std::fprintf(stderr,
+            "EE horizon: shadow_only=1 normal_before=%llu "
+            "normal_before_without_iop=%llu unknown=%llu\n",
+            static_cast<unsigned long long>(horizon_normal_before),
+            static_cast<unsigned long long>(horizon_without_iop_before),
+            static_cast<unsigned long long>(horizon_unknown));
+        for (size_t i = 0u; i < horizon_sources; ++i)
+        {
+            std::fprintf(stderr,
+                "EE horizon: source=%s samples=%llu before=%llu reached=%llu\n",
+                names[i], static_cast<unsigned long long>(horizon_samples[i]),
+                static_cast<unsigned long long>(horizon_before[i]),
+                static_cast<unsigned long long>(horizon_reached[i]));
         }
     }
     if (profile_pcs && !pc_profile.entries().empty())
