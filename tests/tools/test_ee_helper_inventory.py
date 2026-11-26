@@ -35,6 +35,35 @@ def fixture(big=False):
     return bytes(data)
 
 
+def actual_coff():
+    import llvmlite.binding as llvm
+    llvm.initialize_all_targets()
+    llvm.initialize_all_asmprinters()
+    triple = "x86_64-pc-windows-msvc"
+    machine = llvm.Target.from_triple(triple).create_target_machine(opt=2)
+    raw = b"""define internal void @ee_cold_helper_long_name(ptr %p) noinline {
+entry:
+  store i32 1, ptr %p
+  ret void
+}
+define void @guest(ptr %p) {
+entry:
+  call void @ee_cold_helper_long_name(ptr %p)
+  ret void
+}
+"""
+    with llvm.create_context() as context, llvm.parse_assembly(raw.decode(), context=context) as module:
+        module.triple = triple
+        module.data_layout = str(machine.target_data)
+        module.verify()
+        obj = machine.emit_object(module)
+    spans = coff_spans(obj)
+    assert spans["ee_cold_helper_long_name"] > 0
+    assert spans["guest"] > 0
+    from ee_ownership_binary import native_executable_sections
+    assert sum(spans.values()) <= native_executable_sections(obj)[0]
+
+
 def main():
     for big in (False, True):
         data = fixture(big)
@@ -68,6 +97,8 @@ entry:
     assert helpers["helper"]["direct_dependencies"] == ["cold"]
     changed = ir_inventory(raw.replace(b"noinline cold", b"noinline"), "guest")
     assert helpers["cold"]["body_sha256"] != changed["cold"]["body_sha256"]
+    if "--llvm" in sys.argv:
+        actual_coff()
     print("PASS: EE helper inventory")
 
 
