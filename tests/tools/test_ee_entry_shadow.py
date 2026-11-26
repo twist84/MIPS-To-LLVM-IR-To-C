@@ -8,7 +8,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from audit_ee_entry_shadow import analyze, compare, read_module
 
-HEADER = "%ee_cpu_state = type { i32 }\n"
+HEADER = "%ee_cpu_state = type { i32, i32, i32, i32, i32, i32, i32 }\ndeclare void @fault(ptr, i32)\n"
 BODY = """bb_0x1008:
   ; 0x1008: lw
   %t10 = load i32, ptr %cpu
@@ -81,6 +81,8 @@ def run():
         assert result["targets_with_matching_emitted_ir"] == 1
         assert result["entries"][0]["metadata_dispatch_owners"] == ["a.ll"]
         assert result["entries"][0]["candidates"][0]["owner_static"]
+        assert result["entries"][0]["candidates"][0]["all_source_dispatch_pcs_match"]
+        assert not result["entries"][0]["candidates"][0]["owner_has_published_entry"]
         # Stale inventory is rejected before analysis.
         baseline["aggregate_ir_bytes"] += 1
         try:
@@ -91,6 +93,52 @@ def run():
             raise AssertionError("stale baseline accepted")
 
 
+
+def generated(exe):
+    """Exercise the actual EE emitter's entry selector and SSA/CFG syntax."""
+    import struct
+    from test_recomp_discovery_cache import compile_ir, make_elf
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        elf = root / "synthetic.elf"
+        make_elf(elf)
+        image = bytearray(elf.read_bytes())
+        # Conditional branch with a nontrivial delay slot and a join.
+        for offset, instruction in (
+            (0x108, 0x10800003),  # beq a0,zero,0x100018
+            (0x10c, 0x24420001),  # addiu v0,v0,1
+            (0x110, 0x24420002),
+            (0x114, 0x00000000),
+            (0x118, 0x24420003),
+            (0x11c, 0x03e00008),
+            (0x120, 0x00000000),
+        ):
+            struct.pack_into("<I", image, offset, instruction)
+        elf.write_bytes(image)
+        for name, entry in (("owner", 0x100008), ("source", 0x100018)):
+            out = root / name
+            result = compile_ir(exe, elf, out, entry)
+            assert result.returncode == 0, result.stdout + result.stderr
+            meta = json.loads((out / "ee_functions.json").read_text())
+            path = out / Path(meta["functions"][0]["ir_path"]).name
+            module = read_module(path)
+            assert compare(module, module, entry)[0] == "matching_emitted_ir"
+            if name == "owner":
+                owner = module
+                assert 0x100018 in owner[3], owner[3]
+            else:
+                source = module
+        status, _ = compare(source, owner, 0x100018)
+        # Different function-scoped publication or safepoint choices are
+        # legitimate reasons to refuse routing; never require a positive
+        # certificate merely because the guest block starts agree.
+        assert status in ("matching_emitted_ir", "reachable_ir_differs",
+                          "module_environment_differs", "entry_prologue_differs"), status
+        print("Generated internal entry:", status)
+
+
 if __name__ == "__main__":
     run()
+    if len(sys.argv) > 1:
+        generated(sys.argv[1])
     print("PASS: EE internal-entry shadow comparison")

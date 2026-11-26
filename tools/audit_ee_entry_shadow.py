@@ -191,7 +191,7 @@ def analyze(root, baseline):
         if not row["shared_guest_pcs"]:
             continue
         pcs, blocks, _, _, _, switch = scan_details(paths[name])
-        for pc in pcs & targets.keys():
+        for pc in (pcs | blocks) & targets.keys():
             if name != targets[pc]:
                 owners[pc].append((name, switch and pc in blocks))
 
@@ -213,6 +213,21 @@ def analyze(root, baseline):
                     status, fingerprint = compare(a, b, pc)
                     candidate.update(status=status, source_sha256=a[0], owner_sha256=b[0],
                                      reachable_signature_sha256=fingerprint)
+                    if status == "matching_emitted_ir":
+                        # A matching entry is not enough to remove a module.
+                        # Independently compare every metadata-owned dispatch PC.
+                        checks = []
+                        for owned in sorted({int(value, 0) for value in by_name[source]["block_pcs"]}):
+                            check, certificate = compare(a, b, owned)
+                            checks.append({"pc": hex(owned), "status": check,
+                                           "reachable_signature_sha256": certificate})
+                            if check != "matching_emitted_ir":
+                                break
+                        candidate["source_dispatch_checks"] = checks
+                        candidate["all_source_dispatch_pcs_match"] = (
+                            bool(checks) and all(check["status"] == "matching_emitted_ir"
+                                                 for check in checks))
+                        candidate["owner_has_published_entry"] = owner in dispatch[pc]
                 except (ValueError, UnicodeError) as error:
                     candidate.update(status="unsupported_module", detail=str(error))
             counts[candidate["status"]] += 1
@@ -232,6 +247,9 @@ def analyze(root, baseline):
         "targets_with_matching_emitted_ir": sum(any(c["status"] == "matching_emitted_ir"
                                                     for c in row["candidates"]) for row in results),
         "candidate_status_counts": dict(sorted(counts.items())),
+        "targets_with_all_dispatch_pcs_matching": sum(
+            any(c.get("all_source_dispatch_pcs_match", False) for c in row["candidates"])
+            for row in results),
         "entries": results,
         "limitations": [
             "baseline selects scope; it is not a current-cache authentication or native proof",

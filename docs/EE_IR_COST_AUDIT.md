@@ -724,3 +724,36 @@ prologue/dispatch overhead; 10,647 modules with at most 32 guest
 PCs account for 22,074,416 executable object bytes. Preserve accuracy
 and measure size/throughput at unchanged inventory and optimization
 profile. No blanket optimization profile change or size claim.
+
+
+### Checkpoint 2a — shadow internal-entry comparison
+
+Run against the exact IR inventory used by the ownership baseline:
+
+```bat
+python tools\audit_ee_entry_shadow.py build\ps2-game-hle\ir --baseline ee-ownership-audit.json --json ee-entry-shadow.json
+```
+
+This read-only tool uses the ownership baseline only to select nonstatic
+overlap targets and potential overlapping owner modules. It checks the
+inventory and aggregate byte count, then scans the actual IR for guest PC
+coverage and switch targets. Instruction membership alone is not a legal
+resume case. For exact nonzero cases, compare the emitted entry prologue,
+all non-guest module definitions/declarations, and reachable LLVM text
+including auxiliary branches, state stores, helper calls, exception and
+loop exits, with bijective renaming of generated SSA temporaries and
+auxiliary labels. Unrecognized constructs are rejected. Identical
+observed emitted IR is intentionally only a shadow result, not proof
+of native ABI compatibility, instruction-equivalent timing, or safe
+module deletion. A candidate matching the requested entry is checked
+against each source metadata-owned dispatch PC until the first failure.
+Source/owner IR SHA-256 and metadata SHA-256 bind the evidence to inputs;
+no object or dispatch metadata is rewritten. A matching result does not
+prove that a module has no other direct native callers.
+
+CTest ee_entry_shadow covers positive and negative synthetic comparisons,
+different helper environment, prologue, exception return, state write
+and branch target, and actual generated synthetic ELF IR. No production
+lowering or runtime input is changed. Retail cache shadow results are
+required before selecting a safe routing implementation. No gameplay
+replay or recompilation is required to produce the report.
