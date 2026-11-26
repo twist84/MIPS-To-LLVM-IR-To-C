@@ -410,3 +410,50 @@ active regression, since those paths are intentionally not emitted.
 V28 candidate vs V25 control, retain V26/V27 for future experiments.
 CI and retail validation pending. Measure both throughput and DLL sizes
 before promotion; no automatic performance acceptance.
+
+## G2E.1 — compact scoreboard correctness accepted, performance rejected
+
+All five CI workflows passed at 9906181 after scoping the layout assertion
+to the generated guest function rather than unrelated scalar helper
+parameters. ee-graphics-g2e.zip contains four interleaved unprofiled
+synchronous pairs, all 40M dispatches with exact reference report and
+screen SHA-256 independently recomputed, 3127/3127 PAD polls in each
+stderr footer, 184700 matched transitions per receipt, 21910026110
+guest attempts, 22115080673 EE cycles, 4494 fields, 394881 VU1 native
+runs, 445669423 pairs, no fallback, IOP guest fault or timing observer
+failure. Inventory remains 84 native libraries, all hashes changed,
+inputs unchanged.
+
+| Pair | V25 s | V28 s |
+|---|---:|---:|
+| 1 | 42.328 | 42.484 |
+| 2 | 42.250 | 42.672 |
+| 3 | 42.250 | 42.641 |
+| 4 | 42.282 | 42.672 |
+
+Median 42.266 -> 42.6565s, throughput ratio 0.990845 (-0.92%).
+Every candidate is slower; control spread 0.078s, candidate 0.188s.
+The runner timing independently corroborates the direction (all
+candidate elapsed times exceed all controls). Reject performance
+promotion, restore V25 scoreboard, preserve V28 library inventory and
+commit history. V28 total DLL bytes not supplied; size benefit unknown.
+The smaller IR operation count is not a guarantee of lower native
+cost (register allocation and code layout effects remain unmeasured).
+Retain self-loop branch predicate regression. No async performance claim.
+
+## G3A — narrow exact SIMD multiplication boundary and normalization
+
+Build from V25 production lowering. In vu_mul4 replace the wide
+low-23-bit unsigned comparison with the mathematically equivalent
+packed 32-bit zero test on bits 15..22 (mask 0x007f8000). The existing
+64-bit full product is still used for normalization and exact asymmetric
+Booth correction. Keep the nonzero lane predicate and correction
+helper unchanged. Normalize the 24/25-bit significand with a fixed
+one-bit shift and per-lane select instead of a vector variable shift
+by 0 or 1. No host floating-point approximation or change to
+architectural flags, operand order, exceptional results or scalar
+reference. Existing 81920 lane tuple comparisons per O0/O3 include
+boundary-biased products and exception vectors. Add structural checks
+and boundary-mask identity checks. V29 candidate vs V25 control.
+CI, retail timing and DLL size comparison pending. LLVM may already
+canonicalize these forms on some hosts; no speedup claim before replay.
