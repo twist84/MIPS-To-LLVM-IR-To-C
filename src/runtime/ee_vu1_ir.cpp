@@ -367,7 +367,9 @@ public:
         line("store i32 0, ptr %step_count, align 4");
         line("store i32 16, ptr %cycle, align 4");
         line("store i1 false, ptr %ending, align 1");
-        line("br label %dispatch");
+        // The invocation entry is known independently of any indirect
+        // branches later in the program.
+        line("br label %pair_" + std::to_string(start));
         m_ir += "dispatch:\n";
         // The fallback retains the exact emitted-PC guard. Each pair owns
         // its budget check and prelude so a direct edge cannot bypass them.
@@ -385,7 +387,8 @@ public:
     }
 
     bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
-        uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven)
+        uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven,
+        uint32_t incoming_npc, bool ending_known, bool incoming_ending)
     {
         const auto suffix = std::to_string(pc);
         m_ir += "pair_" + suffix + ":\n";
@@ -396,14 +399,25 @@ public:
         m_ir += "body_" + suffix + ":\n";
         m_pair_steps = operation("add i32 " + old_steps + ", 1");
         line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
-        m_pair_npc = operation("load i32, ptr %npc, align 4");
-        const auto ending = operation("load i1, ptr %ending, align 1");
+        // Only complete direct-flow discovery may specialize incoming
+        // state, including states that execute the final E-delay pair.
+        m_pair_npc = incoming_npc == k_unknown_pc ?
+            operation("load i32, ptr %npc, align 4") : std::to_string(incoming_npc);
+        const auto ending = ending_known ? std::string(incoming_ending ? "true" : "false") :
+            operation("load i1, ptr %ending, align 1");
         if (m_branch_vi_mask != 0u)
         {
             m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
         }
-        const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
-        m_pair_sequential = operation("and i32 " + sequential_raw + ", 16383");
+        if (incoming_npc == k_unknown_pc)
+        {
+            const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
+            m_pair_sequential = operation("and i32 " + sequential_raw + ", 16383");
+        }
+        else
+        {
+            m_pair_sequential = std::to_string((incoming_npc + 8u) & 0x3fffu);
+        }
         m_current_pc = pc;
         // Every pair remains a possible dispatcher target. SSA values
         // from a different pair do not necessarily dominate this entry.
@@ -471,7 +485,14 @@ public:
             ", ptr %ending, align 1");
         const auto retire = "retire_" + suffix;
         const auto next = "next_" + suffix;
-        line("br i1 " + ending + ", label %" + retire + ", label %" + next);
+        if (ending_known)
+        {
+            line("br label %" + (incoming_ending ? retire : next));
+        }
+        else
+        {
+            line("br i1 " + ending + ", label %" + retire + ", label %" + next);
+        }
         m_ir += next + ":\n";
         if (direct_pc == k_unknown_pc)
         {
@@ -1993,6 +2014,12 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     direct_successors.fill(k_unknown_pc);
     alternate_successors.fill(k_unknown_pc);
     std::bitset<2048> incomplete_successors;
+    // Incoming state facts are independent of outgoing-edge discovery:
+    // an E-delay pair still consumes NPC and publishes the final TPC.
+    std::array<uint32_t, 2048> incoming_npcs;
+    incoming_npcs.fill(k_unknown_pc);
+    std::bitset<2048> incoming_seen, incoming_npc_ambiguous;
+    std::bitset<2048> ending_seen, nonending_seen;
     bool has_indirect = false;
     const uint32_t start = address & 0x3ff8u;
     const auto enqueue = [&](uint32_t pc, uint32_t npc, bool ending)
@@ -2019,7 +2046,25 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             return {};
         }
         const auto [pc, npc, ending] = queue[index];
-        reached.set(pc >> 3u);
+        const auto pair_index = pc >> 3u;
+        reached.set(pair_index);
+        if (!incoming_seen.test(pair_index))
+        {
+            incoming_seen.set(pair_index);
+            incoming_npcs[pair_index] = npc;
+        }
+        else if (incoming_npcs[pair_index] != npc)
+        {
+            incoming_npc_ambiguous.set(pair_index);
+        }
+        if (ending)
+        {
+            ending_seen.set(pair_index);
+        }
+        else
+        {
+            nonending_seen.set(pair_index);
+        }
         const uint32_t lo = read_word(code.data() + pc);
         const uint32_t hi = read_word(code.data() + pc + 4u);
         const bool branch = is_branch(lo, hi);
@@ -2053,7 +2098,6 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         // The next executed PC is the incoming delayed NPC, not the
         // branch target produced by this pair. Only nonterminating states
         // contribute outgoing edges. Unknown NPCs cannot prove an edge.
-        const auto pair_index = pc >> 3u;
         if (npc == k_unknown_pc)
         {
             incomplete_successors.set(pair_index);
@@ -2136,9 +2180,16 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         // enumerates every incoming PC/NPC/E state from the entry.
         const bool proven = emitted && !has_indirect && !incomplete_successors.test(index) &&
             (alternate == k_unknown_pc || alternate_emitted);
+        // Indirect transfers may enter any emitted pair with a different
+        // delayed state. Do not infer constants for such programs.
+        const auto incoming_npc = !has_indirect && !incoming_npc_ambiguous.test(index) ?
+            incoming_npcs[index] : k_unknown_pc;
+        const bool ending_known = !has_indirect &&
+            ending_seen.test(index) != nonending_seen.test(index);
         if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
                 read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
-                alternate_emitted ? alternate : k_unknown_pc, proven))
+                alternate_emitted ? alternate : k_unknown_pc, proven,
+                incoming_npc, ending_known, ending_seen.test(index)))
         {
             return {};
         }
