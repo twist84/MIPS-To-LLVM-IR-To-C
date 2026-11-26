@@ -3,6 +3,7 @@
 import ctypes
 import pathlib
 import random
+import re
 import subprocess
 import sys
 import tempfile
@@ -190,7 +191,6 @@ define i32 @test_min(i32 %a, i32 %b) {
 
 
 def main():
-    import re
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
@@ -199,6 +199,13 @@ def main():
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
             ir = path.read_text(encoding="utf-8")
+            if case in ("branches", "direct-branches", "branch-wrap", "acc-branches"):
+                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
+                slots = re.search(r"%ready = alloca \[(\d+) x i32\]", guest)
+                assert slots and 0 < int(slots[1]) < 144
+                assert "label %block_" not in guest and "label %loop_" not in guest
+                for index in re.findall(r"getelementptr i32, ptr %ready, i32 (\d+)", guest):
+                    assert int(index) < int(slots[1])
             if case in ("branches", "direct-branches", "branch-wrap"):
                 guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
                 assert "switch i32 %current_pc" in guest
@@ -241,43 +248,8 @@ def main():
             if case == "acc":
                 verify_fmac(ir)
                 verify_minmax(ir)
-            variants = ("normal",)
-            if case in ("branches", "direct-branches", "branch-wrap", "acc-branches"):
-                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
-                assert re.search(r"br i1 %\w+, label %block_\d+, label %single_\d+", guest)
-                assert re.search(r"icmp ule i32 %\w+, 9999[2-7]\n", guest)
-                loop_entries = re.findall(r"^loop_(\d+):$", guest, re.M)
-                assert loop_entries
-                assert re.search(r"br i1 %\w+, label %loop_\d+, label %single_\d+", guest)
-                assert re.search(r"icmp ule i32 %\w+, 99998\n", guest)
-                start = 0x3ff0 if case == "branch-wrap" else 0x80
-                # Before the first backward branch the fixture executes
-                # linearly. Leave exactly one pair of budget at that branch.
-                loop_budget = min(((int(pc) - start) & 0x3fff) // 8 + 1
-                                  for pc in loop_entries)
-                variants = ("normal", "single", "budget-single", "budget",
-                            "loop-budget-single", "loop-budget")
-            exhausted = {}
-            for opt, variant in ((opt, variant) for opt in (0, 3) for variant in variants):
-                test_ir = ir
-                if "budget" in variant:
-                    # Shorten only the generated budget predicates, not
-                    # guest instruction constants. The first block fits
-                    # but the next must take the single-pair tail.
-                    budget = loop_budget if variant.startswith("loop-") else 11
-                    test_ir, count = re.subn(r"(icmp ult i32 %\w+, )100000\n",
-                                             lambda m: m[1] + str(budget) + "\n", test_ir)
-                    assert count
-                    test_ir, count = re.subn(r"(icmp ule i32 %\w+, )(9999[2-8])\n",
-                                             lambda m: m[1] + str(budget - (100000 - int(m[2]))) + "\n",
-                                             test_ir)
-                    assert count
-                if "single" in variant:
-                    test_ir, count = re.subn(
-                        r"br i1 %\w+, label %(?:block|loop)_\d+, label %(single_\d+)",
-                        r"br label %\1", test_ir)
-                    assert count
-                module = llvm.parse_assembly(test_ir)
+            for opt in (0, 3):
+                module = llvm.parse_assembly(ir)
                 module.verify()
                 target = llvm.Target.from_default_triple().create_target_machine(opt=opt)
                 module.triple = llvm.get_default_triple()
@@ -350,13 +322,7 @@ def main():
                                  ctypes.byref(p), ctypes.byref(r), None, ctypes.byref(acc_overflow))
                 actual = [steps, cycles.value, tpc.value, immediate.value, last_pc.value,
                           *vi, *vf, mac.value, status.value, clip.value, q.value, p.value, r.value, *acc, acc_overflow.value, *data]
-                if "budget" in variant and variant.endswith("-single"):
-                    assert steps == 0, (case, opt, variant, steps)
-                    exhausted[opt, variant.removesuffix("-single")] = actual
-                elif "budget" in variant:
-                    assert steps == 0 and actual == exhausted[opt, variant], (case, opt, variant)
-                else:
-                    assert actual == expected, (case, opt, variant, actual, expected)
+                assert actual == expected, (case, opt, actual, expected)
                 if case == "q":
                     assert [vi[i] for i in (10, 11, 9, 13, 14)] == [0, 0, 0x820, 0x800, 0], (opt, list(vi))
     print("VU1 integer LLVM interpreter differential: PASS")
