@@ -1672,3 +1672,17 @@ Accept for this workload only. Four CI workflows passed; fast-2
 reported a test-fixture SEGFAULT after an error in the new sharing test.
 Explicitly dispose linked ModuleRefs before their context and enable
 verbose/fault diagnostics. CI must confirm this repair.
+
+### Checkpoint 5f — revisit residual scalar candidates
+
+Local outlining rejected or did not transform 4,051 modules. The
+shared helpers eliminate local definition overhead, so retry exactly
+this residual set from the hashed expanded trial receipt. Require all
+existing shared owner and object identities to match, reconstruct the
+original addition-parent IR and the exact attempted local outline,
+replace local helpers with shared declarations only, and re-emit the
+unoutlined parent to verify byte identity. Accept positive executable
+size changes only; discard other candidate objects. Retain all 9,682
+previous shared scalar objects, including the eight owners, unchanged.
+Save the full trial receipt and link a new isolated candidate; compare
+against the 74.77 MiB shared scalar parent in four-arm retail replay.

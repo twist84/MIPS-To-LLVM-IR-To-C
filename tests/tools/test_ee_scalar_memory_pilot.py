@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -143,6 +143,17 @@ class TestScalarPilot(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     share_helpers(local + b"\n@escape = global ptr @" + name.encode() + b"\n",
                                   "guest", counts, expected, owners, "a")
+
+    def test_residual_inventory(self):
+        trials = [{"module": "win.ll", "executable_saving": 2},
+                  {"module": "loss.ll", "executable_saving": -1},
+                  {"module": "unmatched.ll"}]
+        self.assertEqual(set(residual_candidates(trials, {"win.ll"}, 2)),
+                         {"loss.ll", "unmatched.ll"})
+        with self.assertRaises(ValueError):
+            residual_candidates(trials, {"loss.ll"}, 2)
+        with self.assertRaises(ValueError):
+            residual_candidates(trials + trials[:1], {"win.ll"}, 3)
 
     def test_exact_rewrite(self):
         for width in (1, 2, 4, 8):

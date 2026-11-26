@@ -112,6 +112,116 @@ def trial(task):
             "removed_ir_bytes": len(local)-len(changed), "trial": result}
 
 
+def residual_candidates(trials, accepted, expected_count):
+    rows = {r["module"]: r for r in trials}
+    if (len(rows) != len(trials) or not set(accepted) <= set(rows) or
+            len(rows) - len(accepted) != expected_count or
+            {n for n, r in rows.items() if r.get("executable_saving", 0) > 0} != set(accepted)):
+        raise ValueError("expanded scalar trial inventory differs")
+    return {n: r for n, r in rows.items() if n not in accepted}
+
+
+def verify_shared_parent(folder, meta, names, parent_raw, manifest, records, parent_plan, scalar):
+    raw, current, entries = read_manifest(folder / "objects", set(names))
+    plan = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    if (plan["mode"] != "experimental_shared_scalar_memory" or
+            plan["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            plan["source_manifest_sha256"] != sha(parent_raw) or
+            plan["prior_library_sha256"] != parent_plan["linked_library_sha256"] or
+            plan["native_target"] != manifest["native_target"] or
+            current["native_target"] != manifest["native_target"] or
+            current["target_triple"] != manifest["target_triple"] or
+            current.get("production_cache_compatible") is not False or
+            current["experimental_mixed_pipeline"] != manifest["experimental_mixed_pipeline"] + "-shared" or
+            plan["retained_functions"] != len(names) or plan["source_functions"] != len(names) or
+            plan["recompiled_modules"] != len(scalar) or plan["reused_modules"] != len(names)-len(scalar) or
+            not plan.get("runtime_validation_required") or
+            dll.stat().st_size != plan["linked_library_bytes"] or sha(dll.read_bytes()) != plan["linked_library_sha256"]):
+        raise ValueError("shared scalar parent identity differs")
+    rows = rows_of(plan)
+    owners, expected = plan["shared_owners"], plan["scalar_body_sha256"]
+    if (set(rows) != set(scalar) or len(rows) != len(plan["modules"]) or
+            set(owners) != set(HELPERS) or set(expected) != set(HELPERS) or
+            any(n not in scalar for n in owners.values())):
+        raise ValueError("shared parent inventory differs")
+    for n, item in entries.items():
+        before = records[n]
+        if (item["ir_sha256"] != before["ir_sha256"] or
+                item.get("experimental_pipeline") != before.get("experimental_pipeline")):
+            raise ValueError("shared parent source or policy differs: " + n)
+        if n not in rows:
+            if any(item.get(k) != before.get(k) for k in
+                   ("sha256", "size_bytes", "transformed_ir_sha256", "defined_symbols")):
+                raise ValueError("unmodified shared parent object differs: " + n)
+            continue
+        row = rows[n]
+        definitions = sorted(shared_name(k) for k in HELPERS if owners[k] == n)
+        if (row["shared_definitions"] != definitions or
+                sorted(item["defined_symbols"]) != sorted(before["defined_symbols"] + definitions) or
+                row["source_ir_sha256"] != before["ir_sha256"] or
+                row["source_object_sha256"] != before["sha256"] or
+                row["source_object_bytes"] != before["size_bytes"] or
+                row["parent_ir_sha256"] != before["transformed_ir_sha256"] or
+                row["transformed_ir_sha256"] != item["transformed_ir_sha256"] or
+                row["trial"]["sha256"] != item["sha256"] or
+                row["trial"]["object_bytes"] != item["size_bytes"] or
+                not item.get("experimental_shared_scalar")):
+            raise ValueError("shared parent row differs: " + n)
+    if Counter(s for item in entries.values() for s in item["defined_symbols"] if s.startswith(SHARED)) != Counter(
+            shared_name(k) for k in HELPERS):
+        raise ValueError("shared parent owner count differs")
+    for key, total in (
+            ("executable_saving", sum(row["source_executable_bytes"]-row["trial"]["executable_bytes"] for row in rows.values())),
+            ("object_saving", sum(row["source_object_bytes"]-row["trial"]["object_bytes"] for row in rows.values())),
+            ("removed_ir_bytes", sum(row["removed_ir_bytes"] for row in rows.values()))):
+        if plan[key] != total:
+            raise ValueError("shared parent aggregate differs: " + key)
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return raw, current, entries, plan
+
+
+def revisit_trial(task):
+    name, guest, path, record, receipts, plans, previous, folder, triple, expected, owners, out = task
+    raw = path.read_bytes()
+    data = verified_object(folder, record, sha(raw))
+    before, prior = reconstruct_parent(raw, guest, name, receipts, plans)
+    mode = check_object(raw, data, record, prior)
+    if (sha(before) != record["transformed_ir_sha256"] or
+            previous["original_ir_sha256"] != sha(raw) or
+            previous["parent_ir_sha256"] != sha(before) or
+            previous["parent_object_sha256"] != sha(data) or
+            previous["parent_object_bytes"] != len(data) or
+            previous["mode"] != mode or
+            previous["parent_executable_bytes"] != native_executable_sections(data)[0]):
+        raise ValueError("residual trial parent differs: " + name)
+    local, counts = outline(before, guest)
+    if (counts != previous["counts"] or
+            (local != before) != ("candidate" in previous) or
+            (local != before and sha(local) != previous["candidate_ir_sha256"])):
+        raise ValueError("residual outline differs: " + name)
+    row = {"module": name, "mode": mode, "source_ir_sha256": sha(raw),
+           "parent_ir_sha256": sha(before), "source_object_sha256": sha(data),
+           "source_object_bytes": len(data), "source_executable_bytes": previous["parent_executable_bytes"],
+           "counts": counts, "shared_definitions": [], "removed_ir_bytes": 0}
+    if local == before:
+        return row
+    if name in owners.values():
+        raise ValueError("residual trial cannot own a shared helper")
+    changed = share_helpers(local, guest, counts, expected, owners, name)
+    baseline = emit_native(before, triple, guest, mode)
+    if baseline["sha256"] != record["sha256"]:
+        raise ValueError("residual parent object not reproducible: " + name)
+    candidate = emit_native(changed, triple, guest, mode, object_output=out)
+    saving = row["source_executable_bytes"] - candidate["executable_bytes"]
+    if saving <= 0:
+        out.unlink()
+    row.update(transformed_ir_sha256=sha(changed), trial=candidate,
+               removed_ir_bytes=len(before)-len(changed), executable_saving=saving)
+    return row
+
+
 def stage(args):
     started = time.monotonic()
     ir = args.ir.resolve()
@@ -119,7 +229,9 @@ def stage(args):
                                     args.multiply_experiment, args.add_experiment)]
     pilot, expanded = args.pilot_experiment.resolve(), args.experiment.resolve()
     out = args.output.resolve()
-    if out.exists() or any(out.is_relative_to(p) for p in (ir, *folders, pilot, expanded)):
+    shared_parent = args.revisit_from.resolve() if args.revisit_from else None
+    inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if out.exists() or any(out.is_relative_to(p) for p in inputs):
         raise ValueError("use a new output outside input caches")
     meta = (ir / "ee_functions.json").read_bytes()
     functions = json.loads(meta)["functions"]
@@ -170,24 +282,50 @@ def stage(args):
         _, local, _ = local_parent(task_for(owner))
         owners[helper] = owner
         expected[helper] = sha(body_of(local, helper))
+    residual = None
+    if shared_parent is not None:
+        trial_raw = (expanded / "scalar-trials.json").read_bytes()
+        if sha(trial_raw) != parent_plan["trials_sha256"]:
+            raise ValueError("expanded trial receipt digest differs")
+        all_trials = json.loads(trial_raw)
+        if len(all_trials) != parent_plan["attempted_modules"]:
+            raise ValueError("expanded trial count differs")
+        residual = residual_candidates(all_trials, rest, parent_plan["rejected_or_unchanged_modules"])
+        if set(residual) & set(scalar) or not set(residual) <= set(names):
+            raise ValueError("residual scalar inventory overlaps accepted modules")
+        parent_raw, manifest, records, parent_plan = verify_shared_parent(
+            shared_parent, meta, names, parent_raw, manifest, records, parent_plan, scalar)
+        if parent_plan["shared_owners"] != owners or parent_plan["scalar_body_sha256"] != expected:
+            raise ValueError("shared scalar owner identities differ")
+        # No previous winners are recompiled; all residual modules use
+        # declarations only, and the eight owner objects are unchanged.
+        expanded = shared_parent
     out.mkdir(parents=True)
     staged = out / "objects"
     staged.mkdir()
     results = []
-    selected = sorted(scalar)
+    selected = sorted(residual if residual is not None else scalar)
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         for start in range(0, len(selected), args.jobs*128):
             batch = selected[start:start+args.jobs*128]
-            tasks = [(task_for(n), expanded / "objects", records[n], manifest["target_triple"],
-                      expected, owners, staged / (Path(n).stem + ".shared-scalar.o")) for n in batch]
-            for row in pool.map(trial, tasks):
+            if residual is None:
+                tasks = [(task_for(n), expanded / "objects", records[n], manifest["target_triple"],
+                          expected, owners, staged / (Path(n).stem + ".shared-scalar.o")) for n in batch]
+                worker = trial
+            else:
+                tasks = [(n, names[n], ir / n, records[n], tuple(r.get(n) for r in rows),
+                          small_plans, residual[n], expanded / "objects", manifest["target_triple"],
+                          expected, owners, staged / (Path(n).stem + ".shared-scalar.o")) for n in batch]
+                worker = revisit_trial
+            for row in pool.map(worker, tasks):
                 results.append(row)
                 if len(results) % 128 == 0 or len(results) == len(selected):
                     print(f"[{len(results)}/{len(selected)}] shared scalar emission", flush=True)
-    wins = sum(r["source_executable_bytes"]-r["trial"]["executable_bytes"] for r in results)
+    accepted = results if residual is None else [r for r in results if r.get("executable_saving", 0) > 0]
+    wins = sum(r["source_executable_bytes"]-r["trial"]["executable_bytes"] for r in accepted)
     if wins <= 0:
         raise ValueError("cross-module sharing did not reduce aggregate executable size")
-    changed = {r["module"]: r for r in results}
+    changed = {r["module"]: r for r in accepted}
     entries = []
     for n, record in records.items():
         if n in changed:
@@ -206,19 +344,29 @@ def stage(args):
         raise ValueError("shared scalar owner inventory differs")
     (out / "ee_functions.json").write_bytes(meta)
     overlay = dict(manifest, objects=entries, object_bytes=sum(r["size_bytes"] for r in entries),
-                   experimental_mixed_pipeline=manifest["experimental_mixed_pipeline"] + "-shared",
+                   experimental_mixed_pipeline=manifest["experimental_mixed_pipeline"] +
+                       ("-residual" if residual is not None else "-shared"),
                    production_cache_compatible=False)
     (staged / "objects.json").write_text(json.dumps(overlay, indent=2)+"\n", encoding="utf-8")
-    plan = {"mode": "experimental_shared_scalar_memory", "metadata_sha256": sha(meta),
+    plan = {"mode": ("experimental_residual_shared_scalar" if residual is not None else
+                     "experimental_shared_scalar_memory"), "metadata_sha256": sha(meta),
             "source_manifest_sha256": sha(parent_raw), "prior_library_sha256": parent_plan["linked_library_sha256"],
             "native_target": manifest["native_target"], "source_functions": len(names),
-            "retained_functions": len(names), "recompiled_modules": len(results),
-            "reused_modules": len(names)-len(results), "shared_owners": owners,
+            "retained_functions": len(names), "recompiled_modules": len(accepted),
+            "reused_modules": len(names)-len(accepted), "shared_owners": owners,
             "scalar_body_sha256": expected, "executable_saving": wins,
-            "object_saving": sum(r["source_object_bytes"]-r["trial"]["object_bytes"] for r in results),
-            "removed_ir_bytes": sum(r["removed_ir_bytes"] for r in results),
+            "object_saving": sum(r["source_object_bytes"]-r["trial"]["object_bytes"] for r in accepted),
+            "removed_ir_bytes": sum(r["removed_ir_bytes"] for r in accepted),
             "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
-            "modules": results}
+            "modules": accepted}
+    if residual is not None:
+        report = out / "scalar-residual-trials.json"
+        report.write_text(json.dumps(results, indent=2)+"\n", encoding="utf-8")
+        plan.update(trials_sha256=sha(report.read_bytes()), attempted_modules=len(results),
+                    rewritten_modules=sum("trial" in row for row in results),
+                    rejected_or_unchanged_modules=len(results)-len(accepted),
+                    retained_shared_modules=len(scalar),
+                    cumulative_scalar_modules=len(scalar)+len(accepted))
     library = out / "game-translated.dll"
     subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
                     str(out / "ee_functions.json"), str(staged), str(library)], check=True)
@@ -235,6 +383,7 @@ def main():
     for flag in ("counter-experiment", "quadword-experiment", "multiply-experiment",
                  "add-experiment", "pilot-experiment", "experiment", "output"):
         parser.add_argument("--"+flag, type=Path, required=True)
+    parser.add_argument("--revisit-from", type=Path, help="accepted shared scalar overlay")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
