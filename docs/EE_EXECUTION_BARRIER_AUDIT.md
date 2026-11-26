@@ -477,6 +477,37 @@ stream validation, axes/buttons, reset-local numbering and actual
 SIO2 digital response bytes. No guest lowering changes. Final CI and
 Windows retail capture/playback remain to be validated.
 
+## Guest RTC determinism
+
+The two short synchronous baseline replays at 987e496 first differ in
+GPR4 at entry to 0x001960A8. At 0x00190720 the JAL delay-slot LD reads
+the RNG state at 0x00464F10 (s0=0x00464E68, offset 0xa8). The values
+0x6B07C65D and 0x6B07C679 are UTC Unix timestamps for 2026-11-26
+05:40:45 and 05:41:13 respectively. The function constructs multiplier
+0x5851F42D4C957F2D, calls the multiplication helper, adds one and stores
+the new RNG state back. Both supplied IR versions implement the load
+from RAM. The retail log contains a real CDVD S RPC method 1 query,
+and both HLE clock handlers previously read host wall time.
+
+`SDBZ_RTC_FIXED_UTC` is an opt-in frozen UTC Unix timestamp for CDVD
+RTC reads. It is shared by the CDVDMAN import and the CDVD S RPC.
+The guest still executes its original clock conversion and RNG code.
+Unset the option for normal host time. Both paths now encode the
+JST calendar after applying the nine-hour offset, including date/year
+rollover (the former RPC path adjusted only the hour). Invalid fixed
+timestamps fail runner startup. This is a diagnostic clock input,
+not a cycle-accurate RTC or a global determinism guarantee.
+
+For initial verification, use the observed epoch 1795671645 and
+repeat the short 7505000-dispatch diagnostic with the same input
+stream and state detail window. Expect incomplete pad playback at
+the intentional short cap; compare raw architectural state instead.
+For full matched-input performance measurements, capture a fresh P40
+recording with the same fixed RTC and initial memory-card state,
+then replay that recording with the same RTC for both configurations.
+The fixed epoch is included in replay provenance. No guest lowering
+or EE runtime ABI changes are required.
+
 ## Remaining activation gates (not implemented)
 
 
