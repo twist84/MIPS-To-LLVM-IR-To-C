@@ -107,7 +107,6 @@ class TestScalarPilot(unittest.TestCase):
     def test_semantics(self):
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
-        machine = llvm.Target.from_default_triple().create_target_machine()
         sig = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint64)
         for width in (1, 2, 4, 8):
             for write in (False, True):
@@ -118,7 +117,11 @@ class TestScalarPilot(unittest.TestCase):
                     outlined = llvm.parse_assembly(changed.decode(), context=ctx)
                     original.verify()
                     outlined.verify()
-                    with llvm.create_mcjit_compiler(original, machine) as a, llvm.create_mcjit_compiler(outlined, machine) as b:
+                    # MCJIT takes ownership of its target machine. Never
+                    # reuse one across engines or across fixture iterations.
+                    target = llvm.Target.from_default_triple()
+                    with llvm.create_mcjit_compiler(original, target.create_target_machine()) as a, \
+                            llvm.create_mcjit_compiler(outlined, target.create_target_machine()) as b:
                         a.finalize_object()
                         b.finalize_object()
                         for size, present, null_rt, addr in (

@@ -1560,3 +1560,29 @@ Do not change the original lowering or production cache. Run matched
 synchronous O5 record/control, addition parent, scalar candidate.
 This small linked pilot is a runtime risk gate, not evidence that all
 scalar memory outlining is beneficial. Expand only after acceptance.
+
+### Checkpoint 5c — selective scalar memory replay accepted
+
+helper-plan(5).json: 38 reproduced wins, 16,214 reused modules; all
+16,252 retained. Executable saving 417,644 bytes, object saving
+403,319 bytes, IR text saving 6,552,836 bytes; stage 58.75 s before
+link. DLL 90,095,104 -> 89,680,384 bytes (85.53 MiB), incremental
+414,720 bytes (0.46%), cumulative 21,790,720 bytes (19.55%) vs O5.
+Linked executable raw bytes 84,723,200. Candidate SHA-256
+1fc04e70ecbea0f0ea8a9f17bfdf24d3c0db5f8da72b81c2bebc9611dfbd51a9.
+Four-arm synchronous replay: exit 4 at 40M dispatches, 2,979/2,979
+PAD0 polls on each replay, 184,260 common samples each, no mismatches
+or unpaired samples. Library hashes match receipts and remain unchanged.
+All terminal reports SHA-256
+5a160465f8e4a0a8ec8e30191d72cf706b7d61019a80958f4e3604c291e3141f
+and GPU screenshots SHA-256
+51edbc81a843cc4018d5efe3798b84fedc4bc1bd335584f867e4160cfb526721
+are identical. EE cycles 21,061,784,673; attempts 20,857,111,836;
+reference slots 20,859,060,982; fields 4,280; GPU draws 4,735,265;
+presents 3,066; VU1 native runs 398,254 / 440,220,978 pairs;
+zero fallbacks or IOP guest fault. Final PC 0x1082a0. Wall seconds
+43.516 / 43.406 / 43.344 / 43.157: -0.43% vs immediate parent,
+within noise. Accept the 38-module image for this workload only.
+Four CI workflows passed; Build and test fast-2 reported a SEGFAULT
+in ee_scalar_memory_pilot. Correct the MCJIT fixture target-machine
+ownership (one fresh machine per engine); CI must confirm the fix.
