@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -367,6 +368,30 @@ def main():
                                  "ee_sw_wrap_negative", 0x1234567800000047)
         require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == 0x43 and
                 not WRITES and not TRACES, "wrapped alignment fault")
+
+        # A branch-likely common flush already commits both POR halves.
+        # The taken ALU slot must retain cached SP, without repeating
+        # unchanged stores. The annulled path must not write r10.
+        for taken in (False, True):
+            result, cpu, _ = execute(fixture, directory, target,
+                                     "ee_likely_clean_gprs", 0 if taken else 1)
+            require(result == EE_EXIT_RETURN and cpu.pc == 0x00140000 and
+                    cpu.gpr[11].lo == 0x0123456789abcdef and
+                    cpu.gpr[11].hi == 0xfedcba9876543210 and
+                    cpu.gpr[29].lo == 0xff0 and
+                    cpu.gpr[10].lo == (0xff1 if taken else 0),
+                    "branch-likely clean GPR state")
+        ir = (pathlib.Path(directory) / "ee_likely_clean_gprs.ll").read_text(
+            encoding="utf-8")
+        require("bl_taken_" in ir, "fixture did not lower an internal likely branch")
+        for half in (0, 1):
+            pointers = re.findall(
+                rf"(%t[0-9]+) = getelementptr %ee_cpu_state, ptr %cpu, "
+                rf"i32 0, i32 0, i32 11, i32 {half}\b", ir)
+            stores = sum(len(re.findall(
+                rf"store i64 [^\n]+, ptr {re.escape(ptr)}\b", ir))
+                for ptr in pointers)
+            require(stores == 1, f"POR half {half} published {stores} times")
 
         # The positive scalar word path remains operational.
         result, cpu, original = execute(

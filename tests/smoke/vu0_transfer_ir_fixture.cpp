@@ -65,6 +65,19 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
                      make_addiu(30u, 10u, 1), make_jr(31u), 0u};
             return true;
         }
+        if (operation == "likely_clean_gprs")
+        {
+            // POR r11,r8,zero commits both halves before BEQL. The
+            // taken delay slot reads the already-published SP and
+            // changes only r10. Both successor paths return to RA.
+            const uint32_t por = (0x1cu << 26u) | (8u << 21u) |
+                (11u << 11u) | (0x12u << 6u) | 0x29u;
+            const uint32_t beql = (0x14u << 26u) | (9u << 21u) | 3u;
+            words = {por, make_addiu(29u, 29u, -16), beql,
+                     make_addiu(29u, 10u, 1),
+                     make_jr(31u), 0u, make_jr(31u), 0u};
+            return true;
+        }
         if (operation == "lw_wrap_positive" || operation == "sw_wrap_negative" ||
             operation == "lw_absolute")
         {

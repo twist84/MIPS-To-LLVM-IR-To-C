@@ -3783,6 +3783,21 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             // earlier writes to those registers made in this same block.)
             store_dirty_regs(live_out);
 
+            // On an audited nontrapping scalar slot, already-published
+            // values remain clean until a new architectural write. Keep
+            // the SSA cache (the slot can read these values); only remove
+            // low halves actually stored by the common path. All dirty
+            // upper halves were published regardless of low-half liveness.
+            // Other slots retain the conservative synchronization path.
+            if (can_count_alu_run(block[delay_idx]))
+            {
+                for (uint8_t reg : live_out)
+                {
+                    m_dirty_lo.erase(reg);
+                }
+                m_dirty_hi.clear();
+            }
+
             // Labels must be unique per emitted block: the analyzer can emit
             // overlapping blocks that contain the same branch-likely pc.
             char taken_buf[64], nottaken_buf[64];
