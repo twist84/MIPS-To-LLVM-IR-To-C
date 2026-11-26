@@ -1,10 +1,10 @@
 #include "iop_sif_rpc_bridge.h"
+#include "iop_cdvd_rtc.h"
 #include "iop_folder_sector_source.h"
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
-#include <ctime>
 #include <iterator>
 #include <sstream>
 #include <limits>
@@ -969,26 +969,18 @@ void c_sif_rpc_bridge::commit_command(const s_request& request)
         const uint32_t method = request.m_words[8];
         if (method == 0x01u)
         {
-            const std::time_t current = std::time(nullptr);
-            const std::tm* clock = std::gmtime(&current);
-            if (clock != nullptr)
+            t_cdvd_rtc rtc{};
+            if (read_cdvd_rtc(rtc))
             {
-                const auto bcd = [](int number) -> uint8_t
-                {
-                    return static_cast<uint8_t>(
-                        ((number / 10) << 4) | (number % 10));
-                };
                 m_ee_ram.write32(destination, 1u);
-                const uint8_t bytes[8] = {
-                    0u, bcd(clock->tm_sec), bcd(clock->tm_min),
-                    bcd((clock->tm_hour + 9) % 24), 0u,
-                    bcd(clock->tm_mday), bcd(clock->tm_mon + 1),
-                    bcd(clock->tm_year % 100)
-                };
-                for (uint32_t index = 0u; index < 8u; ++index)
+                for (uint32_t index = 0u; index < rtc.size(); ++index)
                 {
-                    m_ee_ram.write8(destination + 4u + index, bytes[index]);
+                    m_ee_ram.write8(destination + 4u + index, rtc[index]);
                 }
+            }
+            else
+            {
+                m_ee_ram.write32(destination, 0u);
             }
         }
         else
