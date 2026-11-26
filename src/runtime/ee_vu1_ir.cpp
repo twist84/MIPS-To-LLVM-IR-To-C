@@ -369,22 +369,9 @@ public:
         line("store i1 false, ptr %ending, align 1");
         line("br label %dispatch");
         m_ir += "dispatch:\n";
-        line("%old_steps = load i32, ptr %step_count, align 4");
-        line("%within_budget = icmp ult i32 %old_steps, " +
-            std::to_string(c_ee_vu1::k_max_steps));
-        line("br i1 %within_budget, label %select_pc, label %fail");
-        m_ir += "select_pc:\n";
-        line("%steps = add i32 %old_steps, 1");
-        line("store i32 %steps, ptr %step_count, align 4");
+        // The fallback retains the exact emitted-PC guard. Each pair owns
+        // its budget check and prelude so a direct edge cannot bypass them.
         line("%current_pc = load i32, ptr %pc, align 4");
-        line("%npc_now = load i32, ptr %npc, align 4");
-        line("%ending_now = load i1, ptr %ending, align 1");
-        if (m_branch_vi_mask != 0u)
-        {
-            line("%previous_vi_mask_now = load i32, ptr %previous_vi_mask, align 4");
-        }
-        line("%sequential_raw = add i32 %npc_now, 8");
-        line("%sequential = and i32 %sequential_raw, 16383");
         line("switch i32 %current_pc, label %fail [");
         for (uint32_t index = 0u; index < reached.size(); ++index)
         {
@@ -397,17 +384,34 @@ public:
         line("]");
     }
 
-    bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi)
+    bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
+        uint32_t direct_pc, bool direct_proven)
     {
-        m_ir += "pair_" + std::to_string(pc) + ":\n";
+        const auto suffix = std::to_string(pc);
+        m_ir += "pair_" + suffix + ":\n";
+        const auto old_steps = operation("load i32, ptr %step_count, align 4");
+        const auto within_budget = operation("icmp ult i32 " + old_steps + ", " +
+            std::to_string(c_ee_vu1::k_max_steps));
+        line("br i1 " + within_budget + ", label %body_" + suffix + ", label %fail");
+        m_ir += "body_" + suffix + ":\n";
+        m_pair_steps = operation("add i32 " + old_steps + ", 1");
+        line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
+        m_pair_npc = operation("load i32, ptr %npc, align 4");
+        const auto ending = operation("load i1, ptr %ending, align 1");
+        if (m_branch_vi_mask != 0u)
+        {
+            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
+        }
+        const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
+        m_pair_sequential = operation("and i32 " + sequential_raw + ", 16383");
         m_current_pc = pc;
-        // Every dynamic pair is a switch target, including loop backedges.
-        // SSA values from a different pair do not dominate this entry.
+        // Every pair remains a possible dispatcher target. SSA values
+        // from a different pair do not necessarily dominate this entry.
         m_vf_lanes = {};
         m_vf_vectors = {};
         m_acc_lanes = {};
         m_acc_vector.clear();
-        m_next_target = "%sequential";
+        m_next_target = m_pair_sequential;
         m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
         m_delay_vi_mask = 0u;
 
@@ -436,7 +440,7 @@ public:
         if (m_flag_pipeline)
         {
             m_issue_cycle = cycle;
-            m_flag_time = operation("add i32 %steps, 16");
+            m_flag_time = operation("add i32 " + m_pair_steps + ", 16");
         }
         if (!emit(lo, hi))
         {
@@ -461,11 +465,34 @@ public:
             line("store i32 " + std::to_string(m_delay_vi_mask) +
                 ", ptr %previous_vi_mask, align 4");
         }
-        line("store i32 %npc_now, ptr %pc, align 4");
+        line("store i32 " + m_pair_npc + ", ptr %pc, align 4");
         line("store i32 " + m_next_target + ", ptr %npc, align 4");
         line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
             ", ptr %ending, align 1");
-        line("br i1 %ending_now, label %done, label %dispatch");
+        const auto retire = "retire_" + suffix;
+        const auto next = "next_" + suffix;
+        line("br i1 " + ending + ", label %" + retire + ", label %" + next);
+        m_ir += next + ":\n";
+        if (direct_pc == k_unknown_pc)
+        {
+            line("br label %dispatch");
+        }
+        else if (direct_proven)
+        {
+            line("br label %pair_" + std::to_string(direct_pc));
+        }
+        else
+        {
+            // Indirect transfers and ambiguous delayed NPCs are never
+            // assumed to be sequential. Guard the edge and fall back.
+            const auto matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                std::to_string(direct_pc));
+            line("br i1 " + matches + ", label %pair_" +
+                std::to_string(direct_pc) + ", label %dispatch");
+        }
+        m_ir += retire + ":\n";
+        line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
+        line("br label %done");
         return true;
     }
 
@@ -483,10 +510,11 @@ public:
         const auto cycle = operation("load i32, ptr %cycle, align 4");
         const auto elapsed = operation("sub i32 " + cycle + ", 16");
         line("store i32 " + elapsed + ", ptr %cycles_out, align 4");
-        line("store i32 %current_pc, ptr %last_pc_out, align 4");
-        line("store i32 %npc_now, ptr %tpc, align 4");
+        const auto next_pc = operation("load i32, ptr %pc, align 4");
+        line("store i32 " + next_pc + ", ptr %tpc, align 4");
+        const auto steps = operation("load i32, ptr %step_count, align 4");
         flush_dynamic_vectors();
-        line("ret i32 %steps");
+        line("ret i32 " + steps);
         m_ir += "fail:\n";
         // Preserve even failed invocation's staged register writes. The
         // runtime discards the staged state on failure.
@@ -1024,7 +1052,7 @@ private:
             std::to_string(index));
         const auto previous = operation("load i16, ptr " + saved + ", align 2");
         const auto current = reg(index);
-        const auto bit = operation("and i32 %previous_vi_mask_now, " +
+        const auto bit = operation("and i32 " + m_pair_vi_mask + ", " +
             std::to_string(1u << index));
         const auto delayed = operation("icmp ne i32 " + bit + ", 0");
         return operation("select i1 " + delayed + ", i16 " + previous +
@@ -1067,7 +1095,7 @@ private:
                 const auto taken = operation(std::string("icmp ") + predicate +
                     " i16 " + lhs + ", " + rhs);
                 m_next_target = operation("select i1 " + taken + ", i32 " +
-                    target + ", i32 %sequential");
+                    target + ", i32 " + m_pair_sequential);
             }
         }
         if (major == 0x21u || major == 0x25u)
@@ -1885,6 +1913,7 @@ private:
     int32_t m_fsset = -1;
     uint32_t m_current_pc = 0u;
     std::string m_next_target;
+    std::string m_pair_steps, m_pair_npc, m_pair_sequential, m_pair_vi_mask;
     uint32_t m_counter = 0u;
 };
 } // namespace
@@ -1944,6 +1973,10 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     std::set<t_visit> visited;
     std::vector<t_visit> queue;
     std::bitset<2048> reached;
+    std::array<uint32_t, 2048> direct_successors;
+    direct_successors.fill(k_unknown_pc);
+    std::bitset<2048> ambiguous_successors;
+    bool has_indirect = false;
     const uint32_t start = address & 0x3ff8u;
     const auto enqueue = [&](uint32_t pc, uint32_t npc, bool ending)
     {
@@ -1979,6 +2012,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         if (branch)
         {
             const uint32_t major = lo >> 25u;
+            has_indirect |= major == 0x24u || major == 0x25u;
             if (major == 0x28u || major == 0x29u ||
                 (major >= 0x2cu && major <= 0x2fu))
             {
@@ -1998,6 +2032,27 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         {
             has_end = true;
             continue;
+        }
+        // The next executed PC is the incoming delayed NPC, not the
+        // branch target produced by this pair. Only nonterminating states
+        // contribute outgoing edges. Unknown NPCs cannot prove an edge.
+        const auto pair_index = pc >> 3u;
+        if (npc == k_unknown_pc)
+        {
+            ambiguous_successors.set(pair_index);
+        }
+        else if (direct_successors[pair_index] == k_unknown_pc)
+        {
+            direct_successors[pair_index] = npc;
+        }
+        else if (direct_successors[pair_index] != npc)
+        {
+            ambiguous_successors.set(pair_index);
+            // Prefer the ordinary sequential edge when both are possible.
+            if (npc == ((pc + 8u) & 0x3fffu))
+            {
+                direct_successors[pair_index] = npc;
+            }
         }
         const bool next_end = (hi & 0x40000000u) != 0u;
         const uint32_t sequential = npc == k_unknown_pc ?
@@ -2039,8 +2094,13 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             continue;
         }
         const uint32_t pc = index * 8u;
+        const auto direct = direct_successors[index];
+        const bool emitted = direct != k_unknown_pc && reached.test(direct >> 3u);
+        // With no indirect branch the discovery graph conservatively
+        // enumerates every incoming PC/NPC/E state from the entry.
+        const bool proven = emitted && !has_indirect && !ambiguous_successors.test(index);
         if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
-                read_word(code.data() + pc + 4u)))
+                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc, proven))
         {
             return {};
         }
