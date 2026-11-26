@@ -146,3 +146,31 @@ remain unattributed; synchronous timing is not an async critical-path model.
 G1B/G1C remain open. Retain v22 and existing EE/runner unchanged; compare
 new VU1 libraries in isolation. No claim about unprofiled subsystem time
 or async gameplay throughput.
+
+## G2A — direct delayed-PC successor edges
+
+The old dynamic emitter returns to one switch after every pair, including
+ordinary sequential pairs. Retain the original discovery graph, instruction
+emitters, local VF/ACC storage, exact code guard and native ABI. Each emitted
+pair now has a local step-budget check and prelude. The graph enumerates
+(PC, delayed NPC, pending E) states. For nonterminating states, the incoming
+NPC identifies the next executed pair, not the new branch destination.
+An unambiguous successor is direct when no indirect branch is reachable.
+Ambiguous successors and all programs with reachable JR/JALR use a guarded
+edge to one observed successor and the original reached-PC switch otherwise.
+No speculative edges to unvalidated code. Preserve PC/NPC, flag history,
+VI delay, dependency cycles, Q/P retirement and E delay semantics. No
+per-pair profiling added. Straight-line lowering unchanged.
+
+Existing indirect, conditional, wrap and pipeline fixtures exercise fallback
+and guarded edges. Add a direct-only fixture with loop, delayed conditional
+VI, direct return, branch in delay slot and E termination; verify generated
+IR at O0/O3 against interpreter state. Build/CI and retail replay pending.
+
+Use a new matched v23 inventory from the merged captures; retain v22.
+The runner and EE library are not changed. Extend the profiling harness
+with --candidate-vu1 and optional --profile-vu1 (both arms profiled).
+The separate receipt schema ee-graphics-vu1-comparison-v1 reports candidate
+inventory, per-pair wall seconds and descriptive relative throughput.
+Default comparison is unprofiled; alternate arm order and use four repeats.
+No acceptance of speedup is automatic. No cache promotion.
