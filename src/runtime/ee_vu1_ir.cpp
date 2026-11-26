@@ -317,11 +317,9 @@ public:
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
     void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
-        bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask,
-        const std::array<uint32_t, 144>& ready_slots, uint32_t ready_count)
+        bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask)
     {
         m_dynamic = true;
-        m_ready_slots = ready_slots;
         m_dynamic_local_offset = m_ir.size();
         m_branch_vi_mask = branch_vi_mask;
         m_flag_history_mask = flag_history_mask;
@@ -362,12 +360,8 @@ public:
             line("store [16 x i16] zeroinitializer, ptr %previous_vi, align 2");
             line("store i32 0, ptr %previous_vi_mask, align 4");
         }
-        if (ready_count != 0u)
-        {
-            const auto type = "[" + std::to_string(ready_count) + " x i32]";
-            line("%ready = alloca " + type + ", align 4");
-            line("store " + type + " zeroinitializer, ptr %ready, align 4");
-        }
+        line("%ready = alloca [144 x i32], align 4");
+        line("store [144 x i32] zeroinitializer, ptr %ready, align 4");
         line("store i32 " + std::to_string(start) + ", ptr %pc, align 4");
         line("store i32 " + std::to_string((start + 8u) & 0x3fffu) + ", ptr %npc, align 4");
         line("store i32 0, ptr %step_count, align 4");
@@ -440,23 +434,13 @@ public:
         const auto use = s_ee_vu1_dependency::decode(lo, hi);
         const auto old = operation("load i32, ptr %cycle, align 4");
         auto cycle = operation("add i32 " + old + ", 1");
-        std::bitset<144> read_slots;
-        const auto read_ready = [&](uint32_t lane)
-        {
-            const auto slot = m_ready_slots[lane];
-            if (slot != k_unknown_pc && !read_slots.test(slot))
-            {
-                read_slots.set(slot);
-                cycle = max_ready(cycle, slot);
-            }
-        };
         for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
         {
-            read_ready(use.m_read_lanes[index]);
+            cycle = max_ready(cycle, use.m_read_lanes[index]);
         }
         for (uint32_t index = 0u; index < use.m_vi_index_count; ++index)
         {
-            read_ready(128u + use.m_vi_indices[index]);
+            cycle = max_ready(cycle, 128u + use.m_vi_indices[index]);
         }
         line("store i32 " + cycle + ", ptr %cycle, align 4");
         if (m_q_pipeline)
@@ -476,33 +460,18 @@ public:
         {
             return false;
         }
-        std::bitset<144> write_slots;
-        const auto mark_ready = [&](uint32_t lane)
-        {
-            const auto slot = m_ready_slots[lane];
-            if (slot != k_unknown_pc)
-            {
-                write_slots.set(slot);
-            }
-        };
-        for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
-        {
-            mark_ready(use.m_write_lanes[index]);
-        }
-        if (use.m_vi_load != 0u)
-        {
-            mark_ready(128u + use.m_vi_load);
-        }
-        if (write_slots.any())
+        if (use.m_write_lane_count != 0u || use.m_vi_load != 0u)
         {
             const auto ready = operation("add i32 " + cycle + ", 4");
-            for (uint32_t slot = 0u; slot < write_slots.size(); ++slot)
+            for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
             {
-                if (write_slots.test(slot))
-                {
-                    line("store i32 " + ready + ", ptr " +
-                        ready_pointer(slot) + ", align 4");
-                }
+                line("store i32 " + ready + ", ptr " +
+                    ready_pointer(use.m_write_lanes[index]) + ", align 4");
+            }
+            if (use.m_vi_load != 0u)
+            {
+                line("store i32 " + ready + ", ptr " +
+                    ready_pointer(128u + use.m_vi_load) + ", align 4");
             }
         }
         if (m_branch_vi_mask != 0u)
@@ -1950,7 +1919,6 @@ private:
     // Write-through SSA cache: within a dynamic pair or across the proven
     // straight-line path. Lower writes update cache before upper retirement.
     size_t m_dynamic_local_offset = 0u;
-    std::array<uint32_t, 144> m_ready_slots{};
     std::bitset<32> m_dynamic_vf_accessed{}, m_dynamic_vf_written{};
     bool m_dynamic_acc_accessed = false;
     bool m_dynamic_acc_written = false;
@@ -2192,66 +2160,10 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     {
         return {};
     }
-    // All readiness timestamps start at zero. Two lanes have identical
-    // timestamps on every path when they are always retired together
-    // (identical write-PC sets suffice). Include EVERY emitted pair,
-    // not only ordinary sequential states, to cover indirect entry.
-    std::array<std::bitset<2048>, 144> writes{};
-    std::bitset<144> reads;
-    for (uint32_t index = 0u; index < reached.size(); ++index)
-    {
-        if (!reached.test(index))
-        {
-            continue;
-        }
-        const auto use = s_ee_vu1_dependency::decode(
-            read_word(code.data() + index * 8u), read_word(code.data() + index * 8u + 4u));
-        for (uint32_t lane = 0u; lane < use.m_read_lane_count; ++lane)
-        {
-            reads.set(use.m_read_lanes[lane]);
-        }
-        for (uint32_t vi = 0u; vi < use.m_vi_index_count; ++vi)
-        {
-            reads.set(128u + use.m_vi_indices[vi]);
-        }
-        for (uint32_t lane = 0u; lane < use.m_write_lane_count; ++lane)
-        {
-            writes[use.m_write_lanes[lane]].set(index);
-        }
-        if (use.m_vi_load != 0u)
-        {
-            writes[128u + use.m_vi_load].set(index);
-        }
-    }
-    std::array<uint32_t, 144> ready_slots;
-    ready_slots.fill(k_unknown_pc);
-    uint32_t ready_count = 0u;
-    for (uint32_t lane = 0u; lane < ready_slots.size(); ++lane)
-    {
-        // Never-read readiness cannot affect issue. Never-written
-        // readiness remains zero and cannot exceed the issue cycle.
-        if (!reads.test(lane) || writes[lane].none())
-        {
-            continue;
-        }
-        for (uint32_t previous = 0u; previous < lane; ++previous)
-        {
-            if (ready_slots[previous] != k_unknown_pc &&
-                writes[previous] == writes[lane])
-            {
-                ready_slots[lane] = ready_slots[previous];
-                break;
-            }
-        }
-        if (ready_slots[lane] == k_unknown_pc)
-        {
-            ready_slots[lane] = ready_count++;
-        }
-    }
     c_straight_line_emitter emitter;
     // VI0 is constant, and JR/JALR consume live VI values.
     emitter.begin_dynamic(start, reached, has_flags, has_q, has_p,
-        branch_vi_mask & ~1u, flag_history_mask, ready_slots, ready_count);
+        branch_vi_mask & ~1u, flag_history_mask);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))
