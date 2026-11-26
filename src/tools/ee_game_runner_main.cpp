@@ -9422,6 +9422,41 @@ int main(int argc, char** argv)
         }
     }
 
+    // Keep service counters available at a deliberate short replay cap,
+    // even when strict controller completion validation rejects the run.
+    // These are observations, not an assertion of successful playback.
+    if (iop_kernel != nullptr)
+    {
+        const uint64_t batches = iop_coalesce ? iop_clock_runs : iop_clock_turns;
+        std::printf("IOP scheduler totals: dispatches=%llu logical_turns=%llu "
+            "service_batches=%llu kernel_runs=%llu quiet_advances=%llu debt=%llu\n",
+            static_cast<unsigned long long>(dispatched),
+            static_cast<unsigned long long>(iop_clock_turns),
+            static_cast<unsigned long long>(batches),
+            static_cast<unsigned long long>(batches - iop_quiet_advances),
+            static_cast<unsigned long long>(iop_quiet_advances),
+            static_cast<unsigned long long>(iop_clock.due()));
+    }
+    if (iop_fast_quiet)
+    {
+        std::printf("IOP clock quiet: enabled=1 attempts=%llu advanced=%llu "
+            "fallback=%llu cycles=%llu\n",
+            static_cast<unsigned long long>(iop_quiet_attempts),
+            static_cast<unsigned long long>(iop_quiet_advances),
+            static_cast<unsigned long long>(iop_quiet_attempts - iop_quiet_advances),
+            static_cast<unsigned long long>(iop_quiet_cycles));
+    }
+    if (iop_coalesce)
+    {
+        std::printf("IOP clock coalesce: enabled=1 logical_turns=%llu physical_runs=%llu "
+            "saved_turns=%llu combined_batches=%llu debt=%llu\n",
+            static_cast<unsigned long long>(iop_clock_turns),
+            static_cast<unsigned long long>(iop_clock_runs),
+            static_cast<unsigned long long>(iop_clock_turns - iop_clock_runs),
+            static_cast<unsigned long long>(iop_coalesced_batches),
+            static_cast<unsigned long long>(iop_clock.due()));
+    }
+
     if (pad_poll.enabled())
     {
         // A recording must reach its requested dispatch budget. Do not
@@ -10039,25 +10074,6 @@ int main(int argc, char** argv)
         }
     }
 
-    if (iop_fast_quiet)
-    {
-        std::printf("IOP clock quiet: enabled=1 attempts=%llu advanced=%llu "
-            "fallback=%llu cycles=%llu\n",
-            static_cast<unsigned long long>(iop_quiet_attempts),
-            static_cast<unsigned long long>(iop_quiet_advances),
-            static_cast<unsigned long long>(iop_quiet_attempts - iop_quiet_advances),
-            static_cast<unsigned long long>(iop_quiet_cycles));
-    }
-    if (iop_coalesce)
-    {
-        std::printf("IOP clock coalesce: enabled=1 logical_turns=%llu physical_runs=%llu "
-            "saved_turns=%llu combined_batches=%llu debt=%llu\n",
-            static_cast<unsigned long long>(iop_clock_turns),
-            static_cast<unsigned long long>(iop_clock_runs),
-            static_cast<unsigned long long>(iop_clock_turns - iop_clock_runs),
-            static_cast<unsigned long long>(iop_coalesced_batches),
-            static_cast<unsigned long long>(iop_clock.due()));
-    }
     std::printf(
         "EE timing: source=%s current_cycles=%llu scheduler_yields=%llu next_gs_field=%llu fields=%llu\n",
         ee_cycle_source_name(runtime.m_ee_cycle_scheduler.source()),
