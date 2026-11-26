@@ -3880,7 +3880,25 @@ int main(int argc, char** argv)
     uint64_t iop_coalesced_batches = 0u;
     bool guest_rpc_idle_diagnostic_reported = false;
     uint64_t next_iop_guest_rpc_snapshot = 50000u;
-    ee::c_ee_dispatch_hotspots hotspots;
+    std::string hotspots_environment;
+    const char* hotspots_value = read_host_environment(
+        "SDBZ_REPORT_HOTSPOTS", &hotspots_environment);
+    const bool report_hotspots = hotspots_value == nullptr ||
+        std::strcmp(hotspots_value, "0") != 0;
+    ee::c_ee_dispatch_hotspots hotspots(
+        ee::c_ee_dispatch_hotspots::k_pc_capacity,
+        ee::c_ee_dispatch_hotspots::k_edge_capacity, report_hotspots);
+    std::string boundary_timing_environment;
+    const char* boundary_timing_value = read_host_environment(
+        "SDBZ_REPORT_BOUNDARY_TIMING", &boundary_timing_environment);
+    const bool report_boundary_timing = boundary_timing_value == nullptr ||
+        std::strcmp(boundary_timing_value, "0") != 0;
+    if (report_path != nullptr)
+    {
+        std::printf("EE report options: hotspots=%u boundary_timing=%u "
+            "(history and guest checkpoint cadence retained)\n",
+            report_hotspots ? 1u : 0u, report_boundary_timing ? 1u : 0u);
+    }
     ee::c_bounded_diagnostic_history<s_dispatch_sample, k_report_history_limit> history;
     uint32_t status = 0;
     uint32_t reason = cpu.m_exit_reason;
@@ -3927,6 +3945,13 @@ int main(int argc, char** argv)
         "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
     ee::runtime_profile_begin(runtime_profile_value != nullptr &&
         std::strcmp(runtime_profile_value, "1") == 0);
+    if (report_path != nullptr && !report_boundary_timing &&
+        !ee::g_runtime_profile.m_enabled)
+    {
+        std::puts("EE report boundary timing disabled: legacy native_ms/iop_ms "
+            "and slowest_native fields are unavailable (zero unless PC profiling requested)");
+    }
+
     std::string gs_async_environment;
     const char* gs_async_setting = read_host_environment(
         "SDBZ_GS_ASYNC", &gs_async_environment);
@@ -4622,7 +4647,8 @@ int main(int argc, char** argv)
         // Dividing by eight is reference compatibility timing, not an
         // assertion of verified R5900 cycle accuracy.
         ee::c_runtime_profile_scope iop_profile_scope(
-            ee::e_runtime_profile_id::iop_service, 0u, nullptr, report_path != nullptr);
+            ee::e_runtime_profile_id::iop_service, 0u, nullptr,
+            report_path != nullptr && report_boundary_timing);
         if (hle_startup && iop_rom0_path == nullptr &&
             iop_kernel != nullptr)
         {
@@ -5556,7 +5582,7 @@ int main(int argc, char** argv)
             runtime.m_loop_safepoint_remaining = safepoint_budget;
             ee::c_runtime_profile_scope native_profile_scope(
                 ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
-                report_path != nullptr || profile_pcs);
+                (report_path != nullptr && report_boundary_timing) || profile_pcs);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             const auto resolved = slice == 1u && native_resolve != nullptr ?
                 native_targets.resolve(from_pc, [&](uint32_t pc)
@@ -6085,21 +6111,24 @@ int main(int argc, char** argv)
                 before_s2,
                 static_cast<uint32_t>(cpu.m_gpr[18].m_lo)
             });
-            // Host read-only observations, not synthetic guest events.
-            const auto gif_channel = hardware.dmac().gif_channel_state();
-            const ee::s_ee_hot_loop_state state{
-                current_thread_id,
-                cpu.m_cop0[12], cpu.m_cop0[13],
-                hardware.intc().status(), hardware.intc().mask(),
-                hardware.dmac().status(), hardware.dmac().pending(),
-                gif_channel.m_chcr, gif_channel.m_madr,
-                gif_channel.m_qwc, gif_channel.m_tadr,
-                hardware.dmac().gif_trace_count(),
-                static_cast<uint32_t>(hardware.dmac().gif_last_reject()),
-                hardware.scanout().fields_started(), hardware.scanout().csr(),
-                last_iop_rpc_sequence
-            };
-            hotspots.record(dispatched, from_pc, out_pc, state);
+            if (report_hotspots)
+            {
+                // Host read-only observations, not synthetic guest events.
+                const auto gif_channel = hardware.dmac().gif_channel_state();
+                const ee::s_ee_hot_loop_state state{
+                    current_thread_id,
+                    cpu.m_cop0[12], cpu.m_cop0[13],
+                    hardware.intc().status(), hardware.intc().mask(),
+                    hardware.dmac().status(), hardware.dmac().pending(),
+                    gif_channel.m_chcr, gif_channel.m_madr,
+                    gif_channel.m_qwc, gif_channel.m_tadr,
+                    hardware.dmac().gif_trace_count(),
+                    static_cast<uint32_t>(hardware.dmac().gif_last_reject()),
+                    hardware.scanout().fields_started(), hardware.scanout().csr(),
+                    last_iop_rpc_sequence
+                };
+                hotspots.record(dispatched, from_pc, out_pc, state);
+            }
         }
 
         if (report_path != nullptr &&
