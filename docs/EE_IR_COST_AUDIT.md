@@ -1217,3 +1217,41 @@ again. Compare terminal reports and screenshots offline, and compare
 candidate timing directly against the prior image. One run per image
 cannot establish a statistically significant throughput change.
 No native rebuild or cache modifications.
+
+
+### Checkpoint 4e — shared reached-instruction counter replay accepted
+
+ee-counter-comparison-sync.zip: O5 baseline/control, shared observation
+and shared counter all exit 4 at 40M dispatches. Each replay consumes
+2,982/2,982 PAD0 polls, 190,938 matching sampled transitions, zero
+mismatches or unpaired samples. All library hashes unchanged, no error.
+All four terminal JSON SHA-256
+2519c77284829b3abbde064ef8701d747f0bc60789aef7f08f1a2d26e07e78c1
+and GPU PPM SHA-256
+6fe4bd5cb09b443cf239d42c3ca13bb6180c95d724411968d95daaaaba30391c
+match byte-for-byte. 21,025,084,821 EE cycles; 20,801,549,032 attempts;
+20,803,529,723 reference slots; 2,831 scheduler yields; 4,272 fields;
+4,685,750 GPU draws; 3,071 presents; 393,671 native VU1 runs /
+434,435,124 pairs; zero fallbacks; final PC 0x1a0aa8.
+Wall seconds 42.015/42.109/41.860/41.938, candidate +0.19% relative
+to immediate parent and -0.41% relative to O5 control. Within run
+noise; synchronous workload only. The 90.59 MiB candidate is
+accepted for this workload; production remains unchanged.
+
+### Checkpoint 4f — shared quadword slow-path experiment
+
+The original inventory contains 6,947 identical ee_store_quadword
+definitions (20,070 static direct guest calls), with 2,150 named
+copies and 1,056,789 attributed executable span bytes in the Oz mix.
+Share only this helper, retaining the existing store trace guard
+body and exact external memory ABI. Keep FIFO detection, two trace
+calls, and FIFO/split-scalar write ordering. Reconstruct previous
+observation/counter transforms for the affected modules and verify
+their prior transformed IR hashes. Verify all original source and
+parent object hashes; reuse the 9,305 unaffected objects directly.
+Choose a deterministic owner among modules defining the helper.
+The old alwaysinline helper becomes an external noinline definition
+or declaration; this may increase costs at previously inlined
+call sites, so actual size and matched runtime evidence are required.
+Test cross-module FIFO/scalar ordering, data and dependency rejection.
+Do not change normal lowering, cache policy or dispatch metadata.

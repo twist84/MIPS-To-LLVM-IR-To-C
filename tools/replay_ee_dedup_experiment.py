@@ -36,7 +36,7 @@ def validate_libraries(profile, experiment, elf):
         raise ValueError("boot ELF differs from baseline translation provenance")
     if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
         raise ValueError("baseline must have native ALU certificates disabled")
-    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter") or
+    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword") or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
         raise ValueError("experiment and normal translation metadata do not match")
@@ -51,13 +51,15 @@ def validate_libraries(profile, experiment, elf):
 
 
 def validate_prior(experiment, prior, candidate, baseline, hashes):
-    """Verify the immediate shared-observation parent of a counter image."""
+    """Verify the immediate parent of a cumulative helper experiment."""
     current = read_json(experiment / "helper-plan.json")
     parent = read_json(prior / "helper-plan.json")
     library = prior / candidate.name
     digest = sha(library)
-    if (current.get("mode") != "experimental_shared_counter" or
-            parent.get("mode") != "experimental_shared_observation" or
+    parent_modes = {"experimental_shared_counter": "experimental_shared_observation",
+                    "experimental_shared_quadword": "experimental_shared_counter"}
+    if (current.get("mode") not in parent_modes or
+            parent.get("mode") != parent_modes.get(current.get("mode")) or
             not parent.get("runtime_validation_required") or
             parent.get("metadata_sha256") != current.get("metadata_sha256") or
             parent.get("native_target") != current.get("native_target") or
@@ -67,7 +69,7 @@ def validate_prior(experiment, prior, candidate, baseline, hashes):
             parent.get("linked_library_bytes") != library.stat().st_size or
             library.resolve() in (candidate.resolve(), baseline.resolve()) or
             digest in hashes.values()):
-        raise ValueError("prior shared observation image does not match counter provenance")
+        raise ValueError("prior image does not match helper experiment provenance")
     return library, digest
 
 
@@ -194,7 +196,7 @@ def main():
     parser.add_argument("--experiment", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
-                        help="also replay the verified immediate shared-observation parent")
+                        help="also replay the verified immediate helper-experiment parent")
     parser.add_argument("--control", action="store_true",
                         help="Replay the recording on the original DLL before testing dedup")
     parser.add_argument("--sync", action="store_true",
