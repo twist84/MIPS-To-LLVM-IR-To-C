@@ -1097,3 +1097,31 @@ Report exact-body groups and unattributed bytes separately; these are
 not estimates of removable code. Prioritize cold, repeatedly emitted
 helper dependency families after evidence arrives. No runtime changes,
 IR regeneration, relinking or replay required for this read-only audit.
+
+### Checkpoint 4a — measured helper inventory
+
+All 16,252 modules, 115 distinct exact helper bodies. O5 named helper
+spans 17,136,845 of 95,237,244 executable bytes; mixed 8,226,064
+of 88,371,416. Guest named spans increase 78,100,399 to 80,145,352;
+this is attribution, not proof of instruction-level growth. Cold
+publication/observer/trace family: O5 5,458,432, mixed 3,829,399
+named span bytes, 50,722,492 repeated IR body bytes. Each definition
+is identical across the full inventory. Publication alone is still
+16,252 named copies (3,292,279 mixed span bytes). Prioritize this
+family before changing hot counters or quadword paths.
+
+### Checkpoint 4b — isolated shared observation experiment
+
+Retain exact three helper bodies in one deterministic owner module,
+rename the publisher to a shared external definition and replace
+other publishers with an ABI-identical declaration. The two leaf
+helpers remain internal to the owner. Verify all three original body
+hashes, direct dependency closure and symbol uses in every module.
+Keep original guest metadata, per-module O5/Oz policy, counter gates,
+callback ordering and all original cache files. Re-emit into isolated
+objects; receipt records original and transformed IR hashes. This
+experiment intentionally does not apply a per-module size gate because
+all callers must use the same shared definition. The actual link
+and independent replay determine acceptance. Cross-module synthetic
+MCJIT test verifies publication order and rejects changed/escaping
+helpers. No production lowering changes.
