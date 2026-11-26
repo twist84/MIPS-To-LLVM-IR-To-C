@@ -2201,3 +2201,40 @@ per-arm wall times/median throughput without conflating independent
 optimizations. Hash all input libraries, runner and receipts before and
 after. Baseline AOT hashes are current inventory, not independently
 recorded by the old 8d receipt. CI and retail acceptance pending.
+
+#### Graphics sweep retail acceptance
+
+All five CI workflows passed on 8dad590. The matched native VU1
+inventory contains 84 libraries (74 original captures and 10 miss
+captures), all 84 binary hashes changed, target native in both sets.
+Keep baseline and candidate caches separate.
+
+EE candidate receipt SHA-256:
+57073ddf9ea85fcec05e3c685c0087a3a47c4ada5a50d6c81d873d02635d8b0e
+(matches replay input). Replay archive SHA-256:
+9ff45c2c6388bd32a3faf1c3abaf90645e5f1cf8d11ab8e4f530a08823642203.
+EE candidate DLL e1c4db9c199e56ad3e2ee6184d8918434e36c9f86a12ce1167c74f96d5ef871e.
+16,252 functions, 845,746 function-scoped PCs, no ownership/coverage changes.
+Generation 169.078s, scan 53.922s, compile 219.063s, link 48.547s.
+
+All ten runs reached 40M dispatches, 184,700 equal sampled transitions
+per arm, zero mismatches or unpaired, 3,127/3,127 input polls.
+Terminal reports and GS screenshots byte-identical to 8d.
+21,910,026,110 guest attempts, 22,115,080,673 EE cycles,
+4,494 fields, 394,881 native VU1 executions and 445,669,423 native
+pairs, zero interpreter fallbacks; inputs unchanged.
+
+| Arm | Run 1 (s) | Run 2 (s) | Median (s) | Relative throughput |
+| --- | ---: | ---: | ---: | ---: |
+| Control | 44.719 | 42.687 | 43.703 | 1.0000 |
+| EE only | 42.719 | 42.547 | 42.633 | 1.0251 |
+| VU1 only | 42.844 | 43.000 | 42.922 | 1.0182 |
+| Runtime only | 42.781 | 42.703 | 42.742 | 1.0225 |
+| Combined | 42.797 | 42.906 | 42.8515 | 1.0199 |
+
+Correctness accepted for the tested workload. Control variance is
+4.76% relative to its faster run; the combined candidate is 0.38%
+slower in throughput than that faster control. Do not claim a repeatable
+speedup, additive gains or promote native caches on this evidence.
+Next performance gate: matched profiled gameplay to identify host
+exclusive costs, followed by unprofiled interleaved confirmation.
