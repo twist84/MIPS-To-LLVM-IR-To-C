@@ -50,6 +50,69 @@ def validate_libraries(profile, experiment, elf):
     return baseline, candidate, hashes
 
 
+def validate_source_libraries(profile, experiment, elf, receipt_path):
+    """Authenticate a separately regenerated O5 image, not an overlay."""
+    receipt = read_json(receipt_path)
+    translation_path = profile / "translation-cache.json"
+    translation = read_json(translation_path)
+    baseline = profile / "game-translated.dll"
+    candidate = experiment / baseline.name
+    meta = experiment / "ir" / "ee_functions.json"
+    baseline_objects = profile / "objects" / "objects.json"
+    candidate_objects = experiment / "objects" / "objects.json"
+    hashes = {"baseline": sha(baseline), "dedup": sha(candidate)}
+    rows = receipt["modules"]
+    before = {row["module"]: row["before_sha256"] for row in rows}
+    after = {row["module"]: row["after_sha256"] for row in rows}
+    if (receipt.get("schema") != "ee-source-lowering-comparison-v1" or
+            receipt.get("stage") != "linked_o5_candidate" or
+            receipt.get("profile") != 5 or receipt.get("error") or
+            receipt.get("runtime_validation_required") is not True or
+            receipt.get("retail_replay_performed") is not False or
+            receipt["elf_sha256"] != sha(elf) or
+            translation["inputs"]["ELF"] != receipt["elf_sha256"] or
+            translation["inputs"]["native_alu_certificate_mode"] !=
+            hashlib.sha256(b"0").hexdigest() or translation["emit_opt"] != 5 or
+            sha(translation_path) != receipt["baseline_translation_sha256"] or
+            translation["metadata_sha256"] != receipt["baseline_metadata_sha256"] or
+            sha(meta) != receipt["candidate_metadata_sha256"] or
+            sha(baseline_objects) != receipt["baseline_object_manifest_sha256"] or
+            sha(candidate_objects) != receipt["candidate_object_manifest_sha256"] or
+            any(receipt["ownership_changes"].values()) or receipt["guest_pc_changes"] or
+            len(before) != len(rows) or len(rows) != receipt["functions"] or
+            before != translation["ir_hashes"] or after != receipt["candidate_ir_hashes"] or
+            hashes["baseline"] != translation["library_sha256"] or
+            hashes["baseline"] != receipt["baseline_library"]["sha256"] or
+            hashes["dedup"] != receipt["candidate_library"]["sha256"] or
+            baseline.stat().st_size != receipt["baseline_library"]["bytes"] or
+            candidate.stat().st_size != receipt["candidate_library"]["bytes"] or
+            baseline.resolve() == candidate.resolve() or hashes["baseline"] == hashes["dedup"]):
+        raise ValueError("source-lowering replay provenance differs")
+    for manifest_path in (baseline_objects, candidate_objects):
+        manifest = read_json(manifest_path)
+        if (not manifest.get("complete") or manifest.get("optimization_level") != 5 or
+                any(manifest.get(key) != value for key, value in receipt["native_target"].items())):
+            raise ValueError("source-lowering replay native profile differs")
+    return baseline, candidate, hashes
+
+
+def validate_source_reference(prior, profile, candidate, baseline, hashes, expected_sha):
+    """An accepted mixed-profile image is an independent reference arm."""
+    parent = read_json(prior / "helper-plan.json")
+    translation = read_json(profile / "translation-cache.json")
+    library = prior / candidate.name
+    digest = sha(library)
+    if (parent.get("mode") != "experimental_expanded_entry_rotation" or
+            parent.get("metadata_sha256") != translation["metadata_sha256"] or
+            parent.get("native_target") != read_json(profile / "objects" / "objects.json")["native_target"] or
+            parent.get("linked_library_sha256") != digest or
+            parent.get("linked_library_bytes") != library.stat().st_size or
+            digest != expected_sha or digest in hashes.values() or
+            library.resolve() in (baseline.resolve(), candidate.resolve())):
+        raise ValueError("accepted source-lowering reference image differs")
+    return library, digest
+
+
 def validate_prior(experiment, prior, candidate, baseline, hashes):
     """Verify the immediate parent of a cumulative helper experiment."""
     current = read_json(experiment / "helper-plan.json")
@@ -207,6 +270,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
+    parser.add_argument("--source-comparison", type=Path,
+                        help="linked source-lowering comparison receipt instead of overlay plan")
+    parser.add_argument("--reference-sha256",
+                        help="accepted mixed-profile reference DLL SHA-256 for source comparison")
     parser.add_argument("--control", action="store_true",
                         help="Replay the recording on the original DLL before testing dedup")
     parser.add_argument("--sync", action="store_true",
@@ -229,16 +296,28 @@ def main():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
-        baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
-        prior_library = None
-        if prior_dir is not None:
-            prior_library, hashes["prior"] = validate_prior(
-                args.experiment, prior_dir, candidate, baseline, hashes)
+        if args.source_comparison is not None:
+            if prior_dir is None or not args.reference_sha256:
+                raise ValueError("source comparison requires a pinned accepted reference and --control --sync")
+            baseline, candidate, hashes = validate_source_libraries(
+                args.profile, args.experiment, args.elf, args.source_comparison)
+            prior_library, hashes["prior"] = validate_source_reference(
+                prior_dir, args.profile, candidate, baseline, hashes, args.reference_sha256)
+        else:
+            if args.reference_sha256:
+                raise ValueError("--reference-sha256 requires --source-comparison")
+            baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
+            prior_library = None
+            if prior_dir is not None:
+                prior_library, hashes["prior"] = validate_prior(
+                    args.experiment, prior_dir, candidate, baseline, hashes)
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
+        if args.source_comparison is not None:
+            inputs["source_comparison_sha256"] = sha(args.source_comparison)
         card = env.get("SDBZ_MEMCARD")
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
@@ -324,13 +403,18 @@ def main():
             receipt["libraries_unchanged"] = (
                 sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"] and
                 (prior_library is None or sha(prior_library) == hashes["prior"]))
+            if args.source_comparison is not None:
+                receipt["source_comparison_unchanged"] = (
+                    sha(args.source_comparison) == inputs["source_comparison_sha256"])
             if card:
                 receipt["memcard_unchanged"] = sha(Path(card)) == inputs["memcard_sha256"]
             (args.output / "comparison.json").write_text(
                 json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
             archive = shutil.make_archive(str(args.output), "zip", args.output)
             print("Comparison archive:", archive, flush=True)
-        if receipt["error"] or not receipt["libraries_unchanged"] or not receipt.get("memcard_unchanged", True):
+        if (receipt["error"] or not receipt["libraries_unchanged"] or
+                not receipt.get("memcard_unchanged", True) or
+                not receipt.get("source_comparison_unchanged", True)):
             print("Replay requires investigation:", receipt["error"], file=sys.stderr)
             return 1
         return 0

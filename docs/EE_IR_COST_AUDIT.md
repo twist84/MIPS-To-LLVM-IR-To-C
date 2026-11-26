@@ -2054,3 +2054,31 @@ record individual changed-module digests, so legacy resume verifies the
 changed-name set, not exact prior changed bytes; the new receipt records
 all candidate SHA-256 hashes before scanning. Future resumes require
 exact equality. No IR regeneration is necessary for this tooling-only fix.
+
+#### 8b measured O5 source candidate
+
+Resumed receipt SHA-256:
+3dda06ca6a7102117a0a938aa44852aee9263f8bc0ccf8afb65297774e9ab30b.
+All 16,252 module rows reconcile with totals and candidate hashes;
+4,000 identical, 12,252 changed and all changed guest bodies smaller.
+845,746 function-scoped guest PCs, identical block ownership and
+metadata bf39f4727e00e6b213a62eebcde424f45830b8a6f10fc0cc257e2e0132b1826a.
+IR bytes 992,143,733 -> 985,381,776; all LLVM instructions
+18,133,304 -> 17,913,586; guest instructions 15,337,469 ->
+15,117,751 (219,718 eliminated, 1.43%). Guest blocks 2,321,072 ->
+2,321,060. Both arms have 81 lexical block-count disagreements,
+155 missing lexical blocks and no aggregate instruction disagreement.
+Shifts account for 126,931 and register arithmetic 89,019 eliminated
+lexically attributed instructions. Object executable bytes 95,237,244
+-> 95,235,030, total object bytes 152,560,310 -> 152,559,446.
+O5 DLL 111,471,104 -> 111,469,056 bytes; candidate SHA-256
+c21855b89b3674cb797591dfd08a5f93e04f630625175df51775413513bc5111.
+Generation 164.969s, verified scan 830.094s, compilation 208.422s,
+link 46.875s; no matched baseline wall-time claim. Source optimization
+mainly removes work LLVM already eliminates; do not promote the larger
+unoutlined O5 image over the accepted 72,132,096-byte mixed DLL.
+All five CI workflows passed on 331e3f7. Retail gate remains open.
+Extend the synchronous replay harness with source receipt validation
+and a separately pinned accepted mixed-profile reference arm; compare
+original O5, A/A control, accepted entry rotation and new source O5
+without regenerating IR or modifying either accepted cache.

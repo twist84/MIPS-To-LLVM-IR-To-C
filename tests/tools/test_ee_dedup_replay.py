@@ -5,7 +5,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, validate_prior, trace_comparison, terminal_budget
+from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, validate_prior, validate_source_libraries, validate_source_reference, trace_comparison, terminal_budget
 
 
 def run():
@@ -102,6 +102,71 @@ def run():
                 pass
             else:
                 raise AssertionError("invalid prior provenance accepted: " + key)
+        # Source comparison has a different IR generation, but the same
+        # guest ownership and exact authenticated original/accepted images.
+        source = root / "source"
+        (source / "ir").mkdir(parents=True)
+        (source / "objects").mkdir()
+        (profile / "objects").mkdir()
+        original = profile / "game-translated.dll"
+        regenerated = source / original.name
+        accepted = prior / original.name
+        original.write_bytes(b"original O5")
+        regenerated.write_bytes(b"new O5")
+        accepted.write_bytes(b"accepted mixed")
+        (source / "ir" / "ee_functions.json").write_text("{}")
+        metadata = sha(source / "ir" / "ee_functions.json")
+        native = {"native_target": target, "target_triple": "fixture",
+                  "llvm_version": "fixture", "ir_pipeline": "fixture"}
+        for folder in (profile, source):
+            (folder / "objects" / "objects.json").write_text(json.dumps(
+                dict(native, complete=True, optimization_level=5)))
+        translation_path = profile / "translation-cache.json"
+        translation_path.write_text(json.dumps({
+            "inputs": {"ELF": sha(elf), "native_alu_certificate_mode":
+                       hashlib.sha256(b"0").hexdigest()},
+            "emit_opt": 5, "metadata_sha256": metadata,
+            "library_sha256": sha(original), "ir_hashes": {"a.ll": "old"}}))
+        receipt_path = root / "source.json"
+        receipt = {
+            "schema": "ee-source-lowering-comparison-v1",
+            "stage": "linked_o5_candidate", "profile": 5,
+            "runtime_validation_required": True, "retail_replay_performed": False,
+            "elf_sha256": sha(elf), "baseline_translation_sha256": sha(translation_path),
+            "baseline_metadata_sha256": metadata, "candidate_metadata_sha256": metadata,
+            "baseline_object_manifest_sha256": sha(profile / "objects" / "objects.json"),
+            "candidate_object_manifest_sha256": sha(source / "objects" / "objects.json"),
+            "ownership_changes": {"missing": [], "extra": [], "changed": []},
+            "guest_pc_changes": [], "functions": 1, "native_target": native,
+            "modules": [{"module": "a.ll", "before_sha256": "old", "after_sha256": "new"}],
+            "candidate_ir_hashes": {"a.ll": "new"},
+            "baseline_library": {"sha256": sha(original), "bytes": original.stat().st_size},
+            "candidate_library": {"sha256": sha(regenerated), "bytes": regenerated.stat().st_size},
+        }
+        receipt_path.write_text(json.dumps(receipt))
+        b, c, h = validate_source_libraries(profile, source, elf, receipt_path)
+        assert (b, c) == (original, regenerated)
+        (prior / "helper-plan.json").write_text(json.dumps({
+            "mode": "experimental_expanded_entry_rotation", "metadata_sha256": metadata,
+            "native_target": target, "linked_library_sha256": sha(accepted),
+            "linked_library_bytes": accepted.stat().st_size}))
+        assert validate_source_reference(prior, profile, c, b, h, sha(accepted))[0] == accepted
+        for key, value in (("guest_pc_changes", ["a.ll"]),
+                           ("candidate_ir_hashes", {"a.ll": "wrong"}),
+                           ("candidate_object_manifest_sha256", "wrong")):
+            receipt_path.write_text(json.dumps(dict(receipt, **{key: value})))
+            try:
+                validate_source_libraries(profile, source, elf, receipt_path)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid source receipt accepted: " + key)
+        try:
+            validate_source_reference(prior, profile, c, b, h, "wrong")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unpinned reference accepted")
     print("PASS: dedup replay validates identities and input recording")
 
 
