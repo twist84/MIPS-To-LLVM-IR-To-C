@@ -75,7 +75,33 @@ def test_graphics_profile(root):
                 "subsystems": {"vu1_compiled": row}}
     log = root / "profile.log"
     log.write_text("EE profile interval: " + json.dumps(interval) + "\n")
-    assert extract_profile(report, log, True)["vu1_programs"] == [program]
+    extracted = extract_profile(report, log, True)
+    assert extracted["vu1_programs"] == [program]
+    assert "vu0_sync" in extracted["unattributed"]
+    # Old receipts remain readable. New scopes must arrive as a complete
+    # inventory and must also be present in every interval.
+    with_vu0 = deepcopy(report)
+    with_vu0_interval = deepcopy(interval)
+    vu0_scopes = ("vu0_sync_halted", "vu0_sync_cmsar1",
+                  "vu0_sync_micro", "vu0_sync_invalid")
+    zero = dict(calls=0, inclusive_ns=0, exclusive_ns=0, work=0)
+    for name in vu0_scopes:
+        with_vu0["runtime_profile"]["subsystems"][name] = dict(zero)
+        with_vu0_interval["subsystems"][name] = dict(zero)
+    log.write_text("EE profile interval: " + json.dumps(with_vu0_interval) + "\n")
+    extracted = extract_profile(with_vu0, log, True)
+    assert "vu0_sync" not in extracted["unattributed"]
+    assert "vu0_sync_noncallback" in extracted["unattributed"]
+    del with_vu0["runtime_profile"]["subsystems"]["vu0_sync_invalid"]
+    del with_vu0_interval["subsystems"]["vu0_sync_invalid"]
+    log.write_text("EE profile interval: " + json.dumps(with_vu0_interval) + "\n")
+    try:
+        extract_profile(with_vu0, log, True)
+    except ValueError as error:
+        assert "incomplete VU0 callback scope inventory" in str(error)
+    else:
+        raise AssertionError("partial VU0 inventory accepted")
+    log.write_text("EE profile interval: " + json.dumps(interval) + "\n")
     control = deepcopy(report)
     control["runtime_profile"] = {"schema": "ee-runtime-profile-v1", "enabled": False}
     control["vu1_aot"]["program_profiles"][0]["compiled_exclusive_ns"] = 0
