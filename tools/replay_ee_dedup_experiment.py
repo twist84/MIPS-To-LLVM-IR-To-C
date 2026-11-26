@@ -21,13 +21,18 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def validate_libraries(profile, experiment):
+def validate_libraries(profile, experiment, elf):
     name = ("game-translated.dll" if os.name == "nt" else
             "libgame-translated.dylib" if sys.platform == "darwin" else
             "libgame-translated.so")
     baseline, candidate = profile / name, experiment / name
     translation = read_json(profile / "translation-cache.json")
     plan = read_json(experiment / "dedup-plan.json")
+    inputs = translation.get("inputs", {})
+    if inputs.get("ELF") != sha(elf):
+        raise ValueError("boot ELF differs from baseline translation provenance")
+    if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
+        raise ValueError("baseline must have native ALU certificates disabled")
     if (plan.get("mode") != "experimental_owner_coalescing" or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
@@ -146,7 +151,7 @@ def main():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
-        baseline, candidate, hashes = validate_libraries(args.profile, args.experiment)
+        baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
         env = replay_environment(Path(__file__).resolve().parents[1])
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}

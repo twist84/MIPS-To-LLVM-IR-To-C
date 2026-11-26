@@ -34,18 +34,30 @@ def run():
                         "libgame-translated.dylib" if sys.platform == "darwin" else
                         "libgame-translated.so")
         baseline, candidate = profile / library_name, experiment / library_name
+        import hashlib
+        elf = root / "guest.elf"
+        elf.write_bytes(b"guest ELF")
         baseline.write_bytes(b"normal")
         candidate.write_bytes(b"dedup")
         (profile / "translation-cache.json").write_text(json.dumps({
-            "metadata_sha256": "same", "library_sha256": sha(baseline)}))
+            "metadata_sha256": "same", "library_sha256": sha(baseline),
+            "inputs": {"ELF": sha(elf), "native_alu_certificate_mode": hashlib.sha256(b"0").hexdigest()}}))
         (experiment / "dedup-plan.json").write_text(json.dumps({
             "mode": "experimental_owner_coalescing", "runtime_validation_required": True,
             "metadata_sha256": "same", "linked_library_sha256": sha(candidate),
             "linked_library_bytes": candidate.stat().st_size}))
-        assert validate_libraries(profile, experiment)[:2] == (baseline, candidate)
+        assert validate_libraries(profile, experiment, elf)[:2] == (baseline, candidate)
+        elf.write_bytes(b"wrong ELF")
+        try:
+            validate_libraries(profile, experiment, elf)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("wrong guest accepted")
+        elf.write_bytes(b"guest ELF")
         candidate.write_bytes(b"stale")
         try:
-            validate_libraries(profile, experiment)
+            validate_libraries(profile, experiment, elf)
         except ValueError:
             pass
         else:
