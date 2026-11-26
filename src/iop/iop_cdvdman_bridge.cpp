@@ -1,11 +1,11 @@
 #include "iop_cdvdman_bridge.h"
+#include "iop_cdvd_rtc.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <ctime>
 #include <utility>
 #include <vector>
 
@@ -42,10 +42,6 @@ void put32(uint8_t* bytes, uint32_t value)
     }
 }
 
-uint8_t decimal_to_bcd(uint32_t value)
-{
-    return static_cast<uint8_t>(((value / 10u) << 4u) | (value % 10u));
-}
 } // namespace
 
 c_cdvdman_bridge::c_cdvdman_bridge(
@@ -169,37 +165,11 @@ bool c_cdvdman_bridge::handle_read_clock(uint32_t destination)
         return false;
     }
 
-    // sceCdReadClock returns the eight-byte CDVD RTC layout in BCD.
-    // The reference reports Japan Standard Time (UTC+9); deriving the
-    // calendar after applying the offset also handles date rollover.
-    constexpr std::time_t k_jst_offset = 9 * 60 * 60;
-    const std::time_t now = std::time(nullptr);
-    if (now == static_cast<std::time_t>(-1))
+    t_cdvd_rtc rtc{};
+    if (!read_cdvd_rtc(rtc))
     {
         return false;
     }
-    const std::time_t in_japan = now + k_jst_offset;
-    std::tm calendar{};
-#if defined(_WIN32)
-    if (::gmtime_s(&calendar, &in_japan) != 0)
-#else
-    if (::gmtime_r(&in_japan, &calendar) == nullptr)
-#endif
-    {
-        return false;
-    }
-    const uint32_t year = static_cast<uint32_t>(
-        (calendar.tm_year + 1900) % 100);
-    const std::array<uint8_t, 8u> rtc = {
-        0u,
-        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_sec)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_min)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_hour)),
-        0u,
-        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_mday)),
-        decimal_to_bcd(static_cast<uint32_t>(calendar.tm_mon + 1)),
-        decimal_to_bcd(year)
-    };
     for (uint32_t i = 0u; i < rtc.size(); ++i)
     {
         if (!m_kernel.cpu().write8(destination + i, rtc[i]))
