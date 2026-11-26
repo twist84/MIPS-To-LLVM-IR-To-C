@@ -1,5 +1,7 @@
 #include "iop_hw.h"
 #include "iop_kernel.h"
+#include "iop_pad_poll_replay.h"
+#include <sstream>
 #include "iop_memory_card.h"
 
 #include <array>
@@ -25,6 +27,76 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
         data[at + index] =
             static_cast<uint8_t>(value >> (8u * index));
     }
+}
+
+bool test_pad_poll_stream()
+{
+    // Sequence spans guest resets; the poll number may restart.
+    constexpr const char* trace =
+        "PAD0 input: 1 1 121 21 21 16384 1 2 3 4\n"
+        "PAD0 input: 2 2 121 21 21 32 5 6 7 8\n"
+        "PAD0 input: 3 1 65 5 5 0 128 128 128 128\n"
+        "PAD0 input summary: record 3\n";
+    iop::c_pad_poll_replay replay;
+    std::istringstream input(trace);
+    if (!replay.load(input) || replay.total() != 3u ||
+        replay.consumed() != 0u || replay.finished())
+    {
+        return false;
+    }
+    iop::c_hw::s_pad0_poll sample{};
+    sample.m_poll = 1u;
+    sample.m_mode = 121u;
+    sample.m_input_size = 21u;
+    sample.m_output_size = 21u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        sample.m_buttons != 16384u || sample.m_axes[0u] != 1u ||
+        sample.m_axes[1u] != 2u || sample.m_axes[2u] != 3u ||
+        sample.m_axes[3u] != 4u)
+    {
+        return false;
+    }
+    sample.m_poll = 2u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        sample.m_buttons != 32u || sample.m_axes[3u] != 8u)
+    {
+        return false;
+    }
+    sample.m_poll = 1u;
+    sample.m_mode = 65u;
+    sample.m_input_size = 5u;
+    sample.m_output_size = 5u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        !replay.finished() || sample.m_buttons != 0u ||
+        sample.m_axes[0u] != 128u)
+    {
+        return false;
+    }
+    const char* invalid[] = {
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\n",
+        "PAD0 input: 2 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 1\n",
+        "PAD0 input: 1 1 65 5 5 0 128 256 128 128\nPAD0 input summary: record 1\n",
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 2\n",
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 1\nPAD0 input summary: record 1\n",
+    };
+    for (const char* text : invalid)
+    {
+        iop::c_pad_poll_replay rejected;
+        std::istringstream stream(text);
+        if (rejected.load(stream) || rejected.enabled())
+        {
+            return false;
+        }
+    }
+    iop::c_pad_poll_replay mismatch;
+    std::istringstream second(trace);
+    if (!mismatch.load(second) ||
+        iop::c_pad_poll_replay::poll(&mismatch, sample) ||
+        !mismatch.failed() || mismatch.consumed() != 0u)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool test_timer5_free_running_clock()
@@ -2844,6 +2916,63 @@ bool test_guest_sio2_controller()
         return false;
     }
 
+    // A replay sample overrides host input only when an actual connected
+    // port-0 poll is decoded. Its raw active-high bits become wire bytes.
+    {
+        iop::c_kernel replay_kernel;
+        if (!replay_kernel.attach_hle_hardware())
+        {
+            return false;
+        }
+        auto& hw = replay_kernel.hardware();
+        iop::c_pad_poll_replay replay;
+        std::istringstream samples(
+            "unrelated log line\n"
+            "PAD0 input: 1 1 65 5 5 2080 11 22 33 44\n"
+            "PAD0 input summary: record 1\n");
+        if (!replay.load(samples) || replay.finished())
+        {
+            return false;
+        }
+        hw.bind_pad0_poll(&replay, iop::c_pad_poll_replay::poll);
+        hw.set_sio2_pad0_input(0xffffu, 255u, 255u, 255u, 255u);
+        if (replay.consumed() != 0u ||
+            !hw.write(ctrl, 4u, 0x0cu) ||
+            !hw.write(send3, 4u, (5u << 8u) | (5u << 18u)))
+        {
+            return false;
+        }
+        for (const uint8_t byte : poll)
+        {
+            if (!hw.write(tx, 1u, byte))
+            {
+                return false;
+            }
+        }
+        for (uint32_t index = 0u; index < 5u; ++index)
+        {
+            const uint32_t expected = index == 3u ? 0xdfu :
+                (index == 4u ? 0xf7u : neutral_reply[index]);
+            if (!hw.read(rx, 1u, &status) || status != expected)
+            {
+                return false;
+            }
+        }
+        if (!replay.finished() || replay.consumed() != 1u ||
+            !hw.write(ctrl, 4u, 0x03bdu) ||
+            hw.sio2_completed_transfers() != 1u)
+        {
+            return false;
+        }
+        // No silently substituted neutral input when the stream ends.
+        iop::c_hw::s_pad0_poll extra{};
+        if (iop::c_pad_poll_replay::poll(&replay, extra) ||
+            !replay.failed() || replay.finished())
+        {
+            return false;
+        }
+    }
+
     // A deliberate host Cross press is delivered ONLY in genuine
     // connected port-0 SIO2 0x42 reply bytes, for a bounded number of
     // guest pad polls. No new packet/IRQ is created by configuration,
@@ -3075,6 +3204,10 @@ int main()
     if (!test_spu2_adpcm_voice_progression())
     {
         return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
+    if (!test_pad_poll_stream())
+    {
+        return fail("pad poll stream validation and replay");
     }
     if (!test_timer5_free_running_clock())
     {
