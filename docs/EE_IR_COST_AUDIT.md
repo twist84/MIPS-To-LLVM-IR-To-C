@@ -634,3 +634,93 @@ It is diagnostic-only, published after a child execution, and
 not consumed by the dispatcher or compiler. The audit loads it
 automatically when using the corresponding object manifest. Use
 --log for earlier archives whose events predate this ledger.
+
+
+## Checkpoint 1 — full retail ownership baseline
+
+User-supplied ee-ownership-audit.json, 16,252 modules, all with
+guest entry switches. All five CI workflows passed bb13b46.
+No retail replay was needed. Exact local Git HEAD and object
+hashes were not embedded in the audit; size and inventory
+measurements describe the supplied cache, not an independently
+authenticated revision.
+
+| Metric | Value |
+|---|---:|
+| ELF file bytes | 4,196,528 |
+| File-backed executable ELF segment bytes | 4,195,968 |
+| Aggregate IR bytes | 992,143,733 |
+| Native object file bytes | 152,560,310 |
+| Native object executable section bytes | 95,237,244 |
+| Linked DLL bytes | 111,471,104 |
+| Linked executable raw bytes | 101,812,736 |
+| Unique observed guest PCs | 780,826 |
+| Module-scoped guest PCs | 845,746 |
+| Excess PC copies | 64,920 (7.676%) |
+| Unique guest block starts | 160,826 |
+| Module-scoped block starts | 176,718 |
+| Excess block copies | 15,892 (8.993%) |
+| Multiply emitted block starts | 3,549 |
+| Overlapping modules | 662 |
+| Strictly contained modules | 13 |
+| Partially overlapping modules | 661 |
+| Shared terminal candidates | 1,348 |
+| Multi-block shared-tail pair regions | 2,567 |
+
+Literal accounting calls recover 137,842 unique guest PCs absent
+from instruction comments. Within-module excess annotations: 44,934.
+Native object executable bytes per unique guest instruction: 121.97.
+
+Modules with any cross-module overlap account for 9,067,049 executable
+object bytes (9.52%), including their nonshared code, helpers and
+overhead. Nonoverlapping modules account for 86,170,195 bytes (90.48%).
+Even eliminating all code in overlapping modules (not a feasible
+or safe transformation) cannot address the bulk of this object
+executable footprint. No linked-DLL byte saving is established.
+The 13 strictly contained modules account for 934,392 executable
+object bytes; containment alone does not authorize their removal.
+
+Static entries: 15,601. Nonexclusive source counts: ELF entry 1,
+direct call 7,862, address-taken heuristic 8,066, static indirect
+call 122. No STT_FUNC evidence in the report. 651 nonstatic entries
+lack historical runtime-source evidence; 430 (66.05%) overlap.
+Only 65 of 7,621 heuristic-only modules overlap (0.85%).
+27 nonstatic entries are covered by earlier inventory modules;
+the report cannot prove historical miss origin or time of coverage.
+Nonstatic overlapping modules total 6,563,598 executable bytes.
+
+Largest candidate: 0x193ac8 / 0x193ad0 share a 366-block,
+1,305-PC closed tail candidate. PC 0x1938b8 appears in 25 modules.
+The eight entries from 0x193ac8 through 0x193b78 inclusive total
+947,128 executable object bytes. 0x299da0 / 0x29a728 also overlap
+heavily. Largest individual module 0x369520 has 5,323 guest PCs,
+857 blocks and 600,125 executable object bytes, zero overlap.
+
+### Checkpoint 2 decision
+
+For actual deduplication, prioritize targeted recognition of existing
+internal entry points in the nonstatic expansion inventory, starting
+with the 0x193xxx cluster and using shared-tail evidence to find
+candidate owners. Prove legal resume entry, exact guest block and
+delay-slot semantics, state publication, loop safepoints, exception
+and interrupt behavior, and dispatcher ownership before aliasing
+anything. Do not infer equivalence from PC sets. Where an entry is
+not a legal existing resume block, investigate a shared-tail strategy
+separately rather than silently dropping or redirecting it.
+
+First implementation should be shadow-only candidate/certificate
+generation with directed synthetic equivalence tests, followed by
+opt-in routing only for proven existing block entries. No broad
+heuristic pruning or global canonical-block redesign. Keep guest
+code and dispatcher behavior unchanged until the next implementation
+is explicitly undertaken and validated. A routing change requires
+retail correctness replay before default activation.
+
+For the larger binary-size objective, prioritize lowering/code
+expansion reduction independently: nonoverlapping modules comprise
+90.48% of executable object bytes; the largest module has zero
+overlap. Audit cold paths, repeated helper definitions and per-entry
+prologue/dispatch overhead; 10,647 modules with at most 32 guest
+PCs account for 22,074,416 executable object bytes. Preserve accuracy
+and measure size/throughput at unchanged inventory and optimization
+profile. No blanket optimization profile change or size claim.
