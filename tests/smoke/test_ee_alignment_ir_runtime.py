@@ -521,6 +521,26 @@ def main():
         require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
                 WRITES[0][0:2] == (16, 0x10005000), "quad fastmem split FIFO")
 
+        # Constant propagation must retain the instruction accounting and
+        # prior GPR publication, but omit the provably aligned fault arm.
+        result, cpu, original = execute(fixture, directory, target,
+                                         "ee_constant_address", 0)
+        expected = int.from_bytes(bytes(original[i] for i in range(0x40, 0x44)),
+                                  "little", signed=True) % (1 << 64)
+        require(result == EE_EXIT_DISPATCH and READS == [(4, 0x40)] and
+                cpu.gpr[9].lo == 0x40 and cpu.gpr[8].lo == expected,
+                "constant address folding changed architectural state")
+        ir = (pathlib.Path(directory) / "ee_constant_address.ll").read_text(
+            encoding="utf-8")
+        require("memory_alignment_fault_" not in ir and
+                "call i32 @ee_mem_read32(ptr %rt, i32 64)" in ir,
+                "constant aligned access still emits dynamic address/exception")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_constant_misaligned", 0)
+        require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == 0x41 and
+                cpu.gpr[9].lo == 0x40 and not READS and not WRITES,
+                "constant misaligned access lost precise exception")
+
         # The positive scalar word path remains operational.
         result, cpu, original = execute(
             fixture, directory, target, "ee_lw", 0x40)

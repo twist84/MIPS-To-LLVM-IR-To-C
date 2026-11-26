@@ -78,6 +78,20 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
                      make_jr(31u), 0u, make_jr(31u), 0u};
             return true;
         }
+        if (operation == "constant_address" || operation == "constant_misaligned")
+        {
+            // LUI sign extends; ORI, XORI, ANDI and the signed immediate
+            // additions reduce the effective address to a known low word.
+            const uint32_t lui = (0x0fu << 26u) | (9u << 16u) | 0xffffu;
+            const uint32_t ori = (0x0du << 26u) | (9u << 21u) | (9u << 16u) | 0xfffcu;
+            const uint32_t daddiu = (0x19u << 26u) | (9u << 21u) | (9u << 16u) | 0x48u;
+            const uint32_t xori = (0x0eu << 26u) | (9u << 21u) | (9u << 16u) | 0x04u;
+            const uint32_t andi = (0x0cu << 26u) | (9u << 21u) | (9u << 16u) | 0xffffu;
+            const uint32_t lw = (0x23u << 26u) | (9u << 21u) | (8u << 16u) |
+                (operation == "constant_misaligned" ? 1u : 0u);
+            words = {lui, ori, daddiu, xori, andi, lw};
+            return true;
+        }
         if (operation == "lw_wrap_positive" || operation == "sw_wrap_negative" ||
             operation == "lw_absolute")
         {

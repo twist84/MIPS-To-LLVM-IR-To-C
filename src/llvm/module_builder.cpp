@@ -10,6 +10,7 @@
 #include <cassert>
 #include "ee_opcode.h"
 #include <cctype>
+#include <charconv>
 #include <cstdio>
 #include <cstring>
 #include <set>
@@ -26,6 +27,22 @@ std::string u32hex(uint32_t v)
     char buf[16];
     std::snprintf(buf, sizeof(buf), "0x%x", v);
     return buf;
+}
+
+// Only emitter-owned decimal literals qualify. SSA names and backing
+// loads are never treated as compile-time values.
+bool read_constant_u64(const std::string& operand, uint64_t& value)
+{
+    const auto result = std::from_chars(operand.data(),
+        operand.data() + operand.size(), value, 10);
+    return result.ec == std::errc{} &&
+        result.ptr == operand.data() + operand.size();
+}
+
+uint64_t sign_extend_word(uint64_t value)
+{
+    const uint64_t low = value & 0xffffffffull;
+    return (low & 0x80000000ull) != 0u ? low | 0xffffffff00000000ull : low;
 }
 
 std::string reg_lo(uint8_t r)  { char b[16]; std::snprintf(b, sizeof(b), "%%g%d_lo", r); return b; }
@@ -546,6 +563,12 @@ std::string module_builder::emit_effective_address(const ee::s_ee_instruction& i
         return std::to_string(static_cast<uint32_t>(ins.immediate));
     }
     const std::string base = src_lo(ins.rs);
+    uint64_t constant = 0u;
+    if (read_constant_u64(base, constant))
+    {
+        return std::to_string(static_cast<uint32_t>(constant) +
+                              static_cast<uint32_t>(ins.immediate));
+    }
     const std::string low = newtemp();
     m_out += "  " + low + " = trunc i64 " + base + " to i32\n";
     if (ins.immediate == 0)
@@ -1423,6 +1446,17 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     const auto guard_memory_alignment =
         [&](const std::string& address, uint32_t width, uint32_t excode)
     {
+        uint64_t constant = 0u;
+        if (read_constant_u64(address, constant) &&
+            (constant & (width - 1u)) == 0u)
+        {
+            // Preserve the existing publication boundary for memory callbacks.
+            // A proven aligned address cannot enter the exception arm.
+            std::set<uint8_t> dirty(m_dirty_lo.begin(), m_dirty_lo.end());
+            store_dirty_regs(dirty);
+            reset_tracking();
+            return;
+        }
         const std::string bits = newtemp();
         const std::string misaligned = newtemp();
         const std::string suffix = std::to_string(m_temp_counter++);
@@ -1511,59 +1545,91 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // 32-bit add, result sign-extended into low 64; upper 64 preserved.
         // PCSX2: UD[0] = (s64)(s32)(UL[0] + Imm)
+        const std::string source = src_lo(ins.rs);
+        uint64_t constant = 0u;
+        if (read_constant_u64(source, constant))
+        {
+            set_gpr_lo64(ins.rt, std::to_string(sign_extend_word(constant + static_cast<uint64_t>(ins.immediate))));
+            break;
+        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        m_out += "  " + d + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
+        m_out += "  " + d + " = add i64 " + source + ", " + imm + "\n";
         set_gpr_lo32_sext(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_DADDIU:
     {
         // Full 64-bit add; upper 64 preserved.
+        const std::string source = src_lo(ins.rs);
+        uint64_t constant = 0u;
+        if (read_constant_u64(source, constant))
+        {
+            set_gpr_lo64(ins.rt, std::to_string(constant + static_cast<uint64_t>(ins.immediate)));
+            break;
+        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        m_out += "  " + d + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
+        m_out += "  " + d + " = add i64 " + source + ", " + imm + "\n";
         set_gpr_lo64(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_ORI:
     {
         // Zero-extend 16-bit imm, OR into full 64; upper 64 preserved.
+        const std::string source = src_lo(ins.rs);
+        uint64_t constant = 0u;
+        if (read_constant_u64(source, constant))
+        {
+            set_gpr_lo64(ins.rt, std::to_string(constant | static_cast<uint64_t>(ins.uimmediate)));
+            break;
+        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
-        m_out += "  " + d + " = or i64 " + src_lo(ins.rs) + ", " + imm + "\n";
+        m_out += "  " + d + " = or i64 " + source + ", " + imm + "\n";
         set_gpr_lo64(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_ANDI:
     {
+        const std::string source = src_lo(ins.rs);
+        uint64_t constant = 0u;
+        if (read_constant_u64(source, constant))
+        {
+            set_gpr_lo64(ins.rt, std::to_string(constant & static_cast<uint64_t>(ins.uimmediate)));
+            break;
+        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
-        m_out += "  " + d + " = and i64 " + src_lo(ins.rs) + ", " + imm + "\n";
+        m_out += "  " + d + " = and i64 " + source + ", " + imm + "\n";
         set_gpr_lo64(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_XORI:
     {
+        const std::string source = src_lo(ins.rs);
+        uint64_t constant = 0u;
+        if (read_constant_u64(source, constant))
+        {
+            set_gpr_lo64(ins.rt, std::to_string(constant ^ static_cast<uint64_t>(ins.uimmediate)));
+            break;
+        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
-        m_out += "  " + d + " = xor i64 " + src_lo(ins.rs) + ", " + imm + "\n";
+        m_out += "  " + d + " = xor i64 " + source + ", " + imm + "\n";
         set_gpr_lo64(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_LUI:
     {
         // LUI writes a 32-bit constant << 16, sign-extended into low 64.
-        std::string d = newtemp();
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
-        m_out += "  " + d + " = shl i64 " + imm + ", 16\n";
-        set_gpr_lo32_sext(ins.rt, d);
+        set_gpr_lo64(ins.rt, std::to_string(
+            sign_extend_word(static_cast<uint64_t>(ins.uimmediate) << 16u)));
         break;
     }
     case ee::e_ee_opcode::OP_LB:
