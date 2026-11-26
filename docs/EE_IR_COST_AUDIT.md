@@ -1353,7 +1353,7 @@ bytes versus the immediate parent and 20,975,616 bytes (18.82%)
 versus original O5. Linked executable raw bytes 86,354,432 ->
 85,526,528. DLL SHA-256
 5442d6c4ab264c125bc1132209ac347424f57f1b9c28dbf89a0680b51f605593.
-Retail runtime remains unvalidated.
+Retail runtime subsequently accepted in checkpoint 4i.
 
 ### Checkpoint 4i — matched incremental multiplication comparison
 
@@ -1366,3 +1366,32 @@ The shared multiplication roots use the original aggregate/scalar
 ABI but changed inlining/linkage. A successful native link alone
 does not prove cross-module execution equivalence. Production
 lowering and cache policy remain unchanged.
+
+### Checkpoint 4i — shared COP1 multiplication replay accepted
+
+ee-cop1-mul-comparison-sync.zip: all four arms stop at 40M dispatches
+with exit 4. All three replays consume 2,887/2,887 PAD0 polls;
+193,289 common sampled transitions each, zero differences or unpaired
+samples. No replay error; library hashes unchanged and parent/candidate
+hashes match checkpoints 4f/4h. Terminal JSON SHA-256
+aac20dad151a2b340aff000c78d4b2318849515dcc315116021de155752feb8d
+and GPU PPM SHA-256
+f445bbffb38171c0497539b48bf7f4daa74518440baced07b7c623423a29adcf
+are byte-identical across all four arms. EE cycles 20,388,302,085;
+attempts 20,149,002,811; reference slots 20,150,984,826; scheduler
+yields 2,738; fields 4,143; GPU draws 4,880,260; presents 2,966;
+VU1 native runs 412,371 / 460,273,899 pairs, zero interpreter
+fallbacks; no IOP guest fault or timing observer failure. Wall seconds
+44.282/43.641/43.687/43.406; candidate -0.64% versus immediate
+parent and -0.54% versus O5 control, within measurement noise.
+All five CI workflows passed on 8a8159d. The 90,495,488-byte
+(86.30 MiB) candidate is accepted for this synchronous workload.
+Production lowering and cache policy remain unchanged.
+
+Use exact bytes and identify the comparison metric: original O5 DLL
+111,471,104; immediate quadword parent DLL 91,351,040; candidate DLL
+90,495,488. Incremental DLL saving 855,552 bytes (0.94% of parent),
+cumulative saving 20,975,616 bytes (18.82% of O5). The 827,591-byte
+executable-object saving and 799,502-byte original mixed named helper
+span are different metrics; the latter is not a current marginal
+saving prediction. Do not add independent ownership-coalescing savings.
