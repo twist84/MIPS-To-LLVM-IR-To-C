@@ -561,6 +561,46 @@ int main()
         return 1;
     }
 
+    // Narrow contiguous V4 fast paths versus the masked scalar path.
+    for (uint32_t vl : {1u, 2u})
+    {
+        for (bool unsigned_value : {false, true})
+        {
+            for (uint32_t count : {1u, 3u, 256u})
+            {
+                ee::c_ee_vif1 fast{}, reference{};
+                if (!check(send(fast, {0x01000404u, 0u, 0u, 0u}) &&
+                           send(reference, {0x01000404u, 0u, 0u, 0u}),
+                           "narrow V4 setup rejected"))
+                {
+                    return 1;
+                }
+                std::vector<uint32_t> packet{
+                    (0x6cu + vl) << 24u | ((count & 255u) << 16u) |
+                    (unsigned_value ? 0x4000u : 0u) | 1022u};
+                for (uint32_t i = 0; i < count * (vl == 1u ? 2u : 1u); ++i)
+                {
+                    packet.push_back(0x80ff7f01u ^ (i * 0x1020304u));
+                }
+                while ((packet.size() & 3u) != 0u)
+                {
+                    packet.push_back(0u);
+                }
+                auto masked = packet;
+                masked[0] |= 0x10000000u;
+                if (!check(send(fast, packet) && send(reference, masked),
+                           "narrow V4 transfer rejected") ||
+                    !check(std::memcmp(fast.vu1_data(), reference.vu1_data(),
+                              ee::c_ee_vif1::k_vu1_memory_size) == 0 &&
+                           fast.diagnostic().m_unpack_commands == 1u,
+                           "narrow V4 SIMD differs from reference"))
+                {
+                    return 1;
+                }
+            }
+        }
+    }
+
     // STROW/STCOL, STMASK and masked UNPACK: data/row/col/skip.
     if (!check(send(vif1, {0x30000000u, 9u, 8u, 7u,
                           6u, 0x31000000u, 11u, 12u,

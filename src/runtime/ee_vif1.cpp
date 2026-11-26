@@ -10,6 +10,11 @@
 #include <cstring>
 #include <utility>
 
+#if defined(__SSE2__) || defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2)
+#include <emmintrin.h>
+#define EE_VIF1_SSE2 1
+#endif
+
 namespace ee
 {
 namespace
@@ -20,6 +25,49 @@ bool host_little_endian()
 {
     const uint16_t one = 1u;
     return *reinterpret_cast<const unsigned char*>(&one) == 1u;
+}
+
+// The source contains exactly four elements per vector. No overread,
+// no alignment assumption, no host-endian reinterpretation on fallback.
+template<unsigned bits, bool is_unsigned>
+void unpack_v4_narrow(const uint8_t* source, uint8_t* destination, uint32_t count)
+{
+    static_assert(bits == 8 || bits == 16);
+    for (uint32_t index = 0; index < count; ++index)
+    {
+#if defined(EE_VIF1_SSE2)
+        __m128i packed{};
+        std::memcpy(&packed, source, bits / 2u);
+        const __m128i zero = _mm_setzero_si128();
+        if constexpr (bits == 8)
+        {
+            const __m128i sign = is_unsigned ? zero : _mm_cmpgt_epi8(zero, packed);
+            packed = _mm_unpacklo_epi8(packed, sign);
+        }
+        const __m128i sign = is_unsigned ? zero : _mm_cmpgt_epi16(zero, packed);
+        const __m128i lanes = _mm_unpacklo_epi16(packed, sign);
+        std::memcpy(destination, &lanes, 16u);
+#else
+        uint32_t lanes[4]{};
+        for (unsigned lane = 0; lane < 4; ++lane)
+        {
+            uint32_t value = source[lane * (bits / 8u)];
+            if constexpr (bits == 16)
+            {
+                value |= static_cast<uint32_t>(source[lane * 2u + 1u]) << 8u;
+            }
+            if constexpr (!is_unsigned)
+            {
+                constexpr uint32_t sign = 1u << (bits - 1u);
+                value = (value ^ sign) - sign;
+            }
+            lanes[lane] = value;
+        }
+        std::memcpy(destination, lanes, sizeof(lanes));
+#endif
+        source += bits / 2u;
+        destination += 16u;
+    }
 }
 
 uint32_t element_bits(uint32_t vl)
@@ -184,6 +232,28 @@ void c_ee_vif1::unpack(s_machine& machine, uint32_t code,
         {
             std::memcpy(machine.m_vu1->m_data.data(), words + first * 4u,
                         (num - first) * 16u);
+        }
+        machine.m_num = 0u;
+        ++machine.m_unpack_commands;
+        return;
+    }
+    // V4-8/16 with one source per destination and no mask/ROW work.
+    // Split at the same qword wrap as V4-32. Signedness and width are
+    // selected once per packet; SSE2 widens four lanes at a time.
+    if (vn == 3u && (vl == 1u || vl == 2u) && !masked &&
+        mode == 0u && cl == wl && host_little_endian())
+    {
+        const uint32_t start = address & address_mask;
+        const uint32_t first = std::min(num, address_mask + 1u - start);
+        const auto* source = reinterpret_cast<const uint8_t*>(words);
+        auto* data = machine.m_vu1->m_data.data();
+        const auto unpack = vl == 1u
+            ? (unsigned_value ? unpack_v4_narrow<16, true> : unpack_v4_narrow<16, false>)
+            : (unsigned_value ? unpack_v4_narrow<8, true> : unpack_v4_narrow<8, false>);
+        unpack(source, data + start * 16u, first);
+        if (first < num)
+        {
+            unpack(source + first * (vl == 1u ? 8u : 4u), data, num - first);
         }
         machine.m_num = 0u;
         ++machine.m_unpack_commands;

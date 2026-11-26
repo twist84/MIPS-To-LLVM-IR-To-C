@@ -4633,6 +4633,23 @@ void module_builder::end_function()
     // Callers ensure every path already has a terminator.
     m_out += "}\n";
 
+    // Saturation is target-neutral and needs declarations only for used
+    // lane widths/operations; the selected LLVM target chooses native SIMD.
+    for (const char* op : {"sadd", "ssub", "uadd", "usub"})
+    {
+        for (const auto& shape : {std::make_pair("v4i32", "<4 x i32>"),
+                                 std::make_pair("v8i16", "<8 x i16>"),
+                                 std::make_pair("v16i8", "<16 x i8>")})
+        {
+            const std::string name = std::string("@llvm.") + op + ".sat." + shape.first;
+            const std::string type = shape.second;
+            if (m_out.find(name + "(") != std::string::npos)
+            {
+                m_out += "declare " + type + " " + name + "(" + type + ", " + type + ")\n";
+            }
+        }
+    }
+
     // Emit these only in modules that actually use them. Unrelated IR
     // retains its existing text/hash and native cache identity.
     if (m_out.find("call void @ee_mem_read128_guest(", m_quadword_entry_offset) != std::string::npos)
@@ -5920,60 +5937,19 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         // MMI0 (0x08): independent packed lanes. Saturating operations
         // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {
-            const auto splat = [](const std::string& scalar, uint32_t lanes,
-                                  int64_t value) -> std::string
-            {
-                std::string result = "<";
-                for (uint32_t lane = 0u; lane < lanes; ++lane)
-                {
-                    if (lane != 0u)
-                    {
-                        result += ", ";
-                    }
-                    result += std::string(scalar) + " " + std::to_string(value);
-                }
-                return result + ">";
-            };
+            // Target-neutral saturating intrinsics map to PADDS*/PSUBS*
+            // on x86 and SQADD/SQSUB on AArch64, without widened lanes.
             const auto emit_signed_saturation =
                 [&](const std::string& lhs, const std::string& rhs,
-                    const std::string& narrow_type,
-                    const std::string& wide_type,
-                    const std::string& wide_scalar,
-                    uint32_t lanes, int64_t low, int64_t high,
+                    const std::string& narrow_type, const char* suffix,
                     bool addition) -> std::string
             {
-                const std::string lhs_wide = newtemp();
-                const std::string rhs_wide = newtemp();
-                const std::string calculated = newtemp();
-                const std::string above = newtemp();
-                const std::string below = newtemp();
-                const std::string capped = newtemp();
-                const std::string clamped = newtemp();
                 const std::string result = newtemp();
-                const std::string predicate_type =
-                    "<" + std::to_string(lanes) + " x i1>";
-                const std::string limits_high = splat(wide_scalar, lanes, high);
-                const std::string limits_low = splat(wide_scalar, lanes, low);
-                m_out += "  " + lhs_wide + " = sext " + narrow_type +
-                         " " + lhs + " to " + wide_type + "\n";
-                m_out += "  " + rhs_wide + " = sext " + narrow_type +
-                         " " + rhs + " to " + wide_type + "\n";
-                m_out += "  " + calculated + " = " +
-                         (addition ? "add" : "sub") + " " + wide_type +
-                         " " + lhs_wide + ", " + rhs_wide + "\n";
-                m_out += "  " + above + " = icmp sgt " + wide_type +
-                         " " + calculated + ", " + limits_high + "\n";
-                m_out += "  " + below + " = icmp slt " + wide_type +
-                         " " + calculated + ", " + limits_low + "\n";
-                m_out += "  " + capped + " = select " + predicate_type +
-                         " " + above + ", " + wide_type + " " +
-                         limits_high + ", " + wide_type + " " +
-                         calculated + "\n";
-                m_out += "  " + clamped + " = select " + predicate_type +
-                         " " + below + ", " + wide_type + " " +
-                         limits_low + ", " + wide_type + " " + capped + "\n";
-                m_out += "  " + result + " = trunc " + wide_type + " " +
-                         clamped + " to " + narrow_type + "\n";
+                const std::string intrinsic = std::string("@llvm.s") +
+                    (addition ? "add" : "sub") + ".sat." + suffix;
+                m_out += "  " + result + " = call " + narrow_type + " " +
+                    intrinsic + "(" + narrow_type + " " + lhs + ", " +
+                    narrow_type + " " + rhs + ")\n";
                 return result;
             };
             switch (sa) {
@@ -6036,8 +6012,7 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             }
             case 16: case 17: // PADDSW/PSUBSW
                 store_vec4i32(emit_signed_saturation(
-                    va4, vb4, "<4 x i32>", "<4 x i64>", "i64", 4u,
-                    -2147483648LL, 2147483647LL, sa == 16u));
+                    va4, vb4, "<4 x i32>", "v4i32", sa == 16u));
                 return;
             case 18: // PEXTLW: low-word interleave rt0,rs0,rt1,rs1
             {
@@ -6059,8 +6034,7 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             }
             case 20: case 21: // PADDSH/PSUBSH
                 store_vec8i16(emit_signed_saturation(
-                    va8, vb8, "<8 x i16>", "<8 x i32>", "i32", 8u,
-                    -32768LL, 32767LL, sa == 20u));
+                    va8, vb8, "<8 x i16>", "v8i16", sa == 20u));
                 return;
             case 22: // PEXTLH: low-halfword interleave
             {
@@ -6082,8 +6056,7 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
             }
             case 24: case 25: // PADDSB/PSUBSB
                 store_vec16i8(emit_signed_saturation(
-                    va16, vb16, "<16 x i8>", "<16 x i16>", "i16", 16u,
-                    -128LL, 127LL, sa == 24u));
+                    va16, vb16, "<16 x i8>", "v16i8", sa == 24u));
                 return;
             case 26: // PEXTLB: low-byte interleave
             {
@@ -6175,57 +6148,19 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         // so saturation is explicit and independent for every element.
         if (fn == 0x28)
         {
-            auto emit_unsigned_sat = [&](const std::string& lhs,
-                                         const std::string& rhs,
-                                         const char* narrow_type,
-                                         const char* wide_type,
-                                         const char* predicate_type,
-                                         const char* wide_scalar,
-                                         unsigned lane_count,
-                                         uint64_t lane_max,
-                                         bool is_add) -> std::string
+            const auto emit_unsigned_sat = [&](const std::string& lhs,
+                                               const std::string& rhs,
+                                               const char* narrow_type,
+                                               const char* suffix,
+                                               bool is_add) -> std::string
             {
-                const std::string lhs_wide = newtemp();
-                const std::string rhs_wide = newtemp();
-                const std::string arithmetic = newtemp();
-                const std::string condition = newtemp();
-                const std::string saturated = newtemp();
                 const std::string result = newtemp();
-
-                std::string max_vector = "<";
-                for (unsigned i = 0; i < lane_count; ++i)
-                {
-                    if (i != 0) max_vector += ", ";
-                    max_vector += std::string(wide_scalar) + " " + std::to_string(lane_max);
-                }
-                max_vector += ">";
-
-                m_out += "  " + lhs_wide + " = zext " + narrow_type + " " + lhs +
-                         " to " + wide_type + "\n";
-                m_out += "  " + rhs_wide + " = zext " + narrow_type + " " + rhs +
-                         " to " + wide_type + "\n";
-                if (is_add)
-                {
-                    m_out += "  " + arithmetic + " = add " + wide_type + " " +
-                             lhs_wide + ", " + rhs_wide + "\n";
-                    m_out += "  " + condition + " = icmp ugt " + wide_type + " " +
-                             arithmetic + ", " + max_vector + "\n";
-                    m_out += "  " + saturated + " = select " + predicate_type + " " +
-                             condition + ", " + wide_type + " " + max_vector +
-                             ", " + wide_type + " " + arithmetic + "\n";
-                }
-                else
-                {
-                    m_out += "  " + arithmetic + " = sub " + wide_type + " " +
-                             lhs_wide + ", " + rhs_wide + "\n";
-                    m_out += "  " + condition + " = icmp ult " + wide_type + " " +
-                             lhs_wide + ", " + rhs_wide + "\n";
-                    m_out += "  " + saturated + " = select " + predicate_type + " " +
-                             condition + ", " + wide_type + " zeroinitializer, " +
-                             wide_type + " " + arithmetic + "\n";
-                }
-                m_out += "  " + result + " = trunc " + wide_type + " " +
-                         saturated + " to " + narrow_type + "\n";
+                const std::string type = narrow_type;
+                const std::string intrinsic = std::string("@llvm.u") +
+                    (is_add ? "add" : "sub") + ".sat." + suffix;
+                m_out += "  " + result + " = call " + type + " " +
+                    intrinsic + "(" + type + " " + lhs + ", " +
+                    type + " " + rhs + ")\n";
                 return result;
             };
 
@@ -6404,28 +6339,22 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
                 return;
             }
             case 0x10: // PADDUW
-                store_vec4i32(emit_unsigned_sat(va4, vb4, "<4 x i32>", "<4 x i64>",
-                                                "<4 x i1>", "i64", 4, 0xFFFFFFFFull, true));
+                store_vec4i32(emit_unsigned_sat(va4, vb4, "<4 x i32>", "v4i32", true));
                 return;
             case 0x11: // PSUBUW
-                store_vec4i32(emit_unsigned_sat(va4, vb4, "<4 x i32>", "<4 x i64>",
-                                                "<4 x i1>", "i64", 4, 0xFFFFFFFFull, false));
+                store_vec4i32(emit_unsigned_sat(va4, vb4, "<4 x i32>", "v4i32", false));
                 return;
             case 0x14: // PADDUH
-                store_vec8i16(emit_unsigned_sat(va8, vb8, "<8 x i16>", "<8 x i32>",
-                                                "<8 x i1>", "i32", 8, 0xFFFFull, true));
+                store_vec8i16(emit_unsigned_sat(va8, vb8, "<8 x i16>", "v8i16", true));
                 return;
             case 0x15: // PSUBUH
-                store_vec8i16(emit_unsigned_sat(va8, vb8, "<8 x i16>", "<8 x i32>",
-                                                "<8 x i1>", "i32", 8, 0xFFFFull, false));
+                store_vec8i16(emit_unsigned_sat(va8, vb8, "<8 x i16>", "v8i16", false));
                 return;
             case 0x18: // PADDUB
-                store_vec16i8(emit_unsigned_sat(va16, vb16, "<16 x i8>", "<16 x i16>",
-                                                "<16 x i1>", "i16", 16, 0xFFull, true));
+                store_vec16i8(emit_unsigned_sat(va16, vb16, "<16 x i8>", "v16i8", true));
                 return;
             case 0x19: // PSUBUB
-                store_vec16i8(emit_unsigned_sat(va16, vb16, "<16 x i8>", "<16 x i16>",
-                                                "<16 x i1>", "i16", 16, 0xFFull, false));
+                store_vec16i8(emit_unsigned_sat(va16, vb16, "<16 x i8>", "v16i8", false));
                 return;
             default:
                 // The decoder leaves every other MMI1 sub-op unsupported.
