@@ -372,7 +372,8 @@ int main(int argc, char** argv)
         append(special(0x40u, 0u, 0u, 15u)); // advance R even with VF0
         append(special(0x41u, 0u, 28u, 15u));
     }
-    const bool branches = std::strcmp(argv[2], "branches") == 0 ||
+    const bool direct_branches = std::strcmp(argv[2], "direct-branches") == 0;
+    const bool branches = direct_branches || std::strcmp(argv[2], "branches") == 0 ||
         std::strcmp(argv[2], "branch-wrap") == 0 ||
         std::strcmp(argv[2], "acc-branches") == 0;
     if (branches)
@@ -432,8 +433,26 @@ int main(int argc, char** argv)
         append(k_nop);
         append(k_nop);
         append(integer(0x32u, 1u, 15u, 15u));
-        append(branch(0x24u, 6u, 0u, 0));
+        if (direct_branches)
+        {
+            append(branch(0x20u, 0u, 0u, -5)); // direct return
+        }
+        else
+        {
+            append(branch(0x24u, 6u, 0u, 0));
+        }
         append(k_nop);
+        if (direct_branches)
+        {
+            // The second B executes in the first B's delay slot.
+            // Its delay pair is the first B's target, not PC+8.
+            append(branch(0x20u, 0u, 0u, 2));
+            append(branch(0x20u, 0u, 0u, 3));
+            append(integer(0x32u, 7u, 15u, 15u)); // skipped
+            append(integer(0x32u, 1u, 15u, 15u));
+            append(integer(0x32u, 7u, 15u, 15u)); // skipped
+            append(k_nop);
+        }
         append(branch(0x20u, 0u, 0u, 3), k_end);
         append(integer(0x32u, 1u, 15u, 15u));
     }
