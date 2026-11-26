@@ -30,6 +30,22 @@ def aot_identity(directory):
     return {"target": target, "libraries": libraries}
 
 
+def validate_aot_pair(old, new):
+    if old["target"] != new["target"]:
+        raise ValueError(f'VU1 target mismatch: baseline={old["target"]}, candidate={new["target"]}')
+    before, after = old["libraries"], new["libraries"]
+    missing = sorted(before.keys() - after.keys())
+    extra = sorted(after.keys() - before.keys())
+    if missing or extra:
+        raise ValueError(f"VU1 inventory mismatch: baseline={len(before)}, candidate={len(after)}; "
+                         f"missing={missing}; extra={extra}")
+    changed = sum(before[name] != after[name] for name in before)
+    if not changed:
+        raise ValueError(f"VU1 libraries are byte-identical ({len(before)}); check rebuilt vu1_recomp")
+    print(f"VU1 inventory matched: {len(before)} libraries, {changed} changed, "
+          f"{len(before) - changed} unchanged, target={old['target']}", flush=True)
+
+
 def architectural_report(path):
     report = read_json(path)
     # Host timing only, not the emulated device counters or guest state.
@@ -111,10 +127,7 @@ def main():
         if sha(args.runner) == sha(args.previous_runner):
             raise ValueError("candidate runner is not rebuilt")
         old_aot, new_aot = map(aot_identity, (args.baseline_vu1, args.candidate_vu1))
-        if (old_aot["target"] != new_aot["target"] or
-                old_aot["libraries"].keys() != new_aot["libraries"].keys() or
-                old_aot["libraries"] == new_aot["libraries"]):
-            raise ValueError("VU1 target/capture inventory changed or libraries not rebuilt")
+        validate_aot_pair(old_aot, new_aot)
         polls = record_count(args.recording)
         if not terminal_budget(args.reference, args.max_dispatches):
             raise ValueError("prior reference did not reach requested budget")

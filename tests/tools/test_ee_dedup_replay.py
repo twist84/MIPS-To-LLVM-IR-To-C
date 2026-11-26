@@ -8,9 +8,48 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, validate_prior, validate_source_libraries, validate_source_reference, trace_comparison, terminal_budget
 
 
+from replay_ee_graphics_sweep import validate_aot_pair, aot_identity
+from build_vu1_aot import matching_captures
+
+
+def test_vu1_inventory(root):
+    import os
+    suffix = ".dll" if os.name == "nt" else ".so"
+    before, after, captures = (root / name for name in ("vu-before", "vu-after", "vu-captures"))
+    for directory in (before, after, captures):
+        directory.mkdir()
+    for directory in (before, after):
+        (directory / "vu1-build-target.txt").write_text("generic\n")
+    (before / ("0080-a" + suffix)).write_bytes(b"old")
+    (after / ("0080-a" + suffix)).write_bytes(b"new")
+    (captures / "0080-a.bin").write_bytes(b"capture")
+    (captures / "0090-extra.bin").write_bytes(b"extra")
+    assert matching_captures(captures, before, suffix, "generic") == [captures / "0080-a.bin"]
+    validate_aot_pair(aot_identity(before), aot_identity(after))
+    for new, expected in (
+        ({"target": "native", "libraries": {}}, "target mismatch"),
+        ({"target": "generic", "libraries": {"extra": "hash"}}, "inventory mismatch"),
+        (aot_identity(before), "byte-identical"),
+    ):
+        try:
+            validate_aot_pair(aot_identity(before), new)
+        except ValueError as error:
+            assert expected in str(error)
+        else:
+            raise AssertionError("invalid VU1 inventory accepted")
+    (captures / "0080-a.bin").unlink()
+    try:
+        matching_captures(captures, before, suffix, "generic")
+    except ValueError as error:
+        assert "missing baseline capture" in str(error)
+    else:
+        raise AssertionError("missing VU1 capture accepted")
+
+
 def run():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
+        test_vu1_inventory(root)
         path = root / "record.log"
         sample = "PAD0 input: 1 1 65 5 5 65535 128 128 128 128\n"
         path.write_text("noise\n" + sample + "PAD0 input summary: record 1\n")
