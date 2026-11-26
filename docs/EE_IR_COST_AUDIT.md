@@ -1414,3 +1414,37 @@ edge operands, both latch states and deterministic random inputs.
 Measure incremental executable/object/DLL size against the multiplier
 parent, then independently run the four-arm synchronous replay.
 No production lowering or cache policy changes.
+
+### Checkpoint 4j — measured shared COP1 addition native link
+
+Windows helper-plan(4).json, LLVM 22.1.0 / znver2, same metadata
+and all 16,252 guest modules. Immediate parent library SHA-256
+matches checkpoint 4h. Re-emitted 1,499 modules, reused 14,753.
+Addition owner sub_0x100008_0x100008.ll; multiplier owner unchanged.
+Stage wall time 142.062 s, excluding link. Removed 4,029,865 bytes
+of IR text in memory. Recomputed all per-module totals: 1,478 shrink
+in executable size, 19 unchanged, two grow. O5: 692/692 shrink,
+saving 189,635 executable bytes; Oz: 786/807 shrink, net saving
+195,869 executable bytes. Incremental executable object saving
+385,504 bytes and aggregate object saving 398,956 bytes.
+Executable object bytes 79,036,197 -> 78,650,693; aggregate object
+bytes 115,676,809 -> 115,277,853. Linked raw executable bytes
+85,526,528 -> 85,140,480.
+DLL 90,495,488 -> 90,095,104 bytes (85.92 MiB), saving 400,384
+bytes (0.44%) versus the immediate multiplier parent and 21,376,000
+bytes (19.18%) versus original O5. Candidate DLL SHA-256
+0ba02590afb4806fc979a3b6fdc113566f5be41f0d02036f192f71b5a378fbed.
+The receipt confirms the native link, not runtime equivalence.
+Four CI workflows passed on 3785324 at review; Build and test
+was still running. Production remains unchanged.
+
+### Checkpoint 4k — matched incremental addition comparison
+
+Run the existing four-arm synchronous comparison with original O5
+record/control, shared multiplication immediate parent and shared
+addition candidate. Require matching controller consumption, terminal
+budgets, sampled transitions, terminal reports and GPU screenshots;
+verify library hashes before and after. Compare timings directly with
+the multiplier parent. Keep the 86.30 MiB image as the validated
+baseline until acceptance. After this replay, investigate store and
+V0 trace guards while keeping disabled diagnostic paths inexpensive.
