@@ -2162,3 +2162,42 @@ inferences, no TLB or MMIO bypass. Existing LQ/SQ rounding retained.
 Add compile-time boundary tests and JIT coverage for dynamic proven
 alignment, wrapping high bits, definite misalignment and insufficient
 proof. Runtime measurement pending.
+
+### Graphics performance sweep (after 8d)
+
+8d retail gate: original/control/8c/8d wall times 41.344/41.343/
+41.375/41.391s, 40M dispatches each, 184,700 equal sampled transitions,
+3,127 equal polls, no architectural differences. 8d DLL
+81268a0c1ef524b0f2962cf32c88ba52cb9377f1fb6c048adf48d37854d81579.
+All five 8d CI workflows passed. The scalar overflow checkpoint is
+deferred in favor of graphics-heavy runtime work.
+
+- VIF1 contiguous V4-8/16 signed and unsigned decode uses SSE2 widening
+  on supported build targets, portable fallback elsewhere. No overread;
+  preserve wrapping, NUM=0, ROW/mask/cycle cases on the old path.
+- MMI0/MMI1 signed/unsigned saturation uses target-neutral vector
+  saturation intrinsics rather than widening and clamping. LLVM selects
+  x86 SIMD or AArch64 sequences for the configured target.
+- VU1 retains VF/ACC values in SSA, packs vector MAC flags, commits
+  full vectors and updates the ACC overflow mask once. Dynamic programs
+  stage accessed VF/ACC in nonescaping allocas for promotion across
+  dispatch/loop entries; flush written registers on exits. Q/P waits
+  publish an existing pending value directly at max(cycle, ready).
+  No change to Q/P latency, pair issue, branch delay, flag histories or
+  exact integer FMAC arithmetic.
+- VU0 zero/single active lane specializes the existing exact FMAC tuple,
+  preserving sync and flags; COP1 consecutive S/W chains cache raw FPR
+  and ACC/latch values with write-through, clear at other instructions
+  and dispatcher boundaries. Use raw integer MOV.S and merged flag
+  writes. No IEEE fast-math or approximate guest floating point.
+
+For retail validation retain the prior 8d runner and VU1 AOT directory.
+Build source candidate using performance-first comparison, rebuild VU1
+captures into a fresh directory with the same march target, rebuild the
+runtime. replay_ee_graphics_sweep.py reuses the prior PAD0 recording
+and terminal trace/report/screenshot, compares control, EE-only,
+VU1-only, runtime-only, combined arms at identical budgets, and reports
+per-arm wall times/median throughput without conflating independent
+optimizations. Hash all input libraries, runner and receipts before and
+after. Baseline AOT hashes are current inventory, not independently
+recorded by the old 8d receipt. CI and retail acceptance pending.
