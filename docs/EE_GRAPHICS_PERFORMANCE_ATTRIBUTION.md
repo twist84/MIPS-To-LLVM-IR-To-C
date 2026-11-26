@@ -624,3 +624,74 @@ module_builder includes the same ee_vu_fmac4_ir.h. This is therefore
 a cumulative EE-image experiment, not isolated attribution of the
 COP1 shortcut. No runner or VU1 rebuild needed; no cache promotion.
 CI and retail replay pending.
+
+## G5A — matched EE image correctness accepted; timing neutral
+
+All five CI workflows passed at 2dbede43f730b39d618157099e8db5d8db834bfb.
+The previously reviewed ee-graphics-g5a-comparison.zip and
+ee-graphics-g5a.zip contain the isolated compilation receipt and four
+matched synchronous unprofiled retail pairs. All eight replay arms
+passed the fixed 40M dispatch, transition, PAD, architectural report,
+screenshot and input integrity gates. This is cumulative EE-image
+validation (COP1 shortcut plus EE-side G3A/G3B VU0 helpers), not an
+isolated measurement of the COP1 shortcut.
+
+| Pair | Graphics sweep s | G5A s |
+|---|---:|---:|
+| 1 | 42.703 | 42.219 |
+| 2 | 42.078 | 42.297 |
+| 3 | 42.110 | 42.125 |
+| 4 | 42.078 | 42.156 |
+
+Median 42.094 -> 42.1875s; nominal throughput -0.22%, within observed
+variation. Retain G5A as a correctness-validated experimental EE control,
+not a demonstrated speed improvement. No claim about async gameplay.
+
+Relative to original O5 (not the graphics sweep image), 16252 functions
+and 845746 function-scoped guest PCs retained, 12701 changed IR modules,
+zero ownership/coverage changes. IR bytes 992143733 -> 983470709,
+native object bytes 152560310 -> 152435481, linked DLL bytes
+111471104 -> 111410176, executable section bytes 101812736 -> 101747712.
+IR generation 176.625s, coverage scan 55.204s, native compilation
+231.469s, linking 50.500s. Candidate DLL SHA-256
+9a7a67b83aefe87d5a8233ee77ac838f3c497b230fee48571b2bf2b594e5f385.
+Preserve original O5, graphics sweep, G5A and V30 separately.
+
+## G6A — reuse canonical packed MMI SSA views
+
+Implemented in bd5b929, ea25079, e98ca7e and be57b33.
+Track exact pairs of low/high SSA value names in a block-local map
+to their canonical <2 x i64> representation. Reuse an existing packed
+value instead of reassembling both halves, record packed producers
+when extracting their halves, and use zeroinitializer for an exact
+zero pair. Different lane shapes remain explicit bitcasts. Scalar
+low-half writes preserve the upper half and change the lookup key;
+zero-register writes remain suppressed by the existing setter.
+No new guest arithmetic, guest accounting, runtime ABI, or publication
+policy. Both halves are still extracted eagerly; this is not lazy
+128-bit register residency.
+
+Source audit at be57b33: the MMI emitter creates no LLVM control-flow
+edges within its packed lowering; tracked producers dominate reuse
+within the contiguous MMI chain. Reset at guest-block entry and
+tracking invalidation, non-MMI/invalid instructions, before and after
+delay-slot MMI and on counted-ALU incoming-state restoration. Existing
+dirty-half publication and V0 trace still use scalar SSA values.
+Regression fixture checks direct packed producer/consumer reuse,
+aliased destinations, scalar overwrite with upper-half preservation
+and GPR0 suppression, with O0–O3 execution checks. Source review is
+not proof of all generated IR validity or host register allocation.
+
+Build ee_recomp and MMI fixtures, run the MMI CTest group, then generate
+an isolated performance-first candidate in build/ee-graphics-g6a
+using the original O5 IR/profile and expected 16252 functions.
+Compare candidate receipt and image against build/ee-graphics-g5a
+using replay_ee_graphics_profile.py with fixed V30, G4A runner,
+RTC 1795671645, recorded PAD, fastmem word/scalar/quad enabled,
+certificates disabled, four interleaved unprofiled pairs at 40M
+dispatches. Preserve all existing artifacts. No runner or VU1 rebuild
+required. CI and retail acceptance remain distinct; inspect both
+receipts, every replay and median/spread before making a performance
+claim. G6B (lazy extraction/direct vector publication) requires
+evidence of residual host-side packing/state traffic and an independent
+correctness checkpoint; do not infer native savings from raw IR counts.
