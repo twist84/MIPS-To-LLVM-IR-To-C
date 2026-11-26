@@ -133,6 +133,10 @@ def main():
         parser.add_argument("--" + option, type=Path, required=True)
     parser.add_argument("--candidate-vu1", type=Path,
                         help="matched alternative VU1 inventory; compare with same runner and EE")
+    parser.add_argument("--candidate-source", type=Path,
+                        help="matched alternative EE source-lowered image; same runner and VU1")
+    parser.add_argument("--candidate-source-receipt", type=Path,
+                        help="source-lowering comparison receipt for the candidate EE image")
     parser.add_argument("--profile-vu1", action="store_true",
                         help="profile both VU1 comparison arms (diagnostic only)")
     parser.add_argument("--max-dispatches", type=int, default=40000000)
@@ -147,7 +151,13 @@ def main():
             raise ValueError("invalid repetitions or dispatch limit")
         if args.profile_vu1 and args.candidate_vu1 is None:
             raise ValueError("--profile-vu1 requires --candidate-vu1")
+        if bool(args.candidate_source) != bool(args.candidate_source_receipt):
+            raise ValueError("candidate EE source and receipt must be supplied together")
+        if args.candidate_source and args.candidate_vu1:
+            raise ValueError("compare one changed component at a time")
         protected = (args.profile, args.source, args.vu1, args.disc, args.reference)
+        if args.candidate_source:
+            protected += (args.candidate_source, args.candidate_source_receipt)
         if args.candidate_vu1 is not None:
             protected += (args.candidate_vu1,)
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
@@ -161,7 +171,14 @@ def main():
         if args.candidate_vu1 is not None:
             candidate_inventory = aot_identity(args.candidate_vu1)
             validate_aot_pair(inventory, candidate_inventory)
-        comparison = candidate_inventory is not None
+        candidate_library = None
+        if args.candidate_source:
+            candidate_original, candidate_library, candidate_hashes = validate_source_libraries(
+                args.profile, args.candidate_source, args.elf, args.candidate_source_receipt)
+            if (candidate_original != original or candidate_library == library or
+                    candidate_hashes["dedup"] == sha(library)):
+                raise ValueError("candidate EE image must differ from control")
+        comparison = candidate_inventory is not None or candidate_library is not None
         second_arm = "candidate" if comparison else "profiled"
         if not terminal_budget(args.reference, args.max_dispatches):
             raise ValueError("reference did not reach terminal dispatch budget")
@@ -177,6 +194,9 @@ def main():
                  "recording": args.recording, "reference_report": args.reference / "report.json",
                  "reference_trace": args.reference / "stdout.log",
                  "reference_screen": args.reference / "gs-webgpu.ppm"}
+        if candidate_library is not None:
+            paths["candidate_library"] = candidate_library
+            paths["candidate_source_receipt"] = args.candidate_source_receipt
         if env.get("SDBZ_MEMCARD"):
             paths["memcard"] = Path(env["SDBZ_MEMCARD"])
         hashes = {key: sha(path) for key, path in paths.items()}
@@ -189,20 +209,24 @@ def main():
                    "runs": {"control": [], second_arm: []},
                    "correctness_accepted": False, "performance_accepted": False,
                    "error": None}
-        if comparison:
+        if candidate_inventory is not None:
             receipt["schema"] = "ee-graphics-vu1-comparison-v1"
             receipt["candidate_vu1_inventory"] = candidate_inventory
             receipt["profile_both_arms"] = args.profile_vu1
+        elif candidate_library is not None:
+            receipt["schema"] = "ee-graphics-ee-comparison-v1"
+            receipt["profile_both_arms"] = False
         args.output.mkdir(parents=True)
         try:
             for repetition in range(args.repeats):
                 order = ("control", second_arm) if repetition % 2 == 0 else (second_arm, "control")
                 for name in order:
                     enabled = args.profile_vu1 if comparison else name == "profiled"
-                    aot = args.candidate_vu1 if name == "candidate" else args.vu1
+                    aot = args.candidate_vu1 if name == "candidate" and candidate_inventory else args.vu1
+                    image = candidate_library if name == "candidate" and candidate_library else library
                     directory = args.output / f"{name}-{repetition + 1}"
                     print(f"Graphics {name} {repetition + 1}/{args.repeats}", flush=True)
-                    run = run_one(args, library, directory,
+                    run = run_one(args, image, directory,
                                   dict(env, SDBZ_RUNTIME_PROFILE="1" if enabled else "0",
                                        SDBZ_VU1_AOT=str(aot)))
                     receipt["runs"][name].append(run)
@@ -233,7 +257,7 @@ def main():
             receipt["inputs_unchanged"] = (
                 all(sha(path) == hashes[key] for key, path in paths.items()) and
                 aot_identity(args.vu1) == inventory and
-                (not comparison or aot_identity(args.candidate_vu1) == candidate_inventory))
+                (candidate_inventory is None or aot_identity(args.candidate_vu1) == candidate_inventory))
             if not receipt["inputs_unchanged"]:
                 receipt["correctness_accepted"] = False
             (args.output / "profiling-receipt.json").write_text(
