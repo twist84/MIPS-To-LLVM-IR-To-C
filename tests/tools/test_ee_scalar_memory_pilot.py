@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
-from audit_ee_scalar_memory_pilot import outline, select
+from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt
 
 
 def fixture(width, write):
@@ -64,6 +64,21 @@ class Runtime(ctypes.Structure):
 
 
 class TestScalarPilot(unittest.TestCase):
+    def test_promotion_selects_only_measured_wins(self):
+        good = {"module": "good.ll", "parent_executable_bytes": 10,
+                "parent_object_bytes": 20, "candidate": {"executable_bytes": 8,
+                "object_bytes": 21, "seconds": 1}, "executable_saving": 2,
+                "object_saving": -1, "ir_bytes_saved": 5}
+        bad = dict(good, module="bad.ll", executable_saving=-1,
+                   candidate=dict(good["candidate"], executable_bytes=11))
+        pilot = {"modules": [good, bad], "selected_modules": 2, "rewritten_modules": 2,
+                 "executable_saving": 1, "object_saving": -2, "ir_bytes_saved": 10}
+        self.assertEqual(set(winners(pilot, ["good.ll", "bad.ll"])), {"good.ll"})
+        self.assertEqual(stable_receipt(good), stable_receipt(dict(good,
+                         candidate=dict(good["candidate"], seconds=2))))
+        with self.assertRaises(ValueError):
+            winners(dict(pilot, executable_saving=3), ["good.ll", "bad.ll"])
+
     def test_sparse_audit_selection(self):
         rows = [
             {"module": "missing.ll", "guest_pcs": 4, "current_executable_bytes": 1000},

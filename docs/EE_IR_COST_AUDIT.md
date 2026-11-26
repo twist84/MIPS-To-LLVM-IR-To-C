@@ -1539,3 +1539,24 @@ MCJIT tests exercise all widths, reads/writes, null runtime/base,
 zero-size, unaligned access, boundary and high unsigned addresses.
 Outlining introduces a potential hot-path call cost; do not promote
 based on size alone. Noncanonical patterns remain untouched.
+
+### Checkpoint 5b — measured scalar pilot
+
+55 modules sampled, 54 transformed, 38 executable wins, 16 losses,
+one unchanged. Original sampled executable bytes 2,385,069;
+candidate 1,967,663 (417,406 bytes / 17.50% saved). Aggregate object
+saving 401,487; IR text saving 6,553,307 bytes. O5 saves 190,126
+of 1,164,677 bytes; Oz saves 227,280 of 1,220,392 bytes. The largest
+module 0x369520 saves 111,936 of 574,814 executable bytes. These are
+sampled results only; small modules frequently grow.
+
+### Checkpoint 5c — link measured scalar winners
+
+Promote only the 38 positive executable-size trials, reproducing each
+candidate object byte-for-byte against the pilot receipt and checking
+all parent hashes. Reuse all other parent objects, preserve external
+symbols and guest metadata, and link a separate experimental DLL.
+Do not change the original lowering or production cache. Run matched
+synchronous O5 record/control, addition parent, scalar candidate.
+This small linked pilot is a runtime risk gate, not evidence that all
+scalar memory outlining is beneficial. Expand only after acceptance.

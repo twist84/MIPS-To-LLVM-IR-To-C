@@ -9,6 +9,9 @@ import argparse
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor
 import json
+import os
+import subprocess
+import time
 from pathlib import Path
 import re
 import sys
@@ -19,6 +22,8 @@ from build_ee_helper_experiment import rewrite, rewrite_counter
 from build_ee_quadword_experiment import body_of, rewrite_quadword
 from build_ee_cop1_mul_experiment import check_object, rows_of, rewrite_mul
 from build_ee_cop1_add_experiment import rewrite_add
+from ee_ownership_binary import native_executable_sections
+from link_native_objects import load_inputs
 
 TEMP = rb"%t\d+"
 VALUE = rb"(?:%t\d+|-?\d+)"
@@ -169,7 +174,8 @@ def read_json(path):
 
 
 def trial(task):
-    name, guest, path, obj_dir, record, receipts, plans, triple = task
+    name, guest, path, obj_dir, record, receipts, plans, triple = task[:8]
+    object_output = task[8] if len(task) == 9 else None
     raw = path.read_bytes()
     data = verified_object(obj_dir, record, sha(raw))
     counter, quad, mul, add = plans
@@ -203,7 +209,7 @@ def trial(task):
         baseline = emit_native(changed, triple, guest, mode)
         if baseline["sha256"] != record["sha256"]:
             raise ValueError(f"parent object not reproducible: {name}")
-        result["candidate"] = emit_native(candidate, triple, guest, mode)
+        result["candidate"] = emit_native(candidate, triple, guest, mode, object_output=object_output)
         result["candidate_ir_sha256"] = sha(candidate)
         result["executable_saving"] = result["parent_executable_bytes"] - result["candidate"]["executable_bytes"]
         result["object_saving"] = len(data) - result["candidate"]["object_bytes"]
@@ -234,7 +240,33 @@ def select(rows, per_band, largest):
     return sorted(selected)
 
 
+def stable_receipt(row):
+    # Compilation time is deliberately not part of the identity.
+    return {k: (dict((n, v) for n, v in value.items() if n != "seconds")
+                if k == "candidate" else value) for k, value in row.items()}
+
+
+def winners(pilot, selected):
+    rows = {r["module"]: r for r in pilot["modules"]}
+    if (len(rows) != len(pilot["modules"]) or set(rows) != set(selected) or
+            pilot["selected_modules"] != len(rows) or
+            pilot["rewritten_modules"] != sum("candidate" in r for r in rows.values())):
+        raise ValueError("pilot module inventory differs")
+    for row in rows.values():
+        if "candidate" in row:
+            if (row["executable_saving"] != row["parent_executable_bytes"] - row["candidate"]["executable_bytes"] or
+                    row["object_saving"] != row["parent_object_bytes"] - row["candidate"]["object_bytes"]):
+                raise ValueError("pilot size arithmetic differs")
+        elif row.get("executable_saving", 0) or row.get("object_saving", 0):
+            raise ValueError("uncompiled pilot row reports a saving")
+    for key in ("executable_saving", "object_saving", "ir_bytes_saved"):
+        if pilot[key] != sum(r.get(key, 0) for r in rows.values()):
+            raise ValueError("pilot aggregate differs: " + key)
+    return {n: r for n, r in rows.items() if r.get("executable_saving", 0) > 0}
+
+
 def audit(args):
+    started = time.monotonic()
     ir = args.ir.resolve()
     folders = [p.resolve() for p in (args.counter_experiment, args.quadword_experiment,
                                     args.multiply_experiment, args.experiment)]
@@ -271,15 +303,82 @@ def audit(args):
     selected = select(report["modules"], args.per_band, args.largest)
     if not selected:
         raise ValueError("no selected scalar-memory candidates")
+    promoted = None
+    if args.promote:
+        pilot_raw = args.promote.read_bytes()
+        pilot = json.loads(pilot_raw)
+        if (pilot["mode"] != "read_only_ee_scalar_memory_pilot" or
+                pilot["metadata_sha256"] != sha(meta) or
+                pilot["parent_manifest_sha256"] != sha(manifest_data[-1][0]) or
+                pilot["parent_library_sha256"] != plans[-1]["linked_library_sha256"] or
+                pilot["native_target"] != manifest["native_target"]):
+            raise ValueError("pilot provenance differs")
+        promoted = winners(pilot, selected)
+        if not promoted:
+            raise ValueError("no measured executable size wins")
+        for row in pilot["modules"]:
+            record = records[row["module"]]
+            if (row["original_ir_sha256"] != record["ir_sha256"] or
+                    row["parent_ir_sha256"] != record["transformed_ir_sha256"] or
+                    row["parent_object_sha256"] != record["sha256"] or
+                    row["parent_object_bytes"] != record["size_bytes"]):
+                raise ValueError("pilot parent row identity differs")
+        load_inputs(ir / "ee_functions.json", folders[-1] / "objects")
+        selected = sorted(promoted)
+        args.output.mkdir(parents=True)
+        (args.output / "objects").mkdir()
     tasks = [(n, names[n], ir / n, folders[-1] / "objects", records[n],
               tuple(r.get(n) for r in rows), plans_without_modules(plans), manifest["target_triple"])
              for n in selected]
+    if promoted is not None:
+        tasks = [task + (args.output / "objects" / (Path(task[0]).stem + ".scalar.o"),)
+                 for task in tasks]
     result = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         for row in pool.map(trial, tasks):
+            if promoted is not None and stable_receipt(row) != stable_receipt(promoted[row["module"]]):
+                raise ValueError("promoted candidate differs from pilot: " + row["module"])
             result.append(row)
             print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
                   f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
+    if promoted is not None:
+        changed = {r["module"]: r for r in result}
+        entries = []
+        for name, record in records.items():
+            if name in changed:
+                row = changed[name]
+                entries.append(dict(record, object=Path(name).stem + ".scalar.o",
+                                    size_bytes=row["candidate"]["object_bytes"],
+                                    sha256=row["candidate"]["sha256"],
+                                    transformed_ir_sha256=row["candidate_ir_sha256"],
+                                    experimental_scalar_memory=True))
+            else:
+                entries.append(dict(record, object=str((folders[-1] / "objects" / record["object"]).resolve())))
+        (args.output / "ee_functions.json").write_bytes(meta)
+        overlay = dict(manifest, objects=entries, object_bytes=sum(r["size_bytes"] for r in entries),
+                       experimental_mixed_pipeline=manifest["experimental_mixed_pipeline"] + "-scalar-pilot",
+                       production_cache_compatible=False)
+        (args.output / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2) + "\n", encoding="utf-8")
+        receipt = {"mode": "experimental_selective_scalar_memory",
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(manifest_data[-1][0]),
+                   "prior_library_sha256": plans[-1]["linked_library_sha256"],
+                   "native_target": manifest["native_target"], "pilot_sha256": sha(pilot_raw),
+                   "source_functions": len(names), "retained_functions": len(names),
+                   "recompiled_modules": len(result), "reused_modules": len(names)-len(result),
+                   "executable_saving": sum(r["executable_saving"] for r in result),
+                   "object_saving": sum(r["object_saving"] for r in result),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in result),
+                   "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
+                   "modules": result}
+        library = args.output / "game-translated.dll"
+        subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
+                        str(args.output / "ee_functions.json"), str(args.output / "objects"), str(library)],
+                       check=True)
+        data = library.read_bytes()
+        receipt.update(linked_library_bytes=len(data), linked_library_sha256=sha(data),
+                       linked_executable_raw_bytes=native_executable_sections(data)[0])
+        (args.output / "helper-plan.json").write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+        return receipt
     return {"mode": "read_only_ee_scalar_memory_pilot", "metadata_sha256": sha(meta),
             "parent_manifest_sha256": sha(manifest_data[-1][0]),
             "parent_library_sha256": plans[-1]["linked_library_sha256"],
@@ -301,24 +400,34 @@ def plans_without_modules(plans):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ir", type=Path)
-    for flag in ("counter-experiment", "quadword-experiment", "multiply-experiment", "experiment", "audit", "json"):
+    for flag in ("counter-experiment", "quadword-experiment", "multiply-experiment", "experiment", "audit"):
         parser.add_argument("--" + flag, type=Path, required=True)
+    parser.add_argument("--json", type=Path)
+    parser.add_argument("--promote", type=Path, help="existing measured pilot receipt")
+    parser.add_argument("--output", type=Path, help="new isolated linked experiment directory")
     parser.add_argument("--per-band", type=int, default=8)
     parser.add_argument("--largest", type=int, default=8)
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
-        output = args.json.resolve()
+        if bool(args.promote) != bool(args.output) or bool(args.json) == bool(args.promote):
+            raise ValueError("choose --json or --promote with --output")
+        output = (args.output or args.json).resolve()
         if (not 1 <= args.jobs <= 16 or args.per_band < 0 or args.largest < 0 or output.exists() or
                 any(output.is_relative_to(p.resolve()) for p in (args.ir, args.counter_experiment,
                      args.quadword_experiment, args.multiply_experiment, args.experiment))):
-            raise ValueError("use a new report outside caches and valid sample parameters")
+            raise ValueError("use a new output outside caches and valid sample parameters")
+        if args.promote:
+            if os.name != "nt" or os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
+                raise ValueError("promotion requires Windows and disabled certificates")
+            args.output = output
         report = audit(args)
-        with output.open("x", encoding="utf-8") as stream:
-            json.dump(report, stream, indent=2)
-            stream.write("\n")
-        print(f"Pilot: {report['executable_saving']:,} executable bytes saved", flush=True)
-    except (OSError, ValueError, RuntimeError, KeyError, TypeError) as error:
+        if not args.promote:
+            with output.open("x", encoding="utf-8") as stream:
+                json.dump(report, stream, indent=2)
+                stream.write("\n")
+        print(f"Scalar memory: {report['executable_saving']:,} executable bytes saved", flush=True)
+    except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"EE scalar memory pilot refused: {error}", file=sys.stderr)
         return 1
     return 0
