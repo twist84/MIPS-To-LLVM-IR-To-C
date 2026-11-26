@@ -329,6 +329,68 @@ entry:
     print("PASS: selective O5 pipeline, native object invalidation and immutable source")
 
 
+def test_native_pipeline_upgrade():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_optimized_cache as optimized
+    import shared_ee_ir as shared
+    import run_game
+
+    with tempfile.TemporaryDirectory(prefix="ee-pipeline-upgrade-") as temp:
+        root = Path(temp)
+        ir = root / "ir"
+        ir.mkdir()
+        work = root / "O5"
+        work.mkdir()
+        source = ir / "guest.ll"
+        write_ir(source, 1)
+        original = source.read_bytes()
+        metadata = ir / "ee_functions.json"
+        shared.write_json(metadata, {
+            "function_count": 1,
+            "functions": [{"ir_path": str(source), "vaddr": "0x100000",
+                           "host_symbol": "guest", "block_pcs": ["0x100000"]}],
+        })
+        sources = {"ELF": "synthetic"}
+        hashes = {source.name: shared.digest(source)}
+        shared.publish(metadata, sources, hashes)
+        shared.attach(work, ir)
+        cache = work / "translation-cache.json"
+        shared.write_json(cache, {"schema": run_game.CACHE_SCHEMA,
+                                  "emit_opt": 5, "ir_pipeline": None,
+                                  "ir_sources": sources})
+        library = work / "guest.so"
+
+        # Simulate the legacy native cache being rejected while the shared
+        # source is still authenticated. No guest recompilation or relink
+        # of the old objects is permitted on this transition.
+        with patch.object(run_game, "validate_translation_cache",
+                          side_effect=[ValueError("old pipeline"), None]), \
+             patch.object(run_game, "build_linked_library") as emit, \
+             patch.object(run_game, "write_translation_cache") as save, \
+             patch.object(run_game, "main", side_effect=AssertionError("relift or relink")):
+            optimized.refresh_profile(root / "game.elf", root, "Release",
+                                      work, 5, 1, {}, library,
+                                      ir_sources=sources, verified_ir_hashes=hashes)
+            assert emit.call_count == save.call_count == 1
+            assert emit.call_args.args[2] == metadata
+            assert emit.call_args.args[3] == work / "objects"
+        assert source.read_bytes() == original
+
+        source.write_text("changed guest IR", encoding="utf-8")
+        with patch.object(run_game, "validate_translation_cache",
+                          side_effect=ValueError("old pipeline")), \
+             patch.object(run_game, "build_linked_library") as emit:
+            try:
+                optimized.refresh_profile(root / "game.elf", root, "Release",
+                                          work, 5, 1, {}, library,
+                                          ir_sources=sources)
+            except ValueError as error:
+                assert "guest module hashes changed" in str(error), error
+            else:
+                raise AssertionError("pipeline upgrade accepted tampered IR")
+            emit.assert_not_called()
+
+
 def test_relocated_object_manifest():
     with tempfile.TemporaryDirectory(prefix="ee-relocation-") as temp:
         root = Path(temp)
@@ -452,6 +514,7 @@ if __name__ == "__main__":
     test_shared_ir_provenance()
     test_native_target_profile()
     test_selective_native_pipeline()
+    test_native_pipeline_upgrade()
     test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
