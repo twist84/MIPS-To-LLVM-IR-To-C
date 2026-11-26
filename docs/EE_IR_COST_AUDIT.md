@@ -1469,3 +1469,35 @@ fallbacks; no IOP guest fault or timing observer failure. Final PC
 measurement only. All five CI workflows passed on 3785324.
 The 90,095,104-byte (85.92 MiB) image is accepted for this synchronous
 workload. Production lowering and cache policy remain unchanged.
+
+### Checkpoint 4k — trace guard review
+
+The current module builder already implements the preferred architecture:
+inline null and enable/remaining checks, followed by shared external
+publication (ee_trace_guest_store and ee_trace_guest_v0_write). The
+runtime callbacks own the remaining filtering and budgets; the checks
+are reloaded at each guest write. A shared quadword owner also retains
+the exact local guard. Do not unconditionally outline these hot gates
+or hoist them across callbacks; that would add calls to disabled trace
+paths or risk stale enable/budget state. Retain the current bodies and
+measure their residual footprint before reconsidering full outlining.
+
+### Checkpoint 4l / 5a — remaining accounting and lowering cost audit
+
+The annulled-slot helper increments only reference slots and publishes
+observation kind 1. The ALU-run helper conditionally advances attempts
+and slots together only when both observer and trace are absent; its
+caller emits quiet and observed paths. Do not combine these semantics
+or outline hot batching without measurements. Implement a read-only
+audit of original guest IR instruction lines, annotations, count-only
+PCs, cloned annotations, LLVM blocks, opcode-region costs, register
+state GEPs/accesses, accounting and memory/exception helper calls,
+fastmem regions and entry dispatch costs. Verify original and current
+addition-overlay native object identities, report module-level
+executable bytes and approximate COFF named spans of the four remaining
+helpers. Report lexical attribution separately from exact static
+instruction counts; no native per-opcode mapping is claimed. Include
+size bands, all module summaries, largest blocks, and optionally
+caller-supplied hot PCs. This does not recompile, mutate caches or
+change runtime semantics. Use the results to select the next isolated
+optimization rather than guessing at the cost of small hot helpers.
