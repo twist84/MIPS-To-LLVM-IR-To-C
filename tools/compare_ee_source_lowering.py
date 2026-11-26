@@ -10,7 +10,6 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import os
-import re
 from pathlib import Path
 import subprocess
 import sys
@@ -20,7 +19,7 @@ import run_game
 import run_known_replays
 import verify_ir
 from audit_ee_helper_inventory import HEADER, END, read_manifest, verified_object
-from audit_ee_lowering_cost import band, scan_guest
+from audit_ee_lowering_cost import ANNOTATION, COUNT, band, scan_guest
 from ee_ownership_binary import coff_file_payload, native_executable_sections
 
 
@@ -105,10 +104,6 @@ def ir_metrics(raw, symbol):
 
 # For runtime-first builds only, match the same PC union used by the
 # lexical scanner without computing the expensive per-opcode IR cost.
-PC_ANNOTATION = re.compile(rb"^\\s*;\\s+(0x[0-9a-fA-F]+):\\s+\\S+", re.M)
-PC_COUNT = re.compile(rb"^\\s*call void @ee_count_guest_instruction\\(ptr %rt, i32 (\\d+), i32 \\d+\\)", re.M)
-
-
 def coverage_metrics(raw, symbol):
     matches = [match for match in HEADER.finditer(raw)
                if match[1].decode("ascii") == symbol]
@@ -118,9 +113,20 @@ def coverage_metrics(raw, symbol):
     end = END.search(raw, start.end())
     if end is None:
         raise ValueError("missing guest definition end: " + symbol)
-    body = raw[start.end():end.start()]
-    pcs = {int(match[1], 16) for match in PC_ANNOTATION.finditer(body)}
-    pcs.update(int(match[1]) for match in PC_COUNT.finditer(body))
+    first = raw.find(b"\n", start.end()) + 1
+    if first <= 0:
+        raise ValueError("unterminated guest definition header: " + symbol)
+    pcs = set()
+    for line in raw[first:end.start()].splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(b";"):
+            annotation = ANNOTATION.match(line)
+            if annotation:
+                pcs.add(int(annotation[1], 16))
+        elif b"@ee_count_guest_instruction(" in line:
+            call = COUNT.search(line)
+            if call:
+                pcs.add(int(call[1]))
     return {"ir_bytes": len(raw), "guest_pcs": len(pcs)}, {}, pcs
 
 

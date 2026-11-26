@@ -46,6 +46,19 @@ entry:
     counted = raw.replace(b"  ret i32 3\n",
         b"  call void @ee_count_guest_instruction(ptr %rt, i32 4100, i32 0)\n  ret i32 3\n")
     assert coverage_metrics(counted, "ee_fn_0x1000")[2] == {0x1000, 0x1004}
+    # Reuse the audit's exact patterns; tolerate Windows CRLF and
+    # exclude comments, helper bodies, and duplicate observations.
+    counted = counted.replace(b"define internal i64 @helper(i64 %x) {",
+        b"define internal i64 @helper(i64 %x) {\n; 0x9999: fake")
+    counted = counted.replace(b"  ret i32 3\n",
+        b"  ; @ee_count_guest_instruction(ptr %rt, i32 9999, i32 0)\n"
+        b"  ; 0x1000: addu\n"
+        b"  tail call void @ee_count_guest_instruction(ptr %rt, i32 4104, i32 0)\n"
+        b"  ret i32 3\n")
+    counted = b"declare void @ee_count_guest_instruction(ptr, i32, i32)\n" + counted
+    for sample in (counted, counted.replace(b"\n", b"\r\n")):
+        assert coverage_metrics(sample, "ee_fn_0x1000")[2] == {0x1000, 0x1004, 0x1008}
+        assert coverage_metrics(sample, "ee_fn_0x1000")[2] == ir_metrics(sample, "ee_fn_0x1000")[2]
     # LLVM inserts an unnamed block after a terminator even though
     # there is no textual label. Parsed CFG counts remain authoritative.
     implicit = raw.replace(b"  ret i32 3\n", b"  ret i32 3\n  ret i32 4\n")

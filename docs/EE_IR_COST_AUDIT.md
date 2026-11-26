@@ -2123,3 +2123,12 @@ workstream. In the four-arm replay use --prior-source-comparison to
 pin the preceding validated source O5 image instead of the mixed size
 overlay. Compare wall-clock throughput with both original A/A and the
 immediate source predecessor; one run is not a repeatable speed claim.
+
+Performance-first scanner correction: the initial standalone regexes
+were double escaped in Python raw strings and failed to match real
+annotations. Reuse the existing audit ANNOTATION and COUNT patterns,
+restrict scanning to the guest definition, and test equivalence with
+the full scan for annotations, counter-only PCs, duplicates, comments,
+helper isolation and Windows CRLF. Local 8c scalar evaluator and JIT
+tests passed; comparison-tool test exposed this issue. No lowering
+inputs changed in this fix.
