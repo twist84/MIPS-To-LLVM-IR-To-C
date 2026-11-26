@@ -457,3 +457,48 @@ boundary-biased products and exception vectors. Add structural checks
 and boundary-mask identity checks. V29 candidate vs V25 control.
 CI, retail timing and DLL size comparison pending. LLVM may already
 canonicalize these forms on some hosts; no speedup claim before replay.
+
+## G3A — V25/V29 correctness accepted; timing neutral
+
+All five CI workflows passed at 6b7de55. ee-graphics-g3a.zip contains
+four synchronous unprofiled interleaved pairs, all 40M dispatches.
+Receipt correctness and input integrity passed. All eight raw report
+and screenshot SHA-256 match the reference; all PAD stderr footers
+show 3127/3127 valid polls. Receipt reports 184700 matched transitions,
+21910026110 guest attempts, 22115080673 EE cycles, 4494 fields,
+394881 native runs and 445669423 native pairs per replay. Report
+contains zero VU1 interpreter fallback, no IOP guest fault and
+no timing observer failure. All 84 native DLL hashes changed,
+with identical inventory and native target.
+
+| Pair | V25 s | V29 s |
+|---|---:|---:|
+| 1 | 43.047 | 42.172 |
+| 2 | 42.375 | 42.516 |
+| 3 | 42.484 | 42.266 |
+| 4 | 42.281 | 42.360 |
+
+Median 42.4295 -> 42.313s, nominal throughput +0.2753%.
+Two pairs faster, two slower; difference 0.1165s is below the
+0.766s control and 0.344s candidate spreads. Retain V29 as
+experimental control, not a measured performance improvement.
+V28/V29 DLL totals still outstanding. No async performance claim.
+
+## G3B — exact SIMD addition alignment and normalization
+
+Build from V29. Express unsigned exponent maximum and shift saturation
+with llvm.umax/umin.v4i32, and the bounded sum magnitude with
+llvm.abs.v4i32. The aligned magnitudes each fit 25 bits, so the sum
+cannot reach signed INT_MIN. Preserve signed zero by selecting the
+intersection of operand sign bits when the integer sum is zero,
+otherwise use the integer sum's sign bit. The sign of the second
+operand already includes SUB's sign inversion. No modification to
+guard-bit truncation, exponent saturation, underflow fraction,
+Booth correction, ACC latch, sticky flags or architectural ordering.
+No host FP approximation. O0/O3 scalar/vector differential retains
+81920 existing randomized/boundary lane tuples per level and adds
+524288 ADD/SUB tuples per level covering every exponent pair and
+all four sign combinations with deterministic significands. These
+are not exhaustive mantissa combinations. LLVM may already produce
+equivalent native operations. V30 candidate versus V29; retain V25
+as the prior control. CI, retail and DLL size validation pending.
