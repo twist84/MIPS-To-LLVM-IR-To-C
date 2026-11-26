@@ -41,6 +41,55 @@ int main(int argc, char** argv)
 
     constexpr uint32_t entry_pc = 0x00100000u;
     const std::string mode = argv[1];
+    if (mode == "alu_count_run")
+    {
+        // GPR dependencies, repeated destinations, preserved upper halves,
+        // a V0 trace boundary and a real JR delay slot.
+        const uint32_t words[] =
+        {
+            make_i(0x09, 8, 8, 1),          // addiu t0,t0,1
+            make_i(0x0d, 8, 9, 0x40),       // ori t1,t0,0x40
+            make_r(9, 8, 10, 0, 0x2d),     // daddu t2,t1,t0
+            make_i(0x19, 10, 8, -2),        // daddiu t0,t2,-2
+            make_r(8, 0, 2, 0, 0x2d),      // daddu v0,t0,zero (not batched)
+            make_r(31, 0, 0, 0, 0x08),     // jr ra
+            make_i(0x09, 8, 11, 3)          // delay: addiu t3,t0,3
+        };
+        std::map<uint32_t, ee::s_ee_instruction> instructions;
+        for (size_t index = 0u; index < sizeof(words) / sizeof(words[0]); ++index)
+        {
+            const uint32_t pc = entry_pc + static_cast<uint32_t>(4u * index);
+            const auto ins = ee::decode(pc, words[index]);
+            if (ins.valid != ee::e_ee_valid::VALID)
+            {
+                return 3;
+            }
+            instructions.emplace(pc, ins);
+        }
+        ee::function_analyzer analyzer;
+        const auto functions = analyzer.analyze(instructions, {entry_pc});
+        if (functions.size() != 1u || functions[0].blocks.size() != 1u)
+        {
+            return 6;
+        }
+        llvm::llvm_context context("alu_count_run");
+        llvm::module_builder builder(context);
+        builder.emit_function_cfg(functions[0], instructions, "guest_alu_count_run");
+        std::printf("ALU_COUNT_LAYOUT %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
+            sizeof(ee::s_ee_runtime),
+            offsetof(ee::s_ee_runtime, m_timing_observer_user),
+            offsetof(ee::s_ee_runtime, m_timing_observer),
+            offsetof(ee::s_ee_runtime, m_timing_observer_failed),
+            offsetof(ee::s_ee_runtime, m_guest_instruction_attempts),
+            offsetof(ee::s_ee_runtime, m_reference_instruction_slots),
+            offsetof(ee::s_ee_runtime, m_instruction_trace),
+            offsetof(ee::s_ee_runtime, m_instruction_trace_capacity),
+            offsetof(ee::s_ee_runtime, m_instruction_trace_count),
+            offsetof(ee::s_ee_runtime, m_instruction_trace_last_pc),
+            sizeof(ee::s_ee_instruction_trace_entry));
+        return context.write_ir_to_file(argv[2]) ? 0 : 6;
+    }
+
     const uint32_t function_entry_pc =
         mode == "callee_return" ? entry_pc + 0x2000u : entry_pc;
     uint32_t control_word = 0;
