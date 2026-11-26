@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc, entry_winners
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc, entry_winners, entry_expansion_candidates
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,15 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_entry_expansion_skips_every_sampled_module(self):
+        eligible = [{"module": n} for n in ("win.ll", "loss.ll", "new.ll")]
+        self.assertEqual(entry_expansion_candidates(eligible, {"win.ll", "loss.ll"}),
+                         {"new.ll": {"module": "new.ll"}})
+        with self.assertRaises(ValueError):
+            entry_expansion_candidates(eligible, {"missing.ll"})
+        with self.assertRaises(ValueError):
+            entry_expansion_candidates(eligible + eligible[:1], set())
 
     def test_entry_promotion_requires_both_sizes(self):
         inventory, records, trials = [], {}, []

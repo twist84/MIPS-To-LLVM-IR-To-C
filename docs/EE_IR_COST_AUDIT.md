@@ -1872,3 +1872,34 @@ Link separately and measure actual DLL change and four-arm retail
 correctness against full alignment (69.86 MiB). Do not promote
 mixed-result Oz or other code-only wins yet. Production caches and
 original IR remain untouched.
+
+### Checkpoint 7b — selective entry retail acceptance
+
+Verified the pilot SHA and all 15 candidate receipts (ignoring compile
+time only). 16,237 reused, all 16,252 retained. 3,803 switch cases,
+17,011 executable / 289,457 object bytes saved, 1,405 IR bytes removed.
+Stage 12.469 s before link. DLL 73,252,864 -> 73,159,168 bytes
+(69.77 MiB), 93,696 incremental; 34.3694% cumulative vs original O5.
+Linked raw executable bytes 68,275,712. Candidate SHA-256
+5bd906915b68e968a1b1f322c641a08c90499ef457e8c599c9388b28a94d6d32.
+Four synchronous arms exit 4 at 40M dispatches, 3,070/3,070 PAD0
+polls, 192,495 matched transitions per comparison, zero mismatches or
+unpaired samples. Library identities match receipts and remain unchanged.
+Reports SHA-256 49dfcf2180e40537c6def0bda4021615a07eb043a477de9926f908979a036945;
+screenshots SHA-256 253c48d61917ae0a8391b98b1ab9a3d86843fd36aafd19f20fc311bbb7be9650;
+all four byte-identical. EE cycles 21,547,503,598; attempts 21,318,166,705;
+slots 21,320,170,508; yields 2,904; fields 4,379; no timing observer failure.
+Wall seconds 42.219 / 42.203 / 41.609 / 41.843 (+0.56% vs parent,
+single run). All five CI workflows passed on dfc252f. Accept matched workload.
+
+### Checkpoint 7c — expand entry rotation
+
+Verify the accepted selective overlay against the complete entry pilot,
+including all object/symbol identities and aggregate receipts. Retain
+15 accepted objects, skip 32 previously measured non-wins, and trial
+all 10,392 unsampled eligible modules with exact full-alignment parent
+reconstruction. Retain only positive executable AND object savings,
+remove rejected trial objects, record every trial and its receipt digest.
+Link a separate overlay and require four-arm retail validation; compare
+actual DLL size against 69.77 MiB selective parent. No production or
+original IR mutation. Object metadata savings need not survive linking.

@@ -676,6 +676,66 @@ def entry_winners(pilot, inventory, selected, skipped, eligible, meta, raw, curr
     return accepted
 
 
+def entry_expansion_candidates(eligible, sampled):
+    names = {r["module"] for r in eligible}
+    if len(names) != len(eligible) or not set(sampled) <= names:
+        raise ValueError("entry expansion inventory differs")
+    return {r["module"]: r for r in eligible if r["module"] not in sampled}
+
+
+def verify_entry_overlay(folder, meta, names, raw, current, records, plan, accepted, pilot_raw):
+    overlay_raw, overlay, entries = read_manifest(folder / "objects", set(names))
+    receipt = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    pilot = json.loads(pilot_raw)
+    if (receipt["mode"] != "experimental_selective_entry_rotation" or
+            receipt["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            receipt["source_manifest_sha256"] != sha(raw) or
+            receipt["prior_library_sha256"] != plan["linked_library_sha256"] or
+            receipt["pilot_sha256"] != sha(pilot_raw) or
+            receipt["native_target"] != current["native_target"] or
+            overlay["native_target"] != current["native_target"] or
+            overlay["target_triple"] != current["target_triple"] or
+            overlay["experimental_mixed_pipeline"] != current["experimental_mixed_pipeline"] + "-entry-pilot" or
+            overlay.get("production_cache_compatible") is not False or
+            receipt["source_functions"] != len(names) or receipt["retained_functions"] != len(names) or
+            receipt["recompiled_modules"] != len(accepted) or receipt["reused_modules"] != len(names)-len(accepted) or
+            receipt["eligible_modules"] != pilot["eligible_modules"] or
+            receipt["sampled_modules"] != pilot["selected_modules"] or
+            receipt["acceptance_policy"] != "positive_executable_and_object_saving" or
+            not receipt.get("runtime_validation_required") or
+            dll.stat().st_size != receipt["linked_library_bytes"] or
+            sha(dll.read_bytes()) != receipt["linked_library_sha256"]):
+        raise ValueError("entry overlay identity differs")
+    rows = rows_of(receipt)
+    if len(receipt["modules"]) != len(rows) or set(rows) != set(accepted):
+        raise ValueError("entry overlay inventory differs")
+    for n, item in entries.items():
+        prev = records[n]
+        if any(item.get(k) != prev.get(k) for k in
+               ("ir_sha256", "defined_symbols", "experimental_pipeline", "experimental_alignment_merge")):
+            raise ValueError("entry overlay source or symbol differs: " + n)
+        if n in rows:
+            row = rows[n]
+            if (stable_receipt(row) != stable_receipt(accepted[n]) or
+                    row["candidate"]["sha256"] != item["sha256"] or
+                    row["candidate"]["object_bytes"] != item["size_bytes"] or
+                    row["candidate_ir_sha256"] != item["transformed_ir_sha256"] or
+                    item.get("experimental_entry_rotation") is not True):
+                raise ValueError("entry overlay candidate differs: " + n)
+        elif (item.get("experimental_entry_rotation") or
+              any(item.get(k) != prev.get(k) for k in ("sha256", "size_bytes", "transformed_ir_sha256"))):
+            raise ValueError("unmodified entry object differs: " + n)
+    for key, field in (("executable_saving", "executable_saving"),
+                       ("object_saving", "object_saving"),
+                       ("removed_ir_bytes", "ir_bytes_saved"), ("switch_cases", "switch_cases")):
+        if receipt[key] != sum(r[field] for r in rows.values()):
+            raise ValueError("entry overlay aggregate differs: " + key)
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return overlay_raw, overlay, entries, receipt
+
+
 def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, scalar,
                 residual, shared_rows, expected, owners, folder, entries,
                 candidates, promoted, link_raw, link_manifest, link_entries, link_plan):
@@ -718,12 +778,23 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
         raise ValueError(f"no canonical multi-entry switches: inventory={len(names)}, "
                          f"canonical={len(inventory)}, skipped={dict(skipped)}")
     accepted = None
+    expansion = args.entry_expand_from is not None
+    link_folder, link_raw, link_manifest, link_entries, link_plan = full, raw, current, records, plan
     started = time.monotonic()
     if args.entry_promote:
         pilot_raw = args.entry_promote.read_bytes()
         accepted = entry_winners(json.loads(pilot_raw), inventory, selected, skipped,
                                  len(largest), meta, raw, current, records, plan)
-        selected = {n: selected[n] for n in accepted}
+        sampled = set(selected)
+        if expansion:
+            link_folder = args.entry_expand_from.resolve()
+            link_raw, link_manifest, link_entries, link_plan = verify_entry_overlay(
+                link_folder, meta, names, raw, current, records, plan, accepted, pilot_raw)
+            selected = entry_expansion_candidates(largest, sampled)
+            if not selected:
+                raise ValueError("no remaining entry trials")
+        else:
+            selected = {n: selected[n] for n in accepted}
         out.mkdir(parents=True)
         (out / "objects").mkdir()
     tasks = []
@@ -739,16 +810,24 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
         tasks.append(task)
     results = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        for row in pool.map(entry_trial, tasks):
-            if accepted is not None and stable_receipt(row) != stable_receipt(accepted[row["module"]]):
-                raise ValueError("entry candidate differs from pilot: " + row["module"])
-            results.append(row)
-            print(f"[{len(results)}/{len(tasks)}] {row['module']}: "
-                  f"{row['executable_saving']:+,} executable / {row['object_saving']:+,} object bytes", flush=True)
+        for start in range(0, len(tasks), 128 * args.jobs):
+            for row in pool.map(entry_trial, tasks[start:start+128*args.jobs]):
+                name = row["module"]
+                if accepted is not None and not expansion and stable_receipt(row) != stable_receipt(accepted[name]):
+                    raise ValueError("entry candidate differs from pilot: " + name)
+                if expansion and (row["executable_saving"] <= 0 or row["object_saving"] <= 0):
+                    (out / "objects" / (Path(name).stem + ".entry.o")).unlink()
+                results.append(row)
+                if not expansion or len(results) % 128 == 0 or len(results) == len(tasks):
+                    print(f"[{len(results)}/{len(tasks)}] {name}: "
+                          f"{row['executable_saving']:+,} executable / {row['object_saving']:+,} object bytes", flush=True)
     if accepted is not None:
-        changes = {r["module"]: r for r in results}
+        kept = [r for r in results if r["executable_saving"] > 0 and r["object_saving"] > 0]
+        if not kept:
+            raise ValueError("no further measured entry wins")
+        changes = {r["module"]: r for r in kept}
         objects = []
-        for n, record in records.items():
+        for n, record in link_entries.items():
             if n in changes:
                 row = changes[n]
                 objects.append(dict(record, object=Path(n).stem + ".entry.o",
@@ -757,26 +836,39 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
                                     transformed_ir_sha256=row["candidate_ir_sha256"],
                                     experimental_entry_rotation=True))
             else:
-                objects.append(dict(record, object=str((full / "objects" / record["object"]).resolve())))
+                objects.append(dict(record, object=str((link_folder / "objects" / record["object"]).resolve())))
         (out / "ee_functions.json").write_bytes(meta)
-        overlay = dict(current, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
-                       experimental_mixed_pipeline=current["experimental_mixed_pipeline"] + "-entry-pilot",
+        overlay = dict(link_manifest, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
+                       experimental_mixed_pipeline=link_manifest["experimental_mixed_pipeline"] +
+                           ("-full" if expansion else "-entry-pilot"),
                        production_cache_compatible=False)
         (out / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2)+"\n", encoding="utf-8")
-        receipt = {"mode": "experimental_selective_entry_rotation",
-                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(raw),
-                   "prior_library_sha256": plan["linked_library_sha256"],
-                   "native_target": current["native_target"], "pilot_sha256": sha(pilot_raw),
+        receipt = {"mode": ("experimental_expanded_entry_rotation" if expansion else
+                            "experimental_selective_entry_rotation"),
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(link_raw),
+                   "prior_library_sha256": link_plan["linked_library_sha256"],
+                   "native_target": link_manifest["native_target"], "pilot_sha256": sha(pilot_raw),
                    "source_functions": len(names), "retained_functions": len(names),
-                   "recompiled_modules": len(results), "reused_modules": len(names)-len(results),
-                   "executable_saving": sum(r["executable_saving"] for r in results),
-                   "object_saving": sum(r["object_saving"] for r in results),
-                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in results),
-                   "switch_cases": sum(r["switch_cases"] for r in results),
-                   "eligible_modules": len(largest), "sampled_modules": len(json.loads(pilot_raw)["modules"]),
+                   "recompiled_modules": len(kept), "reused_modules": len(names)-len(kept),
+                   "executable_saving": sum(r["executable_saving"] for r in kept),
+                   "object_saving": sum(r["object_saving"] for r in kept),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in kept),
+                   "switch_cases": sum(r["switch_cases"] for r in kept),
+                   "eligible_modules": len(largest), "sampled_modules": len(sampled),
                    "acceptance_policy": "positive_executable_and_object_saving",
                    "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
-                   "modules": results}
+                   "modules": kept}
+        if expansion:
+            trials = out / "entry-trials.json"
+            trials.write_text(json.dumps(results, indent=2)+"\n", encoding="utf-8")
+            receipt.update(trials_sha256=sha(trials.read_bytes()), attempted_modules=len(results),
+                           retained_pilot_modules=len(accepted),
+                           skipped_pilot_rejections=len(sampled)-len(accepted),
+                           rejected_or_unchanged_modules=len(results)-len(kept),
+                           cumulative_entry_modules=len(accepted)+len(kept),
+                           cumulative_executable_saving=link_plan["executable_saving"]+receipt["executable_saving"],
+                           cumulative_object_saving=link_plan["object_saving"]+receipt["object_saving"],
+                           cumulative_switch_cases=link_plan["switch_cases"]+receipt["switch_cases"])
         library = out / "game-translated.dll"
         subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
                         str(out / "ee_functions.json"), str(out / "objects"), str(library)], check=True)
@@ -956,6 +1048,10 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.entry_expand_from:
+        if not args.entry_promote or not args.entry_from:
+            raise ValueError("--entry-expand-from requires --entry-from and --entry-promote")
+        inputs += (args.entry_expand_from.resolve(),)
     if args.entry_promote and not args.entry_from:
         raise ValueError("--entry-promote requires --entry-from")
     if args.entry_from:
@@ -1133,6 +1229,7 @@ def main():
     parser.add_argument("--alignment-expand-from", type=Path, help="accepted linked alignment pilot overlay; retain its winners and trial all remaining eligible modules")
     parser.add_argument("--entry-from", type=Path, help="accepted full alignment overlay; output is a read-only entry-switch pilot JSON")
     parser.add_argument("--entry-promote", type=Path, help="link only measured entry pilot wins on both size metrics")
+    parser.add_argument("--entry-expand-from", type=Path, help="accepted selective entry overlay; trial all unsampled eligible switches")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
