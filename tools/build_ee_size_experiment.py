@@ -97,19 +97,22 @@ def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs):
     staged.mkdir()
     results = {}
     start = time.monotonic()
-    # Recycle workers to bound LLVM process-local allocation retention.
-    with ProcessPoolExecutor(max_workers=jobs, max_tasks_per_child=128) as pool:
-        futures = {}
-        for name in selected:
-            item = records[name]
-            futures[pool.submit(candidate, paths[name], objects / item["object"],
-                                item, by_name[name], functions[name]["host_symbol"],
-                                manifest["target_triple"], staged / (Path(name).stem + ".oz.o"))] = name
-        for future in as_completed(futures):
-            row = future.result()
-            results[row["module"]] = row
-            if len(results) % 128 == 0 or len(results) == len(selected):
-                print(f"[{len(results)}/{len(selected)}] size trials complete", flush=True)
+    # Use bounded batches with fresh pools instead of max_tasks_per_child:
+    # Python 3.12 can hang when workers recycle with queued futures.
+    batch_size = 128 * jobs
+    for first in range(0, len(selected), batch_size):
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = {}
+            for name in selected[first:first + batch_size]:
+                item = records[name]
+                futures[pool.submit(candidate, paths[name], objects / item["object"],
+                                    item, by_name[name], functions[name]["host_symbol"],
+                                    manifest["target_triple"], staged / (Path(name).stem + ".oz.o"))] = name
+            for future in as_completed(futures):
+                row = future.result()
+                results[row["module"]] = row
+                if len(results) % 128 == 0 or len(results) == len(selected):
+                    print(f"[{len(results)}/{len(selected)}] size trials complete", flush=True)
     accepted = {name: row for name, row in results.items() if row["accepted"]}
     if not accepted:
         raise ValueError("no smaller replacements")
