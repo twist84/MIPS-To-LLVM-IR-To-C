@@ -440,6 +440,43 @@ Tracing is disabled by default and should not be enabled in performance
 benchmarks. No EE guest lowering or runtime ABI changes. Final CI
 and matched retail wall time remain unverified.
 
+## Matched controller-input retail experiments
+
+All five workflows passed at b0c4fff, including the four-way checkpoint
+comparison and replay provenance. Subsequent host-only changes avoid
+sample-phase arithmetic for a valid absent SPU2 IRQ opportunity and
+simplify the ordinary/AutoDMA two-channel deadline selection.
+
+For P40, set `SDBZ_PAD0_RECORD=1` (and unset
+`SDBZ_PAD0_REPLAY`) to log one raw active-high button mask and four
+axis bytes per authentic connected port-0 SIO2 0x42 poll. The sequence
+continues across IOP resets and records reset-local poll number, pad
+mode/config flag and packet sizes. A complete recording ends with
+`PAD0 input summary: record N` after the dispatch budget is exhausted.
+A cancelled or incomplete run has no valid completion footer.
+
+Copy the recorded boot.log outside the replay work directory before
+launching again. Unset `SDBZ_PAD0_RECORD`, set
+`SDBZ_PAD0_REPLAY` to the absolute path of that copy, and replay with
+identical dispatch budget and initial memory-card state. Live input
+is overridden at each actual poll; no extra packet, interrupt or poll
+is manufactured. Cross/script probes and recording/replay cannot be
+combined. A malformed, truncated or mismatched stream is rejected;
+exhaustion is not silently filled with neutral input. A successful
+replay reports `PAD0 input summary: replay consumed=N total=N valid=1`.
+The parser accepts at most one million samples. Multiple concatenated
+recording sessions are rejected.
+
+Use the same recorded stream for both baseline and experimental
+runs, restoring the initial memory card where necessary. Compare
+final architectural state, guest fields, VU1 work and progress PCs
+as well as wall time. Matching controller input alone does not prove
+deterministic guest execution or event order. The provenance JSON
+includes the replay source SHA-256, not its local path. Tests cover
+stream validation, axes/buttons, reset-local numbering and actual
+SIO2 digital response bytes. No guest lowering changes. Final CI and
+Windows retail capture/playback remain to be validated.
+
 ## Remaining activation gates (not implemented)
 
 
