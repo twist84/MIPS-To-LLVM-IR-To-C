@@ -812,3 +812,30 @@ A mismatched poll stream or incomplete run is a diagnostic result,
 not evidence of equivalence. Upload the generated zip even on failure.
 Native ALU certificates remain disabled; owner identity changes.
 No production cache files should be replaced.
+
+
+### Checkpoint 2c — initial async retail replay
+
+Baseline finished 40,000,000 dispatches (exit 4), 43.938 s process
+wall, 39,051.7 ms runner elapsed and 5,123 guest fields.
+Candidate reached the same dispatch budget in stdout scheduler
+totals, 42.844 s process wall, but returned 1 because PAD0 replay
+consumed 3,542 of 3,544 recorded polls. Its JSON is an in_progress
+snapshot at 39,358,862 dispatches, not a terminal report. Last
+candidate progress 39,993,344 / 39,018.2 ms / 5,120 fields.
+First sampled common transition difference at dispatch 11,426,816;
+first spawns 24,243,296 and 24,162,759. Both observed zero VU1
+fallbacks/worker failures and no IOP guest fault in available reports.
+The baseline trace samples a transferred entry 0x193b00 at 16,994,304;
+no transferred PC sampled in candidate, which is not evidence of zero
+executions. No actual dedup regression or speed gain established;
+both library hashes unchanged. The input recording alone does not
+guarantee deterministic device scheduling.
+
+Replay wrapper now supports --control (A/A before A/B) and --sync
+(disable async VU1/GS for every arm), compares sampled dispatch
+transitions and requires terminal dispatch-budget snapshots/exit 4,
+not merely report existence. An A/A failure prevents claiming a
+matched A/B result, but the candidate is still run for diagnosis.
+Synchronous replay is an accuracy experiment, not the P40
+throughput benchmark. No production changes or cache invalidation.

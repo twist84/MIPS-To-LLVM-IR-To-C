@@ -5,7 +5,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries
+from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, trace_comparison, terminal_budget
 
 
 def run():
@@ -26,6 +26,19 @@ def run():
                 raise AssertionError("incomplete or invalid record accepted")
         path.write_text("PAD0 input summary: replay consumed=1 total=1 valid=1\n")
         assert replay_summary(path) == {"consumed": 1, "total": 1, "valid": True}
+        left, right = root / "a.log", root / "b.log"
+        line = "dispatch=1 pc=0x00100000 -> 0x00100004 reason=DISPATCH(3) status=1\n"
+        left.write_text(line)
+        right.write_text(line.replace("0x00100004", "0x00100008"))
+        result = trace_comparison(left, right)
+        assert result["common_samples"] == 1 and result["first_different_dispatch"] == 1
+        right.write_text(line.replace("dispatch=1", "dispatch=2"))
+        result = trace_comparison(left, right)
+        assert result["common_samples"] == 0 and result["unpaired_samples"] == 2
+        (root / "report.json").write_text(json.dumps({"snapshot_kind": "in_progress", "dispatches": 40}))
+        assert not terminal_budget(root, 40)
+        (root / "report.json").write_text(json.dumps({"snapshot_kind": "stopped", "dispatches": 40}))
+        assert terminal_budget(root, 40) and not terminal_budget(root, 41)
         profile, experiment = root / "profile", root / "experiment"
         profile.mkdir()
         experiment.mkdir()

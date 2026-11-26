@@ -81,6 +81,38 @@ def replay_summary(path):
     return result
 
 
+def trace_comparison(left, right):
+    """Compare sampled transitions without interpreting missing samples as equality."""
+    pattern = re.compile(r"dispatch=(\d+) pc=(0x[0-9a-fA-F]+) -> (0x[0-9a-fA-F]+) reason=(\w+)\((\d+)\) status=(\d+)")
+    def read(path):
+        result = {}
+        with path.open(encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                match = pattern.match(line)
+                if match:
+                    result[int(match[1])] = list(match.groups()[1:])
+        return result
+    a, b = read(left), read(right)
+    common = a.keys() & b.keys()
+    mismatches = [index for index in common if a[index] != b[index]]
+    presence = a.keys() ^ b.keys()
+    first = min(mismatches, default=None)
+    return {"common_samples": len(common), "different_common_samples": len(mismatches),
+            "first_different_dispatch": first,
+            "first_different_left": a[first] if first is not None else None,
+            "first_different_right": b[first] if first is not None else None,
+            "first_unpaired_dispatch": min(presence, default=None),
+            "unpaired_samples": len(presence)}
+
+
+def terminal_budget(directory, limit):
+    path = directory / "report.json"
+    if not path.is_file():
+        return False
+    report = read_json(path)
+    return report.get("snapshot_kind") == "stopped" and report.get("dispatches") == limit
+
+
 def replay_environment(root):
     env = os.environ.copy()
     # Match the P40 preset's core runtime options, while leaving opt-in
@@ -137,6 +169,10 @@ def main():
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--experiment", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--control", action="store_true",
+                        help="Replay the recording on the original DLL before testing dedup")
+    parser.add_argument("--sync", action="store_true",
+                        help="Disable async VU1 and GS for all three runs")
     parser.add_argument("--max-dispatches", type=int, default=40000000)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
@@ -153,6 +189,8 @@ def main():
             raise ValueError("invalid dispatch or timeout budget")
         baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
         env = replay_environment(Path(__file__).resolve().parents[1])
+        if args.sync:
+            env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         card = env.get("SDBZ_MEMCARD")
@@ -160,27 +198,58 @@ def main():
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
             k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k == "PS2_SCALE"},
-            "baseline": None, "dedup": None, "pad_replay": None,
+            "baseline": None, "control": None, "dedup": None, "pad_replay": None,
+            "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
         args.output.mkdir(parents=True)
         try:
             print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
             receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
                                           dict(env, SDBZ_PAD0_RECORD="1"))
-            if not receipt["baseline"]["report_present"] or receipt["baseline"]["returncode"] is None:
+            if receipt["baseline"]["returncode"] != 4 or not terminal_budget(args.output / "baseline", args.max_dispatches):
                 raise ValueError("baseline failed to produce a terminal report")
             recording = args.output / "baseline" / "stderr.log"
             receipt["recorded_polls"] = record_count(recording)
+            if args.control:
+                print("Control: replaying the recording on the original DLL.", flush=True)
+                receipt["control"] = run_one(args, baseline, args.output / "control",
+                                             dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                receipt["control_pad_replay"] = replay_summary(args.output / "control" / "stderr.log")
+                receipt["control_trace"] = trace_comparison(
+                    args.output / "baseline" / "stdout.log", args.output / "control" / "stdout.log")
+                receipt["control"]["terminal_budget_reached"] = terminal_budget(
+                    args.output / "control", args.max_dispatches)
+                # Continue even on a failed A/A control: collect comparable
+                # evidence, but never declare a matched A/B result.
             print("Deduplicated: replaying the recorded PAD0 polls.", flush=True)
             receipt["dedup"] = run_one(args, candidate, args.output / "dedup",
                                        dict(env, SDBZ_PAD0_REPLAY=str(recording)))
             receipt["pad_replay"] = replay_summary(args.output / "dedup" / "stderr.log")
+            receipt["dedup_trace"] = trace_comparison(
+                args.output / "baseline" / "stdout.log", args.output / "dedup" / "stdout.log")
+            receipt["dedup"]["terminal_budget_reached"] = terminal_budget(
+                args.output / "dedup", args.max_dispatches)
+            if args.control:
+                control = receipt["control_pad_replay"]
+                if (not control or not control["valid"] or
+                        control["consumed"] != receipt["recorded_polls"] or
+                        control["total"] != receipt["recorded_polls"] or
+                        receipt["control"]["returncode"] != 4 or
+                        not receipt["control"]["terminal_budget_reached"] or
+                        not receipt["control_trace"]["common_samples"] or
+                        receipt["control_trace"]["different_common_samples"] or
+                        receipt["control_trace"]["unpaired_samples"]):
+                    raise ValueError("A/A control not matched; dedup result remains diagnostic")
             replay = receipt["pad_replay"]
             if (not replay or not replay["valid"] or replay["consumed"] != receipt["recorded_polls"]
                     or replay["total"] != receipt["recorded_polls"]):
                 raise ValueError("PAD0 replay diverged or ended early; not a matched comparison")
-            if not receipt["dedup"]["report_present"] or receipt["dedup"]["returncode"] is None:
-                raise ValueError("deduplicated replay failed to produce a terminal report")
+            if receipt["dedup"]["returncode"] != 4 or not receipt["dedup"]["terminal_budget_reached"]:
+                raise ValueError("deduplicated replay failed to produce a terminal budget report")
+            if (not receipt["dedup_trace"]["common_samples"] or
+                    receipt["dedup_trace"]["different_common_samples"] or
+                    receipt["dedup_trace"]["unpaired_samples"]):
+                raise ValueError("sampled dispatch transitions differ; not a matched comparison")
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
