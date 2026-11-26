@@ -535,6 +535,29 @@ std::string module_builder::src_hi(uint8_t reg)
     return hi;
 }
 
+std::string module_builder::emit_effective_address(const ee::s_ee_instruction& ins)
+{
+    // Memory helpers consume a 32-bit guest virtual address. Truncation
+    // commutes with wrapping addition, including negative displacements.
+    // Avoid generating a host addition for the common zero-offset case
+    // or loading the immutable zero register for absolute addresses.
+    if (ins.rs == 0u)
+    {
+        return std::to_string(static_cast<uint32_t>(ins.immediate));
+    }
+    const std::string base = src_lo(ins.rs);
+    const std::string low = newtemp();
+    m_out += "  " + low + " = trunc i64 " + base + " to i32\n";
+    if (ins.immediate == 0)
+    {
+        return low;
+    }
+    const std::string address = newtemp();
+    m_out += "  " + address + " = add i32 " + low + ", " +
+             std::to_string(ins.immediate) + "\n";
+    return address;
+}
+
 void module_builder::emit_guest_store_trace(
     const ee::s_ee_instruction& ins,
     const std::string& effective_address,
@@ -1389,12 +1412,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // Integer loads: addr = trunc32(rs + sext16(imm)); result into low 64,
         // upper 64 preserved (except full 64-bit LD still only writes lo64).
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
+        const std::string addr = emit_effective_address(ins);
         const uint32_t width =
             ins.opcode == ee::e_ee_opcode::OP_LH ||
             ins.opcode == ee::e_ee_opcode::OP_LHU ? 2u :
@@ -1448,12 +1466,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_SW:
     case ee::e_ee_opcode::OP_SD:
     {
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
+        const std::string addr = emit_effective_address(ins);
         const uint32_t width =
             ins.opcode == ee::e_ee_opcode::OP_SB ? 1u :
             ins.opcode == ee::e_ee_opcode::OP_SH ? 2u :
@@ -1484,15 +1497,10 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_LQ:
     {
         // Load quadword into full 128-bit GPR (lo + hi).
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string raw_addr = newtemp();
+        const std::string raw_addr = emit_effective_address(ins);
         std::string addr = newtemp();
         std::string vlo = newtemp();
         std::string vhi = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + raw_addr + " = trunc i64 " + sum + " to i32\n";
         m_out += "  " + addr + " = and i32 " + raw_addr + ", -16\n";
         emit_quadword_read(addr, vlo, vhi);
         set_gpr_temp(ins.rt, vlo, vhi);
@@ -1502,13 +1510,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // EE LQ/SQ mask the low four effective-address bits, unlike
         // LQC2/SQC2. Retain the original address in store diagnostics.
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string raw_addr = newtemp();
+        const std::string raw_addr = emit_effective_address(ins);
         std::string addr = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + raw_addr + " = trunc i64 " + sum + " to i32\n";
         m_out += "  " + addr + " = and i32 " + raw_addr + ", -16\n";
         const std::string lo = src_lo(ins.rt);
         const std::string hi = src_hi(ins.rt);
@@ -1526,13 +1529,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             ins.opcode == ee::e_ee_opcode::OP_LWL ? "lwl" :
             ins.opcode == ee::e_ee_opcode::OP_LWR ? "lwr" :
             ins.opcode == ee::e_ee_opcode::OP_LDL ? "ldl" : "ldr";
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
+        const std::string addr = emit_effective_address(ins);
         std::string merged = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
         m_out += "  " + merged + " = call i64 @ee_mem_" + name +
                  "(ptr %rt, i32 " + addr + ", i64 " + src_lo(ins.rt) + ")\n";
         set_gpr_lo64(ins.rt, merged);
@@ -1548,12 +1546,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             ins.opcode == ee::e_ee_opcode::OP_SWL ? "swl" :
             ins.opcode == ee::e_ee_opcode::OP_SWR ? "swr" :
             ins.opcode == ee::e_ee_opcode::OP_SDL ? "sdl" : "sdr";
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
+        const std::string addr = emit_effective_address(ins);
         const bool is_word =
             ins.opcode == ee::e_ee_opcode::OP_SWL ||
             ins.opcode == ee::e_ee_opcode::OP_SWR;
@@ -1569,14 +1562,9 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_LQC2:
     {
         // LQC2 transfers a full 128-bit vector register, not a scalar dword.
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
+        const std::string addr = emit_effective_address(ins);
         std::string vlo = newtemp();
         std::string vhi = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
         guard_memory_alignment(addr, 16u, 4u); // EX_AdEL
         emit_quadword_read(addr, vlo, vhi);
         // VF00 is hardwired to (0,0,0,1). The access may still trap
@@ -1590,14 +1578,9 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     }
     case ee::e_ee_opcode::OP_SQC2:
     {
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
+        const std::string addr = emit_effective_address(ins);
         std::string vlo = newtemp();
         std::string vhi = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
         guard_memory_alignment(addr, 16u, 5u); // EX_AdES
         // SQC2 VF00 always stores (0,0,0,1), even if the host backing
         // VF0 bytes are stale. Only VF1..31 are backed by storage.
@@ -2373,12 +2356,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_SWC1:
     {
         // Primary LWC1/SWC1: base=rs, ft=rt, offset=imm.
-        char imm[32];
-        std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
-        std::string sum = newtemp();
-        std::string addr = newtemp();
-        m_out += "  " + sum + " = add i64 " + src_lo(ins.rs) + ", " + imm + "\n";
-        m_out += "  " + addr + " = trunc i64 " + sum + " to i32\n";
+        const std::string addr = emit_effective_address(ins);
         guard_memory_alignment(addr, 4u,
                                ins.opcode == ee::e_ee_opcode::OP_LWC1
                                    ? 4u : 5u);

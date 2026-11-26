@@ -65,6 +65,17 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
                      make_addiu(30u, 10u, 1), make_jr(31u), 0u};
             return true;
         }
+        if (operation == "lw_wrap_positive" || operation == "sw_wrap_negative" ||
+            operation == "lw_absolute")
+        {
+            const bool store = operation == "sw_wrap_negative";
+            const uint32_t base = operation == "lw_absolute" ? 0u : 9u;
+            const uint16_t offset = store ? 0xfffcu :
+                (base == 0u ? 0x40u : 0x44u);
+            words = {((store ? 0x2bu : 0x23u) << 26u) |
+                     (base << 21u) | (8u << 16u) | offset};
+            return true;
+        }
         const bool delay = operation.find("_delay") != std::string::npos;
         if (delay)
         {

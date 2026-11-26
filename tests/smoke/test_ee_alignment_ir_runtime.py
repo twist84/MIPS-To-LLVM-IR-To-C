@@ -347,6 +347,27 @@ def main():
                 (0xfedcba9876543210, 0x43, 0xff0, 0x2000, 0x00140000)
             ] if enabled else []), "SQ context lost live GPR values")
 
+        # 32-bit effective address arithmetic must discard high GPR bits
+        # and wrap positive/negative signed offsets before memory access.
+        for mode, base in (("ee_lw_wrap_positive", 0x12345678fffffffc),
+                           ("ee_lw_absolute", 0xffffffffffffffff)):
+            result, cpu, original = execute(fixture, directory, target, mode, base)
+            word = sum(original[0x40 + i] << (8 * i) for i in range(4))
+            require(result == EE_EXIT_DISPATCH and READS == [(4, 0x40)] and
+                    cpu.gpr[8].lo == ctypes.c_int32(word).value % (1 << 64),
+                    f"{mode}: wrapped effective address or value")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_sw_wrap_negative", 0x1234567800000044)
+        require(result == EE_EXIT_DISPATCH and
+                WRITES == [(4, 0x40, 0x89abcdef)] and
+                TRACES == [(0x40, 0x40, 4, 0)] and
+                TRACE_CONTEXTS[0][1] == 0x1234567800000044,
+                "negative displacement lost address or full base provenance")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_sw_wrap_negative", 0x1234567800000047)
+        require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == 0x43 and
+                not WRITES and not TRACES, "wrapped alignment fault")
+
         # The positive scalar word path remains operational.
         result, cpu, original = execute(
             fixture, directory, target, "ee_lw", 0x40)
