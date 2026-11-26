@@ -4792,6 +4792,7 @@ def main():
             states = []
             clocks = []
             checkpoints = []
+            state_traces = []
             for enabled, quiet in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
                 report = root / f"batch-{enabled}-{quiet}.json"
                 replay = command if (enabled, quiet) == ("0", "0") else [
@@ -4805,7 +4806,9 @@ def main():
                              SDBZ_EE_DIRECT_DISPATCH="1",
                              SDBZ_NATIVE_ALU_CERTIFICATES="1",
                              SDBZ_IOP_FAST_QUIET_TURNS=quiet,
-                             SDBZ_IOP_CHECKPOINT_TRACE="1"),
+                             SDBZ_IOP_CHECKPOINT_TRACE="1",
+                             SDBZ_STATE_TRACE_FIRST="1", SDBZ_STATE_TRACE_LAST="16",
+                             SDBZ_STATE_TRACE_EVERY="2"),
                 )
                 assert run.returncode == 3, run.stdout + run.stderr
                 state = json.loads(report.read_text(encoding="utf-8"))
@@ -4842,6 +4845,13 @@ def main():
                 ]
                 assert len(checkpoint_trace) > 1, run.stderr
                 checkpoints.append(checkpoint_trace)
+                state_trace = [line for line in run.stdout.splitlines()
+                               if line.startswith("EE state:")]
+                assert state_trace, run.stdout
+                observations = [int(dict(token.split("=") for token in line.split()[2:])
+                                    ["observations"]) for line in state_trace]
+                assert observations == sorted(set(observations)), state_trace
+                state_traces.append(state_trace)
                 quiet_lines = [line for line in run.stdout.splitlines()
                                if line.startswith("IOP clock quiet:")]
                 if quiet == "1":
@@ -4871,6 +4881,8 @@ def main():
             assert all(clock == clocks[0] for clock in clocks[1:]), clocks
             for checkpoint_trace in checkpoints[1:]:
                 assert checkpoint_trace == checkpoints[0], (checkpoints[0], checkpoint_trace)
+            for state_trace in state_traces[1:]:
+                assert state_trace == state_traces[0], (state_traces[0], state_trace)
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
