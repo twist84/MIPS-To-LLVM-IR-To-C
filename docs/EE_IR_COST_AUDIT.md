@@ -431,3 +431,45 @@ slot's cached SP read and checks one static publication of each
 POR half. No hardware timing change. CI and retail validation
 pending; deliberate IR refresh required. Actual runtime benefit
 is not assumed; the optimization targets redundant host stores.
+
+## PCSX2-inspired follow-up: lazy GPR loading and guarded word fastmem
+
+PCSX2 reference files: x86/ix86-32/iR5900.cpp (block linking and
+event check), x86/iCore.cpp (register caching), x86/ix86-32/
+iR5900LoadStore.cpp (constant addresses), and x86/ix86-32/recVTLB.cpp
+(fastmem and fault backpatching). This project retains LLVM AOT and
+its existing guest clock; no PCSX2 timing or x86 emitter code imported.
+
+af13da2 removes eager loading of the entire live-in GPR set at
+block entry. Predecessor publication analysis remains unchanged.
+The existing SSA cache loads actual operands on demand; helper
+flush/invalidation remains. Directed regressions assert exact GPR
+load sets for scalar control transfers, alongside existing branch,
+delay-slot, packed-half and observer tests.
+
+882e0c2 prototypes a runtime-disabled-by-default word fastmem path.
+SDBZ_EE_FASTMEM_WORD=1 explicitly installs the stable 32 MiB
+little-endian physical RAM span in the HLE runner. Generated LW,
+LWU, SW, LWC1 and SWC1 check the runtime descriptor and full 4-byte
+extent; the direct arm loads/stores align 1 and the other arm calls
+the existing memory helper. Existing guest alignment faults and
+pre-write diagnostic hook remain. Aliases, scratchpad, MMIO,
+out-of-range addresses, null runtime, ROM0 and non-little-endian
+runner configurations do not opt into this path. This is NOT
+fault-based fastmem, strict TLB support or an assumption that all
+guest addresses are physical. The runtime ABI fields append to
+the previous layout. New objects must be linked with matching host
+ABI and current provenance. d5a383d strengthens the direct-write
+test and partial-span fallback case.
+
+Retail checkpoint: the previous b71e84c branch-likely publication
+change has not yet had its own replay. Regenerate once, run lean
+P40 with SDBZ_EE_FASTMEM_WORD=0 and then repeat with =1 without
+overwriting IR. Same native library and translation manifest must
+be verified. Use fixed RTC and identical input if possible;
+live inputs and async workers remain confounders. Compare post-
+spawn field throughput and verify trace/worker/guest fault status.
+The disabled guard itself has a cost; do not assume a faster
+enabled run means a gain versus the pre-fastmem baseline. Final
+CI and measured performance remain pending. Further widths,
+alias specialization and block-level linking require evidence.
