@@ -1962,3 +1962,31 @@ Close checkpoint 7 without promotion or another retail replay.
 Retain the accepted 72,132,096-byte DLL and original IR/caches unchanged.
 All five workflows passed on aac15fc.
 
+## Checkpoint 8a — typed constexpr integer semantics
+
+Architecture-aware lowering starts with the pure C++17 evaluator
+`src/llvm/ee_scalar_constant.h`. Existing module_builder SSA/dirty-half
+tracking, string constant parsing, immediate folding, memory/exception
+lowering and internal dispatcher entries remain unchanged.
+The reference strategy is PCSX2's separation of constant, one-constant
+and dynamic arithmetic paths (PCSX2 revision
+34670c6151d28dee8284e90f7957e470fc03f9d3,
+`pcsx2/x86/ix86-32/iR5900Arit.cpp`); this implementation is independent
+portable unsigned-bit arithmetic, not copied host emission.
+
+The evaluator accepts only nontrapping scalar operations; unsupported
+enum values fail closed. Word results sign-extend into the low 64-bit
+half, immediate comparisons sign-extend the immediate even for SLTIU,
+logical immediates zero-extend, and shift counts mask to 5/6 bits.
+No signed overflow or signed right shift. The value-level GPR contract
+leaves the high half unchanged and treats register zero as hardwired.
+It does not replace SSA or publication logic. No production emitter
+calls the evaluator yet, no architecture-specific native intrinsics,
+and no new retail measurement is claimed.
+
+CTest ee_scalar_constant covers constexpr edge cases, deterministic
+real opcode differential execution against the bounded RAM interpreter
+for its supported scalar ALU subset, zero and aliased operands/destinations,
+all 32 GPR halves, and an independent bit-at-a-time shift oracle for
+the complete shift family. CI must establish the test gate before
+production integration. No intentional shared IR regeneration in 8a.
