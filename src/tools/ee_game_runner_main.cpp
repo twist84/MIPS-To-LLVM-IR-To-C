@@ -4067,6 +4067,45 @@ int main(int argc, char** argv)
         "SDBZ_PROFILE_PCS", &profile_pcs_environment);
     const bool profile_pcs = profile_pcs_value != nullptr &&
         std::strcmp(profile_pcs_value, "0") != 0;
+    uint64_t profile_pcs_first = 1u;
+    uint64_t profile_pcs_last = UINT32_MAX;
+    const auto read_profile_bound = [&](const char* name, uint64_t& bound)
+    {
+        std::string environment;
+        const char* value = read_host_environment(name, &environment);
+        if (value == nullptr || *value == '\0')
+        {
+            return true;
+        }
+        uint64_t parsed = 0u;
+        for (const char* digit = value; *digit != '\0'; ++digit)
+        {
+            if (*digit < '0' || *digit > '9' || parsed > UINT32_MAX / 10u)
+            {
+                return false;
+            }
+            parsed = parsed * 10u + static_cast<uint64_t>(*digit - '0');
+        }
+        if (parsed == 0u || parsed > UINT32_MAX)
+        {
+            return false;
+        }
+        bound = parsed;
+        return true;
+    };
+    if (!read_profile_bound("SDBZ_PROFILE_PCS_FIRST", profile_pcs_first) ||
+        !read_profile_bound("SDBZ_PROFILE_PCS_LAST", profile_pcs_last) ||
+        profile_pcs_first > profile_pcs_last)
+    {
+        std::fprintf(stderr, "invalid PC profile dispatch window (expected 1..UINT32_MAX)\n");
+        return 2;
+    }
+    if (profile_pcs)
+    {
+        std::printf("EE PC profile window: first=%llu last=%llu (native entry ordinal)\n",
+            static_cast<unsigned long long>(profile_pcs_first),
+            static_cast<unsigned long long>(profile_pcs_last));
+    }
     ee::c_ee_pc_profile<> pc_profile(profile_pcs);
     // Observe the existing schedule without changing guest execution.
     std::string horizon_environment;
@@ -5398,6 +5437,9 @@ int main(int argc, char** argv)
         const uint64_t instructions_before_dispatch =
             runtime.m_guest_instruction_attempts;
         const uint64_t idle_before_dispatch = idle_skip_instructions;
+        const bool profile_this_pc = profile_pcs &&
+            dispatched + 1u >= profile_pcs_first &&
+            dispatched + 1u <= profile_pcs_last;
         uint64_t pc_native_ns = 0u;
         uint64_t pc_nested_ns = 0u;
         // Shadow measurement of known deadlines at the existing
@@ -5582,7 +5624,7 @@ int main(int argc, char** argv)
             runtime.m_loop_safepoint_remaining = safepoint_budget;
             ee::c_runtime_profile_scope native_profile_scope(
                 ee::e_runtime_profile_id::ee_native_boundary, 0u, nullptr,
-                (report_path != nullptr && report_boundary_timing) || profile_pcs);
+                (report_path != nullptr && report_boundary_timing) || profile_this_pc);
             const uint32_t exit_reason_before = cpu.m_exit_reason;
             const auto resolved = slice == 1u && native_resolve != nullptr ?
                 native_targets.resolve(from_pc, [&](uint32_t pc)
@@ -5786,7 +5828,7 @@ int main(int argc, char** argv)
                 return 1;
             }
             const uint64_t native_duration_ns = native_profile_scope.stop();
-            if (profile_pcs)
+            if (profile_this_pc)
             {
                 pc_native_ns += native_duration_ns;
                 pc_nested_ns += native_profile_scope.child_ns();
@@ -5914,7 +5956,7 @@ int main(int argc, char** argv)
             break;
         }
 
-        if (profile_pcs)
+        if (profile_this_pc)
         {
             // Attribute measured boundary durations across retries, not
             // the time spent compiling, opening libraries or updating reports.
