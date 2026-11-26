@@ -940,3 +940,34 @@ required; use the existing synchronous A/A/B replay wrapper with
 terminal reports, GPU snapshots, PAD0 replay, sampled transitions,
 wall time and guest counters. Do not promote to production based on
 size alone. No new IR generation, object emission or relink needed.
+
+
+### Checkpoint 3c — synchronous selective Oz A/A/B acceptance
+
+Retail ee-size-comparison-sync.zip: all three exit 4 at 40M
+dispatches; 3,302/3,302 PAD0 polls, 255,866 identical sampled
+transitions per replay, no unpaired samples. All terminal JSONs
+SHA-256 a2802537937575b6dfaba798914313f2c283694d960fb0a008abadc08d2651e5
+and all GPU PPMs SHA-256
+663b40d2b4bb2b382d12ac28f1c29a89378ff50c3392d1486994c3f667f6d76d
+match byte-for-byte. All arms: 23,035,978,613 reference EE cycles,
+22,527,534,836 guest instruction attempts, 4,681 fields,
+4,578,541 GPU draws, 3,390 presents, 380,083 native VU1 runs,
+zero VU1 interpreter fallbacks, final PC 0x185cb0.
+Wall seconds 43.093 / 42.282 / 41.156; runner elapsed seconds
+39.022 / 38.481 / 37.5407. Candidate wall -2.66% and runner
+elapsed -2.44% versus control. Single synchronous workload,
+runtime profiling disabled; no general throughput claim.
+Small-function policy validated on this workload, not all modules.
+
+### Checkpoint 3d — extend the isolated selection to 128 guest PCs
+
+The 33–128 band has 4,114 modules and 29,317,682 O5 executable
+object bytes. Reuse the previous <=32 size-plan and its accepted
+objects only after verifying original manifest/metadata identity,
+complete prior trial selection, size gates and object digests.
+Compile only the additional 4,114 candidates; link a separate
+image preserving the previous selection and metadata. Retain O5
+when either size metric fails. Report incremental as well as
+cumulative savings. This reuse is not a runtime certificate;
+the extended image needs its own replay. No production change.

@@ -10,7 +10,6 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 import time
@@ -51,7 +50,71 @@ def candidate(path, original, record, row, symbol, triple, destination):
     }
 
 
-def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs):
+def reuse_trials(previous, metadata_bytes, manifest_bytes, manifest, by_name, records, selected, max_pcs):
+    """Validate the complete previous selection and reuse its measured objects.
+
+    This is a compilation reuse check, not a runtime acceptance certificate.
+    All accepted objects must still match their recorded content and size.
+    Rejected trials keep the original O5 object; do not try them again.
+    """
+    previous = previous.resolve()
+    plan = json.loads((previous / "size-plan.json").read_text(encoding="utf-8"))
+    threshold = plan["max_guest_pcs"]
+    if (plan["mode"] != "experimental_selective_native_size" or
+            plan["metadata_sha256"] != sha(metadata_bytes) or
+            plan["source_manifest_sha256"] != sha(manifest_bytes) or
+            plan["native_target"] != manifest["native_target"] or
+            not 1 <= threshold < max_pcs or
+            (previous / "ee_functions.json").read_bytes() != metadata_bytes):
+        raise ValueError("previous size experiment does not match current source or threshold")
+    old = {row["module"]: row for row in plan["modules"]}
+    expected = {name for name in selected if by_name[name]["guest_pcs"] <= threshold}
+    if (set(old) != expected or len(old) != len(plan["modules"]) or
+            len(old) != plan["attempted_modules"]):
+        raise ValueError("previous size trial inventory differs")
+    overlay = json.loads((previous / "objects" / "objects.json").read_text(encoding="utf-8"))
+    overlay_records = {basename(item["input"]): item for item in overlay["objects"]}
+    if (overlay.get("experimental_mixed_pipeline") != "O5-selective-Oz" or
+            overlay.get("production_cache_compatible") is not False or
+            len(overlay_records) != len(overlay["objects"]) or
+            set(overlay_records) != set(records)):
+        raise ValueError("invalid previous mixed manifest")
+    reused_paths = {}
+    for name, row in old.items():
+        item, measured, trial = records[name], by_name[name], row["trial"]
+        if (row["guest_pcs"] != measured["guest_pcs"] or
+                row["baseline_sha256"] != item["sha256"] or
+                row["ir_sha256"] != item["ir_sha256"] or
+                row["baseline_executable_bytes"] != measured["native_executable_bytes"] or
+                row["baseline_object_bytes"] != item["size_bytes"]):
+            raise ValueError(f"previous trial source mismatch: {name}")
+        accepted = should_replace(row["baseline_executable_bytes"], row["baseline_object_bytes"],
+                                  trial["executable_bytes"], trial["object_bytes"])
+        if (row["accepted"] != accepted or
+                row["executable_saving"] != (row["baseline_executable_bytes"] - trial["executable_bytes"] if accepted else 0) or
+                row["object_saving"] != (row["baseline_object_bytes"] - trial["object_bytes"] if accepted else 0)):
+            raise ValueError(f"previous trial size gate mismatch: {name}")
+        if accepted:
+            entry = overlay_records[name]
+            if (entry.get("experimental_pipeline") != "Oz" or
+                    entry["sha256"] != trial["sha256"] or
+                    entry["size_bytes"] != trial["object_bytes"] or
+                    entry["ir_sha256"] != item["ir_sha256"]):
+                raise ValueError(f"previous replacement manifest mismatch: {name}")
+            path = (previous / "objects" / entry["object"]).resolve()
+            data = path.read_bytes()
+            if (sha(data) != trial["sha256"] or len(data) != trial["object_bytes"] or
+                    native_executable_sections(data)[0] != trial["executable_bytes"]):
+                raise ValueError(f"previous replacement content mismatch: {name}")
+            reused_paths[name] = path
+    if (len(reused_paths) != plan["replaced_modules"] or
+            sum(row["executable_saving"] for row in old.values()) != plan["executable_saving"] or
+            sum(row["object_saving"] for row in old.values()) != plan["object_saving"]):
+        raise ValueError("previous size trial totals differ")
+    return old, reused_paths
+
+
+def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs, previous=None):
     ir, objects, output = ir.resolve(), objects.resolve(), output.resolve()
     if output.exists() or output.is_relative_to(ir) or output.is_relative_to(objects):
         raise ValueError("use a new output directory outside original caches")
@@ -92,18 +155,24 @@ def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs):
     for name, path in paths.items():
         if sha(path.read_bytes()) != records[name]["ir_sha256"]:
             raise ValueError(f"IR digest mismatch: {name}")
+    start = time.monotonic()
+    results, reused_paths = ({}, {}) if previous is None else reuse_trials(
+        previous, metadata_bytes, manifest_bytes, manifest, by_name, records, selected, max_pcs)
+    reused_count = len(results)
+    pending = [name for name in selected if name not in results]
+    if reused_count:
+        print(f"Reusing {reused_count:,} size trials ({len(reused_paths):,} objects); "
+              f"compiling {len(pending):,} new candidates", flush=True)
     output.mkdir(parents=True, exist_ok=False)
     staged = output / "objects"
     staged.mkdir()
-    results = {}
-    start = time.monotonic()
     # Use bounded batches with fresh pools instead of max_tasks_per_child:
     # Python 3.12 can hang when workers recycle with queued futures.
     batch_size = 128 * jobs
-    for first in range(0, len(selected), batch_size):
+    for first in range(0, len(pending), batch_size):
         with ProcessPoolExecutor(max_workers=jobs) as pool:
             futures = {}
-            for name in selected[first:first + batch_size]:
+            for name in pending[first:first + batch_size]:
                 item = records[name]
                 futures[pool.submit(candidate, paths[name], objects / item["object"],
                                     item, by_name[name], functions[name]["host_symbol"],
@@ -123,7 +192,7 @@ def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs):
                       input=str(paths[name]))
         if name in accepted:
             trial = accepted[name]["trial"]
-            record.update(object=Path(name).stem + ".oz.o",
+            record.update(object=str(reused_paths[name]) if name in reused_paths else Path(name).stem + ".oz.o",
                           size_bytes=trial["object_bytes"], sha256=trial["sha256"],
                           experimental_pipeline="Oz")
         output_records.append(record)
@@ -143,6 +212,10 @@ def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs):
         "native_target": manifest["native_target"],
         "source_functions": len(functions), "retained_functions": len(functions),
         "max_guest_pcs": max_pcs, "attempted_modules": len(selected),
+        "reused_trials": reused_count, "reused_objects": len(reused_paths),
+        "new_trials": len(pending),
+        "new_executable_saving": sum(results[name]["executable_saving"] for name in pending),
+        "new_object_saving": sum(results[name]["object_saving"] for name in pending),
         "replaced_modules": len(accepted),
         "executable_saving": sum(row["executable_saving"] for row in results.values()),
         "object_saving": sum(row["object_saving"] for row in results.values()),
@@ -163,6 +236,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--max-guest-pcs", type=int, default=32)
     parser.add_argument("--jobs", type=int, default=8)
+    parser.add_argument("--reuse-size-experiment", type=Path,
+                        help="reuse a smaller prior size experiment with identical source manifest")
     parser.add_argument("--link", action="store_true")
     args = parser.parse_args()
     try:
@@ -171,7 +246,7 @@ def main():
         if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
             raise ValueError("disable native ALU certificates for experiment")
         receipt = stage(args.ir, args.objects, args.baseline, args.pilot,
-                        args.output, args.max_guest_pcs, args.jobs)
+                        args.output, args.max_guest_pcs, args.jobs, args.reuse_size_experiment)
         print(f"Selected Oz: {receipt['replaced_modules']}/{receipt['attempted_modules']} "
               f"replacements, {receipt['executable_saving']:,} executable bytes saved", flush=True)
         if args.link:
