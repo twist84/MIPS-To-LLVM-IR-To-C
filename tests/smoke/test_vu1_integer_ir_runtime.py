@@ -203,9 +203,15 @@ def main():
                 guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
                 assert "switch i32 %current_pc" in guest
                 assert re.search(r"pair_\d+:\n.*?icmp ult i32.*?\n.*?label %body_\d+, label %fail", guest, re.S)
-                assert re.search(r"next_\d+:\n.*?br i1 .*?, label %pair_\d+, label %dispatch", guest, re.S)
                 if case == "direct-branches":
                     assert re.search(r"next_\d+:\n  br label %pair_\d+", guest)
+                    assert re.search(r"next_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %pair_\d+", guest)
+                else:
+                    assert re.search(r"next_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %alternate_\d+", guest)
+                    assert re.search(r"alternate_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %dispatch", guest)
             if case == "stores":
                 # The full-width memory path must be explicit in the
                 # emitted IR, not dependent on backend scalar combining.
