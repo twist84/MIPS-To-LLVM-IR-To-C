@@ -971,3 +971,23 @@ image preserving the previous selection and metadata. Retain O5
 when either size metric fails. Report incremental as well as
 cumulative savings. This reuse is not a runtime certificate;
 the extended image needs its own replay. No production change.
+
+
+### Checkpoint 3d — measured Windows medium-function selective Oz link
+
+Retail size-plan(1).json, same source manifest and metadata as the
+<=32-PC experiment. Reused all 10,647 prior trials and 10,571 accepted
+objects. Of 4,114 new trials, 2,997 accepted, 1,117 retained O5.
+New executable object bytes saved 1,521,365 / 29,317,682 (5.19%);
+new total object bytes saved 7,028,283. Cumulative replacements
+13,568 / 14,761 trials, all 16,252 function modules retained.
+Cumulative executable object bytes saved 6,470,107; total object
+bytes saved 20,780,101. Experiment stage wall time 99.453 s.
+DLL 101,750,272 bytes (97.04 MiB), down 9,720,832 bytes (8.72%)
+from original O5 and 2,906,112 bytes from the <=32-PC image.
+Linked raw executable sections 95,263,744 bytes (90.85 MiB),
+down 6,548,992 bytes (6.43%) from original O5. DLL SHA-256
+a053549e424bc3d9c0beead7a9341fa68fba5d743c6c7828ad9823e694f2e126.
+The marginal code savings are lower than the <=32-PC band.
+No owner coalescing or production cache changes. Runtime acceptance
+requires another matched synchronous A/A/B replay of the new image.
