@@ -751,20 +751,20 @@ void c_hw::start_spu2_dma(uint32_t core)
 
 uint32_t c_hw::spu2_dma_cycles_remaining() const
 {
-    uint32_t earliest = 0u;
-    for (uint32_t core = 0u; core < 2u; ++core)
+    // Ordinary DMA uses only two countdowns. The refill query is
+    // needed solely for an active AutoDMA transfer with bytes left.
+    uint32_t first = m_spu2_dma_remaining[0u];
+    uint32_t second = m_spu2_dma_remaining[1u];
+    if (m_spu2_auto[0u].m_active && m_spu2_auto[0u].m_bytes != 0u)
     {
-        uint32_t left = m_spu2_dma_remaining[core];
-        if (m_spu2_auto[core].m_active && m_spu2_auto[core].m_bytes != 0u)
-        {
-            left = m_spu2.input_refill_cycles(core);
-        }
-        if (left != 0u && (earliest == 0u || left < earliest))
-        {
-            earliest = left;
-        }
+        first = m_spu2.input_refill_cycles(0u);
     }
-    return earliest;
+    if (m_spu2_auto[1u].m_active && m_spu2_auto[1u].m_bytes != 0u)
+    {
+        second = m_spu2.input_refill_cycles(1u);
+    }
+    return first == 0u ? second :
+        (second == 0u ? first : std::min(first, second));
 }
 
 void c_hw::feed_spu2_input(uint32_t core)
