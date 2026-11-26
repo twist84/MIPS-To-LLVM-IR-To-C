@@ -49,6 +49,10 @@ enum class e_runtime_profile_id : std::size_t
     vu1_compiled,
     vu1_worker_wait,
     vif1_deferred_resume,
+    vu0_sync_halted,
+    vu0_sync_cmsar1,
+    vu0_sync_micro,
+    vu0_sync_invalid,
     count
 };
 
@@ -98,7 +102,11 @@ inline constexpr std::array<s_runtime_profile_descriptor,
     {"report_snapshot_body", "none"},
     {"vu1_compiled", "attempted_microinstruction_pairs"},
     {"vu1_worker_wait", "none"},
-    {"vif1_deferred_resume", "none"}
+    {"vif1_deferred_resume", "none"},
+    {"vu0_sync_halted", "none"},
+    {"vu0_sync_cmsar1", "none"},
+    {"vu0_sync_micro", "none"},
+    {"vu0_sync_invalid", "none"}
 }};
 
 using t_runtime_profile_clock = std::chrono::steady_clock;
