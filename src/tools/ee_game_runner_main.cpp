@@ -781,6 +781,35 @@ uint32_t runner_vu0_sync(
     return synced;
 }
 
+// Install only when profiling: the normal callback remains exactly
+// runner_vu0_sync. Classify by entry state, not by the eventual result.
+uint32_t runner_vu0_profiled_sync(
+    void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
+    uint32_t mode, uint32_t pc)
+{
+    using id = ee::e_runtime_profile_id;
+    auto category = id::vu0_sync_invalid;
+    if (cpu != nullptr && vu0 != nullptr &&
+        mode <= static_cast<uint32_t>(ee::e_ee_vu0_sync_mode::WAIT_TO_E_OR_M))
+    {
+        const auto* context = static_cast<s_runner_vu0_control*>(user);
+        if (context != nullptr && context->m_vif1->cmsar1_running())
+        {
+            category = id::vu0_sync_cmsar1;
+        }
+        else if ((vu0->m_vpu_status & 1u) == 0u && vu0->m_running == 0u)
+        {
+            category = id::vu0_sync_halted;
+        }
+        else
+        {
+            category = id::vu0_sync_micro;
+        }
+    }
+    ee::c_runtime_profile_scope profile_scope(category);
+    return runner_vu0_sync(user, cpu, vu0, mode, pc);
+}
+
 uint32_t runner_vu0_start(
     void* user, ee::s_ee_cpu_state* cpu, ee::s_ee_vu0_state* vu0,
     uint32_t address, uint32_t pc)
@@ -4021,6 +4050,10 @@ int main(int argc, char** argv)
         "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
     ee::runtime_profile_begin(runtime_profile_value != nullptr &&
         std::strcmp(runtime_profile_value, "1") == 0);
+    if (ee::g_runtime_profile.m_enabled)
+    {
+        runtime.m_vu0_sync = runner_vu0_profiled_sync;
+    }
     if (report_path != nullptr && !report_boundary_timing &&
         !ee::g_runtime_profile.m_enabled)
     {
@@ -4198,7 +4231,9 @@ int main(int argc, char** argv)
             ee::s_ee_vu0_state* vu0, uint32_t mode, uint32_t pc)
         {
             ++static_cast<s_runner_vu0_control*>(user)->m_callback_generation;
-            return runner_vu0_sync(user, cpu, vu0, mode, pc);
+            return ee::g_runtime_profile.m_enabled ?
+                runner_vu0_profiled_sync(user, cpu, vu0, mode, pc) :
+                runner_vu0_sync(user, cpu, vu0, mode, pc);
         };
         runtime.m_vu0_start = [](void* user, ee::s_ee_cpu_state* cpu,
             ee::s_ee_vu0_state* vu0, uint32_t address, uint32_t pc)
