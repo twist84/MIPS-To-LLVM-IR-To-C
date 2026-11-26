@@ -1125,3 +1125,28 @@ all callers must use the same shared definition. The actual link
 and independent replay determine acceptance. Cross-module synthetic
 MCJIT test verifies publication order and rejects changed/escaping
 helpers. No production lowering changes.
+
+
+### Checkpoint 4b — measured shared observation native link
+
+Windows helper-plan.json, same metadata and full selective Oz
+source manifest as the helper inventory. All 16,252 original modules
+re-emitted, with one shared publisher owner (sub_0x100008_0x100008.ll).
+Original source files unchanged; 48,882,996 bytes of IR text removed
+in memory. Stage wall time 269.781 s. Exactly 16,251 modules shrink,
+with the owner growing by five executable bytes. All 2,238 O5
+modules save 751,968 executable bytes; 14,013/14,014 Oz modules
+shrink, net saving 2,971,151 executable bytes for the Oz group.
+Total executable object bytes 88,371,416 -> 84,648,297
+(-3,723,119, -4.21%); aggregate object bytes 129,443,174 ->
+124,402,583 (-5,040,591). This is a net code saving, not a
+direct measurement of the exact remaining helper bodies.
+Linked DLL 100,830,208 -> 96,549,888 bytes (92.08 MiB,
+-4,280,320, -4.25%); linked executable raw bytes 94,864,896 ->
+91,141,120. Original O5 DLL reduction 14,921,216 bytes (13.39%).
+DLL SHA-256 a6ca18fc5c16b60976da94b6c39b6acaa9fe3aea74dc41da4cc8dd5bf81fe9b5.
+All five CI workflows on a368d39 passed. Retail acceptance still
+requires independent synchronous matched replay. Observation-enabled
+behavior is covered by the synthetic cross-module test, but retail
+dispatch replay alone does not establish exhaustive observation or
+callback correctness. Production policy unchanged.
