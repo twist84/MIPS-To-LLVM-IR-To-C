@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
-from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt
+from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
 
 
 def fixture(width, write):
@@ -78,6 +78,13 @@ class TestScalarPilot(unittest.TestCase):
                          candidate=dict(good["candidate"], seconds=2))))
         with self.assertRaises(ValueError):
             winners(dict(pilot, executable_saving=3), ["good.ll", "bad.ll"])
+
+    def test_expansion_excludes_accepted_and_non_memory(self):
+        rows = [{"module": "accepted.ll", "memory_helper_calls": 1},
+                {"module": "new.ll", "memory_helper_calls": 2},
+                {"module": "zero.ll", "memory_helper_calls": 0},
+                {"module": "missing.ll"}]
+        self.assertEqual(expansion_candidates(rows, {"accepted.ll"}), ["new.ll"])
 
     def test_sparse_audit_selection(self):
         rows = [

@@ -1586,3 +1586,17 @@ within noise. Accept the 38-module image for this workload only.
 Four CI workflows passed; Build and test fast-2 reported a SEGFAULT
 in ee_scalar_memory_pilot. Correct the MCJIT fixture target-machine
 ownership (one fresh machine per engine); CI must confirm the fix.
+
+### Checkpoint 5d — expand selective scalar outlining
+
+Scan all original memory-bearing modules not already accepted by 5c.
+Reconstruct the COP1 addition parent for each trial, require exact
+paired native baseline reproduction, retain only positive executable
+size changes, delete rejected trial objects, and reuse the accepted 38
+scalar pilot objects by verified absolute path. Validate the complete
+pilot manifest, metadata, DLL hash, object identity and receipt chain.
+Keep a separate all-trial report with rejection and coverage counts;
+link the full retained guest inventory once. Measure incremental savings
+against the 85.53 MiB scalar pilot, not the addition parent. A four-arm
+retail replay must independently validate expanded correctness and
+performance. No generated IR, production cache or lowering changes.

@@ -265,6 +265,67 @@ def winners(pilot, selected):
     return {n: r for n, r in rows.items() if r.get("executable_saving", 0) > 0}
 
 
+def expansion_candidates(report_rows, already):
+    # A canonical scalar region necessarily contains a direct memory call
+    # in the original IR. Sparse zero-count rows cannot match the pattern.
+    return sorted(r["module"] for r in report_rows
+                  if r.get("memory_helper_calls", 0) and r["module"] not in already)
+
+
+def verify_pilot_parent(folder, meta, names, base_raw, base_manifest, base_records, base_plan):
+    parent_raw, parent_manifest, parent_records = read_manifest(folder / "objects", set(names))
+    plan = read_json(folder / "helper-plan.json")
+    library = folder / "game-translated.dll"
+    if (plan["mode"] != "experimental_selective_scalar_memory" or
+            plan["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            plan["source_manifest_sha256"] != sha(base_raw) or
+            plan["prior_library_sha256"] != base_plan["linked_library_sha256"] or
+            plan["native_target"] != base_manifest["native_target"] or
+            parent_manifest["native_target"] != base_manifest["native_target"] or
+            parent_manifest["target_triple"] != base_manifest["target_triple"] or
+            parent_manifest.get("production_cache_compatible") is not False or
+            parent_manifest["experimental_mixed_pipeline"] !=
+                base_manifest["experimental_mixed_pipeline"] + "-scalar-pilot" or
+            plan["source_functions"] != len(names) or plan["retained_functions"] != len(names) or
+            not plan.get("runtime_validation_required") or
+            library.stat().st_size != plan["linked_library_bytes"] or
+            sha(library.read_bytes()) != plan["linked_library_sha256"]):
+        raise ValueError("scalar pilot parent identity differs")
+    accepted = rows_of(plan)
+    if (len(accepted) != len(plan["modules"]) or not set(accepted) <= set(names) or
+            len(accepted) != plan["recompiled_modules"] or
+            len(names)-len(accepted) != plan["reused_modules"]):
+        raise ValueError("scalar pilot inventory differs")
+    for name, record in parent_records.items():
+        base = base_records[name]
+        if name in accepted:
+            row = accepted[name]
+            if (row["executable_saving"] <= 0 or
+                    row["executable_saving"] != row["parent_executable_bytes"] - row["candidate"]["executable_bytes"] or
+                    row["object_saving"] != row["parent_object_bytes"] - row["candidate"]["object_bytes"] or
+                    row["original_ir_sha256"] != base["ir_sha256"] or
+                    row["parent_ir_sha256"] != base["transformed_ir_sha256"] or
+                    row["parent_object_sha256"] != base["sha256"] or
+                    row["parent_object_bytes"] != base["size_bytes"] or
+                    row["candidate"]["sha256"] != record["sha256"] or
+                    row["candidate"]["object_bytes"] != record["size_bytes"] or
+                    row["candidate_ir_sha256"] != record["transformed_ir_sha256"] or
+                    not record.get("experimental_scalar_memory")):
+                raise ValueError("scalar pilot receipt differs: " + name)
+        elif any(record.get(key) != base.get(key) for key in
+                 ("sha256", "size_bytes", "transformed_ir_sha256", "experimental_pipeline")):
+            raise ValueError("unmodified pilot object differs: " + name)
+        if any(record.get(key) != base.get(key) for key in ("defined_symbols", "ir_sha256", "experimental_pipeline")):
+            raise ValueError("scalar pilot symbol or source identity differs: " + name)
+    for key, field in (("executable_saving", "executable_saving"), ("object_saving", "object_saving"),
+                       ("removed_ir_bytes", "ir_bytes_saved")):
+        if plan[key] != sum(row[field] for row in accepted.values()):
+            raise ValueError("scalar pilot aggregate differs")
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return parent_raw, parent_manifest, parent_records, plan, accepted
+
+
 def audit(args):
     started = time.monotonic()
     ir = args.ir.resolve()
@@ -304,6 +365,20 @@ def audit(args):
     if not selected:
         raise ValueError("no selected scalar-memory candidates")
     promoted = None
+    expanded = None
+    link_manifest_raw, link_manifest, link_records = manifest_data[-1]
+    link_parent, link_plan = folders[-1], plans[-1]
+    if args.expand_from:
+        link_parent = args.expand_from.resolve()
+        link_manifest_raw, link_manifest, link_records, link_plan, expanded = verify_pilot_parent(
+            link_parent, meta, names, manifest_data[-1][0], manifest, records, plans[-1])
+        selected = expansion_candidates(report["modules"], expanded)
+        if not selected:
+            raise ValueError("no remaining scalar memory candidates")
+        if not set(expanded) <= {r["module"] for r in report["modules"] if r.get("memory_helper_calls", 0)}:
+            raise ValueError("accepted scalar module missing from lowering audit")
+        args.output.mkdir(parents=True)
+        (args.output / "objects").mkdir()
     if args.promote:
         pilot_raw = args.promote.read_bytes()
         pilot = json.loads(pilot_raw)
@@ -330,21 +405,27 @@ def audit(args):
     tasks = [(n, names[n], ir / n, folders[-1] / "objects", records[n],
               tuple(r.get(n) for r in rows), plans_without_modules(plans), manifest["target_triple"])
              for n in selected]
-    if promoted is not None:
+    if promoted is not None or expanded is not None:
         tasks = [task + (args.output / "objects" / (Path(task[0]).stem + ".scalar.o"),)
                  for task in tasks]
     result = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        for row in pool.map(trial, tasks):
-            if promoted is not None and stable_receipt(row) != stable_receipt(promoted[row["module"]]):
-                raise ValueError("promoted candidate differs from pilot: " + row["module"])
-            result.append(row)
-            print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
-                  f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
-    if promoted is not None:
-        changed = {r["module"]: r for r in result}
+        for first in range(0, len(tasks), 128 * args.jobs):
+            for row in pool.map(trial, tasks[first:first + 128 * args.jobs]):
+                if promoted is not None and stable_receipt(row) != stable_receipt(promoted[row["module"]]):
+                    raise ValueError("promoted candidate differs from pilot: " + row["module"])
+                if expanded is not None and row.get("executable_saving", 0) <= 0 and "candidate" in row:
+                    (args.output / "objects" / (Path(row["module"]).stem + ".scalar.o")).unlink()
+                result.append(row)
+                if expanded is None or len(result) % 128 == 0 or len(result) == len(tasks):
+                    print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
+                          f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
+    if promoted is not None or expanded is not None:
+        changed = {r["module"]: r for r in result if r.get("executable_saving", 0) > 0}
+        if not changed:
+            raise ValueError("no additional executable size wins")
         entries = []
-        for name, record in records.items():
+        for name, record in link_records.items():
             if name in changed:
                 row = changed[name]
                 entries.append(dict(record, object=Path(name).stem + ".scalar.o",
@@ -353,23 +434,39 @@ def audit(args):
                                     transformed_ir_sha256=row["candidate_ir_sha256"],
                                     experimental_scalar_memory=True))
             else:
-                entries.append(dict(record, object=str((folders[-1] / "objects" / record["object"]).resolve())))
+                entries.append(dict(record, object=str((link_parent / "objects" / record["object"]).resolve())))
         (args.output / "ee_functions.json").write_bytes(meta)
-        overlay = dict(manifest, objects=entries, object_bytes=sum(r["size_bytes"] for r in entries),
-                       experimental_mixed_pipeline=manifest["experimental_mixed_pipeline"] + "-scalar-pilot",
+        overlay = dict(link_manifest, objects=entries, object_bytes=sum(r["size_bytes"] for r in entries),
+                       experimental_mixed_pipeline=link_manifest["experimental_mixed_pipeline"] +
+                           ("-full" if expanded is not None else "-scalar-pilot"),
                        production_cache_compatible=False)
         (args.output / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2) + "\n", encoding="utf-8")
-        receipt = {"mode": "experimental_selective_scalar_memory",
-                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(manifest_data[-1][0]),
-                   "prior_library_sha256": plans[-1]["linked_library_sha256"],
-                   "native_target": manifest["native_target"], "pilot_sha256": sha(pilot_raw),
+        wins = [changed[n] for n in sorted(changed)]
+        receipt = {"mode": ("experimental_expanded_scalar_memory" if expanded is not None else
+                            "experimental_selective_scalar_memory"),
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(link_manifest_raw),
+                   "prior_library_sha256": link_plan["linked_library_sha256"],
+                   "native_target": manifest["native_target"],
                    "source_functions": len(names), "retained_functions": len(names),
-                   "recompiled_modules": len(result), "reused_modules": len(names)-len(result),
-                   "executable_saving": sum(r["executable_saving"] for r in result),
-                   "object_saving": sum(r["object_saving"] for r in result),
-                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in result),
+                   "recompiled_modules": len(wins), "reused_modules": len(names)-len(wins),
+                   "executable_saving": sum(r["executable_saving"] for r in wins),
+                   "object_saving": sum(r["object_saving"] for r in wins),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in wins),
                    "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
-                   "modules": result}
+                   "modules": wins}
+        if expanded is not None:
+            trials = args.output / "scalar-trials.json"
+            trials.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+            receipt.update(trials_sha256=sha(trials.read_bytes()),
+                           attempted_modules=len(result),
+                           rewritten_modules=sum("candidate" in row for row in result),
+                           retained_pilot_modules=len(expanded),
+                           cumulative_scalar_modules=len(expanded)+len(wins),
+                           non_memory_modules=len(names)-len(result)-len(expanded),
+                           rejected_or_unchanged_modules=len(result)-len(wins),
+                           cumulative_scalar_executable_saving=link_plan["executable_saving"]+receipt["executable_saving"])
+        else:
+            receipt["pilot_sha256"] = sha(pilot_raw)
         library = args.output / "game-translated.dll"
         subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
                         str(args.output / "ee_functions.json"), str(args.output / "objects"), str(library)],
@@ -405,24 +502,29 @@ def main():
     parser.add_argument("--json", type=Path)
     parser.add_argument("--promote", type=Path, help="existing measured pilot receipt")
     parser.add_argument("--output", type=Path, help="new isolated linked experiment directory")
+    parser.add_argument("--expand-from", type=Path, help="accepted linked scalar pilot directory")
     parser.add_argument("--per-band", type=int, default=8)
     parser.add_argument("--largest", type=int, default=8)
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
-        if bool(args.promote) != bool(args.output) or bool(args.json) == bool(args.promote):
-            raise ValueError("choose --json or --promote with --output")
+        linking = bool(args.promote or args.expand_from)
+        if (args.promote and args.expand_from or linking != bool(args.output) or
+                bool(args.json) == linking):
+            raise ValueError("choose --json, --promote with --output, or --expand-from with --output")
         output = (args.output or args.json).resolve()
         if (not 1 <= args.jobs <= 16 or args.per_band < 0 or args.largest < 0 or output.exists() or
                 any(output.is_relative_to(p.resolve()) for p in (args.ir, args.counter_experiment,
                      args.quadword_experiment, args.multiply_experiment, args.experiment))):
             raise ValueError("use a new output outside caches and valid sample parameters")
-        if args.promote:
+        if linking:
+            if args.expand_from and output.is_relative_to(args.expand_from.resolve()):
+                raise ValueError("use an output outside the scalar parent")
             if os.name != "nt" or os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
                 raise ValueError("promotion requires Windows and disabled certificates")
             args.output = output
         report = audit(args)
-        if not args.promote:
+        if not linking:
             with output.open("x", encoding="utf-8") as stream:
                 json.dump(report, stream, indent=2)
                 stream.write("\n")
