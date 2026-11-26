@@ -65,6 +65,10 @@ if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"
 set "MAX_DISPATCHES=40000000"
 set "MAX_EXPANSION_DISPATCHES=40000000"
 set "MAX_REPLAY_DISPATCHES=40000000"
+rem Optional short diagnostic budget; normal P40 remains 40 million.
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_REPLAY_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
 set "BOOT_TIMEOUT_SECONDS=600"
 
 rem Preserve full profiling by default, but allow a profiler-off control.
