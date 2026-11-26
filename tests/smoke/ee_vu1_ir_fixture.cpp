@@ -389,6 +389,13 @@ int main(int argc, char** argv)
         append(integer(0x32u, 31u, 13u, 13u)); // -1
         append(branch(0x29u, 13u, 0u, -2));
         append(integer(0x32u, 1u, 15u, 15u)); // branch delay slot
+        // Self-loop: the delay pair overwrites the predicate register.
+        // The selected destination must survive that write, and the
+        // next branch sees the architectural previous-VI snapshot.
+        append((0x08u << 25u) | (13u << 16u) | 3u);
+        append(k_nop);
+        append(branch(0x29u, 13u, 0u, -1));
+        append(integer(0x32u, 31u, 13u, 13u));
         // Exercise all conditional predicates, both branch outcomes,
         // and the independent NPC on an E-bit branch.
         append(branch(0x28u, 0u, 0u, 2));
