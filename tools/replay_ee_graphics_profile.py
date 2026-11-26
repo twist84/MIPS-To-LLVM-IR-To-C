@@ -12,7 +12,7 @@ from replay_ee_dedup_experiment import (
     read_json, record_count, replay_environment, run_one, sha,
     terminal_budget, validate_source_libraries,
 )
-from replay_ee_graphics_sweep import aot_identity, validate_run
+from replay_ee_graphics_sweep import aot_identity, validate_aot_pair, validate_run
 
 
 # All fields are emitted exclusively by host-side diagnostic collectors.
@@ -119,6 +119,10 @@ def main():
     for option in ("runner", "elf", "disc", "profile", "source", "source-receipt",
                    "vu1", "recording", "reference", "output"):
         parser.add_argument("--" + option, type=Path, required=True)
+    parser.add_argument("--candidate-vu1", type=Path,
+                        help="matched alternative VU1 inventory; compare with same runner and EE")
+    parser.add_argument("--profile-vu1", action="store_true",
+                        help="profile both VU1 comparison arms (diagnostic only)")
     parser.add_argument("--max-dispatches", type=int, default=40000000)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     parser.add_argument("--repeats", type=int, default=2)
@@ -129,7 +133,11 @@ def main():
     try:
         if not 1 <= args.repeats <= 10 or not 1 <= args.max_dispatches <= 0xffffffff:
             raise ValueError("invalid repetitions or dispatch limit")
+        if args.profile_vu1 and args.candidate_vu1 is None:
+            raise ValueError("--profile-vu1 requires --candidate-vu1")
         protected = (args.profile, args.source, args.vu1, args.disc, args.reference)
+        if args.candidate_vu1 is not None:
+            protected += (args.candidate_vu1,)
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
                 any(args.output.is_relative_to(path) or path.is_relative_to(args.output)
                     for path in protected)):
@@ -137,6 +145,12 @@ def main():
         original, library, _ = validate_source_libraries(
             args.profile, args.source, args.elf, args.source_receipt)
         inventory = aot_identity(args.vu1)
+        candidate_inventory = None
+        if args.candidate_vu1 is not None:
+            candidate_inventory = aot_identity(args.candidate_vu1)
+            validate_aot_pair(inventory, candidate_inventory)
+        comparison = candidate_inventory is not None
+        second_arm = "candidate" if comparison else "profiled"
         if not terminal_budget(args.reference, args.max_dispatches):
             raise ValueError("reference did not reach terminal dispatch budget")
         reference = read_json(args.reference / "report.json")
@@ -160,19 +174,25 @@ def main():
                                    if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k == "PS2_SCALE"},
                    "recorded_polls": polls, "max_dispatches": args.max_dispatches,
                    "mode": "synchronous_runner_thread",
-                   "runs": {"control": [], "profiled": []},
+                   "runs": {"control": [], second_arm: []},
                    "correctness_accepted": False, "performance_accepted": False,
                    "error": None}
+        if comparison:
+            receipt["schema"] = "ee-graphics-vu1-comparison-v1"
+            receipt["candidate_vu1_inventory"] = candidate_inventory
+            receipt["profile_both_arms"] = args.profile_vu1
         args.output.mkdir(parents=True)
         try:
             for repetition in range(args.repeats):
-                order = ("control", "profiled") if repetition % 2 == 0 else ("profiled", "control")
+                order = ("control", second_arm) if repetition % 2 == 0 else (second_arm, "control")
                 for name in order:
-                    enabled = name == "profiled"
+                    enabled = args.profile_vu1 if comparison else name == "profiled"
+                    aot = args.candidate_vu1 if name == "candidate" else args.vu1
                     directory = args.output / f"{name}-{repetition + 1}"
-                    print(f"G1A {name} {repetition + 1}/{args.repeats}", flush=True)
+                    print(f"Graphics {name} {repetition + 1}/{args.repeats}", flush=True)
                     run = run_one(args, library, directory,
-                                  dict(env, SDBZ_RUNTIME_PROFILE="1" if enabled else "0"))
+                                  dict(env, SDBZ_RUNTIME_PROFILE="1" if enabled else "0",
+                                       SDBZ_VU1_AOT=str(aot)))
                     receipt["runs"][name].append(run)
                     run["directory"] = directory.name
                     run["profile_enabled"] = enabled
@@ -186,14 +206,22 @@ def main():
                 name: statistics.median(run["wall_seconds"] for run in runs)
                 for name, runs in receipt["runs"].items()}
             medians = receipt["median_wall_seconds"]
-            receipt["profiling_overhead_ratio"] = medians["profiled"] / medians["control"] - 1
+            if comparison:
+                receipt["relative_throughput"] = medians["control"] / medians["candidate"]
+                receipt["paired_wall_seconds"] = [
+                    {"control": control["wall_seconds"], "candidate": candidate["wall_seconds"]}
+                    for control, candidate in zip(receipt["runs"]["control"],
+                                                  receipt["runs"]["candidate"])]
+            else:
+                receipt["profiling_overhead_ratio"] = medians["profiled"] / medians["control"] - 1
             receipt["correctness_accepted"] = True
         except (OSError, ValueError, KeyError, TypeError) as error:
             receipt["error"] = str(error)
         finally:
             receipt["inputs_unchanged"] = (
                 all(sha(path) == hashes[key] for key, path in paths.items()) and
-                aot_identity(args.vu1) == inventory)
+                aot_identity(args.vu1) == inventory and
+                (not comparison or aot_identity(args.candidate_vu1) == candidate_inventory))
             if not receipt["inputs_unchanged"]:
                 receipt["correctness_accepted"] = False
             (args.output / "profiling-receipt.json").write_text(
