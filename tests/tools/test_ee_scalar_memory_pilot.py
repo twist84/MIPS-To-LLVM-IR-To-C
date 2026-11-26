@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exact scalar region matching and MCJIT direct/fallback equivalence."""
 import ctypes
+import faulthandler
 from pathlib import Path
 import sys
 import unittest
@@ -126,14 +127,17 @@ class TestScalarPilot(unittest.TestCase):
                               b" @" + shared_name(name).encode(), owner)
                 self.assertIn(b"declare " + (b"void" if write else ty.encode()) +
                               b" @" + shared_name(name).encode(), other)
+                # Destroy ModuleRefs before their LLVM context, even on
+                # verification/link/assertion failure. link_modules consumes b.
                 with llvm.create_context() as ctx:
-                    a = llvm.parse_assembly(owner.decode(), context=ctx)
-                    b = llvm.parse_assembly(other.replace(b"@guest(", b"@guest_other(").decode(), context=ctx)
-                    a.verify()
-                    b.verify()
-                    a.link_in(b)
-                    a.verify()
-                    self.assertFalse(a.get_function(shared_name(name)).is_declaration)
+                    with llvm.parse_assembly(owner.decode(), context=ctx) as a:
+                        with llvm.parse_assembly(other.replace(b"@guest(", b"@guest_other(").decode(), context=ctx) as b:
+                            a.verify()
+                            b.verify()
+                            llvm.link_modules(a, b)
+                            a.verify()
+                            self.assertEqual(sum(fn.name == shared_name(name) and
+                                                 not fn.is_declaration for fn in a.functions), 1)
                 with self.assertRaises(ValueError):
                     share_helpers(local, "guest", counts, {name: "wrong"}, owners, "a")
                 with self.assertRaises(ValueError):
@@ -188,4 +192,5 @@ class TestScalarPilot(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    faulthandler.enable()
+    unittest.main(verbosity=2)

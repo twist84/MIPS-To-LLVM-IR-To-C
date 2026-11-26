@@ -1644,3 +1644,31 @@ savings before linking. Unlike 5d, do not independently reject individual
 module losses: the shared owner graph must remain coherent. Compare the
 new DLL against the 77.14 MiB expanded scalar parent in a matched replay.
 No production integration or claim of speedup until separately validated.
+
+### Checkpoint 5e — shared scalar retail acceptance
+
+9,682 unique recompiled modules; all eight shared definitions occur
+once in sub_0x100420_0x100420.ll. O5 2,049 smaller / 1 unchanged
+(800,150 executable bytes saved); Oz 7,632 smaller (1,483,491 saved).
+Zero larger objects by executable-section size. Total executable saving
+2,283,641, object saving 4,541,592, removed IR text 25,014,346 bytes.
+6,570 reused, all 16,252 functions retained. Stage 219.954 s before link.
+DLL 80,889,856 -> 78,397,952 bytes (74.77 MiB), incremental 2,491,904
+bytes (3.08%), cumulative 33,073,152 bytes (29.67%) vs original O5.
+Linked executable raw bytes 73,443,328. Candidate SHA-256
+ d4842c017f4c98d1c55c0c9a5311aa324df9c4f2613e9a0962030435fb6ed3fe.
+All four synchronous replays exit 4 at 40M dispatches; 3,475/3,475 PAD0
+polls on each replay and 186,921 matching transitions per replay,
+zero mismatches/unpaired samples. Reports SHA-256
+109a086dc643d6927c68d685b0ba5d52b3b52fca4e3659c8d6f594210698f513;
+screenshots SHA-256
+24f1602e57a26d808cc40210e9e5e86bb512b729551df183152b5e6fdb4a4a13
+identical across all arms. EE cycles 24,488,995,328; attempts
+24,286,720,915; reference slots 24,288,772,056; fields 4,976;
+VU1 runs 366,743 / 409,223,976 pairs, zero fallbacks or IOP faults;
+final PC 0x185bd8, no timing observer failure. Wall seconds
+40.437 / 40.422 / 40.312 / 40.547 (+0.58% vs parent, single run).
+Accept for this workload only. Four CI workflows passed; fast-2
+reported a test-fixture SEGFAULT after an error in the new sharing test.
+Explicitly dispose linked ModuleRefs before their context and enable
+verbose/fault diagnostics. CI must confirm this repair.
