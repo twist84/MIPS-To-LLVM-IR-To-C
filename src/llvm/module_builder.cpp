@@ -243,6 +243,36 @@ void module_builder::declare_memory_helpers()
     m_out += "  ret void\n";
     m_out += "}\n\n";
 
+    // The normal instruction count path does not need the trace range,
+    // capacity, callback rejection or publication machinery. Keep those
+    // cold, but reload trace state AFTER the observer as before: a
+    // callback may change the installed trace or its capacity.
+    m_out += "define internal void @ee_publish_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot) noinline cold {\n";
+    m_out += "entry:\n";
+    m_out += "  call void @ee_observe_timing_event(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot)\n";
+    m_out += "  call void @ee_trace_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot)\n";
+    m_out += "  ret void\n";
+    m_out += "}\n\n";
+
+    m_out += "define internal void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot) alwaysinline {\n";
+    m_out += "entry:\n";
+    m_out += "  %observer_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_timing_observer)) + "\n";
+    m_out += "  %trace_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_instruction_trace)) + "\n";
+    m_out += "  %observer = load ptr, ptr %observer_ptr\n";
+    m_out += "  %trace = load ptr, ptr %trace_ptr\n";
+    m_out += "  %has_observer = icmp ne ptr %observer, null\n";
+    m_out += "  %has_trace = icmp ne ptr %trace, null\n";
+    m_out += "  %enabled = or i1 %has_observer, %has_trace\n";
+    m_out += "  br i1 %enabled, label %publish, label %done\n";
+    m_out += "publish:\n";
+    m_out += "  call void @ee_publish_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot)\n";
+    m_out += "  br label %done\n";
+    m_out += "done:\n";
+    m_out += "  ret void\n";
+    m_out += "}\n\n";
+
     // Private helper avoids unresolved external symbols in MCJIT fixtures.
     // Count executed VALID guest instructions, not host dispatches/loops.
     // This is NOT an EE cycle counter and must not drive GS scanout.
@@ -266,8 +296,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  %ref_old = load i64, ptr %ref_counter_ptr\n";
     m_out += "  %ref_new = add i64 %ref_old, 1\n";
     m_out += "  store i64 %ref_new, ptr %ref_counter_ptr\n";
-    m_out += "  call void @ee_observe_timing_event(ptr %rt, i32 %pc, i32 %opcode, i32 0, i64 %new_count, i64 %ref_new)\n";
-    m_out += "  call void @ee_trace_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 0, i64 %new_count, i64 %ref_new)\n";
+    m_out += "  call void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 0, i64 %new_count, i64 %ref_new)\n";
     m_out += "  br label %done\n";
     m_out += "done:\n";
     m_out += "  ret void\n";
@@ -326,8 +355,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  %attempt_ptr = getelementptr i8, ptr %rt, i64 " +
              std::to_string(offsetof(ee::s_ee_runtime, m_guest_instruction_attempts)) + "\n";
     m_out += "  %attempt = load i64, ptr %attempt_ptr\n";
-    m_out += "  call void @ee_observe_timing_event(ptr %rt, i32 %pc, i32 %opcode, i32 1, i64 %attempt, i64 %new)\n";
-    m_out += "  call void @ee_trace_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 1, i64 %attempt, i64 %new)\n";
+    m_out += "  call void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 1, i64 %attempt, i64 %new)\n";
     m_out += "  br label %done\n";
     m_out += "done:\n";
     m_out += "  ret void\n";
