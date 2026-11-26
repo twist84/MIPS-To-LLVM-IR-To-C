@@ -6,6 +6,7 @@ invalidates its ELF/object provenance cache, while changing orchestration
 must not throw away previously compiled guest functions.
 """
 import argparse
+import hashlib
 import json
 import locale
 import os
@@ -56,7 +57,7 @@ PROVENANCE_ENV = (
     "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", "SDBZ_VU1_ASYNC", "SDBZ_GS_ASYNC",
     "SDBZ_EE_DIRECT_DISPATCH", "SDBZ_GS_GPU_VRAM", "SDBZ_GIF_IMAGE_DIGEST",
     "SDBZ_HOST_AUDIO", "SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT",
-    "SDBZ_PAD0_SCRIPT", "SDBZ_TRACE_BUFFERED", "SDBZ_DISPATCH_TRACE_EVERY",
+    "SDBZ_PAD0_SCRIPT", "SDBZ_PAD0_RECORD", "SDBZ_TRACE_BUFFERED", "SDBZ_DISPATCH_TRACE_EVERY",
     "SDBZ_REPORT_PROGRESS_EVERY", "SDBZ_REPORT_SNAPSHOT_MS",
     "SDBZ_WINDOW_PUMP_STRIDE", "EE_WEBGPU_WINDOW", "EE_WEBGPU_SNAPSHOT",
 )
@@ -75,8 +76,21 @@ def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
 
     head = git("rev-parse", "HEAD")
     dirty = git("status", "--porcelain", "--untracked-files=no")
+    replay_input = env.get("SDBZ_PAD0_REPLAY")
+    replay_sha256 = None
+    if replay_input:
+        try:
+            with open(replay_input, "rb") as stream:
+                digest = hashlib.sha256()
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+                replay_sha256 = digest.hexdigest()
+        except OSError:
+            pass
     return {
         "schema": "ee-retail-replay-provenance-v1",
+        "pad0_replay_configured": bool(replay_input),
+        "pad0_replay_source_sha256": replay_sha256,
         "git_head": head,
         "tracked_tree_dirty": None if dirty is None else bool(dirty),
         "max_expansion_dispatches": expansion_limit,
@@ -86,7 +100,7 @@ def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
             "source_head_not_a_binary_hash",
             "untracked_files_not_checked",
             "environment_values_not_effective_runtime_defaults",
-            "live_controller_input_not_recorded",
+            "controller_input_reproduction_requires_valid_pad0_stream",
         ],
     }
 
