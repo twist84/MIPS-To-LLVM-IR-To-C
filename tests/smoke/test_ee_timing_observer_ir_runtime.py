@@ -46,7 +46,10 @@ def aligned_buffer(size):
     return backing, ptr
 
 
-def check_alu_count_run(fixture, root, machine):
+def check_alu_count_run(fixture, root, target):
+    # MCJIT takes ownership of its target machine. Never share one across
+    # engines; disposing either engine can invalidate the other.
+    machine = target.create_target_machine(opt=0)
     path = root / "alu.ll"
     emitted = subprocess.run([str(fixture), "alu_count_run", str(path)],
                              text=True, capture_output=True, check=True)
@@ -219,7 +222,7 @@ def main():
             (0x00100000, 0x04520004, 0, 0, 1, 1)
         ], (observed, failed)
 
-        check_alu_count_run(fixture, pathlib.Path(tmp), machine)
+        check_alu_count_run(fixture, pathlib.Path(tmp), target)
 
     print("ee_timing_observer_ir_runtime: PASS")
 
