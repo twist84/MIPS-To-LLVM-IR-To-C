@@ -1255,3 +1255,39 @@ or declaration; this may increase costs at previously inlined
 call sites, so actual size and matched runtime evidence are required.
 Test cross-module FIFO/scalar ordering, data and dependency rejection.
 Do not change normal lowering, cache policy or dispatch metadata.
+
+
+### Checkpoint 4f — measured shared quadword native link
+
+Windows helper-plan(2).json, LLVM 22.1.0 / znver2, same 16,252
+guest modules and metadata. Immediate parent library SHA-256 matches
+checkpoint 4d. Re-emitted 6,947 modules, reused 9,305. Quadword
+and observation/counter owner is sub_0x100008_0x100008.ll.
+Stage wall time 207.640 s, excluding link. Removed 9,049,074
+bytes of IR text in memory. Of affected modules, 6,945 shrink
+and two grow in executable size. O5: 2,150/2,150 shrink, saving
+1,066,834 executable bytes; Oz: 4,795/4,797 shrink, net saving
+2,487,674 executable bytes. Total incremental executable object
+saving 3,554,508 bytes and aggregate object saving 4,732,324 bytes.
+Executable object bytes 83,418,296 -> 79,863,788; aggregate
+object bytes 121,516,151 -> 116,783,827.
+DLL 94,994,432 -> 91,351,040 bytes (87.12 MiB), saving
+3,643,392 bytes (3.84%) versus immediate parent and 20,120,064
+bytes (18.05%) versus original O5. Linked raw executable bytes
+89,910,784 -> 86,354,432. DLL SHA-256
+74559ead7c638172176c08aa6440ba4ec5f7e7ccdc60b8f56b833f2b28a39b3e.
+Net executable savings exceed the old named helper footprint;
+the changed inlining and code generation contribute to the
+difference, but this is not a direct measurement of inlined bytes.
+All five CI workflows passed on 9d804e9. Runtime remains unvalidated.
+
+### Checkpoint 4g — matched incremental quadword comparison
+
+Use the existing four-arm synchronous replay with original O5
+record/control, shared-counter immediate parent, and shared-quadword
+candidate. Verify parent provenance and all library hashes, matched
+input, exact terminal budget, sampled transitions, terminal report
+and GPU screenshot. Compare candidate runtime against the shared
+counter parent. The previous alwaysinline policy was changed, so
+acceptance requires runtime evidence as well as size savings.
+Production policy and original caches remain unchanged.
