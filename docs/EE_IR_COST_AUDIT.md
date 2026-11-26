@@ -1150,3 +1150,39 @@ requires independent synchronous matched replay. Observation-enabled
 behavior is covered by the synthetic cross-module test, but retail
 dispatch replay alone does not establish exhaustive observation or
 callback correctness. Production policy unchanged.
+
+
+### Checkpoint 4c — shared observation retail acceptance
+
+ee-helper-comparison-sync.zip: all three runs exit 4 with 40M
+dispatches, both replays consume 3,018/3,018 controller polls,
+191,606 common sampled transitions each, zero differences or
+unpaired samples. No error, unchanged libraries. Candidate hash
+matches 4b link receipt. Byte-identical terminal JSON SHA-256
+caaead2afaf90f003a14888fa651a3eb049e5029bcf7d83e02f476bf0e974c22
+and GPU PPM SHA-256
+45f163039b259060340900df33859eb1459d66b064f6b4b5a77a86a7455f517b.
+All arms: 21,359,291,879 EE cycles; 21,126,347,677 guest instruction
+attempts; 21,128,382,756 reference slots; 4,340 fields; 4,816,523
+draws; 3,111 presents; 398,539 native VU1 runs / 447,493,790 pairs,
+zero fallbacks; final PC 0x10aff8. Wall seconds 42.812/42.750/42.500.
+Candidate -0.58% versus O5 control, within measurement noise.
+Validated on this synchronous workload only.
+
+### Checkpoint 4d — isolate the reached-instruction counter
+
+Extend the existing experiment with --share-counter, taking the
+previous observation experiment as its source. Reconstruct its
+transformed IR from the original files, validate the prior per-module
+transformed IR and object digests, exact original counter body,
+dependencies, ABI and direct symbol uses. Retain the counter's exact
+body in the existing shared publisher owner and declare a single
+external noinline counter in all others. Preserve the null guard,
+attempt/reference counters and observation gate. Leave ALU batching,
+annulled slots and all other helpers unchanged. Retain the previous
+O5/Oz policy and original guest metadata. Re-emit into a fresh
+isolated output. Synthetic MCJIT coverage exercises null, observed
+and quiet paths and rejects changed or escaping counters. This is
+a hot helper: size savings alone cannot justify promotion. Compare
+retail runtime against the previous shared-observation image as
+well as O5 before considering production policy.
