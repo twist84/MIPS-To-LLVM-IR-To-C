@@ -609,7 +609,8 @@ def verify_full_alignment(folder, meta, names, parent_raw, manifest, records, pa
 
 
 def entry_trial(task):
-    parent_task, row, folder, record, cases = task
+    parent_task, row, folder, record, cases = task[:5]
+    object_output = task[5] if len(task) == 6 else None
     name, guest = parent_task[:2]
     triple = parent_task[11]
     raw, _, before, mode = reconstruct_alignment_parent(parent_task)
@@ -627,7 +628,7 @@ def entry_trial(task):
     baseline = emit_native(before, triple, guest, mode)
     if baseline["sha256"] != record["sha256"]:
         raise ValueError("entry parent object not reproducible: " + name)
-    trial = emit_native(candidate, triple, guest, mode)
+    trial = emit_native(candidate, triple, guest, mode, object_output=object_output)
     return {"module": name, "mode": mode, "switch_cases": count,
             "original_ir_sha256": sha(raw), "parent_ir_sha256": sha(before),
             "parent_object_sha256": sha(data), "parent_object_bytes": len(data),
@@ -636,6 +637,43 @@ def entry_trial(task):
             "executable_saving": baseline["executable_bytes"]-trial["executable_bytes"],
             "object_saving": len(data)-trial["object_bytes"],
             "ir_bytes_saved": len(before)-len(candidate)}
+
+
+def entry_winners(pilot, inventory, selected, skipped, eligible, meta, raw, current, records, plan):
+    if (pilot["mode"] != "read_only_ee_entry_rotation_pilot" or
+            pilot["metadata_sha256"] != sha(meta) or
+            pilot["parent_manifest_sha256"] != sha(raw) or
+            pilot["parent_library_sha256"] != plan["linked_library_sha256"] or
+            pilot["native_target"] != current["native_target"] or
+            pilot["inventory_modules"] != len(records) or
+            pilot["canonical_switch_modules"] != len(inventory) or
+            pilot["eligible_modules"] != eligible or
+            pilot["skipped"] != dict(skipped) or
+            pilot["total_switch_cases"] != sum(r["switch_cases"] for r in inventory) or
+            pilot["entry_inventory"] != inventory):
+        raise ValueError("entry pilot provenance or inventory differs")
+    # Every selected entry trial must have compiled a candidate. The
+    # read-only entry report predates the generic rewritten_modules field.
+    if any("candidate" not in row for row in pilot["modules"]):
+        raise ValueError("entry pilot missing compiled candidate")
+    positive = winners(dict(pilot, rewritten_modules=len(pilot["modules"])), selected)
+    for row in pilot["modules"]:
+        name = row["module"]
+        item = records[name]
+        if (row["original_ir_sha256"] != item["ir_sha256"] or
+                row["parent_ir_sha256"] != item["transformed_ir_sha256"] or
+                row["parent_object_sha256"] != item["sha256"] or
+                row["parent_object_bytes"] != item["size_bytes"] or
+                row["mode"] != item.get("experimental_pipeline", "O5") or
+                row["switch_cases"] != selected[name]["switch_cases"]):
+            raise ValueError("entry pilot trial identity differs: " + name)
+    # Native code size alone is not a reliable proxy for linked image
+    # size when jump-table data or relocations change. First linked test
+    # conservatively requires both executable and object savings.
+    accepted = {n: row for n, row in positive.items() if row["object_saving"] > 0}
+    if not accepted:
+        raise ValueError("no measured entry wins on both size metrics")
+    return accepted
 
 
 def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, scalar,
@@ -679,20 +717,74 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
     if not selected:
         raise ValueError(f"no canonical multi-entry switches: inventory={len(names)}, "
                          f"canonical={len(inventory)}, skipped={dict(skipped)}")
+    accepted = None
+    started = time.monotonic()
+    if args.entry_promote:
+        pilot_raw = args.entry_promote.read_bytes()
+        accepted = entry_winners(json.loads(pilot_raw), inventory, selected, skipped,
+                                 len(largest), meta, raw, current, records, plan)
+        selected = {n: selected[n] for n in accepted}
+        out.mkdir(parents=True)
+        (out / "objects").mkdir()
     tasks = []
     for name, row in sorted(selected.items()):
         parent_task = (name, names[name], ir / name, base_records[name],
                        tuple(r.get(name) for r in rows), small_plans,
                        scalar.get(name), residual.get(name), shared_rows.get(name),
                        folder / "objects", entries[name], current["target_triple"], expected, owners)
-        tasks.append((parent_task, alignment_rows.get(name), full / "objects",
-                      records[name], row["switch_cases"]))
+        task = (parent_task, alignment_rows.get(name), full / "objects",
+                records[name], row["switch_cases"])
+        if accepted is not None:
+            task += (out / "objects" / (Path(name).stem + ".entry.o"),)
+        tasks.append(task)
     results = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         for row in pool.map(entry_trial, tasks):
+            if accepted is not None and stable_receipt(row) != stable_receipt(accepted[row["module"]]):
+                raise ValueError("entry candidate differs from pilot: " + row["module"])
             results.append(row)
             print(f"[{len(results)}/{len(tasks)}] {row['module']}: "
                   f"{row['executable_saving']:+,} executable / {row['object_saving']:+,} object bytes", flush=True)
+    if accepted is not None:
+        changes = {r["module"]: r for r in results}
+        objects = []
+        for n, record in records.items():
+            if n in changes:
+                row = changes[n]
+                objects.append(dict(record, object=Path(n).stem + ".entry.o",
+                                    size_bytes=row["candidate"]["object_bytes"],
+                                    sha256=row["candidate"]["sha256"],
+                                    transformed_ir_sha256=row["candidate_ir_sha256"],
+                                    experimental_entry_rotation=True))
+            else:
+                objects.append(dict(record, object=str((full / "objects" / record["object"]).resolve())))
+        (out / "ee_functions.json").write_bytes(meta)
+        overlay = dict(current, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
+                       experimental_mixed_pipeline=current["experimental_mixed_pipeline"] + "-entry-pilot",
+                       production_cache_compatible=False)
+        (out / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2)+"\n", encoding="utf-8")
+        receipt = {"mode": "experimental_selective_entry_rotation",
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(raw),
+                   "prior_library_sha256": plan["linked_library_sha256"],
+                   "native_target": current["native_target"], "pilot_sha256": sha(pilot_raw),
+                   "source_functions": len(names), "retained_functions": len(names),
+                   "recompiled_modules": len(results), "reused_modules": len(names)-len(results),
+                   "executable_saving": sum(r["executable_saving"] for r in results),
+                   "object_saving": sum(r["object_saving"] for r in results),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in results),
+                   "switch_cases": sum(r["switch_cases"] for r in results),
+                   "eligible_modules": len(largest), "sampled_modules": len(json.loads(pilot_raw)["modules"]),
+                   "acceptance_policy": "positive_executable_and_object_saving",
+                   "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
+                   "modules": results}
+        library = out / "game-translated.dll"
+        subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
+                        str(out / "ee_functions.json"), str(out / "objects"), str(library)], check=True)
+        data = library.read_bytes()
+        receipt.update(linked_library_bytes=len(data), linked_library_sha256=sha(data),
+                       linked_executable_raw_bytes=native_executable_sections(data)[0])
+        (out / "helper-plan.json").write_text(json.dumps(receipt, indent=2)+"\n", encoding="utf-8")
+        return receipt
     report = {"mode": "read_only_ee_entry_rotation_pilot",
               "metadata_sha256": sha(meta), "parent_manifest_sha256": sha(raw),
               "parent_library_sha256": plan["linked_library_sha256"], "native_target": current["native_target"],
@@ -864,6 +956,8 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.entry_promote and not args.entry_from:
+        raise ValueError("--entry-promote requires --entry-from")
     if args.entry_from:
         if not args.alignment_expand_from:
             raise ValueError("--entry-from requires --alignment-expand-from")
@@ -1038,6 +1132,7 @@ def main():
     parser.add_argument("--alignment-promote", type=Path, help="link measured wins from an existing alignment pilot JSON")
     parser.add_argument("--alignment-expand-from", type=Path, help="accepted linked alignment pilot overlay; retain its winners and trial all remaining eligible modules")
     parser.add_argument("--entry-from", type=Path, help="accepted full alignment overlay; output is a read-only entry-switch pilot JSON")
+    parser.add_argument("--entry-promote", type=Path, help="link only measured entry pilot wins on both size metrics")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:

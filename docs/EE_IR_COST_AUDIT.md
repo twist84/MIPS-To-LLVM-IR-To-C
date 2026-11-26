@@ -1844,3 +1844,31 @@ original closing line, test actual emitter indentation and optional
 quadword scratch allocation, and report rejection counts if no
 eligible switch is found. This is a matcher-only repair: no lowering
 inputs or previously compiled native objects change.
+
+### Checkpoint 7a — measured entry rotation pilot
+
+Receipt SHA-256 0aa9eb6b340b32a317a229f82520dcdc026f748943357a7379a078b1d7e3d465.
+All 16,252 modules recognized, 192,970 switch cases, 10,439 eligible;
+5,813 small switches skipped. All 47 paired parent compilations
+reproduced. O5 26 sampled, 23 executable wins, 16 object wins,
+15 win both; net 21,119 executable and 268,615 object bytes saved.
+Oz 21 sampled, 16 executable wins but every object grows; net 6,462
+executable bytes saved and 27,294 object bytes added. Across both
+profiles 27,581 executable and 241,321 object bytes saved; IR grows
+1,296 bytes. Object sizes include metadata/relocations and cannot
+predict linked-image size exactly. Do not infer jump-table section
+changes without section-level measurements.
+
+### Checkpoint 7b — selective entry rotation replay gate
+
+Require both positive executable and positive object savings for this
+first linked entry experiment. 15 O5 modules satisfy the policy,
+17,011 executable and 289,457 object bytes saved, 1,405 IR bytes
+removed. Verify exact entire canonical entry inventory, selected
+sample, parent manifest/library, every pilot row and size arithmetic.
+Reproduce accepted IR and object hashes, preserve symbols and every
+other object, retain all 16,252 functions, reuse 16,237 objects.
+Link separately and measure actual DLL change and four-arm retail
+correctness against full alignment (69.86 MiB). Do not promote
+mixed-result Oz or other code-only wins yet. Production caches and
+original IR remain untouched.

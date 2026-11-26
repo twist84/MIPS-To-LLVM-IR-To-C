@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc, entry_winners
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,36 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_entry_promotion_requires_both_sizes(self):
+        inventory, records, trials = [], {}, []
+        for name, executable, obj in (("both.ll", 4, 8), ("code.ll", 4, -8),
+                                      ("object.ll", -4, 8), ("tie.ll", 4, 0)):
+            inventory.append({"module": name, "switch_cases": 8})
+            records[name] = {"ir_sha256": "original", "transformed_ir_sha256": "parent",
+                             "sha256": "object", "size_bytes": 100, "experimental_pipeline": "O5"}
+            trials.append({"module": name, "mode": "O5", "switch_cases": 8,
+                           "original_ir_sha256": "original", "parent_ir_sha256": "parent",
+                           "parent_object_sha256": "object", "parent_object_bytes": 100,
+                           "parent_executable_bytes": 80, "ir_bytes_saved": -4,
+                           "candidate": {"executable_bytes": 80-executable, "object_bytes": 100-obj},
+                           "executable_saving": executable, "object_saving": obj})
+        selected = {r["module"]: r for r in inventory}
+        pilot = {"mode": "read_only_ee_entry_rotation_pilot", "metadata_sha256": sha(b"meta"),
+                 "parent_manifest_sha256": sha(b"manifest"), "parent_library_sha256": "dll",
+                 "native_target": {}, "inventory_modules": 4, "canonical_switch_modules": 4,
+                 "eligible_modules": 4, "skipped": {}, "total_switch_cases": 32,
+                 "selected_modules": 4, "entry_inventory": inventory, "modules": trials,
+                 "executable_saving": 8, "object_saving": 8, "ir_bytes_saved": -16}
+        args = (inventory, selected, {}, 4, b"meta", b"manifest", {"native_target": {}},
+                records, {"linked_library_sha256": "dll"})
+        self.assertEqual(set(entry_winners(pilot, *args)), {"both.ll"})
+        with self.assertRaises(ValueError):
+            entry_winners(dict(pilot, object_saving=9), *args)
+        with self.assertRaises(ValueError):
+            entry_winners(dict(pilot, parent_library_sha256="stale"), *args)
+        with self.assertRaises(ValueError):
+            entry_winners(dict(pilot, modules=[dict(trials[0], switch_cases=9), *trials[1:]]), *args)
 
     def test_entry_switch_rotation(self):
         raw = b"""%ee_cpu_state = type { i32, i32, i32, i32, i32, i32, i32, i32 }
