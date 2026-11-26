@@ -50,6 +50,27 @@ def validate_libraries(profile, experiment, elf):
     return baseline, candidate, hashes
 
 
+def validate_prior(experiment, prior, candidate, baseline, hashes):
+    """Verify the immediate shared-observation parent of a counter image."""
+    current = read_json(experiment / "helper-plan.json")
+    parent = read_json(prior / "helper-plan.json")
+    library = prior / candidate.name
+    digest = sha(library)
+    if (current.get("mode") != "experimental_shared_counter" or
+            parent.get("mode") != "experimental_shared_observation" or
+            not parent.get("runtime_validation_required") or
+            parent.get("metadata_sha256") != current.get("metadata_sha256") or
+            parent.get("native_target") != current.get("native_target") or
+            current.get("source_manifest_sha256") != sha(prior / "objects" / "objects.json") or
+            current.get("prior_library_sha256") != digest or
+            parent.get("linked_library_sha256") != digest or
+            parent.get("linked_library_bytes") != library.stat().st_size or
+            library.resolve() in (candidate.resolve(), baseline.resolve()) or
+            digest in hashes.values()):
+        raise ValueError("prior shared observation image does not match counter provenance")
+    return library, digest
+
+
 def record_count(path):
     count = 0
     footer = None
@@ -172,6 +193,8 @@ def main():
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--experiment", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--prior-experiment", type=Path,
+                        help="also replay the verified immediate shared-observation parent")
     parser.add_argument("--control", action="store_true",
                         help="Replay the recording on the original DLL before testing dedup")
     parser.add_argument("--sync", action="store_true",
@@ -182,15 +205,23 @@ def main():
     for key in ("runner", "elf", "disc", "profile", "experiment", "output"):
         setattr(args, key, getattr(args, key).resolve())
     try:
+        prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
+        if prior_dir is not None and (not args.control or not args.sync):
+            raise ValueError("prior experiment comparison requires --control --sync")
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
                 any(args.output.is_relative_to(path) for path in
-                    (args.profile, args.experiment, args.disc))):
+                    (args.profile, args.experiment, args.disc)) or
+                (prior_dir is not None and args.output.is_relative_to(prior_dir))):
             raise ValueError("use a fresh output directory outside the cache and disc")
         if not args.runner.is_file() or not args.elf.is_file() or not args.disc.is_dir():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
         baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
+        prior_library = None
+        if prior_dir is not None:
+            prior_library, hashes["prior"] = validate_prior(
+                args.experiment, prior_dir, candidate, baseline, hashes)
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
@@ -204,6 +235,8 @@ def main():
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
+        if prior_library is not None:
+            receipt.update(prior=None, prior_pad_replay=None, prior_trace=None)
         args.output.mkdir(parents=True)
         try:
             print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
@@ -224,7 +257,16 @@ def main():
                     args.output / "control", args.max_dispatches)
                 # Continue even on a failed A/A control: collect comparable
                 # evidence, but never declare a matched A/B result.
-            print("Deduplicated: replaying the recorded PAD0 polls.", flush=True)
+            if prior_library is not None:
+                print("Prior experiment: replaying the recorded PAD0 polls.", flush=True)
+                receipt["prior"] = run_one(args, prior_library, args.output / "prior",
+                                           dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                receipt["prior_pad_replay"] = replay_summary(args.output / "prior" / "stderr.log")
+                receipt["prior_trace"] = trace_comparison(
+                    args.output / "baseline" / "stdout.log", args.output / "prior" / "stdout.log")
+                receipt["prior"]["terminal_budget_reached"] = terminal_budget(
+                    args.output / "prior", args.max_dispatches)
+            print("Candidate: replaying the recorded PAD0 polls.", flush=True)
             receipt["dedup"] = run_one(args, candidate, args.output / "dedup",
                                        dict(env, SDBZ_PAD0_REPLAY=str(recording)))
             receipt["pad_replay"] = replay_summary(args.output / "dedup" / "stderr.log")
@@ -243,6 +285,17 @@ def main():
                         receipt["control_trace"]["different_common_samples"] or
                         receipt["control_trace"]["unpaired_samples"]):
                     raise ValueError("A/A control not matched; dedup result remains diagnostic")
+            if prior_library is not None:
+                parent = receipt["prior_pad_replay"]
+                trace = receipt["prior_trace"]
+                if (not parent or not parent["valid"] or
+                        parent["consumed"] != receipt["recorded_polls"] or
+                        parent["total"] != receipt["recorded_polls"] or
+                        receipt["prior"]["returncode"] != 4 or
+                        not receipt["prior"]["terminal_budget_reached"] or
+                        not trace["common_samples"] or trace["different_common_samples"] or
+                        trace["unpaired_samples"]):
+                    raise ValueError("prior experiment replay not matched")
             replay = receipt["pad_replay"]
             if (not replay or not replay["valid"] or replay["consumed"] != receipt["recorded_polls"]
                     or replay["total"] != receipt["recorded_polls"]):
@@ -257,7 +310,8 @@ def main():
             receipt["error"] = str(error)
         finally:
             receipt["libraries_unchanged"] = (
-                sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"])
+                sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"] and
+                (prior_library is None or sha(prior_library) == hashes["prior"]))
             if card:
                 receipt["memcard_unchanged"] = sha(Path(card)) == inputs["memcard_sha256"]
             (args.output / "comparison.json").write_text(

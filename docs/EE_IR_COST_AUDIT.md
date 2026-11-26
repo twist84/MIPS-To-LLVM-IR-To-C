@@ -1186,3 +1186,34 @@ and quiet paths and rejects changed or escaping counters. This is
 a hot helper: size savings alone cannot justify promotion. Compare
 retail runtime against the previous shared-observation image as
 well as O5 before considering production policy.
+
+
+### Checkpoint 4d — measured shared counter link
+
+Windows helper-plan(1).json, same 16,252 modules and native target.
+Prior observation library SHA-256 matches checkpoint 4b. Incremental
+IR text reduction 11,809,640 bytes; stage wall 256.672 seconds.
+Executable object bytes 84,648,297 -> 83,418,296 (-1,230,001);
+aggregate object bytes 124,402,583 -> 121,516,151 (-2,886,432).
+O5: 2,238/2,238 shrink, 179,040 executable bytes saved; Oz:
+14,013/14,014 shrink, 1,050,961 bytes saved. One owner unchanged
+in executable size, none grow. DLL 96,549,888 -> 94,994,432
+(-1,555,456 bytes, 90.59 MiB); raw linked executable bytes
+91,141,120 -> 89,910,784. Cumulative DLL saving versus O5
+16,476,672 bytes (14.78%). Candidate DLL SHA-256
+158753088be4d03da0845a6ce6b4d1f8d095a350af7b079d63445652e0bcfc48.
+All five CI workflows passed on 86aa7fe. Runtime still unvalidated.
+
+### Checkpoint 4e — matched incremental counter comparison
+
+Extend replay wrapper with optional --prior-experiment for the
+verified immediate shared-observation parent of a counter candidate.
+Verify prior library hash, size, metadata, native target and source
+object manifest hash against both receipts. Require --control --sync.
+Record on O5, replay on O5 control, prior and new candidate with
+identical input. Require matched PAD0, terminal dispatch budgets and
+sampled transitions on all three replay arms; check all library hashes
+again. Compare terminal reports and screenshots offline, and compare
+candidate timing directly against the prior image. One run per image
+cannot establish a statistically significant throughput change.
+No native rebuild or cache modifications.

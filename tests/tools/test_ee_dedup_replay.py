@@ -5,7 +5,7 @@ import sys
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, trace_comparison, terminal_budget
+from replay_ee_dedup_experiment import record_count, replay_summary, sha, validate_libraries, validate_prior, trace_comparison, terminal_budget
 
 
 def run():
@@ -75,6 +75,33 @@ def run():
             pass
         else:
             raise AssertionError("changed library accepted")
+
+        # Validate the exact previous experiment, not just a similarly named DLL.
+        prior = root / "prior"
+        (prior / "objects").mkdir(parents=True)
+        (prior / "objects" / "objects.json").write_text("{}")
+        parent_lib = prior / library_name
+        parent_lib.write_bytes(b"observation")
+        target = {"cpu": "fixture"}
+        parent_plan = {"mode": "experimental_shared_observation",
+                       "runtime_validation_required": True, "metadata_sha256": "same",
+                       "native_target": target, "linked_library_sha256": sha(parent_lib),
+                       "linked_library_bytes": parent_lib.stat().st_size}
+        (prior / "helper-plan.json").write_text(json.dumps(parent_plan))
+        current = {"mode": "experimental_shared_counter", "metadata_sha256": "same",
+                   "native_target": target, "prior_library_sha256": sha(parent_lib),
+                   "source_manifest_sha256": sha(prior / "objects" / "objects.json")}
+        (experiment / "helper-plan.json").write_text(json.dumps(current))
+        hashes = {"baseline": sha(baseline), "dedup": sha(candidate)}
+        assert validate_prior(experiment, prior, candidate, baseline, hashes) == (parent_lib, sha(parent_lib))
+        for key in ("prior_library_sha256", "source_manifest_sha256", "metadata_sha256"):
+            (experiment / "helper-plan.json").write_text(json.dumps(dict(current, **{key: "wrong"})))
+            try:
+                validate_prior(experiment, prior, candidate, baseline, hashes)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("invalid prior provenance accepted: " + key)
     print("PASS: dedup replay validates identities and input recording")
 
 
