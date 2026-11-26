@@ -917,3 +917,26 @@ metadata, original symbol names and ownership. Link a fresh experiment
 with the explicit mixed-pipeline manifest, never publish into the
 normal cache. No deduplication is combined with this experiment.
 Runtime acceptance requires independent synchronous matched replay.
+
+
+### Checkpoint 3b — measured Windows selective Oz link
+
+Retail size-plan.json, LLVM 22.1.0 / znver2, original manifest SHA-256
+`ee903728352c1d28a83211826fbfe5c735d0a027e18b194f6db10b4abdcc1c5c`.
+10,571/10,647 replacements accepted; 76 retained O5. All 16,252
+function modules retained. Selected executable bytes 22,074,416 ->
+17,125,674 (-4,948,742, -22.42%); total object bytes saved 13,751,818.
+By guest-PC band: 1–4, 3,567/3,567 accepted, 1,588,663 executable
+bytes saved (-46.44%); 5–16, 3,031/3,033, 1,472,633 (-27.42%);
+17–32, 3,973/4,047, 1,887,446 (-14.21%). Trial wall time 73.625 s
+(excludes linking and other setup). DLL 111,471,104 -> 104,656,384
+bytes (-6,814,720, -6.11%, 99.81 MiB); linked executable raw sections
+101,812,736 -> 96,803,840 (-5,008,896, -4.92%). Linked DLL SHA-256
+`f6aef76a2e6d9c9dd4e5b95459b181e7dd28a6aee55aaf8f68c461089dad5cf2`.
+The size experiment does not include the earlier owner coalescing.
+All five CI workflows on d8262a5 passed. Runtime validation is still
+required; use the existing synchronous A/A/B replay wrapper with
+`--experiment build/ee-size-experiment --control --sync`. Compare
+terminal reports, GPU snapshots, PAD0 replay, sampled transitions,
+wall time and guest counters. Do not promote to production based on
+size alone. No new IR generation, object emission or relink needed.
