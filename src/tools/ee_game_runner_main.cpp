@@ -2438,6 +2438,19 @@ int main(int argc, char** argv)
             "at most 100000 sampled dispatch intervals)\n");
         return 2;
     }
+    std::string state_trace_detail_environment;
+    const char* state_trace_detail_value = read_host_environment(
+        "SDBZ_STATE_TRACE_DETAIL", &state_trace_detail_environment);
+    const bool state_trace_detail = state_trace_detail_value != nullptr &&
+        std::strcmp(state_trace_detail_value, "1") == 0;
+    if (state_trace_detail &&
+        (state_trace_first == 0u || state_trace_every != 1u ||
+         state_trace_last - state_trace_first >= 256u))
+    {
+        std::fprintf(stderr,
+            "SDBZ_STATE_TRACE_DETAIL requires a dense range of at most 256 dispatches\n");
+        return 2;
+    }
     state_trace_next = state_trace_first;
     uint32_t report_progress_interval = static_cast<uint32_t>(k_report_progress_interval);
     std::string progress_environment;
@@ -5148,6 +5161,49 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(state_trace_observations),
                     static_cast<unsigned long long>(state_trace_path),
                     static_cast<unsigned long long>(state_trace_clocks));
+                if (state_trace_detail)
+                {
+                    // Full architectural operands, not structure bytes/padding.
+                    std::fprintf(stdout,
+                        "EE detail: dispatch=%llu pc=%08x hi=%016llx lo=%016llx "
+                        "hi1=%016llx lo1=%016llx sa=%08x fcsr=%08x "
+                        "fpu_acc=%08x fpu_acc_overflow=%u\n",
+                        static_cast<unsigned long long>(trace_dispatch), from_pc,
+                        static_cast<unsigned long long>(cpu.m_hi),
+                        static_cast<unsigned long long>(cpu.m_lo),
+                        static_cast<unsigned long long>(cpu.m_hi1),
+                        static_cast<unsigned long long>(cpu.m_lo1),
+                        cpu.m_sa, cpu.m_fcsr, cpu.m_fpu_acc, cpu.m_fpu_acc_overflow);
+                    for (uint32_t index = 0u; index < 32u; ++index)
+                    {
+                        std::fprintf(stdout,
+                            "EE detail reg: dispatch=%llu index=%02u "
+                            "gpr=%016llx:%016llx fpr=%016llx vf=%016llx:%016llx cop0=%08x\n",
+                            static_cast<unsigned long long>(trace_dispatch), index,
+                            static_cast<unsigned long long>(cpu.m_gpr[index].m_hi),
+                            static_cast<unsigned long long>(cpu.m_gpr[index].m_lo),
+                            static_cast<unsigned long long>(cpu.m_fpr[index]),
+                            static_cast<unsigned long long>(cpu.m_vu0[index].m_hi),
+                            static_cast<unsigned long long>(cpu.m_vu0[index].m_lo),
+                            cpu.m_cop0[index]);
+                    }
+                    // Static ELF instruction window; does not read MMIO or
+                    // claim that every word in the window was executed.
+                    for (uint32_t index = 0u; index < 16u; ++index)
+                    {
+                        const uint64_t pc = static_cast<uint64_t>(from_pc) + index * 4u;
+                        uint32_t word = 0u;
+                        if (pc > UINT32_MAX ||
+                            !image.read32_at(static_cast<uint32_t>(pc), &word))
+                        {
+                            break;
+                        }
+                        std::fprintf(stdout,
+                            "EE detail code: dispatch=%llu pc=%08x elf=%08x\n",
+                            static_cast<unsigned long long>(trace_dispatch),
+                            static_cast<uint32_t>(pc), word);
+                    }
+                }
             }
         }
         if (report_path != nullptr)
