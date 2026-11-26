@@ -10,6 +10,11 @@ from collections import Counter, defaultdict
 import json
 from pathlib import Path
 import re
+import struct
+import subprocess
+import sys
+
+from ee_ownership_binary import executable_segments, native_executable_sections
 
 GUEST_PC = re.compile(rb"^\s*; (0x[0-9a-fA-F]+): ")
 BLOCK_PC = re.compile(rb"^bb_(0x[0-9a-fA-F]+):")
@@ -80,13 +85,15 @@ def scan_module(path):
     return pcs, blocks, occurrences
 
 
-def audit(paths, object_sizes=None, top=20):
+def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, runtime_sources=None, native_sizes=None):
     pc_counts = Counter()
     block_counts = Counter()
     modules = []
     owners = defaultdict(list)
     tails = defaultdict(list)
     switch_modules = 0
+    rows = []
+    module_index = {}
     for path in sorted(paths):
         pcs, blocks, occurrences, annotated, terminal, has_switch = scan_details(path)
         if not pcs:
@@ -94,6 +101,7 @@ def audit(paths, object_sizes=None, top=20):
         pc_counts.update(pcs)
         block_counts.update(blocks)
         index = len(modules)
+        module_index[path.name] = index
         for pc in pcs:
             owners[pc].append(index)
         for pc, members in terminal.items():
@@ -126,8 +134,7 @@ def audit(paths, object_sizes=None, top=20):
             else:
                 pc_only_pairs += 1
         shared = sum(pc_counts[pc] > 1 for pc in pcs)
-        if shared:
-            overlap.append({
+        row = {
                 "module": path.name,
                 "guest_pcs": len(pcs),
                 "guest_blocks": len(blocks),
@@ -135,11 +142,29 @@ def audit(paths, object_sizes=None, top=20):
                 "shared_guest_pcs": shared,
                 "shared_block_starts": sum(block_counts[pc] > 1 for pc in blocks),
                 "object_file_bytes": (object_sizes or {}).get(path.stem + ".o"),
-            })
+                "native_executable_bytes": (native_sizes or {}).get(path.stem + ".o"),
+                "wholly_contained": index in contained,
+                "partially_overlapping": index in partial,
+            }
+        rows.append(row)
+        if shared:
+            overlap.append(row)
+    for index, row in enumerate(rows):
+        row["wholly_contained"] = index in contained
+        row["partially_overlapping"] = index in partial
+    ownership = discovery_ownership(metadata, discovery, runtime_sources, module_index, modules, owners, rows)
+    largest_native = sorted(
+        (row for row in rows if row["object_file_bytes"] is not None),
+        key=lambda row: (-row["object_file_bytes"], row["module"]))
     overlap.sort(key=lambda item: (-item["shared_guest_pcs"], item["module"]))
     return {
         "modules_scanned": len(paths),
+        "aggregate_ir_bytes": sum(path.stat().st_size for path in paths),
+        "discovery": ownership,
+        "largest_native_modules": largest_native[:top],
+        "module_details": rows,
         "guest_modules": len(modules),
+        "unique_annotated_or_counted_guest_pcs": len(pc_counts),
         "unique_annotated_guest_pcs": len(pc_counts),
         "unique_guest_pcs": len(pc_counts),
         "module_scoped_guest_pcs": total_pcs,
@@ -185,23 +210,235 @@ def audit(paths, object_sizes=None, top=20):
     }
 
 
+
+def runtime_evidence(logs):
+    """Positive evidence only: an expansion sibling is not a proven miss."""
+    result = defaultdict(set)
+    for path in logs:
+        with path.open(encoding="utf-8", errors="replace") as source:
+            for line in source:
+                match = re.search(r"(?:live cache-miss: PC=|auto-expand: compiling reachable PC |auto-expand: guest-reached PC )(0x[0-9a-fA-F]+)", line)
+                if match:
+                    result[int(match[1], 16)].add("runtime_cache_miss")
+                match = re.search(r"auto-expand: compiling table sibling PC (0x[0-9a-fA-F]+)", line)
+                if match:
+                    result[int(match[1], 16)].add("runtime_table_sibling")
+    return result
+
+
+def discovery_ownership(metadata, discovery, runtime_sources, module_index, modules, owners, rows):
+    if metadata is None:
+        return None
+    functions = metadata["functions"]
+    static = {int(pc, 0) for pc in metadata.get("discovered_entries", [])}
+    source_map = {int(pc, 0): set(values) for pc, values in
+                  (discovery or {}).get("entry_sources", {}).items()}
+    evidence = runtime_sources or {}
+    entries = static | set(source_map) | set(evidence)
+    module_entries = {}
+    order = {}
+    dispatch_owners = defaultdict(list)
+    for position, fn in enumerate(functions):
+        pc = int(fn["vaddr"], 0)
+        # Metadata may be moved between Windows and Unix.
+        name = fn["ir_path"].replace("\\", "/").rsplit("/", 1)[-1]
+        entries.add(pc)
+        if name not in module_index:
+            continue
+        index = module_index[name]
+        order[index] = position
+        module_entries[pc] = index
+        for block in fn.get("block_pcs", []):
+            dispatch_owners[int(block, 0)].append(index)
+
+    counts = Counter()
+    shared_by_source = Counter()
+    result = {}
+    for pc in sorted(entries):
+        sources = set(source_map.get(pc, ())) | set(evidence.get(pc, ()))
+        if pc in static and not source_map.get(pc):
+            sources.add("static_unattributed")
+        if pc not in static and pc in module_entries and not evidence.get(pc):
+            sources.add("nonstatic_inventory_unattributed")
+        if not sources:
+            sources.add("unattributed")
+        counts.update(sources)
+        index = module_entries.get(pc)
+        other_owners = [owner for owner in owners.get(pc, ()) if owner != index]
+        previous = [owner for owner in other_owners
+                    if index is not None and order.get(owner, 1 << 60) < order[index]]
+        row = {
+            "sources": sorted(sources),
+            "module": modules[index][0].name if index is not None else None,
+            "other_native_modules_covering_pc": len(other_owners),
+            "earlier_inventory_modules_covering_pc": len(previous),
+            "other_dispatch_owners": sum(owner != index for owner in dispatch_owners[pc]),
+        }
+        if index is not None:
+            rows[index]["entry_pc"] = hex(pc)
+            rows[index]["discovery_sources"] = sorted(sources)
+            rows[index]["earlier_inventory_modules_covering_entry"] = len(previous)
+            if rows[index]["shared_guest_pcs"]:
+                shared_by_source.update(sources)
+        result[hex(pc)] = row
+    return {
+        "static_entries": len(static),
+        "static_source_snapshot_available": discovery is not None,
+        "sources_count": dict(counts),
+        "overlapping_modules_by_source": dict(shared_by_source),
+        "confirmed_runtime_misses_covered_by_other_modules": sum(
+            "runtime_cache_miss" in row["sources"] and row["other_native_modules_covering_pc"] > 0
+            for row in result.values()),
+        "nonstatic_entries_covered_by_earlier_inventory": sum(
+            int(pc, 0) not in static and row["earlier_inventory_modules_covering_pc"] > 0
+            for pc, row in result.items()),
+        "entries": result,
+        "limitations": [
+            "source categories are non-exclusive; missing historic logs cannot prove a runtime cache miss",
+            "earlier inventory order is not necessarily historical compilation order after recovery",
+            "dispatch ownership is distinct from native code coverage",
+        ],
+    }
+
+
+def read_object_inventory(manifest_path):
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not manifest.get("complete"):
+        raise ValueError("object manifest is incomplete")
+    sizes, sections = {}, {}
+    for item in manifest["objects"]:
+        name = item["object"]
+        if name in sizes or Path(name).name != name:
+            raise ValueError("invalid or duplicate object filename")
+        path = manifest_path.parent / name
+        data = path.read_bytes()
+        if len(data) != item["size_bytes"]:
+            raise ValueError(f"object size differs from manifest: {path}")
+        sizes[name] = len(data)
+        sections[name], _ = native_executable_sections(data)
+    return sizes, sections
+
+
+def summary(report, output=sys.stderr):
+    def line(label, key):
+        value = report.get(key)
+        print(f"{label}: {value:,}" if isinstance(value, int) else
+              f"{label}: {value if value is not None else 'not supplied'}", file=output)
+    for label, key in (
+        ("Guest modules", "guest_modules"),
+        ("Unique guest PCs", "unique_guest_pcs"),
+        ("Module-scoped guest PCs", "module_scoped_guest_pcs"),
+        ("Excess guest PC copies", "cross_module_excess_pc_copies"),
+        ("Unique guest blocks", "unique_block_starts"),
+        ("Module-scoped guest blocks", "module_scoped_block_starts"),
+        ("Multiply emitted guest blocks", "blocks_in_multiple_modules"),
+        ("Contained modules", "wholly_contained_modules"),
+        ("Partially overlapping modules", "partially_overlapping_modules"),
+        ("Shared terminal-block candidates", "shared_terminal_block_candidates"),
+        ("Original ELF bytes", "original_elf_bytes"),
+        ("Executable ELF segment bytes", "executable_elf_segment_bytes"),
+        ("IR bytes", "aggregate_ir_bytes"),
+        ("Native object bytes", "aggregate_native_object_bytes"),
+        ("Native object executable section bytes", "native_object_executable_bytes"),
+        ("Linked library bytes", "linked_library_bytes"),
+        ("Linked executable section bytes", "linked_executable_section_bytes"),
+        ("Native executable bytes / unique guest PC", "native_bytes_per_unique_guest_instruction"),
+    ):
+        line(label, key)
+    print("Worst overlapping modules:", file=output)
+    for row in report["largest_overlaps"]:
+        print(f"  {row['module']}: {row['shared_guest_pcs']}/{row['guest_pcs']} PCs, "
+              f"{row['shared_block_starts']} shared blocks", file=output)
+    if report["discovery"]:
+        print("Discovery sources (non-exclusive):", report["discovery"]["sources_count"], file=output)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ir_dir", type=Path)
-    parser.add_argument("--objects", type=Path, help="optional objects.json manifest")
+    parser.add_argument("--objects", type=Path, help="complete objects.json manifest")
+    parser.add_argument("--elf", type=Path, help="original ELF (defaults to metadata path)")
+    parser.add_argument("--library", type=Path, help="linked DLL/shared library")
+    parser.add_argument("--metadata", type=Path, help="defaults to ir_dir/ee_functions.json")
+    parser.add_argument("--discovery-tool", type=Path, help="built ee_discovery_audit executable")
+    parser.add_argument("--discovery-cache", type=Path, help="defaults to ir_dir/ee_discovery_cache.bin")
+    parser.add_argument("--log", type=Path, action="append", default=[], help="historical expansion log; repeatable")
+    parser.add_argument("--json", type=Path, help="write JSON report here; console prints summary")
     parser.add_argument("--top", type=int, default=20)
     args = parser.parse_args()
     if args.top < 1:
         parser.error("--top must be positive")
-    sizes = None
     try:
-        if args.objects is not None:
-            manifest = json.loads(args.objects.read_text(encoding="utf-8"))
-            sizes = {item["object"]: item["size_bytes"] for item in manifest["objects"]}
-        report = audit(list(args.ir_dir.glob("*.ll")), sizes, args.top)
-    except (OSError, ValueError, KeyError) as exc:
+        meta_path = args.metadata or args.ir_dir / "ee_functions.json"
+        metadata = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.is_file() else None
+        elf = args.elf
+        if elf is None and metadata and metadata.get("elf"):
+            from shared_ee_ir import elf_path
+            candidate = elf_path(metadata, meta_path.parent)
+            if candidate.is_file():
+                elf = candidate
+        discovery = None
+        if args.discovery_tool:
+            if elf is None:
+                raise ValueError("--discovery-tool requires the original ELF")
+            cache = args.discovery_cache or args.ir_dir / "ee_discovery_cache.bin"
+            proc = subprocess.run([str(args.discovery_tool.resolve()), str(elf), str(cache)],
+                                  capture_output=True, text=True, check=True)
+            discovery = json.loads(proc.stdout)
+            if metadata and set(discovery["entry_sources"]) != set(metadata.get("discovered_entries", [])):
+                raise ValueError("discovery snapshot does not match metadata entry inventory")
+        sizes = native = None
+        library = args.library
+        if args.objects:
+            sizes, native = read_object_inventory(args.objects)
+            if library is None:
+                for name in ("game-translated.dll", "libgame-translated.so"):
+                    candidate = args.objects.parent.parent / name
+                    if candidate.is_file():
+                        library = candidate
+                        break
+        paths = list(args.ir_dir.glob("*.ll"))
+        if metadata:
+            names = {fn["ir_path"].replace("\\", "/").rsplit("/", 1)[-1]
+                     for fn in metadata["functions"]}
+            if names != {path.name for path in paths}:
+                raise ValueError("IR files differ from authoritative function inventory")
+        if sizes is not None and set(sizes) != {path.stem + ".o" for path in paths}:
+            raise ValueError("object manifest and IR module inventory differ")
+        report = audit(paths, sizes, args.top, metadata=metadata, discovery=discovery,
+                       runtime_sources=runtime_evidence(args.log), native_sizes=native)
+        if elf:
+            data = elf.read_bytes()
+            report["original_elf_bytes"] = len(data)
+            report["executable_elf_segment_bytes"] = executable_segments(data)
+        if sizes is not None:
+            report["aggregate_native_object_bytes"] = sum(sizes.values())
+            report["native_object_executable_bytes"] = sum(native.values())
+            report["native_bytes_per_unique_guest_instruction"] = (
+                sum(native.values()) / report["unique_guest_pcs"])
+        if library:
+            data = library.read_bytes()
+            report["linked_library_bytes"] = len(data)
+            raw, virtual = native_executable_sections(data)
+            report["linked_executable_section_bytes"] = raw
+            report["linked_executable_virtual_bytes"] = virtual
+        report["limitations"].append(
+            "object executable bytes are file-backed section sizes, not attributable duplicate bytes; linked executable bytes include host/dispatcher code")
+        if args.json:
+            destination = args.json.resolve()
+            protected = [args.ir_dir.resolve()]
+            if args.objects:
+                protected.append(args.objects.parent.resolve())
+            if any(directory == destination or directory in destination.parents for directory in protected):
+                raise ValueError("write the audit JSON outside IR and object cache directories")
+            args.json.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            summary(report, sys.stdout)
+            print(f"JSON report: {args.json}")
+        else:
+            print(json.dumps(report, indent=2))
+            summary(report)
+    except (OSError, ValueError, KeyError, struct.error, subprocess.CalledProcessError) as exc:
         parser.error(str(exc))
-    print(json.dumps(report, indent=2))
 
 
 if __name__ == "__main__":

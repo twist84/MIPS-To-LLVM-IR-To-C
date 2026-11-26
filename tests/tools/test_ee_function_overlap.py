@@ -87,9 +87,53 @@ def test_generated_ir(exe, discovery_tool=None):
             assert 0x00100040 not in blocks
 
 
+def test_binary_accounting():
+    import struct
+    from ee_ownership_binary import executable_segments, native_executable_sections
+    from test_recomp_discovery_cache import make_elf
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / "guest.elf"
+        make_elf(path)
+        assert executable_segments(path.read_bytes()) == 0x100
+    data = bytearray(128)
+    struct.pack_into("<HHIIIHH", data, 0, 0x8664, 2, 0, 0, 0, 0, 0)
+    struct.pack_into("<4I", data, 28, 0, 0, 12, 100)
+    struct.pack_into("<I", data, 56, 0x60000020)
+    struct.pack_into("<4I", data, 68, 0, 0, 8, 112)
+    struct.pack_into("<I", data, 96, 0x40000040)
+    assert native_executable_sections(data) == (12, None)
+
+
+def test_provenance_ownership():
+    from audit_ee_function_overlap import runtime_evidence
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        a = root / "a.ll"
+        b = root / "b.ll"
+        a.write_text("bb_0x1000:\n  ; 0x1000: nop\n  ; 0x1004: nop\n")
+        b.write_text("bb_0x1004:\n  ; 0x1004: nop\n")
+        log = root / "run.log"
+        log.write_text("live cache-miss: PC=0x00001004, request=1\n"
+                       "auto-expand: compiling table sibling PC 0x00001008\n")
+        meta = {"discovered_entries": ["0x1000"], "functions": [
+            {"vaddr": "0x1000", "ir_path": "a.ll", "block_pcs": ["0x1000"]},
+            {"vaddr": "0x1004", "ir_path": "b.ll", "block_pcs": ["0x1004"]}]}
+        discovery = {"entry_sources": {"0x1000": ["elf_entry", "direct_call"]}}
+        report = audit([a, b], metadata=meta, discovery=discovery,
+                       runtime_sources=runtime_evidence([log]))
+        entries = report["discovery"]["entries"]
+        assert entries["0x1000"]["sources"] == ["direct_call", "elf_entry"]
+        assert entries["0x1004"]["sources"] == ["runtime_cache_miss"]
+        assert entries["0x1004"]["earlier_inventory_modules_covering_pc"] == 1
+        assert entries["0x1008"]["sources"] == ["runtime_table_sibling"]
+        assert report["discovery"]["confirmed_runtime_misses_covered_by_other_modules"] == 1
+
+
 if __name__ == "__main__":
     test_cross_module_overlap()
     test_ownership()
+    test_binary_accounting()
+    test_provenance_ownership()
     if len(sys.argv) > 1:
         test_generated_ir(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
     print("PASS: cross-module guest PC overlap audit")

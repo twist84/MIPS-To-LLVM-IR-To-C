@@ -579,3 +579,42 @@ against hot native modules before committing a size/speed tradeoff.
 Do not equate smaller textual IR or fewer basic blocks with smaller
 machine code. Preserve PS2 timing, observable state and exception
 semantics; no blanket size optimization enabled yet.
+
+
+## Read-only function ownership baseline
+
+Use the existing shared IR and native object cache. The audit does not
+recompile or relink the guest and does not modify dispatcher ownership.
+
+On a configured Ninja Windows build:
+
+```bat
+cmake --build build --target ee_discovery_audit
+python tools\audit_ee_function_overlap.py build\ps2-game-hle\ir --objects build\ps2-game-hle\O2-native\objects\objects.json --discovery-tool build\ee_discovery_audit.exe --json ee-ownership-audit.json
+```
+
+
+The metadata supplies the original ELF path; override with --elf if it
+has moved. The object manifest locates the linked DLL automatically;
+override with --library for another linked image. Supply any available
+historical expansion text logs with repeated --log arguments. Without
+logs, nonstatic inventory entries are deliberately not asserted to be
+confirmed runtime misses. Static discovery provenance is reconstructed
+from the validated EEIDXC02 discovery snapshot and original ELF using
+the same decoder and address-taken predicate as the recompiler.
+
+The audit identifies real emitted guest blocks from the IR entry
+switch, including blocks hidden by append-time dispatcher ownership
+filtering. Guest-PC coverage is the union of instruction annotations
+and literal instruction accounting calls. Repeated annotation counts
+remain separate. Containment compares observed instruction and
+block-start sets, and shared terminal blocks are candidates rather
+than proven mergeable regions. Aggregate object size, executable
+section bytes, ELF file-backed executable segments and linked image
+size are separate quantities; PE raw executable sections include file
+alignment padding. Do not infer a byte saving from overlap alone.
+
+No lowering inputs or runtime paths are changed. The diagnostic
+executable and Python tools are outside the IR/object provenance
+fingerprints. Build only the diagnostic target; no overwrite or
+retail gameplay replay is needed.
