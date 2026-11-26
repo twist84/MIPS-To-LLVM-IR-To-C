@@ -13,7 +13,7 @@ import time
 
 from audit_ee_helper_inventory import ir_inventory, read_manifest, verified_object, sha
 from audit_ee_scalar_memory_pilot import (outline, reconstruct_parent, verify_pilot_parent,
-                                         plans_without_modules, read_json)
+                                         plans_without_modules, read_json, stable_receipt, winners)
 from benchmark_ee_native_size import emit_native
 from build_ee_cop1_mul_experiment import rows_of, check_object
 from build_ee_helper_experiment import refs
@@ -345,7 +345,8 @@ def verify_residual_alignment_parent(folder, meta, names, parent_raw, manifest, 
 
 def alignment_trial(task):
     (name, guest, path, base, receipts, plans, scalar, residual, shared_row,
-     folder, record, triple, expected, owners) = task
+     folder, record, triple, expected, owners) = task[:14]
+    object_output = task[14] if len(task) == 15 else None
     raw = path.read_bytes()
     data = verified_object(folder, record, sha(raw))
     before, prior = reconstruct_parent(raw, guest, name, receipts, plans)
@@ -377,11 +378,40 @@ def alignment_trial(task):
         baseline = emit_native(before, triple, guest, mode)
         if baseline["sha256"] != record["sha256"]:
             raise ValueError("alignment parent object not reproducible: " + name)
-        row["candidate"] = emit_native(candidate, triple, guest, mode)
+        row["candidate"] = emit_native(candidate, triple, guest, mode, object_output=object_output)
         row["candidate_ir_sha256"] = sha(candidate)
         row["executable_saving"] = row["parent_executable_bytes"]-row["candidate"]["executable_bytes"]
         row["object_saving"] = len(data)-row["candidate"]["object_bytes"]
     return row
+
+
+def alignment_winners(pilot, selected, candidates, meta, raw, current, entries, plan):
+    if (pilot["mode"] != "read_only_ee_alignment_merge_pilot" or
+            pilot["metadata_sha256"] != sha(meta) or
+            pilot["parent_manifest_sha256"] != sha(raw) or
+            pilot["parent_library_sha256"] != plan["linked_library_sha256"] or
+            pilot["native_target"] != current["native_target"] or
+            pilot["inventory_modules"] != len(entries) or
+            pilot["eligible_modules"] != len(candidates) or
+            pilot["eligible_call_reductions"] != sum(r[0] for r in candidates)):
+        raise ValueError("alignment pilot provenance differs")
+    accepted = winners(pilot, selected)
+    reduction = {n: count for count, _, n in candidates}
+    for row in pilot["modules"]:
+        n = row["module"]
+        item = entries[n]
+        if (row["original_ir_sha256"] != item["ir_sha256"] or
+                row["parent_ir_sha256"] != item["transformed_ir_sha256"] or
+                row["parent_object_sha256"] != item["sha256"] or
+                row["parent_object_bytes"] != item["size_bytes"] or
+                row["mode"] != item.get("experimental_pipeline", "O5") or
+                row["merged_sites"] - row["remaining_calls"] != reduction[n] or
+                not 1 <= row["remaining_calls"] <= 4 or
+                "candidate" not in row):
+            raise ValueError("alignment pilot row differs: " + n)
+    if not accepted:
+        raise ValueError("alignment pilot has no measured wins")
+    return accepted
 
 
 def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
@@ -414,16 +444,69 @@ def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
     for group in bands.values():
         count = min(8, len(group))
         selected.update(group[i*(len(group)-1)//max(1, count-1)][2] for i in range(count))
+    promoted = None
+    started = time.monotonic()
+    if args.alignment_promote:
+        pilot_raw = args.alignment_promote.read_bytes()
+        promoted = alignment_winners(json.loads(pilot_raw), selected, candidates,
+                                     meta, raw, current, entries, plan)
+        selected = set(promoted)
+        out.mkdir(parents=True)
+        (out / "objects").mkdir()
     tasks = [(n, names[n], ir / n, base_records[n], tuple(r.get(n) for r in rows),
               small_plans, scalar.get(n), residual.get(n), shared_rows.get(n),
               folder / "objects", entries[n], current["target_triple"], expected, owners)
              for n in sorted(selected)]
+    if promoted is not None:
+        tasks = [task + (out / "objects" / (Path(task[0]).stem + ".alignment.o"),)
+                 for task in tasks]
     result = []
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
         for row in pool.map(alignment_trial, tasks):
+            if promoted is not None and stable_receipt(row) != stable_receipt(promoted[row["module"]]):
+                raise ValueError("alignment candidate differs from pilot: " + row["module"])
             result.append(row)
             print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
                   f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
+    if promoted is not None:
+        changes = {r["module"]: r for r in result}
+        objects = []
+        for n, record in entries.items():
+            if n in changes:
+                row = changes[n]
+                objects.append(dict(record, object=Path(n).stem + ".alignment.o",
+                                    size_bytes=row["candidate"]["object_bytes"],
+                                    sha256=row["candidate"]["sha256"],
+                                    transformed_ir_sha256=row["candidate_ir_sha256"],
+                                    experimental_alignment_merge=True))
+            else:
+                objects.append(dict(record, object=str((folder / "objects" / record["object"]).resolve())))
+        (out / "ee_functions.json").write_bytes(meta)
+        overlay = dict(current, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
+                       experimental_mixed_pipeline=current["experimental_mixed_pipeline"] + "-alignment-pilot",
+                       production_cache_compatible=False)
+        (out / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2)+"\n", encoding="utf-8")
+        receipt = {"mode": "experimental_selective_alignment_merge",
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(raw),
+                   "prior_library_sha256": plan["linked_library_sha256"],
+                   "native_target": current["native_target"], "pilot_sha256": sha(pilot_raw),
+                   "source_functions": len(names), "retained_functions": len(names),
+                   "recompiled_modules": len(result), "reused_modules": len(names)-len(result),
+                   "executable_saving": sum(r["executable_saving"] for r in result),
+                   "object_saving": sum(r["object_saving"] for r in result),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in result),
+                   "merged_sites": sum(r["merged_sites"] for r in result),
+                   "remaining_calls": sum(r["remaining_calls"] for r in result),
+                   "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
+                   "modules": result}
+        library = out / "game-translated.dll"
+        subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
+                        str(out / "ee_functions.json"), str(out / "objects"), str(library)], check=True)
+        data = library.read_bytes()
+        receipt.update(linked_library_bytes=len(data), linked_library_sha256=sha(data),
+                       linked_executable_raw_bytes=native_executable_sections(data)[0])
+        (out / "helper-plan.json").write_text(json.dumps(receipt, indent=2)+"\n", encoding="utf-8")
+        return receipt
     report = {"mode": "read_only_ee_alignment_merge_pilot", "metadata_sha256": sha(meta),
               "parent_manifest_sha256": sha(raw), "parent_library_sha256": plan["linked_library_sha256"],
               "native_target": current["native_target"], "inventory_modules": len(names),
@@ -448,6 +531,8 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.alignment_promote and not args.alignment_from:
+        raise ValueError("--alignment-promote requires --alignment-from")
     if args.alignment_from:
         if shared_parent is None:
             raise ValueError("--alignment-from requires --revisit-from")
@@ -609,6 +694,7 @@ def main():
         parser.add_argument("--"+flag, type=Path, required=True)
     parser.add_argument("--revisit-from", type=Path, help="accepted shared scalar overlay")
     parser.add_argument("--alignment-from", type=Path, help="accepted residual overlay; output is a read-only alignment pilot JSON")
+    parser.add_argument("--alignment-promote", type=Path, help="link measured wins from an existing alignment pilot JSON")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:

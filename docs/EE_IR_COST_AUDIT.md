@@ -1731,3 +1731,27 @@ count band plus eight largest candidates. Require byte-identical paired
 parent re-emission. Record per-module size changes only; no linking,
 cache mutation or runtime acceptance at this checkpoint. If the pilot
 wins, select measured improvements for a separate retail gate.
+
+### Checkpoint 6a — measured alignment pilot
+
+Pilot SHA-256 aa2eb99d046f0556a1d608de41a098c75fb8ed21d049e3b9b61be45ca183b947.
+10,156 eligible of 16,252 modules; 178,311 potentially removable
+exception call sites. 55 sampled; 54 wins, one Oz loss of eight bytes.
+O5 23/23 wins save 120,999 of 1,201,542 executable bytes; Oz 31/32
+wins save a net 113,757 of 1,236,243 bytes. Total 234,756 executable
+bytes saved (9.63%), object saving 234,646; IR text grows 222,343 bytes.
+9,402 grouped call sites become 146 (9,256 eliminated). Largest module
+0x369520 saves 44,541 executable bytes. All sampled arithmetic and
+unique module inventory verified; no linked DLL or runtime data yet.
+
+### Checkpoint 6b — promote measured alignment wins
+
+Reconstruct and reproduce the 54 positive executable-size trials from
+6a; reject the one losing module. Expected 234,764 executable bytes and
+234,654 object bytes saved; IR growth 222,067 bytes. 9,400 grouped calls
+become 145; 9,255 eliminated. Require exact candidate IR and object
+hashes and matching full pilot identity, sampled inventory and original
+site counts. Keep existing owner graph, symbols, and all 16,252 guest
+functions; reuse 16,198 objects. Link separately, validate in four-arm
+synchronous replay against the residual scalar parent (74.33 MiB).
+Expand only after runtime acceptance. No production cache changes.

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,29 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_alignment_promotion_receipt(self):
+        item = {"ir_sha256": "original", "transformed_ir_sha256": "parent",
+                "sha256": "object", "size_bytes": 100, "experimental_pipeline": "Oz"}
+        row = {"module": "a.ll", "mode": "Oz", "original_ir_sha256": "original",
+               "parent_ir_sha256": "parent", "parent_object_sha256": "object",
+               "parent_object_bytes": 100, "parent_executable_bytes": 80,
+               "merged_sites": 3, "remaining_calls": 1, "ir_bytes_saved": -10,
+               "candidate": {"executable_bytes": 60, "object_bytes": 90},
+               "executable_saving": 20, "object_saving": 10}
+        pilot = {"mode": "read_only_ee_alignment_merge_pilot", "metadata_sha256": sha(b"meta"),
+                 "parent_manifest_sha256": sha(b"manifest"), "parent_library_sha256": "dll",
+                 "native_target": {}, "inventory_modules": 1, "eligible_modules": 1,
+                 "eligible_call_reductions": 2, "selected_modules": 1, "rewritten_modules": 1,
+                 "executable_saving": 20, "object_saving": 10, "ir_bytes_saved": -10,
+                 "modules": [row]}
+        args = ({"a.ll"}, [(2, 100, "a.ll")], b"meta", b"manifest", {"native_target": {}},
+                {"a.ll": item}, {"linked_library_sha256": "dll"})
+        self.assertEqual(alignment_winners(pilot, *args), {"a.ll": row})
+        with self.assertRaises(ValueError):
+            alignment_winners(dict(pilot, modules=[dict(row, merged_sites=4)]), *args)
+        with self.assertRaises(ValueError):
+            alignment_winners(dict(pilot, parent_library_sha256="stale"), *args)
 
     def test_merge_alignment_faults(self):
         # Same AdEL/BD group may merge; different AdES/BD stays independent.
