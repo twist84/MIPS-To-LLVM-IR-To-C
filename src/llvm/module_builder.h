@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <utility>
 
 namespace llvm {
 
@@ -50,6 +51,9 @@ private:
     // only to prune low-half writes and conservatively publish dirty hi.
     std::map<uint8_t, std::string> m_cur_lo, m_cur_hi;
     std::set<uint8_t> m_dirty_lo, m_dirty_hi;
+    // Packed views of exact SSA half pairs, valid only in a contiguous
+    // MMI chain. A scalar overwrite changes the key; reset on CFG edges.
+    std::map<std::pair<std::string, std::string>, std::string> m_mmi_vectors;
     // Facts follow unique SSA values; unknown reloads do not inherit them.
     std::map<std::string, ee::scalar_constant::s_known_bits> m_value_bits;
     ee::scalar_constant::s_known_bits value_bits(const std::string& value) const;
