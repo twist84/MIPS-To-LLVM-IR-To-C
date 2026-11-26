@@ -27,13 +27,16 @@ def validate_libraries(profile, experiment, elf):
             "libgame-translated.so")
     baseline, candidate = profile / name, experiment / name
     translation = read_json(profile / "translation-cache.json")
-    plan = read_json(experiment / "dedup-plan.json")
+    plans = [path for path in (experiment / "dedup-plan.json", experiment / "size-plan.json") if path.is_file()]
+    if len(plans) != 1:
+        raise ValueError("expected one experiment plan")
+    plan = read_json(plans[0])
     inputs = translation.get("inputs", {})
     if inputs.get("ELF") != sha(elf):
         raise ValueError("boot ELF differs from baseline translation provenance")
     if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
         raise ValueError("baseline must have native ALU certificates disabled")
-    if (plan.get("mode") != "experimental_owner_coalescing" or
+    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size") or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
         raise ValueError("experiment and normal translation metadata do not match")

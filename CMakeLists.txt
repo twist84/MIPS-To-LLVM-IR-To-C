@@ -849,6 +849,9 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_chunked_dispatcher.py)
     if(EE_HAVE_LLVM_JIT_TEST)
+        add_test(NAME ee_native_size_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_experiment.py)
         add_test(NAME ee_native_size_pilot
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_pilot.py)

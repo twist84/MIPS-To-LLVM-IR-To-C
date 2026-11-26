@@ -894,3 +894,26 @@ these policies are not identical across LLVM major versions. The
 in-memory IR copy is annotated, never the original file. Tests cover
 attribute placement and helper/declaration handling even on LLVM 20.
 Production O5, target settings, cache and runtime are unchanged.
+
+
+### Checkpoint 3a — Windows retail native size results
+
+LLVM 22.1.0 / znver2: all 55/55 O5 objects reproduced exactly.
+Executable bytes: O5 2,580,264; O2 2,852,750 (+10.56%);
+Os 2,666,544 (+3.34%); Oz 2,567,056 (-0.51%). Oz object file
+bytes 3,076,237 vs 3,468,711 (-11.31%). Oz wins 38 of 55,
+O5 wins 17; the per-module minimum is 2,517,347 (-2.44%).
+For 24 modules with at most 32 guest PCs, all shrink under Oz:
+67,686 -> 51,021 executable bytes (-24.62%). This is a selected
+sample, not a whole-image savings estimate. Larger bands are mixed.
+
+### Checkpoint 3b — isolated selective Oz build
+
+Try Oz only for modules with 1–32 guest PCs; require both native
+executable bytes and total object bytes to decrease. Keep all other
+O5 objects unchanged. Verify source IR and original object hashes,
+pilot manifest identity and host target; preserve byte-identical
+metadata, original symbol names and ownership. Link a fresh experiment
+with the explicit mixed-pipeline manifest, never publish into the
+normal cache. No deduplication is combined with this experiment.
+Runtime acceptance requires independent synchronous matched replay.

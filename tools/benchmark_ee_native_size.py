@@ -99,7 +99,7 @@ def verify_size_attributes(module, count, attributes):
     module.verify()
 
 
-def emit_native(raw, triple, symbol, mode):
+def emit_native(raw, triple, symbol, mode, *, object_output=None):
     started = time.monotonic()
     machine = get_target_machine(5, triple)
     if mode not in MODES:
@@ -139,6 +139,9 @@ def emit_native(raw, triple, symbol, mode):
             raise ValueError("experimental pipeline changed external function inventory")
         data = machine.emit_object(module)
     executable, _ = native_executable_sections(data)
+    if object_output is not None:
+        with object_output.open("xb") as stream:
+            stream.write(data)
     return {"object_bytes": len(data), "executable_bytes": executable,
             "sha256": sha(data), "seconds": time.monotonic() - started,
             "middle_end_size_level": size_level,
