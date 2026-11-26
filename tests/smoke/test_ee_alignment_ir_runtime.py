@@ -41,6 +41,11 @@ def write_word(address, size, value):
         MEMORY[int(address) + i] = (int(value) >> (8 * i)) & 0xFF
 
 
+@ctypes.CFUNCTYPE(ctypes.c_uint8, ctypes.c_void_p, ctypes.c_uint32)
+def read8(_rt, addr):
+    return read_word(addr, 1)
+
+
 @ctypes.CFUNCTYPE(ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint32)
 def read16(_rt, addr):
     return read_word(addr, 2)
@@ -54,6 +59,11 @@ def read32(_rt, addr):
 @ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32)
 def read64(_rt, addr):
     return read_word(addr, 8)
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint8)
+def write8(_rt, addr, value):
+    write_word(addr, 1, value)
 
 
 @ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint16)
@@ -123,9 +133,11 @@ def trace_store(_rt, pc, opcode, address, aligned, size,
 def install_symbols(path):
     library = ctypes.CDLL(str(path))
     for name, callback in (
+        ("ee_mem_read8", read8),
         ("ee_mem_read16", read16),
         ("ee_mem_read32", read32),
         ("ee_mem_read64", read64),
+        ("ee_mem_write8", write8),
         ("ee_mem_write16", write16),
         ("ee_mem_write32", write32),
         ("ee_mem_write64", write64),
@@ -145,7 +157,7 @@ def install_symbols(path):
 
 
 def execute(fixture, directory, target, mode, address, trace_enabled=True,
-            fused_store=False, fastmem=None):
+            fused_store=False, fastmem=None, fastmem_scalar=False):
     global ALLOW_FUSED_STORE
     ALLOW_FUSED_STORE = fused_store and not trace_enabled
     PAIRS.clear()
@@ -169,15 +181,18 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     if fastmem is not None:
         # Obtain the actual descriptor offsets from the generated gate.
         ir = str(module)
-        check = re.search(r"fastmem_word_check_[0-9]+:.*?(?=fastmem_word_direct_)",
-                          ir, re.S)
-        require(check is not None, "missing fastmem gate")
-        offsets = re.findall(
-            r"getelementptr i8, ptr %rt, i64 ([0-9]+)", check.group())
-        require(len(offsets) == 2, "unexpected fastmem descriptor layout")
-        size_offset, base_offset = map(int, offsets)
-        ctypes.c_uint32.from_buffer(rt_backing, size_offset).value = len(fastmem)
-        ctypes.c_void_p.from_buffer(rt_backing, base_offset).value = ctypes.addressof(fastmem)
+        prefixes = ("word", "scalar") if fastmem_scalar else ("word",)
+        for prefix in prefixes:
+            check = re.search(rf"fastmem_{prefix}_check_[0-9]+:.*?(?=fastmem_{prefix}_direct_)",
+                              ir, re.S)
+            if check is None:
+                continue
+            offsets = re.findall(
+                r"getelementptr i8, ptr %rt, i64 ([0-9]+)", check.group())
+            require(len(offsets) == 2, "unexpected fastmem descriptor layout")
+            size_offset, base_offset = map(int, offsets)
+            ctypes.c_uint32.from_buffer(rt_backing, size_offset).value = len(fastmem)
+            ctypes.c_void_p.from_buffer(rt_backing, base_offset).value = ctypes.addressof(fastmem)
     UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
@@ -438,6 +453,38 @@ def main():
                                  fastmem=ram)
         require(result == EE_EXIT_EXCEPTION and not WRITES and not TRACES,
                 "fastmem bypassed alignment fault")
+
+        # Other scalar widths are independently opt-in, including signed
+        # extension, exact store widths, final byte and final aligned span.
+        for load, store, width, signed in (
+                ("lb", "sb", 1, True), ("lbu", "sb", 1, False),
+                ("lh", "sh", 2, True), ("lhu", "sh", 2, False),
+                ("ld", "sd", 8, False)):
+            address = 0x40
+            ram = ctypes.create_string_buffer(address + width)
+            ram[address:address + width] = bytes([0x80] * width)
+            expected = int.from_bytes(bytes([0x80] * width), "little", signed=signed)
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + load,
+                                     address, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and not READS and
+                    cpu.gpr[8].lo == expected % (1 << 64) and
+                    cpu.gpr[8].hi == 0xfedcba9876543210,
+                    f"direct {load} value")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + load,
+                                     address, fastmem=ram)
+            require(result == EE_EXIT_DISPATCH and READS == [(width, address)],
+                    f"{load} must fall back with only word fastmem")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + store,
+                                     address, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and not WRITES and
+                    EVENTS == [("trace", address)] and
+                    ram[address:address + width] ==
+                    bytes.fromhex("efcdab8967452301")[:width], f"direct {store} bytes")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + store,
+                                     address + width, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
+                    WRITES[0][:2] == (width, address + width),
+                    f"{store} out-of-range fallback")
 
         # The positive scalar word path remains operational.
         result, cpu, original = execute(

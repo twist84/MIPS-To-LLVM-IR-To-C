@@ -390,6 +390,10 @@ struct s_ee_runtime
     // null pointer disables the path; aliases and devices remain on bus ABI.
     uint8_t* m_fastmem_word_base = nullptr;
     uint32_t m_fastmem_word_size = 0u;
+    // Independent descriptor for byte, halfword and doubleword accesses.
+    // Same lifetime and direct physical RAM restrictions as word fastmem.
+    uint8_t* m_fastmem_other_scalar_base = nullptr;
+    uint32_t m_fastmem_other_scalar_size = 0u;
 };
 
 // ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,

@@ -97,8 +97,9 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
         static const std::map<std::string, uint32_t> k_load_store_opcodes =
         {
             {"lq", 0x1eu}, {"sq", 0x1fu},
-            {"lh", 0x21u}, {"lw", 0x23u},
-            {"sh", 0x29u}, {"sw", 0x2bu},
+            {"lb", 0x20u}, {"lbu", 0x24u},
+            {"lh", 0x21u}, {"lhu", 0x25u}, {"lw", 0x23u},
+            {"sb", 0x28u}, {"sh", 0x29u}, {"sw", 0x2bu},
             {"lwc1", 0x31u}, {"ld", 0x37u},
             {"swc1", 0x39u}, {"sd", 0x3fu}
         };

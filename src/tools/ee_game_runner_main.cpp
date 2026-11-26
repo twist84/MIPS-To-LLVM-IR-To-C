@@ -3479,7 +3479,21 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "invalid SDBZ_EE_FASTMEM_WORD (expected 0 or 1)\n");
         return 2;
     }
-    if (fastmem_word_setting != nullptr && std::strcmp(fastmem_word_setting, "1") == 0)
+    std::string fastmem_scalar_environment;
+    const char* fastmem_scalar_setting = read_host_environment(
+        "SDBZ_EE_FASTMEM_SCALAR", &fastmem_scalar_environment);
+    if (fastmem_scalar_setting != nullptr && *fastmem_scalar_setting != '\0' &&
+        std::strcmp(fastmem_scalar_setting, "0") != 0 &&
+        std::strcmp(fastmem_scalar_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_EE_FASTMEM_SCALAR (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool fastmem_word = fastmem_word_setting != nullptr &&
+        std::strcmp(fastmem_word_setting, "1") == 0;
+    const bool fastmem_scalar = fastmem_scalar_setting != nullptr &&
+        std::strcmp(fastmem_scalar_setting, "1") == 0;
+    if (fastmem_word || fastmem_scalar)
     {
 #if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
         // Restrict this prototype to the current HLE direct physical RAM
@@ -3490,14 +3504,24 @@ int main(int argc, char** argv)
             return 2;
         }
         static_assert(k_ee_ram_size <= 0x10000000u, "fastmem RAM below devices");
-        runtime.m_fastmem_word_base = memory->physical_ram_span(0u, k_ee_ram_size);
-        if (runtime.m_fastmem_word_base == nullptr)
+        uint8_t* ram = memory->physical_ram_span(0u, k_ee_ram_size);
+        if (ram == nullptr)
         {
             std::fprintf(stderr, "EE fastmem word RAM span rejected\n");
             return 2;
         }
-        runtime.m_fastmem_word_size = k_ee_ram_size;
-        std::printf("EE fastmem word: enabled (direct physical RAM only)\n");
+        if (fastmem_word || fastmem_scalar)
+        {
+            runtime.m_fastmem_word_base = ram;
+            runtime.m_fastmem_word_size = k_ee_ram_size;
+            std::printf("EE fastmem word: enabled (direct physical RAM only)\n");
+        }
+        if (fastmem_scalar)
+        {
+            runtime.m_fastmem_other_scalar_base = ram;
+            runtime.m_fastmem_other_scalar_size = k_ee_ram_size;
+            std::printf("EE fastmem scalar: enabled (8/16/32/64-bit physical RAM)\n");
+        }
 #else
         std::fprintf(stderr, "EE fastmem word requires little-endian host\n");
         return 2;
