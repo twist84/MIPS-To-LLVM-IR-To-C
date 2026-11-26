@@ -464,9 +464,10 @@ def load_inputs(metadata_path, object_dir):
     object_manifest = json.loads(object_manifest_path.read_text(encoding="utf-8"))
     if (object_manifest.get("optimization_level") == 5 or
             object_manifest.get("native_target") is not None):
-        from verify_ir import native_target_identity
+        from verify_ir import native_target_identity, ir_pipeline_id
         if (object_manifest.get("optimization_level") != 5 or
-                object_manifest.get("native_target") != native_target_identity(5)):
+                object_manifest.get("native_target") != native_target_identity(5) or
+                object_manifest.get("ir_pipeline") != ir_pipeline_id(5)):
             raise ValueError("host-native object manifest CPU target mismatch")
     if not object_manifest.get("complete"):
         raise ValueError("objects.json does not report a complete emission")
