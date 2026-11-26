@@ -349,3 +349,64 @@ O0/O3 fixtures exercise taken/not-taken loop edges, self-loop delay
 writes to the predicate, forced single-pair path, and test-only budget
 exhaustion with exactly one pair remaining at a loop terminator.
 V27 is the next candidate; retain V26. CI and matched replay pending.
+
+## G2D.1 — correctness passed, footprint tradeoff rejected
+
+All five CI workflows passed at 4c8f2e5. ee-graphics-g2d.zip contains
+four unprofiled synchronous pairs, 40M dispatches each. Receipt correctness
+and input integrity passed; 184700 matched transitions per replay,
+3127/3127 PAD polls (raw stderr verified), 21910026110 guest attempts,
+22115080673 EE cycles, 4494 fields, 394881 VU1 runs, 445669423 pairs,
+zero interpreter fallbacks, IOP fault or timing observer failure.
+Independently recomputed raw report and screenshot hashes match all
+eight runs. All 84 DLL hashes changed, same filename inventory and target.
+
+| Pair | V26 s | V27 s |
+|---|---:|---:|
+| 1 | 42.594 | 42.750 |
+| 2 | 42.625 | 42.656 |
+| 3 | 42.610 | 42.937 |
+| 4 | 42.906 | 42.813 |
+
+Median 42.6175 -> 42.7815s; nominal throughput -0.38%, one of four
+pairs faster. No established speedup. User-reported total DLL bytes:
+
+| Version | Bytes |
+|---|---:|
+| V21 | 5409792 |
+| V22 | 6114304 |
+| V23 | 8358400 |
+| V24 | 8630272 |
+| V25 | 7904768 |
+| V26 | 11729408 |
+| V27 | 11470848 |
+
+V26 adds 48.38% versus V25, V27 remains 45.11% larger than V25.
+These are on-disk DLL totals, not executable section sizes or measured
+resident memory. Neither duplicated-body experiment establishes a
+speedup. Restore V25 production lowering while retaining all prior
+inventories and the self-loop regression. G2C.2 and G2D.1 are correctness
+validated experiments, rejected for promotion; not a correctness revert.
+Use V25 as the next matched performance control.
+
+## G2E.1 — exact compact readiness scoreboard
+
+Build on V25 direct edges and incoming-state specialization, without
+duplicated bodies. For all emitted pair PCs (including indirect targets),
+collect the read set and exact write-PC bitset for each of the 128 VF
+lanes and 16 VI slots using the existing dependency decoder. Drop slots
+never read or never written. Coalesce slots whose write-PC sets match:
+all start at zero and each shared retirement writes the same issue
+cycle+4 timestamp. Distinct partial-write sets remain independent.
+Deduplicate each pair's max checks and retirement stores by compact slot.
+Preserve issue and retirement order, scalar waits and cycles; no changes
+to the interpreter, ABI, code guard, runtime, EE lowering or callback
+ordering. No workload-specific assumptions. Straight-line path unchanged.
+Structural fixtures check one shared slot for a full-vector write,
+two for a partial write, and no allocation for unused readiness.
+Retain O0/O3 architectural differential tests, including self-loop
+predicate overwrite. Remove fast-block-specific assertions from the
+active regression, since those paths are intentionally not emitted.
+V28 candidate vs V25 control, retain V26/V27 for future experiments.
+CI and retail validation pending. Measure both throughput and DLL sizes
+before promotion; no automatic performance acceptance.
