@@ -40,6 +40,26 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
         # It is safe to build a NEW native library from the authenticated
         # current IR, not to relabel the old library or accept stale IR.
         snapshot = shared_ir.read_json(cache)
+        # Native pipeline upgrades must re-emit objects, not relift the
+        # authenticated shared IR or relabel old object manifests.
+        pipeline_changed = (snapshot.get("schema") == run_game.CACHE_SCHEMA and
+                            snapshot.get("emit_opt") == opt and
+                            snapshot.get("ir_pipeline") != run_game.ir_pipeline_id(opt))
+        if (pipeline_changed and shared_ir.active(metadata) and
+                snapshot.get("ir_sources") == ir_sources):
+            hashes = (verified_ir_hashes if verified_ir_hashes is not None
+                      else run_game.translated_ir_hashes(metadata))
+            shared_ir.current_state(metadata, ir_sources, hashes)
+            print("Optimized native pipeline changed; re-emitting objects "
+                  "from verified shared IR", flush=True)
+            root = Path(__file__).resolve().parents[1]
+            run_game.build_linked_library(
+                root, work, metadata, work / "objects", library,
+                opt, emit_jobs=jobs)
+            run_game.write_translation_cache(
+                cache, inputs, opt, metadata, library, ir_sources)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            return
         if (verified_ir_hashes is not None and
                 shared_ir.active(metadata) and
                 snapshot.get("schema") == run_game.CACHE_SCHEMA and
