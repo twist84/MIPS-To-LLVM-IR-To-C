@@ -4440,6 +4440,14 @@ def main():
             timing = next(line for line in lean_run.stderr.splitlines()
                           if line.startswith("EE timing: dispatched=300"))
             assert "native_ms=0.0" in timing and "iop_ms=0.0" in timing, timing
+            assert int(timing.rsplit("fields=", 1)[1]) == lean_state["gs_fields_started"]
+            lean_progress = [line for line in lean_run.stderr.splitlines()
+                             if line.startswith("EE progress: dispatched=")]
+            assert lean_progress, lean_run.stderr
+            fields = [int(line.rsplit("fields=", 1)[1]) for line in lean_progress]
+            assert fields == sorted(fields)
+            assert fields[-1] <= lean_state["gs_fields_started"]
+
             direct_report = root / "direct.json"
             direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1",
                               SDBZ_PROFILE_PCS="1", SDBZ_RUNTIME_PROFILE="1")
