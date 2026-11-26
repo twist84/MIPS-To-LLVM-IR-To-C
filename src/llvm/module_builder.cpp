@@ -7,6 +7,7 @@
 #include "ee_vu0_macro_ir.h"
 #include "ee_runtime.h"
 #include <cstddef>
+#include <cassert>
 #include "ee_opcode.h"
 #include <cctype>
 #include <cstdio>
@@ -270,6 +271,41 @@ void module_builder::declare_memory_helpers()
     m_out += "  br label %done\n";
     m_out += "done:\n";
     m_out += "  ret void\n";
+    m_out += "}\n\n";
+
+    // Pure scalar GPR runs contain no event producers or exception
+    // edges. Observed runs retain the original per-instruction path.
+    m_out += "define internal i1 @ee_try_count_alu_run(ptr %rt, i64 %count) alwaysinline {\n";
+    m_out += "entry:\n";
+    m_out += "  %null = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 %null, label %accepted, label %check\n";
+    m_out += "check:\n";
+    m_out += "  %observer_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_timing_observer)) + "\n";
+    m_out += "  %trace_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_instruction_trace)) + "\n";
+    m_out += "  %observer = load ptr, ptr %observer_ptr\n";
+    m_out += "  %trace = load ptr, ptr %trace_ptr\n";
+    m_out += "  %no_observer = icmp eq ptr %observer, null\n";
+    m_out += "  %no_trace = icmp eq ptr %trace, null\n";
+    m_out += "  %quiet = and i1 %no_observer, %no_trace\n";
+    m_out += "  br i1 %quiet, label %advance, label %observed\n";
+    m_out += "advance:\n";
+    m_out += "  %attempt_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_guest_instruction_attempts)) + "\n";
+    m_out += "  %slot_ptr = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_reference_instruction_slots)) + "\n";
+    m_out += "  %attempt = load i64, ptr %attempt_ptr\n";
+    m_out += "  %slot = load i64, ptr %slot_ptr\n";
+    m_out += "  %new_attempt = add i64 %attempt, %count\n";
+    m_out += "  %new_slot = add i64 %slot, %count\n";
+    m_out += "  store i64 %new_attempt, ptr %attempt_ptr\n";
+    m_out += "  store i64 %new_slot, ptr %slot_ptr\n";
+    m_out += "  br label %accepted\n";
+    m_out += "accepted:\n";
+    m_out += "  ret i1 true\n";
+    m_out += "observed:\n";
+    m_out += "  ret i1 false\n";
     m_out += "}\n\n";
 
     // The ps2-web-recomp reference interpreter charges two instruction
@@ -1029,7 +1065,7 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
 void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                                bool is_last_in_block,
                                uint32_t fallthrough_pc,
-                               bool in_delay_slot)
+                               bool in_delay_slot, bool count_instruction)
 {
     using ee::e_ee_opcode;
     // Restore the previous instruction even when an opcode emits an early
@@ -1079,9 +1115,12 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
 
     // Instructions that the code generator refuses remain uncounted.
     // The call is internal to each IR module, so it has no host ABI cost.
-    m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-             std::to_string(ins.pc) + ", i32 " +
-             std::to_string(ins.opcode_word) + ")\n";
+    if (count_instruction)
+    {
+        m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
+                 std::to_string(ins.pc) + ", i32 " +
+                 std::to_string(ins.opcode_word) + ")\n";
+    }
 
     if (fallthrough_pc == 0)
         fallthrough_pc = ins.pc + 8;
@@ -2965,6 +3004,108 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     }
 }
 
+// Only audited, nontrapping scalar GPR lowerings. Exclude V0 writes
+// because their separate trace helper can call out. No memory, COP,
+// control transfer, delay slot, HI/LO or exception is batched.
+static bool can_count_alu_run(const ee::s_ee_instruction& ins)
+{
+    using ee::e_ee_opcode;
+    if (ins.valid != ee::e_ee_valid::VALID ||
+        ins.flow != ee::e_ee_flow::FLOW_NONE || ins.has_delay_slot)
+    {
+        return false;
+    }
+    switch (ins.opcode)
+    {
+    case e_ee_opcode::OP_ADDIU: case e_ee_opcode::OP_DADDIU:
+    case e_ee_opcode::OP_ANDI: case e_ee_opcode::OP_ORI:
+    case e_ee_opcode::OP_XORI: case e_ee_opcode::OP_LUI:
+    case e_ee_opcode::OP_SLTI: case e_ee_opcode::OP_SLTIU:
+        return ins.rt != 2u;
+    case e_ee_opcode::OP_SPECIAL:
+        if (ins.rd == 2u)
+        {
+            return false;
+        }
+        switch (ins.funct)
+        {
+        case 0x00u: case 0x02u: case 0x03u:
+        case 0x04u: case 0x06u: case 0x07u:
+        case 0x21u: case 0x23u: case 0x24u: case 0x25u:
+        case 0x26u: case 0x27u: case 0x2au: case 0x2bu:
+        case 0x2du: case 0x2fu: case 0x38u: case 0x3au:
+        case 0x3bu: case 0x3cu: case 0x3eu: case 0x3fu:
+            return true;
+        default:
+            return false;
+        }
+    default:
+        return false;
+    }
+}
+
+void module_builder::emit_counted_alu_run(
+    const std::vector<ee::s_ee_instruction>& block, size_t first, size_t end)
+{
+    const std::string suffix = std::to_string(m_temp_counter++);
+    const std::string fast = "alu_count_fast_" + suffix;
+    const std::string slow = "alu_count_observed_" + suffix;
+    const std::string merge = "alu_count_merge_" + suffix;
+    const std::string counted = newtemp();
+    m_out += "  " + counted + " = call i1 @ee_try_count_alu_run(ptr %rt, i64 " +
+             std::to_string(end - first) + ")\n";
+    m_out += "  br i1 " + counted + ", label %" + fast + ", label %" + slow + "\n";
+
+    const auto incoming_lo = m_cur_lo;
+    const auto incoming_hi = m_cur_hi;
+    const auto incoming_dirty_lo = m_dirty_lo;
+    const auto incoming_dirty_hi = m_dirty_hi;
+
+    m_out += fast + ":\n";
+    for (size_t index = first; index < end; ++index)
+    {
+        emit_insn(block[index], false, 0u, false, false);
+    }
+    const auto fast_lo = m_cur_lo;
+    const auto fast_hi = m_cur_hi;
+    const auto fast_dirty_lo = m_dirty_lo;
+    const auto fast_dirty_hi = m_dirty_hi;
+    m_out += "  br label %" + merge + "\n";
+
+    m_cur_lo = incoming_lo;
+    m_cur_hi = incoming_hi;
+    m_dirty_lo = incoming_dirty_lo;
+    m_dirty_hi = incoming_dirty_hi;
+    m_out += slow + ":\n";
+    for (size_t index = first; index < end; ++index)
+    {
+        emit_insn(block[index], false, 0u);
+    }
+    m_out += "  br label %" + merge + "\n";
+    m_out += merge + ":\n";
+
+    // The two copies have identical tracking shape. Only changed SSA
+    // values need PHIs; incoming values already dominate both copies.
+    assert(m_dirty_lo == fast_dirty_lo && m_dirty_hi == fast_dirty_hi);
+    const auto merge_values = [&](auto& values, const auto& fast_values)
+    {
+        assert(values.size() == fast_values.size());
+        for (auto& item : values)
+        {
+            const std::string& fast_value = fast_values.at(item.first);
+            if (item.second != fast_value)
+            {
+                const std::string joined = newtemp();
+                m_out += "  " + joined + " = phi i64 [ " + fast_value +
+                    ", %" + fast + " ], [ " + item.second + ", %" + slow + " ]\n";
+                item.second = joined;
+            }
+        }
+    };
+    merge_values(m_cur_lo, fast_lo);
+    merge_values(m_cur_hi, fast_hi);
+}
+
 void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                                 bool /*is_last*/, uint32_t /*entry_pc*/,
                                 const std::set<uint8_t>& live_in,
@@ -3151,10 +3292,32 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         ctrl_idx = static_cast<int>(n - 1);
     }
 
-    for (size_t i = 0; i < n; ++i) {
+    for (size_t i = 0; i < n;)
+    {
         if (static_cast<int>(i) == ctrl_idx || static_cast<int>(i) == delay_idx)
+        {
+            ++i;
             continue;
-        emit_insn(block[i], false, 0);
+        }
+        size_t end = i;
+        // Bound cloned regions for code size. Short runs keep the
+        // original lowering to avoid paying for a new guard.
+        while (end < n && end - i < 16u &&
+               static_cast<int>(end) != ctrl_idx &&
+               static_cast<int>(end) != delay_idx &&
+               can_count_alu_run(block[end]))
+        {
+            ++end;
+        }
+        if (end - i >= 3u)
+        {
+            emit_counted_alu_run(block, i, end);
+            i = end;
+        }
+        else
+        {
+            emit_insn(block[i++], false, 0u);
+        }
     }
 
     auto make_cond = [&](const ee::s_ee_instruction& ctrl) -> std::string {
