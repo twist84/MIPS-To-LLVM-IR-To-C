@@ -550,7 +550,7 @@ if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%W
 if "%SDBZ_EE_OPT%"=="4" (
     echo EE native object optimization: O2 IR pipeline + O2 backend
 ) else if "%SDBZ_EE_OPT%"=="5" (
-    echo EE native object optimization: host-native O2 backend
+    echo EE native object optimization: host-native O2 backend + selective VU0 FMAC IR passes
 ) else (
     echo EE native object optimization: O%SDBZ_EE_OPT%
 )
