@@ -149,3 +149,59 @@ IR. Choose the lower bound based on actual gameplay entry and use
 normal uncapped asynchronous P40. Do not interpret PC ranks as
 static instruction counts or compare profiled wall time directly to
 an unprofiled run.
+
+## Gameplay hot modules and selective O5 (2026-11-26)
+
+The 06:40 gameplay profile covers native entry ordinals 26M..40M.
+The twelve provided modules include five with calls to specialised
+VU0 FMAC helpers. The hottest exclusive native entry, 0x00108220,
+performs 8 LQC2, 16 FMAC operations, 4 SQC2, JR and its delay slot.
+Previous O5 did not run the middle-end inliner and still paid for
+many alwaysinline helper calls. The local LLVM 20.1.8 host-native
+O2 comparison (Linux x86-64) gives:
+
+| Entry | Backend-only mnemonics | O2 IR + backend mnemonics |
+| --- | ---: | ---: |
+| 00108220 | 3302 | 2468 |
+| 00106a20 | 3433 | 2323 |
+| 001068e0 | 3060 | 1714 |
+| 00106950 | 3402 | 2311 |
+| 00106aa0 | 6430 | 5588 |
+| Total | 19627 | 14404 |
+
+Call sites 1133 -> 518, object bytes 154720 -> 110840. Static
+counts include internal helpers, not dynamic retired instructions.
+Full O2 expands some other hot modules (001102b0: 3431 -> 5936;
+00185830: 3065 -> 6012), so do not apply it globally.
+
+The revised O5 pipeline identity is llvm-vu0-fmac-selective-O2-v1.
+Select a module by an actual specialised FMAC call, not the presence
+of generic helper definitions or game-specific addresses. The other
+modules still use the host-native O2 backend alone. O0..O4 retain
+their previous policy. The verifier, audit tool, cache builder and
+linker agree on pipeline identity. A previous O5 object manifest is
+incompatible and is rebuilt once from verified shared IR, without
+re-emitting guest source IR or changing the known function inventory.
+
+The uploaded 00108220 module was also linked with an isolated
+synthetic RAM/sync harness. Two versions matched all 640 cases
+(128 fixed-seed mixed arbitrary/edge-bit inputs, each with normal
+completion, synchronization failure at calls 1/8/16, and misaligned
+input). Compared return status, complete CPU and VU buffers, RAM,
+both counters and ordered read/write/sync/exception records. Eight
+alternating samples of 100,000 calls, finite input, no event-log
+recording: baseline median 147.679 ms, selective 103.701 ms, 29.8%
+less time. Every sample recorded exactly 3M guest attempts/slots and
+1.6M sync calls. This is a host-local stubbed-memory microbenchmark,
+not a retail game benchmark or hardware timing validation. The
+initial MCJIT-based local harness crashed; the linked-object harness
+was used instead. Repository regressions exercise actual decoded
+VMUL, VADD, VMULA/MADD, failure paths, source identity and pipeline
+migration; final-head CI and Windows retail throughput remain to
+be checked.
+
+Next run ordinary P40 with the same gameplay PC window and full
+profiling. Do not use --overwrite-ir: only O5 native objects need
+rebuilding. Compare native-exclusive PC costs normalized by calls
+and post-spawn field throughput; asynchronous completion and manual
+input remain workload-matching limitations.
