@@ -214,3 +214,47 @@ after the delay pair, no change to guest issue, termination or validation.
 Test both direct outcomes and guarded alternatives in the interpreter
 differential fixture, including wrap and delayed branches. G2B build/CI
 and matched V23/V24 replay pending. Retain V23, use fresh V24 inventory.
+
+## G2B accepted — matched V23/V24 retail experiment
+
+All five workflows passed at fa025ef. ee-graphics-g2b.zip contains four
+interleaved pairs with profiling disabled. All eight runs reached 40M
+dispatches, 3127/3127 PAD polls, 184700 identical sampled transitions per
+receipt, 21910026110 guest attempts, 22115080673 EE cycles, 4494 fields,
+394881 VU1 runs, 445669423 pairs, zero interpreter fallbacks and no IOP
+guest fault or timing observer failure. Independently recomputed terminal
+report and GS screenshot hashes match across all eight runs. Exact inventory
+of 84 libraries and native target preserved, all 84 binary hashes changed.
+Input integrity receipt passed.
+
+| Pair | V23 s | V24 s |
+|---|---:|---:|
+| 1 | 41.750 | 41.235 |
+| 2 | 41.625 | 41.406 |
+| 3 | 41.547 | 41.125 |
+| 4 | 41.406 | 41.141 |
+
+Median 41.586 -> 41.188s: 0.96% elapsed reduction, 0.97% nominal
+throughput gain. All pairs favor V24 but the 0.398s median difference is
+close to the 0.344s control spread; retain V24 as the experimental
+baseline, not a definitive magnitude of speedup. Compounded G2A/G2B
+throughput ratio is approximately 1.0401, not a direct V22/V24 comparison.
+No cache promotion, no EE or runner rebuild, no async performance claim.
+
+## G2C.1 — specialize incoming state before block formation
+
+Use the existing complete direct-flow discovery graph to collect NPC and
+pending E facts for every reached pair, including terminating states.
+Emit a constant incoming NPC and sequential NPC only when all observed
+states agree and no indirect transfer is reachable. Emit an unconditional
+retire or continue edge only if every incoming state agrees on pending E.
+Mixed NPC/E states keep dynamic values. Programs containing indirect
+transfers retain dynamic incoming state and existing guarded fallback.
+Enter every native invocation directly at its known entry PC; retain the
+emitted-PC dispatcher for unknown transfers. This is a first step toward
+LLVM forming longer native blocks, not explicit multi-pair budget
+hoisting. Preserve per-pair budget checks, callback order, dependency
+cycles, VI delay, Q/P and flag retirement, final TPC and native ABI.
+Extend O0/O3 differential fixture IR assertions for constant NPC and E
+state, dynamic ambiguous NPC and guarded indirect cases. Build/CI and
+V24/V25 matched replay pending. Retain all previous library inventories.
