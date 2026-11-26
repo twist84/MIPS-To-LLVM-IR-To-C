@@ -202,6 +202,19 @@ def main():
                 import re
                 guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
                 assert "switch i32 %current_pc" in guest
+                entry = guest.split("dispatch:\n", 1)[0]
+                assert re.search(r"br label %pair_\d+\n$", entry)
+                bodies = re.findall(r"body_\d+:\n(.*?)(?=\n(?:body|pair|next|retire)_\d+:)",
+                                    guest, re.S)
+                assert bodies
+                if case == "direct-branches":
+                    assert any("load i32, ptr %npc" not in body for body in bodies)
+                    assert any("load i32, ptr %npc" in body for body in bodies)
+                    assert any("load i1, ptr %ending" not in body for body in bodies)
+                    assert re.search(r"br label %retire_\d+\n", guest)
+                else:
+                    assert all("load i32, ptr %npc" in body for body in bodies)
+                    assert all("load i1, ptr %ending" in body for body in bodies)
                 assert re.search(r"pair_\d+:\n.*?icmp ult i32.*?\n.*?label %body_\d+, label %fail", guest, re.S)
                 if case == "direct-branches":
                     assert re.search(r"next_\d+:\n  br label %pair_\d+", guest)
