@@ -205,3 +205,48 @@ profiling. Do not use --overwrite-ir: only O5 native objects need
 rebuilding. Compare native-exclusive PC costs normalized by calls
 and post-spawn field throughput; asynchronous completion and manual
 input remain workload-matching limitations.
+
+## Selective O5 retail result (06:53:43)
+
+Clean 0820c18, O5 pipeline llvm-vu0-fmac-selective-O2-v1, all
+16,250 source IR hashes and lowering inputs identical to ce21604.
+New native library SHA-256 81322ff69b6a6671cbd29cb824c14a5a78ac0e26744a17a1603c00c9ed8e7f9a.
+Both 40M runs use the same 26M..40M PC window, fixed RTC, async VU1/GS,
+full profiling and baseline IOP. No reported IOP guest fault, no VU1
+interpreter fallbacks, zero IOP debt.
+
+| Entry PC | Previous ns/attempt | Selective ns/attempt |
+| --- | ---: | ---: |
+| 00108220 | 43.36 | 28.01 |
+| 00106a20 | 26.12 | 16.11 |
+| 001068e0 | 14.82 | 10.16 |
+| 00106950 | 28.98 | 19.95 |
+| 00106aa0 | 81.98 | 49.31 |
+
+Five-PC total native time 559.2425 -> 362.5967 ms (-35.16%),
+699,123 -> 698,255 calls and 20,452,246 -> 20,427,994 attempts.
+Process wall 46.672 -> 45.453 s; profile wall 41.7953 -> 40.8858 s;
+EE exclusive 12.8512 -> 12.7502 s; IOP 7.3532 -> 7.2668 s.
+Fields 4697 -> 4869. First spawn at 22,493,853; complete post-spawn
+intervals 598 fields / 12.526043 s = 47.7405 fields/s, versus 44.377
+previously. Post-spawn native exclusive 243.313 -> 215.985 ns/dispatch.
+These phase estimates are not controlled execution traces. The five
+PC instruction-normalized reductions (31..40%) have close workload
+counts and are the stronger evidence for the targeted improvement.
+
+0820c18 CI: original ps2autotests, ROM0, SIF DMA and WebGPU passed;
+Build and test failed the historical O5 recovery inventory selection
+regression. 0b6b2cc accepts the known legacy backend-only O5 pipeline
+identity for guest inventory recovery only; native reuse/linking still
+requires the current pipeline ID. Unknown pipeline IDs remain rejected.
+
+Next host-only change f320cb1 outlines scalar memory bus/fallback
+logic. This leaves address translation, RAM-span checks, endianness,
+callback widths/order, scratchpad and rejected transfers unchanged.
+80aacbc adds scalar ABI tests for RAM aliases, scratchpad, bounds and
+MMIO read/write widths and unhandled reads. Native recompilation or
+relink may be needed, but no guest IR change. Performance benefit and
+latest CI are unverified. Compare the next normal P40 replay using
+identical diagnostics and PC window; the remaining scalar-heavy
+hot modules repeatedly call memory and trace helpers. Avoid bypassing
+MMIO/TLB or guest-store trace semantics for speculative gains.
