@@ -12,6 +12,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import hashlib
 import json
 from pathlib import Path
+import re
 import sys
 import time
 
@@ -69,6 +70,35 @@ def select_modules(rows, per_band, top, include=()):
     return {name: sorted(reasons) for name, reasons in sorted(selected.items())}
 
 
+def size_attribute_ir(text, size_level):
+    """LLVM 22 uses function attributes, not pipeline-level Os/Oz.
+
+    Generated EE definitions have a single-line header. Work on an
+    in-memory copy and verify every definition received the attributes.
+    Do not use ValueRef.add_function_attribute: older bindings attach
+    these enum attributes to the return slot instead of the function.
+    """
+    attributes = {1: ("optsize",), 2: ("optsize", "minsize")}[size_level]
+    replacement = " ".join(attributes)
+    text, count = re.subn(r"^(define\b[^\r\n]*?)[ \t]*\{[ \t]*$",
+                          lambda match: match[1] + " " + replacement + " {",
+                          text, flags=re.M)
+    if not count:
+        raise ValueError("no supported LLVM function headers for size attributes")
+    return text, count, attributes
+
+
+def verify_size_attributes(module, count, attributes):
+    definitions = [fn for fn in module.functions if not fn.is_declaration]
+    if len(definitions) != count:
+        raise ValueError("not all LLVM function definitions were annotated")
+    for fn in definitions:
+        actual = set(b" ".join(fn.attributes).split())
+        if any(attr.encode() not in actual for attr in attributes):
+            raise ValueError(f"size attributes missing on {fn.name}")
+    module.verify()
+
+
 def emit_native(raw, triple, symbol, mode):
     started = time.monotonic()
     machine = get_target_machine(5, triple)
@@ -76,11 +106,19 @@ def emit_native(raw, triple, symbol, mode):
         raise ValueError("unsupported experimental mode")
     size_level = ({"O2": 0, "Os": 1, "Oz": 2}[mode] if mode != "O5" else
                   0 if uses_ir_pipeline(5, raw) else None)
+    text = raw.decode("utf-8")
+    size_attributes = None
+    modern_size_api = llvm.llvm_version_info[0] >= 22
+    if modern_size_api and size_level in (1, 2):
+        text, count, attributes = size_attribute_ir(text, size_level)
+        size_attributes = (count, attributes)
     with llvm.create_context() as context, llvm.parse_assembly(
-            raw.decode("utf-8"), context=context) as module:
+            text, context=context) as module:
         module.triple = triple
         module.data_layout = str(machine.target_data)
         module.verify()
+        if size_attributes is not None:
+            verify_size_attributes(module, *size_attributes)
         # The guest entry must remain a defined external symbol.
         def public_definitions():
             return sorted(fn.name for fn in module.functions
@@ -89,7 +127,10 @@ def emit_native(raw, triple, symbol, mode):
         if symbol not in public:
             raise ValueError("guest entry symbol missing from LLVM input")
         if size_level is not None:
-            with llvm.create_pipeline_tuning_options(2, size_level) as tuning:
+            tuning_options = (llvm.create_pipeline_tuning_options(2)
+                              if modern_size_api or size_level == 0 else
+                              llvm.create_pipeline_tuning_options(2, size_level))
+            with tuning_options as tuning:
                 with llvm.create_pass_builder(machine, tuning) as builder:
                     with builder.getModulePassManager() as passes:
                         passes.run(module, builder)
@@ -100,7 +141,9 @@ def emit_native(raw, triple, symbol, mode):
     executable, _ = native_executable_sections(data)
     return {"object_bytes": len(data), "executable_bytes": executable,
             "sha256": sha(data), "seconds": time.monotonic() - started,
-            "middle_end_size_level": size_level}
+            "middle_end_size_level": size_level,
+            "size_optimization_method": ("function_attributes" if size_attributes is not None else
+                                         "pipeline_level" if size_level in (1, 2) else None)}
 
 
 def measure(path, object_path, item, symbol, row, reasons, triple):
@@ -220,7 +263,8 @@ def main():
             "modules": results,
             "limitations": ["selected size-stratified sample, not a population estimate",
                             "no native execution or linked library measurement",
-                            "same backend O2; experimental changes are middle-end pipelines only",
+                            "same backend O2 target; LLVM 22 size attributes also guide machine code generation",
+                            "LLVM 20 size pipeline and LLVM 22 size attributes are not identical policies",
                             "not a production optimization profile or cache manifest"],
         }
         with output.open("x", encoding="utf-8") as stream:
@@ -230,7 +274,7 @@ def main():
         for mode, total in totals.items():
             print(f"{mode}: {total['executable_bytes']:,} executable bytes "
                   f"({total['executable_delta_vs_o5']:+,} vs O5)")
-    except (OSError, ValueError, KeyError, RuntimeError) as error:
+    except (OSError, ValueError, KeyError, RuntimeError, TypeError) as error:
         print(f"EE native size pilot refused: {error}", file=sys.stderr)
         return 1
     return 0

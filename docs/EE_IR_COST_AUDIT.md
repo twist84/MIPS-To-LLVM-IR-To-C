@@ -882,3 +882,15 @@ native objects from a synthetic guest function. Do not adopt a
 global size profile or extrapolate a selected sample to the
 whole image. Use the resulting size/runtime tradeoffs to choose
 a selective experimental profile and validate it independently.
+
+
+### LLVM 22 size-pilot compatibility
+
+LLVM 22 removed pipeline-level Os/Oz (llvmlite 0.48+). Use the
+O2 pipeline with verified function attributes: optsize for Os,
+optsize+minsize for Oz. LLVM 20 retains its original size pipeline.
+The report records the effective size optimization method per variant;
+these policies are not identical across LLVM major versions. The
+in-memory IR copy is annotated, never the original file. Tests cover
+attribute placement and helper/declaration handling even on LLVM 20.
+Production O5, target settings, cache and runtime are unchanged.
