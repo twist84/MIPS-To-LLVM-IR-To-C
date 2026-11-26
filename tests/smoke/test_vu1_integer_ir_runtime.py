@@ -193,11 +193,19 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags", "q", "random"):
+        for case in ("integer", "normal", "wrap", "stores", "branches", "direct-branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags", "q", "random"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
             ir = path.read_text(encoding="utf-8")
+            if case in ("branches", "direct-branches", "branch-wrap"):
+                import re
+                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
+                assert "switch i32 %current_pc" in guest
+                assert re.search(r"pair_\d+:\n.*?icmp ult i32.*?\n.*?label %body_\d+, label %fail", guest, re.S)
+                assert re.search(r"next_\d+:\n.*?br i1 .*?, label %pair_\d+, label %dispatch", guest, re.S)
+                if case == "direct-branches":
+                    assert re.search(r"next_\d+:\n  br label %pair_\d+", guest)
             if case == "stores":
                 # The full-width memory path must be explicit in the
                 # emitted IR, not dependent on backend scalar combining.
