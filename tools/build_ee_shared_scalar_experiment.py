@@ -343,10 +343,9 @@ def verify_residual_alignment_parent(folder, meta, names, parent_raw, manifest, 
     return raw, current, entries, plan, rows
 
 
-def alignment_trial(task):
+def reconstruct_alignment_parent(task):
     (name, guest, path, base, receipts, plans, scalar, residual, shared_row,
      folder, record, triple, expected, owners) = task[:14]
-    object_output = task[14] if len(task) == 15 else None
     raw = path.read_bytes()
     data = verified_object(folder, record, sha(raw))
     before, prior = reconstruct_parent(raw, guest, name, receipts, plans)
@@ -368,6 +367,14 @@ def alignment_trial(task):
     mode = record.get("experimental_pipeline", "O5")
     if mode != prior["mode"]:
         raise ValueError("alignment parent policy differs")
+    return raw, data, before, mode
+
+
+def alignment_trial(task):
+    name, guest = task[:2]
+    record, triple = task[10:12]
+    object_output = task[14] if len(task) == 15 else None
+    raw, data, before, mode = reconstruct_alignment_parent(task)
     candidate, sites, groups = merge_alignment_faults(before, guest)
     row = {"module": name, "mode": mode, "original_ir_sha256": sha(raw),
            "parent_ir_sha256": sha(before), "parent_object_sha256": sha(data),
@@ -474,6 +481,234 @@ def alignment_remaining(candidates, promoted):
     return remaining - set(promoted)
 
 
+# A rotate, unlike a bare right shift, is a bijection on i32. Unknown
+# misaligned PCs cannot alias any accepted aligned case, including zero.
+ENTRY_SWITCH = re.compile(
+    rb"^entry:\n(?:  %quadword_read_slot = alloca \{ i64, i64 \}, align 16\n)?"
+    rb"  (?P<ptr>%t\d+) = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6\n"
+    rb"  (?P<pc>%t\d+) = load i32, ptr (?P=ptr)\n"
+    rb"(?P<switch>  switch i32 (?P=pc), label %dispatch_unknown \[\n"
+    rb"(?P<cases>(?:    i32 \d+, label %bb_0x[0-9a-fA-F]+\n)+) \]\n)"
+    rb"(?=dispatch_unknown:\n)", re.M)
+ENTRY_CASE = re.compile(rb"    i32 (\d+), label %(bb_0x[0-9a-fA-F]+)\n")
+
+
+def rotate_pc(pc):
+    if not 0 <= pc <= 0xffffffff:
+        raise ValueError("entry PC outside i32")
+    return (pc >> 2) | ((pc & 3) << 30)
+
+
+def entry_switch(body):
+    match = ENTRY_SWITCH.search(body)
+    if match is None:
+        return None, []
+    cases = [(int(m[1]), m[2]) for m in ENTRY_CASE.finditer(match["cases"])]
+    pcs = {pc for pc, _ in cases}
+    if (len(pcs) != len(cases) or 0 not in pcs or
+            any(not 0 <= pc <= 0xffffffff or pc & 3 for pc in pcs)):
+        return None, []
+    return match, cases
+
+
+def normalize_entry_switch(raw, guest):
+    body = body_of(raw, guest)
+    match, cases = entry_switch(body)
+    if match is None or len(cases) < 4:
+        return raw, len(cases)
+    if b"%ee_entry_rot_" in body:
+        raise ValueError("entry rotation temporary already present")
+    pc = match["pc"]
+    replacement = (b"  %ee_entry_rot_low = lshr i32 " + pc + b", 2\n"
+                   b"  %ee_entry_rot_high = shl i32 " + pc + b", 30\n"
+                   b"  %ee_entry_rot_key = or i32 %ee_entry_rot_low, %ee_entry_rot_high\n"
+                   b"  switch i32 %ee_entry_rot_key, label %dispatch_unknown [\n")
+    replacement += b"".join(b"    i32 " + str(rotate_pc(value)).encode() +
+                            b", label %" + label + b"\n" for value, label in cases)
+    replacement += b" ]\n"
+    new_body = body[:match.start("switch")] + replacement + body[match.end("switch"):]
+    return raw.replace(body, new_body, 1), len(cases)
+
+
+def verify_full_alignment(folder, meta, names, parent_raw, manifest, records, parent_plan, candidates, promoted):
+    raw, current, entries = read_manifest(folder / "objects", set(names))
+    plan = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    trial_raw = (folder / "alignment-trials.json").read_bytes()
+    trials = json.loads(trial_raw)
+    selected = alignment_remaining(candidates, promoted)
+    reductions = {n: count for count, _, n in candidates}
+    if (plan["mode"] != "experimental_expanded_alignment_merge" or
+            plan["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            plan["source_manifest_sha256"] != sha(parent_raw) or
+            plan["prior_library_sha256"] != parent_plan["linked_library_sha256"] or
+            plan["pilot_sha256"] != parent_plan["pilot_sha256"] or
+            plan["native_target"] != manifest["native_target"] or
+            current["native_target"] != manifest["native_target"] or
+            current["target_triple"] != manifest["target_triple"] or
+            current["experimental_mixed_pipeline"] != manifest["experimental_mixed_pipeline"] + "-full" or
+            current.get("production_cache_compatible") is not False or
+            plan["source_functions"] != len(names) or plan["retained_functions"] != len(names) or
+            plan["trials_sha256"] != sha(trial_raw) or
+            len(trials) != len(selected) or plan["attempted_modules"] != len(selected) or
+            {r["module"] for r in trials} != selected or
+            plan["retained_pilot_modules"] != len(promoted) or
+            plan["eligible_modules"] != len(candidates) or
+            plan["eligible_call_reductions"] != sum(reductions.values()) or
+            not plan.get("runtime_validation_required") or
+            dll.stat().st_size != plan["linked_library_bytes"] or
+            sha(dll.read_bytes()) != plan["linked_library_sha256"]):
+        raise ValueError("full alignment overlay identity differs")
+    for row in trials:
+        name = row["module"]
+        previous = records[name]
+        if (row["original_ir_sha256"] != previous["ir_sha256"] or
+                row["parent_ir_sha256"] != previous["transformed_ir_sha256"] or
+                row["parent_object_sha256"] != previous["sha256"] or
+                row["parent_object_bytes"] != previous["size_bytes"] or
+                row["mode"] != previous.get("experimental_pipeline", "O5") or
+                row["executable_saving"] != row["parent_executable_bytes"]-row["candidate"]["executable_bytes"] or
+                row["object_saving"] != row["parent_object_bytes"]-row["candidate"]["object_bytes"] or
+                row["merged_sites"]-row["remaining_calls"] != reductions[name]):
+            raise ValueError("full alignment trial differs: " + name)
+    wins = [row for row in trials if row["executable_saving"] > 0]
+    if (wins != plan["modules"] or plan["recompiled_modules"] != len(wins) or
+            plan["reused_modules"] != len(names)-len(wins) or
+            plan["rejected_or_unchanged_modules"] != len(trials)-len(wins) or
+            plan["cumulative_alignment_modules"] != len(promoted)+len(wins)):
+        raise ValueError("full alignment winner inventory differs")
+    accepted = {r["module"]: r for r in wins}
+    for name, item in entries.items():
+        previous = records[name]
+        if any(item.get(k) != previous.get(k) for k in
+               ("ir_sha256", "defined_symbols", "experimental_pipeline")):
+            raise ValueError("full alignment source or symbol differs: " + name)
+        if name in accepted:
+            row = accepted[name]
+            if (row["candidate"]["sha256"] != item["sha256"] or
+                    row["candidate"]["object_bytes"] != item["size_bytes"] or
+                    row["candidate_ir_sha256"] != item["transformed_ir_sha256"] or
+                    item.get("experimental_alignment_merge") is not True):
+                raise ValueError("full alignment accepted object differs: " + name)
+        elif any(item.get(k) != previous.get(k) for k in
+                 ("sha256", "size_bytes", "transformed_ir_sha256", "experimental_alignment_merge")):
+            raise ValueError("unmodified full alignment object differs: " + name)
+    for key, field in (("executable_saving", "executable_saving"),
+                       ("object_saving", "object_saving"),
+                       ("removed_ir_bytes", "ir_bytes_saved"),
+                       ("merged_sites", "merged_sites"), ("remaining_calls", "remaining_calls")):
+        if plan[key] != sum(r[field] for r in wins):
+            raise ValueError("full alignment aggregate differs: " + key)
+    if (plan["cumulative_alignment_executable_saving"] != parent_plan["executable_saving"]+plan["executable_saving"] or
+            plan["cumulative_call_reductions"] != parent_plan["merged_sites"]-parent_plan["remaining_calls"]+
+            plan["merged_sites"]-plan["remaining_calls"]):
+        raise ValueError("full alignment cumulative totals differ")
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return raw, current, entries, plan, dict(promoted, **accepted)
+
+
+def entry_trial(task):
+    parent_task, row, folder, record, cases = task
+    name, guest = parent_task[:2]
+    triple = parent_task[11]
+    raw, _, before, mode = reconstruct_alignment_parent(parent_task)
+    if row is not None:
+        before, sites, groups = merge_alignment_faults(before, guest)
+        if (sha(before) != row["candidate_ir_sha256"] or sites != row["merged_sites"] or
+                groups != row["remaining_calls"] or row["candidate"]["sha256"] != record["sha256"]):
+            raise ValueError("entry pilot alignment reconstruction differs: " + name)
+    data = verified_object(folder, record, sha(raw))
+    if sha(before) != record["transformed_ir_sha256"]:
+        raise ValueError("entry pilot parent IR differs: " + name)
+    candidate, count = normalize_entry_switch(before, guest)
+    if candidate == before or count != cases:
+        raise ValueError("entry switch differs: " + name)
+    baseline = emit_native(before, triple, guest, mode)
+    if baseline["sha256"] != record["sha256"]:
+        raise ValueError("entry parent object not reproducible: " + name)
+    trial = emit_native(candidate, triple, guest, mode)
+    return {"module": name, "mode": mode, "switch_cases": count,
+            "original_ir_sha256": sha(raw), "parent_ir_sha256": sha(before),
+            "parent_object_sha256": sha(data), "parent_object_bytes": len(data),
+            "parent_executable_bytes": baseline["executable_bytes"],
+            "candidate_ir_sha256": sha(candidate), "candidate": trial,
+            "executable_saving": baseline["executable_bytes"]-trial["executable_bytes"],
+            "object_saving": len(data)-trial["object_bytes"],
+            "ir_bytes_saved": len(before)-len(candidate)}
+
+
+def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, scalar,
+                residual, shared_rows, expected, owners, folder, entries,
+                candidates, promoted, link_raw, link_manifest, link_entries, link_plan):
+    full = args.entry_from.resolve()
+    raw, current, records, plan, alignment_rows = verify_full_alignment(
+        full, meta, names, link_raw, link_manifest, link_entries, link_plan, candidates, promoted)
+    inventory, bands, largest = [], {}, []
+    skipped = Counter()
+    for name, guest in sorted(names.items()):
+        original = (ir / name).read_bytes()
+        if sha(original) != base_records[name]["ir_sha256"]:
+            raise ValueError("entry source differs: " + name)
+        match, cases = entry_switch(body_of(original, guest))
+        if match is None:
+            skipped["noncanonical"] += 1
+            continue
+        nonzero = [pc for pc, _ in cases if pc]
+        span = max(nonzero)-min(nonzero)+4 if nonzero else 0
+        record = records[name]
+        row = {"module": name, "mode": record.get("experimental_pipeline", "O5"),
+               "switch_cases": len(cases), "nonzero_cases": len(nonzero),
+               "nonzero_span_bytes": span,
+               "unique_targets": len({target for _, target in cases}),
+               "object_bytes": record["size_bytes"]}
+        inventory.append(row)
+        if len(cases) < 4:
+            skipped["small_switch"] += 1
+            continue
+        band = next((n for n in (8, 16, 32, 128, 512) if len(cases) <= n), 2**32)
+        bands.setdefault((row["mode"], band), []).append(row)
+        largest.append(row)
+    selected = {r["module"]: r for r in sorted(largest, key=lambda r: (r["switch_cases"], r["object_bytes"], r["module"]))[-8:]}
+    for group in bands.values():
+        ordered = sorted(group, key=lambda r: (r["switch_cases"], r["object_bytes"], r["module"]))
+        count = min(4, len(ordered))
+        for i in range(count):
+            row = ordered[i*(len(ordered)-1)//max(1, count-1)]
+            selected[row["module"]] = row
+    if not selected:
+        raise ValueError("no canonical multi-entry switches")
+    tasks = []
+    for name, row in sorted(selected.items()):
+        parent_task = (name, names[name], ir / name, base_records[name],
+                       tuple(r.get(name) for r in rows), small_plans,
+                       scalar.get(name), residual.get(name), shared_rows.get(name),
+                       folder / "objects", entries[name], current["target_triple"], expected, owners)
+        tasks.append((parent_task, alignment_rows.get(name), full / "objects",
+                      records[name], row["switch_cases"]))
+    results = []
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for row in pool.map(entry_trial, tasks):
+            results.append(row)
+            print(f"[{len(results)}/{len(tasks)}] {row['module']}: "
+                  f"{row['executable_saving']:+,} executable / {row['object_saving']:+,} object bytes", flush=True)
+    report = {"mode": "read_only_ee_entry_rotation_pilot",
+              "metadata_sha256": sha(meta), "parent_manifest_sha256": sha(raw),
+              "parent_library_sha256": plan["linked_library_sha256"], "native_target": current["native_target"],
+              "inventory_modules": len(names), "canonical_switch_modules": len(inventory),
+              "eligible_modules": len(largest), "skipped": dict(skipped),
+              "total_switch_cases": sum(r["switch_cases"] for r in inventory),
+              "selected_modules": len(results),
+              "executable_saving": sum(r["executable_saving"] for r in results),
+              "object_saving": sum(r["object_saving"] for r in results),
+              "ir_bytes_saved": sum(r["ir_bytes_saved"] for r in results),
+              "modules": results, "entry_inventory": inventory}
+    with out.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+        stream.write("\n")
+    return report
+
+
 def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
                     scalar, expected, owners, parent_raw, manifest, records, parent_plan):
     folder = args.alignment_from.resolve()
@@ -517,6 +752,10 @@ def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
             link_folder = args.alignment_expand_from.resolve()
             link_raw, link_manifest, link_entries, link_plan = verify_alignment_overlay(
                 link_folder, meta, names, raw, current, entries, plan, promoted, pilot_raw)
+            if args.entry_from:
+                return entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
+                                   scalar, residual, shared_rows, expected, owners, folder, entries,
+                                   candidates, promoted, link_raw, link_manifest, link_entries, link_plan)
             selected = alignment_remaining(candidates, promoted)
             if not selected:
                 raise ValueError("no remaining alignment candidates")
@@ -624,6 +863,10 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.entry_from:
+        if not args.alignment_expand_from:
+            raise ValueError("--entry-from requires --alignment-expand-from")
+        inputs += (args.entry_from.resolve(),)
     if args.alignment_expand_from:
         if not args.alignment_promote or not args.alignment_from:
             raise ValueError("--alignment-expand-from requires --alignment-from and --alignment-promote")
@@ -793,6 +1036,7 @@ def main():
     parser.add_argument("--alignment-from", type=Path, help="accepted residual overlay; output is a read-only alignment pilot JSON")
     parser.add_argument("--alignment-promote", type=Path, help="link measured wins from an existing alignment pilot JSON")
     parser.add_argument("--alignment-expand-from", type=Path, help="accepted linked alignment pilot overlay; retain its winners and trial all remaining eligible modules")
+    parser.add_argument("--entry-from", type=Path, help="accepted full alignment overlay; output is a read-only entry-switch pilot JSON")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:

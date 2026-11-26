@@ -1790,3 +1790,49 @@ objects. Report all trials with a digest and incremental/cumulative
 call reduction; link a separate experimental DLL against the accepted
 74.11 MiB alignment pilot, with a new four-arm retail replay required.
 No production cache or original IR changes.
+
+### Checkpoint 6c — full alignment retail acceptance
+
+Verified all 10,102 unique trial rows and SHA-256
+6a232b5183f7a08b6c70ee836ea04f922e4bbc91d1ae40f8d68b5079a2a09e7b.
+10,053 wins (O5 2,121/2,121, saving 2,529,945 executable bytes;
+Oz 7,932/7,981, saving 1,934,550; 39 ties, ten losses). Retain 54
+pilot objects unchanged; 10,107 cumulative alignment modules, all
+16,252 functions. Incremental executable saving 4,464,495 bytes;
+object saving 4,459,391; IR grows 8,234,247. 188,886 -> 19,880 grouped
+call sites, 169,006 removed incrementally / 178,261 cumulatively.
+Stage 329.391 s before link. DLL 77,711,360 -> 73,252,864 bytes
+(69.86 MiB), 4,458,496 incremental; 38,218,240 cumulative bytes
+(34.29%) vs original O5. Linked raw executable bytes 68,292,608.
+Candidate SHA-256 a952526e4e1600868c83194fd7236acc349147f6580eef7622cad94a295aa2f8.
+Four arms exit 4 at 40M dispatches, 3,037/3,037 PAD0 polls, 188,546
+matched transitions per replay, zero mismatches/unpaired. DLL identities
+match and remain unchanged. Reports SHA-256
+cdc2db9d5d18b3f9640710e1888bd55199e8200c51379c9b110758a144465c48;
+screenshots SHA-256
+f580d6304eede5133a698226dd15c2a71c7bb413c4f23955ac65eb41e8e9775c
+byte-identical. EE cycles 21,388,715,259; attempts 21,172,070,604;
+slots 21,174,069,449; yields 2,883; fields 4,346; final PC 0x1ab3e8;
+no IOP guest fault or timing observer failure. Wall seconds 42.422 /
+42.141 / 41.922 / 41.469 (-1.08% vs immediate parent, single run).
+All five CI workflows passed on d5399e0. Accept for matched workload.
+
+### Checkpoint 7a — entry-switch inventory and paired normalization pilot
+
+Every nonempty translated function dispatches cpu.m_pc through an entry
+switch, retaining nonzero continuation cases, the zero legacy sentinel
+and unknown-PC return. Do not remove or redirect cases. Trial a bijective
+32-bit rotate-right-by-two selector and transform every constant case by
+the same mapping; aligned PCs become dense word-index keys and unaligned
+PCs remain distinct. Preserve original entry block, target labels,
+PHI predecessor identity, unknown path, state updates and helper graph.
+Test original and rewritten executable entry paths with MCJIT, including
+misaligned and high unsigned addresses, zero, and unknown PC. Verify the
+full accepted alignment chain, scan original entry switches, and sample
+canonical switches with at least four cases, stratified by O5/Oz and
+case-count bands plus eight largest. Reconstruct transformed parent IR
+and require identical parent object re-emission. Report executable and
+whole-object sizes separately: denser switch lowering may trade code
+for jump-table data, and LLVM may already perform similar normalization.
+No DLL, original IR mutation, cache changes or retail replay at this
+read-only pilot checkpoint. Promote only measured net benefits later.

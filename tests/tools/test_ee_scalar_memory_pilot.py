@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,59 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_entry_switch_rotation(self):
+        raw = b"""%ee_cpu_state = type { i32, i32, i32, i32, i32, i32, i32, i32 }
+define i32 @guest(ptr %cpu, ptr %rt) {
+entry:
+  %t0 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6
+  %t1 = load i32, ptr %t0
+  switch i32 %t1, label %dispatch_unknown [
+    i32 4096, label %bb_0x1000
+    i32 0, label %bb_0x1000
+    i32 4100, label %bb_0x1004
+    i32 4294967292, label %bb_0xfffffffc
+ ]
+dispatch_unknown:
+  %t2 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 7
+  store i32 3, ptr %t2
+  ret i32 3
+bb_0x1000:
+  ret i32 10
+bb_0x1004:
+  ret i32 11
+bb_0xfffffffc:
+  ret i32 12
+}
+"""
+        changed, count = normalize_entry_switch(raw, "guest")
+        self.assertEqual(count, 4)
+        self.assertNotEqual(changed, raw)
+        self.assertIn(b"i32 0, label %bb_0x1000", changed)
+        self.assertIn(b"i32 1073741823, label %bb_0xfffffffc", changed)
+        self.assertEqual(normalize_entry_switch(raw.replace(b"i32 4100,", b"i32 4101,"), "guest")[0],
+                         raw.replace(b"i32 4100,", b"i32 4101,"))
+        for pc in (0, 1, 2, 3, 4096, 4100, 0xffffffff, 0xfffffffc):
+            key = rotate_pc(pc)
+            self.assertEqual(((key << 2) & 0xffffffff) | (key >> 30), pc)
+        linked = raw + changed.split(b"\n", 1)[1].replace(b"@guest(", b"@candidate(")
+        llvm.initialize_native_target()
+        llvm.initialize_native_asmprinter()
+        signature = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p)
+        with llvm.create_context() as ctx:
+            with llvm.parse_assembly(linked.decode(), context=ctx) as module:
+                module.verify()
+                target = llvm.Target.from_default_triple().create_target_machine()
+                with llvm.create_mcjit_compiler(module, target) as engine:
+                    engine.finalize_object()
+                    funcs = [signature(engine.get_function_address(n)) for n in ("guest", "candidate")]
+                    for pc in [*range(4088, 4110), 0, 1, 2, 3, 4, 0xfffffffc, 0xffffffff, 0x80000000]:
+                        outcomes = []
+                        for fn in funcs:
+                            state = (ctypes.c_uint32 * 8)()
+                            state[6], state[7] = pc, 99
+                            outcomes.append((fn(state, None), list(state)))
+                        self.assertEqual(*outcomes)
 
     def test_alignment_expansion_inventory(self):
         candidates = [(2, 100, "accepted.ll"), (5, 200, "remaining.ll"), (1, 50, "loss.ll")]
