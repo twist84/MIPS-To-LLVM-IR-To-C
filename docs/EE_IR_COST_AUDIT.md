@@ -1066,3 +1066,34 @@ blanket optimization level sweeps. Measure actual emitted helper
 bodies and call sites before outlining; do not assume that identical
 helper names imply equivalent definitions, or that outlined helpers
 improve hot-path throughput.
+
+
+### Checkpoint 3g — full-inventory selective Oz replay accepted
+
+Retail ee-size-comparison-all-sync.zip: all three stopped at 40M
+dispatches (exit 4), both replays consumed 3,123/3,123 PAD0 polls,
+186,029 matching sampled transitions per replay, zero mismatches
+or unpaired samples. Libraries unchanged, no replay error.
+Terminal JSON SHA-256 e88e0729b86050537166fd109dfd84e509cf49dbe5877427f3cbcb1e50c3d24d;
+GPU PPM SHA-256 20d5296384f2151610280f2c35e7f1804a4974902f91fbc3fca5f12dbd34db27.
+Both byte-identical across all three arms. Reference EE cycles
+21,885,929,018; guest instruction attempts 21,674,108,653;
+reference slots 21,676,097,062; fields 4,447; GPU draws 4,913,924;
+presents 3,211; native VU1 runs 407,157, pairs 459,420,098,
+zero interpreter fallbacks; final PC 0x19e620. Wall time
+43.157 / 43.031 / 42.812 seconds (-0.51% candidate/control).
+No observed regression in this matched workload. Not an exhaustive
+test or evidence to change production compiler/cache policy.
+
+### Checkpoint 4a — helper inventory before lowering changes
+
+Audit exact internal IR definition bodies and static direct guest/helper
+call sites. Compare current O5 objects against the full selective Oz
+overlay, checking per-module IR/object digests and trial provenance.
+Attribute x86-64 COFF/bigobj executable spans to exact named function
+symbols using the next symbol boundary or section end; exclude ambiguous
+aliases. Spans may include padding and omit inlined or renamed functions.
+Report exact-body groups and unattributed bytes separately; these are
+not estimates of removable code. Prioritize cold, repeatedly emitted
+helper dependency families after evidence arrives. No runtime changes,
+IR regeneration, relinking or replay required for this read-only audit.

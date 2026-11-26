@@ -859,6 +859,9 @@ if(Python3_Interpreter_FOUND)
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_verify_ir_incremental.py)
     endif()
+    add_test(NAME ee_helper_inventory
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_helper_inventory.py)
     add_test(NAME ee_instruction_trace_comparator
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_compare_ee_instruction_traces.py
