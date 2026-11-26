@@ -884,6 +884,8 @@ def main():
         "set \"EE_WEBGPU_SNAPSHOT=1\"",
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
+    assert 'if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"' in preset
+    assert 'if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"' in preset
     assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
     assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
             '    set "SDBZ_SPEED_PERCENT=100"\n'
