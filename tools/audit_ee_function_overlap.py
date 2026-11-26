@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 from ee_ownership_binary import executable_segments, native_executable_sections
+from ee_discovery_evidence import EVIDENCE_NAME, collect, load
 
 GUEST_PC = re.compile(rb"^\s*; (0x[0-9a-fA-F]+): ")
 BLOCK_PC = re.compile(rb"^bb_(0x[0-9a-fA-F]+):")
@@ -26,7 +27,7 @@ EDGE = re.compile(rb"\blabel %(bb_0x[0-9a-fA-F]+)\b")
 GUEST_FUNCTION = re.compile(rb"^define\b.*@ee_fn_[0-9a-fA-F]+\(")
 
 
-def scan_details(path):
+def scan_details(path, *, with_graph=False):
     """Use the guest entry switch, not all guest-looking LLVM labels."""
     annotations, counted, cases, labels = set(), set(), set(), set()
     members, edges = defaultdict(set), defaultdict(set)
@@ -77,12 +78,65 @@ def scan_details(path):
     blocks.discard(0)
     terminal = {pc: frozenset(members[pc]) for pc in blocks
                 if members[pc] and not (edges[pc] & blocks)}
+    if with_graph:
+        graph = {pc: (frozenset(members[pc]), frozenset(edges[pc] & blocks),
+                      frozenset(edges[pc] - blocks)) for pc in blocks}
+        return annotations | counted, blocks, occurrences, annotations, terminal, saw_switch, graph
     return annotations | counted, blocks, occurrences, len(annotations), terminal, saw_switch
 
 
 def scan_module(path):
     pcs, blocks, occurrences, _, _, _ = scan_details(path)
     return pcs, blocks, occurrences
+
+
+
+def shared_tail_regions(left, right):
+    """Common closed regions with at least one reachable guest terminal.
+
+    Equality here is equality of observed guest instruction membership and
+    emitted guest-label successors (including external targets), not a proof
+    of equivalent native execution or architectural state publication.
+    """
+    shared = {pc for pc in left.keys() & right.keys()
+              if left[pc] == right[pc] and left[pc][0]}
+    predecessors = defaultdict(set)
+    for pc in shared:
+        for successor in left[pc][1]:
+            predecessors[successor].add(pc)
+    pending = [pc for pc in shared if not left[pc][1] <= shared]
+    while pending:
+        pc = pending.pop()
+        if pc not in shared:
+            continue
+        shared.remove(pc)
+        pending.extend(predecessors[pc] & shared)
+    # A closed cycle with no path to a terminal is not a tail.
+    reaches_exit = {pc for pc in shared if not left[pc][1]}
+    pending = list(reaches_exit)
+    while pending:
+        pc = pending.pop()
+        new = (predecessors[pc] & shared) - reaches_exit
+        reaches_exit.update(new)
+        pending.extend(new)
+    # Group connected shared blocks; leave single-block terminals to the
+    # existing distinct terminal-block inventory.
+    remaining = set(reaches_exit)
+    while remaining:
+        first = min(remaining)
+        pending = [first]
+        component = {first}
+        remaining.remove(first)
+        while pending:
+            pc = pending.pop()
+            adjacent = (predecessors[pc] | left[pc][1]) & remaining
+            remaining.difference_update(adjacent)
+            component.update(adjacent)
+            pending.extend(adjacent)
+        # Exclude a component if any branch can reach a closed nonterminal
+        # loop rather than another member of this candidate tail.
+        if len(component) > 1 and all(left[pc][1] <= component for pc in component):
+            yield component
 
 
 def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, runtime_sources=None, native_sizes=None):
@@ -94,11 +148,17 @@ def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, ru
     switch_modules = 0
     rows = []
     module_index = {}
+    annotated_pcs = set()
+    graphs = []
+    tail_region_count = 0
+    largest_tail_regions = []
     for path in sorted(paths):
-        pcs, blocks, occurrences, annotated, terminal, has_switch = scan_details(path)
+        pcs, blocks, occurrences, annotations, terminal, has_switch, graph = scan_details(path, with_graph=True)
         if not pcs:
             continue
         pc_counts.update(pcs)
+        annotated_pcs.update(annotations)
+        graphs.append(graph)
         block_counts.update(blocks)
         index = len(modules)
         module_index[path.name] = index
@@ -107,7 +167,7 @@ def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, ru
         for pc, members in terminal.items():
             tails[(pc, members)].append(index)
         switch_modules += has_switch
-        modules.append((path, pcs, blocks, occurrences, annotated))
+        modules.append((path, pcs, blocks, occurrences, len(annotations)))
     if not modules:
         raise ValueError("no guest instruction annotations found")
     total_pcs = sum(pc_counts.values())
@@ -118,7 +178,19 @@ def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, ru
     for index, (path, pcs, blocks, occurrences, annotated) in enumerate(modules):
         candidates = {owner for pc in pcs for owner in owners[pc] if owner > index}
         for other in candidates:
-            _, other_pcs, other_blocks, _, _ = modules[other]
+            other_path, other_pcs, other_blocks, _, _ = modules[other]
+            if len(blocks & other_blocks) > 1:
+                for region in shared_tail_regions(graphs[index], graphs[other]):
+                    tail_region_count += 1
+                    row = {
+                        "modules": [path.name, other_path.name],
+                        "guest_blocks": len(region),
+                        "guest_pcs": len(set().union(*(graphs[index][pc][0] for pc in region))),
+                        "block_starts": [hex(pc) for pc in sorted(region)],
+                    }
+                    largest_tail_regions.append(row)
+                    largest_tail_regions.sort(key=lambda item: (-item["guest_pcs"], item["modules"]))
+                    del largest_tail_regions[top:]
             if pcs == other_pcs and blocks == other_blocks:
                 equal_pairs += 1
                 contained.update((index, other))
@@ -162,10 +234,13 @@ def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, ru
         "aggregate_ir_bytes": sum(path.stat().st_size for path in paths),
         "discovery": ownership,
         "largest_native_modules": largest_native[:top],
+        "largest_native_executable_modules": sorted(largest_native, key=lambda row: (-(row["native_executable_bytes"] or 0), row["module"]))[:top],
+        "multi_block_shared_tail_pair_regions": tail_region_count,
+        "largest_shared_tail_regions": largest_tail_regions,
         "module_details": rows,
         "guest_modules": len(modules),
         "unique_annotated_or_counted_guest_pcs": len(pc_counts),
-        "unique_annotated_guest_pcs": len(pc_counts),
+        "unique_annotated_guest_pcs": len(annotated_pcs),
         "unique_guest_pcs": len(pc_counts),
         "module_scoped_guest_pcs": total_pcs,
         "cross_module_excess_pc_copies": total_pcs - len(pc_counts),
@@ -201,7 +276,7 @@ def audit(paths, object_sizes=None, top=20, *, metadata=None, discovery=None, ru
         "limitations": [
             "counts IR guest comments plus literal accounting calls, not native instructions",
             "containment compares observed PC and block-entry sets, not edge equivalence",
-            "terminal-block candidates are not proof of equivalent shared-tail regions",
+            "shared-tail candidates compare guest PC membership and observed guest-label edges, not native semantics",
             "shared guest PCs do not prove removable machine-code duplication",
             "within-module repeated annotations are excluded from cross-module counts",
             "object sizes are optional metadata and are not attributed to shared PCs",
@@ -217,12 +292,8 @@ def runtime_evidence(logs):
     for path in logs:
         with path.open(encoding="utf-8", errors="replace") as source:
             for line in source:
-                match = re.search(r"(?:live cache-miss: PC=|auto-expand: compiling reachable PC |auto-expand: guest-reached PC )(0x[0-9a-fA-F]+)", line)
-                if match:
-                    result[int(match[1], 16)].add("runtime_cache_miss")
-                match = re.search(r"auto-expand: compiling table sibling PC (0x[0-9a-fA-F]+)", line)
-                if match:
-                    result[int(match[1], 16)].add("runtime_table_sibling")
+                for pc, sources in collect(line).items():
+                    result[pc].update(sources)
     return result
 
 
@@ -335,6 +406,7 @@ def summary(report, output=sys.stderr):
         ("Contained modules", "wholly_contained_modules"),
         ("Partially overlapping modules", "partially_overlapping_modules"),
         ("Shared terminal-block candidates", "shared_terminal_block_candidates"),
+        ("Multi-block shared tail pair regions", "multi_block_shared_tail_pair_regions"),
         ("Original ELF bytes", "original_elf_bytes"),
         ("Executable ELF segment bytes", "executable_elf_segment_bytes"),
         ("IR bytes", "aggregate_ir_bytes"),
@@ -362,6 +434,7 @@ def main():
     parser.add_argument("--metadata", type=Path, help="defaults to ir_dir/ee_functions.json")
     parser.add_argument("--discovery-tool", type=Path, help="built ee_discovery_audit executable")
     parser.add_argument("--discovery-cache", type=Path, help="defaults to ir_dir/ee_discovery_cache.bin")
+    parser.add_argument("--runtime-evidence", type=Path, help="ELF-bound runtime discovery ledger")
     parser.add_argument("--log", type=Path, action="append", default=[], help="historical expansion log; repeatable")
     parser.add_argument("--json", type=Path, help="write JSON report here; console prints summary")
     parser.add_argument("--top", type=int, default=20)
@@ -405,8 +478,19 @@ def main():
                 raise ValueError("IR files differ from authoritative function inventory")
         if sizes is not None and set(sizes) != {path.stem + ".o" for path in paths}:
             raise ValueError("object manifest and IR module inventory differ")
+        evidence = runtime_evidence(args.log)
+        ledger = args.runtime_evidence
+        if ledger is None and args.objects:
+            candidate = args.objects.parent.parent / EVIDENCE_NAME
+            if candidate.is_file():
+                ledger = candidate
+        if ledger is not None:
+            if elf is None or not ledger.is_file():
+                raise ValueError("runtime evidence requires existing ledger and original ELF")
+            for pc, sources in load(ledger, elf).items():
+                evidence[pc].update(sources)
         report = audit(paths, sizes, args.top, metadata=metadata, discovery=discovery,
-                       runtime_sources=runtime_evidence(args.log), native_sizes=native)
+                       runtime_sources=evidence, native_sizes=native)
         if elf:
             data = elf.read_bytes()
             report["original_elf_bytes"] = len(data)

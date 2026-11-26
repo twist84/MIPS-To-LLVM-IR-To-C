@@ -21,6 +21,7 @@ import time
 
 from iop_disc_catalog import build_catalog, reconcile_runtime_loadfile
 from shared_ee_ir import ir_directory
+from ee_discovery_evidence import EVIDENCE_NAME, record as record_discovery_evidence
 
 
 LINKED_COUNT_PATTERN = re.compile(
@@ -354,6 +355,11 @@ def main(argv=None):
         parser.error(f"driver does not exist: {args.driver}")
 
     work = args.work_dir.resolve()
+    def preserve_discovery(output):
+        try:
+            record_discovery_evidence(work, args.elf, output)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"EE discovery evidence unavailable: {exc}", file=sys.stderr, flush=True)
     report = args.report.resolve()
     catalog_path = work / ("quick-probe-iop-disc-catalog.json" if args.quick_probe
                            else "iop-disc-catalog.json")
@@ -363,7 +369,8 @@ def main(argv=None):
     provenance_path = work / ("quick-probe-provenance.json" if args.quick_probe
                               else "replay-provenance.json")
     if report in (args.elf.resolve(), args.driver.resolve(), catalog_path,
-                  boot_log, expansion_log, metadata_path, provenance_path, work / "translation-cache.json"):
+                  boot_log, expansion_log, metadata_path, provenance_path, work / "translation-cache.json",
+                  work / EVIDENCE_NAME):
         parser.error("report path must be distinct from inputs, logs, and cache metadata")
     work.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -442,7 +449,7 @@ def main(argv=None):
         path.resolve() for _, path in snapshots if path is not None
     ]
     if len(requested_paths) != len(set(requested_paths)) or any(
-            path in (report, expansion_log, boot_log, catalog_path, provenance_path)
+            path in (report, expansion_log, boot_log, catalog_path, provenance_path, work / EVIDENCE_NAME)
             for path in requested_paths):
         parser.error("GS snapshot paths must be distinct from diagnostic outputs")
     if args.replay_provenance:
@@ -488,6 +495,7 @@ def main(argv=None):
         code, output, elapsed = run_session(
             command, expansion_log, append=True, **progress_kwargs
         )
+        preserve_discovery(output)
         state = read_report(report)
         replays = REPLAY_PATTERN.findall(output)
         last_replay = int(replays[-1]) if replays else -1
@@ -603,6 +611,7 @@ def main(argv=None):
     code, final_output, elapsed = run_session(
         final_command, boot_log, **progress_kwargs
     )
+    preserve_discovery(final_output)
     if code == 130:
         print(
             "Native final replay cancelled by user (Ctrl+C); "

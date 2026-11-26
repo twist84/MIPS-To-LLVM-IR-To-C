@@ -46,6 +46,7 @@ def test_ownership():
         c = module("c", [4104, 4112], tail + "bb_0x1010:\n  ; 0x1010: nop\n  br label %bb_0x1008\n")
         report = audit([a, b, c])
         assert report["unique_guest_pcs"] == 4
+        assert report["unique_annotated_guest_pcs"] == 3
         assert report["unique_block_starts"] == 3
         assert report["module_scoped_block_starts"] == 5
         assert report["blocks_in_multiple_modules"] == 1
@@ -129,11 +130,49 @@ def test_provenance_ownership():
         assert report["discovery"]["confirmed_runtime_misses_covered_by_other_modules"] == 1
 
 
+def test_multi_block_tail():
+    from audit_ee_function_overlap import shared_tail_regions
+    def block(pcs, successors=(), external=()):
+        return frozenset(pcs), frozenset(successors), frozenset(external)
+    tail = {0x1008: block([0x1008, 0x100c], [0x1010]),
+            0x1010: block([0x1010, 0x1014])}
+    left = {0x1000: block([0x1000], [0x1008]), **tail}
+    right = {0x2000: block([0x2000], [0x1008]), **tail}
+    assert list(shared_tail_regions(left, right)) == [{0x1008, 0x1010}]
+    right[0x1010] = block([0x1010, 0x1014], external=[0x3000])
+    assert not list(shared_tail_regions(left, right))
+    cycle = {0x1008: block([0x1008], [0x1010]),
+             0x1010: block([0x1010], [0x1008])}
+    assert not list(shared_tail_regions(cycle, cycle))
+
+
+def test_runtime_evidence_ledger():
+    from ee_discovery_evidence import EVIDENCE_NAME, load, record
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        elf = root / "guest.elf"
+        elf.write_bytes(b"guest")
+        record(root, elf, "live cache-miss: PC=0x00001000, request=1\n")
+        record(root, elf, "auto-expand: compiling table sibling PC 0x00001000\n")
+        record(root, elf, "live cache-miss: PC=0x00001000, request=2\n")
+        assert load(root / EVIDENCE_NAME, elf) == {
+            0x1000: {"runtime_cache_miss", "runtime_table_sibling"}}
+        elf.write_bytes(b"different guest")
+        try:
+            load(root / EVIDENCE_NAME, elf)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("wrong ELF accepted")
+
+
 if __name__ == "__main__":
     test_cross_module_overlap()
     test_ownership()
     test_binary_accounting()
     test_provenance_ownership()
+    test_multi_block_tail()
+    test_runtime_evidence_ledger()
     if len(sys.argv) > 1:
         test_generated_ir(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
     print("PASS: cross-module guest PC overlap audit")

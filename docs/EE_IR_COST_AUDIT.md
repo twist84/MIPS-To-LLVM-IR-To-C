@@ -618,3 +618,19 @@ No lowering inputs or runtime paths are changed. The diagnostic
 executable and Python tools are outside the IR/object provenance
 fingerprints. Build only the diagnostic target; no overwrite or
 retail gameplay replay is needed.
+
+
+Multi-block shared tails are additionally identified by matching
+guest-PC membership and emitted guest-label successors, requiring
+a closed connected region with a path to a terminal. This is
+a pairwise candidate count, not a count of unique globally
+mergeable regions. The JSON ranks these regions separately from
+single shared terminal blocks.
+
+The boot-session wrapper now preserves positive runtime-cache-miss
+and speculative table-sibling observations in an ELF-SHA-256-bound
+ee-discovery-events.json ledger beside the profile's boot logs.
+It is diagnostic-only, published after a child execution, and
+not consumed by the dispatcher or compiler. The audit loads it
+automatically when using the corresponding object manifest. Use
+--log for earlier archives whose events predate this ledger.
