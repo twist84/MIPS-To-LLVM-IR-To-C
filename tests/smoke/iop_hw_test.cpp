@@ -1,4 +1,5 @@
 #include "iop_hw.h"
+#include "iop_cdvd_rtc.h"
 #include "iop_kernel.h"
 #include "iop_pad_poll_replay.h"
 #include <sstream>
@@ -27,6 +28,35 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
         data[at + index] =
             static_cast<uint8_t>(value >> (8u * index));
     }
+}
+
+bool test_cdvd_rtc()
+{
+    std::time_t utc{};
+    iop::t_cdvd_rtc rtc{};
+    const iop::t_cdvd_rtc expected{0u, 0x45u, 0x40u, 0x14u, 0u, 0x26u, 0x11u, 0x26u};
+    if (!iop::parse_fixed_cdvd_rtc("1795671645", utc) ||
+        !iop::encode_cdvd_rtc(utc, rtc) || rtc != expected)
+    {
+        return false;
+    }
+    // 2024-12-31 15:00 UTC is 2025-01-01 00:00 JST.
+    const iop::t_cdvd_rtc new_year{0u, 0u, 0u, 0u, 0u, 1u, 1u, 0x25u};
+    if (!iop::parse_fixed_cdvd_rtc("1735657200", utc) ||
+        !iop::encode_cdvd_rtc(utc, rtc) || rtc != new_year)
+    {
+        return false;
+    }
+    const char* invalid[] = {nullptr, "", "-1", "0", "1795671645x",
+        " 1795671645", "4102444800", "18446744073709551615"};
+    for (const char* text : invalid)
+    {
+        if (iop::parse_fixed_cdvd_rtc(text, utc))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool test_pad_poll_stream()
@@ -3204,6 +3234,10 @@ int main()
     if (!test_spu2_adpcm_voice_progression())
     {
         return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
+    if (!test_cdvd_rtc())
+    {
+        return fail("CDVD RTC fixed UTC parsing and JST calendar conversion");
     }
     if (!test_pad_poll_stream())
     {
