@@ -17,6 +17,29 @@ entry:
   %eb = and i32 %eb_shift, 255
   %a_zero = icmp eq i32 %ea, 0
   %b_zero = icmp eq i32 %eb, 0
+  %a_larger = icmp uge i32 %ea, %eb
+  %e = select i1 %a_larger, i32 %ea, i32 %eb
+  %da = sub i32 %e, %ea
+  %db = sub i32 %e, %eb
+  %a_far = icmp uge i32 %da, 25
+  %b_far = icmp uge i32 %db, 25
+  ; With one discarded aligned significand, the other operand is
+  ; returned exactly: exponent-zero payloads flush, and a gap >=25
+  ; discards all guarded bits. Both discarded implies two zero
+  ; exponents. SUB has already inverted the second sign.
+  %discard_a = or i1 %a_zero, %a_far
+  %discard_b = or i1 %b_zero, %b_far
+  %identity = or i1 %discard_a, %discard_b
+  br i1 %identity, label %identity_result, label %arithmetic
+identity_result:
+  %both = and i1 %discard_a, %discard_b
+  %common = and i32 %lhs, %b
+  %zero_sign = and i32 %common, -2147483648
+  %survivor = select i1 %discard_a, i32 %b, i32 %lhs
+  %identity_bits = select i1 %both, i32 %zero_sign, i32 %survivor
+  %identity_tuple = insertvalue { i32, i1, i1 } zeroinitializer, i32 %identity_bits, 0
+  ret { i32, i1, i1 } %identity_tuple
+arithmetic:
   %a_fraction = and i32 %lhs, 8388607
   %b_fraction = and i32 %b, 8388607
   %a_hidden = or i32 %a_fraction, 8388608
@@ -25,12 +48,6 @@ entry:
   %b_guard = shl i32 %b_hidden, 1
   %ma = select i1 %a_zero, i32 0, i32 %a_guard
   %mb = select i1 %b_zero, i32 0, i32 %b_guard
-  %a_larger = icmp uge i32 %ea, %eb
-  %e = select i1 %a_larger, i32 %ea, i32 %eb
-  %da = sub i32 %e, %ea
-  %db = sub i32 %e, %eb
-  %a_far = icmp uge i32 %da, 25
-  %b_far = icmp uge i32 %db, 25
   %sa = select i1 %a_far, i32 25, i32 %da
   %sb = select i1 %b_far, i32 25, i32 %db
   %aligned_a = lshr i32 %ma, %sa
