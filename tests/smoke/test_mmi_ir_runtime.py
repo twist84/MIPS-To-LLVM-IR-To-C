@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -53,7 +54,16 @@ def run_opt_level(fixture_exe, temp_dir, opt_level, target_machine):
     ir_path = temp_dir / f"mmi_transfer_o{opt_level}.ll"
     subprocess.run([str(fixture_exe), str(ir_path), str(opt_level)], check=True)
 
-    module = llvm.parse_assembly(ir_path.read_text(encoding="utf-8"))
+    ir = ir_path.read_text(encoding="utf-8")
+    if opt_level == 0:
+        # The aliased PAND result feeds the immediately following PXOR
+        # directly as a packed SSA value, not an extract/reinsert pair.
+        guest = ir.split("@guest_mmi_transfer_test(", 1)[1]
+        packed_ands = re.findall(r"(%t\d+) = and <2 x i64> ", guest)
+        packed_xors = re.findall(r"= xor <2 x i64> (%t\d+), ", guest)
+        require(bool(set(packed_ands) & set(packed_xors)),
+                "packed producer is not reused directly by its consumer")
+    module = llvm.parse_assembly(ir)
     module.verify()
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
@@ -95,7 +105,7 @@ def run_opt_level(fixture_exe, temp_dir, opt_level, target_machine):
     prefix = f"O{opt_level}: "
     require(result == 3, prefix + f"unexpected exit result: {result}")
     require(state.exit_reason == 3, prefix + f"unexpected exit reason: {state.exit_reason}")
-    require(state.pc == 0x001000A8, prefix + f"unexpected dispatcher PC: 0x{state.pc:08x}")
+    require(state.pc == 0x001000B8, prefix + f"unexpected dispatcher PC: 0x{state.pc:08x}")
     require(state.gpr[4].lo == 0x1234, prefix + f"ADDIU writeback lost: 0x{state.gpr[4].lo:x}")
     require(state.gpr[4].hi == 0x4444444444444444, prefix + "ADDIU clobbered upper GPR half")
     require(state.gpr[14].lo == 0x5678,
@@ -180,6 +190,8 @@ def run_opt_level(fixture_exe, temp_dir, opt_level, target_machine):
         20: halves(packed_lanes(16, "max_signed")),
         21: halves(packed_lanes(8, "add")),
         22: halves(packed_lanes(8, "sub")),
+        31: (0x1234 ^ b_lo, (a_hi & b_hi) ^ b_hi),
+        0: (0, 0),
     }
     for register, (expected_lo, expected_hi) in expected.items():
         actual = state.gpr[register]
