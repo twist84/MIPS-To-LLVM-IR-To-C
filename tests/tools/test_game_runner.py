@@ -4890,6 +4890,8 @@ def main():
                 capture_output=True, text=True, check=False, timeout=40,
                 env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS="0",
                          SDBZ_IOP_FAST_QUIET_TURNS="0", SDBZ_IDLE_SKIP="0",
+                         SDBZ_EE_DIRECT_DISPATCH="1",
+                         SDBZ_NATIVE_ALU_CERTIFICATES="1",
                          SDBZ_STATE_TRACE_FIRST="1", SDBZ_STATE_TRACE_LAST="16",
                          SDBZ_STATE_TRACE_EVERY="1", SDBZ_STATE_TRACE_DETAIL="1"),
             )
