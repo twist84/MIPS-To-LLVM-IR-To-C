@@ -322,6 +322,31 @@ def main():
                 (0x0123456789abcdef, 0x40, 0xff0, 0x2000, 0x00140000)
             ] if enabled else []), "scalar trace lost live GPR context")
 
+        # The quadword fast arm must bypass diagnostic materialization.
+        # Failed fusion must still preserve both lanes and SSA context.
+        for enabled, fused in ((False, True), (False, False), (True, False)):
+            result, cpu, _ = execute(
+                fixture, directory, target, "ee_sq_trace_context", 0x43,
+                trace_enabled=enabled, fused_store=fused)
+            require(result == EE_EXIT_RETURN and
+                    cpu.gpr[29].lo == 0xff0 and cpu.gpr[10].lo == 0x2001,
+                    f"SQ context: exit={result}, SP={cpu.gpr[29].lo:#x}, "
+                    f"r10={cpu.gpr[10].lo:#x}")
+            require(PAIRS == [("try_write", 0x40)], "SQ probe repeated")
+            require(bytes(MEMORY[i] for i in range(0x40, 0x50)) ==
+                    bytes.fromhex("efcdab89674523011032547698badcfe"),
+                    "SQ context lane data")
+            expected_events = [] if fused else [
+                ("write", 0x40), ("write", 0x48)]
+            if enabled:
+                expected_events = [("trace", 0x40), ("write", 0x40),
+                                   ("trace", 0x48), ("write", 0x48)]
+            require(EVENTS == expected_events, "SQ context ordering")
+            require(TRACE_CONTEXTS == ([
+                (0x0123456789abcdef, 0x43, 0xff0, 0x2000, 0x00140000),
+                (0xfedcba9876543210, 0x43, 0xff0, 0x2000, 0x00140000)
+            ] if enabled else []), "SQ context lost live GPR values")
+
         # The positive scalar word path remains operational.
         result, cpu, original = execute(
             fixture, directory, target, "ee_lw", 0x40)

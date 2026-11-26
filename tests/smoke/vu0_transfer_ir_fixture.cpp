@@ -56,11 +56,12 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
     if (mode.rfind("ee_", 0u) == 0u)
     {
         std::string operation = mode.substr(3u);
-        if (operation == "sw_trace_context")
+        if (operation == "sw_trace_context" || operation == "sq_trace_context")
         {
             // Dirty SP before the store; FP is consumed after the cold arm.
-            const uint32_t sw = (0x2bu << 26u) | (9u << 21u) | (8u << 16u);
-            words = {make_addiu(29u, 29u, -16), sw,
+            const uint32_t op = operation == "sw_trace_context" ? 0x2bu : 0x1fu;
+            const uint32_t store = (op << 26u) | (9u << 21u) | (8u << 16u);
+            words = {make_addiu(29u, 29u, -16), store,
                      make_addiu(30u, 10u, 1), make_jr(31u), 0u};
             return true;
         }

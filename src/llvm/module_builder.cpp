@@ -615,15 +615,46 @@ void module_builder::emit_quadword_store(const ee::s_ee_instruction& ins,
                                          const std::string& affected,
                                          const std::string& lo, const std::string& hi)
 {
-    const std::string base = src_lo(ins.rs);
-    const std::string sp = src_lo(29);
-    const std::string fp = src_lo(30);
-    const std::string ra = src_lo(31);
+    // The RAM probe either completes the entire untraced write or
+    // fails without touching guest state. Only the latter path needs
+    // diagnostic context, including the original unmasked address.
+    const std::string suffix = std::to_string(m_temp_counter++);
+    const std::string fallback = "quad_store_fallback_" + suffix;
+    const std::string done = "quad_store_done_" + suffix;
+    const std::string fused = newtemp();
+    const std::string ok = newtemp();
+    m_out += "  " + fused + " = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 " +
+             affected + ", i64 " + lo + ", i64 " + hi + ")\n";
+    m_out += "  " + ok + " = icmp ne i32 " + fused + ", 0\n";
+    m_out += "  br i1 " + ok + ", label %" + done + ", label %" + fallback + "\n";
+    m_out += fallback + ":\n";
+    const auto trace_value = [&](uint8_t reg) -> std::string
+    {
+        if (reg == 0u)
+        {
+            return "0";
+        }
+        const auto found = m_cur_lo.find(reg);
+        if (found != m_cur_lo.end())
+        {
+            return found->second;
+        }
+        const std::string value = newtemp();
+        const std::string pointer = gptr_lo(reg);
+        m_out += "  " + value + " = load i64, ptr " + pointer + "\n";
+        return value;
+    };
+    const std::string base = trace_value(ins.rs);
+    const std::string sp = trace_value(29u);
+    const std::string fp = trace_value(30u);
+    const std::string ra = trace_value(31u);
     m_out += "  call void @ee_store_quadword(ptr %rt, i32 " +
              std::to_string(ins.pc) + ", i32 " + std::to_string(ins.opcode_word) +
              ", i32 " + effective + ", i32 " + affected +
              ", i64 " + lo + ", i64 " + hi + ", i64 " + base +
              ", i64 " + sp + ", i64 " + fp + ", i64 " + ra + ")\n";
+    m_out += "  br label %" + done + "\n";
+    m_out += done + ":\n";
 }
 
 void module_builder::emit_guest_v0_write(
@@ -3944,19 +3975,15 @@ void module_builder::end_function()
     }
     if (m_out.find("call void @ee_store_quadword(", m_quadword_entry_offset) != std::string::npos)
     {
-        // A failed RAM probe has no side effects. Preserve trace/write
-        // interleaving for scalar fallback, but keep a hardware FIFO
-        // quadword indivisible (both diagnostic lanes precede its write).
+        // The caller has already tried the fused RAM path. Preserve
+        // trace/write interleaving for scalar fallback, but keep a
+        // hardware FIFO quadword indivisible (both traces precede its write).
         m_out += R"IR(
 declare i32 @ee_mem_try_write128_ram(ptr, i32, i64, i64)
 declare i32 @ee_mem_is_quadword_fifo(ptr, i32)
 declare void @ee_mem_write128_words(ptr, i32, i64, i64)
 define internal void @ee_store_quadword(ptr %rt, i32 %pc, i32 %op, i32 %effective, i32 %affected, i64 %lo, i64 %hi, i64 %base, i64 %sp, i64 %fp, i64 %ra) alwaysinline {
 entry:
-  %fused = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 %affected, i64 %lo, i64 %hi)
-  %ok = icmp ne i32 %fused, 0
-  br i1 %ok, label %done, label %fallback
-fallback:
   %fifo_flag = call i32 @ee_mem_is_quadword_fifo(ptr %rt, i32 %affected)
   %fifo = icmp ne i32 %fifo_flag, 0
   br i1 %fifo, label %fifo_write, label %scalar_write
