@@ -4418,7 +4418,8 @@ def main():
             lean_report = root / "lean.json"
             lean_env = dict(env, SDBZ_RUNTIME_PROFILE="0",
                             SDBZ_PROFILE_PCS="0", SDBZ_REPORT_HOTSPOTS="0",
-                            SDBZ_REPORT_BOUNDARY_TIMING="0")
+                            SDBZ_REPORT_BOUNDARY_TIMING="0",
+                            SDBZ_REPORT_PROGRESS_EVERY="256")
             lean_run = subprocess.run([
                 sys.executable, str(source / "tools" / "run_game.py"), str(elf),
                 "--build-dir", str(build), "--work-dir", str(root / "out"),
