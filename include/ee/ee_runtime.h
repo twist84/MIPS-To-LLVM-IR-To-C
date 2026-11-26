@@ -394,6 +394,9 @@ struct s_ee_runtime
     // Same lifetime and direct physical RAM restrictions as word fastmem.
     uint8_t* m_fastmem_other_scalar_base = nullptr;
     uint32_t m_fastmem_other_scalar_size = 0u;
+    // Independent aligned 128-bit physical RAM experiment.
+    uint8_t* m_fastmem_quad_base = nullptr;
+    uint32_t m_fastmem_quad_size = 0u;
 };
 
 // ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,

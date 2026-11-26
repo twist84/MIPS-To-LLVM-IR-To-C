@@ -157,7 +157,8 @@ def install_symbols(path):
 
 
 def execute(fixture, directory, target, mode, address, trace_enabled=True,
-            fused_store=False, fastmem=None, fastmem_scalar=False):
+            fused_store=False, fastmem=None, fastmem_scalar=False,
+            fastmem_quad=False):
     global ALLOW_FUSED_STORE
     ALLOW_FUSED_STORE = fused_store and not trace_enabled
     PAIRS.clear()
@@ -182,6 +183,8 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
         # Obtain the actual descriptor offsets from the generated gate.
         ir = str(module)
         prefixes = ("word", "scalar") if fastmem_scalar else ("word",)
+        if fastmem_quad:
+            prefixes += ("quad",)
         for prefix in prefixes:
             check = re.search(rf"fastmem_{prefix}_check_[0-9]+:.*?(?=fastmem_{prefix}_direct_)",
                               ir, re.S)
@@ -189,8 +192,9 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
                 continue
             offsets = re.findall(
                 r"getelementptr i8, ptr %rt, i64 ([0-9]+)", check.group())
-            require(len(offsets) == 2, "unexpected fastmem descriptor layout")
-            size_offset, base_offset = map(int, offsets)
+            require(len(offsets) == 2 or (prefix == "quad" and len(offsets) == 3),
+                    "unexpected fastmem descriptor layout")
+            size_offset, base_offset = map(int, offsets[:2])
             ctypes.c_uint32.from_buffer(rt_backing, size_offset).value = len(fastmem)
             ctypes.c_void_p.from_buffer(rt_backing, base_offset).value = ctypes.addressof(fastmem)
     UNEXPECTED_TRACES.clear()
@@ -485,6 +489,37 @@ def main():
             require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
                     WRITES[0][:2] == (width, address + width),
                     f"{store} out-of-range fallback")
+
+        # A 128-bit direct access is optional and preserves masking, both
+        # lanes, whole-span rejection, and the existing traced/FIFO fallback.
+        ram = ctypes.create_string_buffer(0x50)
+        payload = bytes.fromhex("efcdab89674523011032547698badcfe")
+        ram[0x40:0x50] = payload
+        result, cpu, _ = execute(fixture, directory, target, "ee_lq", 0x43,
+                                 fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and not PAIRS and not READS and
+                cpu.gpr[8].lo == 0x0123456789abcdef and
+                cpu.gpr[8].hi == 0xfedcba9876543210, "direct LQ lanes/mask")
+        ram[0x40:0x50] = bytes(16)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 trace_enabled=False, fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and not PAIRS and not WRITES and
+                not TRACES and ram[0x40:0x50] == payload, "direct SQ lanes/mask")
+        ram[0x40:0x50] = bytes(16)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and ram[0x40:0x50] == bytes(16) and
+                EVENTS == [("trace", 0x40), ("write", 0x40),
+                           ("trace", 0x48), ("write", 0x48)], "traced SQ fallback")
+        short_ram = ctypes.create_string_buffer(0x4f)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 trace_enabled=False, fastmem=short_ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and len(WRITES) == 2 and
+                short_ram[0x40:0x4f] == bytes(15), "partial quadword fallback")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x10005003,
+                                 trace_enabled=False, fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
+                WRITES[0][0:2] == (16, 0x10005000), "quad fastmem split FIFO")
 
         # The positive scalar word path remains operational.
         result, cpu, original = execute(

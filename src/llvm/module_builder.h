@@ -64,6 +64,10 @@ private:
                                 const std::string& affected_address,
                                 uint32_t width, const std::string& source_value,
                                 uint32_t source_lane);
+    std::string emit_quadword_fastmem_gate(const std::string& address,
+                                           const std::string& suffix,
+                                           const std::string& fallback,
+                                           bool write);
     void emit_quadword_read(const std::string& address,
                             const std::string& lo, const std::string& hi);
     void emit_quadword_store(const ee::s_ee_instruction& ins,

@@ -705,18 +705,86 @@ void module_builder::emit_guest_store_trace(
     m_out += done + ":\n";
 }
 
+std::string module_builder::emit_quadword_fastmem_gate(
+    const std::string& address, const std::string& suffix,
+    const std::string& fallback, bool write)
+{
+    const std::string check = "fastmem_quad_check_" + suffix;
+    const std::string direct = "fastmem_quad_direct_" + suffix;
+    const std::string is_null = newtemp();
+    m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 " + is_null + ", label %" + fallback +
+             ", label %" + check + "\n";
+    m_out += check + ":\n";
+    const std::string size_ptr = newtemp();
+    const std::string size = newtemp();
+    const std::string base_ptr = newtemp();
+    const std::string base = newtemp();
+    const std::string offset = newtemp();
+    const std::string end = newtemp();
+    const std::string limit = newtemp();
+    const std::string fits = newtemp();
+    const std::string present = newtemp();
+    const std::string span = newtemp();
+    m_out += "  " + size_ptr + " = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_fastmem_quad_size)) + "\n";
+    m_out += "  " + size + " = load i32, ptr " + size_ptr + "\n";
+    m_out += "  " + base_ptr + " = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_fastmem_quad_base)) + "\n";
+    m_out += "  " + base + " = load ptr, ptr " + base_ptr + "\n";
+    m_out += "  " + offset + " = zext i32 " + address + " to i64\n";
+    m_out += "  " + end + " = add i64 " + offset + ", 16\n";
+    m_out += "  " + limit + " = zext i32 " + size + " to i64\n";
+    m_out += "  " + fits + " = icmp ule i64 " + end + ", " + limit + "\n";
+    m_out += "  " + present + " = icmp ne ptr " + base + ", null\n";
+    m_out += "  " + span + " = and i1 " + fits + ", " + present + "\n";
+    std::string safe = span;
+    if (write)
+    {
+        // A traced store must preserve per-lane trace/write interleaving.
+        const std::string trace_ptr = newtemp();
+        const std::string trace = newtemp();
+        const std::string quiet = newtemp();
+        safe = newtemp();
+        m_out += "  " + trace_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_guest_store_trace_enabled)) + "\n";
+        m_out += "  " + trace + " = load i8, ptr " + trace_ptr + "\n";
+        m_out += "  " + quiet + " = icmp eq i8 " + trace + ", 0\n";
+        m_out += "  " + safe + " = and i1 " + span + ", " + quiet + "\n";
+    }
+    m_out += "  br i1 " + safe + ", label %" + direct + ", label %" + fallback + "\n";
+    m_out += direct + ":\n";
+    const std::string pointer = newtemp();
+    m_out += "  " + pointer + " = getelementptr i8, ptr " + base +
+             ", i64 " + offset + "\n";
+    return pointer;
+}
+
 void module_builder::emit_quadword_read(const std::string& address,
                                         const std::string& lo, const std::string& hi)
 {
-    // One fixed entry-block slot is shared by all quadword loads. Do not
-    // allocate in guest loops or write directly into a guest register before
-    // both ordered fallback reads have completed.
-    const std::string high_ptr = newtemp();
+    // Callers have already masked or checked guest quadword alignment.
+    const std::string suffix = std::to_string(m_temp_counter++);
+    const std::string direct = "fastmem_quad_direct_" + suffix;
+    const std::string slow = "fastmem_quad_slow_" + suffix;
+    const std::string done = "fastmem_quad_done_" + suffix;
+    const std::string pointer = emit_quadword_fastmem_gate(address, suffix, slow, false);
+    const std::string direct_pair = newtemp();
+    m_out += "  " + direct_pair + " = load <2 x i64>, ptr " + pointer + ", align 1\n";
+    m_out += "  br label %" + done + "\n";
+    m_out += slow + ":\n";
+    // Shared entry-block slot retains existing ordered bus/FIFO behavior.
+    const std::string slow_pair = newtemp();
     m_out += "  call void @ee_mem_read128_guest(ptr %rt, i32 " + address +
              ", ptr %quadword_read_slot)\n";
-    m_out += "  " + lo + " = load i64, ptr %quadword_read_slot, align 16\n";
-    m_out += "  " + high_ptr + " = getelementptr i8, ptr %quadword_read_slot, i64 8\n";
-    m_out += "  " + hi + " = load i64, ptr " + high_ptr + ", align 8\n";
+    m_out += "  " + slow_pair + " = load <2 x i64>, ptr %quadword_read_slot, align 16\n";
+    m_out += "  br label %" + done + "\n";
+    m_out += done + ":\n";
+    const std::string pair = newtemp();
+    m_out += "  " + pair + " = phi <2 x i64> [ " + direct_pair + ", %" + direct +
+             " ], [ " + slow_pair + ", %" + slow + " ]\n";
+    m_out += "  " + lo + " = extractelement <2 x i64> " + pair + ", i32 0\n";
+    m_out += "  " + hi + " = extractelement <2 x i64> " + pair + ", i32 1\n";
 }
 
 void module_builder::emit_quadword_store(const ee::s_ee_instruction& ins,
@@ -730,6 +798,16 @@ void module_builder::emit_quadword_store(const ee::s_ee_instruction& ins,
     const std::string suffix = std::to_string(m_temp_counter++);
     const std::string fallback = "quad_store_fallback_" + suffix;
     const std::string done = "quad_store_done_" + suffix;
+    const std::string slow = "fastmem_quad_slow_" + suffix;
+    const std::string pointer = emit_quadword_fastmem_gate(affected, suffix, slow, true);
+    const std::string low_pair = newtemp();
+    const std::string pair = newtemp();
+    m_out += "  " + low_pair + " = insertelement <2 x i64> poison, i64 " + lo + ", i32 0\n";
+    m_out += "  " + pair + " = insertelement <2 x i64> " + low_pair +
+             ", i64 " + hi + ", i32 1\n";
+    m_out += "  store <2 x i64> " + pair + ", ptr " + pointer + ", align 1\n";
+    m_out += "  br label %" + done + "\n";
+    m_out += slow + ":\n";
     const std::string fused = newtemp();
     const std::string ok = newtemp();
     m_out += "  " + fused + " = call i32 @ee_mem_try_write128_ram(ptr %rt, i32 " +

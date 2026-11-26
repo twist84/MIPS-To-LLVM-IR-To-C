@@ -3493,7 +3493,19 @@ int main(int argc, char** argv)
         std::strcmp(fastmem_word_setting, "1") == 0;
     const bool fastmem_scalar = fastmem_scalar_setting != nullptr &&
         std::strcmp(fastmem_scalar_setting, "1") == 0;
-    if (fastmem_word || fastmem_scalar)
+    std::string fastmem_quad_environment;
+    const char* fastmem_quad_setting = read_host_environment(
+        "SDBZ_EE_FASTMEM_QUAD", &fastmem_quad_environment);
+    if (fastmem_quad_setting != nullptr && *fastmem_quad_setting != '\0' &&
+        std::strcmp(fastmem_quad_setting, "0") != 0 &&
+        std::strcmp(fastmem_quad_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_EE_FASTMEM_QUAD (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool fastmem_quad = fastmem_quad_setting != nullptr &&
+        std::strcmp(fastmem_quad_setting, "1") == 0;
+    if (fastmem_word || fastmem_scalar || fastmem_quad)
     {
 #if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
         // Restrict this prototype to the current HLE direct physical RAM
@@ -3521,6 +3533,12 @@ int main(int argc, char** argv)
             runtime.m_fastmem_other_scalar_base = ram;
             runtime.m_fastmem_other_scalar_size = k_ee_ram_size;
             std::printf("EE fastmem scalar: enabled (8/16/32/64-bit physical RAM)\n");
+        }
+        if (fastmem_quad)
+        {
+            runtime.m_fastmem_quad_base = ram;
+            runtime.m_fastmem_quad_size = k_ee_ram_size;
+            std::printf("EE fastmem quad: enabled (128-bit physical RAM)\n");
         }
 #else
         std::fprintf(stderr, "EE fastmem word requires little-endian host\n");
