@@ -146,6 +146,10 @@ def stage(ir, objects, audit, pilot_path, output, max_pcs, jobs, previous=None):
             set(by_name) != set(functions) or set(functions) != set(records) or
             set(records) != set(paths) or pilot["population_modules"] != len(rows)):
         raise ValueError("audit, pilot, metadata and object inventories differ")
+    # Resolve the explicit full-inventory selection from the verified audit.
+    # Record a concrete threshold so prior trial reuse remains reproducible.
+    if max_pcs is None:
+        max_pcs = max(row["guest_pcs"] for row in rows)
     selected = sorted(name for name, row in by_name.items()
                       if 1 <= row["guest_pcs"] <= max_pcs)
     if not selected:
@@ -234,19 +238,23 @@ def main():
     parser.add_argument("--baseline", type=Path, required=True)
     parser.add_argument("--pilot", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--max-guest-pcs", type=int, default=32)
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--max-guest-pcs", type=int, default=32)
+    selection.add_argument("--all-modules", action="store_true",
+                           help="try every remaining positive-PC module")
     parser.add_argument("--jobs", type=int, default=8)
     parser.add_argument("--reuse-size-experiment", type=Path,
                         help="reuse a smaller prior size experiment with identical source manifest")
     parser.add_argument("--link", action="store_true")
     args = parser.parse_args()
     try:
-        if not 1 <= args.jobs <= 16 or not 1 <= args.max_guest_pcs <= 128:
+        if not 1 <= args.jobs <= 16 or not 1 <= args.max_guest_pcs:
             raise ValueError("invalid worker count or guest-PC threshold")
         if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
             raise ValueError("disable native ALU certificates for experiment")
         receipt = stage(args.ir, args.objects, args.baseline, args.pilot,
-                        args.output, args.max_guest_pcs, args.jobs, args.reuse_size_experiment)
+                        args.output, None if args.all_modules else args.max_guest_pcs,
+                        args.jobs, args.reuse_size_experiment)
         print(f"Selected Oz: {receipt['replaced_modules']}/{receipt['attempted_modules']} "
               f"replacements, {receipt['executable_saving']:,} executable bytes saved", flush=True)
         if args.link:

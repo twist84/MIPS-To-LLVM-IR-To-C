@@ -991,3 +991,37 @@ a053549e424bc3d9c0beead7a9341fa68fba5d743c6c7828ad9823e694f2e126.
 The marginal code savings are lower than the <=32-PC band.
 No owner coalescing or production cache changes. Runtime acceptance
 requires another matched synchronous A/A/B replay of the new image.
+
+
+### Checkpoint 3e — synchronous medium-function selective Oz acceptance
+
+Retail ee-size-comparison-128-sync.zip: baseline, control and candidate
+all stopped at 40,000,000 dispatches with exit 4; both replays consumed
+2,940/2,940 PAD0 polls, 176,276 matching sampled transitions, zero
+differences or unpaired samples. Libraries unchanged, no replay error.
+All terminal JSONs SHA-256
+3c87f908b34d09a85ee25f9d4d4c2da404dfd45595c282a0087e0bbe3c919af6
+and all GPU PPMs SHA-256
+f683fb5289e4978a01e6eb1a9d19285437e1780f253afae21e624412ca8ad47b
+are byte-identical. Candidate DLL SHA-256 matches the 3d link receipt.
+All arms: 20,665,443,624 reference EE cycles; 20,479,515,230
+guest instruction attempts; 20,481,365,577 reference slots;
+4,199 fields; 4,966,017 GPU draws; 3,024 presents; 412,650
+native VU1 runs; 464,411,184 native pairs; zero interpreter
+fallbacks; final PC 0x2ff580. Wall seconds 42.907 / 42.750 /
+42.640, candidate -0.26% versus control. No measured performance
+regression on this synchronous workload; not a general speed claim.
+The <=128-PC experiment remains isolated and not a production cache.
+
+### Checkpoint 3f — complete the selective Oz size inventory
+
+Add explicit --all-modules selection to build_ee_size_experiment.py.
+Resolve the threshold from the maximum guest-PC count in the current
+audit. Reuse verified <=128-PC trials and accepted objects, including
+absolute paths to objects from earlier size experiments. Only the
+remaining 1,491 large modules need new trials, assuming the same
+16,252-module inventory. Continue using the two-metric size gate.
+Measure actual linked size before requesting another runtime replay.
+Do not change the normal O5 compiler profile or combine owner coalescing.
+Larger modules have mixed size results; the goal is measurement, not
+a prediction that Oz will improve runtime or code size for every module.
