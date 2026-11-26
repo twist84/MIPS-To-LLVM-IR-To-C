@@ -42,12 +42,25 @@ _worker_machines = {}
 IR_PIPELINE_PROFILE = 4
 HOST_NATIVE_PROFILE = 5
 IR_PIPELINE_ID = "llvm-default-O2-v1"
+HOST_NATIVE_PIPELINE_ID = "llvm-vu0-fmac-selective-O2-v1"
+# Match an actual call to a specialized VU0 FMAC helper, not the generic
+# helper definitions also present in modules that never execute VU0.
+_VU0_FMAC_CALL = re.compile(rb"\bcall i32 @ee_vu0_ir_fmac_s[0-9][^\s(]*\(")
 # Bound process-local LLVM/allocator retention during whole-image builds.
 IR_PIPELINE_WORKER_MODULES = 128
 
 
 def ir_pipeline_id(profile):
-    return IR_PIPELINE_ID if profile == IR_PIPELINE_PROFILE else None
+    if profile == IR_PIPELINE_PROFILE:
+        return IR_PIPELINE_ID
+    if profile == HOST_NATIVE_PROFILE:
+        return HOST_NATIVE_PIPELINE_ID
+    return None
+
+
+def uses_ir_pipeline(profile, raw_ir):
+    return (profile == IR_PIPELINE_PROFILE or
+            (profile == HOST_NATIVE_PROFILE and _VU0_FMAC_CALL.search(raw_ir) is not None))
 
 
 def backend_opt(profile):
@@ -102,9 +115,9 @@ def get_target_machine(emit_opt, target_triple):
     return _worker_machines[key]
 
 
-def preflight_ir_pipeline(target_triple):
+def preflight_ir_pipeline(target_triple, profile=IR_PIPELINE_PROFILE):
     """Check the installed LLVM pipeline before creating objects or workers."""
-    machine = get_target_machine(IR_PIPELINE_PROFILE, target_triple)
+    machine = get_target_machine(profile, target_triple)
     with llvm.create_context() as context, llvm.parse_assembly("""
 define i32 @ee_pipeline_probe(i32 %x) {
 entry:
@@ -131,8 +144,8 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
         # The global LLVM context may retain uniqued types/metadata across
         # thousands of modules. Release each optimized module and its
         # private context before processing the next input.
-        context_scope = (llvm.create_context() if emit_opt == IR_PIPELINE_PROFILE
-                         else nullcontext(None))
+        use_pipeline = uses_ir_pipeline(emit_opt, ir_bytes)
+        context_scope = (llvm.create_context() if use_pipeline else nullcontext(None))
         with context_scope as context, llvm.parse_assembly(
                 ir_bytes.decode("utf-8"), context=context) as module:
             module.verify()
@@ -145,7 +158,7 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
                 module.triple = target_triple
                 module.data_layout = str(target_machine.target_data)
                 module.verify()
-                if emit_opt == IR_PIPELINE_PROFILE:
+                if use_pipeline:
                     optimize_guest_ir(module, target_machine)
                 object_data = target_machine.emit_object(module)
                 object_size = len(object_data)
@@ -319,7 +332,7 @@ def main():
         elif arg.startswith("--emit-opt="):
             emit_opt = int(arg.split("=", 1)[1])
             if not 0 <= emit_opt <= HOST_NATIVE_PROFILE:
-                raise SystemExit("--emit-opt must be 0..3 (backend only), 4 (O2 IR + O2 backend), or 5 (host-native O2 backend)")
+                raise SystemExit("--emit-opt must be 0..3 (backend only), 4 (O2 IR + O2 backend), or 5 (host-native O2 backend + selective VU0 FMAC O2 IR)")
         elif arg.startswith("--emit-dir="):
             emit_dir = Path(arg.split("=", 1)[1])
             if emit_opt is None:
@@ -356,9 +369,9 @@ def main():
         except Exception as exc:
             print(f"verify_ir: host-native target setup failed: {exc}", file=sys.stderr)
             return 1
-    if emit_opt == IR_PIPELINE_PROFILE:
+    if emit_opt in (IR_PIPELINE_PROFILE, HOST_NATIVE_PROFILE):
         try:
-            preflight_ir_pipeline(target_triple)
+            preflight_ir_pipeline(target_triple, emit_opt)
         except Exception as exc:
             print(f"verify_ir: O2 IR pipeline preflight failed (LLVM "
                   f"{llvm.llvm_version_info}): {exc}", file=sys.stderr)
@@ -437,7 +450,7 @@ def main():
     # worker per ~6 modules measured fastest (25 modules: 1.51 s with one
     # worker, 0.87 s with four, 1.14 s with sixteen).
     workers = min(jobs, len(pending), max(1, len(pending) // 6))
-    if emit_opt == IR_PIPELINE_PROFILE and (
+    if emit_opt in (IR_PIPELINE_PROFILE, HOST_NATIVE_PROFILE) and (
             workers > 1 or len(pending) > IR_PIPELINE_WORKER_MODULES):
         # Pool.maxtasksperchild reclaims native allocations even when
         # LLVM or the process allocator retains them after context teardown.
