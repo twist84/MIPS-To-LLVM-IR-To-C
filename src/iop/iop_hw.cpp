@@ -322,8 +322,20 @@ bool c_hw::process_sio2_packet()
                 // PS2 pad button bits are active-low: Cross is bit 14,
                 // the upper byte's bit 6. Only a genuine guest 0x42
                 // read on a connected port-0 pad consumes the probe.
-                uint16_t buttons = m_pad0_buttons;
                 ++m_sio2_pad0_poll_count;
+                s_pad0_poll input{};
+                input.m_poll = m_sio2_pad0_poll_count;
+                input.m_mode = pad.m_mode | (pad.m_config ? 0x100u : 0u);
+                input.m_input_size = in_size;
+                input.m_output_size = out_size;
+                input.m_buttons = m_pad0_buttons;
+                std::copy_n(m_pad0_axes, 4u, input.m_axes);
+                if (m_pad0_poll != nullptr &&
+                    !m_pad0_poll(m_pad0_poll_user, input))
+                {
+                    return false;
+                }
+                uint16_t buttons = input.m_buttons;
                 if (m_sio2_pad0_cross_poll_count != 0u &&
                     m_sio2_pad0_poll_count >=
                         m_sio2_pad0_cross_first_poll &&
@@ -357,7 +369,7 @@ bool c_hw::process_sio2_packet()
                 {
                     for (uint32_t index = 0u; index < 4u; ++index)
                     {
-                        put(5u + index, m_pad0_axes[index]);
+                        put(5u + index, input.m_axes[index]);
                     }
                 }
                 if (pad.m_mode == 0x79u)
@@ -368,7 +380,7 @@ bool c_hw::process_sio2_packet()
                     for (uint32_t index = 0u; index < sizeof(pressure_bits); ++index)
                     {
                         put(9u + index,
-                            (m_pad0_buttons & (1u << pressure_bits[index])) != 0u ?
+                            (input.m_buttons & (1u << pressure_bits[index])) != 0u ?
                                 0xffu : 0u);
                     }
                 }
