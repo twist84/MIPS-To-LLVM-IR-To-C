@@ -44,7 +44,11 @@ CACHE_SCHEMA = "ee-translation-cache-v1"
 
 def ir_pipeline_id(profile):
     # Keep this provenance identifier in sync with verify_ir.py.
-    return "llvm-default-O2-v1" if profile == 4 else None
+    if profile == 4:
+        return "llvm-default-O2-v1"
+    if profile == 5:
+        return "llvm-vu0-fmac-selective-O2-v1"
+    return None
 
 
 def native_target_identity(profile):
