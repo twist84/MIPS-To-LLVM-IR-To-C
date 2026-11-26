@@ -46,10 +46,79 @@ def test_vu1_inventory(root):
         raise AssertionError("missing VU1 capture accepted")
 
 
+
+def test_graphics_profile(root):
+    from replay_ee_graphics_profile import extract_profile, require_match
+    from copy import deepcopy
+
+    row = {"calls": 2, "inclusive_ns": 8, "exclusive_ns": 6, "work": 3}
+    program = {"pc": 80, "library_index": 0, "code_fnv1a64": "abc",
+               "attempts": 2, "attempted_pairs": 3, "native_runs": 2,
+               "native_pairs": 3, "profiled_attempts": 2, "profiled_pairs": 3,
+               "compiled_exclusive_ns": 6}
+    from replay_ee_graphics_profile import WORKER_TIMING_FIELDS
+    report = {"dispatches": 40, "ee_cycles": 100, "gs_fields_started": 2,
+              "gpr_lo": [0, 1], "vu1_aot": {"program_profiles": [program]},
+              "vu1_worker": dict.fromkeys(WORKER_TIMING_FIELDS, 0),
+              "runtime_profile": {
+                  "schema": "ee-runtime-profile-v1", "enabled": True,
+                  "scope": "runner_thread_completed_scopes", "clock": "steady_clock",
+                  "dispatches": 40, "guest_fields": 2, "presentations": 1,
+                  "wall_ns": 10, "covered_ns": 6, "uninstrumented_ns": 4,
+                  "subsystems": {"vu1_compiled": row}}}
+    interval = {"schema": "ee-runtime-profile-interval-v1",
+                "start_dispatch": 0, "end_dispatch": 40,
+                "start_cycle": 0, "end_cycle": 100,
+                "start_fields": 0, "end_fields": 2,
+                "start_presentations": 0, "end_presentations": 1,
+                "wall_ns": 10, "covered_ns": 6, "uninstrumented_ns": 4,
+                "subsystems": {"vu1_compiled": row}}
+    log = root / "profile.log"
+    log.write_text("EE profile interval: " + json.dumps(interval) + "\n")
+    assert extract_profile(report, log, True)["vu1_programs"] == [program]
+    control = deepcopy(report)
+    control["runtime_profile"] = {"schema": "ee-runtime-profile-v1", "enabled": False}
+    control["vu1_aot"]["program_profiles"][0]["compiled_exclusive_ns"] = 0
+    require_match(report, control)
+    for mutate in (
+        lambda value: value["gpr_lo"].__setitem__(1, 2),
+        lambda value: value["vu1_aot"]["program_profiles"][0].__setitem__("native_pairs", 2),
+        lambda value: value["vu1_worker"].__setitem__("unexpected_ns", 1),
+    ):
+        bad = deepcopy(control)
+        mutate(bad)
+        try:
+            require_match(report, bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("architectural difference ignored")
+    bad = deepcopy(interval)
+    bad["end_dispatch"] = 39
+    log.write_text("EE profile interval: " + json.dumps(bad) + "\n")
+    try:
+        extract_profile(report, log, True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("incomplete interval accepted")
+    bad = deepcopy(report)
+    bad["runtime_profile"]["covered_ns"] = 7
+    try:
+        extract_profile(bad, log, True)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("invalid accounting accepted")
+    log.write_text("")
+    assert extract_profile(control, log, False) is None
+
+
 def run():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         test_vu1_inventory(root)
+        test_graphics_profile(root)
         path = root / "record.log"
         sample = "PAD0 input: 1 1 65 5 5 65535 128 128 128 128\n"
         path.write_text("noise\n" + sample + "PAD0 input summary: record 1\n")
