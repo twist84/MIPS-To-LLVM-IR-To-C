@@ -1438,7 +1438,7 @@ The receipt confirms the native link, not runtime equivalence.
 Four CI workflows passed on 3785324 at review; Build and test
 was still running. Production remains unchanged.
 
-### Checkpoint 4k — matched incremental addition comparison
+### Checkpoint 4j — matched incremental addition comparison
 
 Run the existing four-arm synchronous comparison with original O5
 record/control, shared multiplication immediate parent and shared
