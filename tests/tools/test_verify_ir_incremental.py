@@ -251,7 +251,7 @@ def test_native_target_profile():
         assert "reused 0/1" in out and "host-native O2 CPU=" in out
         assert native["optimization_level"] == 5
         assert native["backend_optimization_level"] == 2
-        assert native["ir_pipeline"] is None
+        assert native["ir_pipeline"] == "llvm-vu0-fmac-selective-O2-v1"
         assert native["native_target"]["cpu"]
         assert native["native_target"]["features"] is not None
         assert native["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
@@ -274,6 +274,59 @@ def test_native_target_profile():
         assert "reused 0/2" in out and fixed["object_count"] == 2
         assert first.read_bytes() == original
         print("PASS: host-native O2 profile, CPU provenance and immutable IR")
+
+
+def test_selective_native_pipeline():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import verify_ir
+    import run_game
+    assert verify_ir.ir_pipeline_id(5) == run_game.ir_pipeline_id(5)
+    helper = """define internal i32 @ee_vu0_ir_fmac_s0_fixture(i32 %x) alwaysinline {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+"""
+    scalar = helper + "define i32 @guest_scalar(i32 %x) { ret i32 %x }\n"
+    vector = helper + """define i32 @guest_vector(i32 %x) {
+entry:
+  %result = call i32 @ee_vu0_ir_fmac_s0_fixture(i32 %x)
+  ret i32 %result
+}
+"""
+    assert not verify_ir.uses_ir_pipeline(5, scalar.encode())
+    assert verify_ir.uses_ir_pipeline(5, vector.encode())
+    assert not verify_ir.uses_ir_pipeline(2, vector.encode())
+    assert verify_ir.uses_ir_pipeline(4, scalar.encode())
+
+    with tempfile.TemporaryDirectory(prefix="ee-selective-o5-") as temp:
+        root = Path(temp)
+        ir = root / "ir"
+        ir.mkdir()
+        scalar_path = ir / "scalar.ll"
+        vector_path = ir / "vector.ll"
+        scalar_path.write_text(scalar, encoding="utf-8")
+        vector_path.write_text(vector, encoding="utf-8")
+        objects = root / "objects"
+        _, manifest = run_emitter(ir, objects, opt=5)
+        assert manifest["ir_pipeline"] == verify_ir.ir_pipeline_id(5)
+        by_name = {Path(item["input"]).name: item for item in manifest["objects"]}
+        assert "ee_vu0_ir_fmac_s0_fixture" in by_name["scalar.ll"]["defined_symbols"]
+        assert "ee_vu0_ir_fmac_s0_fixture" not in by_name["vector.ll"]["defined_symbols"]
+        assert scalar_path.read_text() == scalar and vector_path.read_text() == vector
+        out, _ = run_emitter(ir, objects, opt=5)
+        assert "reused 2/2" in out, out
+        # A previous backend-only O5 manifest must not be silently adopted.
+        manifest["ir_pipeline"] = None
+        manifest_path = objects / "objects.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        out, fresh = run_emitter(ir, objects, opt=5)
+        assert "reused 0/2" in out, out
+        assert fresh["ir_pipeline"] == verify_ir.ir_pipeline_id(5)
+        assert scalar_path.read_text() == scalar and vector_path.read_text() == vector
+    print("PASS: selective O5 pipeline, native object invalidation and immutable source")
 
 
 def test_relocated_object_manifest():
@@ -398,6 +451,7 @@ if __name__ == "__main__":
     test_nested_profile_reuses_matching_backup_objects()
     test_shared_ir_provenance()
     test_native_target_profile()
+    test_selective_native_pipeline()
     test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()
     test_incremental_parallel_emission()
