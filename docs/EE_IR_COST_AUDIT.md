@@ -342,3 +342,35 @@ the 300-dispatch lean fixture inherited the 1024-dispatch progress
 interval from the preceding suppression test. f846bbc explicitly
 selects a 256-dispatch progress interval for the lean fixture.
 This is test-only, no additional retail replay required.
+
+## Scalar store trace hot path (07:23:22)
+
+Clean 34dc040, selective O5, 16,250 regenerated modules, native
+library SHA-256 76d9ae790a65235167c1c8019972e7f4004cc9b7ff8f058976a9c4a1d4bd1be7.
+Fixed RTC, live input, async VU1/GS, baseline IOP, lean diagnostics.
+40M dispatches, native process wall 45.046 s, terminal runner elapsed
+40416.8 ms, 5887 fields, 4194/4194 successful presentations, 1693
+skipped fields, 4481260 draws, 366058 native VU1 runs, zero fallback,
+IOP guest fault or worker failure. One outstanding VU1 job at stop.
+First spawn 23367441; first post-spawn progress 23371776 at
+23084.1 ms with 4801 fields; terminal 5887 fields.
+1086 fields / 17.3327 s = 62.6561 fields/s, +3.13% vs prior lean
+mean 60.7553. Not a matched workload or isolated instruction cost.
+Presentation rate and minimum frame speed are not established.
+
+34dc040 CI passed SIF DMA, ROM0, original autotests and WebGPU;
+Build and test failed the new scalar trace fixture (expected
+DISPATCH despite ending in JR RA). ade1d11 corrects the expected
+RETURN and adds more informative failure diagnostics; CI pending.
+
+74ee385 moves the fused quadword RAM probe into the emitted caller,
+so successful untraced RAM stores bypass diagnostic-only context
+loads and the large helper call. Failed probes retain the original
+FIFO/ordered per-lane fallback and trace checks, including enable
+changes between lanes. Regression extends dirty-SP/live-FP context
+testing to fused success, untraced fallback and traced fallback.
+No guest timing or memory semantics intentionally changed.
+New lowering requires one deliberate known-inventory IR refresh.
+Repeat lean P40, compare first post-spawn progress through terminal
+timing; final CI and actual speed benefit of the quadword change
+remain unverified.
