@@ -16,6 +16,10 @@ def verify_fmac(ir):
     assert "@vu_fmac(" in ir
     # Correction eligibility depends on bits 15..22 of the product.
     # Keep the packed comparison narrow and the normalization shift fixed.
+    add4 = ir.split(" @vu_add4(", 1)[1].split("\n}", 1)[0]
+    assert "@llvm.umax.v4i32" in add4 and "@llvm.umin.v4i32" in add4
+    assert "@llvm.abs.v4i32" in add4
+    assert "%sign_source = select <4 x i1> %zero" in add4
     mul4 = ir.split(" @vu_mul4(", 1)[1].split("\n}", 1)[0]
     assert "trunc <4 x i64> %full to <4 x i32>" in mul4
     assert "icmp eq <4 x i32> %boundary_bits, zeroinitializer" in mul4
@@ -134,6 +138,24 @@ define void @test_fmac4(i32 %op, ptr %in, ptr %out) {
             clz((word * 4)(*lanes), clz_out)
             expected = tuple(32 - n.bit_length() for n in lanes)
             assert tuple(clz_out) == expected, (opt, lanes, tuple(clz_out), expected)
+        # Exhaust exponent-pair combinations, including alignment
+        # distances 24/25, signed zeros, cancellation and exponent 255.
+        # Each vector tests all four input-sign combinations.
+        for ea in range(256):
+            for eb in range(256):
+                fa = (ea * 65537 + eb * 17) & 0x7fffff
+                fb = fa if ea == eb else (eb * 65537 + ea * 17) & 0x7fffff
+                a = (ea << 23) | fa
+                b = (eb << 23) | fb
+                words = [0] * 4 + [a, a, a | 0x80000000, a | 0x80000000] + [
+                    b, b | 0x80000000, b, b | 0x80000000] + [0] * 4
+                for op in (0, 1):
+                    vector(op, (word * 16)(*words), vector_out)
+                    for lane in range(4):
+                        function(op, 0, words[4 + lane], words[8 + lane], 0, out)
+                        actual = tuple(vector_out[4 * field + lane] for field in range(4))
+                        assert actual == tuple(out), (opt, op, ea, eb, lane, actual, tuple(out))
+        print(f"VU1 ADD/SUB SIMD: 524288 exponent/sign lane tuples at O{opt} match scalar IR")
         rng = random.Random(0x5900)
         edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x0080008b,
                  0x008000ea, 0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000,
