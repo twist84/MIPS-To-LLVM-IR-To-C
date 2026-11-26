@@ -1403,14 +1403,17 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
     {
         return compute_voice_irq_cycles_remaining();
     }
+    // A valid zero result remains zero throughout the same sample.
+    // Every clock reset/wrap, sample crossing and relevant mutation
+    // invalidates the cache, so no phase calculation is needed here.
+    if (m_irq_deadline_valid && m_irq_deadline_remaining == 0u)
+    {
+        return 0u;
+    }
     const uint32_t phase = sample_phase();
     if (m_irq_deadline_valid && phase >= m_irq_deadline_phase)
     {
         const uint32_t elapsed = phase - m_irq_deadline_phase;
-        if (m_irq_deadline_remaining == 0u)
-        {
-            return 0u;
-        }
         if (m_irq_deadline_remaining > elapsed)
         {
             return m_irq_deadline_remaining - elapsed;
