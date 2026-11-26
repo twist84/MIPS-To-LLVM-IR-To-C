@@ -542,19 +542,58 @@ void module_builder::emit_guest_store_trace(
     const std::string& source_value, uint32_t source_lane
 )
 {
-    // SSA values capture current architectural operands even when the CPU
-    // backing store has not been synchronized at this block boundary.
-    const std::string base = src_lo(ins.rs);
-    const std::string sp = src_lo(29);
-    const std::string fp = src_lo(30);
-    const std::string ra = src_lo(31);
-    m_out += "  call void @ee_guard_guest_store_trace(ptr %rt, i32 " +
+    // Branch before materializing diagnostic-only arguments. Backend-only
+    // profiles otherwise pass all twelve arguments to the guarded helper
+    // even when tracing is disabled. Keep the check at the original
+    // instruction boundary: a previous callback can change the flag.
+    const std::string suffix = std::to_string(m_temp_counter++);
+    const std::string check = "store_trace_check_" + suffix;
+    const std::string invoke = "store_trace_invoke_" + suffix;
+    const std::string done = "store_trace_done_" + suffix;
+    const std::string is_null = newtemp();
+    m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 " + is_null + ", label %" + done + ", label %" + check + "\n";
+    m_out += check + ":\n";
+    const std::string enabled_ptr = newtemp();
+    const std::string enabled = newtemp();
+    const std::string active = newtemp();
+    m_out += "  " + enabled_ptr + " = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_guest_store_trace_enabled)) + "\n";
+    m_out += "  " + enabled + " = load i8, ptr " + enabled_ptr + "\n";
+    m_out += "  " + active + " = icmp ne i8 " + enabled + ", 0\n";
+    m_out += "  br i1 " + active + ", label %" + invoke + ", label %" + done + "\n";
+    m_out += invoke + ":\n";
+    // Dirty SSA values dominate this branch. Loads emitted only in the
+    // diagnostic arm must not enter the block-wide GPR cache.
+    const auto trace_value = [&](uint8_t reg) -> std::string
+    {
+        if (reg == 0u)
+        {
+            return "0";
+        }
+        const auto found = m_cur_lo.find(reg);
+        if (found != m_cur_lo.end())
+        {
+            return found->second;
+        }
+        const std::string value = newtemp();
+        const std::string pointer = gptr_lo(reg);
+        m_out += "  " + value + " = load i64, ptr " + pointer + "\n";
+        return value;
+    };
+    const std::string base = trace_value(ins.rs);
+    const std::string sp = trace_value(29u);
+    const std::string fp = trace_value(30u);
+    const std::string ra = trace_value(31u);
+    m_out += "  call void @ee_trace_guest_store(ptr %rt, i32 " +
              std::to_string(ins.pc) + ", i32 " +
              std::to_string(ins.opcode_word) + ", i32 " +
              effective_address + ", i32 " + affected_address + ", i32 " +
              std::to_string(width) + ", i64 " + source_value + ", i32 " +
              std::to_string(source_lane) + ", i64 " + base + ", i64 " +
              sp + ", i64 " + fp + ", i64 " + ra + ")\n";
+    m_out += "  br label %" + done + "\n";
+    m_out += done + ":\n";
 }
 
 void module_builder::emit_quadword_read(const std::string& address,

@@ -20,6 +20,7 @@ MEMORY = {}
 READS = []
 WRITES = []
 TRACES = []
+TRACE_CONTEXTS = []
 PAIRS = []
 EVENTS = []
 ALLOW_FUSED_STORE = False
@@ -113,6 +114,7 @@ def write_quadword(_rt, addr, lo, hi):
 def trace_store(_rt, pc, opcode, address, aligned, size,
                 value, slot, old0, old1, old2, old3):
     TRACES.append((int(address), int(aligned), int(size), int(slot)))
+    TRACE_CONTEXTS.append(tuple(map(int, (value, old0, old1, old2, old3))))
     EVENTS.append(("trace", int(aligned)))
 
 
@@ -150,6 +152,7 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     READS.clear()
     WRITES.clear()
     TRACES.clear()
+    TRACE_CONTEXTS.clear()
     for i in range(0x40, 0x60):
         MEMORY[i] = (i * 7 + 3) & 0xFF
     before = dict(MEMORY)
@@ -165,6 +168,8 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
     cpu.fpr[8] = 0xaabbccdd11223344
+    cpu.gpr[29] = U128(0x1000, 0)
+    cpu.gpr[30] = U128(0x2000, 0)
     cpu.gpr[31] = U128(0x00140000, 0)
     cpu.cop0[12] = 0
     result = guest(
@@ -299,6 +304,22 @@ def main():
                     cpu.gpr[8].hi == 0xfedcba9876543210 and
                     cpu.fpr[8] == 0xaabbccdd11223344,
                     f"{mode}: alignment exception modified destination")
+        # The scalar store cold arm must retain live SSA context and must
+        # not contaminate the GPR cache used after the branch rejoins.
+        for enabled in (False, True):
+            result, cpu, _ = execute(
+                fixture, directory, target, "ee_sw_trace_context", 0x40,
+                trace_enabled=enabled)
+            require(result == EE_EXIT_DISPATCH and
+                    cpu.gpr[29].lo == 0xff0 and cpu.gpr[10].lo == 0x2001 and
+                    WRITES == [(4, 0x40, 0x89abcdef)],
+                    "scalar store changed architectural state")
+            require(EVENTS == ([("trace", 0x40)] if enabled else []) +
+                    [("write", 0x40)], "scalar trace/write order")
+            require(TRACE_CONTEXTS == ([
+                (0x0123456789abcdef, 0x40, 0xff0, 0x2000, 0x00140000)
+            ] if enabled else []), "scalar trace lost live GPR context")
+
         # The positive scalar word path remains operational.
         result, cpu, original = execute(
             fixture, directory, target, "ee_lw", 0x40)

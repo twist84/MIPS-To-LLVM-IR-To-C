@@ -56,6 +56,14 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
     if (mode.rfind("ee_", 0u) == 0u)
     {
         std::string operation = mode.substr(3u);
+        if (operation == "sw_trace_context")
+        {
+            // Dirty SP before the store; FP is consumed after the cold arm.
+            const uint32_t sw = (0x2bu << 26u) | (9u << 21u) | (8u << 16u);
+            words = {make_addiu(29u, 29u, -16), sw,
+                     make_addiu(30u, 10u, 1), make_jr(31u), 0u};
+            return true;
+        }
         const bool delay = operation.find("_delay") != std::string::npos;
         if (delay)
         {
