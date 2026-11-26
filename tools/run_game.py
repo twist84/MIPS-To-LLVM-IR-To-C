@@ -1369,7 +1369,7 @@ def main(argv=None):
                         help="Generate game-translated.pdb using Windows Clang/LLD")
     parser.add_argument("--emit-opt", type=int, choices=range(6), default=0,
                         metavar="{0,1,2,3,4,5}",
-                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend")
+                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend + selective VU0 FMAC O2 IR")
     parser.add_argument("--emit-jobs", type=int, default=2,
                         help="parallel LLVM object-emission processes (default: 2)")
     parser.add_argument("--max-dispatches", type=int, default=10000)
