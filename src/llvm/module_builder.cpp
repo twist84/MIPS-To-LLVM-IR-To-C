@@ -5991,6 +5991,20 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
         // MMI0 (0x08): independent packed lanes. Saturating operations
         // widen before arithmetic so LLVM never sees overflow/poison.
         if (fn == 0x08) {
+            const auto splat = [](const std::string& scalar, uint32_t lanes,
+                                  int64_t value) -> std::string
+            {
+                std::string result = "<";
+                for (uint32_t lane = 0u; lane < lanes; ++lane)
+                {
+                    if (lane != 0u)
+                    {
+                        result += ", ";
+                    }
+                    result += std::string(scalar) + " " + std::to_string(value);
+                }
+                return result + ">";
+            };
             // Target-neutral saturating intrinsics map to PADDS*/PSUBS*
             // on x86 and SQADD/SQSUB on AArch64, without widened lanes.
             const auto emit_signed_saturation =
