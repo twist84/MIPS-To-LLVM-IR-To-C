@@ -2,6 +2,7 @@
 #include "ee_instruction.h"
 #include "ee_cfg.h"
 #include "llvm_context.h"
+#include "../architecture/ee_known_bits.h"
 #include <string>
 #include <vector>
 #include <map>
@@ -49,6 +50,11 @@ private:
     // only to prune low-half writes and conservatively publish dirty hi.
     std::map<uint8_t, std::string> m_cur_lo, m_cur_hi;
     std::set<uint8_t> m_dirty_lo, m_dirty_hi;
+    // Facts follow unique SSA values; unknown reloads do not inherit them.
+    std::map<std::string, ee::scalar_constant::s_known_bits> m_value_bits;
+    ee::scalar_constant::s_known_bits value_bits(const std::string& value) const;
+    ee::scalar_constant::s_known_bits register_bits(uint8_t reg) const;
+    void record_bits(const std::string& value, ee::scalar_constant::s_known_bits bits);
 
     // Scope of the guest instruction currently being emitted. Only used to
     // annotate read-only, SSA-based register provenance events.

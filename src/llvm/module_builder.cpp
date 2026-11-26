@@ -912,14 +912,57 @@ void module_builder::set_gpr_lo64(uint8_t reg, const std::string& lo)
 
 // Sign-extend a 32-bit (or low-32-of-64) result into the full low 64 bits,
 // then preserve the upper 64. Used by ADDU/ADDIU/SUBU/LW/LUI/etc.
+ee::scalar_constant::s_known_bits module_builder::value_bits(const std::string& value) const
+{
+    uint64_t constant = 0;
+    if (read_constant_u64(value, constant))
+    {
+        return ee::scalar_constant::exact_bits(constant);
+    }
+    const auto found = m_value_bits.find(value);
+    return found == m_value_bits.end() ? ee::scalar_constant::s_known_bits{} : found->second;
+}
+
+ee::scalar_constant::s_known_bits module_builder::register_bits(uint8_t reg) const
+{
+    if (reg == 0)
+    {
+        return ee::scalar_constant::exact_bits(0);
+    }
+    const auto found = m_cur_lo.find(reg);
+    return found == m_cur_lo.end() ? ee::scalar_constant::s_known_bits{} :
+        value_bits(found->second);
+}
+
+void module_builder::record_bits(const std::string& value,
+                                 ee::scalar_constant::s_known_bits bits)
+{
+    assert((bits.m_zero & bits.m_one) == 0);
+    if (!bits.empty())
+    {
+        m_value_bits[value] = bits;
+    }
+}
+
 std::string module_builder::trunc32_sext64(const std::string& val)
 {
+    const auto bits = value_bits(val);
+    if (bits.m_word)
+    {
+        return val;
+    }
+    const auto extended = ee::scalar_constant::word_bits(bits);
+    if (const auto known = extended.constant())
+    {
+        return std::to_string(*known);
+    }
     // trunc to i32 then sext to i64 so the high 32 of the low doubleword
     // become a proper sign extension of the 32-bit result.
     std::string t32 = newtemp();
     std::string t64 = newtemp();
     m_out += "  " + t32 + " = trunc i64 " + val + " to i32\n";
     m_out += "  " + t64 + " = sext i32 " + t32 + " to i64\n";
+    record_bits(t64, extended);
     return t64;
 }
 
@@ -951,6 +994,7 @@ void module_builder::reset_tracking()
 {
     m_cur_lo.clear();
     m_cur_hi.clear();
+    m_value_bits.clear();
     m_dirty_lo.clear();
     m_dirty_hi.clear();
 }
@@ -1440,39 +1484,29 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
         return true;
     }
 
-    const auto known = [&](uint8_t reg) -> std::optional<uint64_t>
-    {
-        if (reg == 0)
-        {
-            return uint64_t{0};
-        }
-        const auto found = m_cur_lo.find(reg);
-        uint64_t value = 0;
-        if (found != m_cur_lo.end() && read_constant_u64(found->second, value))
-        {
-            return value;
-        }
-        return std::nullopt;
-    };
-
+    using namespace ee::scalar_constant;
     const bool shift = form == e_form::shift || form == e_form::variable_shift;
     const uint8_t lhs_reg = shift ? ins.rt : ins.rs;
     const uint8_t rhs_reg = shift ? ins.rs : ins.rt;
-    const auto lhs = known(lhs_reg);
-    std::optional<uint64_t> rhs;
+    const auto lhs_bits = register_bits(lhs_reg);
+    const bool word_shift = *op == e_op::sll || *op == e_op::srl ||
+        *op == e_op::sra || *op == e_op::sllv ||
+        *op == e_op::srlv || *op == e_op::srav;
+    const auto lhs = lhs_bits.constant();
+    auto rhs_bits = register_bits(rhs_reg);
     if (form == e_form::immediate)
     {
-        rhs = *op == e_op::andi || *op == e_op::ori || *op == e_op::xori
-            ? ins.uimmediate : static_cast<uint16_t>(ins.immediate);
+        rhs_bits = exact_bits(*op == e_op::andi || *op == e_op::ori ||
+            *op == e_op::xori ? ins.uimmediate : static_cast<uint16_t>(ins.immediate));
     }
     else if (form == e_form::shift)
     {
-        rhs = ins.sa & 31u;
+        rhs_bits = exact_bits(ins.sa & 31u);
     }
-    else
-    {
-        rhs = known(rhs_reg);
-    }
+    // A variable shift only consumes the low 5/6 count bits.
+    const auto rhs = form == e_form::variable_shift
+        ? rhs_bits.masked_constant(word_shift ? 31u : 63u)
+        : rhs_bits.constant();
 
     const auto write_constant = [&](uint64_t value)
     {
@@ -1491,8 +1525,8 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
     const bool rhs_zero = rhs && *rhs == 0;
     const bool lhs_ones = lhs && *lhs == UINT64_MAX;
     const bool rhs_ones = rhs && *rhs == UINT64_MAX;
-    const bool lhs_word_zero = lhs && (*lhs & 0xffffffffu) == 0;
-    const bool rhs_word_zero = rhs && (*rhs & 0xffffffffu) == 0;
+    const bool lhs_word_zero = (lhs_bits.m_zero & 0xffffffffu) == 0xffffffffu;
+    const bool rhs_word_zero = (rhs_bits.m_zero & 0xffffffffu) == 0xffffffffu;
     const auto move = [&](uint8_t reg, bool word)
     {
         const std::string value = src_lo(reg);
@@ -1510,6 +1544,7 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
         const std::string value = src_lo(reg);
         const std::string result = newtemp();
         m_out += "  " + result + " = xor i64 " + value + ", -1\n";
+        record_bits(result, not_bits(value_bits(value)));
         set_gpr_lo64(dest, result);
     };
     switch (*op)
@@ -1635,11 +1670,70 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
         break;
     }
 
+    // Propagate known bits through the logical and comparison families.
+    // No source load is required when the result is proven independent.
+    const bool logical = *op == e_op::bit_and || *op == e_op::bit_or ||
+        *op == e_op::bit_xor || *op == e_op::bit_nor ||
+        *op == e_op::andi || *op == e_op::ori || *op == e_op::xori;
+    if (logical)
+    {
+        auto result_bits = logical_bits(*op, lhs_bits, rhs_bits);
+        if (const auto value = result_bits.constant())
+        {
+            write_constant(*value);
+            return true;
+        }
+        // If every changed bit is already known, a mask/or is an identity.
+        if ((*op == e_op::andi && (lhs_bits.m_zero | rhs_bits.m_one) == UINT64_MAX) ||
+            (*op == e_op::ori && (lhs_bits.m_one | rhs_bits.m_zero) == UINT64_MAX))
+        {
+            move(lhs_reg, false);
+            return true;
+        }
+        const std::string a = src_lo(lhs_reg);
+        const std::string b = form == e_form::immediate
+            ? std::to_string(*rhs) : src_lo(rhs_reg);
+        const char* operation = *op == e_op::bit_and || *op == e_op::andi ? "and" :
+            *op == e_op::bit_xor || *op == e_op::xori ? "xor" : "or";
+        std::string result = newtemp();
+        m_out += "  " + result + " = " + operation + " i64 " + a + ", " + b + "\n";
+        if (*op == e_op::bit_nor)
+        {
+            const std::string inverted = newtemp();
+            m_out += "  " + inverted + " = xor i64 " + result + ", -1\n";
+            result = inverted;
+        }
+        record_bits(result, result_bits);
+        set_gpr_lo64(dest, result);
+        return true;
+    }
+    if (*op == e_op::slt || *op == e_op::sltu ||
+        *op == e_op::slti || *op == e_op::sltiu)
+    {
+        const bool signed_compare = *op == e_op::slt || *op == e_op::slti;
+        const auto compare_rhs = form == e_form::immediate
+            ? exact_bits(sign_extend<16>(*rhs)) : rhs_bits;
+        if (const auto value = less_bits(lhs_bits, compare_rhs, signed_compare))
+        {
+            write_constant(*value);
+            return true;
+        }
+        const std::string a = src_lo(lhs_reg);
+        const std::string b = form == e_form::immediate
+            ? std::to_string(ins.immediate) : src_lo(rhs_reg);
+        const std::string cmp = newtemp();
+        const std::string result = newtemp();
+        m_out += "  " + cmp + " = icmp " + (signed_compare ? "slt" : "ult") +
+            " i64 " + a + ", " + b + "\n";
+        m_out += "  " + result + " = zext i1 " + cmp + " to i64\n";
+        record_bits(result, unsigned_bits(1));
+        set_gpr_lo64(dest, result);
+        return true;
+    }
+
     if (shift)
     {
-        const bool word = *op == e_op::sll || *op == e_op::srl ||
-            *op == e_op::sra || *op == e_op::sllv ||
-            *op == e_op::srlv || *op == e_op::srav;
+        const bool word = word_shift;
         const bool arithmetic = *op == e_op::sra || *op == e_op::srav ||
             *op == e_op::dsra || *op == e_op::dsrav || *op == e_op::dsra32;
         const bool left = *op == e_op::sll || *op == e_op::sllv ||
@@ -1662,9 +1756,12 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
                 move(lhs_reg, word);
                 return true;
             }
-            // Immediate shifts already have this exact dynamic lowering.
-            // Only replace a variable count proven constant in this scope.
-            if (form == e_form::variable_shift)
+            const auto result_bits = shift_bits(lhs_bits, count, word, left, arithmetic);
+            if (const auto value = result_bits.constant())
+            {
+                write_constant(*value);
+                return true;
+            }
             {
                 const std::string source = src_lo(lhs_reg);
                 const char* opcode = left ? "shl" : arithmetic ? "ashr" : "lshr";
@@ -1677,6 +1774,7 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
                     m_out += "  " + shifted + " = " + opcode + " i32 " + narrow +
                         ", " + std::to_string(count) + "\n";
                     m_out += "  " + result + " = sext i32 " + shifted + " to i64\n";
+                    record_bits(result, result_bits);
                     set_gpr_lo64(dest, result);
                 }
                 else
@@ -1684,11 +1782,48 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
                     const std::string result = newtemp();
                     m_out += "  " + result + " = " + opcode + " i64 " + source +
                         ", " + std::to_string(count) + "\n";
+                    record_bits(result, result_bits);
                     set_gpr_lo64(dest, result);
                 }
                 return true;
             }
         }
+        // Unknown variable count: preserve the width mask unless typed
+        // facts prove the value already lies in the legal shift range.
+        const std::string source = src_lo(lhs_reg);
+        const std::string raw_count = src_lo(rhs_reg);
+        const uint64_t mask = word ? 31u : 63u;
+        const bool bounded = (rhs_bits.m_zero | mask) == UINT64_MAX;
+        const char* operation = left ? "shl" : arithmetic ? "ashr" : "lshr";
+        std::string count = raw_count;
+        std::string value = source;
+        const std::string type = word ? "i32" : "i64";
+        if (word)
+        {
+            count = newtemp();
+            value = newtemp();
+            m_out += "  " + count + " = trunc i64 " + raw_count + " to i32\n";
+            m_out += "  " + value + " = trunc i64 " + source + " to i32\n";
+        }
+        if (!bounded)
+        {
+            const std::string masked = newtemp();
+            m_out += "  " + masked + " = and " + type + " " + count +
+                ", " + std::to_string(mask) + "\n";
+            count = masked;
+        }
+        std::string result = newtemp();
+        m_out += "  " + result + " = " + operation + " " + type + " " +
+            value + ", " + count + "\n";
+        if (word)
+        {
+            const std::string extended = newtemp();
+            m_out += "  " + extended + " = sext i32 " + result + " to i64\n";
+            result = extended;
+            record_bits(result, word_bits({}));
+        }
+        set_gpr_lo64(dest, result);
+        return true;
     }
     return false;
 }
@@ -1955,6 +2090,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + d + " = sext i8 " + b + " to i64\n";
             else
                 m_out += "  " + d + " = zext i8 " + b + " to i64\n";
+            record_bits(d, ins.opcode == ee::e_ee_opcode::OP_LBU
+                ? ee::scalar_constant::unsigned_bits(8) : ee::scalar_constant::word_bits({}));
             set_gpr_lo64(ins.rt, d);
         } else if (ins.opcode == ee::e_ee_opcode::OP_LH ||
                    ins.opcode == ee::e_ee_opcode::OP_LHU) {
@@ -1964,6 +2101,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + d + " = sext i16 " + h + " to i64\n";
             else
                 m_out += "  " + d + " = zext i16 " + h + " to i64\n";
+            record_bits(d, ins.opcode == ee::e_ee_opcode::OP_LHU
+                ? ee::scalar_constant::unsigned_bits(16) : ee::scalar_constant::word_bits({}));
             set_gpr_lo64(ins.rt, d);
         } else if (ins.opcode == ee::e_ee_opcode::OP_LD) {
             const std::string d = emit_scalar_access(addr, 8u);
@@ -1976,6 +2115,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + d + " = zext i32 " + w + " to i64\n";
             else
                 m_out += "  " + d + " = sext i32 " + w + " to i64\n";
+            record_bits(d, ins.opcode == ee::e_ee_opcode::OP_LWU
+                ? ee::scalar_constant::unsigned_bits(32) : ee::scalar_constant::word_bits({}));
             set_gpr_lo64(ins.rt, d);
         }
         break;
@@ -3696,6 +3837,8 @@ void module_builder::emit_counted_alu_run(
                 const std::string joined = newtemp();
                 m_out += "  " + joined + " = phi i64 [ " + fast_value +
                     ", %" + fast + " ], [ " + item.second + ", %" + slow + " ]\n";
+                record_bits(joined, ee::scalar_constant::common_bits(
+                    value_bits(fast_value), value_bits(item.second)));
                 item.second = joined;
             }
         }

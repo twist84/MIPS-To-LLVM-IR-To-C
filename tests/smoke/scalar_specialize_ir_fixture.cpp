@@ -64,6 +64,13 @@ int main(int argc, char** argv)
         make_r(3, 4, 22, 0, 0x21),         // delay slot
         make_r(3, 4, 23, 0, 0x2d),         // external continuation must read state
         make_r(0, 3, 24, 0, 0x3c),         // DSLL32
+        make_i(0x0c, 10, 25, 31),          // ANDI produces a bounded count
+        make_r(25, 10, 26, 0, 0x14),       // DSLLV needs no count mask
+        make_i(0x0b, 25, 27, 32),          // SLTIU range proven true
+        make_i(0x0c, 25, 28, 0x100),       // disjoint bits -> zero
+        make_i(0x0d, 25, 29, 31),          // known result 31
+        make_r(29, 10, 30, 0, 0x04),       // SLLV fixed count
+        make_r(0, 30, 31, 0, 0x00)         // word identity needs no trunc/sext
     };
 
     std::map<uint32_t, ee::s_ee_instruction> insn_map;

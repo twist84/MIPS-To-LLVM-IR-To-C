@@ -1,4 +1,5 @@
 #include "ee_scalar_constant.h"
+#include "ee_known_bits.h"
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
 #include "ee_state.h"
@@ -40,6 +41,19 @@ static_assert(read_gpr(0, {1, 2}).m_lo == 0 && read_gpr(0, {1, 2}).m_hi == 0);
 static_assert(write_scalar(0, {0, 0}, 3).m_lo == 0);
 static_assert(write_scalar(1, {1, 2}, 3).m_lo == 3 &&
               write_scalar(1, {1, 2}, 3).m_hi == 2);
+
+static_assert(unsigned_bits(8).m_zero == 0xffffffffffffff00ull);
+static_assert(*logical_bits(op::bit_and, unsigned_bits(8), exact_bits(0xff00)).constant() == 0);
+static_assert(*less_bits(unsigned_bits(8), exact_bits(256), false) == 1);
+static_assert(*less_bits(unsigned_bits(8), exact_bits(UINT64_MAX), true) == 0);
+static_assert(!less_bits(unsigned_bits(8), exact_bits(128), false));
+static_assert(*logical_bits(op::bit_or, unsigned_bits(8), exact_bits(31)).masked_constant(31) == 31);
+static_assert(word_bits({}).m_word);
+static_assert(!common_bits(word_bits({}), {}).m_word);
+static_assert(*shift_bits(exact_bits(0x80000000), 31, true, false, true).constant() == UINT64_MAX);
+static_assert(*shift_bits(exact_bits(0x80000000), 31, true, false, false).constant() == 1);
+static_assert(*shift_bits(exact_bits(UINT64_MAX), 63, false, true, false).constant() == (uint64_t{1} << 63));
+static_assert(shift_bits(unsigned_bits(8), 4, false, true, false).m_zero == 0xfffffffffffff00full);
 
 enum class e_form { reg, immediate, shift, lui };
 struct s_case

@@ -28,7 +28,8 @@ def run(fixture):
         # Folded instructions must not leave arithmetic/comparison SSA,
         # even when the counted run emits separate fast/observed copies.
         for pc in (ENTRY + 8, ENTRY + 12, ENTRY + 16, ENTRY + 20,
-                   ENTRY + 24, ENTRY + 32, ENTRY + 36, ENTRY + 40):
+                   ENTRY + 24, ENTRY + 32, ENTRY + 36, ENTRY + 40,
+                   ENTRY + 26 * 4, ENTRY + 27 * 4, ENTRY + 28 * 4):
             bodies = re.findall(
                 rf"(?m)^  ; 0x{pc:x}: [^\n]*\n((?:  [^\n]*\n)*)", source
             )
@@ -41,6 +42,15 @@ def run(fixture):
                     body
                 ), (hex(pc), body)
         assert "shl i64 " in source and ", 63\n" in source
+        for index in (25, 30):
+            bodies = re.findall(rf"(?m)^  ; 0x{ENTRY + index * 4:x}: [^\n]*\n((?:  [^\n]*\n)*)", source)
+            assert bodies
+            for body in bodies:
+                body = body.split("  ; ")[0]
+                if index == 25:
+                    assert not re.search(r" = and i(?:32|64) ", body), body
+                else:
+                    assert not re.search(r" = (?:trunc|sext) ", body), body
         assert re.search(r"call void @ee_guard_guest_v0_trace\(", source)
         module = llvm.parse_assembly(source)
         module.verify()
@@ -94,12 +104,17 @@ def run(fixture):
                         22: 0x7fffffff, 23: 0xffffffff7fffffff,
                         24: 0x8000000000000000,
                     }
+                expected.update({
+                    25: x & 31, 26: (x << (x & 31)) & MASK, 27: 1, 28: 0,
+                    29: 31, 30: MASK ^ 0x7fffffff if x & 1 else 0,
+                    31: MASK ^ 0x7fffffff if x & 1 else 0,
+                })
                 runtime = ctypes.create_string_buffer(runtime_size)
                 result = fn(ctypes.pointer(state), ctypes.cast(runtime, ctypes.c_void_p))
                 assert result == 3, (result, state.pc)
-                assert state.pc == ENTRY + 24 * 4, hex(state.pc)
-                assert ctypes.c_uint64.from_buffer(runtime, counter).value == (2 if resume else 24)
-                assert ctypes.c_uint64.from_buffer(runtime, reference).value == (2 if resume else 24)
+                assert state.pc == ENTRY + 31 * 4, hex(state.pc)
+                assert ctypes.c_uint64.from_buffer(runtime, counter).value == (9 if resume else 31)
+                assert ctypes.c_uint64.from_buffer(runtime, reference).value == (9 if resume else 31)
                 assert state.gpr[0].lo == state.gpr[0].hi == 0
                 for reg in range(1, 32):
                     assert state.gpr[reg].lo == expected.get(reg, initial[reg]), (reg, resume, hex(x))

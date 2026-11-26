@@ -2082,3 +2082,34 @@ Extend the synchronous replay harness with source receipt validation
 and a separately pinned accepted mixed-profile reference arm; compare
 original O5, A/A control, accepted entry rotation and new source O5
 without regenerating IR or modifying either accepted cache.
+
+### Checkpoint 8b retail acceptance and revised objective
+
+Replay archive c7ef5958ddf92c2a3b7a1d2a71455d332b625c6178ec30f794bb8276cfeb269b:
+all four synchronous arms reach 40,000,000 dispatches with 199,914
+matching sampled transitions each, zero mismatches/unpaired, 3,676
+recorded and consumed polls. Terminal report and GS screenshot hashes
+are identical. Final PC 0x001cf434; 25,652,755,084 guest attempts,
+25,654,860,437 reference slots, 25,900,359,643 EE cycles, 5,263 GS fields;
+no IOP guest fault or timing-observer failure. Wall times baseline
+40.984s, A/A 40.984s, accepted mixed 40.187s, 8b O5 40.860s.
+Profiling disabled, fixed RTC and synchronous GS/VU1. The 0.30%
+difference is not evidence of a repeatable speedup. 8b correctness
+accepted for this replay. No cache promotion.
+
+The constexpr/PCSX2-inspired phase prioritizes architectural accuracy,
+runtime throughput, reduced state traffic and host instruction work,
+not linked size. Keep the separate size-overlay workstream intact.
+
+### Checkpoint 8c — typed local SSA facts
+
+Represent known zero/one masks and sign-extended word correlation,
+separately from guest register identity. Facts attach only to the
+current SSA value; clear at block or helper invalidation, intersect
+at counted-run PHIs. Propagate logical operations, bounded comparisons,
+fixed/partially known shift counts and scalar load extensions. Avoid
+redundant sign extension and shift masks only when proven. No new
+facts across externally dispatchable block entries, no memory mapping
+assumptions, no trapping/branch changes. Add constexpr boundary tests
+and extend the generated IR runtime fixture including direct resume.
+Retail/runtime measurement pending.
