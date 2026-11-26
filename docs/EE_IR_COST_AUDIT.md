@@ -543,3 +543,39 @@ then enabled using identical cache at 1x. Final CI pending.
 Large function compilation cost remains an open optimization
 target; prefer compact guards and cold-path outlining before
 expanding further or splitting functions.
+
+## Quadword fastmem A/B and binary-size objective (08:25/08:26)
+
+Both replays clean 7599bfc, word/scalar enabled, quad flag 0 then 1,
+40M dispatches, 1x, lean, fixed RTC, live input and async VU1/GS.
+Observed post-spawn throughput 63.45 versus 63.28 fields/s; wall
+45.265 versus 42.922 s; fields 5472/6057, presents 3877/4322,
+native VU1 executions 388620/332454. No fallback, IOP guest fault
+or worker failure reported. All five workflows passed 7599bfc.
+No further speed gain established; quad remains opt-in.
+
+Performance work now explicitly targets native binary size as well
+as throughput and compilation time. Recent user-reported O5 scalar
+build: 16250 modules, 150.49 MB aggregate object files, 160.9 s,
+4897 reused; largest compilation time 15.55 s for sub_0x369520.
+Object bytes include relocation and symbol metadata and are not
+the linked DLL size. Link tool already reports library bytes.
+
+eb88399 folds known immediate ALU operands and LUI into literal
+SSA values, and removes an alignment fault arm only for statically
+aligned addresses while retaining the original register publication
+boundary. Unknown and misaligned addresses keep existing checks.
+Directed regression exercises LUI sign extension, wrapping,
+literal effective addresses and precise misalignment faults.
+0f53542 reports the ten largest validated native objects including
+cache hits, without changing the LLVM optimization pipeline.
+Both changes require current CI; the intentional lowering change
+requires regeneration and a fixed-RTC lean P40 retail comparison.
+
+Next: measure final DLL and total object bytes with matched inventory,
+then target repeated cold paths, helper duplication, and selective
+size-oriented pipelines for non-hot/large functions. Benchmark
+against hot native modules before committing a size/speed tradeoff.
+Do not equate smaller textual IR or fewer basic blocks with smaller
+machine code. Preserve PS2 timing, observable state and exception
+semantics; no blanket size optimization enabled yet.
