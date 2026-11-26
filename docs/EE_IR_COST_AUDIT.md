@@ -1291,3 +1291,45 @@ and GPU screenshot. Compare candidate runtime against the shared
 counter parent. The previous alwaysinline policy was changed, so
 acceptance requires runtime evidence as well as size savings.
 Production policy and original caches remain unchanged.
+
+
+### Checkpoint 4g — shared quadword replay accepted
+
+ee-quadword-comparison-sync.zip: all four runs exit 4 at 40M
+dispatches, each replay consumes 3,196/3,196 PAD0 polls with
+192,752 identical sampled transitions, zero differences/unpaired.
+No error, all DLL hashes unchanged and match the link receipts.
+Terminal report SHA-256
+902606cadfc619ed21ac2db91412c2a572a9ab4692cfbc93104b74ad6d1a90bb
+and GPU screenshot SHA-256
+b24f1bab576e738260f77445c762699f1a317f7b717b230b77deadcd4461242c
+match byte-for-byte in all four arms. EE cycles 22,565,867,672;
+attempts 22,342,246,283; reference slots 22,344,315,309; scheduler
+yields 3,047; fields 4,586; GPU draws 4,924,226; presents 3,285;
+VU1 native runs 402,205 / 455,160,950 pairs, zero interpreter
+fallbacks; final PC 0x1c3c68. Wall seconds 44.266/43.985/43.859/
+43.734; candidate -0.29% vs parent and -0.57% vs O5 control.
+Within measurement noise; one synchronous workload only.
+The 87.12 MiB DLL is accepted for this workload. All five CI
+workflows passed on d4823a5. Production remains unchanged.
+
+### Checkpoint 4h — COP1 multiplication family experiment
+
+The original inventory contains 1,134 identical definitions of
+each of mul_bits, mul_correct, booth_row and mul_csa, with total
+799,502 named mixed executable span bytes. mul_bits has 8,265
+direct guest and 694 helper calls; mul_correct is also used by VU0
+helpers. Share both roots with exact scalar/aggregate signatures,
+keeping the two leaf definitions internal to the selected owner.
+Validate the original audited body hashes, direct dependencies and
+all symbol references; reject leaf escapes. Keep operand order,
+correction gating, rounding/truncation and result flags unchanged.
+Reconstruct the observation/counter/quadword transformations for
+affected modules and verify the exact parent transformed IR hash.
+Verify all parent objects against receipts, using the earlier
+counter receipt for the 9,305 modules not rewritten by quadword
+sharing. Recompile only 1,134 affected modules, retain the other
+15,118 objects by absolute path. Synthetic MCJIT differential uses
+the actual generated multiplier header, edge values and 10,000
+deterministic random pairs, comparing all result bits and flags.
+A separate native link and matched retail replay remain required.
