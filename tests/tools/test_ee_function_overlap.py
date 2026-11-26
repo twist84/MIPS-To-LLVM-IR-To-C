@@ -57,7 +57,7 @@ def test_ownership():
         assert report["guest_modules_with_entry_switch"] == 3
 
 
-def test_generated_ir(exe):
+def test_generated_ir(exe, discovery_tool=None):
     from test_recomp_discovery_cache import make_elf, compile_ir
     from audit_ee_function_overlap import scan_details
     import json
@@ -69,6 +69,15 @@ def test_generated_ir(exe):
         result = compile_ir(exe, elf, out, 0x00100008)
         assert result.returncode == 0, result.stdout + result.stderr
         metadata = json.loads((out / "ee_functions.json").read_text())
+        if discovery_tool:
+            import subprocess
+            result = subprocess.run([discovery_tool, str(elf), str(out / "ee_discovery_cache.bin")],
+                                    capture_output=True, text=True)
+            assert result.returncode == 0, result.stderr
+            sources = json.loads(result.stdout)["entry_sources"]
+            assert set(sources) == set(metadata["discovered_entries"])
+            assert "elf_entry" in sources["0x100008"]
+            assert "direct_call" in sources["0x100040"]
         for function in metadata["functions"]:
             path = out / Path(function["ir_path"]).name
             pcs, blocks, _, _, _, has_switch = scan_details(path)
@@ -82,5 +91,5 @@ if __name__ == "__main__":
     test_cross_module_overlap()
     test_ownership()
     if len(sys.argv) > 1:
-        test_generated_ir(sys.argv[1])
+        test_generated_ir(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
     print("PASS: cross-module guest PC overlap audit")

@@ -282,6 +282,9 @@ add_executable(ee_recomp
 )
 target_link_libraries(ee_recomp PRIVATE ee_core)
 
+add_executable(ee_discovery_audit src/tools/ee_discovery_audit.cpp)
+target_link_libraries(ee_discovery_audit PRIVATE ee_core)
+
 # Standalone captured VU1 microprogram LLVM translator.
 add_executable(vu1_recomp src/tools/vu1_recomp_main.cpp)
 target_link_libraries(vu1_recomp PRIVATE ee_core)
@@ -828,7 +831,7 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ee_function_overlap
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_function_overlap.py
-                $<TARGET_FILE:ee_recomp>)
+                $<TARGET_FILE:ee_recomp> $<TARGET_FILE:ee_discovery_audit>)
     add_test(NAME ee_pointer_table_expansion
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_function_pointer_tables.py)
