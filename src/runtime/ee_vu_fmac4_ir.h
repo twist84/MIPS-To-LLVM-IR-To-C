@@ -162,8 +162,12 @@ entry:
   %ma64 = zext <4 x i32> %ma to <4 x i64>
   %mb64 = zext <4 x i32> %mb to <4 x i64>
   %full = mul <4 x i64> %ma64, %mb64
-  %low23 = and <4 x i64> %full, <i64 8388607, i64 8388607, i64 8388607, i64 8388607>
-  %boundary = icmp ult <4 x i64> %low23, <i64 32768, i64 32768, i64 32768, i64 32768>
+  ; Only product bits 15..22 determine whether subtracting 2^15
+  ; could cross the truncation boundary. A packed 32-bit zero test
+  ; avoids wide compares and discards no observable product bits.
+  %full_low = trunc <4 x i64> %full to <4 x i32>
+  %boundary_bits = and <4 x i32> %full_low, <i32 8355840, i32 8355840, i32 8355840, i32 8355840>
+  %boundary = icmp eq <4 x i32> %boundary_bits, zeroinitializer
   %nonzero = xor <4 x i1> %zero, <i1 true, i1 true, i1 true, i1 true>
   %needs = and <4 x i1> %boundary, %nonzero
   %mask = bitcast <4 x i1> %needs to i4
@@ -178,7 +182,8 @@ normalize:
   %sig = trunc <4 x i64> %shifted to <4 x i32>
   %wide = icmp ugt <4 x i32> %sig, <i32 16777215, i32 16777215, i32 16777215, i32 16777215>
   %shift = zext <4 x i1> %wide to <4 x i32>
-  %norm = lshr <4 x i32> %sig, %shift
+  %half_sig = lshr <4 x i32> %sig, <i32 1, i32 1, i32 1, i32 1>
+  %norm = select <4 x i1> %wide, <4 x i32> %half_sig, <4 x i32> %sig
   %sum_exp = add <4 x i32> %ea, %eb
   %biased = sub <4 x i32> %sum_exp, <i32 127, i32 127, i32 127, i32 127>
   %exponent = add <4 x i32> %biased, %shift
