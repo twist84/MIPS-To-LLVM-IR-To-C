@@ -41,6 +41,7 @@
 #endif
 #include "elf_loader.h"
 #include "iop_kernel.h"
+#include "iop_pad_poll_replay.h"
 #include "iop_aot.h"
 #include "iop_memory_card.h"
 #include "iop_guest_fault_probe.h"
@@ -2485,6 +2486,41 @@ int main(int argc, char** argv)
             }
         }
     }
+    iop::c_pad_poll_replay pad_poll;
+    std::string pad_record_environment;
+    std::string pad_replay_environment;
+    const char* pad_record = read_host_environment(
+        "SDBZ_PAD0_RECORD", &pad_record_environment);
+    const char* pad_replay = read_host_environment(
+        "SDBZ_PAD0_REPLAY", &pad_replay_environment);
+    const bool record_pad = pad_record != nullptr &&
+        std::strcmp(pad_record, "1") == 0;
+    if (record_pad || pad_replay != nullptr)
+    {
+        if ((record_pad && pad_replay != nullptr) ||
+            pad0_cross_poll_count != 0u || !pad0_script.empty() ||
+            !hle_startup || iop_rom0_path != nullptr ||
+            (iop_irx_paths.empty() && disc_folder_path == nullptr))
+        {
+            std::fprintf(stderr,
+                "Pad recording/replay requires HLE IOP and cannot mix with "
+                "another input probe or recording/replay mode\n");
+            return 2;
+        }
+        if (record_pad)
+        {
+            pad_poll.record(stderr);
+        }
+        else
+        {
+            std::ifstream input(pad_replay);
+            if (!input || !pad_poll.load(input))
+            {
+                std::fprintf(stderr, "Invalid or incomplete PAD0 input recording\n");
+                return 2;
+            }
+        }
+    }
     if (trace)
     {
         // Keep the historical immediate trace by default. The optional
@@ -3072,6 +3108,11 @@ int main(int argc, char** argv)
             {
                 std::fprintf(stderr, "IOP HLE MMIO attachment failed\n");
                 return 1;
+            }
+            if (pad_poll.enabled())
+            {
+                iop_kernel->hardware().bind_pad0_poll(
+                    &pad_poll, iop::c_pad_poll_replay::poll);
             }
             if (pad0_cross_poll_count != 0u)
             {
@@ -4464,6 +4505,12 @@ int main(int argc, char** argv)
 
     while (remaining != 0)
     {
+        if (pad_poll.failed())
+        {
+            pad_poll.summary(stderr);
+            std::fprintf(stderr, "PAD0 input stream rejected a guest poll\n");
+            return 1;
+        }
         if (hardware.dmac().deferred_vif1_pending())
         {
             (void)hardware.dmac().service_deferred_vif1();
@@ -4586,6 +4633,12 @@ int main(int argc, char** argv)
                 // service outcomes. The fast path has no guest execution.
                 const iop::s_kernel_run_result progressed = quiet_advanced
                     ? iop::s_kernel_run_result{} : iop_kernel->run(cycles, 128u);
+                if (pad_poll.failed())
+                {
+                    pad_poll.summary(stderr);
+                    std::fprintf(stderr, "PAD0 input stream rejected a guest poll\n");
+                    return 1;
+                }
                 if (batch.m_turns > 1u &&
                     (progressed.m_executed != 0u ||
                         iop_kernel->cycles() - kernel_before != cycles ||
@@ -8242,6 +8295,11 @@ int main(int argc, char** argv)
                                 break;
                             }
                             host_audio.resume();
+                            if (pad_poll.enabled())
+                            {
+                                iop_kernel->hardware().bind_pad0_poll(
+                                    &pad_poll, iop::c_pad_poll_replay::poll);
+                            }
                             if (pad0_cross_poll_count != 0u)
                             {
                                 iop_kernel->hardware()
@@ -9195,6 +9253,22 @@ int main(int argc, char** argv)
         {
             break;
         }
+    }
+
+    if (pad_poll.enabled())
+    {
+        // A recording must reach its requested dispatch budget. Do not
+        // put a complete footer on a cancelled, faulted or partial run.
+        if (remaining != 0 || !pad_poll.finished())
+        {
+            if (!record_pad)
+            {
+                pad_poll.summary(stderr);
+            }
+            std::fprintf(stderr, "PAD0 input stream incomplete at session stop\n");
+            return 1;
+        }
+        pad_poll.summary(stderr);
     }
 
     // The last authentic IOP thread state is the most useful artifact
