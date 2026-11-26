@@ -786,3 +786,29 @@ normal cache and inspect the independent experiment directory.
 set "SDBZ_NATIVE_ALU_CERTIFICATES=0"
 python tools\build_ee_dedup_experiment.py build\ps2-game-hle\ir build\ps2-game-hle\O2-native\objects ee-entry-shadow.json build\ee-dedup-experiment --link
 ```
+
+
+### Checkpoint 2b — measured retail link
+
+User-supplied dedup-plan.json confirms 16,252 -> 16,241 modules
+and exactly 160,826 dispatch PCs. Excluded 1,434,549 object-file
+bytes and 928,664 executable object bytes. Linked DLL 110,445,056
+bytes vs baseline 111,471,104 (-1,026,048, -0.92%); executable raw
+sections 100,879,872 vs 101,812,736 (-932,864). Dedup DLL SHA-256
+4ab4664517a8ffa4adc3f767777c440783fee9ef4191f9f219354543e5a8f0a8.
+No claim of runtime equivalence yet.
+
+### Checkpoint 2c — matched runtime replay
+
+Use tools/replay_ee_dedup_experiment.py to run the existing native
+runner directly with each independently verified DLL. This avoids
+the production translation/cache manager and disables cache expansion.
+The baseline records real PAD0 polls, and the second run must consume
+the complete recording in order. Both use the same fixed RTC, disc,
+memory card (discard guest writes), runner binary and dispatch budget.
+Core P40 settings are applied; caller-specific optional runtime
+flags are retained and recorded, and AOT capture is disabled.
+A mismatched poll stream or incomplete run is a diagnostic result,
+not evidence of equivalence. Upload the generated zip even on failure.
+Native ALU certificates remain disabled; owner identity changes.
+No production cache files should be replaced.
