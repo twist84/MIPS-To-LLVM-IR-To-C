@@ -585,6 +585,22 @@ def test_replay_provenance():
                       SimpleNamespace(returncode=0, stdout="")):
         clean = SESSION.capture_replay_provenance(ROOT, {}, None, None)
     assert clean["tracked_tree_dirty"] is False
+    assert not clean["pad0_replay_configured"]
+    assert clean["pad0_replay_source_sha256"] is None
+    with tempfile.TemporaryDirectory(prefix="pad-replay-provenance-") as folder:
+        source = Path(folder) / "recorded.log"
+        source.write_bytes(b"abc")
+        replay_env = {"SDBZ_PAD0_REPLAY": str(source), "SDBZ_PAD0_RECORD": "0"}
+        with patch.object(SESSION.subprocess, "run", return_value=
+                          SimpleNamespace(returncode=0, stdout="")):
+            replay = SESSION.capture_replay_provenance(ROOT, replay_env, 10, 40)
+        assert replay["pad0_replay_configured"] is True
+        assert replay["pad0_replay_source_sha256"] == (
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        assert replay["environment"]["SDBZ_PAD0_RECORD"] == "0"
+        assert "SDBZ_PAD0_REPLAY" not in replay["environment"]
+        assert str(source) not in json.dumps(replay)
 
 
 def main():
