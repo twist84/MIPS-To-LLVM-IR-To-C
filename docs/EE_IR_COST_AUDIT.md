@@ -1448,3 +1448,24 @@ verify library hashes before and after. Compare timings directly with
 the multiplier parent. Keep the 86.30 MiB image as the validated
 baseline until acceptance. After this replay, investigate store and
 V0 trace guards while keeping disabled diagnostic paths inexpensive.
+
+### Checkpoint 4j — shared COP1 addition replay accepted
+
+ee-cop1-add-comparison-sync.zip: all four arms stop at 40M dispatches
+with exit 4. All three replays consume 2,838/2,838 PAD0 polls;
+182,384 sampled transitions each, zero differences or unpaired samples.
+No replay error; libraries unchanged and parent/candidate hashes match
+4h/4j link receipts. Terminal JSON SHA-256
+c9fba9f24569160916b07ffc02dfaab7e64c763d30323414344246ca91b86882
+and GPU PPM SHA-256
+8e8b96cb81e8d54be0c807878c638e383ac525b19bc896f6f1b630948ddafc30
+are byte-identical across all four arms. EE cycles 20,070,022,629;
+attempts 19,862,797,506; reference slots 19,864,714,689; scheduler
+yields 2,697; fields 4,078; GPU draws 4,887,086; presents 2,925;
+VU1 native runs 407,359 / 460,705,640 pairs, zero interpreter
+fallbacks; no IOP guest fault or timing observer failure. Final PC
+0x1a9f00. Wall seconds 45.703/45.312/43.891/43.656; candidate
+-0.54% versus immediate parent, -3.65% versus O5 control, single
+measurement only. All five CI workflows passed on 3785324.
+The 90,095,104-byte (85.92 MiB) image is accepted for this synchronous
+workload. Production lowering and cache policy remain unchanged.
