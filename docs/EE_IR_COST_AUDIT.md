@@ -1686,3 +1686,31 @@ size changes only; discard other candidate objects. Retain all 9,682
 previous shared scalar objects, including the eight owners, unchanged.
 Save the full trial receipt and link a new isolated candidate; compare
 against the 74.77 MiB shared scalar parent in four-arm retail replay.
+
+### Checkpoint 5f — residual shared scalar retail acceptance
+
+All 4,051 residual trials verified against receipt SHA-256
+81c4353a74dc88de8f549b6cd7be7369d6df3b0e7a067f527ec4351fed2f932c.
+4,025 canonical rewrites, all executable wins; 26 unmodified.
+O5 178 wins / 4 unchanged, 39,474 executable bytes saved; Oz 3,847
+wins / 22 unchanged, 413,345 bytes saved. Total executable saving
+452,819, object saving 359,749, removed IR text 6,537,936 bytes.
+Stage 49.437 s before link. 13,707 cumulative scalar modules, 16,252
+retained functions. DLL 78,397,952 -> 77,945,856 bytes (74.33 MiB),
+452,096 bytes smaller than parent; cumulative 33,525,248 bytes /
+30.075% vs O5. Linked executable raw bytes 72,991,232. Candidate
+SHA-256 be08d290a081efdd28f17b73a91742236ab0f6df7aa4eda4d6bc40708b964cc7.
+Four arms exit 4 at 40M dispatches; 3,606/3,606 PAD0 polls, 225,607
+matching samples per replay, no mismatches/unpaired samples, libraries
+unchanged. Reports SHA-256
+4133ab36f59ef02cd0a908043064a4f0d077ce5699ebad4cb41f55930c44df40;
+screenshots SHA-256
+b359b9f003f3fd3d96a5befb9842fa87ed184af60ebf105bf92ec04370eb2ff1.
+All four arms byte-identical reports/screenshots. EE cycles
+25,220,954,778; attempts 24,904,636,159; slots 24,907,078,219;
+yields 3,410; fields 5,125; final PC 0x19d2d0. VU1 native runs
+353,348 / 397,589,308 pairs; no fallbacks, IOP fault or timing observer
+failure. Wall seconds 40.796 / 40.672 / 40.250 / 40.234 (-0.04%
+vs parent; noise). All five CI workflows passed on aaa294e, including
+LLVM fixture repair. Accept the 74.33 MiB residual overlay for this
+matched workload, with production cache unchanged.
