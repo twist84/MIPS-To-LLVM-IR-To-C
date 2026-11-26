@@ -2013,3 +2013,23 @@ The new JIT fixture covers folded IR shape, dynamic and fixed shifts,
 identity word sign extension, V0, zero writes, counters, delay slots
 and dispatch directly into an internal continuation. No retail or
 native size savings claimed until measured on retained retail entries.
+
+### Checkpoint 8b — isolated retail source comparison
+
+`tools/compare_ee_source_lowering.py` authenticates the preserved O5
+ELF, metadata, module hashes, native object manifest, native target and
+DLL. Reconstruct known entries into a fresh sibling work directory
+using the existing recovery implementation in IR-only mode. Fail
+closed if function symbols, block ownership or function-scoped guest
+PC coverage differ. Report exact parsed LLVM instruction and basic
+block counts (all definitions and guest only), IR bytes, lexical
+opcode attribution and per-function/size-band metrics. The candidate
+is compiled at the same O5 profile without any experimental overlays.
+Verify objects against their respective IR hashes and retain all guest
+symbols; measure native executable and initialized section payload,
+whole-object sizes and linked PE bytes. Record generation, scan,
+compilation and link wall time separately. No production cache
+promotion or replay. The accepted 68.79 MiB overlay is not directly
+comparable to an unoutlined O5 source candidate; compare source gains
+against original O5 first, then evaluate consolidation separately.
+Receipt remains available if an inventory or provenance gate fails.

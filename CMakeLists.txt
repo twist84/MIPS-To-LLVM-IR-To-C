@@ -1045,6 +1045,9 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_scalar_specialize_ir_runtime.py
                 $<TARGET_FILE:ee_scalar_specialize_ir_fixture>)
+    add_test(NAME ee_source_lowering_comparison
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_compare_ee_source_lowering.py)
     add_test(NAME cop0_write_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_cop0_write_ir_runtime.py
