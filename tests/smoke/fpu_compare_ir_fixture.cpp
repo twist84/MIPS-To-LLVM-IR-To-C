@@ -244,7 +244,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "FCR read group fixture CFG analysis failed\n");
         return 4;
     }
+    if (std::strcmp(mode, "matrix_chain") == 0 &&
+        (functions[0].blocks.size() != 1 ||
+         functions[0].blocks[0].insn_indices.size() != 5))
+    {
+        std::fprintf(stderr, "matrix-chain COP1 fixture CFG analysis failed\n");
+        return 4;
+    }
     if (!fcr_read_group &&
+        std::strcmp(mode, "matrix_chain") != 0 &&
         std::strcmp(mode, "ctc1_after_branch") != 0 &&
         std::strcmp(mode, "bc1_t_delay") != 0 &&
         std::strcmp(mode, "bc1_fl_annul") != 0 &&
