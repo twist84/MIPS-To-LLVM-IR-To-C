@@ -464,6 +464,43 @@ void write_ram(uint8_t* bytes, T value)
 #endif
 }
 
+// Keep bus result storage, callback dispatch and the secondary memory
+// mapper out of the ordinary RAM helper's machine-code frame. These
+// fallbacks receive the already translated bus address and the original
+// guest address; scratchpad, MMIO, and bounds behavior are unchanged.
+#if defined(_MSC_VER)
+#define EE_MEMORY_NOINLINE __declspec(noinline)
+#elif defined(__GNUC__) || defined(__clang__)
+#define EE_MEMORY_NOINLINE __attribute__((noinline))
+#else
+#define EE_MEMORY_NOINLINE
+#endif
+
+template<typename T, T (ee_memory::*Read)(uint32_t)>
+EE_MEMORY_NOINLINE T read_scalar_fallback(
+    s_ee_runtime* runtime, ee_memory* memory, uint32_t address, uint32_t physical)
+{
+    s_ee_u128 result{};
+    if (read_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &result))
+    {
+        return static_cast<T>(result.m_lo);
+    }
+    return memory != nullptr ? (memory->*Read)(address) : T{};
+}
+
+template<typename T, void (ee_memory::*Write)(uint32_t, T)>
+EE_MEMORY_NOINLINE void write_scalar_fallback(
+    s_ee_runtime* runtime, ee_memory* memory, uint32_t address, uint32_t physical, T value)
+{
+    const s_ee_u128 data{value, 0};
+    if (!write_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &data) && memory != nullptr)
+    {
+        (memory->*Write)(address, value);
+    }
+}
+
+#undef EE_MEMORY_NOINLINE
+
 template<typename T, T (ee_memory::*Read)(uint32_t)>
 T read_scalar(s_ee_runtime* runtime, uint32_t address)
 {
@@ -474,12 +511,7 @@ T read_scalar(s_ee_runtime* runtime, uint32_t address)
     {
         return read_ram<T>(bytes);
     }
-    s_ee_u128 result{};
-    if (read_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &result))
-    {
-        return static_cast<T>(result.m_lo);
-    }
-    return memory != nullptr ? (memory->*Read)(address) : T{};
+    return read_scalar_fallback<T, Read>(runtime, memory, address, physical);
 }
 
 template<typename T, void (ee_memory::*Write)(uint32_t, T)>
@@ -493,11 +525,7 @@ void write_scalar(s_ee_runtime* runtime, uint32_t address, T value)
         write_ram(bytes, value);
         return;
     }
-    const s_ee_u128 data{value, 0};
-    if (!write_bus(runtime, physical, static_cast<uint32_t>(sizeof(T)), &data) && memory != nullptr)
-    {
-        (memory->*Write)(address, value);
-    }
+    write_scalar_fallback<T, Write>(runtime, memory, address, physical, value);
 }
 } // namespace
 
