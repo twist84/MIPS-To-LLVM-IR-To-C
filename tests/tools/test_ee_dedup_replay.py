@@ -140,11 +140,75 @@ def test_graphics_profile(root):
     assert extract_profile(control, log, False) is None
 
 
+def test_graphics_ee_comparison(root):
+    from unittest.mock import patch
+    import replay_ee_graphics_profile as harness
+
+    files = ("runner", "elf", "baseline.dll", "control.dll", "candidate.dll",
+             "control.json", "candidate.json", "record.log")
+    for name in files:
+        (root / name).write_text(name)
+    for name in ("profile", "control-source", "candidate-source", "vu1",
+                 "disc", "reference"):
+        (root / name).mkdir()
+    for name in ("report.json", "stdout.log", "gs-webgpu.ppm"):
+        (root / "reference" / name).write_text("{}")
+    report = {"vu1_worker": {"enabled": False}}
+    inventory = {"target": "native", "libraries": {"x.dll": "hash"}}
+    calls = []
+
+    def validate(profile, source, elf, receipt):
+        assert profile == root / "profile" and elf == root / "elf"
+        name = "control" if source.name == "control-source" else "candidate"
+        assert receipt == root / (name + ".json")
+        image = root / (name + ".dll")
+        return root / "baseline.dll", image, {"dedup": sha(image)}
+
+    def replay(args, image, directory, env):
+        calls.append((directory.name, image.name, env["SDBZ_VU1_AOT"],
+                      env["SDBZ_RUNTIME_PROFILE"]))
+        directory.mkdir()
+        return {"wall_seconds": 2.0 if image.name == "control.dll" else 1.0}
+
+    args = ["graphics", "--repeats", "2"]
+    for key, value in (("runner", "runner"), ("elf", "elf"), ("disc", "disc"),
+                       ("profile", "profile"), ("source", "control-source"),
+                       ("source-receipt", "control.json"), ("vu1", "vu1"),
+                       ("recording", "record.log"), ("reference", "reference"),
+                       ("output", "ee-replay"), ("candidate-source", "candidate-source"),
+                       ("candidate-source-receipt", "candidate.json")):
+        args += ["--" + key, str(root / value)]
+    with patch.object(sys, "argv", args), patch.multiple(
+            harness, validate_source_libraries=validate,
+            aot_identity=lambda path: inventory,
+            terminal_budget=lambda path, budget: True,
+            read_json=lambda path: report, record_count=lambda path: 1,
+            replay_environment=lambda path: {}, run_one=replay,
+            validate_run=lambda *args: {}, require_match=lambda *args: None,
+            extract_profile=lambda *args: None):
+        assert harness.main() == 0
+    assert calls == [
+        (directory, image, str(root / "vu1"), "0")
+        for directory, image in (("control-1", "control.dll"),
+                                 ("candidate-1", "candidate.dll"),
+                                 ("candidate-2", "candidate.dll"),
+                                 ("control-2", "control.dll"))]
+    receipt = json.loads((root / "ee-replay" / "profiling-receipt.json").read_text())
+    assert receipt["schema"] == "ee-graphics-ee-comparison-v1"
+    assert receipt["inputs"]["candidate_library"] == sha(root / "candidate.dll")
+    assert receipt["inputs"]["candidate_source_receipt"] == sha(root / "candidate.json")
+    assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
+    assert not receipt["performance_accepted"] and receipt["relative_throughput"] == 2.0
+
+
 def run():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
         test_vu1_inventory(root)
         test_graphics_profile(root)
+        ee_root = root / "ee-comparison"
+        ee_root.mkdir()
+        test_graphics_ee_comparison(ee_root)
         path = root / "record.log"
         sample = "PAD0 input: 1 1 65 5 5 65535 128 128 128 128\n"
         path.write_text("noise\n" + sample + "PAD0 input summary: record 1\n")
