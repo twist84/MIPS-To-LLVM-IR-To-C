@@ -99,6 +99,12 @@ private:
     std::string vu0_lo_ptr(uint8_t reg);
     std::string vu0_hi_ptr(uint8_t reg);
     std::string state_field(int field);
+    // Write-through raw FP SSA cache, limited to consecutive COP1 S/W
+    // instructions in a single guest block (never across a helper edge).
+    bool m_cache_cop1 = false;
+    std::map<uint8_t, std::string> m_fpr_bits;
+    std::string m_cop1_acc_bits, m_cop1_acc_latch;
+    void clear_cop1_tracking();
     // COP1 helpers: load/store FPR as float / i32 bits.
     std::string load_fpr_f32(uint8_t freg);
     std::string load_fpr_i32(uint8_t freg);

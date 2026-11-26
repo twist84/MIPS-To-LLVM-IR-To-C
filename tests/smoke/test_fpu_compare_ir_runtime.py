@@ -846,6 +846,34 @@ def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs, opt):
                          f"expected 0x{expected_fcsr:08x}")
 
 
+def check_matrix_chain(fixture, temp_dir, target):
+    for opt in (0, 3):
+        fn, engine, module, machine = compile_jit(
+            fixture, temp_dir, "matrix_chain", target, opt)
+        raw = (temp_dir / "matrix_chain.ll").read_text(encoding="utf-8")
+        guest = raw.split("define i32 @guest_fpu_compare_test(", 1)[1].split("\n}\n", 1)[0]
+        # Only the two incoming FPRs require loads, ACC and latch are
+        # already written by MULA.S. No float round-trip for MOV.S.
+        require(len(re.findall(r" = load i64, ptr ", guest)) == 2,
+                "matrix chain reloaded raw FPR inputs")
+        require("bitcast i32" not in guest, "MOV.S used host FP")
+        backing, state = aligned_state()
+        state.fpr[1] = 0xdeadbeef40000000
+        state.fpr[2] = 0x1234567840400000
+        state.fcsr = 0x0000c008
+        require(fn(ctypes.pointer(state), None) == 3, "matrix chain exit")
+        require(state.pc == ENTRY_PC + 20, "matrix chain PC")
+        require(state.fpr[6] == f32_bits(6) and
+                state.fpu_acc == f32_bits(12) and
+                state.fpr[7] == state.fpr[8] == f32_bits(24),
+                "matrix chain FPR/ACC result")
+        require(state.fpu_acc_overflow == 0 and state.fcsr == 8,
+                "matrix chain flags")
+        require(state.fpr[1] == 0xdeadbeef40000000 and
+                state.fpr[2] == 0x1234567840400000, "matrix chain sources")
+        _ = backing, engine, module, machine
+
+
 def main():
     require(
         len(sys.argv) == 2,
@@ -1566,6 +1594,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-fpu-compare-") as directory:
         temp_dir = pathlib.Path(directory)
+        check_matrix_chain(fixture, temp_dir, target)
         for opt in (0, 3):
             for mode, lhs, rhs, expected in cases:
                 run_case(fixture, temp_dir, target, mode, lhs, rhs, expected, opt)

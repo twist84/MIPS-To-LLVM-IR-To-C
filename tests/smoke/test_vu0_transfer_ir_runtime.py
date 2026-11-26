@@ -597,6 +597,25 @@ def main():
                 and vu0.mac_flags == 0x1404 and vu0.status_flags == 0x34d,
                 "direct VU0 VMUL result and true range flags")
         check_sync(sync, 1, ENTRY_PC, "direct VMUL")
+        for mode, mask in (("ir_vmul_x", 8), ("ir_vmul_empty", 0)):
+            def init_partial(cpu, vu0):
+                init_mul(cpu, vu0)
+                set_vf(cpu, 3, (1, 2, 3, 4))
+                vu0.mac_flags = 0xffff
+            for optimized in (False, True):
+                result, cpu, vu0, sync, _, keep = run_guest(
+                    fixture, temp_dir, target, mode, init_partial, optimized=optimized)
+                require(result == EE_EXIT_DISPATCH and
+                        vf_words(cpu, 3) == ((0x3ffffffe if mask else 1), 2, 3, 4)
+                        and vu0.mac_flags == 0,
+                        "masked VU0 FMAC changed inactive lanes or MAC flags")
+                check_sync(sync, 1, ENTRY_PC, mode)
+            raw = (temp_dir / f"{mode}.ll").read_text(encoding="utf-8")
+            name = f"define internal i32 @ee_vu0_ir_fmac_s2_0_0_{mask}_false("
+            body = raw.split(name, 1)[1].split("\n}\n", 1)[0]
+            require("@vu_fmac4(" not in body and
+                    ("@vu_fmac(" in body) == bool(mask),
+                    mode + ": FMAC component specialization missing")
 
         def init_add(cpu, vu0):
             set_vf(cpu, 1, (0x8080002c, 0x80800036, 0x80c1aa65, 0x3f800000))

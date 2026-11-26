@@ -221,6 +221,11 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
         words = {vu_special(op, mask, 1u, ft)};
         return true;
     }
+    if (mode == "ir_vmul_x" || mode == "ir_vmul_empty")
+    {
+        words = {vu_macro(0x2au, mode == "ir_vmul_x" ? 8u : 0u, 1u, 2u, 3u)};
+        return true;
+    }
     if (mode == "ir_vmul" || mode == "ir_vadd" || mode == "ir_vmula_madd" ||
         mode == "ir_vdiv_wait" || mode == "ir_vsqrt_wait")
     {

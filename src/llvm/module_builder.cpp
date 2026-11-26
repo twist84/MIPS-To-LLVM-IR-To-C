@@ -433,14 +433,34 @@ std::string module_builder::fpu_acc_ptr()
     return "getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 13";
 }
 
+void module_builder::clear_cop1_tracking()
+{
+    m_fpr_bits.clear();
+    m_cop1_acc_bits.clear();
+    m_cop1_acc_latch.clear();
+    m_cache_cop1 = false;
+}
+
 std::string module_builder::load_fpr_i32(uint8_t freg)
 {
+    if (m_cache_cop1)
+    {
+        const auto found = m_fpr_bits.find(freg);
+        if (found != m_fpr_bits.end())
+        {
+            return found->second;
+        }
+    }
     std::string p = newtemp();
     std::string v64 = newtemp();
     std::string v32 = newtemp();
     m_out += "  " + p + " = " + fpr_ptr(freg) + "\n";
     m_out += "  " + v64 + " = load i64, ptr " + p + "\n";
     m_out += "  " + v32 + " = trunc i64 " + v64 + " to i32\n";
+    if (m_cache_cop1)
+    {
+        m_fpr_bits[freg] = v32;
+    }
     return v32;
 }
 
@@ -459,6 +479,10 @@ void module_builder::store_fpr_i32(uint8_t freg, const std::string& ival)
     m_out += "  " + p + " = " + fpr_ptr(freg) + "\n";
     m_out += "  " + v64 + " = zext i32 " + ival + " to i64\n";
     m_out += "  store i64 " + v64 + ", ptr " + p + "\n";
+    if (m_cache_cop1)
+    {
+        m_fpr_bits[freg] = ival;
+    }
 }
 
 void module_builder::store_fpr_f32(uint8_t freg, const std::string& fval)
@@ -997,6 +1021,7 @@ void module_builder::reset_tracking()
     m_cur_lo.clear();
     m_cur_hi.clear();
     m_value_bits.clear();
+    clear_cop1_tracking();
     m_dirty_lo.clear();
     m_dirty_hi.clear();
 }
@@ -1851,6 +1876,16 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         }
     } restore{m_current_guest_insn, saved_insn};
 
+    // Only pure COP1 S/W arithmetic/compare/convert chains retain FP
+    // facts. Other opcodes can call runtime observers or memory helpers.
+    const bool cache_cop1 = ins.valid == ee::e_ee_valid::VALID &&
+        ins.opcode == e_ee_opcode::OP_COP1 &&
+        (ins.rs == 0x10u || ins.rs == 0x14u) && !in_delay_slot;
+    if (!cache_cop1)
+    {
+        clear_cop1_tracking();
+    }
+    m_cache_cop1 = cache_cop1;
     m_out += "  ; ";
     m_out += u32hex(ins.pc);
     m_out += ": ";
@@ -3145,6 +3180,10 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const std::string p = newtemp();
                 m_out += "  " + p + " = " + fpu_acc_ptr() + "\n";
                 m_out += "  store i32 " + bits + ", ptr " + p + "\n";
+                if (m_cache_cop1)
+                {
+                    m_cop1_acc_bits = bits;
+                }
             };
             auto store_acc_overflow = [&](const std::string& overflow) {
                 const std::string p = newtemp();
@@ -3152,6 +3191,10 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 m_out += "  " + p + " = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 14\n";
                 m_out += "  " + word + " = zext i1 " + overflow + " to i32\n";
                 m_out += "  store i32 " + word + ", ptr " + p + "\n";
+                if (m_cache_cop1)
+                {
+                    m_cop1_acc_latch = overflow;
+                }
             };
             auto set_fcc = [&](const std::string& cmp_i1) {
                 std::string p = newtemp();
@@ -3195,24 +3238,19 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
 
                 const std::string fcsr = newtemp();
                 const std::string old_flags = newtemp();
-                const std::string set_o = newtemp();
-                const std::string clear_o = newtemp();
-                const std::string after_o = newtemp();
-                const std::string set_u = newtemp();
-                const std::string clear_u = newtemp();
-                const std::string after_u = newtemp();
+                const std::string cleared = newtemp();
+                const std::string o_flags = newtemp();
+                const std::string u_flags = newtemp();
+                const std::string merged = newtemp();
+                const std::string final_flags = newtemp();
                 m_out += "  " + fcsr + " = " + fcsr_ptr() + "\n";
                 m_out += "  " + old_flags + " = load i32, ptr " + fcsr + "\n";
-                m_out += "  " + set_o + " = or i32 " + old_flags + ", 32784\n";
-                m_out += "  " + clear_o + " = and i32 " + old_flags + ", -32769\n";
-                m_out += "  " + after_o + " = select i1 " + overflow +
-                         ", i32 " + set_o + ", i32 " + clear_o + "\n";
-                m_out += "  " + set_u + " = or i32 " + after_o + ", 16392\n";
-                m_out += "  " + clear_u + " = and i32 " + after_o + ", -16385\n";
-                m_out += "  " + after_u + " = select i1 " + underflow +
-                         ", i32 " + set_u + ", i32 " + clear_u + "\n";
-                // Both causes reflect the current result; retain sticky bits.
-                m_out += "  store i32 " + after_u + ", ptr " + fcsr + "\n";
+                m_out += "  " + cleared + " = and i32 " + old_flags + ", -49153\n";
+                m_out += "  " + o_flags + " = select i1 " + overflow + ", i32 32784, i32 0\n";
+                m_out += "  " + u_flags + " = select i1 " + underflow + ", i32 16392, i32 0\n";
+                m_out += "  " + merged + " = or i32 " + cleared + ", " + o_flags + "\n";
+                m_out += "  " + final_flags + " = or i32 " + merged + ", " + u_flags + "\n";
+                m_out += "  store i32 " + final_flags + ", ptr " + fcsr + "\n";
                 if (fp_funct >= 0x18)
                 {
                     store_acc_i32(bits);
@@ -3309,7 +3347,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             }
             else if (fmt == 0x10 && fp_funct == 0x06) // MOV.S
             {
-                store_fpr_f32(fd, load_fpr_f32(fs));
+                store_fpr_i32(fd, load_fpr_i32(fs));
             }
             else if (fmt == 0x10 && fp_funct == 0x07) // NEG.S
             {
@@ -3386,21 +3424,37 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                 const bool subtract = (fp_funct & 1u) != 0;
                 const std::string lhs = load_fpr_i32(fs);
                 const std::string rhs = load_fpr_i32(ft);
-                const std::string acc_ptr = newtemp();
-                const std::string acc = newtemp();
-                const std::string latch_ptr = newtemp();
-                const std::string latch_word = newtemp();
-                const std::string latch = newtemp();
+                std::string acc = m_cop1_acc_bits;
+                std::string latch = m_cop1_acc_latch;
+                if (acc.empty())
+                {
+                    const auto ptr = newtemp();
+                    acc = newtemp();
+                    m_out += "  " + ptr + " = " + fpu_acc_ptr() + "\n";
+                    m_out += "  " + acc + " = load i32, ptr " + ptr + "\n";
+                    if (m_cache_cop1)
+                    {
+                        m_cop1_acc_bits = acc;
+                    }
+                }
+                if (latch.empty())
+                {
+                    const auto ptr = newtemp();
+                    const auto word = newtemp();
+                    latch = newtemp();
+                    m_out += "  " + ptr + " = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 14\n";
+                    m_out += "  " + word + " = load i32, ptr " + ptr + "\n";
+                    m_out += "  " + latch + " = icmp ne i32 " + word + ", 0\n";
+                    if (m_cache_cop1)
+                    {
+                        m_cop1_acc_latch = latch;
+                    }
+                }
                 const std::string tuple = newtemp();
                 const std::string bits = newtemp();
                 const std::string overflow = newtemp();
                 const std::string underflow = newtemp();
                 const std::string product_underflow = newtemp();
-                m_out += "  " + acc_ptr + " = " + fpu_acc_ptr() + "\n";
-                m_out += "  " + acc + " = load i32, ptr " + acc_ptr + "\n";
-                m_out += "  " + latch_ptr + " = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 14\n";
-                m_out += "  " + latch_word + " = load i32, ptr " + latch_ptr + "\n";
-                m_out += "  " + latch + " = icmp ne i32 " + latch_word + ", 0\n";
                 m_out += "  " + tuple + " = call { i32, i1, i1, i1 } @ee_cop1_mac_bits(i32 " +
                          acc + ", i32 " + lhs + ", i32 " + rhs + ", i1 " +
                          (subtract ? "true" : "false") + ", i1 " + latch + ")\n";
