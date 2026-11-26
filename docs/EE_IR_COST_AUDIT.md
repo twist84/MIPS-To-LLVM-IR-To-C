@@ -1627,3 +1627,20 @@ reference slots 22,070,897,648; yields 3,008; fields 4,527; GPU draws
 40.906 (0.039% faster than scalar pilot; noise). All five PR CI workflows
 passed on f2cfa77. Accept expanded scalar outlining for the matched retail
 workload, retaining isolated cache status.
+
+### Checkpoint 5e — cross-module scalar helper sharing
+
+The 9,644 new scalar winners contain 36,164 module-local scalar helper
+definitions (static IR, not native span sizes). The 38 pilot modules
+also contain local helpers. Test one exact noinline definition per
+width/direction across the 9,682 accepted scalar modules. Choose a
+stable O5 owner when available. Reconstruct and hash-check every local
+outline, verify the complete two-layer scalar object/manifest chain,
+require identical helper bodies, fallback declarations, direct call
+counts and no escaping symbol uses. Preserve all other guest and shared
+symbols. Recompile only existing scalar modules with original O5/Oz
+policy, retain unchanged non-scalar objects, require aggregate executable
+savings before linking. Unlike 5d, do not independently reject individual
+module losses: the shared owner graph must remain coherent. Compare the
+new DLL against the 77.14 MiB expanded scalar parent in a matched replay.
+No production integration or claim of speedup until separately validated.

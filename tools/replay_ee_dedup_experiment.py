@@ -36,7 +36,7 @@ def validate_libraries(profile, experiment, elf):
         raise ValueError("boot ELF differs from baseline translation provenance")
     if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
         raise ValueError("baseline must have native ALU certificates disabled")
-    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory") or
+    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory", "experimental_shared_scalar_memory") or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
         raise ValueError("experiment and normal translation metadata do not match")
@@ -61,7 +61,8 @@ def validate_prior(experiment, prior, candidate, baseline, hashes):
                     "experimental_shared_cop1_mul": "experimental_shared_quadword",
                     "experimental_shared_cop1_add": "experimental_shared_cop1_mul",
                     "experimental_selective_scalar_memory": "experimental_shared_cop1_add",
-                    "experimental_expanded_scalar_memory": "experimental_selective_scalar_memory"}
+                    "experimental_expanded_scalar_memory": "experimental_selective_scalar_memory",
+                    "experimental_shared_scalar_memory": "experimental_expanded_scalar_memory"}
     if (current.get("mode") not in parent_modes or
             parent.get("mode") != parent_modes.get(current.get("mode")) or
             not parent.get("runtime_validation_required") or

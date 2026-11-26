@@ -9,6 +9,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
+from build_ee_shared_scalar_experiment import share_helpers, shared_name
+from build_ee_quadword_experiment import body_of
+from audit_ee_helper_inventory import sha
 
 
 def fixture(width, write):
@@ -100,6 +103,41 @@ class TestScalarPilot(unittest.TestCase):
         self.assertEqual(select(rows, 0, 8), ["large.ll", "small.ll"])
         self.assertEqual(select(rows, 1, 0), ["large.ll", "small.ll"])
         self.assertEqual(select(rows[:2], 8, 8), [])
+
+    def test_share_exact_scalar_helpers(self):
+        for width in (1, 2, 4, 8):
+            for write in (False, True):
+                op = "write" if write else "read"
+                bits = width * 8
+                ty = f"i{bits}"
+                fallback = f"ee_mem_{op}{bits}"
+                declaration = (f"declare void @{fallback}(ptr, i32, {ty})" if write else
+                               f"declare {ty} @{fallback}(ptr, i32)").encode()
+                raw = fixture(width, write)
+                raw = raw.replace(body_of(raw, fallback), declaration, 1)
+                local, counts = outline(raw, "guest")
+                name = f"ee_pilot_scalar_{op}{bits}"
+                owners = {name: "a"}
+                expected = {name: sha(body_of(local, name))}
+                owner = share_helpers(local, "guest", counts, expected, owners, "a")
+                other = share_helpers(local, "guest", counts, expected, owners, "b")
+                self.assertIn(b"define " + (b"void" if write else ty.encode()) +
+                              b" @" + shared_name(name).encode(), owner)
+                self.assertIn(b"declare " + (b"void" if write else ty.encode()) +
+                              b" @" + shared_name(name).encode(), other)
+                with llvm.create_context() as ctx:
+                    a = llvm.parse_assembly(owner.decode(), context=ctx)
+                    b = llvm.parse_assembly(other.replace(b"@guest(", b"@guest_other(").decode(), context=ctx)
+                    a.verify()
+                    b.verify()
+                    a.link_in(b)
+                    a.verify()
+                    self.assertFalse(a.get_function(shared_name(name)).is_declaration)
+                with self.assertRaises(ValueError):
+                    share_helpers(local, "guest", counts, {name: "wrong"}, owners, "a")
+                with self.assertRaises(ValueError):
+                    share_helpers(local + b"\n@escape = global ptr @" + name.encode() + b"\n",
+                                  "guest", counts, expected, owners, "a")
 
     def test_exact_rewrite(self):
         for width in (1, 2, 4, 8):

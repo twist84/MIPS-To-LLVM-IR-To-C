@@ -173,11 +173,7 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def trial(task):
-    name, guest, path, obj_dir, record, receipts, plans, triple = task[:8]
-    object_output = task[8] if len(task) == 9 else None
-    raw = path.read_bytes()
-    data = verified_object(obj_dir, record, sha(raw))
+def reconstruct_parent(raw, guest, name, receipts, plans):
     counter, quad, mul, add = plans
     r0, r1, r2, r3 = receipts
     owner = name == counter["shared_owner"]
@@ -197,6 +193,15 @@ def trial(task):
             if sha(changed) != r["transformed_ir_sha256"]:
                 raise ValueError(f"prior transform digest mismatch: {name}")
             row = r
+    return changed, row
+
+
+def trial(task):
+    name, guest, path, obj_dir, record, receipts, plans, triple = task[:8]
+    object_output = task[8] if len(task) == 9 else None
+    raw = path.read_bytes()
+    data = verified_object(obj_dir, record, sha(raw))
+    changed, row = reconstruct_parent(raw, guest, name, receipts, plans)
     mode = check_object(raw, data, record, row)
     candidate, counts = outline(changed, guest)
     result = {"module": name, "mode": mode, "original_ir_sha256": sha(raw),
@@ -272,11 +277,13 @@ def expansion_candidates(report_rows, already):
                   if r.get("memory_helper_calls", 0) and r["module"] not in already)
 
 
-def verify_pilot_parent(folder, meta, names, base_raw, base_manifest, base_records, base_plan):
+def verify_pilot_parent(folder, meta, names, base_raw, base_manifest, base_records, base_plan,
+                        *, expanded=False):
     parent_raw, parent_manifest, parent_records = read_manifest(folder / "objects", set(names))
     plan = read_json(folder / "helper-plan.json")
     library = folder / "game-translated.dll"
-    if (plan["mode"] != "experimental_selective_scalar_memory" or
+    if (plan["mode"] != ("experimental_expanded_scalar_memory" if expanded else
+                         "experimental_selective_scalar_memory") or
             plan["metadata_sha256"] != sha(meta) or
             (folder / "ee_functions.json").read_bytes() != meta or
             plan["source_manifest_sha256"] != sha(base_raw) or
@@ -286,7 +293,7 @@ def verify_pilot_parent(folder, meta, names, base_raw, base_manifest, base_recor
             parent_manifest["target_triple"] != base_manifest["target_triple"] or
             parent_manifest.get("production_cache_compatible") is not False or
             parent_manifest["experimental_mixed_pipeline"] !=
-                base_manifest["experimental_mixed_pipeline"] + "-scalar-pilot" or
+                base_manifest["experimental_mixed_pipeline"] + ("-full" if expanded else "-scalar-pilot") or
             plan["source_functions"] != len(names) or plan["retained_functions"] != len(names) or
             not plan.get("runtime_validation_required") or
             library.stat().st_size != plan["linked_library_bytes"] or
