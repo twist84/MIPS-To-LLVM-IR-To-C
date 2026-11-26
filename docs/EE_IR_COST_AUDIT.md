@@ -250,3 +250,39 @@ latest CI are unverified. Compare the next normal P40 replay using
 identical diagnostics and PC window; the remaining scalar-heavy
 hot modules repeatedly call memory and trace helpers. Avoid bypassing
 MMIO/TLB or guest-store trace semantics for speculative gains.
+
+## Scalar memory follow-up (07:00:12)
+
+Clean 07ee4f6, 40M dispatches, unchanged 16,250 guest IR hashes and
+lowering provenance, selective O5, native library SHA-256
+42f2fbc7d9cc456bc109168072fd7c318420fd8d2289140ad00126f53cba6a2d.
+Same full diagnostics, fixed RTC, async VU1/GS, baseline IOP and
+26M..40M PC window. No IOP guest fault, VU1 interpreter fallbacks or
+residual cycle debt.
+
+Compared to 06:53:43: process wall 45.453 -> 43.609 s, exclusive
+EE 12.750 -> 11.942 s, IOP service 7.267 -> 6.875 s. First spawn
+22,493,853 -> 21,552,226. Complete post-spawn intervals 598 fields
+in 12.526043 s -> 619 in 12.6848695 s (47.74 -> 48.80 fields/s);
+EE exclusive 215.99 -> 211.37 ns/dispatch. The total field count
+actually fell 4869 -> 4386, so raw process times are not an isolated
+memory-helper speedup. Post-spawn IOP cost also fell; manual input,
+async completion and workload differences remain confounders.
+
+The five optimized VU0 entries remain faster than the old backend-only
+O5. Their latest ns/non-skipped attempt: 108220 27.74, 106a20 16.06,
+1068e0 9.67, 106950 19.79, 106aa0 49.07. Scalar hotspots show mixed
+small changes; avoid claiming a uniform improvement.
+
+The latest post-spawn intervals spend 0.908 s on dispatch diagnostics
+alone (plus timer sampling overhead, not isolated). 471a9f6 adds
+cumulative guest field counts to ordinary progress/final timing lines,
+including when detailed runtime profiling is disabled. 39856c6 checks
+monotonic counts and final JSON agreement in the lean fixture. Measure
+normal uncapped gameplay with SDBZ_RUNTIME_PROFILE=0,
+SDBZ_REPORT_HOTSPOTS=0, SDBZ_REPORT_BOUNDARY_TIMING=0,
+SDBZ_PROFILE_PCS=0; retain the normal snapshot and progress cadence.
+Use differences in cumulative fields and elapsed_ms between progress
+samples wholly after first spawn, not absent subsystem timings or the
+full-run mean. This is a separate diagnostic-cost experiment, not a
+new codegen change or exact workload comparison.
