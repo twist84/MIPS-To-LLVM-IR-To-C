@@ -2405,6 +2405,21 @@ int main(int argc, char** argv)
     }
     uint32_t state_trace_first = 0u;
     uint32_t state_trace_last = 0u;
+    uint32_t state_trace_every = 1u;
+    uint64_t state_trace_next = 0u;
+    uint64_t state_trace_observations = 0u;
+    uint64_t state_trace_path = 14695981039346656037ull;
+    uint64_t state_trace_clocks = 14695981039346656037ull;
+    std::string state_trace_every_environment;
+    const char* state_trace_stride = read_host_environment(
+        "SDBZ_STATE_TRACE_EVERY", &state_trace_every_environment);
+    if (state_trace_stride != nullptr &&
+        (!parse_u32(state_trace_stride, &state_trace_every) ||
+         state_trace_every == 0u))
+    {
+        std::fprintf(stderr, "Invalid SDBZ_STATE_TRACE_EVERY (positive integer)\n");
+        return 2;
+    }
     std::string state_trace_first_environment;
     std::string state_trace_last_environment;
     const char* state_trace_begin = read_host_environment(
@@ -2416,13 +2431,14 @@ int main(int argc, char** argv)
          (!parse_u32(state_trace_begin, &state_trace_first) ||
           !parse_u32(state_trace_end, &state_trace_last) ||
           state_trace_first == 0u || state_trace_last < state_trace_first ||
-          state_trace_last - state_trace_first >= 100000u)))
+          (state_trace_last - state_trace_first) / state_trace_every >= 100000u)))
     {
         std::fprintf(stderr,
             "Invalid SDBZ_STATE_TRACE_FIRST/LAST (positive inclusive range, "
-            "at most 100000 dispatches)\n");
+            "at most 100000 sampled dispatch intervals)\n");
         return 2;
     }
+    state_trace_next = state_trace_first;
     uint32_t report_progress_interval = static_cast<uint32_t>(k_report_progress_interval);
     std::string progress_environment;
     const char* progress_setting = read_host_environment(
@@ -5077,32 +5093,62 @@ int main(int argc, char** argv)
         if (state_trace_first != 0u && dispatched + 1u >= state_trace_first &&
             dispatched + 1u <= state_trace_last)
         {
-            // Passive pre-native state, independent of host timestamps.
-            // Hash only defined architectural GPR fields, not struct padding.
-            uint64_t gpr_digest = 14695981039346656037ull;
-            for (const auto& reg : cpu.m_gpr)
+            // Rolling fingerprints include all observed pre-native entries
+            // between samples, even if dispatch PCs later reconverge.
+            const uint64_t trace_dispatch = dispatched + 1u;
+            const auto mix_trace = [](uint64_t hash, uint64_t value)
             {
-                gpr_digest = (gpr_digest ^ reg.m_lo) * 1099511628211ull;
-                gpr_digest = (gpr_digest ^ reg.m_hi) * 1099511628211ull;
+                return (hash ^ value) * 1099511628211ull;
+            };
+            ++state_trace_observations;
+            state_trace_path = mix_trace(state_trace_path, trace_dispatch);
+            state_trace_path = mix_trace(state_trace_path, from_pc);
+            state_trace_path = mix_trace(state_trace_path, current_thread_id);
+            state_trace_clocks = mix_trace(state_trace_clocks,
+                runtime.m_ee_cycle_scheduler.current_cycle());
+            state_trace_clocks = mix_trace(state_trace_clocks,
+                runtime.m_guest_instruction_attempts);
+            state_trace_clocks = mix_trace(state_trace_clocks,
+                iop_kernel ? iop_kernel->cycles() : 0u);
+            state_trace_clocks = mix_trace(state_trace_clocks, iop_clock.due());
+            state_trace_clocks = mix_trace(state_trace_clocks,
+                hardware.scanout().fields_started());
+            if (state_trace_every == 1u || trace_dispatch >= state_trace_next)
+            {
+                state_trace_next = static_cast<uint64_t>(state_trace_first) +
+                    ((trace_dispatch - state_trace_first) / state_trace_every + 1u) *
+                    state_trace_every;
+                // Passive pre-native state, independent of host timestamps.
+                // Hash only defined architectural GPR fields, not struct padding.
+                uint64_t gpr_digest = 14695981039346656037ull;
+                for (const auto& reg : cpu.m_gpr)
+                {
+                    gpr_digest = (gpr_digest ^ reg.m_lo) * 1099511628211ull;
+                    gpr_digest = (gpr_digest ^ reg.m_hi) * 1099511628211ull;
+                }
+                std::fprintf(stdout,
+                    "EE state: dispatch=%llu pc=%08x thread=%u gpr=%016llx "
+                    "status=%08x cause=%08x epc=%08x "
+                    "ee=%llu attempts=%llu iop=%llu debt=%llu "
+                    "intc=%08x/%08x dmac=%08x/%08x fields=%llu rpc=%llu pad=%u "
+                    "observations=%llu path=%016llx clocks=%016llx\n",
+                    static_cast<unsigned long long>(dispatched + 1u),
+                    from_pc, current_thread_id,
+                    static_cast<unsigned long long>(gpr_digest),
+                    cpu.m_cop0[12u], cpu.m_cop0[13u], cpu.m_cop0[14u],
+                    static_cast<unsigned long long>(runtime.m_ee_cycle_scheduler.current_cycle()),
+                    static_cast<unsigned long long>(runtime.m_guest_instruction_attempts),
+                    static_cast<unsigned long long>(iop_kernel ? iop_kernel->cycles() : 0u),
+                    static_cast<unsigned long long>(iop_clock.due()),
+                    hardware.intc().status(), hardware.intc().mask(),
+                    hardware.dmac().status(), hardware.dmac().pending(),
+                    static_cast<unsigned long long>(hardware.scanout().fields_started()),
+                    static_cast<unsigned long long>(last_iop_rpc_sequence),
+                    iop_kernel ? iop_kernel->hardware().pad0_polls() : 0u,
+                    static_cast<unsigned long long>(state_trace_observations),
+                    static_cast<unsigned long long>(state_trace_path),
+                    static_cast<unsigned long long>(state_trace_clocks));
             }
-            std::fprintf(stdout,
-                "EE state: dispatch=%llu pc=%08x thread=%u gpr=%016llx "
-                "status=%08x cause=%08x epc=%08x "
-                "ee=%llu attempts=%llu iop=%llu debt=%llu "
-                "intc=%08x/%08x dmac=%08x/%08x fields=%llu rpc=%llu pad=%u\n",
-                static_cast<unsigned long long>(dispatched + 1u),
-                from_pc, current_thread_id,
-                static_cast<unsigned long long>(gpr_digest),
-                cpu.m_cop0[12u], cpu.m_cop0[13u], cpu.m_cop0[14u],
-                static_cast<unsigned long long>(runtime.m_ee_cycle_scheduler.current_cycle()),
-                static_cast<unsigned long long>(runtime.m_guest_instruction_attempts),
-                static_cast<unsigned long long>(iop_kernel ? iop_kernel->cycles() : 0u),
-                static_cast<unsigned long long>(iop_clock.due()),
-                hardware.intc().status(), hardware.intc().mask(),
-                hardware.dmac().status(), hardware.dmac().pending(),
-                static_cast<unsigned long long>(hardware.scanout().fields_started()),
-                static_cast<unsigned long long>(last_iop_rpc_sequence),
-                iop_kernel ? iop_kernel->hardware().pad0_polls() : 0u);
         }
         if (report_path != nullptr)
         {
