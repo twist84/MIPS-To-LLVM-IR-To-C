@@ -1965,7 +1965,7 @@ All five workflows passed on aac15fc.
 ## Checkpoint 8a — typed constexpr integer semantics
 
 Architecture-aware lowering starts with the pure C++17 evaluator
-`src/llvm/ee_scalar_constant.h`. Existing module_builder SSA/dirty-half
+`src/architecture/ee_scalar_constant.h`. Existing module_builder SSA/dirty-half
 tracking, string constant parsing, immediate folding, memory/exception
 lowering and internal dispatcher entries remain unchanged.
 The reference strategy is PCSX2's separation of constant, one-constant
@@ -1989,4 +1989,7 @@ real opcode differential execution against the bounded RAM interpreter
 for its supported scalar ALU subset, zero and aliased operands/destinations,
 all 32 GPR halves, and an independent bit-at-a-time shift oracle for
 the complete shift family. CI must establish the test gate before
-production integration. No intentional shared IR regeneration in 8a.
+production integration. The isolated architecture header is outside the existing lowering input
+fingerprint; the test target alone includes it. At 8b, add the architecture
+sources to the lowering provenance before the emitter starts using them.
+No shared IR regeneration is required in 8a.

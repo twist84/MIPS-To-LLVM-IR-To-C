@@ -539,6 +539,7 @@ add_executable(ee_ram_interpreter_test tests/smoke/ee_ram_interpreter_test.cpp)
 target_link_libraries(ee_ram_interpreter_test PRIVATE ee_core)
 add_executable(ee_scalar_constant_test tests/smoke/ee_scalar_constant_test.cpp)
 target_link_libraries(ee_scalar_constant_test PRIVATE ee_core)
+target_include_directories(ee_scalar_constant_test PRIVATE ${CMAKE_SOURCE_DIR}/src/architecture)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
 target_link_libraries(ee_ram_tlb_test PRIVATE ee_core)
 
