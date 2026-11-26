@@ -6191,11 +6191,12 @@ int main(int argc, char** argv)
                 "EE progress: dispatched=%llu pc=0x%08x "
                 "elapsed_ms=%.1f native_ms=%.1f report_ms=%.1f "
                 "slowest_native_pc=0x%08x slowest_native_ms=%.3f "
-                "iop_ms=%.1f compile_wait_ms=%.1f\n",
+                "iop_ms=%.1f compile_wait_ms=%.1f fields=%llu\n",
                 static_cast<unsigned long long>(dispatched),
                 cpu.m_pc, elapsed_ms, static_cast<double>(native_time_ns) / 1e6, report_time_ms,
                 slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
-                static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
+                static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms,
+                static_cast<unsigned long long>(hardware.scanout().fields_started())
             );
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
@@ -9564,11 +9565,12 @@ int main(int argc, char** argv)
             stderr,
             "EE timing: dispatched=%llu elapsed_ms=%.1f native_ms=%.1f "
             "report_ms=%.1f slowest_native_pc=0x%08x "
-            "slowest_native_ms=%.3f iop_ms=%.1f compile_wait_ms=%.1f\n",
+            "slowest_native_ms=%.3f iop_ms=%.1f compile_wait_ms=%.1f fields=%llu\n",
             static_cast<unsigned long long>(dispatched), elapsed_ms,
             static_cast<double>(native_time_ns) / 1e6, report_time_ms,
             slowest_native_pc, static_cast<double>(slowest_native_ns) / 1e6,
-            static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms
+            static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms,
+            static_cast<unsigned long long>(hardware.scanout().fields_started())
         );
     }
     std::string trace_iop_storage;
