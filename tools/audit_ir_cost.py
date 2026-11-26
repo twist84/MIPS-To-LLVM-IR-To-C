@@ -69,7 +69,7 @@ def measure(path, profile, target_triple, machine):
         module.triple = target_triple
         module.data_layout = str(machine.target_data)
         module.verify()
-        if profile == verify_ir.IR_PIPELINE_PROFILE:
+        if verify_ir.uses_ir_pipeline(profile, raw):
             verify_ir.optimize_guest_ir(module, machine)
         after = ir_counts(module)
         assembly = assembly_counts(machine.emit_assembly(module))
