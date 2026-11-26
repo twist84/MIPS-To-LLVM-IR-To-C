@@ -303,3 +303,49 @@ must be measured before promotion. V26 is experimental, retain V25.
 O0/O3 differential fixtures test normal and forced single-pair paths;
 a shortened test-only budget checks exact partial staged state on failure
 against the single-pair path. CI and matched V25/V26 replay pending.
+
+## G2C.2 accepted for correctness — matched V25/V26 replay
+
+All five CI workflows passed at 614ec20. ee-graphics-g2c2.zip contains
+four interleaved unprofiled synchronous pairs. All eight completed 40M
+dispatches; receipt reports 184700 matching transitions per replay,
+3127/3127 PAD polls (independently checked stderr footers), 21910026110
+guest attempts, 22115080673 EE cycles, 4494 fields, 394881 native VU1
+runs, 445669423 pairs, no fallback or IOP guest fault. Recomputed raw
+terminal-report and screenshot hashes match all eight runs. All 84
+library hashes changed with identical inventory and native build target;
+input integrity receipt passed.
+
+| Pair | V25 s | V26 s |
+|---|---:|---:|
+| 1 | 42.391 | 42.391 |
+| 2 | 43.907 | 42.547 |
+| 3 | 43.797 | 44.047 |
+| 4 | 44.016 | 43.844 |
+
+Median 43.852 -> 43.1955s, nominal throughput +1.52%. Two pairs faster,
+one tied and one slower. Control spread 1.625s exceeds median difference
+0.6565s; both arms are slower than previous session, no established
+speedup. Retain V26 as correctness-validated experimental baseline,
+not performance promotion. Receipt has hashes rather than library
+sizes; size/code-cache cost is still unmeasured. No async claim.
+
+## G2D.1 — guarded backedge/delay-pair fusion
+
+For reached backward relative B and conditional branches, fuse the
+branch and its ordinary nonbranch delay pair into a two-pair guarded
+block. Exclude E-bit, callback and nested-branch delay pairs; require
+reached backedge and (for conditional branches) fallthrough targets.
+The same entry guard proves normal incoming NPC, no pending E, and
+budget for both pairs. Execute both original pair bodies in order.
+Capture the destination before executing the delay pair; do not
+re-evaluate the condition after VI writes. Preserve per-pair cycle,
+dependency, flag, Q/P and delayed-VI updates. Update PC/NPC/step once
+at the exit and branch directly to the selected emitted target.
+Original pair entries retain exact fallback for unusual incoming
+state, insufficient budget, indirect targets and unsupported cases.
+No loop trip-count assumptions or unrolling, no EE or ABI changes.
+O0/O3 fixtures exercise taken/not-taken loop edges, self-loop delay
+writes to the predicate, forced single-pair path, and test-only budget
+exhaustion with exactly one pair remaining at a loop terminator.
+V27 is the next candidate; retain V26. CI and matched replay pending.
