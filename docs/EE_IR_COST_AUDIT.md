@@ -508,3 +508,38 @@ Provenance records both flags and PS2_SCALE. New IR refresh
 required once, then compare word-only and all-scalar using the
 same cache. Keep PS2_SCALE=1 and lean fixed-RTC settings.
 Latest CI and broader fastmem performance are pending.
+
+## Extended scalar fastmem A/B (08:12 and 08:13)
+
+Both clean 172cb52, 40M dispatches, fixed RTC, lean, 1x, host audio
+off. Same translation manifest SHA-256
+7bd5b937d84a773b68783f03054a6883af178692497c7ffd61c9ef6e8b7d8543
+and native library SHA-256
+ea254f8e6e5e41d2f1c7b3a071518bbd29e80c6242cf5695265e6c57833c5812.
+Both word enabled; scalar flag explicitly 0 then 1 in provenance
+and corresponding enabled log markers.
+
+Word only: first spawn 21635490, progress 21643264 at 21598.7ms
+with 4261 fields; terminal 40630.4ms and 5458 fields.
+1197 / 19.0317s = 62.8951 fields/s. Wall 45.484s, 3866 presents,
+1592 skipped, 4655381 draws, 381059 native VU1 runs.
+All scalar: first spawn 22938942, progress 22945792 at 22553.2ms
+with 4606 fields; terminal 40299.6ms and 5718 fields.
+1112 / 17.7464s = 62.6606 fields/s. Wall 44.969s, 4060 presents,
+1658 skipped, 4451110 draws, 365924 native VU1 runs.
+Both zero fallbacks, guest IOP faults and worker failures,
+one VU1 job pending at stop, matching CPU/GPU digests within
+each run. All five workflows passed 172cb52. Difference -0.37%;
+no additional throughput gain established. Keep scalar optional.
+
+3913de6 adds independent SDBZ_EE_FASTMEM_QUAD=1 for LQ/SQ
+and LQC2/SQC2. Guarded 16-byte physical spans use native vector
+loads/stores; traced stores keep original per-lane ordering;
+FIFO, aliases, scratchpad, null/partial spans use original helpers.
+Guest alignment/masking unchanged. New regression cases cover
+both lanes, rounded address, partial span and traced/FIFO fallback.
+New IR refresh required. Compare word+scalar with quad disabled
+then enabled using identical cache at 1x. Final CI pending.
+Large function compilation cost remains an open optimization
+target; prefer compact guards and cold-path outlining before
+expanding further or splitting functions.
