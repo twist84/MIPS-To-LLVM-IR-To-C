@@ -388,11 +388,50 @@ public:
 
     bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
         uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven,
-        uint32_t incoming_npc, bool ending_known, bool incoming_ending)
+        uint32_t incoming_npc, bool ending_known, bool incoming_ending,
+        const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
+        uint32_t block_length)
     {
         const auto suffix = std::to_string(pc);
         m_ir += "pair_" + suffix + ":\n";
         const auto old_steps = operation("load i32, ptr %step_count, align 4");
+        if (block_length > 1u)
+        {
+            // Fast blocks are optional; insufficient budget or a delay
+            // entry goes through the original single-pair path.
+            const auto npc = operation("load i32, ptr %npc, align 4");
+            const auto ending = operation("load i1, ptr %ending, align 1");
+            const auto sequential = operation("icmp eq i32 " + npc + ", " +
+                std::to_string((pc + 8u) & 0x3fffu));
+            const auto not_ending = operation("xor i1 " + ending + ", true");
+            const auto normal = operation("and i1 " + sequential + ", " + not_ending);
+            const auto fits = operation("icmp ule i32 " + old_steps + ", " +
+                std::to_string(c_ee_vu1::k_max_steps - block_length));
+            const auto fast = operation("and i1 " + normal + ", " + fits);
+            line("br i1 " + fast + ", label %block_" + suffix + ", label %single_" + suffix);
+            m_ir += "block_" + suffix + ":\n";
+            for (uint32_t index = 0u; index < block_length; ++index)
+            {
+                const uint32_t at = (pc + index * 8u) & 0x3fffu;
+                m_pair_steps = operation("add i32 " + old_steps + ", " +
+                    std::to_string(index + 1u));
+                m_pair_npc = std::to_string((at + 8u) & 0x3fffu);
+                m_pair_sequential = std::to_string((at + 16u) & 0x3fffu);
+                if (!emit_dynamic_body(at, read_word(code.data() + at),
+                        read_word(code.data() + at + 4u), index == 0u))
+                {
+                    return false;
+                }
+            }
+            const auto next_pc = (pc + block_length * 8u) & 0x3fffu;
+            line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
+            line("store i32 " + std::to_string(next_pc) + ", ptr %pc, align 4");
+            line("store i32 " + std::to_string((next_pc + 8u) & 0x3fffu) +
+                ", ptr %npc, align 4");
+            line("store i1 false, ptr %ending, align 1");
+            line("br label %pair_" + std::to_string(next_pc));
+            m_ir += "single_" + suffix + ":\n";
+        }
         const auto within_budget = operation("icmp ult i32 " + old_steps + ", " +
             std::to_string(c_ee_vu1::k_max_steps));
         line("br i1 " + within_budget + ", label %body_" + suffix + ", label %fail");
@@ -405,10 +444,6 @@ public:
             operation("load i32, ptr %npc, align 4") : std::to_string(incoming_npc);
         const auto ending = ending_known ? std::string(incoming_ending ? "true" : "false") :
             operation("load i1, ptr %ending, align 1");
-        if (m_branch_vi_mask != 0u)
-        {
-            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
-        }
         if (incoming_npc == k_unknown_pc)
         {
             const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
@@ -418,13 +453,80 @@ public:
         {
             m_pair_sequential = std::to_string((incoming_npc + 8u) & 0x3fffu);
         }
+        if (!emit_dynamic_body(pc, lo, hi, true))
+        {
+            return false;
+        }
+        line("store i32 " + m_pair_npc + ", ptr %pc, align 4");
+        line("store i32 " + m_next_target + ", ptr %npc, align 4");
+        line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
+            ", ptr %ending, align 1");
+        const auto retire = "retire_" + suffix;
+        const auto next = "next_" + suffix;
+        if (ending_known)
+        {
+            line("br label %" + (incoming_ending ? retire : next));
+        }
+        else
+        {
+            line("br i1 " + ending + ", label %" + retire + ", label %" + next);
+        }
+        m_ir += next + ":\n";
+        if (direct_pc == k_unknown_pc)
+        {
+            line("br label %dispatch");
+        }
+        else if (direct_proven && alternate_pc == k_unknown_pc)
+        {
+            line("br label %pair_" + std::to_string(direct_pc));
+        }
+        else
+        {
+            // Select using the incoming delayed NPC, never recompute the
+            // predecessor's condition from potentially overwritten VI.
+            const auto matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                std::to_string(direct_pc));
+            std::string other = "dispatch";
+            if (alternate_pc != k_unknown_pc)
+            {
+                other = direct_proven ? "pair_" + std::to_string(alternate_pc) :
+                    "alternate_" + suffix;
+            }
+            line("br i1 " + matches + ", label %pair_" +
+                std::to_string(direct_pc) + ", label %" + other);
+            if (alternate_pc != k_unknown_pc && !direct_proven)
+            {
+                // Unknown indirect or third successors still use the
+                // original emitted-PC guard; both fast edges are exact.
+                m_ir += other + ":\n";
+                const auto alternate_matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                    std::to_string(alternate_pc));
+                line("br i1 " + alternate_matches + ", label %pair_" +
+                    std::to_string(alternate_pc) + ", label %dispatch");
+            }
+        }
+        m_ir += retire + ":\n";
+        line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
+        line("br label %done");
+        return true;
+    }
+
+    bool emit_dynamic_body(uint32_t pc, uint32_t lo, uint32_t hi, bool reset_cache)
+    {
         m_current_pc = pc;
-        // Every pair remains a possible dispatcher target. SSA values
-        // from a different pair do not necessarily dominate this entry.
-        m_vf_lanes = {};
-        m_vf_vectors = {};
-        m_acc_lanes = {};
-        m_acc_vector.clear();
+        // A single-entry block keeps write-through SSA values across
+        // its pairs. Independent entries must discard the emitter cache.
+        if (reset_cache)
+        {
+            m_vf_lanes = {};
+            m_vf_vectors = {};
+            m_acc_lanes = {};
+            m_acc_vector.clear();
+        }
+        if (m_branch_vi_mask != 0u)
+        {
+            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
+        }
         m_next_target = m_pair_sequential;
         m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
         m_delay_vi_mask = 0u;
@@ -479,57 +581,6 @@ public:
             line("store i32 " + std::to_string(m_delay_vi_mask) +
                 ", ptr %previous_vi_mask, align 4");
         }
-        line("store i32 " + m_pair_npc + ", ptr %pc, align 4");
-        line("store i32 " + m_next_target + ", ptr %npc, align 4");
-        line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
-            ", ptr %ending, align 1");
-        const auto retire = "retire_" + suffix;
-        const auto next = "next_" + suffix;
-        if (ending_known)
-        {
-            line("br label %" + (incoming_ending ? retire : next));
-        }
-        else
-        {
-            line("br i1 " + ending + ", label %" + retire + ", label %" + next);
-        }
-        m_ir += next + ":\n";
-        if (direct_pc == k_unknown_pc)
-        {
-            line("br label %dispatch");
-        }
-        else if (direct_proven && alternate_pc == k_unknown_pc)
-        {
-            line("br label %pair_" + std::to_string(direct_pc));
-        }
-        else
-        {
-            // Select using the incoming delayed NPC, never recompute the
-            // predecessor's condition from potentially overwritten VI.
-            const auto matches = operation("icmp eq i32 " + m_pair_npc + ", " +
-                std::to_string(direct_pc));
-            std::string other = "dispatch";
-            if (alternate_pc != k_unknown_pc)
-            {
-                other = direct_proven ? "pair_" + std::to_string(alternate_pc) :
-                    "alternate_" + suffix;
-            }
-            line("br i1 " + matches + ", label %pair_" +
-                std::to_string(direct_pc) + ", label %" + other);
-            if (alternate_pc != k_unknown_pc && !direct_proven)
-            {
-                // Unknown indirect or third successors still use the
-                // original emitted-PC guard; both fast edges are exact.
-                m_ir += other + ":\n";
-                const auto alternate_matches = operation("icmp eq i32 " + m_pair_npc + ", " +
-                    std::to_string(alternate_pc));
-                line("br i1 " + alternate_matches + ", label %pair_" +
-                    std::to_string(alternate_pc) + ", label %dispatch");
-            }
-        }
-        m_ir += retire + ":\n";
-        line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
-        line("br label %done");
         return true;
     }
 
@@ -2160,6 +2211,43 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     {
         return {};
     }
+    // Form bounded, nonoverlapping sequential blocks. Keep every original
+    // pair entry for arbitrary indirect/delay transfers. Exclude callback
+    // pairs and branch/E boundaries; the fast guard proves all internal
+    // PC/NPC/E transitions and budget before executing any pair.
+    std::array<uint32_t, 2048> block_lengths{};
+    std::bitset<2048> block_members;
+    for (uint32_t index = 0u; index < reached.size(); ++index)
+    {
+        if (!reached.test(index) || block_members.test(index))
+        {
+            continue;
+        }
+        uint32_t length = 0u;
+        for (; length < 8u && index + length + 1u < reached.size(); ++length)
+        {
+            const auto at = index + length;
+            if (!reached.test(at) || !reached.test(at + 1u) || block_members.test(at))
+            {
+                break;
+            }
+            const auto lo = read_word(code.data() + at * 8u);
+            const auto hi = read_word(code.data() + at * 8u + 4u);
+            if (is_branch(lo, hi) || (hi & 0x40000000u) != 0u ||
+                is_kick_pair(lo, hi) || is_p_pair(lo, hi))
+            {
+                break;
+            }
+        }
+        if (length >= 3u)
+        {
+            block_lengths[index] = length;
+            for (uint32_t offset = 0u; offset < length; ++offset)
+            {
+                block_members.set(index + offset);
+            }
+        }
+    }
     c_straight_line_emitter emitter;
     // VI0 is constant, and JR/JALR consume live VI values.
     emitter.begin_dynamic(start, reached, has_flags, has_q, has_p,
@@ -2189,7 +2277,8 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
                 read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
                 alternate_emitted ? alternate : k_unknown_pc, proven,
-                incoming_npc, ending_known, ending_seen.test(index)))
+                incoming_npc, ending_known, ending_seen.test(index),
+                code, block_lengths[index]))
         {
             return {};
         }
