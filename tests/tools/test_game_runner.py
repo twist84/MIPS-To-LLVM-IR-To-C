@@ -4793,6 +4793,7 @@ def main():
             clocks = []
             checkpoints = []
             state_traces = []
+            service_totals = []
             for enabled, quiet in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
                 report = root / f"batch-{enabled}-{quiet}.json"
                 replay = command if (enabled, quiet) == ("0", "0") else [
@@ -4852,6 +4853,19 @@ def main():
                                     ["observations"]) for line in state_trace]
                 assert observations == sorted(set(observations)), state_trace
                 state_traces.append(state_trace)
+                totals_line = next(line for line in run.stdout.splitlines()
+                                   if line.startswith("IOP scheduler totals:"))
+                totals = {key: int(value) for key, value in
+                          (token.split("=") for token in totals_line.split()[3:])}
+                assert totals["service_batches"] == totals["kernel_runs"] + totals["quiet_advances"], totals
+                assert totals["logical_turns"] >= totals["service_batches"], totals
+                assert totals["dispatches"] == state["dispatches"], totals
+                if enabled == "0":
+                    assert totals["logical_turns"] == totals["service_batches"], totals
+                if quiet == "0":
+                    assert totals["quiet_advances"] == 0, totals
+                service_totals.append(totals)
+
                 quiet_lines = [line for line in run.stdout.splitlines()
                                if line.startswith("IOP clock quiet:")]
                 if quiet == "1":
@@ -4883,6 +4897,10 @@ def main():
                 assert checkpoint_trace == checkpoints[0], (checkpoints[0], checkpoint_trace)
             for state_trace in state_traces[1:]:
                 assert state_trace == state_traces[0], (state_traces[0], state_trace)
+            for key in ("dispatches", "logical_turns", "debt"):
+                assert all(totals[key] == service_totals[0][key]
+                           for totals in service_totals[1:]), service_totals
+
 
             detail_run = subprocess.run(
                 [arg for arg in command if not arg.startswith("--extra-functions=")] +
