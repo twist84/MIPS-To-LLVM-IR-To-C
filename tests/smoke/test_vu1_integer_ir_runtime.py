@@ -14,6 +14,18 @@ def verify_fmac(ir):
     # Exercise the generated result/exception tuple independently of
     # the interpreter differential, at both optimization levels.
     assert "@vu_fmac(" in ir
+    # Correction eligibility depends on bits 15..22 of the product.
+    # Keep the packed comparison narrow and the normalization shift fixed.
+    mul4 = ir.split(" @vu_mul4(", 1)[1].split("\n}", 1)[0]
+    assert "trunc <4 x i64> %full to <4 x i32>" in mul4
+    assert "icmp eq <4 x i32> %boundary_bits, zeroinitializer" in mul4
+    assert "lshr <4 x i32> %sig, %shift" not in mul4
+    # Exhaust every possible low-23-bit remainder mathematically by
+    # testing all upper eight bits with representative lower 15 bits.
+    for upper in range(256):
+        for lower in (0, 1, 0x3fff, 0x7fff):
+            rem = (upper << 15) | lower
+            assert (rem < 32768) == ((rem & 0x7f8000) == 0)
     wrapper = """
 define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) {
   %latched = icmp ne i32 %latch, 0
