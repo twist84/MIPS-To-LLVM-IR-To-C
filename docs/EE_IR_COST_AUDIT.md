@@ -102,3 +102,50 @@ Next: use the hot PC profile and original/native IR counts to select
 specific register caching, memory access, MMI/COP2 and control-flow
 lowerings. Measure each change on the actual backend rather than
 assuming smaller source IR means less dynamic native work.
+
+## First regenerated retail runs (73ff235)
+
+Two complete 40M O5 runs at 06:34:18 and 06:35:27, fixed RTC,
+async VU1/GS, baseline IOP, full runtime profiling and hotspot maps.
+Both have the identical translation-cache manifest and native library
+SHA-256 prefix 5ec0985422fdb780. All 16,250 source hashes changed from
+the earlier 8fab876 cache; the same ELF and module inventory are retained.
+No reported IOP fault, VU1 fallback, timing observer failure or residual
+IOP debt. Both reach spawn. Manual input and host completion timing
+prevent treating these as exactly matched workloads.
+
+| Metric | 8fab876 baseline replay | 06:34 | 06:35 |
+| --- | ---: | ---: | ---: |
+| Process wall (s) | 51.453 | 51.078 | 47.532 |
+| Profile wall (s) | 46.824 | 45.609 | 42.507 |
+| EE native exclusive (s) | 19.793 | 14.745 | 13.052 |
+| IOP service (s) | 7.257 | 8.441 | 7.938 |
+| Fields | 5094 | 5829 | 5744 |
+| Fields/s | 108.79 | 127.80 | 135.13 |
+| Non-idle-charged guest attempts | 2222410928 | 2300403380 | 2434007009 |
+| Spawn dispatch | 22054541 | 25137707 | 24816127 |
+| Pre-spawn fields/s | 143.86 | 168.53 | 178.49 |
+| Post-spawn fields/s | 43.08 | 40.45 | 44.11 |
+| Post-spawn exclusive native ns/dispatch | 321.63 | 295.92 | 245.26 |
+
+Phase figures sum complete logged profile intervals wholly before or
+after first spawn; the straddling interval is excluded. This is a
+spawn-based proxy, not an exact title or active-gameplay classifier.
+The first common sampled dispatch mismatch is 4,839,424. At the
+preceding common progress sample 4,833,280, native inclusive ms are
+911.3 / 727.4 / 639.9. These are observations, not an architectural
+trace equivalence or isolated codegen speedup. CI timing observer
+JIT crash was reproduced with two MCJIT engines sharing an owned
+target machine; d024d18 gives each its own. Original autotest workflow
+also failed setup (raylib GitHub 403 and missing test files), not a
+verified guest transcript regression.
+
+For the next gameplay profile set SDBZ_PROFILE_PCS=1 and optionally
+SDBZ_PROFILE_PCS_FIRST=26000000 / SDBZ_PROFILE_PCS_LAST=40000000.
+Bounds are inclusive prospective native dispatch ordinals, default
+1..UINT32_MAX. The full report/profiler remains unchanged; only PC
+attribution is filtered. This is host-only and needs no regenerated
+IR. Choose the lower bound based on actual gameplay entry and use
+normal uncapped asynchronous P40. Do not interpret PC ranks as
+static instruction counts or compare profiled wall time directly to
+an unprofiled run.
