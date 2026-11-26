@@ -561,3 +561,66 @@ profiling harness (two repeats each). Review actual callback counts and
 elapsed durations before designing G4B. Profiling overhead is diagnostic
 and must not be interpreted as an optimization or as CPU time. CI and
 retail validation pending.
+
+## G4A accepted — matched VU0 callback attribution
+
+All five CI workflows passed at a21ae8e. Archive ee-graphics-g4a.zip
+SHA-256 949d2339b541e934c7f049bff76dde6eacd0488e8a884f8834db5694e91118cc.
+Runner SHA-256 00d8b0545155181ff7296e713e3e003d845e9b8da2126e3aa97f6b68bb3f2c17.
+All four replays reached 40M dispatches, 3127/3127 PAD polls, 184700
+reference-matched transitions per receipt, 21910026110 attempts,
+22115080673 EE cycles, 4494 fields, 394881 native runs and 445669423
+pairs. Raw report and screenshot digests independently verified;
+normalized reports identical, raw archived transition maps identical
+across four runs, PAD footers verified. Input integrity passed.
+Control 42.516/42.687s, profiled 49.922/50.016s; median overhead
+17.29%. Mean runner elapsed 46.0198365s, covered 38.00376165s
+(82.58%). VU1 compiled exclusive 11.687s (25.40%), EE native boundary
+8.292s (18.02%), IOP 7.319s (15.90%).
+
+Both profiled arms measured exactly 12343615 halted callbacks;
+CMSAR1, micro and invalid categories each zero. Halted exclusive
+324588000 and 323625400ns, mean 0.3241067s (0.7043% of profiled
+runner elapsed), approximately 26ns per callback including timed
+instrumentation. Classification and scope setup outside the measured
+interval, periodic direct device-service calls unmeasured. Do not
+interpret as an exact unprofiled saving or CPU time. Defer G4B:
+callback elision would require proving service and observer safety
+for a small measured exclusive cost. Retain the opt-in attribution
+and the V30 inventory, no ABI changes or async claim.
+
+## G5A — exact COP1 ADD/SUB discarded-significand fast path
+
+In the integer ee_cop1_add_bits helper, identify operands whose raw
+exponent is zero (flush) or whose alignment distance is >=25 (all
+guarded significand bits discarded). If one contributes nothing,
+return the surviving original raw operand with SUB sign already
+applied. If both contribute nothing, return signed zero with the
+intersection of operand signs. Neither case sets O/U: a surviving
+nonzero original exponent already lies in 1..255, and no rounding
+or normalization changes its significand. Otherwise execute the
+unchanged integer adder, including the distance-24 guard bit.
+No IEEE arithmetic, no operand exchange or fused MAC. ACC and
+FCSR writeback remains unchanged. Add O0/O3 comparison with the
+same helper forced through the full arithmetic branch, all exponent
+pairs, sign combinations, both operations, selected raw edge
+encodings and seeded random mantissas. Hardware vectors remain
+in the original test suite. No assumption about runtime hit rate.
+
+Extend replay_ee_graphics_profile.py with mutually exclusive
+--candidate-source and --candidate-source-receipt pair, preserving
+the VU1 comparison and profile-only modes. Independently validate
+both source images against the original O5 translation, unchanged
+ownership, coverage and native target. Hash both images and receipts
+before/after; interleave unprofiled EE arms with one fixed runner
+and V30 inventory, preserve raw outputs and exact architectural
+gates. Regression exercises arm selection, receipt hashes and fixed
+VU1. Rebuild only ee_recomp and the COP1 fixture, then use isolated
+performance-first regeneration from original O5 to a fresh
+build/ee-graphics-g5a directory. Compare against build/ee-graphics-sweep,
+not the original O5 image. The new image also includes intervening
+G3A/G3B shared vector-helper changes in EE-side VU0, because
+module_builder includes the same ee_vu_fmac4_ir.h. This is therefore
+a cumulative EE-image experiment, not isolated attribution of the
+COP1 shortcut. No runner or VU1 rebuild needed; no cache promotion.
+CI and retail replay pending.
