@@ -1941,3 +1941,24 @@ positive payload wins separately from object size and all trial rows.
 Relocations, symbols, COMDAT selection, linker alignment and synthesized
 sections prevent exact prediction of linked PE size. No new DLL or
 retail replay for this audit; only promote measured payload wins later.
+
+### Checkpoint 7d — section payload audit conclusion
+
+Receipt SHA-256 2c3bfbda685efac771887d659f62f3596e7943aa9ed638adb742c7540a267cce.
+Parent DLL, pilot and expanded trial digests agree with 7a/7c.
+All 5,656 distinct rows reconcile, including 24 exact pilot receipt
+matches (ignoring compilation time). The audit's local reproduction
+gate checks all original candidate object hashes; the complete prior
+expanded trial file was not independently available for row-by-row
+external comparison. Inventory 16,252; retain 1,322 accepted rotations.
+All candidates save 553,800 executable bytes but add 769,564 initialized
+bytes, 215,764 combined payload bytes and 2,596,244 object bytes.
+449 positive-payload candidates (233 O5, 216 Oz) save 152,078 executable
+and 43,842 combined payload bytes, while adding 108,236 initialized
+and 240,660 whole-object bytes. 31 neutral and 5,176 negative payload
+results. Audit time 204.844 s. The positive payload total is only
+0.061% of the accepted DLL size and is not a linked-size prediction.
+Close checkpoint 7 without promotion or another retail replay.
+Retain the accepted 72,132,096-byte DLL and original IR/caches unchanged.
+All five workflows passed on aac15fc.
+
