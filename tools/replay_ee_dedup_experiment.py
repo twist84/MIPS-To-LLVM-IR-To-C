@@ -272,6 +272,8 @@ def main():
                         help="also replay the verified immediate helper-experiment parent")
     parser.add_argument("--source-comparison", type=Path,
                         help="linked source-lowering comparison receipt instead of overlay plan")
+    parser.add_argument("--prior-source-comparison", type=Path,
+                        help="receipt for the previous correctness-validated source O5 candidate")
     parser.add_argument("--reference-sha256",
                         help="accepted mixed-profile reference DLL SHA-256 for source comparison")
     parser.add_argument("--control", action="store_true",
@@ -301,11 +303,21 @@ def main():
                 raise ValueError("source comparison requires a pinned accepted reference and --control --sync")
             baseline, candidate, hashes = validate_source_libraries(
                 args.profile, args.experiment, args.elf, args.source_comparison)
-            prior_library, hashes["prior"] = validate_source_reference(
-                prior_dir, args.profile, candidate, baseline, hashes, args.reference_sha256)
+            if args.prior_source_comparison is not None:
+                original, prior_library, prior_hashes = validate_source_libraries(
+                    args.profile, prior_dir, args.elf, args.prior_source_comparison)
+                digest = prior_hashes["dedup"]
+                if (original != baseline or prior_hashes["baseline"] != hashes["baseline"] or
+                        digest != args.reference_sha256 or digest in hashes.values() or
+                        prior_library.resolve() == candidate.resolve()):
+                    raise ValueError("previous source O5 reference identity differs")
+                hashes["prior"] = digest
+            else:
+                prior_library, hashes["prior"] = validate_source_reference(
+                    prior_dir, args.profile, candidate, baseline, hashes, args.reference_sha256)
         else:
-            if args.reference_sha256:
-                raise ValueError("--reference-sha256 requires --source-comparison")
+            if args.reference_sha256 or args.prior_source_comparison:
+                raise ValueError("source reference options require --source-comparison")
             baseline, candidate, hashes = validate_libraries(args.profile, args.experiment, args.elf)
             prior_library = None
             if prior_dir is not None:
@@ -318,6 +330,8 @@ def main():
                   "library_sha256": hashes}
         if args.source_comparison is not None:
             inputs["source_comparison_sha256"] = sha(args.source_comparison)
+        if args.prior_source_comparison is not None:
+            inputs["prior_source_comparison_sha256"] = sha(args.prior_source_comparison)
         card = env.get("SDBZ_MEMCARD")
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
@@ -406,6 +420,9 @@ def main():
             if args.source_comparison is not None:
                 receipt["source_comparison_unchanged"] = (
                     sha(args.source_comparison) == inputs["source_comparison_sha256"])
+            if args.prior_source_comparison is not None:
+                receipt["prior_source_comparison_unchanged"] = (
+                    sha(args.prior_source_comparison) == inputs["prior_source_comparison_sha256"])
             if card:
                 receipt["memcard_unchanged"] = sha(Path(card)) == inputs["memcard_sha256"]
             (args.output / "comparison.json").write_text(
@@ -414,7 +431,8 @@ def main():
             print("Comparison archive:", archive, flush=True)
         if (receipt["error"] or not receipt["libraries_unchanged"] or
                 not receipt.get("memcard_unchanged", True) or
-                not receipt.get("source_comparison_unchanged", True)):
+                not receipt.get("source_comparison_unchanged", True) or
+                not receipt.get("prior_source_comparison_unchanged", True)):
             print("Replay requires investigation:", receipt["error"], file=sys.stderr)
             return 1
         return 0

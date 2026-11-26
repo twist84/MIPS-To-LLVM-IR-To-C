@@ -2113,3 +2113,13 @@ facts across externally dispatchable block entries, no memory mapping
 assumptions, no trapping/branch changes. Add constexpr boundary tests
 and extend the generated IR runtime fixture including direct resume.
 Retail/runtime measurement pending.
+
+For performance-first checkpoints use --performance-first to skip the
+full per-opcode LLVM/COFF cost audit; authenticate both inventories and
+PC coverage with the same annotation/counter union, then perform normal
+LLVM verification, same-profile native compilation and object identity
+checks. Retain the earlier full audit option for the separate size
+workstream. In the four-arm replay use --prior-source-comparison to
+pin the preceding validated source O5 image instead of the mixed size
+overlay. Compare wall-clock throughput with both original A/A and the
+immediate source predecessor; one run is not a repeatable speed claim.

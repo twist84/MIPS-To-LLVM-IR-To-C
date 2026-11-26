@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from compare_ee_source_lowering import (inventory, ownership_changes, ir_metrics, separate,
-    validate_resume, RESUME_IDENTITY_FIELDS)
+    validate_resume, RESUME_IDENTITY_FIELDS, coverage_metrics)
 
 
 def main():
@@ -42,6 +42,10 @@ entry:
     assert counts["guest_pcs"] == 1
     assert pcs == {0x1000}
     assert opcodes["addu"]["ir_instructions"] == 2
+    assert coverage_metrics(raw, "ee_fn_0x1000")[2] == pcs
+    counted = raw.replace(b"  ret i32 3\n",
+        b"  call void @ee_count_guest_instruction(ptr %rt, i32 4100, i32 0)\n  ret i32 3\n")
+    assert coverage_metrics(counted, "ee_fn_0x1000")[2] == {0x1000, 0x1004}
     # LLVM inserts an unnamed block after a terminator even though
     # there is no textual label. Parsed CFG counts remain authoritative.
     implicit = raw.replace(b"  ret i32 3\n", b"  ret i32 3\n  ret i32 4\n")

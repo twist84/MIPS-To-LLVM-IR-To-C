@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -18,7 +19,7 @@ import time
 import run_game
 import run_known_replays
 import verify_ir
-from audit_ee_helper_inventory import read_manifest, verified_object
+from audit_ee_helper_inventory import HEADER, END, read_manifest, verified_object
 from audit_ee_lowering_cost import band, scan_guest
 from ee_ownership_binary import coff_file_payload, native_executable_sections
 
@@ -100,6 +101,27 @@ def ir_metrics(raw, symbol):
             guest_blocks != counts["llvm_blocks"]),
         "guest_pcs": len(pcs),
     }, opcodes, pcs
+
+
+# For runtime-first builds only, match the same PC union used by the
+# lexical scanner without computing the expensive per-opcode IR cost.
+PC_ANNOTATION = re.compile(rb"^\\s*;\\s+(0x[0-9a-fA-F]+):\\s+\\S+", re.M)
+PC_COUNT = re.compile(rb"^\\s*call void @ee_count_guest_instruction\\(ptr %rt, i32 (\\d+), i32 \\d+\\)", re.M)
+
+
+def coverage_metrics(raw, symbol):
+    matches = [match for match in HEADER.finditer(raw)
+               if match[1].decode("ascii") == symbol]
+    if len(matches) != 1:
+        raise ValueError("expected exactly one guest definition: " + symbol)
+    start = matches[0]
+    end = END.search(raw, start.end())
+    if end is None:
+        raise ValueError("missing guest definition end: " + symbol)
+    body = raw[start.end():end.start()]
+    pcs = {int(match[1], 16) for match in PC_ANNOTATION.finditer(body)}
+    pcs.update(int(match[1]) for match in PC_COUNT.finditer(body))
+    return {"ir_bytes": len(raw), "guest_pcs": len(pcs)}, {}, pcs
 
 
 def native_metrics(data):
@@ -250,6 +272,8 @@ def compare(args, report):
 
     report["stage"] = "reconstruction_complete"
     write_receipt(receipt, report)
+    measure = coverage_metrics if args.performance_first else ir_metrics
+    report["performance_first"] = args.performance_first
     started = time.monotonic()
     totals = {arm: Counter() for arm in ("before", "after")}
     by_opcode = {arm: defaultdict(Counter) for arm in totals}
@@ -264,8 +288,8 @@ def compare(args, report):
             raise ValueError("baseline IR changed during measurement: " + name)
         if new_hash != candidate_hashes[name]:
             raise ValueError("candidate IR changed during measurement: " + name)
-        a = ir_metrics(old_raw, symbol)
-        b = a if old_hash == new_hash else ir_metrics(new_raw, symbol)
+        a = measure(old_raw, symbol)
+        b = a if old_hash == new_hash else measure(new_raw, symbol)
         if a[2] != b[2]:
             coverage_changes.append({
                 "module": name, "missing": sorted(a[2] - b[2]),
@@ -277,7 +301,8 @@ def compare(args, report):
         for arm, values in (("before", a), ("after", b)):
             totals[arm].update(values[0])
             by_band[arm][band(values[0]["guest_pcs"])].update(values[0])
-            aggregate_opcode(by_opcode[arm], values[1])
+            if not args.performance_first:
+                aggregate_opcode(by_opcode[arm], values[1])
         if index % 256 == 0 or index == len(names):
             print(f"[{index}/{len(names)}] paired IR metrics", flush=True)
     report.update({"ir_scan_seconds": time.monotonic() - started,
@@ -285,14 +310,15 @@ def compare(args, report):
                    "guest_pc_changes": coverage_changes, "modules": rows,
                    "lexical_count_disagreements": {
                        arm: [row["module"] for row in rows
-                             if row[arm]["lexical_count_disagreement"]]
+                             if row[arm].get("lexical_count_disagreement", 0)]
                        for arm in totals
                    }})
-    for arm, values in totals.items():
-        values["llvm_instructions_per_guest_pc"] = (
-            values["llvm_instructions"] / values["guest_pcs"])
-        values["guest_llvm_instructions_per_guest_pc"] = (
-            values["guest_llvm_instructions"] / values["guest_pcs"])
+    if not args.performance_first:
+        for arm, values in totals.items():
+            values["llvm_instructions_per_guest_pc"] = (
+                values["llvm_instructions"] / values["guest_pcs"])
+            values["guest_llvm_instructions_per_guest_pc"] = (
+                values["guest_llvm_instructions"] / values["guest_pcs"])
     if coverage_changes:
         raise ValueError("function-scoped guest instruction coverage changed")
     report["stage"] = "static_ir_complete"
@@ -321,7 +347,7 @@ def compare(args, report):
             if row["symbol"] not in record["defined_symbols"]:
                 raise ValueError("missing guest symbol: " + name)
             data = verified_object(directory, record, row[arm + "_sha256"])
-            metrics = native_metrics(data)
+            metrics = {"object_bytes": len(data)} if args.performance_first else native_metrics(data)
             row[arm].update(metrics, object_sha256=record["sha256"])
             native_totals[arm].update(metrics)
             native_bands[arm][band(row[arm]["guest_pcs"])].update(metrics)
@@ -358,9 +384,13 @@ def main(argv=None):
     parser.add_argument("--expected-functions", type=int)
     parser.add_argument("--expected-baseline-bytes", type=int)
     parser.add_argument("--ir-only", action="store_true")
+    parser.add_argument("--performance-first", action="store_true",
+                        help="verify ownership/PC coverage and compile; omit detailed IR and COFF cost scans")
     parser.add_argument("--resume-from", type=Path,
                         help="prior receipt for the same isolated reconstruction")
     args = parser.parse_args(argv)
+    if args.performance_first and args.ir_only:
+        parser.error("--performance-first requires native LLVM verification, not --ir-only")
     if not 1 <= args.jobs <= 32:
         parser.error("--jobs must be in 1..32")
     output = args.output.resolve()
