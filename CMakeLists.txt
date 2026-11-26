@@ -836,6 +836,9 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_entry_shadow.py
                 $<TARGET_FILE:ee_recomp>)
+    add_test(NAME ee_dedup_experiment
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_dedup_experiment.py)
     add_test(NAME ee_pointer_table_expansion
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_function_pointer_tables.py)

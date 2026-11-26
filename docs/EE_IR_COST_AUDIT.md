@@ -757,3 +757,32 @@ and branch target, and actual generated synthetic ELF IR. No production
 lowering or runtime input is changed. Retail cache shadow results are
 required before selecting a safe routing implementation. No gameplay
 replay or recompilation is required to produce the report.
+
+
+### Checkpoint 2b — isolated native coalescing experiment
+
+Retail shadow report (metadata SHA-256 bf39f4727e00e6b213a62eebcde424f45830b8a6f10fc0cc257e2e0132b1826a):
+430 nonstatic overlap modules, 36 covered entries, 13 matching at
+the requested entry, 11 matching all published dispatch PCs. 49
+matching pairs, 65 not legal resume blocks, 7 differing reachable IR.
+The eight sources 193ad0, 193ad8, 193b00, 193b78, 193e00, 193e28,
+193e88, 193ed0 directly match 193ac8 (921,560 executable object bytes).
+Three further candidates at 33b880, 3e0cc8, 3e18e4 bring the total
+to 928,664 executable object bytes, not a measured DLL saving.
+
+The isolated experiment requires current metadata and object digests,
+recomputes matching emitted IR for each published PC, forbids static
+or boot-entry removal and transitive owner chains, and verifies the
+exact published PC inventory. It uses an independent metadata/object
+manifest and links to a new directory; the normal cache is untouched.
+Original owner vaddr and native pointer identity change for transferred
+PCs. This is explicitly not an enabled production optimization.
+Do not run it with native ALU certificates or auto-expansion. Actual
+native link and runtime correctness/performance validation are required.
+Use a new output directory each time. If a link fails, retain the
+normal cache and inspect the independent experiment directory.
+
+```bat
+set "SDBZ_NATIVE_ALU_CERTIFICATES=0"
+python tools\build_ee_dedup_experiment.py build\ps2-game-hle\ir build\ps2-game-hle\O2-native\objects ee-entry-shadow.json build\ee-dedup-experiment --link
+```
