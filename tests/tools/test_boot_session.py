@@ -884,6 +884,8 @@ def main():
         "set \"EE_WEBGPU_SNAPSHOT=1\"",
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
+    for budget in ("MAX_DISPATCHES", "MAX_EXPANSION_DISPATCHES", "MAX_REPLAY_DISPATCHES"):
+        assert f'if defined SDBZ_P40_MAX_DISPATCHES set "{budget}=%SDBZ_P40_MAX_DISPATCHES%"' in preset
     assert 'if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"' in preset
     assert 'if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"' in preset
     assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
@@ -921,6 +923,7 @@ def main():
                 preset_env = dict(env)
                 preset_env.pop("SDBZ_P40_LISTEN", None)
                 preset_env.pop("SDBZ_HOST_AUDIO", None)
+                preset_env.pop("SDBZ_P40_MAX_DISPATCHES", None)
                 result = subprocess.run(
                     ["cmd.exe", "/d", "/c", fr"call scripts\run_ps2_game.bat {option} --overwrite-ir"],
                     cwd=ROOT, env=preset_env, capture_output=True, text=True, timeout=30,
@@ -928,6 +931,14 @@ def main():
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
+            short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000")
+            short_env.pop("SDBZ_P40_LISTEN", None)
+            short = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
+                cwd=ROOT, env=short_env, capture_output=True, text=True, timeout=30,
+            )
+            assert short.returncode == 0, short.stdout + short.stderr
+            assert "opt=5 dispatches=7505000" in short.stdout, short.stdout
             help_result = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,
