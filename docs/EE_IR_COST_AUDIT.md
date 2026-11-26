@@ -1501,3 +1501,41 @@ size bands, all module summaries, largest blocks, and optionally
 caller-supplied hot PCs. This does not recompile, mutate caches or
 change runtime semantics. Use the results to select the next isolated
 optimization rather than guessing at the cost of small hot helpers.
+
+### Checkpoint 5a — measured lowering inventory
+
+All 16,252 modules, 845,746 function-scoped PCs (780,826 unique),
+15,337,469 original guest LLVM instructions (18.13 per scoped PC).
+Guest body text 807,337,002 bytes. Current executable objects total
+78,650,693 bytes, of which 77,586,186 are attributed to named guest
+symbols (98.65%; includes inlined code/padding). Memory mnemonic
+regions account for approximately 10.60M IR instructions (69.1%);
+SW 2,396,997, LW 2,020,680, SWC1 1,493,075, LWC1 1,029,796.
+Fastmem-labelled regions contain 8,222,941 instructions (53.61%),
+not exclusively gate operations. 3,113,728 GEPs, 2,100,317 loads,
+1,901,983 branches, 1,094,827 stores. Largest module 0x369520:
+5,323 PCs, 117,469 IR instructions, 600,125 -> 574,814 executable
+bytes. Remaining named spans: store guard 322,272, V0 guard 107,424,
+annulled counter 204,007, ALU-run counter 107,424. These are approximate
+attributions, not savings. Defer full outlining of these hot guards.
+Prioritize repeated scalar memory lowering before speculative register
+forwarding: the current memory boundary flush/reload is intentional.
+
+### Checkpoint 5b — paired scalar-memory outlining pilot
+
+Test module-local noinline per-width read/write helpers against the
+validated addition parent (90,095,104-byte DLL). Match the canonical
+null, physical span, base, widened end-address, bounds, direct and
+slow arms exactly with SSA backreferences; reject escaping internal
+values/labels and additional merge PHIs. Preserve the guest alignment,
+state publication, diagnostic trace, address calculation and external
+memory callback ABI. No hoisting or weakened range checks. Reconstruct
+all previous transforms with their digests, verify selected parent
+objects, require byte-identical parent re-emission, and compare native
+object and executable bytes with unchanged O5/Oz policy. Use eight
+modules per populated size band plus eight largest memory-call counts
+by default. The pilot does not produce a DLL or update any cache.
+MCJIT tests exercise all widths, reads/writes, null runtime/base,
+zero-size, unaligned access, boundary and high unsigned addresses.
+Outlining introduces a potential hot-path call cost; do not promote
+based on size alone. Noncanonical patterns remain untouched.
