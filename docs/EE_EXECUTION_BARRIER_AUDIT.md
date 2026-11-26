@@ -508,6 +508,66 @@ then replay that recording with the same RTC for both configurations.
 The fixed epoch is included in replay provenance. No guest lowering
 or EE runtime ABI changes are required.
 
+## Controlled IOP scheduler experiment (2026-11-26)
+
+Fixed UTC 1795671645, identical recorded PAD0 input, O5, synchronous
+VU1, asynchronous GS, 12,250,000 dispatch cap. Four baseline replays
+and one replay of each experimental configuration match all 11,963
+state samples, including cumulative path and clock fingerprints,
+19,123 DMAC IRQ records, 2,394 channel-1 callback returns and 69 RPC
+records. All consume 2,362 input samples; the intentional short cap
+leaves the full stream incomplete. This is bounded observed
+equivalence, not proof of all RAM/device state or full-game accuracy.
+
+| Configuration | Native wall (s) | IOP service at 12,247,040 (ms) |
+| --- | ---: | ---: |
+| Baseline (four runs, f8c379a) | 18.46475 | 3512.2 |
+| Coalescing only (fb6da91) | 18.641 | 3582.9 |
+| Quiet only (fb6da91) | 18.890 | 3598.9 |
+| Both (f8c379a) | 18.516 | 3615.3 |
+
+The two revisions differ in end-of-session counter reporting and its
+test, not in the scheduling loop. Each experimental configuration
+has one timed sample; no statistically established gain. The baseline
+wall range was 18.328..18.578 s.
+
+At the cap, coalescing alone reduces 18,808,148 logical turns to
+18,159,564 physical kernel runs (648,584 saved, 3.45%). Quiet alone
+bypasses 7,165,118 of 18,808,148 kernel runs (38.10%), with 2,243,768
+failed attempts out of 9,408,886. Debt is zero in both. The extra
+ownership, deadline, and fallback checks are candidates for overhead;
+their individual costs have not been measured. Keep both experiments
+off by default. Do not promote either based on avoided calls.
+
+## P4 prerequisite: deterministic VIF1 completion publication
+
+With fixed RTC and asynchronous VU1 enabled, repeated baseline runs
+diverge near dispatch 12,227,584. Disabling only asynchronous VU1
+produces the matched traces above. This implicates the deferred
+VIF1 path; it does not exclude other sources of nondeterminism.
+
+The current DMAC service polls the worker and commits the staged
+channel registers and raises IRQ1 as soon as a completed transaction
+is available. The runner polls before its outer-loop checkpoint and
+again during device service; it waits at a due scanout field. MMIO
+and dependent transfers also have explicit fences. Host worker
+readiness therefore influences the guest-visible publication boundary.
+
+Next work should separate worker-result readiness from guest-visible
+publication eligibility. Inventory every publication and cancellation
+path, including multi-job VIF batches, CHCR stop/restart, register
+access, PATH3 ordering, GIF/GS readback, CMSAR1 and scanout. Add
+synthetic tests with deliberately early and late worker completion
+and compare the complete sequence of guest-visible effects. At a
+proven guest publication boundary a late host worker must wait, not
+move the guest deadline; an early result must not publish early.
+Derive the boundary from documented/reference-compatible device
+semantics, not a made-up VU latency or elapsed host time. A
+conservative synchronous fallback is required for unproven paths.
+Retain worker overlap only where the dependency and timing contract
+can be demonstrated. No new completion policy is enabled by this
+audit.
+
 ## Remaining activation gates (not implemented)
 
 
