@@ -1395,3 +1395,22 @@ cumulative saving 20,975,616 bytes (18.82% of O5). The 827,591-byte
 executable-object saving and 799,502-byte original mixed named helper
 span are different metrics; the latter is not a current marginal
 saving prediction. Do not add independent ownership-coalescing savings.
+
+### Checkpoint 4j — exact COP1 addition experiment
+
+The immediate parent is the validated 90,495,488-byte (86.30 MiB)
+shared multiplier DLL, not original O5 or the earlier quadword DLL.
+The original mixed add-helper span is an attribution estimate, not
+an incremental size baseline. Share only ee_cop1_add_bits, preserving
+its exact aggregate ABI, signed-zero, guard-bit alignment, range
+flags and llvm.ctlz.i32 dependency. Leave MAC and VU0 FMAC bodies
+unchanged; redirect their calls without altering operands or flags.
+Verify the counter/quadword/multiplier receipt and manifest chain,
+reconstruct earlier transforms for selected modules, require their
+parent IR digests, and retain unaffected verified objects by absolute
+path. Select one deterministic addition owner. Test real emitted
+addition, COP1 MAC and VU0 FMAC bodies with cross-module ownership,
+edge operands, both latch states and deterministic random inputs.
+Measure incremental executable/object/DLL size against the multiplier
+parent, then independently run the four-arm synchronous replay.
+No production lowering or cache policy changes.
