@@ -54,11 +54,45 @@ bool rejection_tests()
     pair(code, 8u, 0x800006fdu, k_upper); // unknown lower index 0x6d
     return ee::vu1_lift_straight_line_ir(code, 0u).m_ir.empty();
 }
+bool scoreboard_layout_tests()
+{
+    t_code code{};
+    const auto add = [](uint32_t fd, uint32_t fs, uint32_t ft, uint32_t mask)
+    {
+        return 0x28u | (fd << 6u) | (fs << 11u) | (ft << 16u) | (mask << 21u);
+    };
+    pair(code, 0u, k_nop, add(4u, 2u, 3u, 15u));
+    pair(code, 8u, k_nop, k_upper);
+    pair(code, 16u, k_nop, add(5u, 4u, 4u, 15u));
+    pair(code, 24u, (0x20u << 25u) | 1u, k_upper);
+    pair(code, 32u, k_nop, k_upper);
+    pair(code, 40u, k_nop, k_end);
+    pair(code, 48u, k_nop, k_upper);
+    // VF4's four lanes retire together; VF5 is never read and VF2/3
+    // are never written. A repeated source must not allocate more slots.
+    const auto grouped = ee::vu1_lift_program_ir(code, 0u);
+    if (grouped.m_ir.find("%ready = alloca [1 x i32]") == std::string::npos)
+    {
+        return false;
+    }
+    // An X-only write breaks the equality of X and YZW timestamps.
+    pair(code, 8u, k_nop, add(4u, 2u, 3u, 8u));
+    const auto split = ee::vu1_lift_program_ir(code, 0u);
+    if (split.m_ir.find("%ready = alloca [2 x i32]") == std::string::npos)
+    {
+        return false;
+    }
+    pair(code, 16u, k_nop, add(5u, 2u, 3u, 15u));
+    const auto unused = ee::vu1_lift_program_ir(code, 0u);
+    return !unused.m_ir.empty() &&
+        unused.m_ir.find("%ready = alloca") == std::string::npos &&
+        unused.m_ir.find("ptr %ready,") == std::string::npos;
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (!rejection_tests())
+    if (!rejection_tests() || !scoreboard_layout_tests())
     {
         return 1;
     }
