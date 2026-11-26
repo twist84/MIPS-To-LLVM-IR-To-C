@@ -48,6 +48,9 @@ def test_incremental_parallel_emission():
         assert "reused 0/2" in out, out
         assert manifest["complete"] and manifest["object_count"] == 2
         assert len({item["sha256"] for item in manifest["objects"]}) == 2
+        assert "Largest native objects (file bytes):" in out, out
+        for item in manifest["objects"]:
+            assert f"{item['size_bytes']:,}" in out and item["object"] in out, out
 
         first_object = object_dir / (first.stem + ".o")
         second_object = object_dir / (second.stem + ".o")
@@ -57,6 +60,8 @@ def test_incremental_parallel_emission():
         os.utime(first_object, ns=(1000000000000000000, 1000000000000000000))
         out, manifest = run_emitter(ir_dir, object_dir)
         assert "reused 2/2" in out, out
+        assert "Largest native objects (file bytes):" in out, out
+        assert all(item["object"] in out for item in manifest["objects"]), out
         assert first_object.stat().st_mtime_ns == 1000000000000000000
         assert manifest["complete"]
 

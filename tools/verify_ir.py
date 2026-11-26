@@ -510,6 +510,15 @@ def main():
     )
     if slowest[0]:
         print(f"slowest module: {slowest[0]:.2f}s {slowest[1]}")
+    if emitted:
+        # Rank the complete validated inventory, including cache hits.
+        # Object file bytes include metadata/relocations, not just .text.
+        print("Largest native objects (file bytes):", flush=True)
+        ranked = sorted(emitted.values(),
+                        key=lambda item: (-item["size_bytes"], item["object"]))
+        for item in ranked[:10]:
+            share = 100.0 * item["size_bytes"] / object_bytes if object_bytes else 0.0
+            print(f"  {item['size_bytes']:12,}  {share:6.2f}%  {item['object']}")
     for key, count in errors.most_common(8):
         print(f"  {count:5d}x {key}\n         e.g. {first[key]}")
     return 1 if bad else 0
