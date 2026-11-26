@@ -473,3 +473,38 @@ The disabled guard itself has a cost; do not assume a faster
 enabled run means a gain versus the pre-fastmem baseline. Final
 CI and measured performance remain pending. Further widths,
 alias specialization and block-level linking require evidence.
+
+## Word fastmem retail A/B (08:00 and 08:01)
+
+Both clean 2c6abdb, 40M dispatches, fixed RTC, lean diagnostics,
+async VU1/GS, host audio off. Identical cache manifest SHA-256
+be8cb7183aa20b576d2e30c804af84446ac7b4817b535f2adadbed04cfe5e22c
+and native library SHA-256
+a0e1435d494a9a875451302b7aa533857bb267c054b80aa4583d9900f2f4d71a.
+Second log explicitly reports enabled direct physical word fastmem.
+First has no enabled marker; original provenance omitted this flag.
+
+Off: spawn 26920920, first subsequent progress 26927104 at 25998.7ms,
+4760 fields; terminal 40384.9ms, 5614 fields.
+854 / 14.3862s = 59.3624 fields/s, wall 45.234s, 3990 presents,
+1624 skipped, 3959215 draws, 369366 native VU1 runs.
+On: spawn 23113735, first subsequent progress 23117824 at 22738.7ms,
+4614 fields; terminal 40000.0ms, 5711 fields.
+1097 / 17.2613s = 63.5526 fields/s, wall 44.671s, 4065 presents,
+1646 skipped, 4375811 draws, 364442 native VU1 runs.
+Both zero VU1 fallbacks, IOP guest faults, worker failures;
+CPU/GPU display digests agree within each capture.
+Observed +7.06% post-spawn throughput, not isolated or deterministic
+because input and async timing vary. All five workflows passed 2c6abdb.
+
+0b73bf4 generalizes the guarded scalar lowering to 8/16/64-bit
+accesses. SDBZ_EE_FASTMEM_SCALAR=1 enables all four scalar widths;
+WORD=1 with SCALAR=0 retains word-only direct access. Other
+widths use a separate appended runtime span descriptor. Alignment,
+sign extension, trace order and whole-span fallback unchanged.
+Directed tests include signed/unsigned loads, preserved upper
+GPR half, exact-width stores and independent flag/fallback checks.
+Provenance records both flags and PS2_SCALE. New IR refresh
+required once, then compare word-only and all-scalar using the
+same cache. Keep PS2_SCALE=1 and lean fixed-RTC settings.
+Latest CI and broader fastmem performance are pending.
