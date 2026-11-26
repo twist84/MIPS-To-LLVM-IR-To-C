@@ -205,6 +205,12 @@ def main():
                            for line in ir.splitlines())
                 assert any("store <4 x i32> " in line and line.endswith(", align 1")
                            for line in ir.splitlines())
+            if case == "acc-branches":
+                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
+                assert "%acc_local = alloca <4 x i32>" in guest
+                assert "%vf_local_" in guest
+                assert "ptr %vf_backing_" in guest
+                assert "store <4 x i32>" in guest
             if case == "acc":
                 verify_fmac(ir)
                 verify_minmax(ir)

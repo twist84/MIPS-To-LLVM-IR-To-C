@@ -320,6 +320,7 @@ public:
         bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask)
     {
         m_dynamic = true;
+        m_dynamic_local_offset = m_ir.size();
         m_branch_vi_mask = branch_vi_mask;
         m_flag_history_mask = flag_history_mask;
         m_flag_pipeline = flags;
@@ -484,10 +485,15 @@ public:
         line("store i32 " + elapsed + ", ptr %cycles_out, align 4");
         line("store i32 %current_pc, ptr %last_pc_out, align 4");
         line("store i32 %npc_now, ptr %tpc, align 4");
+        flush_dynamic_vectors();
         line("ret i32 %steps");
         m_ir += "fail:\n";
+        // Preserve even failed invocation's staged register writes. The
+        // runtime discards the staged state on failure.
+        flush_dynamic_vectors();
         line("ret i32 0");
         m_ir += "}\n";
+        initialize_dynamic_vectors();
         return m_ir;
     }
 
@@ -1078,8 +1084,82 @@ private:
         return value;
     }
 
+    // Only the VF/ACC bank used by the emitted microprogram is staged
+    // here. AOT passes separate VF/ACC storage; its kick callback reads
+    // VU data and its EFU callback receives raw scalar operands, never VF.
+    // Non-escaping fixed-size allocas allow SROA/mem2reg across switch
+    // targets and loops without changing the dispatcher or pair timing.
+    std::string local_vf(uint32_t reg_index)
+    {
+        m_dynamic_vf_accessed.set(reg_index);
+        return "%vf_local_" + std::to_string(reg_index);
+    }
+
+    std::string acc_base()
+    {
+        if (!m_dynamic)
+        {
+            return "%acc";
+        }
+        m_dynamic_acc_accessed = true;
+        return "%acc_local";
+    }
+
+    void initialize_dynamic_vectors()
+    {
+        std::string prologue;
+        for (uint32_t reg_index = 1u; reg_index < 32u; ++reg_index)
+        {
+            if (!m_dynamic_vf_accessed.test(reg_index))
+            {
+                continue;
+            }
+            const auto suffix = std::to_string(reg_index);
+            const auto backing = "%vf_backing_" + suffix;
+            const auto initial = "%vf_initial_" + suffix;
+            const auto local = "%vf_local_" + suffix;
+            prologue += "  " + backing + " = getelementptr i32, ptr %vf, i32 " +
+                std::to_string(reg_index * 4u) + "\n";
+            prologue += "  " + initial + " = load <4 x i32>, ptr " + backing + ", align 4\n";
+            prologue += "  " + local + " = alloca <4 x i32>, align 16\n";
+            prologue += "  store <4 x i32> " + initial + ", ptr " + local + ", align 16\n";
+        }
+        if (m_dynamic_acc_accessed)
+        {
+            prologue += "  %acc_initial = load <4 x i32>, ptr %acc, align 4\n"
+                "  %acc_local = alloca <4 x i32>, align 16\n"
+                "  store <4 x i32> %acc_initial, ptr %acc_local, align 16\n";
+        }
+        m_ir.insert(m_dynamic_local_offset, prologue);
+    }
+
+    void flush_dynamic_vectors()
+    {
+        for (uint32_t reg_index = 1u; reg_index < 32u; ++reg_index)
+        {
+            if (m_dynamic_vf_written.test(reg_index))
+            {
+                const auto value = operation("load <4 x i32>, ptr " +
+                    local_vf(reg_index) + ", align 16");
+                line("store <4 x i32> " + value + ", ptr %vf_backing_" +
+                    std::to_string(reg_index) + ", align 4");
+            }
+        }
+        if (m_dynamic_acc_written)
+        {
+            const auto value = operation("load <4 x i32>, ptr " + acc_base() + ", align 16");
+            line("store <4 x i32> " + value + ", ptr %acc, align 4");
+        }
+    }
+
     std::string vf_pointer(uint32_t reg_index, uint32_t lane)
     {
+        if (m_dynamic)
+        {
+            const auto base = local_vf(reg_index);
+            return lane == 0u ? base : operation("getelementptr i32, ptr " +
+                base + ", i32 " + std::to_string(lane));
+        }
         return operation("getelementptr i32, ptr %vf, i32 " +
             std::to_string(reg_index * 4u + lane));
     }
@@ -1202,6 +1282,10 @@ private:
     {
         if (target != 0u)
         {
+            if (m_dynamic)
+            {
+                m_dynamic_vf_written.set(target);
+            }
             line("store <4 x i32> " + value + ", ptr " +
                 vf_pointer(target, 0u) + ", align 4");
             m_vf_vectors[target] = value;
@@ -1221,6 +1305,10 @@ private:
         {
             write_full_vf(target, vector.empty() ? assemble_vector(values) : vector);
             return;
+        }
+        if (m_dynamic)
+        {
+            m_dynamic_vf_written.set(target);
         }
         m_vf_vectors[target].clear();
         for (uint32_t lane = 0u; lane < 4u; ++lane)
@@ -1280,11 +1368,15 @@ private:
     {
         if (m_upper_acc)
         {
+            if (m_dynamic && m_upper_mask != 0u)
+            {
+                m_dynamic_acc_written = true;
+            }
             if (m_upper_mask == 15u)
             {
                 const auto value = m_upper_vector.empty()
                     ? assemble_vector(m_upper_values) : m_upper_vector;
-                line("store <4 x i32> " + value + ", ptr %acc, align 4");
+                line("store <4 x i32> " + value + ", ptr " + acc_base() + ", align 4");
                 m_acc_vector = value;
                 m_acc_lanes = {};
             }
@@ -1429,8 +1521,9 @@ private:
 
     std::string acc_pointer(uint32_t lane)
     {
-        return operation("getelementptr i32, ptr %acc, i32 " +
-            std::to_string(lane));
+        const auto base = acc_base();
+        return lane == 0u ? base : operation("getelementptr i32, ptr " +
+            base + ", i32 " + std::to_string(lane));
     }
 
     std::string acc(uint32_t lane)
@@ -1450,7 +1543,7 @@ private:
     {
         if (m_acc_vector.empty())
         {
-            m_acc_vector = operation("load <4 x i32>, ptr %acc, align 4");
+            m_acc_vector = operation("load <4 x i32>, ptr " + acc_base() + ", align 4");
         }
         return m_acc_vector;
     }
@@ -1760,6 +1853,10 @@ private:
     std::string m_ir;
     // Write-through SSA cache: within a dynamic pair or across the proven
     // straight-line path. Lower writes update cache before upper retirement.
+    size_t m_dynamic_local_offset = 0u;
+    std::bitset<32> m_dynamic_vf_accessed{}, m_dynamic_vf_written{};
+    bool m_dynamic_acc_accessed = false;
+    bool m_dynamic_acc_written = false;
     std::array<std::array<std::string, 4>, 32> m_vf_lanes{};
     std::array<std::string, 32> m_vf_vectors{};
     std::array<std::string, 4> m_acc_lanes{};
