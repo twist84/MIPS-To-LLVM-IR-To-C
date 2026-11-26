@@ -1025,3 +1025,44 @@ Measure actual linked size before requesting another runtime replay.
 Do not change the normal O5 compiler profile or combine owner coalescing.
 Larger modules have mixed size results; the goal is measurement, not
 a prediction that Oz will improve runtime or code size for every module.
+
+
+### Checkpoint 3f — measured full-inventory selective Oz link
+
+Windows retail size-plan(2).json, LLVM 22.1.0 / znver2, same source
+manifest and metadata as the <=128-PC experiment. Reused 14,761 trials
+and 13,568 objects. All 16,252 modules evaluated, 14,014 accepted,
+2,238 retain O5. All function modules and published PCs retained.
+The remaining 1,491 trials accepted 446 replacements, saving
+395,721 executable bytes and 2,337,035 total object bytes.
+Stage wall time 180.954 s (not including link).
+
+| Guest PCs | Accepted / tried | Original executable bytes | Executable bytes saved |
+| --- | ---: | ---: | ---: |
+| 1–4 | 3567/3567 | 3420534 | 1588663 |
+| 5–16 | 3031/3033 | 5369953 | 1472633 |
+| 17–32 | 3973/4047 | 13283929 | 1887446 |
+| 33–128 | 2997/4114 | 29317682 | 1521365 |
+| 129–512 | 417/1316 | 28955963 | 318646 |
+| 513+ | 29/175 | 14889183 | 77075 |
+| Total | 14014/16252 | 95237244 | 6865828 |
+
+Executable object bytes 95,237,244 -> 88,371,416 (-7.21%);
+aggregate object bytes 152,560,310 -> 129,443,174 (-15.15%).
+Linked DLL 111,471,104 -> 100,830,208 (-9.55%, 96.16 MiB).
+Linked executable raw sections 101,812,736 -> 94,864,896 (-6.82%).
+DLL SHA-256
+96ee5bc10813db53dfab2d7fdb9104e31ec736ebad84c2a42e71b2e82c4812e2.
+All five CI workflows passed on 49eed3e. The additional DLL saving
+versus the <=128-PC experiment is 920,064 bytes, so the marginal
+benefit of the large-module size trials is modest. The final
+full-inventory DLL still requires independent synchronous matched
+replay. Production cache and discovery remain unchanged; no owner
+coalescing is included.
+
+Next checkpoint: after runtime validation, prioritize lowering-level
+code expansion and repeated helper inventory rather than further
+blanket optimization level sweeps. Measure actual emitted helper
+bodies and call sites before outlining; do not assume that identical
+helper names imply equivalent definitions, or that outlined helpers
+improve hot-path throughput.
