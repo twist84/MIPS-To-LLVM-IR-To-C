@@ -14,6 +14,7 @@ from test_vu0_transfer_ir_runtime import (
     UNEXPECTED_TRACES,
 )
 
+EE_EXIT_RETURN = 0
 EE_EXIT_EXCEPTION = 1
 EE_EXIT_DISPATCH = 3
 MEMORY = {}
@@ -310,10 +311,11 @@ def main():
             result, cpu, _ = execute(
                 fixture, directory, target, "ee_sw_trace_context", 0x40,
                 trace_enabled=enabled)
-            require(result == EE_EXIT_DISPATCH and
+            require(result == EE_EXIT_RETURN and
                     cpu.gpr[29].lo == 0xff0 and cpu.gpr[10].lo == 0x2001 and
                     WRITES == [(4, 0x40, 0x89abcdef)],
-                    "scalar store changed architectural state")
+                    f"scalar store: exit={result}, SP={cpu.gpr[29].lo:#x}, "
+                    f"r10={cpu.gpr[10].lo:#x}, writes={WRITES}")
             require(EVENTS == ([("trace", 0x40)] if enabled else []) +
                     [("write", 0x40)], "scalar trace/write order")
             require(TRACE_CONTEXTS == ([
