@@ -258,3 +258,48 @@ cycles, VI delay, Q/P and flag retirement, final TPC and native ABI.
 Extend O0/O3 differential fixture IR assertions for constant NPC and E
 state, dynamic ambiguous NPC and guarded indirect cases. Build/CI and
 V24/V25 matched replay pending. Retain all previous library inventories.
+
+## G2C.1 accepted for correctness — matched V24/V25 replay
+
+All five workflows passed at e160b54. ee-graphics-g2c.zip contains four
+interleaved unprofiled pairs. All eight replays completed 40M dispatches,
+3127/3127 PAD polls (raw stderr footers verified), 184700 matching sampled
+transitions per receipt, 21910026110 guest attempts, 22115080673 EE cycles,
+4494 fields, 394881 VU1 native runs, 445669423 pairs, zero interpreter
+fallbacks, no IOP guest fault or timing observer failure. Raw report and
+GS screenshot SHA-256 are identical across all eight. Exact inventory of
+84 libraries and native target preserved, all 84 DLL hashes changed;
+input integrity receipt passed.
+
+| Pair | V24 s | V25 s |
+|---|---:|---:|
+| 1 | 41.844 | 41.359 |
+| 2 | 41.453 | 41.375 |
+| 3 | 41.313 | 41.218 |
+| 4 | 41.391 | 41.484 |
+
+Median 41.422 -> 41.367s, nominal throughput +0.13%, 3/4 pairs faster.
+Difference 0.055s is within timing spread (control 0.531s; candidate
+0.266s). Retain V25 as a correctness-validated foundation, not a
+demonstrated speedup. No cache promotion or asynchronous claim.
+
+## G2C.2 — bounded guarded multi-pair blocks
+
+Form nonoverlapping runs of 3–8 reached, consecutive, nonbranch,
+non-E pairs with a reached sequential exit. Exclude XGKICK and P/EFU
+pairs from the fast block. At its entry test incoming NPC == PC+8,
+pending E == false and remaining pair budget >= length. Failed guard
+uses the original single-pair path, including partial execution up to
+budget exhaustion. Retain every original emitted pair entry, including
+interior entries and unknown indirect dispatch. The fast path reuses
+the same pair body (issue cycle, dependency retirement, Q/P sync,
+flag history, delayed VI snapshot, upper/lower ordering). Write-through
+VF/ACC SSA cache spans only the single-entry fast block; reset for every
+independent pair entry. Advance step count and PC/NPC/E once at block
+exit; per-pair flag time still uses the exact step ordinal. No block
+crosses a micro-memory wrap. No ABI, runtime, EE or code guard change.
+Fast bodies duplicate bounded code; size increase is a tradeoff that
+must be measured before promotion. V26 is experimental, retain V25.
+O0/O3 differential fixtures test normal and forced single-pair paths;
+a shortened test-only budget checks exact partial staged state on failure
+against the single-pair path. CI and matched V25/V26 replay pending.
