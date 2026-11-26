@@ -105,7 +105,7 @@ def ir_generation_inputs(elf, source_root):
         "function_analyzer.cpp", "ee_recomp.cpp"
     }
     for directory in ("include/ee", "src/ee", "src/elf",
-                      "src/lift", "src/llvm"):
+                      "src/lift", "src/llvm", "src/architecture"):
         for item in sorted((source_root / directory).rglob("*")):
             if not item.is_file() or item.suffix not in (".h", ".hpp", ".cpp"):
                 continue

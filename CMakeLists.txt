@@ -729,6 +729,8 @@ target_link_libraries(ee_control_flow_ir_fixture PRIVATE ee_core)
 # Scalar 64-bit signed/unsigned comparison lowering regression.
 add_executable(ee_compare_ir_fixture tests/smoke/compare_ir_fixture.cpp)
 target_link_libraries(ee_compare_ir_fixture PRIVATE ee_core)
+add_executable(ee_scalar_specialize_ir_fixture tests/smoke/scalar_specialize_ir_fixture.cpp)
+target_link_libraries(ee_scalar_specialize_ir_fixture PRIVATE ee_core)
 
 add_executable(ee_cop0_write_ir_fixture tests/smoke/cop0_write_ir_fixture.cpp)
 target_link_libraries(ee_cop0_write_ir_fixture PRIVATE ee_core)
@@ -1039,6 +1041,10 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_compare_ir_runtime.py
                 $<TARGET_FILE:ee_compare_ir_fixture>)
+    add_test(NAME scalar_specialize_ir_runtime
+                COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_scalar_specialize_ir_runtime.py
+                $<TARGET_FILE:ee_scalar_specialize_ir_fixture>)
     add_test(NAME cop0_write_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_cop0_write_ir_runtime.py

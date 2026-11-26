@@ -40,6 +40,7 @@ def verify_real_probe_location():
         assert shared_fmac_key in guest, "VU0 consumes the shared SIMD lowering template"
         assert guest[shared_fmac_key] == host[shared_fmac_key]
         assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
+        assert "src/architecture/ee_scalar_constant.h" in guest
 
 
 def verify_preservation_when_host_only_inputs_change():
@@ -61,6 +62,7 @@ def verify_preservation_when_host_only_inputs_change():
             "src/ee/decoder.cpp": b"decoder",
             "src/tools/ee_recomp_main.cpp": b"recomp front-end",
             "include/ee/guest_lifter_input.h": b"guest header",
+            "src/architecture/ee_scalar_constant.h": b"scalar evaluator",
             "src/runtime/ee_sdbz_pad_return_probe.h": b"first host probe",
             "src/runtime/ee_vu_fmac4_ir.h": b"shared FMAC lowering",
         }
@@ -171,6 +173,11 @@ def verify_preservation_when_host_only_inputs_change():
         else:
             raise AssertionError("changed shared FMAC template unexpectedly reused")
         shared_fmac.write_bytes(paths["src/runtime/ee_vu_fmac4_ir.h"])
+
+        architecture = source_root / "src/architecture/ee_scalar_constant.h"
+        architecture.write_bytes(b"changed scalar evaluator")
+        assert run_game.ir_generation_inputs(elf, source_root) != initial_guest
+        architecture.write_bytes(paths["src/architecture/ee_scalar_constant.h"])
 
         # A genuinely changed guest lowering header must still fail closed.
         (source_root / "include/ee/guest_lifter_input.h").write_bytes(

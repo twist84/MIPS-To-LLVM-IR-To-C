@@ -1993,3 +1993,23 @@ production integration. The isolated architecture header is outside the existing
 fingerprint; the test target alone includes it. At 8b, add the architecture
 sources to the lowering provenance before the emitter starts using them.
 No shared IR regeneration is required in 8a.
+
+### Checkpoint 8b — scalar specialization integration
+
+8a passed all five CI workflows on 6d560ab. Integrate the evaluator
+after the existing guest-instruction accounting, with a pure nontrapping
+ALU whitelist only. Known constants are read from the existing local
+SSA cache (zero is architectural); no cross-dispatch facts, no new
+global value state. Reuse the normal scalar write/V0 trace path.
+Word identities still truncate and sign-extend, and variable shifts
+with proven counts use masked immediate shifts. Identical operands,
+zero/ones absorbers and identities avoid emitting unnecessary operations
+or reads. Existing dynamic lowerings remain the fallback; trapping,
+memory, COP, HI/LO and control-flow instructions are not specialized.
+The existing immediate constant-folding paths now use the same evaluator.
+Track src/architecture in guest lowering provenance before using its
+header; old accepted IR and objects must be retained for comparison.
+The new JIT fixture covers folded IR shape, dynamic and fixed shifts,
+identity word sign extension, V0, zero writes, counters, delay slots
+and dispatch directly into an internal continuation. No retail or
+native size savings claimed until measured on retained retail entries.

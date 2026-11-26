@@ -121,6 +121,7 @@ private:
                     bool is_terminator = false,
                     bool guarded_loop_header = false,
                     const std::map<uint32_t, ee::s_ee_instruction>* insn_map = nullptr);
+    bool try_specialize_scalar(const ee::s_ee_instruction& ins);
     void emit_insn(const ee::s_ee_instruction& ins, bool is_last_in_block,
                    uint32_t fallthrough_pc, bool in_delay_slot = false,
                    bool count_instruction = true);

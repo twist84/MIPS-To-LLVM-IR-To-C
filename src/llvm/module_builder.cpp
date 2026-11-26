@@ -1,4 +1,5 @@
 #include "module_builder.h"
+#include "../architecture/ee_scalar_constant.h"
 #include "ee_cop1_rsqrt_ir.h"
 #include "ee_cop1_add_ir.h"
 #include "ee_cop1_mul_ir.h"
@@ -37,12 +38,6 @@ bool read_constant_u64(const std::string& operand, uint64_t& value)
         operand.data() + operand.size(), value, 10);
     return result.ec == std::errc{} &&
         result.ptr == operand.data() + operand.size();
-}
-
-uint64_t sign_extend_word(uint64_t value)
-{
-    const uint64_t low = value & 0xffffffffull;
-    return (low & 0x80000000ull) != 0u ? low | 0xffffffff00000000ull : low;
 }
 
 std::string reg_lo(uint8_t r)  { char b[16]; std::snprintf(b, sizeof(b), "%%g%d_lo", r); return b; }
@@ -1375,6 +1370,329 @@ static std::set<uint8_t> block_read_before_write(const std::vector<ee::s_ee_inst
     return result;
 }
 
+// Specialize only nontrapping scalar ALU instructions. This runs after
+// instruction accounting, and all writes still use the usual GPR/trace
+// publication path. Facts are confined to the current SSA tracking scope.
+bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
+{
+    using ee::e_ee_opcode;
+    using ee::scalar_constant::e_op;
+    using ee::scalar_constant::evaluate;
+
+    enum class e_form { reg, immediate, shift, variable_shift };
+    e_form form = e_form::reg;
+    std::optional<e_op> op;
+    switch (ins.opcode)
+    {
+    case e_ee_opcode::OP_ADDIU: op = e_op::addiu; break;
+    case e_ee_opcode::OP_DADDIU: op = e_op::daddiu; break;
+    case e_ee_opcode::OP_ANDI: op = e_op::andi; break;
+    case e_ee_opcode::OP_ORI: op = e_op::ori; break;
+    case e_ee_opcode::OP_XORI: op = e_op::xori; break;
+    case e_ee_opcode::OP_SLTI: op = e_op::slti; break;
+    case e_ee_opcode::OP_SLTIU: op = e_op::sltiu; break;
+    case e_ee_opcode::OP_SPECIAL:
+        switch (ins.funct)
+        {
+        case 0x21: op = e_op::addu; break;
+        case 0x23: op = e_op::subu; break;
+        case 0x2d: op = e_op::daddu; break;
+        case 0x2f: op = e_op::dsubu; break;
+        case 0x24: op = e_op::bit_and; break;
+        case 0x25: op = e_op::bit_or; break;
+        case 0x26: op = e_op::bit_xor; break;
+        case 0x27: op = e_op::bit_nor; break;
+        case 0x2a: op = e_op::slt; break;
+        case 0x2b: op = e_op::sltu; break;
+        case 0x00: op = e_op::sll; form = e_form::shift; break;
+        case 0x02: op = e_op::srl; form = e_form::shift; break;
+        case 0x03: op = e_op::sra; form = e_form::shift; break;
+        case 0x04: op = e_op::sllv; form = e_form::variable_shift; break;
+        case 0x06: op = e_op::srlv; form = e_form::variable_shift; break;
+        case 0x07: op = e_op::srav; form = e_form::variable_shift; break;
+        case 0x38: op = e_op::dsll; form = e_form::shift; break;
+        case 0x3a: op = e_op::dsrl; form = e_form::shift; break;
+        case 0x3b: op = e_op::dsra; form = e_form::shift; break;
+        case 0x3c: op = e_op::dsll32; form = e_form::shift; break;
+        case 0x3e: op = e_op::dsrl32; form = e_form::shift; break;
+        case 0x3f: op = e_op::dsra32; form = e_form::shift; break;
+        case 0x14: op = e_op::dsllv; form = e_form::variable_shift; break;
+        case 0x16: op = e_op::dsrlv; form = e_form::variable_shift; break;
+        case 0x17: op = e_op::dsrav; form = e_form::variable_shift; break;
+        default: break;
+        }
+        break;
+    default:
+        break;
+    }
+    if (!op)
+    {
+        return false;
+    }
+    if (ins.opcode != e_ee_opcode::OP_SPECIAL)
+    {
+        form = e_form::immediate;
+    }
+    const uint8_t dest = form == e_form::immediate ? ins.rt : ins.rd;
+    // Only this explicit pure-ALU whitelist may discard a zero destination.
+    if (dest == 0)
+    {
+        return true;
+    }
+
+    const auto known = [&](uint8_t reg) -> std::optional<uint64_t>
+    {
+        if (reg == 0)
+        {
+            return uint64_t{0};
+        }
+        const auto found = m_cur_lo.find(reg);
+        uint64_t value = 0;
+        if (found != m_cur_lo.end() && read_constant_u64(found->second, value))
+        {
+            return value;
+        }
+        return std::nullopt;
+    };
+
+    const bool shift = form == e_form::shift || form == e_form::variable_shift;
+    const uint8_t lhs_reg = shift ? ins.rt : ins.rs;
+    const uint8_t rhs_reg = shift ? ins.rs : ins.rt;
+    const auto lhs = known(lhs_reg);
+    std::optional<uint64_t> rhs;
+    if (form == e_form::immediate)
+    {
+        rhs = *op == e_op::andi || *op == e_op::ori || *op == e_op::xori
+            ? ins.uimmediate : static_cast<uint16_t>(ins.immediate);
+    }
+    else if (form == e_form::shift)
+    {
+        rhs = ins.sa & 31u;
+    }
+    else
+    {
+        rhs = known(rhs_reg);
+    }
+
+    const auto write_constant = [&](uint64_t value)
+    {
+        set_gpr_lo64(dest, std::to_string(value));
+    };
+    if (lhs && rhs)
+    {
+        const auto result = evaluate(*op, *lhs, *rhs);
+        assert(result.has_value());
+        write_constant(*result);
+        return true;
+    }
+
+    const bool same = form == e_form::reg && lhs_reg == rhs_reg;
+    const bool lhs_zero = lhs && *lhs == 0;
+    const bool rhs_zero = rhs && *rhs == 0;
+    const bool lhs_ones = lhs && *lhs == UINT64_MAX;
+    const bool rhs_ones = rhs && *rhs == UINT64_MAX;
+    const bool lhs_word_zero = lhs && (*lhs & 0xffffffffu) == 0;
+    const bool rhs_word_zero = rhs && (*rhs & 0xffffffffu) == 0;
+    const auto move = [&](uint8_t reg, bool word)
+    {
+        const std::string value = src_lo(reg);
+        if (word)
+        {
+            set_gpr_lo32_sext(dest, value);
+        }
+        else
+        {
+            set_gpr_lo64(dest, value);
+        }
+    };
+    const auto complement = [&](uint8_t reg)
+    {
+        const std::string value = src_lo(reg);
+        const std::string result = newtemp();
+        m_out += "  " + result + " = xor i64 " + value + ", -1\n";
+        set_gpr_lo64(dest, result);
+    };
+    switch (*op)
+    {
+    case e_op::addu:
+        if (lhs_word_zero || rhs_word_zero)
+        {
+            move(lhs_word_zero ? rhs_reg : lhs_reg, true);
+            return true;
+        }
+        break;
+    case e_op::subu:
+        if (same)
+        {
+            write_constant(0);
+            return true;
+        }
+        if (rhs_word_zero)
+        {
+            move(lhs_reg, true);
+            return true;
+        }
+        break;
+    case e_op::daddu:
+        if (lhs_zero || rhs_zero)
+        {
+            move(lhs_zero ? rhs_reg : lhs_reg, false);
+            return true;
+        }
+        break;
+    case e_op::dsubu:
+        if (same)
+        {
+            write_constant(0);
+            return true;
+        }
+        if (rhs_zero)
+        {
+            move(lhs_reg, false);
+            return true;
+        }
+        break;
+    case e_op::bit_and:
+        if (lhs_zero || rhs_zero)
+        {
+            write_constant(0);
+            return true;
+        }
+        if (same || lhs_ones || rhs_ones)
+        {
+            move(lhs_ones ? rhs_reg : lhs_reg, false);
+            return true;
+        }
+        break;
+    case e_op::bit_or:
+        if (lhs_ones || rhs_ones)
+        {
+            write_constant(UINT64_MAX);
+            return true;
+        }
+        if (same || lhs_zero || rhs_zero)
+        {
+            move(lhs_zero ? rhs_reg : lhs_reg, false);
+            return true;
+        }
+        break;
+    case e_op::bit_xor:
+        if (same)
+        {
+            write_constant(0);
+            return true;
+        }
+        if (lhs_zero || rhs_zero)
+        {
+            move(lhs_zero ? rhs_reg : lhs_reg, false);
+            return true;
+        }
+        if (lhs_ones || rhs_ones)
+        {
+            complement(lhs_ones ? rhs_reg : lhs_reg);
+            return true;
+        }
+        break;
+    case e_op::bit_nor:
+        if (lhs_ones || rhs_ones)
+        {
+            write_constant(0);
+            return true;
+        }
+        if (same || lhs_zero || rhs_zero)
+        {
+            complement(lhs_zero ? rhs_reg : lhs_reg);
+            return true;
+        }
+        break;
+    case e_op::slt:
+    case e_op::sltu:
+        if (same || (*op == e_op::sltu && (rhs_zero || lhs_ones)))
+        {
+            write_constant(0);
+            return true;
+        }
+        break;
+    case e_op::andi:
+    case e_op::sltiu:
+        if (rhs_zero)
+        {
+            write_constant(0);
+            return true;
+        }
+        break;
+    case e_op::addiu:
+    case e_op::daddiu:
+    case e_op::ori:
+    case e_op::xori:
+        if (rhs_zero)
+        {
+            move(lhs_reg, *op == e_op::addiu);
+            return true;
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (shift)
+    {
+        const bool word = *op == e_op::sll || *op == e_op::srl ||
+            *op == e_op::sra || *op == e_op::sllv ||
+            *op == e_op::srlv || *op == e_op::srav;
+        const bool arithmetic = *op == e_op::sra || *op == e_op::srav ||
+            *op == e_op::dsra || *op == e_op::dsrav || *op == e_op::dsra32;
+        const bool left = *op == e_op::sll || *op == e_op::sllv ||
+            *op == e_op::dsll || *op == e_op::dsllv || *op == e_op::dsll32;
+        if ((word && lhs_word_zero) || lhs_zero ||
+            (arithmetic && lhs && (word ? (*lhs & 0xffffffffu) == 0xffffffffu
+                                        : *lhs == UINT64_MAX)))
+        {
+            write_constant(lhs_zero || (word && lhs_word_zero) ? 0 : UINT64_MAX);
+            return true;
+        }
+        if (rhs)
+        {
+            const bool extended = *op == e_op::dsll32 ||
+                *op == e_op::dsrl32 || *op == e_op::dsra32;
+            const unsigned count = static_cast<unsigned>(*rhs &
+                (word || extended ? 31u : 63u)) + (extended ? 32u : 0u);
+            if (count == 0)
+            {
+                move(lhs_reg, word);
+                return true;
+            }
+            // Immediate shifts already have this exact dynamic lowering.
+            // Only replace a variable count proven constant in this scope.
+            if (form == e_form::variable_shift)
+            {
+                const std::string source = src_lo(lhs_reg);
+                const char* opcode = left ? "shl" : arithmetic ? "ashr" : "lshr";
+                if (word)
+                {
+                    const std::string narrow = newtemp();
+                    const std::string shifted = newtemp();
+                    const std::string result = newtemp();
+                    m_out += "  " + narrow + " = trunc i64 " + source + " to i32\n";
+                    m_out += "  " + shifted + " = " + opcode + " i32 " + narrow +
+                        ", " + std::to_string(count) + "\n";
+                    m_out += "  " + result + " = sext i32 " + shifted + " to i64\n";
+                    set_gpr_lo64(dest, result);
+                }
+                else
+                {
+                    const std::string result = newtemp();
+                    m_out += "  " + result + " = " + opcode + " i64 " + source +
+                        ", " + std::to_string(count) + "\n";
+                    set_gpr_lo64(dest, result);
+                }
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                                bool is_last_in_block,
                                uint32_t fallthrough_pc,
@@ -1433,6 +1751,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
                  std::to_string(ins.pc) + ", i32 " +
                  std::to_string(ins.opcode_word) + ")\n";
+    }
+
+    if (try_specialize_scalar(ins))
+    {
+        return;
     }
 
     if (fallthrough_pc == 0)
@@ -1546,12 +1869,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         // 32-bit add, result sign-extended into low 64; upper 64 preserved.
         // PCSX2: UD[0] = (s64)(s32)(UL[0] + Imm)
         const std::string source = src_lo(ins.rs);
-        uint64_t constant = 0u;
-        if (read_constant_u64(source, constant))
-        {
-            set_gpr_lo64(ins.rt, std::to_string(sign_extend_word(constant + static_cast<uint64_t>(ins.immediate))));
-            break;
-        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
@@ -1563,12 +1880,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // Full 64-bit add; upper 64 preserved.
         const std::string source = src_lo(ins.rs);
-        uint64_t constant = 0u;
-        if (read_constant_u64(source, constant))
-        {
-            set_gpr_lo64(ins.rt, std::to_string(constant + static_cast<uint64_t>(ins.immediate)));
-            break;
-        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
@@ -1580,12 +1891,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // Zero-extend 16-bit imm, OR into full 64; upper 64 preserved.
         const std::string source = src_lo(ins.rs);
-        uint64_t constant = 0u;
-        if (read_constant_u64(source, constant))
-        {
-            set_gpr_lo64(ins.rt, std::to_string(constant | static_cast<uint64_t>(ins.uimmediate)));
-            break;
-        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
@@ -1596,12 +1901,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_ANDI:
     {
         const std::string source = src_lo(ins.rs);
-        uint64_t constant = 0u;
-        if (read_constant_u64(source, constant))
-        {
-            set_gpr_lo64(ins.rt, std::to_string(constant & static_cast<uint64_t>(ins.uimmediate)));
-            break;
-        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
@@ -1612,12 +1911,6 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     case ee::e_ee_opcode::OP_XORI:
     {
         const std::string source = src_lo(ins.rs);
-        uint64_t constant = 0u;
-        if (read_constant_u64(source, constant))
-        {
-            set_gpr_lo64(ins.rt, std::to_string(constant ^ static_cast<uint64_t>(ins.uimmediate)));
-            break;
-        }
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%u", ins.uimmediate);
@@ -1629,7 +1922,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // LUI writes a 32-bit constant << 16, sign-extended into low 64.
         set_gpr_lo64(ins.rt, std::to_string(
-            sign_extend_word(static_cast<uint64_t>(ins.uimmediate) << 16u)));
+            *ee::scalar_constant::evaluate(ee::scalar_constant::e_op::lui, 0, ins.uimmediate)));
         break;
     }
     case ee::e_ee_opcode::OP_LB:
