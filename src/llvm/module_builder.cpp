@@ -557,22 +557,24 @@ std::string module_builder::emit_effective_address(const ee::s_ee_instruction& i
     {
         return std::to_string(static_cast<uint32_t>(ins.immediate));
     }
-    const std::string base = src_lo(ins.rs);
-    uint64_t constant = 0u;
-    if (read_constant_u64(base, constant))
+    const auto address_bits = ee::scalar_constant::effective_address_bits(
+        register_bits(ins.rs), ins.immediate);
+    if (const auto constant = address_bits.masked_constant(0xffffffffu))
     {
-        return std::to_string(static_cast<uint32_t>(constant) +
-                              static_cast<uint32_t>(ins.immediate));
+        return std::to_string(*constant);
     }
+    const std::string base = src_lo(ins.rs);
     const std::string low = newtemp();
     m_out += "  " + low + " = trunc i64 " + base + " to i32\n";
     if (ins.immediate == 0)
     {
+        record_bits(low, address_bits);
         return low;
     }
     const std::string address = newtemp();
     m_out += "  " + address + " = add i32 " + low + ", " +
              std::to_string(ins.immediate) + "\n";
+    record_bits(address, address_bits);
     return address;
 }
 
@@ -1904,9 +1906,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     const auto guard_memory_alignment =
         [&](const std::string& address, uint32_t width, uint32_t excode)
     {
-        uint64_t constant = 0u;
-        if (read_constant_u64(address, constant) &&
-            (constant & (width - 1u)) == 0u)
+        if ((value_bits(address).m_zero & (width - 1u)) == (width - 1u))
         {
             // Preserve the existing publication boundary for memory callbacks.
             // A proven aligned address cannot enter the exception arm.
@@ -2003,22 +2003,28 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     {
         // 32-bit add, result sign-extended into low 64; upper 64 preserved.
         // PCSX2: UD[0] = (s64)(s32)(UL[0] + Imm)
+        const auto bits = ee::scalar_constant::add_low_bits(register_bits(ins.rs),
+            ee::scalar_constant::exact_bits(ee::scalar_constant::sign_extend<16>(ins.immediate)));
         const std::string source = src_lo(ins.rs);
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
         m_out += "  " + d + " = add i64 " + source + ", " + imm + "\n";
+        record_bits(d, bits);
         set_gpr_lo32_sext(ins.rt, d);
         break;
     }
     case ee::e_ee_opcode::OP_DADDIU:
     {
         // Full 64-bit add; upper 64 preserved.
+        const auto bits = ee::scalar_constant::add_low_bits(register_bits(ins.rs),
+            ee::scalar_constant::exact_bits(ee::scalar_constant::sign_extend<16>(ins.immediate)));
         const std::string source = src_lo(ins.rs);
         std::string d = newtemp();
         char imm[32];
         std::snprintf(imm, sizeof(imm), "%d", ins.immediate);
         m_out += "  " + d + " = add i64 " + source + ", " + imm + "\n";
+        record_bits(d, bits);
         set_gpr_lo64(ins.rt, d);
         break;
     }
@@ -2865,6 +2871,13 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             else
             {
                 m_out += "  " + r + " = " + std::string(op) + " i64 " + a + ", " + b + "\n";
+                if (funct == e_ee_opcode::FUNCT_ADDU || funct == e_ee_opcode::FUNCT_SUBU ||
+                    funct == e_ee_opcode::FUNCT_DADDU || funct == e_ee_opcode::FUNCT_DSUBU)
+                {
+                    record_bits(r, ee::scalar_constant::add_low_bits(
+                        value_bits(a), value_bits(b),
+                        funct == e_ee_opcode::FUNCT_SUBU || funct == e_ee_opcode::FUNCT_DSUBU));
+                }
                 if (is_32bit_arith)
                     set_gpr_lo32_sext(ins.rd, r); // 32-bit result, sext into low 64
                 else

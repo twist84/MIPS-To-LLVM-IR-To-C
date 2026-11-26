@@ -78,6 +78,19 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
                      make_jr(31u), 0u, make_jr(31u), 0u};
             return true;
         }
+        if (operation == "known_aligned" || operation == "known_misaligned" ||
+            operation == "partially_aligned")
+        {
+            // SLL r9,r9,2 (or 1); ADDIU r9,r9,-4; LW r8,4(r9).
+            // The value is dynamic, but the alignment can be proven in
+            // the first mode. The other modes still use the fault gate.
+            const uint32_t sll = (9u << 16u) | (9u << 11u) |
+                ((operation == "partially_aligned" ? 1u : 2u) << 6u);
+            const uint32_t lw = (0x23u << 26u) | (9u << 21u) | (8u << 16u) |
+                (operation == "known_misaligned" ? 5u : 4u);
+            words = {sll, make_addiu(9u, 9u, -4), lw};
+            return true;
+        }
         if (operation == "constant_address" || operation == "constant_misaligned")
         {
             // LUI sign extends; ORI, XORI, ANDI and the signed immediate

@@ -49,6 +49,15 @@ static_assert(*less_bits(unsigned_bits(8), exact_bits(UINT64_MAX), true) == 0);
 static_assert(!less_bits(unsigned_bits(8), exact_bits(128), false));
 static_assert(*logical_bits(op::bit_or, unsigned_bits(8), exact_bits(31)).masked_constant(31) == 31);
 static_assert(word_bits({}).m_word);
+static_assert(add_low_bits({15, 0, false}, exact_bits(4)).m_zero == 11);
+static_assert(add_low_bits({15, 0, false}, exact_bits(4)).m_one == 4);
+static_assert(add_low_bits({15, 0, false}, exact_bits(4), true).m_one == 12);
+static_assert(add_low_bits({0, 0, false}, exact_bits(4)).empty());
+static_assert(*effective_address_bits(exact_bits(0x12345678fffffffcull), 0x44)
+    .masked_constant(0xffffffffu) == 0x40);
+static_assert(*effective_address_bits({15, 0, false}, -4).masked_constant(15) == 12);
+static_assert(!effective_address_bits({3, 0, false}, 0).masked_constant(15));
+static_assert(add_low_bits(exact_bits(UINT64_MAX), exact_bits(1)).m_zero == UINT64_MAX);
 static_assert(!common_bits(word_bits({}), {}).m_word);
 static_assert(*shift_bits(exact_bits(0x80000000), 31, true, false, true).constant() == UINT64_MAX);
 static_assert(*shift_bits(exact_bits(0x80000000), 31, true, false, false).constant() == 1);

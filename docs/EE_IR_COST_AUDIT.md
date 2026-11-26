@@ -2132,3 +2132,33 @@ the full scan for annotations, counter-only PCs, duplicates, comments,
 helper isolation and Windows CRLF. Local 8c scalar evaluator and JIT
 tests passed; comparison-tool test exposed this issue. No lowering
 inputs changed in this fix.
+
+#### 8c retail acceptance
+
+Performance-first receipt e280c34147c60946baaceba68d224711948f6c11b8eac41bcd78f6e5c60da0a0;
+replay archive b7baff8d3a68107d7ddc30a3628aabf85f40f686bfcbe7a7266d882515a3dbc4.
+16,252 entries, 845,746 function-scoped PCs, no ownership/coverage changes.
+Candidate DLL c39de683372fce83c9c8e7a11d4da852e75554d8ea400c07ca9897acef252ed0.
+Generation 166.765s, coverage scan 52.797s, native compilation 219.375s,
+link 47.329s. All five CI workflows on 082a1ea passed.
+All four replay arms reached 40M dispatches, 193,569 matching samples
+each, no mismatches/unpaired, 3,283/3,283 polls. Reports and screenshots
+byte-identical. Final PC 0x0010a940, 22,756,641,460 guest attempts,
+22,758,707,828 reference slots, 23,005,385,922 EE cycles, 4,675 fields.
+Wall times original 41.844s, control 41.546s, 8b 41.687s, 8c 41.422s.
+8c 0.64% higher throughput than 8b, within observed A/A variation.
+Correctness accepted; no repeatable speedup claimed.
+
+### Checkpoint 8d — effective address facts and alignment
+
+Propagate contiguous known low bits through nontrapping add/sub
+(including signed immediates), word sign extension and wrapping
+32-bit guest effective addresses. Fold known low-32 addresses even
+when the high GPR word is unknown; bypass only proven-aligned
+architectural alignment guards. Keep existing pre-access publication,
+reset, RAM descriptor checks, memory callbacks, trace ordering and
+dynamic misalignment exception paths. No virtual-to-physical mapping
+inferences, no TLB or MMIO bypass. Existing LQ/SQ rounding retained.
+Add compile-time boundary tests and JIT coverage for dynamic proven
+alignment, wrapping high bits, definite misalignment and insufficient
+proof. Runtime measurement pending.

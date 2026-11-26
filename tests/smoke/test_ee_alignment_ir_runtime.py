@@ -379,6 +379,36 @@ def main():
                 (0xfedcba9876543210, 0x43, 0xff0, 0x2000, 0x00140000)
             ] if enabled else []), "SQ context lost live GPR values")
 
+        # Dynamic values with proven low bits: retain the callback and
+        # precise publication boundary while eliminating only the check.
+        for mode, base, expected_addr, fault in (
+            ("ee_known_aligned", 0x1234567800000010, 0x40, False),
+            ("ee_known_aligned", 0x1234567840000010, 0x40, False),
+            ("ee_known_misaligned", 0x10, 0x41, True),
+            ("ee_partially_aligned", 0x20, 0x40, False),
+            ("ee_partially_aligned", 0x21, 0x42, True),
+        ):
+            raw_path = pathlib.Path(directory) / (mode + "-shape.ll")
+            import subprocess
+            subprocess.run([str(fixture), str(raw_path), mode], check=True)
+            source = raw_path.read_text(encoding="utf-8")
+            require(("memory_alignment_fault_" not in source) ==
+                    (mode == "ee_known_aligned"), mode + ": alignment proof shape")
+            result, cpu, original = execute(fixture, directory, target, mode, base)
+            if fault:
+                require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == expected_addr and
+                        cpu.cop0[14] == ENTRY_PC + 8 and not READS and not WRITES,
+                        mode + ": precise alignment exception")
+                require(cpu.gpr[8].lo == 0x0123456789abcdef,
+                        mode + ": fault overwrote destination")
+            else:
+                require(result == EE_EXIT_DISPATCH and READS == [(4, expected_addr)],
+                        mode + ": memory callback/address differs")
+                value = sum(original[expected_addr + i] << (8 * i) for i in range(4))
+                expected = value | 0xffffffff00000000 if value & 0x80000000 else value
+                require(cpu.gpr[8].lo == expected and cpu.gpr[8].hi == 0xfedcba9876543210,
+                        mode + ": load result differs")
+
         # 32-bit effective address arithmetic must discard high GPR bits
         # and wrap positive/negative signed offsets before memory access.
         for mode, base in (("ee_lw_wrap_positive", 0x12345678fffffffc),

@@ -52,6 +52,25 @@ constexpr s_known_bits common_bits(s_known_bits a, s_known_bits b)
     return {a.m_zero & b.m_zero, a.m_one & b.m_one, a.m_word && b.m_word};
 }
 
+// Only the contiguous known low prefix survives arbitrary higher bits
+// through wrapping addition/subtraction. Carry never travels downward.
+constexpr s_known_bits add_low_bits(s_known_bits a, s_known_bits b,
+                                   bool subtract = false)
+{
+    const uint64_t known = (a.m_zero | a.m_one) & (b.m_zero | b.m_one);
+    const uint64_t prefix = known & ~(known + 1u);
+    const uint64_t result = (subtract ? a.m_one - b.m_one : a.m_one + b.m_one) & prefix;
+    return {prefix ^ result, result, false};
+}
+
+constexpr s_known_bits effective_address_bits(s_known_bits base, int32_t displacement)
+{
+    constexpr uint64_t low = low_mask<32>();
+    const auto sum = add_low_bits(base, exact_bits(static_cast<uint32_t>(displacement)));
+    // Only the low 32 bits describe the guest virtual address.
+    return {sum.m_zero & low, sum.m_one & low, false};
+}
+
 constexpr s_known_bits not_bits(s_known_bits a)
 {
     return {a.m_one, a.m_zero, a.m_word};
