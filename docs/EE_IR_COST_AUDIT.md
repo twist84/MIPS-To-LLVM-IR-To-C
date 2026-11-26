@@ -374,3 +374,31 @@ New lowering requires one deliberate known-inventory IR refresh.
 Repeat lean P40, compare first post-spawn progress through terminal
 timing; final CI and actual speed benefit of the quadword change
 remain unverified.
+
+## Quadword store replay (07:32:57)
+
+Clean 8d9889e, selective O5, fixed RTC, lean diagnostics, async
+VU1/GS and baseline IOP. 40M dispatches, native wall 45.734 s,
+terminal elapsed 41079.8 ms, 5725 guest fields. First spawn
+23633526; first post-spawn progress 23633920 at 23444.3 ms with
+4661 fields. 1064 fields / 17.6355 s = 60.3329 fields/s versus
+62.6561 in the scalar-only replay and 60.7553 prior lean mean.
+4068/4068 successful presents, 1657 skipped fields, 4365192 draws,
+362390 native VU1 executions, zero fallbacks, worker failures or
+IOP guest faults. One VU1 job outstanding at stop. Native DLL SHA-256
+073ac9584d0c83b577f1bd9b19eef27520ec0d58eff9c667a8697ea512997cae.
+All five workflows passed 8d9889e. No demonstrated quadword gain;
+different live input and async worker timing confound comparison.
+Keep the change for now; consider controlled hot-module A/B if
+subsequent measurements do not improve.
+
+233f14d centralizes nine memory lowering sites on modular 32-bit
+address arithmetic: no addition for zero displacement, constant
+address for zero base register, and 32-bit addition otherwise.
+Preserves signed immediate, high-bit truncation, alignment traps,
+LQ/SQ rounding, and original full GPR base for trace context.
+Directed tests cover positive wrapping, absolute addressing,
+negative offsets and wrapped alignment faults. No new bus or
+timing semantics; backend may already fold some old expressions,
+so native speed benefit is not assumed. CI and retail validation
+pending; known-inventory IR refresh required.
