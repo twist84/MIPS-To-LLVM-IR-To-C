@@ -1755,3 +1755,38 @@ site counts. Keep existing owner graph, symbols, and all 16,252 guest
 functions; reuse 16,198 objects. Link separately, validate in four-arm
 synchronous replay against the residual scalar parent (74.33 MiB).
 Expand only after runtime acceptance. No production cache changes.
+
+### Checkpoint 6b — selective alignment replay accepted
+
+54 measured wins reproduced; 16,198 reused; 16,252 retained. Removed
+9,255 grouped calls (9,400 -> 145), 234,764 executable and 234,654
+object bytes saved; IR text grows 222,067 bytes. Stage 45.593 s before
+link. DLL 77,945,856 -> 77,711,360 bytes (74.11 MiB), 234,496 bytes
+incremental; 30.2856% cumulative reduction from original O5. Linked
+executable raw bytes 72,756,736. Candidate SHA-256
+9551853b8af7f0e0cd27202a3f035f89de7216d2cbf845115d46b57d7049a802.
+Four synchronous arms exit 4 at 40M dispatches; 3,076/3,076 PAD0
+polls in each replay, 189,248 common samples per replay, zero mismatches
+or unpaired samples. Parent/candidate library identities match receipt;
+libraries unchanged. Report SHA-256
+5df10f878ca3df79a4e2dfa7902cbbf582c4f300c26adfb724343f62da2f3760;
+screenshot SHA-256
+bb9d7f627a0387f8eec6773922fe5351ab3ecef2479c531ff08d84dc3ed00409.
+Reports and screenshots byte-identical across all arms. EE cycles
+21,671,491,707; attempts 21,432,995,394; slots 21,434,978,998;
+yields 2,920; fields 4,404; timing observer did not fail. Wall seconds
+41.609 / 41.547 / 41.266 / 41.110 (-0.38% vs parent, single run).
+All five CI workflows passed on b2c7090. Accept this matched workload.
+
+### Checkpoint 6c — expand alignment merging
+
+Verify original pilot receipt and accepted 54-module overlay, including
+all object identities, symbols, prior manifest/DLL chain, aggregate
+arithmetic and original candidate site counts. Reuse its 54 objects
+unchanged. Trial every remaining eligible module (10,102), including
+the original losing sample; reproduce each residual-scalar parent
+object, retain only positive executable-size savings and delete rejected
+objects. Report all trials with a digest and incremental/cumulative
+call reduction; link a separate experimental DLL against the accepted
+74.11 MiB alignment pilot, with a new four-arm retail replay required.
+No production cache or original IR changes.

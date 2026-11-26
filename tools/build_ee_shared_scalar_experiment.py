@@ -414,6 +414,66 @@ def alignment_winners(pilot, selected, candidates, meta, raw, current, entries, 
     return accepted
 
 
+def verify_alignment_overlay(folder, meta, names, raw, current, entries, plan, promoted, pilot_raw):
+    overlay_raw, overlay, records = read_manifest(folder / "objects", set(names))
+    receipt = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    if (receipt["mode"] != "experimental_selective_alignment_merge" or
+            receipt["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            receipt["source_manifest_sha256"] != sha(raw) or
+            receipt["prior_library_sha256"] != plan["linked_library_sha256"] or
+            receipt["pilot_sha256"] != sha(pilot_raw) or
+            receipt["native_target"] != current["native_target"] or
+            overlay["native_target"] != current["native_target"] or
+            overlay["target_triple"] != current["target_triple"] or
+            overlay["experimental_mixed_pipeline"] != current["experimental_mixed_pipeline"] + "-alignment-pilot" or
+            overlay.get("production_cache_compatible") is not False or
+            receipt["source_functions"] != len(names) or receipt["retained_functions"] != len(names) or
+            receipt["recompiled_modules"] != len(promoted) or
+            receipt["reused_modules"] != len(names)-len(promoted) or
+            not receipt.get("runtime_validation_required") or
+            dll.stat().st_size != receipt["linked_library_bytes"] or
+            sha(dll.read_bytes()) != receipt["linked_library_sha256"]):
+        raise ValueError("alignment overlay identity differs")
+    rows = rows_of(receipt)
+    if len(receipt["modules"]) != len(rows) or set(rows) != set(promoted):
+        raise ValueError("alignment overlay inventory differs")
+    for name, item in records.items():
+        previous = entries[name]
+        if any(item.get(k) != previous.get(k) for k in
+               ("ir_sha256", "defined_symbols", "experimental_pipeline")):
+            raise ValueError("alignment overlay symbol or source differs: " + name)
+        if name in rows:
+            row = rows[name]
+            if (stable_receipt(row) != stable_receipt(promoted[name]) or
+                    row["candidate"]["sha256"] != item["sha256"] or
+                    row["candidate"]["object_bytes"] != item["size_bytes"] or
+                    row["candidate_ir_sha256"] != item["transformed_ir_sha256"] or
+                    item.get("experimental_alignment_merge") is not True):
+                raise ValueError("alignment overlay trial differs: " + name)
+        elif (item.get("experimental_alignment_merge") or
+              any(item.get(k) != previous.get(k) for k in
+                  ("sha256", "size_bytes", "transformed_ir_sha256"))):
+            raise ValueError("unmodified alignment overlay object differs: " + name)
+    for key, field in (("executable_saving", "executable_saving"),
+                       ("object_saving", "object_saving"),
+                       ("removed_ir_bytes", "ir_bytes_saved"),
+                       ("merged_sites", "merged_sites"),
+                       ("remaining_calls", "remaining_calls")):
+        if receipt[key] != sum(row[field] for row in rows.values()):
+            raise ValueError("alignment overlay aggregate differs: " + key)
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return overlay_raw, overlay, records, receipt
+
+
+def alignment_remaining(candidates, promoted):
+    remaining = {n for _, _, n in candidates}
+    if len(remaining) != len(candidates) or not set(promoted) <= remaining:
+        raise ValueError("alignment candidate inventory differs")
+    return remaining - set(promoted)
+
+
 def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
                     scalar, expected, owners, parent_raw, manifest, records, parent_plan):
     folder = args.alignment_from.resolve()
@@ -445,12 +505,21 @@ def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
         count = min(8, len(group))
         selected.update(group[i*(len(group)-1)//max(1, count-1)][2] for i in range(count))
     promoted = None
+    expansion = args.alignment_expand_from is not None
+    link_folder, link_raw, link_manifest, link_entries, link_plan = folder, raw, current, entries, plan
     started = time.monotonic()
     if args.alignment_promote:
         pilot_raw = args.alignment_promote.read_bytes()
         promoted = alignment_winners(json.loads(pilot_raw), selected, candidates,
                                      meta, raw, current, entries, plan)
         selected = set(promoted)
+        if expansion:
+            link_folder = args.alignment_expand_from.resolve()
+            link_raw, link_manifest, link_entries, link_plan = verify_alignment_overlay(
+                link_folder, meta, names, raw, current, entries, plan, promoted, pilot_raw)
+            selected = alignment_remaining(candidates, promoted)
+            if not selected:
+                raise ValueError("no remaining alignment candidates")
         out.mkdir(parents=True)
         (out / "objects").mkdir()
     tasks = [(n, names[n], ir / n, base_records[n], tuple(r.get(n) for r in rows),
@@ -461,17 +530,28 @@ def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
         tasks = [task + (out / "objects" / (Path(task[0]).stem + ".alignment.o"),)
                  for task in tasks]
     result = []
+    reduction = {n: count for count, _, n in candidates}
     with ProcessPoolExecutor(max_workers=args.jobs) as pool:
-        for row in pool.map(alignment_trial, tasks):
-            if promoted is not None and stable_receipt(row) != stable_receipt(promoted[row["module"]]):
-                raise ValueError("alignment candidate differs from pilot: " + row["module"])
-            result.append(row)
-            print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
-                  f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
+        for start in range(0, len(tasks), 128 * args.jobs):
+            for row in pool.map(alignment_trial, tasks[start:start+128*args.jobs]):
+                name = row["module"]
+                if row["merged_sites"] - row["remaining_calls"] != reduction[name] or "candidate" not in row:
+                    raise ValueError("alignment candidate site count differs: " + name)
+                if promoted is not None and not expansion and stable_receipt(row) != stable_receipt(promoted[name]):
+                    raise ValueError("alignment candidate differs from pilot: " + name)
+                if expansion and row["executable_saving"] <= 0:
+                    (out / "objects" / (Path(name).stem + ".alignment.o")).unlink()
+                result.append(row)
+                if not expansion or len(result) % 128 == 0 or len(result) == len(tasks):
+                    print(f"[{len(result)}/{len(tasks)}] {name}: "
+                          f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
     if promoted is not None:
-        changes = {r["module"]: r for r in result}
+        accepted = [r for r in result if r["executable_saving"] > 0]
+        if not accepted:
+            raise ValueError("no further measured alignment wins")
+        changes = {r["module"]: r for r in accepted}
         objects = []
-        for n, record in entries.items():
+        for n, record in link_entries.items():
             if n in changes:
                 row = changes[n]
                 objects.append(dict(record, object=Path(n).stem + ".alignment.o",
@@ -480,25 +560,38 @@ def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
                                     transformed_ir_sha256=row["candidate_ir_sha256"],
                                     experimental_alignment_merge=True))
             else:
-                objects.append(dict(record, object=str((folder / "objects" / record["object"]).resolve())))
+                objects.append(dict(record, object=str((link_folder / "objects" / record["object"]).resolve())))
         (out / "ee_functions.json").write_bytes(meta)
-        overlay = dict(current, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
-                       experimental_mixed_pipeline=current["experimental_mixed_pipeline"] + "-alignment-pilot",
+        overlay = dict(link_manifest, objects=objects, object_bytes=sum(r["size_bytes"] for r in objects),
+                       experimental_mixed_pipeline=link_manifest["experimental_mixed_pipeline"] +
+                           ("-full" if expansion else "-alignment-pilot"),
                        production_cache_compatible=False)
         (out / "objects" / "objects.json").write_text(json.dumps(overlay, indent=2)+"\n", encoding="utf-8")
-        receipt = {"mode": "experimental_selective_alignment_merge",
-                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(raw),
-                   "prior_library_sha256": plan["linked_library_sha256"],
-                   "native_target": current["native_target"], "pilot_sha256": sha(pilot_raw),
+        receipt = {"mode": ("experimental_expanded_alignment_merge" if expansion else
+                            "experimental_selective_alignment_merge"),
+                   "metadata_sha256": sha(meta), "source_manifest_sha256": sha(link_raw),
+                   "prior_library_sha256": link_plan["linked_library_sha256"],
+                   "native_target": link_manifest["native_target"], "pilot_sha256": sha(pilot_raw),
                    "source_functions": len(names), "retained_functions": len(names),
-                   "recompiled_modules": len(result), "reused_modules": len(names)-len(result),
-                   "executable_saving": sum(r["executable_saving"] for r in result),
-                   "object_saving": sum(r["object_saving"] for r in result),
-                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in result),
-                   "merged_sites": sum(r["merged_sites"] for r in result),
-                   "remaining_calls": sum(r["remaining_calls"] for r in result),
+                   "recompiled_modules": len(accepted), "reused_modules": len(names)-len(accepted),
+                   "executable_saving": sum(r["executable_saving"] for r in accepted),
+                   "object_saving": sum(r["object_saving"] for r in accepted),
+                   "removed_ir_bytes": sum(r["ir_bytes_saved"] for r in accepted),
+                   "merged_sites": sum(r["merged_sites"] for r in accepted),
+                   "remaining_calls": sum(r["remaining_calls"] for r in accepted),
                    "wall_seconds": time.monotonic()-started, "runtime_validation_required": True,
-                   "modules": result}
+                   "modules": accepted}
+        if expansion:
+            trials = out / "alignment-trials.json"
+            trials.write_text(json.dumps(result, indent=2)+"\n", encoding="utf-8")
+            receipt.update(trials_sha256=sha(trials.read_bytes()), attempted_modules=len(result),
+                           eligible_modules=len(candidates), eligible_call_reductions=sum(r[0] for r in candidates),
+                           retained_pilot_modules=len(promoted),
+                           rejected_or_unchanged_modules=len(result)-len(accepted),
+                           cumulative_alignment_modules=len(promoted)+len(accepted),
+                           cumulative_alignment_executable_saving=link_plan["executable_saving"]+receipt["executable_saving"],
+                           cumulative_call_reductions=link_plan["merged_sites"]-link_plan["remaining_calls"]+
+                                                     receipt["merged_sites"]-receipt["remaining_calls"])
         library = out / "game-translated.dll"
         subprocess.run([sys.executable, str(Path(__file__).with_name("link_native_objects.py")),
                         str(out / "ee_functions.json"), str(out / "objects"), str(library)], check=True)
@@ -531,6 +624,10 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.alignment_expand_from:
+        if not args.alignment_promote or not args.alignment_from:
+            raise ValueError("--alignment-expand-from requires --alignment-from and --alignment-promote")
+        inputs += (args.alignment_expand_from.resolve(),)
     if args.alignment_promote and not args.alignment_from:
         raise ValueError("--alignment-promote requires --alignment-from")
     if args.alignment_from:
@@ -695,6 +792,7 @@ def main():
     parser.add_argument("--revisit-from", type=Path, help="accepted shared scalar overlay")
     parser.add_argument("--alignment-from", type=Path, help="accepted residual overlay; output is a read-only alignment pilot JSON")
     parser.add_argument("--alignment-promote", type=Path, help="link measured wins from an existing alignment pilot JSON")
+    parser.add_argument("--alignment-expand-from", type=Path, help="accepted linked alignment pilot overlay; retain its winners and trial all remaining eligible modules")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:

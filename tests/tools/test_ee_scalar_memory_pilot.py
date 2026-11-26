@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,15 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_alignment_expansion_inventory(self):
+        candidates = [(2, 100, "accepted.ll"), (5, 200, "remaining.ll"), (1, 50, "loss.ll")]
+        self.assertEqual(alignment_remaining(candidates, {"accepted.ll": {}}),
+                         {"remaining.ll", "loss.ll"})
+        with self.assertRaises(ValueError):
+            alignment_remaining(candidates, {"unknown.ll": {}})
+        with self.assertRaises(ValueError):
+            alignment_remaining(candidates + candidates[:1], {})
 
     def test_alignment_promotion_receipt(self):
         item = {"ir_sha256": "original", "transformed_ir_sha256": "parent",
