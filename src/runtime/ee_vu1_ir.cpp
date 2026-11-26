@@ -28,6 +28,7 @@ uint32_t read_word(const uint8_t* bytes)
 // fast-math, or out-of-range shifts. These helpers are module-local.
 constexpr const char* k_fp_ir = R"IR(
 declare i32 @llvm.ctlz.i32(i32, i1 immarg)
+declare i32 @llvm.vector.reduce.or.v4i32(<4 x i32>)
 
 ; Each ring stores the last eight writes in issue order, not timestamp
 ; order (FCSET and FSSET can publish retroactively visible values).
@@ -102,21 +103,28 @@ done:
   ret void
 }
 
-define internal void @vu_scalar_wait(ptr %current, ptr %ready, ptr %value,
+define internal i32 @vu_scalar_wait(ptr %current, ptr %ready, ptr %value,
     ptr %cycle) alwaysinline {
+entry:
   %now = load i32, ptr %cycle, align 4
   %r = load i32, ptr %ready, align 4
   %stall = icmp ugt i32 %r, %now
   %elapsed = select i1 %stall, i32 %r, i32 %now
   store i32 %elapsed, ptr %cycle, align 4
-  call void @vu_scalar_sync(ptr %current, ptr %ready, ptr %value, i32 %elapsed)
-  ret void
+  %busy = icmp ne i32 %r, 0
+  br i1 %busy, label %publish, label %done
+publish:
+  %v = load i32, ptr %value, align 4
+  store i32 %v, ptr %current, align 4
+  store i32 0, ptr %ready, align 4
+  br label %done
+done:
+  ret i32 %elapsed
 }
 
 define internal void @vu_scalar_schedule(ptr %current, ptr %ready, ptr %value,
     ptr %cycle, i32 %new_value, i32 %latency) alwaysinline {
-  call void @vu_scalar_wait(ptr %current, ptr %ready, ptr %value, ptr %cycle)
-  %now = load i32, ptr %cycle, align 4
+  %now = call i32 @vu_scalar_wait(ptr %current, ptr %ready, ptr %value, ptr %cycle)
   %at = add i32 %now, %latency
   store i32 %new_value, ptr %value, align 4
   store i32 %at, ptr %ready, align 4
@@ -153,8 +161,19 @@ define internal void @vu_q_wait(ptr %q, ptr %ready, ptr %pending,
   %stall = icmp ugt i32 %r, %now
   %elapsed = select i1 %stall, i32 %r, i32 %now
   store i32 %elapsed, ptr %cycle, align 4
-  call void @vu_q_sync(ptr %q, ptr %ready, ptr %pending,
-      ptr %status, ptr %flags, i32 %elapsed)
+  %busy = icmp ne i32 %r, 0
+  br i1 %busy, label %publish, label %done
+publish:
+  %v = load i32, ptr %pending, align 4
+  store i32 %v, ptr %q, align 4
+  %f = load i32, ptr %flags, align 4
+  %old = load i32, ptr %status, align 4
+  %cleared = and i32 %old, -49
+  %merged = or i32 %cleared, %f
+  store i32 %merged, ptr %status, align 4
+  store i32 0, ptr %ready, align 4
+  br label %done
+done:
   ret void
 }
 )IR";
@@ -381,6 +400,12 @@ public:
     {
         m_ir += "pair_" + std::to_string(pc) + ":\n";
         m_current_pc = pc;
+        // Every dynamic pair is a switch target, including loop backedges.
+        // SSA values from a different pair do not dominate this entry.
+        m_vf_lanes = {};
+        m_vf_vectors = {};
+        m_acc_lanes = {};
+        m_acc_vector.clear();
         m_next_target = "%sequential";
         m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
         m_delay_vi_mask = 0u;
@@ -473,6 +498,10 @@ public:
         m_upper_mask = 0u;
         m_upper_flags = false;
         m_upper_acc = false;
+        m_upper_vector.clear();
+        m_upper_over_vector.clear();
+        m_upper_under_vector.clear();
+        m_upper_sticky_vector.clear();
         m_pending_clip.clear();
         m_fsset = -1;
         if ((hi & 0x38000000u) != 0u || !emit_upper(hi) ||
@@ -733,7 +762,7 @@ private:
         }
         else
         {
-            line("call void @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
+            line("call i32 @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
         }
     }
 
@@ -1061,8 +1090,15 @@ private:
         {
             return lane == 3u ? "1065353216" : "0";
         }
-        return operation("load i32, ptr " + vf_pointer(reg_index, lane) +
-            ", align 4");
+        auto& cached = m_vf_lanes[reg_index][lane];
+        if (cached.empty())
+        {
+            const auto& vector = m_vf_vectors[reg_index];
+            cached = vector.empty()
+                ? operation("load i32, ptr " + vf_pointer(reg_index, lane) + ", align 4")
+                : operation("extractelement <4 x i32> " + vector + ", i32 " + std::to_string(lane));
+        }
+        return cached;
     }
 
     std::string vf_vector(uint32_t reg_index)
@@ -1071,8 +1107,15 @@ private:
         {
             return "<i32 0, i32 0, i32 0, i32 1065353216>";
         }
-        return operation("load <4 x i32>, ptr " + vf_pointer(reg_index, 0u) +
-            ", align 4");
+        auto& cached = m_vf_vectors[reg_index];
+        if (cached.empty())
+        {
+            // Writes remain published at the original architectural point.
+            // A full load therefore also sees any earlier partial writes.
+            cached = operation("load <4 x i32>, ptr " + vf_pointer(reg_index, 0u) +
+                ", align 4");
+        }
+        return cached;
     }
 
     std::string splat(const std::string& value)
@@ -1144,18 +1187,49 @@ private:
         }
     }
 
-    void write_vector(uint32_t target, uint32_t mask,
-        const std::array<std::string, 4>& values)
+    std::string assemble_vector(const std::array<std::string, 4>& values)
+    {
+        std::string result = "poison";
+        for (uint32_t lane = 0; lane < 4u; ++lane)
+        {
+            result = operation("insertelement <4 x i32> " + result + ", i32 " +
+                values[lane] + ", i32 " + std::to_string(lane));
+        }
+        return result;
+    }
+
+    void write_full_vf(uint32_t target, const std::string& value)
     {
         if (target != 0u)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            line("store <4 x i32> " + value + ", ptr " +
+                vf_pointer(target, 0u) + ", align 4");
+            m_vf_vectors[target] = value;
+            m_vf_lanes[target] = {};
+        }
+    }
+
+    void write_vector(uint32_t target, uint32_t mask,
+        const std::array<std::string, 4>& values,
+        const std::string& vector = {})
+    {
+        if (target == 0u || mask == 0u)
+        {
+            return;
+        }
+        if (mask == 15u)
+        {
+            write_full_vf(target, vector.empty() ? assemble_vector(values) : vector);
+            return;
+        }
+        m_vf_vectors[target].clear();
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    line("store i32 " + values[lane] + ", ptr " +
-                        vf_pointer(target, lane) + ", align 4");
-                }
+                line("store i32 " + values[lane] + ", ptr " +
+                    vf_pointer(target, lane) + ", align 4");
+                m_vf_lanes[target][lane] = values[lane];
             }
         }
     }
@@ -1168,8 +1242,7 @@ private:
             // address (0x3ff0). Do not assume host data alignment.
             const auto value = operation("load <4 x i32>, ptr " +
                 data_pointer(address, 0u) + ", align 1");
-            line("store <4 x i32> " + value + ", ptr " +
-                vf_pointer(target, 0u) + ", align 4");
+            write_full_vf(target, value);
             return;
         }
         std::array<std::string, 4> values{};
@@ -1207,28 +1280,55 @@ private:
     {
         if (m_upper_acc)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            if (m_upper_mask == 15u)
             {
-                if ((m_upper_mask & (8u >> lane)) != 0u)
+                const auto value = m_upper_vector.empty()
+                    ? assemble_vector(m_upper_values) : m_upper_vector;
+                line("store <4 x i32> " + value + ", ptr %acc, align 4");
+                m_acc_vector = value;
+                m_acc_lanes = {};
+            }
+            else if (m_upper_mask != 0u)
+            {
+                m_acc_vector.clear();
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
                 {
-                    line("store i32 " + m_upper_values[lane] + ", ptr " +
-                        acc_pointer(lane) + ", align 4");
-                    if (m_upper_flags)
+                    if ((m_upper_mask & (8u >> lane)) != 0u)
                     {
-                        const auto latch = operation("load i32, ptr %acc_overflow, align 4");
-                        const uint32_t bit = 8u >> lane;
-                        const auto cleared = operation("and i32 " + latch + ", " + std::to_string(~bit));
-                        const auto flag = operation("select i1 " + m_upper_overflow[lane] +
-                            ", i32 " + std::to_string(bit) + ", i32 0");
-                        const auto next = operation("or i32 " + cleared + ", " + flag);
-                        line("store i32 " + next + ", ptr %acc_overflow, align 4");
+                        line("store i32 " + m_upper_values[lane] + ", ptr " +
+                            acc_pointer(lane) + ", align 4");
+                        m_acc_lanes[lane] = m_upper_values[lane];
                     }
                 }
+            }
+            if (m_upper_flags && m_upper_mask != 0u)
+            {
+                const auto latch = operation("load i32, ptr %acc_overflow, align 4");
+                auto next = operation("and i32 " + latch + ", " + std::to_string(~m_upper_mask));
+                if (!m_upper_over_vector.empty())
+                {
+                    next = operation("or i32 " + next + ", " +
+                        pack_flags(m_upper_over_vector, m_upper_mask));
+                }
+                else
+                {
+                    for (uint32_t lane = 0u; lane < 4u; ++lane)
+                    {
+                        const uint32_t bit = 8u >> lane;
+                        if ((m_upper_mask & bit) != 0u)
+                        {
+                            const auto flag = operation("select i1 " + m_upper_overflow[lane] +
+                                ", i32 " + std::to_string(bit) + ", i32 0");
+                            next = operation("or i32 " + next + ", " + flag);
+                        }
+                    }
+                }
+                line("store i32 " + next + ", ptr %acc_overflow, align 4");
             }
         }
         else
         {
-            write_vector(m_upper_target, m_upper_mask, m_upper_values);
+            write_vector(m_upper_target, m_upper_mask, m_upper_values, m_upper_vector);
         }
         if (m_upper_flags)
         {
@@ -1236,10 +1336,37 @@ private:
         }
     }
 
+    std::string pack_flags(const std::string& lanes, uint32_t mask)
+    {
+        // x,y,z,w map to guest MAC bits 8,4,2,1 respectively.
+        const auto reversed = operation("shufflevector <4 x i1> " + lanes +
+            ", <4 x i1> poison, <4 x i32> <i32 3, i32 2, i32 1, i32 0>");
+        const auto packed = operation("bitcast <4 x i1> " + reversed + " to i4");
+        const auto bits = operation("zext i4 " + packed + " to i32");
+        return mask == 15u ? bits :
+            operation("and i32 " + bits + ", " + std::to_string(mask));
+    }
+
     void emit_flags(const std::array<std::string, 4>& values, uint32_t mask)
     {
         std::string mac = "0";
-        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        if (!m_upper_vector.empty())
+        {
+            const auto exp = operation("and <4 x i32> " + m_upper_vector +
+                ", <i32 2139095040, i32 2139095040, i32 2139095040, i32 2139095040>");
+            const auto zero = operation("icmp eq <4 x i32> " + exp + ", zeroinitializer");
+            const auto sign = operation("icmp slt <4 x i32> " + m_upper_vector + ", zeroinitializer");
+            mac = pack_flags(zero, mask);
+            for (const auto& group : {std::make_pair(sign, 4u),
+                                      std::make_pair(m_upper_under_vector, 8u),
+                                      std::make_pair(m_upper_over_vector, 12u)})
+            {
+                const auto bits = pack_flags(group.first, mask);
+                const auto shifted = operation("shl i32 " + bits + ", " + std::to_string(group.second));
+                mac = operation("or i32 " + mac + ", " + shifted);
+            }
+        }
+        else for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
             const uint32_t bit = 8u >> lane;
             if ((mask & bit) == 0u)
@@ -1264,11 +1391,20 @@ private:
         line("store i32 " + mac + ", ptr %mac, align 4");
         const auto old = operation("load i32, ptr %status, align 4");
         auto status = operation("and i32 " + old + ", 4080");
-        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        if (!m_upper_sticky_vector.empty() && mask == 15u)
         {
-            if ((mask & (8u >> lane)) != 0u)
+            const auto sticky = operation("call i32 @llvm.vector.reduce.or.v4i32(<4 x i32> " +
+                m_upper_sticky_vector + ")");
+            status = operation("or i32 " + status + ", " + sticky);
+        }
+        else
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
             {
-                status = operation("or i32 " + status + ", " + m_upper_sticky[lane]);
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    status = operation("or i32 " + status + ", " + m_upper_sticky[lane]);
+                }
             }
         }
         for (uint32_t group = 0u; group < 4u; ++group)
@@ -1299,7 +1435,24 @@ private:
 
     std::string acc(uint32_t lane)
     {
-        return operation("load i32, ptr " + acc_pointer(lane) + ", align 4");
+        auto& value = m_acc_lanes[lane];
+        if (value.empty())
+        {
+            value = m_acc_vector.empty()
+                ? operation("load i32, ptr " + acc_pointer(lane) + ", align 4")
+                : operation("extractelement <4 x i32> " + m_acc_vector + ", i32 " +
+                    std::to_string(lane));
+        }
+        return value;
+    }
+
+    std::string acc_vector()
+    {
+        if (m_acc_vector.empty())
+        {
+            m_acc_vector = operation("load <4 x i32>, ptr %acc, align 4");
+        }
+        return m_acc_vector;
     }
 
     std::string fp_binary(const char* helper, const std::string& lhs,
@@ -1443,9 +1596,7 @@ private:
                 lhs = operation("select <4 x i1> " + active + ", <4 x i32> " +
                     lhs + ", <4 x i32> zeroinitializer");
             }
-            const auto acc_value = mac ?
-                operation("load <4 x i32>, ptr %acc, align 4") :
-                std::string("zeroinitializer");
+            const auto acc_value = mac ? acc_vector() : std::string("zeroinitializer");
             std::string latched = "zeroinitializer";
             if (mac)
             {
@@ -1463,6 +1614,10 @@ private:
             const auto over = operation("extractvalue " + type + " " + result + ", 1");
             const auto under = operation("extractvalue " + type + " " + result + ", 2");
             const auto sticky = operation("extractvalue " + type + " " + result + ", 3");
+            m_upper_vector = bits;
+            m_upper_over_vector = over;
+            m_upper_under_vector = under;
+            m_upper_sticky_vector = sticky;
             for (uint32_t lane = 0u; lane < 4u; ++lane)
             {
                 if ((write_mask & (8u >> lane)) != 0u)
@@ -1603,6 +1758,13 @@ private:
     }
 
     std::string m_ir;
+    // Write-through SSA cache: within a dynamic pair or across the proven
+    // straight-line path. Lower writes update cache before upper retirement.
+    std::array<std::array<std::string, 4>, 32> m_vf_lanes{};
+    std::array<std::string, 32> m_vf_vectors{};
+    std::array<std::string, 4> m_acc_lanes{};
+    std::string m_acc_vector;
+    std::string m_upper_vector, m_upper_over_vector, m_upper_under_vector, m_upper_sticky_vector;
     std::array<std::string, 4> m_upper_values{};
     std::array<std::string, 4> m_upper_overflow{};
     std::array<std::string, 4> m_upper_underflow{};
