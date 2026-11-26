@@ -4415,6 +4415,31 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert sampled_state[key] == snapshot[key], key
+            lean_report = root / "lean.json"
+            lean_env = dict(env, SDBZ_RUNTIME_PROFILE="0",
+                            SDBZ_PROFILE_PCS="0", SDBZ_REPORT_HOTSPOTS="0",
+                            SDBZ_REPORT_BOUNDARY_TIMING="0")
+            lean_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(lean_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=lean_env)
+            assert lean_run.returncode == 4, lean_run.stdout + lean_run.stderr
+            lean_state = json.loads(lean_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert lean_state[key] == snapshot[key], key
+            assert snapshot["m2_runtime"]["enabled"] is True
+            assert snapshot["m2_runtime"]["observations"] == 300
+            assert lean_state["m2_runtime"]["enabled"] is False
+            assert lean_state["m2_runtime"]["observations"] == 0
+            assert lean_state["m2_runtime"]["latest_state"] is None
+            assert lean_state["runtime_profile"]["enabled"] is False
+            assert "EE report boundary timing disabled" in lean_run.stdout
+            timing = next(line for line in lean_run.stderr.splitlines()
+                          if line.startswith("EE timing: dispatched=300"))
+            assert "native_ms=0.0" in timing and "iop_ms=0.0" in timing, timing
             direct_report = root / "direct.json"
             direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1",
                               SDBZ_PROFILE_PCS="1", SDBZ_RUNTIME_PROFILE="1")
