@@ -80,6 +80,9 @@ set "SDBZ_WINDOW_PUMP_STRIDE=64"
 set "SDBZ_EE_DIRECT_DISPATCH=1"
 set "SDBZ_VU1_ASYNC=1"
 set "SDBZ_GS_ASYNC=1"
+rem Diagnostic controls: preserve the P40 workload while isolating host workers.
+if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"
+if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"
 rem Retail-validated experimental mode; regular runner defaults remain unchanged.
 set "SDBZ_GS_GPU_VRAM=1"
 rem Disable byte-wise image hashing, retain committed event/QWC counters.
