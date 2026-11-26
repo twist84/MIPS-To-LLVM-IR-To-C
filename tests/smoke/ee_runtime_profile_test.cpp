@@ -17,6 +17,7 @@ int main()
         }
         overlay.toggle();
         counters.m_clock_available = true;
+        counters.m_crt_mode = 2u;
         if (!overlay.visible() || !overlay.sample(1.0, counters) ||
             overlay.sample(1.1, counters))
         {
@@ -34,20 +35,42 @@ int main()
         }
         ee::s_ee_overlay_text expected{};
         expected.set_line(0u, "PERFORMANCE  F9");
-        expected.set_line(1u, "SPEED 100.0% / UNLIMITED");
-        expected.set_line(2u, "PRESENT 60.0 FPS");
-        expected.set_line(3u, "GUEST 60.0 FIELDS/S");
-        expected.set_line(4u, "EE 294.0 M INST/S");
-        expected.set_line(5u, "DISPATCH 1000.0 K/S");
-        expected.set_line(6u, "GS 100.0 K DRAWS/S");
+        expected.set_line(1u, "SPEED       100.0% / UNLIMITED");
+        expected.set_line(2u, "PRESENT      60.0 / 59.94 FPS");
+        expected.set_line(3u, "GUEST        60.0 / 59.94 F/S");
+        expected.set_line(4u, "EE          294.0 M INST/S");
+        expected.set_line(5u, "DISPATCH   1000.0 K/S");
+        expected.set_line(6u, "GS          100.0 K DRAWS/S");
         expected.set_line(7u, "CPU PROFILE OFF");
         if (overlay.text().m_words != expected.m_words)
         {
             return 14;
         }
+        // Changing CRT mode reanchors sampling; PAL uses its own nominal rate.
+        counters.m_crt_mode = 3u;
+        if (!overlay.sample(1.5, counters))
+        {
+            return 19;
+        }
+        counters.m_cycles += 147456000u;
+        counters.m_presentations += 20u;
+        counters.m_fields += 25u;
+        if (!overlay.sample(2.0, counters))
+        {
+            return 20;
+        }
+        expected.set_line(2u, "PRESENT      40.0 / 50.00 FPS");
+        expected.set_line(3u, "GUEST        50.0 / 50.00 F/S");
+        expected.set_line(4u, "EE            0.0 M INST/S");
+        expected.set_line(5u, "DISPATCH      0.0 K/S");
+        expected.set_line(6u, "GS            0.0 K DRAWS/S");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 21;
+        }
         // Counter reset must not manufacture enormous rates.
         counters.m_fields = 0u;
-        if (!overlay.sample(1.6, counters))
+        if (!overlay.sample(2.1, counters))
         {
             return 15;
         }

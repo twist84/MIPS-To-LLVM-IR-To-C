@@ -96,6 +96,7 @@ struct s_ee_performance_counters
     uint64_t m_ee_host_ns = 0u;
     uint64_t m_iop_host_ns = 0u;
     uint32_t m_target_speed = 0u;
+    uint32_t m_crt_mode = 0u;
     bool m_clock_available = false;
     bool m_profile_enabled = false;
 };
@@ -133,7 +134,8 @@ public:
             current.m_presentations < old.m_presentations || current.m_draws < old.m_draws ||
             current.m_ee_host_ns < old.m_ee_host_ns || current.m_iop_host_ns < old.m_iop_host_ns ||
             current.m_clock_available != old.m_clock_available ||
-            current.m_profile_enabled != old.m_profile_enabled)
+            current.m_profile_enabled != old.m_profile_enabled ||
+            current.m_crt_mode != old.m_crt_mode)
         {
             m_previous = current;
             m_time = now;
@@ -156,38 +158,49 @@ public:
                 (294912000.0 * dt);
             if (current.m_target_speed == 0u)
             {
-                std::snprintf(line, sizeof(line), "SPEED %.1f%% / UNLIMITED", speed);
+                std::snprintf(line, sizeof(line), "SPEED    %8.1f%% / UNLIMITED", speed);
             }
             else
             {
-                std::snprintf(line, sizeof(line), "SPEED %.1f%% / %u%%", speed,
+                std::snprintf(line, sizeof(line), "SPEED    %8.1f%% / %u%%", speed,
                     current.m_target_speed);
             }
         }
         else
         {
-            std::snprintf(line, sizeof(line), "SPEED UNAVAILABLE");
+            std::snprintf(line, sizeof(line), "SPEED    UNAVAILABLE");
         }
         m_text.set_line(1u, line);
-        std::snprintf(line, sizeof(line), "PRESENT %.1f FPS",
-            (current.m_presentations - old.m_presentations) / dt);
-        m_text.set_line(2u, line);
-        std::snprintf(line, sizeof(line), "GUEST %.1f FIELDS/S",
-            (current.m_fields - old.m_fields) / dt);
+        const double nominal_hz = current.m_crt_mode == 2u ? 60000.0 / 1001.0 :
+            (current.m_crt_mode == 3u ? 50.0 : 0.0);
+        const double presents = (current.m_presentations - old.m_presentations) / dt;
+        const double fields = (current.m_fields - old.m_fields) / dt;
+        if (nominal_hz > 0.0)
+        {
+            std::snprintf(line, sizeof(line), "PRESENT  %8.1f / %5.2f FPS", presents, nominal_hz);
+            m_text.set_line(2u, line);
+            std::snprintf(line, sizeof(line), "GUEST    %8.1f / %5.2f F/S", fields, nominal_hz);
+        }
+        else
+        {
+            std::snprintf(line, sizeof(line), "PRESENT  %8.1f FPS", presents);
+            m_text.set_line(2u, line);
+            std::snprintf(line, sizeof(line), "GUEST    %8.1f F/S", fields);
+        }
         m_text.set_line(3u, line);
-        std::snprintf(line, sizeof(line), "EE %.1f M INST/S",
+        std::snprintf(line, sizeof(line), "EE       %8.1f M INST/S",
             (current.m_instructions - old.m_instructions) / (dt * 1e6));
         m_text.set_line(4u, line);
-        std::snprintf(line, sizeof(line), "DISPATCH %.1f K/S",
+        std::snprintf(line, sizeof(line), "DISPATCH %8.1f K/S",
             (current.m_dispatches - old.m_dispatches) / (dt * 1e3));
         m_text.set_line(5u, line);
-        std::snprintf(line, sizeof(line), "GS %.1f K DRAWS/S",
+        std::snprintf(line, sizeof(line), "GS       %8.1f K DRAWS/S",
             (current.m_draws - old.m_draws) / (dt * 1e3));
         m_text.set_line(6u, line);
         if (current.m_profile_enabled)
         {
             // Completed exclusive runner-thread scopes, not total CPU/GPU usage.
-            std::snprintf(line, sizeof(line), "EE HOST %.1f%% IOP %.1f%%",
+            std::snprintf(line, sizeof(line), "EE HOST  %8.1f%% IOP %5.1f%%",
                 (current.m_ee_host_ns - old.m_ee_host_ns) / (dt * 1e7),
                 (current.m_iop_host_ns - old.m_iop_host_ns) / (dt * 1e7));
         }

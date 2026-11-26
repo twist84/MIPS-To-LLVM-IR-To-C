@@ -307,6 +307,7 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     if (m_performance_overlay.visible())
     {
         auto current = counters;
+        current.m_crt_mode = crt_mode;
         current.m_fields = field_count;
         current.m_presentations = m_presentations;
         if (m_performance_overlay.sample(now, current))
