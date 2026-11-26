@@ -3189,7 +3189,7 @@ void module_builder::emit_counted_alu_run(
 
 void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                                 bool /*is_last*/, uint32_t /*entry_pc*/,
-                                const std::set<uint8_t>& live_in,
+                                const std::set<uint8_t>& /*live_in*/,
                                 const std::set<uint8_t>& live_out,
                                 uint32_t fallthrough_pc,
                                 bool is_terminator,
@@ -3354,10 +3354,12 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         m_out += continue_label + ":\n";
     }
 
+    // Live-in is a backwards dataflow requirement for predecessor
+    // publication, not a list of operands consumed in this block.
+    // Load on the first actual SSA use; preserve dirty-state flushes
+    // and helper invalidation. Unused incoming GPRs stay in backing
+    // storage, even when a dispatcher exit makes all of them live.
     reset_tracking();
-
-    for (uint8_t r : live_in)
-        (void)load_gpr_temp(r);
 
     // Analyzer layout for control-flow blocks:
     //   [ ... straight-line ..., control-flow insn, delay-slot insn ]

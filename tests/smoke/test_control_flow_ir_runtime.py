@@ -62,6 +62,20 @@ def run_case(fixture_exe, temp_dir, target, retained, mode, function_name, setup
         require(not re.search(
             r"getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 0, i32 \d+, i32 1\b",
             ir_text), f"{mode}: scalar-only IR accessed a GPR upper half")
+    # Live-through registers must remain in backing storage rather than
+    # being loaded eagerly simply because an exit makes them live.
+    expected_loads = {
+        "jr": {2}, "jrra": {31}, "jr_daddu": {2, 19, 31},
+        "beq_taken": {2}, "beq_not_taken": {2},
+    }
+    if mode in expected_loads:
+        pointers = dict(re.findall(
+            r"(%t[0-9]+) = getelementptr %ee_cpu_state, ptr %cpu, "
+            r"i32 0, i32 0, i32 (\d+), i32 0\b", ir_text))
+        loaded = {int(pointers[ptr]) for ptr in re.findall(
+            r"load i64, ptr (%t[0-9]+)\b", ir_text) if ptr in pointers}
+        require(loaded == expected_loads[mode],
+                f"{mode}: unexpected incoming GPR loads {loaded}")
     module = llvm.parse_assembly(ir_text)
     module.verify()
     module.triple = llvm.get_default_triple()
