@@ -839,3 +839,46 @@ not merely report existence. An A/A failure prevents claiming a
 matched A/B result, but the candidate is still run for diagnosis.
 Synchronous replay is an accuracy experiment, not the P40
 throughput benchmark. No production changes or cache invalidation.
+
+
+### Checkpoint 2c — synchronous A/A/B acceptance
+
+Retail ee-dedup-comparison-sync.zip: all three runs stopped at
+40,000,000 dispatches, exit 4, 3,217/3,217 PAD0 polls consumed
+on both replays. 209,808 common sampled transitions with no
+differences or unpaired samples on either comparison. The complete
+terminal JSONs are byte-identical, SHA-256
+9adccfd5617ec2ef633fb89d4eb385600840f73729f756773ba040daced173f5.
+GPU PPMs are byte-identical, SHA-256
+ccad7fe1da5af5bbe9d03aa590f38bc5c58d5bd9f0c359516e62d7d8ae0ff079.
+All arms reached 4,582 fields, 4,643,431 GPU draws, 3,297 presents,
+22,547,591,829 reference EE cycles, 22,217,865,368 guest instruction
+attempts, 377,264 native VU1 runs and no fallback/IOP guest fault.
+A redirected PC, 0x193e28, occurs at dispatch 9,956,352 in all arms.
+No claim of execution coverage of every redirected PC. Wall seconds
+42.469 / 41.406 / 41.515; no demonstrated throughput improvement
+or regression. This validates the 1,026,048-byte DLL saving for
+the synchronous retail workload. Keep the experiment opt-in;
+do not replace the normal cache or enable broad discovery pruning.
+
+### Checkpoint 3a — size-oriented native pipeline pilot
+
+The bulk of native expansion remains in nonoverlapping modules.
+Test the effect of full middle-end O2, Os and Oz against the
+existing selective O5 profile with the same native O2 backend,
+CPU and features. A local LLVM 20.1.8 Linux pilot on 12 earlier
+hot IR modules measured 109,104 executable object bytes with
+selective O5 policy, 106,776 with Os and 103,101 with Oz (-5.50%);
+some modules grew. This is not the Windows retail cache or a
+linked image, and no runtime conclusion follows.
+
+tools/benchmark_ee_native_size.py verifies the current O5 target
+and selected IR/object digests, samples the current inventory by
+guest-PC count and native code size, includes the largest modules,
+re-emits each selected module in four independent pipelines and
+reports actual executable/object bytes, times and exact O5 object
+reproduction. No objects or IR are written. CTest emits four
+native objects from a synthetic guest function. Do not adopt a
+global size profile or extrapolate a selected sample to the
+whole image. Use the resulting size/runtime tradeoffs to choose
+a selective experimental profile and validate it independently.
