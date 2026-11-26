@@ -46,6 +46,7 @@
 #include "iop_memory_card.h"
 #include "iop_guest_fault_probe.h"
 #include "iop_cdvd.h"
+#include "iop_cdvd_rtc.h"
 #include "iop_folder_sector_source.h"
 #include "iop_cdvdman_bridge.h"
 #include "iop_sifman_bridge.h"
@@ -2389,6 +2390,20 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "invalid SDBZ_HOST_AUDIO (expected 0 or 1)\n");
             return 2;
         }
+    }
+    // Both CDVDMAN and SIF RPC use the same optional frozen UTC
+    // source. Reject invalid input before running any guest code.
+    if (const char* fixed_rtc = std::getenv("SDBZ_RTC_FIXED_UTC"))
+    {
+        std::time_t utc{};
+        if (!iop::parse_fixed_cdvd_rtc(fixed_rtc, utc))
+        {
+            std::fprintf(stderr,
+                "Invalid SDBZ_RTC_FIXED_UTC (UTC Unix seconds in the PS2 RTC era)\n");
+            return 2;
+        }
+        std::printf("IOP CDVD RTC: fixed UTC=%llu (diagnostic)\n",
+            static_cast<unsigned long long>(utc));
     }
     uint32_t dispatch_trace_every = 1u;
     std::string dispatch_trace_environment;
