@@ -82,18 +82,23 @@ def check_alu_count_run(fixture, root, machine):
         events = []
         token = ctypes.c_uint64(42)
 
+        trace_buffer = ctypes.create_string_buffer(entry_size * 16)
+
         @OBSERVER
         def observe(arg, pc, opcode, kind, service, attempt, slot):
             events.append((arg, pc, kind, attempt, slot,
                            ctypes.c_uint64.from_address(rt + attempts).value,
                            ctypes.c_uint64.from_address(rt + slots).value))
+            if mode == "install_trace" and len(events) == 1:
+                ctypes.c_void_p.from_address(rt + trace).value = ctypes.addressof(trace_buffer)
+                ctypes.c_uint32.from_address(rt + capacity).value = 16
+                ctypes.c_uint32.from_address(rt + last_pc).value = 0xffffffff
             return mode != "reject"
 
-        if mode in ("observe", "reject", "both"):
+        if mode in ("observe", "reject", "both", "install_trace"):
             ctypes.c_void_p.from_address(rt + user).value = ctypes.addressof(token)
             ctypes.c_void_p.from_address(rt + callback).value = ctypes.cast(
                 observe, ctypes.c_void_p).value
-        trace_buffer = ctypes.create_string_buffer(entry_size * 16)
         if mode in ("trace", "both"):
             ctypes.c_void_p.from_address(rt + trace).value = ctypes.addressof(trace_buffer)
             ctypes.c_uint32.from_address(rt + capacity).value = 16
@@ -107,14 +112,14 @@ def check_alu_count_run(fixture, root, machine):
         if mode != "null":
             assert ctypes.c_uint64.from_address(rt + attempts).value == 17
             assert ctypes.c_uint64.from_address(rt + slots).value == 27
-        if mode in ("observe", "reject", "both"):
+        if mode in ("observe", "reject", "both", "install_trace"):
             count = 1 if mode == "reject" else 7
             assert events == [(ctypes.addressof(token), 0x100000 + 4*i, 0,
                                11+i, 21+i, 11+i, 21+i) for i in range(count)], events
         else:
             assert not events
         assert ctypes.c_uint32.from_address(rt + failed).value == (mode == "reject")
-        if mode in ("trace", "both"):
+        if mode in ("trace", "both", "install_trace"):
             assert ctypes.c_uint32.from_address(rt + used).value == 7
             # m_attempt is the first uint64 field in every trace entry.
             assert [ctypes.c_uint64.from_address(ctypes.addressof(trace_buffer) +
@@ -124,7 +129,7 @@ def check_alu_count_run(fixture, root, machine):
             assert ctypes.c_uint32.from_address(rt + used).value == 0
         return bytes(state)
 
-    results = [run(mode) for mode in ("fast", "observe", "reject", "trace", "both", "null")]
+    results = [run(mode) for mode in ("fast", "observe", "reject", "trace", "both", "install_trace", "null")]
     assert all(result == results[0] for result in results)
 
 
