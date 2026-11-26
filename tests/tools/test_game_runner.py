@@ -4470,6 +4470,27 @@ def main():
             assert sum(times) == total_native_ns, profile_entries
             attempts = sum(int(line.split("non_skipped=")[1].split()[0]) for line in profile_entries)
             assert attempts == direct_state["guest_instruction_attempts"], profile_entries
+            window_report = root / "window.json"
+            window_env = dict(direct_env, SDBZ_PROFILE_PCS_FIRST="101",
+                              SDBZ_PROFILE_PCS_LAST="200")
+            window_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(window_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=window_env)
+            assert window_run.returncode == 4, window_run.stdout + window_run.stderr
+            window_state = json.loads(window_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert window_state[key] == direct_state[key], key
+            window_entries = [line for line in window_run.stderr.splitlines()
+                              if line.startswith("EE profile: pc=")]
+            assert window_entries, window_run.stderr
+            assert sum(int(line.split("dispatches=")[1].split()[0])
+                       for line in window_entries) == 100, window_entries
+            assert sum(int(line.split("non_skipped=")[1].split()[0])
+                       for line in window_entries) == 200, window_entries
             assert sampled_state["vu1_worker"]["enabled"] is False
             worker_report = root / "worker.json"
             worker_env = dict(env, SDBZ_VU1_ASYNC="1")
