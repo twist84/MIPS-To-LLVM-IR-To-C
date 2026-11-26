@@ -413,6 +413,7 @@ def main():
                                  fastmem=ram)
         require(result == EE_EXIT_DISPATCH and not READS and
                 cpu.gpr[8].lo == 0xffffffff89abcdef, "direct LW sign extension")
+        ram[0x40:0x44] = bytes.fromhex("10203040")
         result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x40,
                                  fastmem=ram)
         require(result == EE_EXIT_DISPATCH and not WRITES and
@@ -423,6 +424,11 @@ def main():
                                  fastmem=ram)
         require(result == EE_EXIT_DISPATCH and WRITES == [(4, 0x44, 0x89abcdef)],
                 "out-of-range word store bypassed helper")
+        short_ram = ctypes.create_string_buffer(0x43)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x40,
+                                 fastmem=short_ram)
+        require(result == EE_EXIT_DISPATCH and WRITES == [(4, 0x40, 0x89abcdef)] and
+                short_ram[0x40:0x43] == bytes(3), "partial span must fall back")
         for address in (0x80000040, 0x70000040, 0x10000040, 0xfffffffc):
             result, cpu, _ = execute(fixture, directory, target, "ee_lw", address,
                                      fastmem=ram)
