@@ -402,3 +402,32 @@ negative offsets and wrapped alignment faults. No new bus or
 timing semantics; backend may already fold some old expressions,
 so native speed benefit is not assumed. CI and retail validation
 pending; known-inventory IR refresh required.
+
+## Effective-address replay (07:42:51)
+
+Clean ce795f0, selective O5, 16,250 modules, fixed RTC, lean
+diagnostics, async VU1/GS and baseline IOP. Native library SHA-256
+dd054cedc2503906a131d2a28354a1b41e72630b0d5006f6f3f777d81f576683.
+40M dispatches, process wall 43.875 s, terminal elapsed 39173.7 ms,
+6257 guest fields, 4449/4449 successful presents, 1808 skipped,
+3666448 GPU draws, 341793 native VU1 executions, zero fallbacks,
+worker failures or IOP guest faults. One VU1 job outstanding at stop.
+First spawn 28716720; first post-spawn progress 28721152 at
+26687.6 ms with 5520 fields. 737 fields / 12.4861 s = 59.0256
+fields/s versus previous 60.3329. Later spawn and different work
+make the shorter overall wall time noncomparable. No demonstrated
+speed benefit for effective-address simplification. All five
+workflows passed ce795f0.
+
+b71e84c avoids repeated GPR backing-store publication on internal
+branch-likely paths with audited, nontrapping scalar delay slots.
+After the existing common flush it marks only published low
+halves and all published upper halves clean, retaining their SSA
+values. Dirty unpublished low halves remain dirty; slot writes
+mark their destination dirty normally. Other slot types retain
+the conservative path. Regression exercises a packed POR value
+and scalar SP value across both branch outcomes, tests the taken
+slot's cached SP read and checks one static publication of each
+POR half. No hardware timing change. CI and retail validation
+pending; deliberate IR refresh required. Actual runtime benefit
+is not assumed; the optimization targets redundant host stores.
