@@ -254,24 +254,32 @@ void module_builder::declare_memory_helpers()
     m_out += "  ret void\n";
     m_out += "}\n\n";
 
-    m_out += "define internal void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot) alwaysinline {\n";
-    m_out += "entry:\n";
-    m_out += "  %observer_ptr = getelementptr i8, ptr %rt, i64 " +
-             std::to_string(offsetof(ee::s_ee_runtime, m_timing_observer)) + "\n";
-    m_out += "  %trace_ptr = getelementptr i8, ptr %rt, i64 " +
-             std::to_string(offsetof(ee::s_ee_runtime, m_instruction_trace)) + "\n";
-    m_out += "  %observer = load ptr, ptr %observer_ptr\n";
-    m_out += "  %trace = load ptr, ptr %trace_ptr\n";
-    m_out += "  %has_observer = icmp ne ptr %observer, null\n";
-    m_out += "  %has_trace = icmp ne ptr %trace, null\n";
-    m_out += "  %enabled = or i1 %has_observer, %has_trace\n";
-    m_out += "  br i1 %enabled, label %publish, label %done\n";
-    m_out += "publish:\n";
-    m_out += "  call void @ee_publish_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 %kind, i64 %attempt, i64 %slot)\n";
-    m_out += "  br label %done\n";
-    m_out += "done:\n";
-    m_out += "  ret void\n";
-    m_out += "}\n\n";
+    // O5 uses the LLVM native backend without a middle-end inliner.
+    // Emit the gate directly in the two counters, not as another
+    // alwaysinline function that could still incur an actual host call.
+    const auto emit_observation_gate = [&](uint32_t kind,
+        const char* attempt_pointer, const char* slot_pointer)
+    {
+        m_out += "  %observer_ptr = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_timing_observer)) + "\n";
+        m_out += "  %trace_ptr = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_instruction_trace)) + "\n";
+        m_out += "  %observer = load ptr, ptr %observer_ptr\n";
+        m_out += "  %trace = load ptr, ptr %trace_ptr\n";
+        m_out += "  %has_observer = icmp ne ptr %observer, null\n";
+        m_out += "  %has_trace = icmp ne ptr %trace, null\n";
+        m_out += "  %enabled = or i1 %has_observer, %has_trace\n";
+        m_out += "  br i1 %enabled, label %publish, label %done\n";
+        m_out += "publish:\n";
+        // No intermediate guest work or callback has run. Read the
+        // just-updated counters only on this path so a backend-only
+        // build can use memory increment instructions on the hot path.
+        m_out += "  %published_count = load i64, ptr " + std::string(attempt_pointer) + "\n";
+        m_out += "  %published_slot = load i64, ptr " + std::string(slot_pointer) + "\n";
+        m_out += "  call void @ee_publish_instruction_observation(ptr %rt, i32 %pc, i32 %opcode, i32 " +
+                 std::to_string(kind) + ", i64 %published_count, i64 %published_slot)\n";
+        m_out += "  br label %done\n";
+    };
 
     // Private helper avoids unresolved external symbols in MCJIT fixtures.
     // Count executed VALID guest instructions, not host dispatches/loops.
@@ -296,8 +304,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  %ref_old = load i64, ptr %ref_counter_ptr\n";
     m_out += "  %ref_new = add i64 %ref_old, 1\n";
     m_out += "  store i64 %ref_new, ptr %ref_counter_ptr\n";
-    m_out += "  call void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 0, i64 %new_count, i64 %ref_new)\n";
-    m_out += "  br label %done\n";
+    emit_observation_gate(0u, "%counter_ptr", "%ref_counter_ptr");
     m_out += "done:\n";
     m_out += "  ret void\n";
     m_out += "}\n\n";
@@ -354,9 +361,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  store i64 %new, ptr %ref_ptr\n";
     m_out += "  %attempt_ptr = getelementptr i8, ptr %rt, i64 " +
              std::to_string(offsetof(ee::s_ee_runtime, m_guest_instruction_attempts)) + "\n";
-    m_out += "  %attempt = load i64, ptr %attempt_ptr\n";
-    m_out += "  call void @ee_maybe_observe_instruction(ptr %rt, i32 %pc, i32 %opcode, i32 1, i64 %attempt, i64 %new)\n";
-    m_out += "  br label %done\n";
+    emit_observation_gate(1u, "%attempt_ptr", "%ref_ptr");
     m_out += "done:\n";
     m_out += "  ret void\n";
     m_out += "}\n\n";
