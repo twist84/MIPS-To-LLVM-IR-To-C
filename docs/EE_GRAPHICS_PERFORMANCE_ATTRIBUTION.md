@@ -111,3 +111,38 @@ as additive wall time. Use interleaved unprofiled comparisons for actual
 optimization acceptance.
 
 No guest lowering, timing, runtime ABI or cache policy changes are made in G1A.
+
+## G1A accepted — matched retail evidence (2026-11-26)
+
+Archive: ee-graphics-g1a.zip. All five CI workflows passed at 809a207.
+All four synchronous replays completed 40M dispatches, 184700 matching sampled
+transitions each, 3127/3127 PAD polls, identical normalized terminal reports
+and screenshot hashes, 21910026110 guest attempts, 22115080673 EE cycles,
+4494 GS fields, 3221 presents, 394881 VU1 native runs and 445669423 pairs,
+84 matched libraries, no fallback or IOP fault. Inputs unchanged.
+Control 43.031/42.828s; profiled 49.406/49.406s. Median profiling overhead
+15.09%; runner-thread mean wall 45.652s, covered 82.81%. No speed claim.
+
+Mean exclusive elapsed seconds: VU1 compiled 13.036 (28.56% wall), EE
+native boundary 7.635 (16.72%), IOP 7.234 (15.85%), WebGPU submission 1.359,
+device service 1.340, VIF1 UNPACK 0.040. Uninstrumented 7.848s.
+DMA VIF1 chain inclusive 17.419s versus exclusive 0.307s: nested VU1
+execution accounts for much of the apparent DMA/VIF cost. Both GPU
+timestamp series completed all 3882 regular compute passes, 7.080/7.116s
+sampled GPU time, not additive with host elapsed time.
+
+| VU1 PC | Code FNV1a64 | Native pairs | Mean compiled exclusive s |
+|---|---|---:|---:|
+| 0x0730 | 80e18246ed4922d9 | 204689960 | 7.412 |
+| 0x0620 | fdffdb7fcbf68252 | 77732955 | 2.242 |
+| 0x0130 | 2cf115e2c19ba013 | 64974482 | 1.068 |
+| 0x0420 | 31d7741f1bfa69cf | 61907074 | 1.066 |
+| 0x05a0 | cfae43a4ec036735 | 25493805 | 0.807 |
+
+Top five account for 96.62% of measured VU1 compiled time; first alone
+56.86%. Prioritize G2 direct control-flow lowering before VIF1 SIMD or
+additional COP1/MMI instrumentation. VU0/COP1/MMI and dependency costs
+remain unattributed; synchronous timing is not an async critical-path model.
+G1B/G1C remain open. Retain v22 and existing EE/runner unchanged; compare
+new VU1 libraries in isolation. No claim about unprofiled subsystem time
+or async gameplay throughput.
