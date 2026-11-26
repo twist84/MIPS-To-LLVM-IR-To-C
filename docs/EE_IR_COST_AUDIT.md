@@ -1903,3 +1903,41 @@ remove rejected trial objects, record every trial and its receipt digest.
 Link a separate overlay and require four-arm retail validation; compare
 actual DLL size against 69.77 MiB selective parent. No production or
 original IR mutation. Object metadata savings need not survive linking.
+
+### Checkpoint 7c — expanded entry retail acceptance
+
+Verified all 10,392 unique trials and SHA-256
+97bc27e416fafa2db421d1351e2a0b5caacd6d5e6a6d618f7d03affdcf531bfc.
+1,307 dual-metric wins, 9,085 rejected or unchanged; retain 15 pilot
+objects, 1,322 cumulative rotations, all 16,252 functions. O5 1,303/2,200
+wins (344,774 executable / 2,767,272 object bytes saved), Oz 4/8,192
+(15 / 15 bytes). Incremental 344,789 executable / 2,767,287 object
+bytes saved; IR grows 159,207 bytes. 56,885 switch cases, cumulative
+60,688. Stage 333.922 s. DLL 73,159,168 -> 72,132,096 bytes (68.79 MiB),
+1,027,072 incremental, 35.29077% cumulative vs original O5.
+Linked raw executable bytes 67,930,624. Candidate SHA-256
+d196c3daafa94e84670943f5925d2437b97e72a18c18485d2f4add1afc24b833.
+Four synchronous arms exit 4 at 40M dispatches, 3,347/3,347 PAD0 polls,
+198,268 matched transitions per comparison, zero mismatches or unpaired.
+Report SHA-256 e0996d1fac0f1c30cd385b534c3f3f906d57aad89dac865dc6b3e6397b128809;
+screenshot SHA-256 74718e0b9259aacba52397f379e7009c621243464ecac1e31e66e06898222345;
+all four byte-identical. EE cycles 23,619,886,466; attempts 23,376,722,937;
+slots 23,378,875,307; yields 3,195; HLE boundaries 152,067; fields 4,800;
+no IOP fault or timing observer failure. Wall seconds 41.265 / 40.750 /
+40.328 / 40.063 (-0.66% vs parent, single run). All five CI workflows
+passed on 34b21ff. Accept matched workload.
+
+### Checkpoint 7d — read-only section payload audit of code-only wins
+
+The expansion rejects 5,632 code-only wins (543,049 executable bytes
+saved, object size grows 2,546,877). Revisit these and 24 pilot code-only
+wins using the exact original paired parent and candidate receipts.
+Verify the full expanded entry chain and trial digest, retain all 1,322
+accepted objects unchanged. Recompile each residual into a temporary
+object, require identical candidate hashes, compare raw likely loadable
+COFF executable and initialized section payloads, excluding nonmemory,
+linker-info/removed, discardable and uninitialized sections. Report
+positive payload wins separately from object size and all trial rows.
+Relocations, symbols, COMDAT selection, linker alignment and synthesized
+sections prevent exact prediction of linked PE size. No new DLL or
+retail replay for this audit; only promote measured payload wins later.

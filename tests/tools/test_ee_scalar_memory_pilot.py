@@ -2,6 +2,7 @@
 """Exact scalar region matching and MCJIT direct/fallback equivalence."""
 import ctypes
 import faulthandler
+import struct
 from pathlib import Path
 import sys
 import unittest
@@ -10,9 +11,10 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc, entry_winners, entry_expansion_candidates
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults, alignment_winners, alignment_remaining, normalize_entry_switch, rotate_pc, entry_winners, entry_expansion_candidates, entry_section_candidates
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
+from ee_ownership_binary import coff_file_payload
 
 
 def fixture(width, write):
@@ -154,6 +156,28 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_entry_section_payload(self):
+        sections = [(b".text", 10, 0x60000020), (b".rdata", 12, 0x40000040),
+                    (b".debug", 14, 0x42000040), (b".drectve", 6, 0x00100a00),
+                    (b".bss", 99, 0xc0000080)]
+        table = bytearray(struct.pack("<HHIIIHH", 0x8664, len(sections), 0, 0, 0, 0, 0))
+        payload = bytearray()
+        for name, size, flags in sections:
+            pos = 20 + 40*len(sections) + len(payload) if not flags & 0x80 else 0
+            table.extend(struct.pack("<8sIIIIIIHHI", name, 0, 0, size, pos, 0, 0, 0, 0, flags))
+            if pos:
+                payload.extend(b"\0"*size)
+        data = bytes(table+payload+b"symbols")
+        self.assertEqual(coff_file_payload(data),
+                         {"executable_payload": 10, "initialized_payload": 12, "file_payload": 22,
+                          "excluded_section_payload": 20, "other_object_bytes": len(table)+7})
+        with self.assertRaises(ValueError):
+            coff_file_payload(bytes(table))
+        rows = [{"module": name, "executable_saving": code, "object_saving": obj}
+                for name, code, obj in (("keep.ll", 5, -1), ("old.ll", 3, 0),
+                                        ("loss.ll", -1, 4), ("both.ll", 4, 5))]
+        self.assertEqual(set(entry_section_candidates(rows, {"old.ll"})), {"keep.ll"})
 
     def test_entry_expansion_skips_every_sampled_module(self):
         eligible = [{"module": n} for n in ("win.ll", "loss.ll", "new.ll")]

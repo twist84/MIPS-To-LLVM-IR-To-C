@@ -84,3 +84,50 @@ def native_executable_sections(data):
             raw_total += raw
             virtual_total += virtual if virtual else raw
     return raw_total, virtual_total if pe else None
+
+
+def coff_file_payload(data):
+    """Raw initialized sections likely to survive linking, not PE size.
+
+    Exclude non-memory, discardable, linker-info and removed sections.
+    COFF relocations, symbols, strings and headers are not section payload.
+    COMDAT selection, alignment, linker synthesis and folding can change
+    the eventual PE size; this deliberately makes no exact prediction.
+    """
+    if data[:4] == b"\0\0\xff\xff":
+        if len(data) < 56 or data[12:28] != bytes.fromhex(
+                "c7a1bad1eebaa94baf20faf66aa4dcb8"):
+            raise ValueError("unsupported COFF anonymous object")
+        count, = struct.unpack_from("<I", data, 44)
+        table = 56
+    else:
+        if len(data) < 20:
+            raise ValueError("truncated COFF header")
+        machine, count, _, _, _, optional, _ = struct.unpack_from("<HHIIIHH", data)
+        if machine != 0x8664 or optional:
+            raise ValueError("expected AMD64 COFF object")
+        table = 20
+    if not count or table + 40*count > len(data):
+        raise ValueError("invalid COFF section table")
+    executable = initialized = excluded = 0
+    for i in range(count):
+        pos = table+40*i
+        size, offset = struct.unpack_from("<II", data, pos+16)
+        flags, = struct.unpack_from("<I", data, pos+36)
+        # Uninitialized storage has no file payload.
+        if flags & 0x80 or not size:
+            continue
+        if not offset or offset+size > len(data):
+            raise ValueError("COFF section outside object")
+        if flags & (0x02000000 | 0x00000200 | 0x00000800) or not flags & 0xe0000000:
+            excluded += size
+        elif flags & (0x20000000 | 0x20):
+            executable += size
+        elif flags & 0x40:
+            initialized += size
+        else:
+            excluded += size
+    total = executable + initialized
+    return {"executable_payload": executable, "initialized_payload": initialized,
+            "file_payload": total, "excluded_section_payload": excluded,
+            "other_object_bytes": len(data)-total-excluded}

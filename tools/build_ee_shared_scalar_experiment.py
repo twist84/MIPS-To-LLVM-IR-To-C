@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import tempfile
 
 from audit_ee_helper_inventory import ir_inventory, read_manifest, verified_object, sha
 from audit_ee_scalar_memory_pilot import (outline, reconstruct_parent, verify_pilot_parent,
@@ -18,7 +19,7 @@ from benchmark_ee_native_size import emit_native
 from build_ee_cop1_mul_experiment import rows_of, check_object
 from build_ee_helper_experiment import refs
 from build_ee_quadword_experiment import body_of
-from ee_ownership_binary import native_executable_sections
+from ee_ownership_binary import native_executable_sections, coff_file_payload
 from link_native_objects import load_inputs
 
 LOCAL = "ee_pilot_scalar_"
@@ -736,6 +737,158 @@ def verify_entry_overlay(folder, meta, names, raw, current, records, plan, accep
     return overlay_raw, overlay, entries, receipt
 
 
+def entry_section_candidates(trials, accepted):
+    return {r["module"]: r for r in trials if r["module"] not in accepted and
+            r["executable_saving"] > 0 and r["object_saving"] <= 0}
+
+
+def verify_expanded_entry(folder, meta, names, raw, current, records, plan,
+                          original_records, eligible, sampled, accepted, pilot_raw):
+    full_raw, manifest, entries = read_manifest(folder / "objects", set(names))
+    receipt = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    trials_raw = (folder / "entry-trials.json").read_bytes()
+    trials = json.loads(trials_raw)
+    expected = entry_expansion_candidates(eligible, sampled)
+    if (receipt["mode"] != "experimental_expanded_entry_rotation" or
+            receipt["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            receipt["source_manifest_sha256"] != sha(raw) or
+            receipt["prior_library_sha256"] != plan["linked_library_sha256"] or
+            receipt["pilot_sha256"] != sha(pilot_raw) or
+            receipt["trials_sha256"] != sha(trials_raw) or
+            receipt["native_target"] != current["native_target"] or
+            manifest["native_target"] != current["native_target"] or
+            manifest["target_triple"] != current["target_triple"] or
+            manifest["experimental_mixed_pipeline"] != current["experimental_mixed_pipeline"]+"-full" or
+            manifest.get("production_cache_compatible") is not False or
+            receipt["source_functions"] != len(names) or receipt["retained_functions"] != len(names) or
+            receipt["acceptance_policy"] != "positive_executable_and_object_saving" or
+            receipt["eligible_modules"] != len(eligible) or receipt["sampled_modules"] != len(sampled) or
+            receipt["retained_pilot_modules"] != len(accepted) or
+            receipt["skipped_pilot_rejections"] != len(sampled)-len(accepted) or
+            receipt["attempted_modules"] != len(trials) or len(trials) != len(expected) or
+            {r["module"] for r in trials} != set(expected) or
+            not receipt.get("runtime_validation_required") or
+            dll.stat().st_size != receipt["linked_library_bytes"] or
+            sha(dll.read_bytes()) != receipt["linked_library_sha256"]):
+        raise ValueError("expanded entry identity differs")
+    for row in trials:
+        n = row["module"]
+        old = original_records[n]
+        if (row["mode"] != old.get("experimental_pipeline", "O5") or
+                row["original_ir_sha256"] != old["ir_sha256"] or
+                row["parent_ir_sha256"] != old["transformed_ir_sha256"] or
+                row["parent_object_sha256"] != old["sha256"] or
+                row["parent_object_bytes"] != old["size_bytes"] or
+                row["switch_cases"] != expected[n]["switch_cases"] or
+                row["executable_saving"] != row["parent_executable_bytes"]-row["candidate"]["executable_bytes"] or
+                row["object_saving"] != row["parent_object_bytes"]-row["candidate"]["object_bytes"]):
+            raise ValueError("expanded entry trial differs: " + n)
+    wins = [r for r in trials if r["executable_saving"] > 0 and r["object_saving"] > 0]
+    if (wins != receipt["modules"] or receipt["recompiled_modules"] != len(wins) or
+            receipt["reused_modules"] != len(names)-len(wins) or
+            receipt["rejected_or_unchanged_modules"] != len(trials)-len(wins) or
+            receipt["cumulative_entry_modules"] != len(accepted)+len(wins)):
+        raise ValueError("expanded entry winners differ")
+    changes = {r["module"]: r for r in wins}
+    for n, item in entries.items():
+        old = records[n]
+        if any(item.get(k) != old.get(k) for k in
+               ("ir_sha256", "defined_symbols", "experimental_pipeline", "experimental_alignment_merge")):
+            raise ValueError("expanded entry symbol or source differs: " + n)
+        if n in changes:
+            row = changes[n]
+            if (item["sha256"] != row["candidate"]["sha256"] or
+                    item["size_bytes"] != row["candidate"]["object_bytes"] or
+                    item["transformed_ir_sha256"] != row["candidate_ir_sha256"] or
+                    item.get("experimental_entry_rotation") is not True):
+                raise ValueError("expanded entry object differs: " + n)
+        elif any(item.get(k) != old.get(k) for k in
+                 ("sha256", "size_bytes", "transformed_ir_sha256", "experimental_entry_rotation")):
+            raise ValueError("unchanged expanded entry object differs: " + n)
+    for key, field in (("executable_saving", "executable_saving"),
+                       ("object_saving", "object_saving"), ("removed_ir_bytes", "ir_bytes_saved"),
+                       ("switch_cases", "switch_cases")):
+        if receipt[key] != sum(r[field] for r in wins):
+            raise ValueError("expanded entry aggregate differs: " + key)
+    for key, field in (("cumulative_executable_saving", "executable_saving"),
+                       ("cumulative_object_saving", "object_saving"),
+                       ("cumulative_switch_cases", "switch_cases")):
+        if receipt[key] != plan[field]+receipt[field]:
+            raise ValueError("expanded entry cumulative differs: " + key)
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return full_raw, manifest, entries, receipt, trials, trials_raw
+
+
+def entry_section_trial(task):
+    entry_task, expected = task
+    with tempfile.TemporaryDirectory(prefix="ee-entry-sections-") as temp:
+        output = Path(temp) / "candidate.o"
+        row = entry_trial(entry_task + (output,))
+        if stable_receipt(row) != stable_receipt(expected):
+            raise ValueError("entry section trial not reproducible: " + row["module"])
+        _, _, folder, record, _ = entry_task
+        parent = verified_object(folder, record, row["original_ir_sha256"])
+        trial = output.read_bytes()
+        if sha(trial) != row["candidate"]["sha256"]:
+            raise ValueError("entry section candidate object differs")
+        before, after = coff_file_payload(parent), coff_file_payload(trial)
+        return dict(row, parent_sections=before, candidate_sections=after,
+                    file_payload_saving=before["file_payload"]-after["file_payload"],
+                    initialized_payload_saving=before["initialized_payload"]-after["initialized_payload"])
+
+
+def entry_section_audit(args, out, meta, names, base_records, rows, small_plans, scalar,
+                        residual, shared_rows, expected, owners, folder, entries, full, records,
+                        alignment_rows, eligible, sampled, accepted, pilot_raw,
+                        link_raw, link_manifest, link_entries, link_plan):
+    final = args.entry_section_from.resolve()
+    raw, manifest, final_entries, plan, trials, trials_raw = verify_expanded_entry(
+        final, meta, names, link_raw, link_manifest, link_entries, link_plan, records,
+        eligible, sampled, accepted, pilot_raw)
+    all_trials = json.loads(pilot_raw)["modules"]+trials
+    retained = set(accepted) | set(rows_of(plan))
+    candidates = entry_section_candidates(all_trials, retained)
+    if not candidates:
+        raise ValueError("no code-only entry wins")
+    tasks = []
+    for n, row in sorted(candidates.items()):
+        if final_entries[n]["sha256"] != records[n]["sha256"]:
+            raise ValueError("entry section candidate no longer has original parent")
+        parent_task = (n, names[n], args.ir.resolve()/n, base_records[n],
+                       tuple(r.get(n) for r in rows), small_plans, scalar.get(n),
+                       residual.get(n), shared_rows.get(n), folder/"objects", entries[n],
+                       manifest["target_triple"], expected, owners)
+        tasks.append(((parent_task, alignment_rows.get(n), full/"objects",
+                       records[n], row["switch_cases"]), row))
+    started = time.monotonic()
+    results = []
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for start in range(0, len(tasks), 128*args.jobs):
+            for row in pool.map(entry_section_trial, tasks[start:start+128*args.jobs]):
+                results.append(row)
+                if len(results) % 128 == 0 or len(results) == len(tasks):
+                    print(f"[{len(results)}/{len(tasks)}] entry section audit", flush=True)
+    wins = [r for r in results if r["file_payload_saving"] > 0]
+    report = {"mode": "read_only_ee_entry_section_audit", "metadata_sha256": sha(meta),
+              "parent_manifest_sha256": sha(raw), "parent_library_sha256": plan["linked_library_sha256"],
+              "pilot_sha256": sha(pilot_raw), "entry_trials_sha256": sha(trials_raw),
+              "native_target": manifest["native_target"], "inventory_modules": len(names),
+              "retained_entry_modules": len(retained), "selected_modules": len(results),
+              "payload_wins": len(wins), "executable_saving": sum(r["executable_saving"] for r in results),
+              "object_saving": sum(r["object_saving"] for r in results),
+              "file_payload_saving": sum(r["file_payload_saving"] for r in results),
+              "positive_payload_saving": sum(r["file_payload_saving"] for r in wins),
+              "positive_payload_executable_saving": sum(r["executable_saving"] for r in wins),
+              "wall_seconds": time.monotonic()-started, "modules": results,
+              "limitations": "Raw likely loadable COFF section payload, not exact linked PE size."}
+    with out.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+        stream.write("\n")
+    return report
+
+
 def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, scalar,
                 residual, shared_rows, expected, owners, folder, entries,
                 candidates, promoted, link_raw, link_manifest, link_entries, link_plan):
@@ -790,6 +943,11 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
             link_folder = args.entry_expand_from.resolve()
             link_raw, link_manifest, link_entries, link_plan = verify_entry_overlay(
                 link_folder, meta, names, raw, current, records, plan, accepted, pilot_raw)
+            if args.entry_section_from:
+                return entry_section_audit(args, out, meta, names, base_records, rows, small_plans,
+                                           scalar, residual, shared_rows, expected, owners, folder,
+                                           entries, full, records, alignment_rows, largest, sampled,
+                                           accepted, pilot_raw, link_raw, link_manifest, link_entries, link_plan)
             selected = entry_expansion_candidates(largest, sampled)
             if not selected:
                 raise ValueError("no remaining entry trials")
@@ -1048,6 +1206,10 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.entry_section_from:
+        if not args.entry_expand_from:
+            raise ValueError("--entry-section-from requires --entry-expand-from")
+        inputs += (args.entry_section_from.resolve(),)
     if args.entry_expand_from:
         if not args.entry_promote or not args.entry_from:
             raise ValueError("--entry-expand-from requires --entry-from and --entry-promote")
@@ -1230,6 +1392,7 @@ def main():
     parser.add_argument("--entry-from", type=Path, help="accepted full alignment overlay; output is a read-only entry-switch pilot JSON")
     parser.add_argument("--entry-promote", type=Path, help="link only measured entry pilot wins on both size metrics")
     parser.add_argument("--entry-expand-from", type=Path, help="accepted selective entry overlay; trial all unsampled eligible switches")
+    parser.add_argument("--entry-section-from", type=Path, help="accepted expanded entry overlay; audit loadable COFF payload of rejected code-only wins")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
