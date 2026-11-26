@@ -70,29 +70,56 @@ bool scoreboard_layout_tests()
     pair(code, 48u, k_nop, k_upper);
     // VF4's four lanes retire together; VF5 is never read and VF2/3
     // are never written. A repeated source must not allocate more slots.
-    const auto grouped = ee::vu1_lift_program_ir(code, 0u);
-    if (grouped.m_ir.find("%ready = alloca [1 x i32]") == std::string::npos)
+    const auto check_layout = [&](const char* name, uint32_t expected)
+    {
+        const auto program = ee::vu1_lift_program_ir(code, 0u);
+        const auto entry = program.m_ir.find("define dso_local i32 @ee_vu1_program(");
+        if (entry == std::string::npos)
+        {
+            std::fprintf(stderr, "scoreboard %s: native guest function missing\n", name);
+            return false;
+        }
+        // The module also includes Q/P scalar helpers with their own
+        // %ready parameters. Inspect only the guest function's locals.
+        const auto end = program.m_ir.find("\n}", entry);
+        const auto guest = program.m_ir.substr(entry, end - entry);
+        const auto allocation = guest.find("%ready = alloca");
+        const bool valid = expected == 0u ?
+            allocation == std::string::npos &&
+                guest.find("ptr %ready,") == std::string::npos :
+            guest.find("%ready = alloca [" + std::to_string(expected) + " x i32]") !=
+                std::string::npos;
+        if (!valid)
+        {
+            std::fprintf(stderr, "scoreboard %s: expected %u slots; observed %s\n",
+                name, expected, allocation == std::string::npos ? "no allocation" :
+                guest.substr(allocation, guest.find('\n', allocation) - allocation).c_str());
+        }
+        return valid;
+    };
+    if (!check_layout("grouped", 1u))
     {
         return false;
     }
     // An X-only write breaks the equality of X and YZW timestamps.
     pair(code, 8u, k_nop, add(4u, 2u, 3u, 8u));
-    const auto split = ee::vu1_lift_program_ir(code, 0u);
-    if (split.m_ir.find("%ready = alloca [2 x i32]") == std::string::npos)
+    if (!check_layout("split", 2u))
     {
         return false;
     }
     pair(code, 16u, k_nop, add(5u, 2u, 3u, 15u));
-    const auto unused = ee::vu1_lift_program_ir(code, 0u);
-    return !unused.m_ir.empty() &&
-        unused.m_ir.find("%ready = alloca") == std::string::npos &&
-        unused.m_ir.find("ptr %ready,") == std::string::npos;
+    return check_layout("unused", 0u);
 }
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (!rejection_tests() || !scoreboard_layout_tests())
+    if (!rejection_tests())
+    {
+        std::fprintf(stderr, "VU1 rejection tests failed\n");
+        return 1;
+    }
+    if (!scoreboard_layout_tests())
     {
         return 1;
     }
