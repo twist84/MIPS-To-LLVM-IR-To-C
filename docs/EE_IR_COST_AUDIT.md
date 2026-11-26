@@ -286,3 +286,59 @@ Use differences in cumulative fields and elapsed_ms between progress
 samples wholly after first spawn, not absent subsystem timings or the
 full-run mean. This is a separate diagnostic-cost experiment, not a
 new codegen change or exact workload comparison.
+
+## Lean P40 repeatability (07:04:04 and 07:06:34)
+
+Both archives identify clean eece224, fixed RTC 1795671645, selective
+O5, async VU1/GS, baseline IOP, all four diagnostic controls disabled
+and identical translation-cache.json SHA-256
+69fb5b58326bf5b996967721f2ca722f927b7248b708b12c50e5339d26fb9d38.
+Both stop at 40M dispatches with no IOP guest fault, VU1 interpreter
+fallback or worker failure. Each has one outstanding worker job at
+the stop boundary; all attempted presentations succeeded.
+
+| Measurement | 07:04 | 07:06 |
+| --- | ---: | ---: |
+| Native process wall (s) | 46.640 | 47.547 |
+| First spawn dispatch | 22307633 | 19338869 |
+| First post-spawn sample dispatch | 22315008 | 19341312 |
+| First post-spawn elapsed (ms) | 22986.8 | 20849.8 |
+| First post-spawn fields | 4375 | 3738 |
+| Terminal elapsed (ms) | 41955.8 | 42995.3 |
+| Terminal fields | 5527 | 5084 |
+| Post-spawn fields/s | 60.7307 | 60.7798 |
+| Successful presents | 3949 | 3614 |
+| GPU draws | 4511358 | 4998470 |
+| VU1 native executions | 374804 | 411796 |
+| VU1 worker polls | 48549059 | 53488311 |
+| Empty polls | 48289998 | 53205091 |
+| Blocking waits | 115742 | 128575 |
+| Controller wait (s) | 4.7441602 | 5.2445352 |
+
+Mean 60.7553 fields/s, about 101.26% of the nominal 60 fields/s
+target, versus the preceding instrumented 48.7983 fields/s. This is
+a repeated observation, not a matched-workload speedup or proof of
+sustained full speed at every field. Controller input is live and
+asynchronous completion remains a source of workload divergence.
+Host audio is disabled. Final timing is included here; the full-run
+wall time includes different amounts of boot/menu and gameplay.
+
+The empty-poll rate is about 99.47% in both captures, but counts
+alone do not identify CPU cost. The VIF1 poll path already checks
+the atomic ready flag before taking the worker mutex. The two main
+runner checkpoints are at the top of the dispatch loop and in
+service_devices before scanout. They are not interchangeable:
+other host/device work may occur between them and host-ready
+publication can change guest IRQ order. Keep the scanout wait,
+COP2 sync, register-write/PATH3 fences, reset/discard and rejection
+paths intact. Do not simply throttle or remove acquire checkpoints.
+A future experiment needs either proven duplicate boundaries or
+separation of host readiness from guest completion eligibility
+with explicit ordered-event tests.
+
+eece224 CI passed SIF DMA, ROM0, original autotests and native
+WebGPU. Build and test failed game_runner_end_to_end_3 because
+the 300-dispatch lean fixture inherited the 1024-dispatch progress
+interval from the preceding suppression test. f846bbc explicitly
+selects a 256-dispatch progress interval for the lean fixture.
+This is test-only, no additional retail replay required.
