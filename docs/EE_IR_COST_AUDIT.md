@@ -2033,3 +2033,24 @@ promotion or replay. The accepted 68.79 MiB overlay is not directly
 comparable to an unoutlined O5 source candidate; compare source gains
 against original O5 first, then evaluate consolidation separately.
 Receipt remains available if an inventory or provenance gate fails.
+
+#### 8b measurement recovery
+
+First reconstruction receipt: 16,252 entries, 4,000 identical and
+12,252 changed IR hashes, no missing/extra or changed block ownership,
+identical normalized metadata SHA-256, 164.969 seconds. Static scan
+stopped at ee_fn_00115258 because lexical and parsed guest counts differed.
+No native compilation or retail execution occurred. LLVM can synthesize
+unnamed blocks after terminators (regression fixture); the actual retail
+module was not available for independent diagnosis. Verified parsed LLVM
+counts are authoritative; retain lexical annotation counts and report
+disagreements per module rather than treating them as invalid IR.
+Preserve strict guest PC coverage and LLVM verification.
+
+Resume with --resume-from using the original receipt and a new output.
+Revalidate ELF, baseline, lowering and compiler identities, normalized
+metadata, and the reconstruction comparison. The first receipt did not
+record individual changed-module digests, so legacy resume verifies the
+changed-name set, not exact prior changed bytes; the new receipt records
+all candidate SHA-256 hashes before scanning. Future resumes require
+exact equality. No IR regeneration is necessary for this tooling-only fix.

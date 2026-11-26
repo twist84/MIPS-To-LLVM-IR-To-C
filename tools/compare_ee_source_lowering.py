@@ -67,10 +67,14 @@ def ir_metrics(raw, symbol):
     # Exact LLVM instruction/block counts, including internal helpers.
     with verify_ir.llvm.create_context() as context, verify_ir.llvm.parse_assembly(
             raw.decode("utf-8"), context=context) as module:
+        module.verify()
         all_instructions = all_blocks = guest_instructions = guest_blocks = 0
+        found_guest = False
         for function in module.functions:
             if function.is_declaration:
                 continue
+            if function.name == symbol:
+                found_guest = True
             for block in function.blocks:
                 number = sum(1 for _ in block.instructions)
                 all_instructions += number
@@ -78,15 +82,22 @@ def ir_metrics(raw, symbol):
                 if function.name == symbol:
                     guest_instructions += number
                     guest_blocks += 1
-    if (guest_instructions != counts["ir_instructions"] or
-            guest_blocks != counts["llvm_blocks"]):
-        raise ValueError("lexical and parsed guest IR counts differ: " + symbol)
+    if not found_guest:
+        raise ValueError("missing parsed guest definition: " + symbol)
+    # LLVM may materialize implicit unnamed blocks after terminators.
+    # Lexical attribution uses emitted annotations, not LLVM's CFG.
+    # Report differences explicitly; use verified LLVM counts as totals.
     return {
         "ir_bytes": len(raw),
         "llvm_instructions": all_instructions,
         "llvm_blocks": all_blocks,
         "guest_llvm_instructions": guest_instructions,
         "guest_llvm_blocks": guest_blocks,
+        "lexical_guest_instructions": counts["ir_instructions"],
+        "lexical_guest_blocks": counts["llvm_blocks"],
+        "lexical_count_disagreement": int(
+            guest_instructions != counts["ir_instructions"] or
+            guest_blocks != counts["llvm_blocks"]),
         "guest_pcs": len(pcs),
     }, opcodes, pcs
 
@@ -118,6 +129,29 @@ def write_receipt(path, report):
         path, (json.dumps(report, indent=2) + "\n").encode("utf-8"))
 
 
+RESUME_IDENTITY_FIELDS = (
+    "schema", "profile", "baseline_metadata_sha256",
+    "baseline_translation_sha256", "baseline_object_manifest_sha256",
+    "baseline_library", "native_target", "elf_sha256", "functions",
+    "candidate_lowering_inputs", "recompiler_sha256", "candidate_work",
+)
+
+
+def validate_resume(previous, current, comparison, metadata_hash, hashes):
+    for field in RESUME_IDENTITY_FIELDS:
+        if field not in previous or previous[field] != current[field]:
+            raise ValueError("resume identity differs: " + field)
+    if (previous.get("retail_replay_performed") is not False or
+            previous.get("candidate_metadata_sha256") != metadata_hash or
+            previous.get("reconstruction") != comparison or
+            comparison["missing"] or comparison["extra"]):
+        raise ValueError("resume reconstruction/metadata identity differs")
+    old_hashes = previous.get("candidate_ir_hashes")
+    if old_hashes is not None and old_hashes != hashes:
+        raise ValueError("resumed candidate IR hashes differ")
+    return old_hashes is not None
+
+
 def compare(args, report):
     source_root = Path(__file__).resolve().parents[1]
     elf, build = args.elf.resolve(strict=True), args.build_dir.resolve(strict=True)
@@ -130,8 +164,10 @@ def compare(args, report):
             raise ValueError("candidate must be isolated from baseline cache")
         if receipt == protected or protected in receipt.parents:
             raise ValueError("receipt must not write into baseline cache")
-    if work.exists():
-        raise ValueError("candidate work directory already exists; choose a fresh path")
+    if work.exists() and args.resume_from is None:
+        raise ValueError("candidate work directory already exists; use --resume-from or choose a fresh path")
+    if args.resume_from is not None and not work.is_dir():
+        raise ValueError("resume requires the original candidate work directory")
     if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES", "0") != "0":
         raise ValueError("disable native ALU certificates for comparable O5 output")
 
@@ -177,21 +213,43 @@ def compare(args, report):
         "candidate_work": str(work),
     })
 
-    started = time.monotonic()
-    comparison = run_known_replays.reconstruct(
-        manifest, entries, elf, build, args.config, work, args.jobs,
-        True, ir_only=True)
-    report["ir_generation_seconds"] = time.monotonic() - started
-    report["reconstruction"] = comparison
     candidate_ir = work / "ir"
     candidate_meta = candidate_ir / "ee_functions.json"
+    previous = None
+    if args.resume_from is not None:
+        previous = load_json(args.resume_from)
+        comparison = run_known_replays.compare_ir(work, manifest["ir_hashes"])
+        report["ir_generation_seconds"] = previous["ir_generation_seconds"]
+    else:
+        started = time.monotonic()
+        comparison = run_known_replays.reconstruct(
+            manifest, entries, elf, build, args.config, work, args.jobs,
+            True, ir_only=True)
+        report["ir_generation_seconds"] = time.monotonic() - started
+    report["reconstruction"] = comparison
     report["candidate_metadata_sha256"] = run_game.sha256_path(candidate_meta)
+    candidate_hashes = run_game.hash_ir_modules(
+        candidate_ir, load_json(candidate_meta)["functions"],
+        require_owned_directory=True)
+    if set(candidate_hashes) != names:
+        raise ValueError("candidate IR inventory differs")
+    if previous is not None:
+        exact = validate_resume(previous, report, comparison,
+                                report["candidate_metadata_sha256"], candidate_hashes)
+        report["resume"] = {
+            "receipt_sha256": run_game.sha256_path(args.resume_from),
+            "previous_candidate_hashes_verified": exact,
+            "ir_regenerated": False,
+        }
+    report["candidate_ir_hashes"] = candidate_hashes
     after = inventory(load_json(candidate_meta))
     changes = ownership_changes(before, after)
     report["ownership_changes"] = changes
     if any(changes.values()):
         raise ValueError("reconstructed function/block ownership changed; no comparison accepted")
 
+    report["stage"] = "reconstruction_complete"
+    write_receipt(receipt, report)
     started = time.monotonic()
     totals = {arm: Counter() for arm in ("before", "after")}
     by_opcode = {arm: defaultdict(Counter) for arm in totals}
@@ -204,6 +262,8 @@ def compare(args, report):
         old_hash, new_hash = digest(old_raw), digest(new_raw)
         if old_hash != manifest["ir_hashes"][name]:
             raise ValueError("baseline IR changed during measurement: " + name)
+        if new_hash != candidate_hashes[name]:
+            raise ValueError("candidate IR changed during measurement: " + name)
         a = ir_metrics(old_raw, symbol)
         b = a if old_hash == new_hash else ir_metrics(new_raw, symbol)
         if a[2] != b[2]:
@@ -222,7 +282,12 @@ def compare(args, report):
             print(f"[{index}/{len(names)}] paired IR metrics", flush=True)
     report.update({"ir_scan_seconds": time.monotonic() - started,
                    "ir_totals": totals, "opcodes": by_opcode, "function_bands": by_band,
-                   "guest_pc_changes": coverage_changes, "modules": rows})
+                   "guest_pc_changes": coverage_changes, "modules": rows,
+                   "lexical_count_disagreements": {
+                       arm: [row["module"] for row in rows
+                             if row[arm]["lexical_count_disagreement"]]
+                       for arm in totals
+                   }})
     for arm, values in totals.items():
         values["llvm_instructions_per_guest_pc"] = (
             values["llvm_instructions"] / values["guest_pcs"])
@@ -293,10 +358,14 @@ def main(argv=None):
     parser.add_argument("--expected-functions", type=int)
     parser.add_argument("--expected-baseline-bytes", type=int)
     parser.add_argument("--ir-only", action="store_true")
+    parser.add_argument("--resume-from", type=Path,
+                        help="prior receipt for the same isolated reconstruction")
     args = parser.parse_args(argv)
     if not 1 <= args.jobs <= 32:
         parser.error("--jobs must be in 1..32")
     output = args.output.resolve()
+    if args.resume_from is not None and args.resume_from.resolve() == output:
+        parser.error("choose a new output receipt when resuming")
     if output.exists():
         parser.error("--output already exists; choose a new receipt")
     for protected in (args.baseline_ir.resolve().parent, args.baseline_profile.resolve()):

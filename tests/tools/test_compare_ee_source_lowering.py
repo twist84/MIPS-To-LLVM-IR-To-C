@@ -3,7 +3,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from compare_ee_source_lowering import inventory, ownership_changes, ir_metrics, separate
+from compare_ee_source_lowering import (inventory, ownership_changes, ir_metrics, separate,
+    validate_resume, RESUME_IDENTITY_FIELDS)
 
 
 def main():
@@ -41,6 +42,35 @@ entry:
     assert counts["guest_pcs"] == 1
     assert pcs == {0x1000}
     assert opcodes["addu"]["ir_instructions"] == 2
+    # LLVM inserts an unnamed block after a terminator even though
+    # there is no textual label. Parsed CFG counts remain authoritative.
+    implicit = raw.replace(b"  ret i32 3\n", b"  ret i32 3\n  ret i32 4\n")
+    counts, _, pcs = ir_metrics(implicit, "ee_fn_0x1000")
+    assert counts["guest_llvm_blocks"] == 2
+    assert counts["lexical_guest_blocks"] == 1
+    assert counts["guest_llvm_instructions"] == 3
+    assert counts["lexical_count_disagreement"] == 1
+    assert pcs == {0x1000}
+
+    identity = {key: key for key in RESUME_IDENTITY_FIELDS}
+    comparison = {"missing": [], "extra": [], "matching": 0}
+    previous = dict(identity, retail_replay_performed=False,
+                    candidate_metadata_sha256="metadata",
+                    reconstruction=comparison)
+    hashes = {"module": "digest"}
+    assert not validate_resume(previous, identity, comparison, "metadata", hashes)
+    previous["candidate_ir_hashes"] = hashes
+    assert validate_resume(previous, identity, comparison, "metadata", hashes)
+    for updated, metadata, candidate in (
+            (dict(identity, recompiler_sha256="changed"), "metadata", hashes),
+            (identity, "changed", hashes),
+            (identity, "metadata", {"module": "changed"})):
+        try:
+            validate_resume(previous, updated, comparison, metadata, candidate)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid resume accepted")
     print("source-lowering comparison: PASS")
 
 
