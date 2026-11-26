@@ -7,6 +7,7 @@ namespace llvm
 inline constexpr char k_vu_fmac4_ir[] = R"IR(
 declare <4 x i32> @llvm.umax.v4i32(<4 x i32>, <4 x i32>)
 declare <4 x i32> @llvm.umin.v4i32(<4 x i32>, <4 x i32>)
+declare <4 x i32> @llvm.abs.v4i32(<4 x i32>, i1 immarg)
 
 ; The two aligned 25-bit significands sum to a magnitude below 2^26.
 ; For n >= 4, removing the two low bits preserves its highest set bit
@@ -45,14 +46,13 @@ entry:
   %b_guard = shl <4 x i32> %b_hidden, <i32 1, i32 1, i32 1, i32 1>
   %ma = select <4 x i1> %a_zero, <4 x i32> <i32 0, i32 0, i32 0, i32 0>, <4 x i32> %a_guard
   %mb = select <4 x i1> %b_zero, <4 x i32> <i32 0, i32 0, i32 0, i32 0>, <4 x i32> %b_guard
-  %a_larger = icmp uge <4 x i32> %ea, %eb
-  %e = select <4 x i1> %a_larger, <4 x i32> %ea, <4 x i32> %eb
+  ; Exponents are unsigned bytes. The alignment shifts saturate at
+  ; 25, which discards the entire 25-bit guarded significand.
+  %e = call <4 x i32> @llvm.umax.v4i32(<4 x i32> %ea, <4 x i32> %eb)
   %da = sub <4 x i32> %e, %ea
   %db = sub <4 x i32> %e, %eb
-  %a_far = icmp uge <4 x i32> %da, <i32 25, i32 25, i32 25, i32 25>
-  %b_far = icmp uge <4 x i32> %db, <i32 25, i32 25, i32 25, i32 25>
-  %sa = select <4 x i1> %a_far, <4 x i32> <i32 25, i32 25, i32 25, i32 25>, <4 x i32> %da
-  %sb = select <4 x i1> %b_far, <4 x i32> <i32 25, i32 25, i32 25, i32 25>, <4 x i32> %db
+  %sa = call <4 x i32> @llvm.umin.v4i32(<4 x i32> %da, <4 x i32> <i32 25, i32 25, i32 25, i32 25>)
+  %sb = call <4 x i32> @llvm.umin.v4i32(<4 x i32> %db, <4 x i32> <i32 25, i32 25, i32 25, i32 25>)
   %aligned_a = lshr <4 x i32> %ma, %sa
   %aligned_b = lshr <4 x i32> %mb, %sb
   %a_negative = icmp slt <4 x i32> %lhs, <i32 0, i32 0, i32 0, i32 0>
@@ -63,9 +63,9 @@ entry:
   %signed_b = select <4 x i1> %b_negative, <4 x i32> %neg_b, <4 x i32> %aligned_b
   %sum = add <4 x i32> %signed_a, %signed_b
   %zero = icmp eq <4 x i32> %sum, <i32 0, i32 0, i32 0, i32 0>
-  %negative = icmp slt <4 x i32> %sum, <i32 0, i32 0, i32 0, i32 0>
-  %neg_sum = sub <4 x i32> <i32 0, i32 0, i32 0, i32 0>, %sum
-  %magnitude = select <4 x i1> %negative, <4 x i32> %neg_sum, <4 x i32> %sum
+  ; The sum is strictly between -2^26 and 2^26. Packed abs is
+  ; exact, including zero, and cannot encounter INT_MIN.
+  %magnitude = call <4 x i32> @llvm.abs.v4i32(<4 x i32> %sum, i1 false)
   %leading = call <4 x i32> @vu_clz26_4(<4 x i32> %magnitude)
   %safe_shift = and <4 x i32> %leading, <i32 31, i32 31, i32 31, i32 31>
   %normalized = shl <4 x i32> %magnitude, %safe_shift
@@ -78,9 +78,11 @@ entry:
   %nonzero = xor <4 x i1> %zero, <i1 true, i1 true, i1 true, i1 true>
   %overflow = and <4 x i1> %above, %nonzero
   %underflow = and <4 x i1> %below, %nonzero
-  %both_negative = and <4 x i1> %a_negative, %b_negative
-  %result_negative = select <4 x i1> %zero, <4 x i1> %both_negative, <4 x i1> %negative
-  %sign = select <4 x i1> %result_negative, <4 x i32> <i32 -2147483648, i32 -2147483648, i32 -2147483648, i32 -2147483648>, <4 x i32> <i32 0, i32 0, i32 0, i32 0>
+  ; A zero sum has a negative sign only for two negative inputs.
+  ; For a nonzero sum its sign bit is already in the integer sum.
+  %both_sign = and <4 x i32> %lhs, %b
+  %sign_source = select <4 x i1> %zero, <4 x i32> %both_sign, <4 x i32> %sum
+  %sign = and <4 x i32> %sign_source, <i32 -2147483648, i32 -2147483648, i32 -2147483648, i32 -2147483648>
   %exp_bits = shl <4 x i32> %exponent, <i32 23, i32 23, i32 23, i32 23>
   %normal = or <4 x i32> %exp_bits, %fraction
   %bounded = select <4 x i1> %overflow, <4 x i32> <i32 2147483647, i32 2147483647, i32 2147483647, i32 2147483647>, <4 x i32> %normal
