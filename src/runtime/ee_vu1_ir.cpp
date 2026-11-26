@@ -317,9 +317,11 @@ public:
     // straight-line path. PC and delayed NPC are independent values, so
     // branches in delay slots and E termination obey interpreter order.
     void begin_dynamic(uint32_t start, const std::bitset<2048>& reached,
-        bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask)
+        bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask,
+        const std::array<uint32_t, 144>& ready_slots, uint32_t ready_count)
     {
         m_dynamic = true;
+        m_ready_slots = ready_slots;
         m_dynamic_local_offset = m_ir.size();
         m_branch_vi_mask = branch_vi_mask;
         m_flag_history_mask = flag_history_mask;
@@ -360,8 +362,12 @@ public:
             line("store [16 x i16] zeroinitializer, ptr %previous_vi, align 2");
             line("store i32 0, ptr %previous_vi_mask, align 4");
         }
-        line("%ready = alloca [144 x i32], align 4");
-        line("store [144 x i32] zeroinitializer, ptr %ready, align 4");
+        if (ready_count != 0u)
+        {
+            const auto type = "[" + std::to_string(ready_count) + " x i32]";
+            line("%ready = alloca " + type + ", align 4");
+            line("store " + type + " zeroinitializer, ptr %ready, align 4");
+        }
         line("store i32 " + std::to_string(start) + ", ptr %pc, align 4");
         line("store i32 " + std::to_string((start + 8u) & 0x3fffu) + ", ptr %npc, align 4");
         line("store i32 0, ptr %step_count, align 4");
@@ -388,80 +394,11 @@ public:
 
     bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
         uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven,
-        uint32_t incoming_npc, bool ending_known, bool incoming_ending,
-        const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
-        uint32_t block_length, uint32_t loop_target)
+        uint32_t incoming_npc, bool ending_known, bool incoming_ending)
     {
         const auto suffix = std::to_string(pc);
         m_ir += "pair_" + suffix + ":\n";
         const auto old_steps = operation("load i32, ptr %step_count, align 4");
-        if (block_length > 1u)
-        {
-            // Fast blocks are optional; insufficient budget or a delay
-            // entry goes through the original single-pair path.
-            const auto npc = operation("load i32, ptr %npc, align 4");
-            const auto ending = operation("load i1, ptr %ending, align 1");
-            const auto sequential = operation("icmp eq i32 " + npc + ", " +
-                std::to_string((pc + 8u) & 0x3fffu));
-            const auto not_ending = operation("xor i1 " + ending + ", true");
-            const auto normal = operation("and i1 " + sequential + ", " + not_ending);
-            const auto fits = operation("icmp ule i32 " + old_steps + ", " +
-                std::to_string(c_ee_vu1::k_max_steps - block_length));
-            const auto fast = operation("and i1 " + normal + ", " + fits);
-            const bool loop = loop_target != k_unknown_pc;
-            const auto fast_label = std::string(loop ? "loop_" : "block_") + suffix;
-            line("br i1 " + fast + ", label %" + fast_label + ", label %single_" + suffix);
-            m_ir += fast_label + ":\n";
-            std::string loop_destination;
-            for (uint32_t index = 0u; index < block_length; ++index)
-            {
-                const uint32_t at = (pc + index * 8u) & 0x3fffu;
-                m_pair_steps = operation("add i32 " + old_steps + ", " +
-                    std::to_string(index + 1u));
-                if (loop && index == 1u)
-                {
-                    // The branch has already sampled its predicate and
-                    // retired its upper writes. The delay pair sees the
-                    // selected NPC, not a freshly evaluated VI condition.
-                    m_pair_npc = loop_destination;
-                    const auto raw = operation("add i32 " + m_pair_npc + ", 8");
-                    m_pair_sequential = operation("and i32 " + raw + ", 16383");
-                }
-                else
-                {
-                    m_pair_npc = std::to_string((at + 8u) & 0x3fffu);
-                    m_pair_sequential = std::to_string((at + 16u) & 0x3fffu);
-                }
-                if (!emit_dynamic_body(at, read_word(code.data() + at),
-                        read_word(code.data() + at + 4u), index == 0u))
-                {
-                    return false;
-                }
-                if (loop && index == 0u)
-                {
-                    loop_destination = m_next_target;
-                }
-            }
-            const auto next_pc = (pc + block_length * 8u) & 0x3fffu;
-            line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
-            line("store i32 " + (loop ? loop_destination : std::to_string(next_pc)) +
-                ", ptr %pc, align 4");
-            line("store i32 " + (loop ? m_pair_sequential :
-                std::to_string((next_pc + 8u) & 0x3fffu)) + ", ptr %npc, align 4");
-            line("store i1 false, ptr %ending, align 1");
-            if (loop && (lo >> 25u) != 0x20u && loop_target != next_pc)
-            {
-                const auto taken = operation("icmp eq i32 " + loop_destination + ", " +
-                    std::to_string(loop_target));
-                line("br i1 " + taken + ", label %pair_" + std::to_string(loop_target) +
-                    ", label %pair_" + std::to_string(next_pc));
-            }
-            else
-            {
-                line("br label %pair_" + std::to_string(loop ? loop_target : next_pc));
-            }
-            m_ir += "single_" + suffix + ":\n";
-        }
         const auto within_budget = operation("icmp ult i32 " + old_steps + ", " +
             std::to_string(c_ee_vu1::k_max_steps));
         line("br i1 " + within_budget + ", label %body_" + suffix + ", label %fail");
@@ -474,6 +411,10 @@ public:
             operation("load i32, ptr %npc, align 4") : std::to_string(incoming_npc);
         const auto ending = ending_known ? std::string(incoming_ending ? "true" : "false") :
             operation("load i1, ptr %ending, align 1");
+        if (m_branch_vi_mask != 0u)
+        {
+            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
+        }
         if (incoming_npc == k_unknown_pc)
         {
             const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
@@ -483,9 +424,91 @@ public:
         {
             m_pair_sequential = std::to_string((incoming_npc + 8u) & 0x3fffu);
         }
-        if (!emit_dynamic_body(pc, lo, hi, true))
+        m_current_pc = pc;
+        // Every pair remains a possible dispatcher target. SSA values
+        // from a different pair do not necessarily dominate this entry.
+        m_vf_lanes = {};
+        m_vf_vectors = {};
+        m_acc_lanes = {};
+        m_acc_vector.clear();
+        m_next_target = m_pair_sequential;
+        m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
+        m_delay_vi_mask = 0u;
+
+        // Identical dependency lists and four-cycle retire semantics to
+        // s_ee_vu1_dependency. Readiness is local to this invocation.
+        const auto use = s_ee_vu1_dependency::decode(lo, hi);
+        const auto old = operation("load i32, ptr %cycle, align 4");
+        auto cycle = operation("add i32 " + old + ", 1");
+        std::bitset<144> read_slots;
+        const auto read_ready = [&](uint32_t lane)
+        {
+            const auto slot = m_ready_slots[lane];
+            if (slot != k_unknown_pc && !read_slots.test(slot))
+            {
+                read_slots.set(slot);
+                cycle = max_ready(cycle, slot);
+            }
+        };
+        for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
+        {
+            read_ready(use.m_read_lanes[index]);
+        }
+        for (uint32_t index = 0u; index < use.m_vi_index_count; ++index)
+        {
+            read_ready(128u + use.m_vi_indices[index]);
+        }
+        line("store i32 " + cycle + ", ptr %cycle, align 4");
+        if (m_q_pipeline)
+        {
+            sync_scalar("q", cycle);
+        }
+        if (m_p_pipeline)
+        {
+            sync_scalar("p", cycle);
+        }
+        if (m_flag_pipeline)
+        {
+            m_issue_cycle = cycle;
+            m_flag_time = operation("add i32 " + m_pair_steps + ", 16");
+        }
+        if (!emit(lo, hi))
         {
             return false;
+        }
+        std::bitset<144> write_slots;
+        const auto mark_ready = [&](uint32_t lane)
+        {
+            const auto slot = m_ready_slots[lane];
+            if (slot != k_unknown_pc)
+            {
+                write_slots.set(slot);
+            }
+        };
+        for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
+        {
+            mark_ready(use.m_write_lanes[index]);
+        }
+        if (use.m_vi_load != 0u)
+        {
+            mark_ready(128u + use.m_vi_load);
+        }
+        if (write_slots.any())
+        {
+            const auto ready = operation("add i32 " + cycle + ", 4");
+            for (uint32_t slot = 0u; slot < write_slots.size(); ++slot)
+            {
+                if (write_slots.test(slot))
+                {
+                    line("store i32 " + ready + ", ptr " +
+                        ready_pointer(slot) + ", align 4");
+                }
+            }
+        }
+        if (m_branch_vi_mask != 0u)
+        {
+            line("store i32 " + std::to_string(m_delay_vi_mask) +
+                ", ptr %previous_vi_mask, align 4");
         }
         line("store i32 " + m_pair_npc + ", ptr %pc, align 4");
         line("store i32 " + m_next_target + ", ptr %npc, align 4");
@@ -538,79 +561,6 @@ public:
         m_ir += retire + ":\n";
         line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
         line("br label %done");
-        return true;
-    }
-
-    bool emit_dynamic_body(uint32_t pc, uint32_t lo, uint32_t hi, bool reset_cache)
-    {
-        m_current_pc = pc;
-        // A single-entry block keeps write-through SSA values across
-        // its pairs. Independent entries must discard the emitter cache.
-        if (reset_cache)
-        {
-            m_vf_lanes = {};
-            m_vf_vectors = {};
-            m_acc_lanes = {};
-            m_acc_vector.clear();
-        }
-        if (m_branch_vi_mask != 0u)
-        {
-            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
-        }
-        m_next_target = m_pair_sequential;
-        m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
-        m_delay_vi_mask = 0u;
-
-        // Identical dependency lists and four-cycle retire semantics to
-        // s_ee_vu1_dependency. Readiness is local to this invocation.
-        const auto use = s_ee_vu1_dependency::decode(lo, hi);
-        const auto old = operation("load i32, ptr %cycle, align 4");
-        auto cycle = operation("add i32 " + old + ", 1");
-        for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
-        {
-            cycle = max_ready(cycle, use.m_read_lanes[index]);
-        }
-        for (uint32_t index = 0u; index < use.m_vi_index_count; ++index)
-        {
-            cycle = max_ready(cycle, 128u + use.m_vi_indices[index]);
-        }
-        line("store i32 " + cycle + ", ptr %cycle, align 4");
-        if (m_q_pipeline)
-        {
-            sync_scalar("q", cycle);
-        }
-        if (m_p_pipeline)
-        {
-            sync_scalar("p", cycle);
-        }
-        if (m_flag_pipeline)
-        {
-            m_issue_cycle = cycle;
-            m_flag_time = operation("add i32 " + m_pair_steps + ", 16");
-        }
-        if (!emit(lo, hi))
-        {
-            return false;
-        }
-        if (use.m_write_lane_count != 0u || use.m_vi_load != 0u)
-        {
-            const auto ready = operation("add i32 " + cycle + ", 4");
-            for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
-            {
-                line("store i32 " + ready + ", ptr " +
-                    ready_pointer(use.m_write_lanes[index]) + ", align 4");
-            }
-            if (use.m_vi_load != 0u)
-            {
-                line("store i32 " + ready + ", ptr " +
-                    ready_pointer(128u + use.m_vi_load) + ", align 4");
-            }
-        }
-        if (m_branch_vi_mask != 0u)
-        {
-            line("store i32 " + std::to_string(m_delay_vi_mask) +
-                ", ptr %previous_vi_mask, align 4");
-        }
         return true;
     }
 
@@ -2000,6 +1950,7 @@ private:
     // Write-through SSA cache: within a dynamic pair or across the proven
     // straight-line path. Lower writes update cache before upper retirement.
     size_t m_dynamic_local_offset = 0u;
+    std::array<uint32_t, 144> m_ready_slots{};
     std::bitset<32> m_dynamic_vf_accessed{}, m_dynamic_vf_written{};
     bool m_dynamic_acc_accessed = false;
     bool m_dynamic_acc_written = false;
@@ -2241,47 +2192,66 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     {
         return {};
     }
-    // Form bounded, nonoverlapping sequential blocks. Keep every original
-    // pair entry for arbitrary indirect/delay transfers. Exclude callback
-    // pairs and branch/E boundaries; the fast guard proves all internal
-    // PC/NPC/E transitions and budget before executing any pair.
-    std::array<uint32_t, 2048> block_lengths{};
-    std::bitset<2048> block_members;
+    // All readiness timestamps start at zero. Two lanes have identical
+    // timestamps on every path when they are always retired together
+    // (identical write-PC sets suffice). Include EVERY emitted pair,
+    // not only ordinary sequential states, to cover indirect entry.
+    std::array<std::bitset<2048>, 144> writes{};
+    std::bitset<144> reads;
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
-        if (!reached.test(index) || block_members.test(index))
+        if (!reached.test(index))
         {
             continue;
         }
-        uint32_t length = 0u;
-        for (; length < 8u && index + length + 1u < reached.size(); ++length)
+        const auto use = s_ee_vu1_dependency::decode(
+            read_word(code.data() + index * 8u), read_word(code.data() + index * 8u + 4u));
+        for (uint32_t lane = 0u; lane < use.m_read_lane_count; ++lane)
         {
-            const auto at = index + length;
-            if (!reached.test(at) || !reached.test(at + 1u) || block_members.test(at))
+            reads.set(use.m_read_lanes[lane]);
+        }
+        for (uint32_t vi = 0u; vi < use.m_vi_index_count; ++vi)
+        {
+            reads.set(128u + use.m_vi_indices[vi]);
+        }
+        for (uint32_t lane = 0u; lane < use.m_write_lane_count; ++lane)
+        {
+            writes[use.m_write_lanes[lane]].set(index);
+        }
+        if (use.m_vi_load != 0u)
+        {
+            writes[128u + use.m_vi_load].set(index);
+        }
+    }
+    std::array<uint32_t, 144> ready_slots;
+    ready_slots.fill(k_unknown_pc);
+    uint32_t ready_count = 0u;
+    for (uint32_t lane = 0u; lane < ready_slots.size(); ++lane)
+    {
+        // Never-read readiness cannot affect issue. Never-written
+        // readiness remains zero and cannot exceed the issue cycle.
+        if (!reads.test(lane) || writes[lane].none())
+        {
+            continue;
+        }
+        for (uint32_t previous = 0u; previous < lane; ++previous)
+        {
+            if (ready_slots[previous] != k_unknown_pc &&
+                writes[previous] == writes[lane])
             {
-                break;
-            }
-            const auto lo = read_word(code.data() + at * 8u);
-            const auto hi = read_word(code.data() + at * 8u + 4u);
-            if (is_branch(lo, hi) || (hi & 0x40000000u) != 0u ||
-                is_kick_pair(lo, hi) || is_p_pair(lo, hi))
-            {
+                ready_slots[lane] = ready_slots[previous];
                 break;
             }
         }
-        if (length >= 3u)
+        if (ready_slots[lane] == k_unknown_pc)
         {
-            block_lengths[index] = length;
-            for (uint32_t offset = 0u; offset < length; ++offset)
-            {
-                block_members.set(index + offset);
-            }
+            ready_slots[lane] = ready_count++;
         }
     }
     c_straight_line_emitter emitter;
     // VI0 is constant, and JR/JALR consume live VI values.
     emitter.begin_dynamic(start, reached, has_flags, has_q, has_p,
-        branch_vi_mask & ~1u, flag_history_mask);
+        branch_vi_mask & ~1u, flag_history_mask, ready_slots, ready_count);
     for (uint32_t index = 0u; index < reached.size(); ++index)
     {
         if (!reached.test(index))
@@ -2304,37 +2274,10 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             incoming_npcs[index] : k_unknown_pc;
         const bool ending_known = !has_indirect &&
             ending_seen.test(index) != nonending_seen.test(index);
-        const auto lo = read_word(code.data() + pc);
-        const auto hi = read_word(code.data() + pc + 4u);
-        uint32_t loop_target = k_unknown_pc;
-        uint32_t block_length = block_lengths[index];
-        // A backward B or conditional branch plus its ordinary delay
-        // pair is a two-pair loop terminator. Keep both original entries
-        // and require the same NPC/E/budget guard as sequential blocks.
-        const auto major = lo >> 25u;
-        if (is_branch(lo, hi) && (lo & 0x400u) != 0u &&
-            (hi & 0x40000000u) == 0u &&
-            (major == 0x20u || major == 0x28u || major == 0x29u ||
-                (major >= 0x2cu && major <= 0x2fu)))
-        {
-            const auto target = relative_target(pc, lo);
-            const auto delay = (pc + 8u) & 0x3fffu;
-            const auto fallthrough = (pc + 16u) & 0x3fffu;
-            const auto delay_lo = read_word(code.data() + delay);
-            const auto delay_hi = read_word(code.data() + delay + 4u);
-            if (reached.test(delay >> 3u) && reached.test(target >> 3u) &&
-                (major == 0x20u || reached.test(fallthrough >> 3u)) &&
-                !is_branch(delay_lo, delay_hi) && (delay_hi & 0x40000000u) == 0u &&
-                !is_kick_pair(delay_lo, delay_hi) && !is_p_pair(delay_lo, delay_hi))
-            {
-                loop_target = target;
-                block_length = 2u;
-            }
-        }
-        if (!emitter.emit_dynamic_pair(pc, lo, hi, emitted ? direct : k_unknown_pc,
+        if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
+                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
                 alternate_emitted ? alternate : k_unknown_pc, proven,
-                incoming_npc, ending_known, ending_seen.test(index),
-                code, block_length, loop_target))
+                incoming_npc, ending_known, ending_seen.test(index)))
         {
             return {};
         }
