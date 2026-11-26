@@ -8,7 +8,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
-from audit_ee_scalar_memory_pilot import outline
+from audit_ee_scalar_memory_pilot import outline, select
 
 
 def fixture(width, write):
@@ -64,6 +64,21 @@ class Runtime(ctypes.Structure):
 
 
 class TestScalarPilot(unittest.TestCase):
+    def test_sparse_audit_selection(self):
+        rows = [
+            {"module": "missing.ll", "guest_pcs": 4, "current_executable_bytes": 1000},
+            {"module": "zero.ll", "guest_pcs": 4, "current_executable_bytes": 900,
+             "memory_helper_calls": 0},
+            {"module": "small.ll", "guest_pcs": 4, "current_executable_bytes": 100,
+             "memory_helper_calls": 2},
+            {"module": "large.ll", "guest_pcs": 32, "current_executable_bytes": 200,
+             "memory_helper_calls": 5},
+        ]
+        self.assertEqual(select(rows, 0, 1), ["large.ll"])
+        self.assertEqual(select(rows, 0, 8), ["large.ll", "small.ll"])
+        self.assertEqual(select(rows, 1, 0), ["large.ll", "small.ll"])
+        self.assertEqual(select(rows[:2], 8, 8), [])
+
     def test_exact_rewrite(self):
         for width in (1, 2, 4, 8):
             for write in (False, True):

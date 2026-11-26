@@ -227,7 +227,10 @@ def select(rows, per_band, largest):
             selected.add(ordered[len(ordered)//2]["module"])
         elif count > 1:
             selected.update(ordered[i*(len(ordered)-1)//(count-1)]["module"] for i in range(count))
-    selected.update(r["module"] for r in sorted(rows, key=rank, reverse=True)[:largest])
+    # Audit Counters omit zero-valued fields. Only rank actual memory
+    # candidates, including for the global largest-module selection.
+    candidates = [row for group in groups.values() for row in group]
+    selected.update(r["module"] for r in sorted(candidates, key=rank, reverse=True)[:largest])
     return sorted(selected)
 
 
