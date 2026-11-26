@@ -115,7 +115,10 @@ private:
                     bool guarded_loop_header = false,
                     const std::map<uint32_t, ee::s_ee_instruction>* insn_map = nullptr);
     void emit_insn(const ee::s_ee_instruction& ins, bool is_last_in_block,
-                   uint32_t fallthrough_pc, bool in_delay_slot = false);
+                   uint32_t fallthrough_pc, bool in_delay_slot = false,
+                   bool count_instruction = true);
+    void emit_counted_alu_run(const std::vector<ee::s_ee_instruction>& block,
+                              size_t first, size_t end);
     void emit_mmi_insn(const ee::s_ee_instruction& ins);
 
     // IR text optimisation passes (Phase 7). Operates on the emitted LLVM IR
