@@ -1021,6 +1021,7 @@ void module_builder::reset_tracking()
     m_cur_lo.clear();
     m_cur_hi.clear();
     m_value_bits.clear();
+    m_mmi_vectors.clear();
     clear_cop1_tracking();
     m_dirty_lo.clear();
     m_dirty_hi.clear();
@@ -1886,6 +1887,11 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         clear_cop1_tracking();
     }
     m_cache_cop1 = cache_cop1;
+    if (ins.valid != ee::e_ee_valid::VALID ||
+        ins.opcode != e_ee_opcode::OP_MMI || in_delay_slot)
+    {
+        m_mmi_vectors.clear();
+    }
     m_out += "  ; ";
     m_out += u32hex(ins.pc);
     m_out += ": ";
@@ -2923,6 +2929,10 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     }
     case ee::e_ee_opcode::OP_MMI:
         emit_mmi_insn(ins);
+        if (in_delay_slot)
+        {
+            m_mmi_vectors.clear();
+        }
         break;
     case ee::e_ee_opcode::OP_COP0:
     {
@@ -3880,6 +3890,7 @@ void module_builder::emit_counted_alu_run(
 
     m_cur_lo = incoming_lo;
     m_cur_hi = incoming_hi;
+    m_mmi_vectors.clear();
     m_dirty_lo = incoming_dirty_lo;
     m_dirty_hi = incoming_dirty_hi;
     m_out += slow + ":\n";
@@ -5012,18 +5023,31 @@ void module_builder::emit_mmi_insn(const ee::s_ee_instruction& ins)
     auto store_gpr = [&](uint8_t r, const std::string& lo, const std::string& hi) {
         set_gpr_temp(r, lo, hi);
     };
-    auto build2i64 = [&](const std::string& lo, const std::string& hi) {
+    auto build2i64 = [&](const std::string& lo, const std::string& hi) -> std::string {
+        if (lo == "0" && hi == "0")
+        {
+            return "zeroinitializer";
+        }
+        const auto key = std::make_pair(lo, hi);
+        const auto found = m_mmi_vectors.find(key);
+        if (found != m_mmi_vectors.end())
+        {
+            return found->second;
+        }
         std::string v = newtemp();
         m_out += "  " + v + " = insertelement <2 x i64> undef, i64 " + lo + ", i32 0\n";
         std::string v2 = newtemp();
         m_out += "  " + v2 + " = insertelement <2 x i64> " + v + ", i64 " + hi + ", i32 1\n";
+        m_mmi_vectors.emplace(key, v2);
         return v2;
     };
     auto extract2i64 = [&](const std::string& v) {
         std::string lo = newtemp(), hi = newtemp();
         m_out += "  " + lo + " = extractelement <2 x i64> " + v + ", i32 0\n";
         m_out += "  " + hi + " = extractelement <2 x i64> " + v + ", i32 1\n";
-        return std::make_pair(lo, hi);
+        const auto key = std::make_pair(lo, hi);
+        m_mmi_vectors.emplace(key, v);
+        return key;
     };
     auto build4i32 = [&](const std::string& lo, const std::string& hi) {
         // bitcast 2xi64 → 4xi32
