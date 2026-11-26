@@ -390,7 +390,7 @@ public:
         uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven,
         uint32_t incoming_npc, bool ending_known, bool incoming_ending,
         const std::array<uint8_t, c_ee_vu1::k_memory_size>& code,
-        uint32_t block_length)
+        uint32_t block_length, uint32_t loop_target)
     {
         const auto suffix = std::to_string(pc);
         m_ir += "pair_" + suffix + ":\n";
@@ -408,28 +408,58 @@ public:
             const auto fits = operation("icmp ule i32 " + old_steps + ", " +
                 std::to_string(c_ee_vu1::k_max_steps - block_length));
             const auto fast = operation("and i1 " + normal + ", " + fits);
-            line("br i1 " + fast + ", label %block_" + suffix + ", label %single_" + suffix);
-            m_ir += "block_" + suffix + ":\n";
+            const bool loop = loop_target != k_unknown_pc;
+            const auto fast_label = std::string(loop ? "loop_" : "block_") + suffix;
+            line("br i1 " + fast + ", label %" + fast_label + ", label %single_" + suffix);
+            m_ir += fast_label + ":\n";
+            std::string loop_destination;
             for (uint32_t index = 0u; index < block_length; ++index)
             {
                 const uint32_t at = (pc + index * 8u) & 0x3fffu;
                 m_pair_steps = operation("add i32 " + old_steps + ", " +
                     std::to_string(index + 1u));
-                m_pair_npc = std::to_string((at + 8u) & 0x3fffu);
-                m_pair_sequential = std::to_string((at + 16u) & 0x3fffu);
+                if (loop && index == 1u)
+                {
+                    // The branch has already sampled its predicate and
+                    // retired its upper writes. The delay pair sees the
+                    // selected NPC, not a freshly evaluated VI condition.
+                    m_pair_npc = loop_destination;
+                    const auto raw = operation("add i32 " + m_pair_npc + ", 8");
+                    m_pair_sequential = operation("and i32 " + raw + ", 16383");
+                }
+                else
+                {
+                    m_pair_npc = std::to_string((at + 8u) & 0x3fffu);
+                    m_pair_sequential = std::to_string((at + 16u) & 0x3fffu);
+                }
                 if (!emit_dynamic_body(at, read_word(code.data() + at),
                         read_word(code.data() + at + 4u), index == 0u))
                 {
                     return false;
                 }
+                if (loop && index == 0u)
+                {
+                    loop_destination = m_next_target;
+                }
             }
             const auto next_pc = (pc + block_length * 8u) & 0x3fffu;
             line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
-            line("store i32 " + std::to_string(next_pc) + ", ptr %pc, align 4");
-            line("store i32 " + std::to_string((next_pc + 8u) & 0x3fffu) +
-                ", ptr %npc, align 4");
+            line("store i32 " + (loop ? loop_destination : std::to_string(next_pc)) +
+                ", ptr %pc, align 4");
+            line("store i32 " + (loop ? m_pair_sequential :
+                std::to_string((next_pc + 8u) & 0x3fffu)) + ", ptr %npc, align 4");
             line("store i1 false, ptr %ending, align 1");
-            line("br label %pair_" + std::to_string(next_pc));
+            if (loop && (lo >> 25u) != 0x20u && loop_target != next_pc)
+            {
+                const auto taken = operation("icmp eq i32 " + loop_destination + ", " +
+                    std::to_string(loop_target));
+                line("br i1 " + taken + ", label %pair_" + std::to_string(loop_target) +
+                    ", label %pair_" + std::to_string(next_pc));
+            }
+            else
+            {
+                line("br label %pair_" + std::to_string(loop ? loop_target : next_pc));
+            }
             m_ir += "single_" + suffix + ":\n";
         }
         const auto within_budget = operation("icmp ult i32 " + old_steps + ", " +
@@ -2274,11 +2304,37 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             incoming_npcs[index] : k_unknown_pc;
         const bool ending_known = !has_indirect &&
             ending_seen.test(index) != nonending_seen.test(index);
-        if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
-                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
+        const auto lo = read_word(code.data() + pc);
+        const auto hi = read_word(code.data() + pc + 4u);
+        uint32_t loop_target = k_unknown_pc;
+        uint32_t block_length = block_lengths[index];
+        // A backward B or conditional branch plus its ordinary delay
+        // pair is a two-pair loop terminator. Keep both original entries
+        // and require the same NPC/E/budget guard as sequential blocks.
+        const auto major = lo >> 25u;
+        if (is_branch(lo, hi) && (lo & 0x400u) != 0u &&
+            (hi & 0x40000000u) == 0u &&
+            (major == 0x20u || major == 0x28u || major == 0x29u ||
+                (major >= 0x2cu && major <= 0x2fu)))
+        {
+            const auto target = relative_target(pc, lo);
+            const auto delay = (pc + 8u) & 0x3fffu;
+            const auto fallthrough = (pc + 16u) & 0x3fffu;
+            const auto delay_lo = read_word(code.data() + delay);
+            const auto delay_hi = read_word(code.data() + delay + 4u);
+            if (reached.test(delay >> 3u) && reached.test(target >> 3u) &&
+                (major == 0x20u || reached.test(fallthrough >> 3u)) &&
+                !is_branch(delay_lo, delay_hi) && (delay_hi & 0x40000000u) == 0u &&
+                !is_kick_pair(delay_lo, delay_hi) && !is_p_pair(delay_lo, delay_hi))
+            {
+                loop_target = target;
+                block_length = 2u;
+            }
+        }
+        if (!emitter.emit_dynamic_pair(pc, lo, hi, emitted ? direct : k_unknown_pc,
                 alternate_emitted ? alternate : k_unknown_pc, proven,
                 incoming_npc, ending_known, ending_seen.test(index),
-                code, block_lengths[index]))
+                code, block_length, loop_target))
         {
             return {};
         }
