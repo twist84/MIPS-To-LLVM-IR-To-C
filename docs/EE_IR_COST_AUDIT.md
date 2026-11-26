@@ -1714,3 +1714,20 @@ failure. Wall seconds 40.796 / 40.672 / 40.250 / 40.234 (-0.04%
 vs parent; noise). All five CI workflows passed on aaa294e, including
 LLVM fixture repair. Accept the 74.33 MiB residual overlay for this
 matched workload, with production cache unchanged.
+
+### Checkpoint 6a — cold alignment exception merge pilot
+
+The alignment guard already publishes precise state on both paths and
+skips proven-aligned constants. Do not change those checks or memory
+callback boundaries. Instead merge only exact terminal AdEL/AdES arms
+inside a guest definition, grouping by exception code and BD constant.
+Retain each original guard, fault label and normal successor; select
+PC/BadVAddr with PHIs in a common cold call/return block. Leave other
+exceptions and singleton groups unchanged. Test all argument and exit
+semantics with a mock exception publisher in MCJIT. Reconstruct the
+accepted residual parent and verify its full object/manifest chain.
+Scan original IR for actual mergeable arms and sample eight per site
+count band plus eight largest candidates. Require byte-identical paired
+parent re-emission. Record per-module size changes only; no linking,
+cache mutation or runtime acceptance at this checkpoint. If the pilot
+wins, select measured improvements for a separate retail gate.

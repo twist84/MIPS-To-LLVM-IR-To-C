@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 import llvmlite.binding as llvm
 from audit_ee_scalar_memory_pilot import outline, select, winners, stable_receipt, expansion_candidates
-from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates
+from build_ee_shared_scalar_experiment import share_helpers, shared_name, residual_candidates, merge_alignment_faults
 from build_ee_quadword_experiment import body_of
 from audit_ee_helper_inventory import sha
 
@@ -154,6 +154,78 @@ class TestScalarPilot(unittest.TestCase):
             residual_candidates(trials, {"loss.ll"}, 2)
         with self.assertRaises(ValueError):
             residual_candidates(trials + trials[:1], {"win.ll"}, 3)
+
+    def test_merge_alignment_faults(self):
+        # Same AdEL/BD group may merge; different AdES/BD stays independent.
+        raw = b"""declare i32 @ee_raise_exception(ptr, ptr, i32, i32, i32, i32)
+define i32 @guest(ptr %cpu, ptr %rt, i32 %t0, i32 %t1, i32 %t2) {
+entry:
+  %t3 = icmp ne i32 %t0, 0
+  br i1 %t3, label %memory_alignment_fault_1, label %memory_alignment_ok_1
+memory_alignment_fault_1:
+  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 4, i32 100, i32 0, i32 %t0)
+  ret i32 1
+memory_alignment_ok_1:
+  %t4 = icmp ne i32 %t1, 0
+  br i1 %t4, label %memory_alignment_fault_2, label %memory_alignment_ok_2
+memory_alignment_fault_2:
+  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 4, i32 104, i32 0, i32 %t1)
+  ret i32 1
+memory_alignment_ok_2:
+  %t5 = icmp ne i32 %t2, 0
+  br i1 %t5, label %memory_alignment_fault_3, label %memory_alignment_ok_3
+memory_alignment_fault_3:
+  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 5, i32 108, i32 1, i32 %t2)
+  ret i32 1
+memory_alignment_ok_3:
+  ret i32 0
+}
+"""
+        changed, sites, groups = merge_alignment_faults(raw, "guest")
+        self.assertEqual((sites, groups), (2, 1))
+        self.assertEqual(changed.count(b"call i32 @ee_raise_exception"), 2)
+        self.assertIn(b"[ 100, %memory_alignment_fault_1 ], [ 104, %memory_alignment_fault_2 ]", changed)
+        self.assertIn(b"[ %t0, %memory_alignment_fault_1 ], [ %t1, %memory_alignment_fault_2 ]", changed)
+        self.assertIn(b"i32 5, i32 108, i32 1, i32 %t2", changed)
+        self.assertEqual(merge_alignment_faults(raw.replace(b"i32 4, i32 104, i32 0",
+                                                           b"i32 4, i32 104, i32 1"), "guest")[1:], (0, 0))
+        # Execute both functions with a mock exception publisher that records
+        # every argument and call count. No unresolved fallback symbols.
+        mock = b"""define i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 %code, i32 %pc, i32 %bd, i32 %addr) {
+entry:
+  %p1 = getelementptr i32, ptr %cpu, i32 1
+  %p2 = getelementptr i32, ptr %cpu, i32 2
+  %p3 = getelementptr i32, ptr %cpu, i32 3
+  %p4 = getelementptr i32, ptr %cpu, i32 4
+  %old = load i32, ptr %p4
+  %next = add i32 %old, 1
+  store i32 %code, ptr %cpu
+  store i32 %pc, ptr %p1
+  store i32 %bd, ptr %p2
+  store i32 %addr, ptr %p3
+  store i32 %next, ptr %p4
+  ret i32 99
+}
+"""
+        linked = mock + raw.split(b"\n", 1)[1] + changed.split(b"\n", 1)[1].replace(b"@guest(", b"@candidate(")
+        llvm.initialize_native_target()
+        llvm.initialize_native_asmprinter()
+        signature = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p, ctypes.c_void_p,
+                                      ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32)
+        with llvm.create_context() as ctx:
+            with llvm.parse_assembly(linked.decode(), context=ctx) as module:
+                module.verify()
+                target = llvm.Target.from_default_triple().create_target_machine()
+                with llvm.create_mcjit_compiler(module, target) as engine:
+                    engine.finalize_object()
+                    functions = [signature(engine.get_function_address(n)) for n in ("guest", "candidate")]
+                    for args in ((0, 0, 0), (1, 2, 3), (0, 0xffffffff, 3), (0, 0, 5)):
+                        outcomes = []
+                        for fn in functions:
+                            state = (ctypes.c_uint32 * 5)()
+                            ret = fn(state, None, *args)
+                            outcomes.append((ret, list(state)))
+                        self.assertEqual(*outcomes)
 
     def test_exact_rewrite(self):
         for width in (1, 2, 4, 8):

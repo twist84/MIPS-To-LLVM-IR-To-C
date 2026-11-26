@@ -222,6 +222,223 @@ def revisit_trial(task):
     return row
 
 
+# Only match the exact terminal alignment arms emitted by module_builder.
+# Keep every original guard and predecessor block; merge the cold call/ret
+# by exception code and delay-slot status. PC and BadVAddr are SSA PHIs.
+ALIGNMENT = re.compile(
+    rb"^  br i1 %t\d+, label %memory_alignment_fault_(?P<id>\d+), "
+    rb"label %memory_alignment_ok_(?P=id)\n"
+    rb"(?P<fault>memory_alignment_fault_(?P=id):\n"
+    rb"  call i32 @ee_raise_exception\(ptr %cpu, ptr %rt, i32 (?P<code>[45]), "
+    rb"i32 (?P<pc>\d+), i32 (?P<bd>[01]), i32 (?P<addr>%t\d+|-?\d+)\)\n"
+    rb"  ret i32 1\n)(?=memory_alignment_ok_(?P=id):\n)", re.M)
+ALIGN_JOIN = b"ee_alignment_merge_"
+
+
+def alignment_groups(body):
+    groups = {}
+    for match in ALIGNMENT.finditer(body):
+        key = (match["code"], match["bd"])
+        groups.setdefault(key, []).append(match)
+    return {key: group for key, group in groups.items() if len(group) >= 2}
+
+
+def merge_alignment_faults(raw, guest):
+    body = body_of(raw, guest)
+    if ALIGN_JOIN in body:
+        raise ValueError("alignment join symbol already present")
+    groups = alignment_groups(body)
+    if not groups:
+        return raw, 0, 0
+    replacements, tails = [], []
+    for (code, bd), matches in sorted(groups.items()):
+        tag = ALIGN_JOIN + code + b"_" + bd
+        labels = [b"memory_alignment_fault_" + m["id"] for m in matches]
+        if len(labels) != len(set(labels)):
+            raise ValueError("duplicate alignment fault label")
+        for match, label in zip(matches, labels):
+            replacements.append((match.start("fault"), match.end("fault"),
+                                 label + b":\n  br label %" + tag + b"\n"))
+        def phi(field):
+            return b", ".join(b"[ " + m[field] + b", %" + label + b" ]"
+                              for m, label in zip(matches, labels))
+        pc, address = b"%" + tag + b"_pc", b"%" + tag + b"_addr"
+        tails.append(tag + b":\n  " + pc + b" = phi i32 " + phi("pc") +
+                     b"\n  " + address + b" = phi i32 " + phi("addr") +
+                     b"\n  call i32 @ee_raise_exception(ptr %cpu, ptr %rt, i32 " +
+                     code + b", i32 " + pc + b", i32 " + bd + b", i32 " +
+                     address + b")\n  ret i32 1\n")
+    result = body
+    for start, end, replacement in sorted(replacements, reverse=True):
+        result = result[:start] + replacement + result[end:]
+    close = result.rfind(b"\n}")
+    if close < 0:
+        raise ValueError("guest definition terminator differs")
+    result = result[:close+1] + b"\n".join(tails) + result[close+1:]
+    return raw.replace(body, result, 1), len(replacements), len(tails)
+
+
+def verify_residual_alignment_parent(folder, meta, names, parent_raw, manifest, records, parent_plan):
+    raw, current, entries = read_manifest(folder / "objects", set(names))
+    plan = read_json(folder / "helper-plan.json")
+    dll = folder / "game-translated.dll"
+    if (plan["mode"] != "experimental_residual_shared_scalar" or
+            plan["metadata_sha256"] != sha(meta) or
+            (folder / "ee_functions.json").read_bytes() != meta or
+            plan["source_manifest_sha256"] != sha(parent_raw) or
+            plan["prior_library_sha256"] != parent_plan["linked_library_sha256"] or
+            plan["native_target"] != manifest["native_target"] or
+            current["native_target"] != manifest["native_target"] or
+            current["target_triple"] != manifest["target_triple"] or
+            current["experimental_mixed_pipeline"] != manifest["experimental_mixed_pipeline"] + "-residual" or
+            current.get("production_cache_compatible") is not False or
+            plan["source_functions"] != len(names) or plan["retained_functions"] != len(names) or
+            plan["shared_owners"] != parent_plan["shared_owners"] or
+            plan["scalar_body_sha256"] != parent_plan["scalar_body_sha256"] or
+            not plan.get("runtime_validation_required") or
+            dll.stat().st_size != plan["linked_library_bytes"] or
+            sha(dll.read_bytes()) != plan["linked_library_sha256"]):
+        raise ValueError("residual alignment parent identity differs")
+    rows = rows_of(plan)
+    trial_raw = (folder / "scalar-residual-trials.json").read_bytes()
+    trials = json.loads(trial_raw)
+    if (sha(trial_raw) != plan["trials_sha256"] or
+            len(trials) != plan["attempted_modules"] or
+            len({r["module"] for r in trials}) != len(trials) or
+            [r for r in trials if r.get("executable_saving", 0) > 0] != plan["modules"] or
+            len(rows) != plan["recompiled_modules"] or
+            len(names)-len(rows) != plan["reused_modules"] or
+            not set(rows) <= set(names)):
+        raise ValueError("residual alignment trial inventory differs")
+    for name, item in entries.items():
+        before = records[name]
+        if any(item.get(k) != before.get(k) for k in
+               ("ir_sha256", "defined_symbols", "experimental_pipeline")):
+            raise ValueError("residual source or symbol identity differs: " + name)
+        if name not in rows:
+            if any(item.get(k) != before.get(k) for k in
+                   ("sha256", "size_bytes", "transformed_ir_sha256")):
+                raise ValueError("unmodified residual object differs: " + name)
+            continue
+        row = rows[name]
+        if (before.get("experimental_shared_scalar") or row["shared_definitions"] or
+                row["source_ir_sha256"] != before["ir_sha256"] or
+                row["parent_ir_sha256"] != before["transformed_ir_sha256"] or
+                row["source_object_sha256"] != before["sha256"] or
+                row["source_object_bytes"] != before["size_bytes"] or
+                row["trial"]["sha256"] != item["sha256"] or
+                row["trial"]["object_bytes"] != item["size_bytes"] or
+                row["transformed_ir_sha256"] != item["transformed_ir_sha256"] or
+                row["executable_saving"] <= 0 or
+                row["executable_saving"] != row["source_executable_bytes"]-row["trial"]["executable_bytes"] or
+                not item.get("experimental_shared_scalar")):
+            raise ValueError("residual alignment receipt differs: " + name)
+    for key, total in (
+            ("executable_saving", sum(r["executable_saving"] for r in rows.values())),
+            ("object_saving", sum(r["source_object_bytes"]-r["trial"]["object_bytes"] for r in rows.values())),
+            ("removed_ir_bytes", sum(r["removed_ir_bytes"] for r in rows.values()))):
+        if plan[key] != total:
+            raise ValueError("residual alignment aggregate differs: " + key)
+    load_inputs(folder / "ee_functions.json", folder / "objects")
+    return raw, current, entries, plan, rows
+
+
+def alignment_trial(task):
+    (name, guest, path, base, receipts, plans, scalar, residual, shared_row,
+     folder, record, triple, expected, owners) = task
+    raw = path.read_bytes()
+    data = verified_object(folder, record, sha(raw))
+    before, prior = reconstruct_parent(raw, guest, name, receipts, plans)
+    if (sha(raw) != base["ir_sha256"] or
+            sha(before) != base["transformed_ir_sha256"] or
+            prior["trial"]["sha256"] != base["sha256"]):
+        raise ValueError("alignment base reconstruction differs: " + name)
+    if scalar is not None or residual is not None:
+        local, counts = outline(before, guest)
+        row = scalar if scalar is not None else residual
+        if counts != row["counts"] or local == before:
+            raise ValueError("alignment scalar counts differ: " + name)
+        if scalar is not None and (sha(local) != scalar["candidate_ir_sha256"] or
+                                   shared_row["parent_ir_sha256"] != sha(local)):
+            raise ValueError("alignment local scalar digest differs: " + name)
+        before = share_helpers(local, guest, counts, expected, owners, name)
+    if sha(before) != record["transformed_ir_sha256"]:
+        raise ValueError("alignment parent reconstruction differs: " + name)
+    mode = record.get("experimental_pipeline", "O5")
+    if mode != prior["mode"]:
+        raise ValueError("alignment parent policy differs")
+    candidate, sites, groups = merge_alignment_faults(before, guest)
+    row = {"module": name, "mode": mode, "original_ir_sha256": sha(raw),
+           "parent_ir_sha256": sha(before), "parent_object_sha256": sha(data),
+           "parent_executable_bytes": native_executable_sections(data)[0],
+           "parent_object_bytes": len(data), "merged_sites": sites, "remaining_calls": groups,
+           "ir_bytes_saved": len(before)-len(candidate)}
+    if candidate != before:
+        baseline = emit_native(before, triple, guest, mode)
+        if baseline["sha256"] != record["sha256"]:
+            raise ValueError("alignment parent object not reproducible: " + name)
+        row["candidate"] = emit_native(candidate, triple, guest, mode)
+        row["candidate_ir_sha256"] = sha(candidate)
+        row["executable_saving"] = row["parent_executable_bytes"]-row["candidate"]["executable_bytes"]
+        row["object_saving"] = len(data)-row["candidate"]["object_bytes"]
+    return row
+
+
+def alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
+                    scalar, expected, owners, parent_raw, manifest, records, parent_plan):
+    folder = args.alignment_from.resolve()
+    shared_rows = rows_of(parent_plan)
+    raw, current, entries, plan, residual = verify_residual_alignment_parent(
+        folder, meta, names, parent_raw, manifest, records, parent_plan)
+    if set(scalar) & set(residual):
+        raise ValueError("alignment scalar inventories overlap")
+    # Read only original IR, whose alignment arms are untouched by previous
+    # transforms. Scan once, sample by actual mergeable site count and size.
+    candidates = []
+    for name, guest in names.items():
+        original = (ir / name).read_bytes()
+        if sha(original) != base_records[name]["ir_sha256"]:
+            raise ValueError("stale alignment source: " + name)
+        groups = alignment_groups(body_of(original, guest))
+        if groups:
+            sites = sum(map(len, groups.values()))
+            candidates.append((sites-len(groups), entries[name]["size_bytes"], name))
+    if not candidates:
+        raise ValueError("no mergeable alignment faults")
+    candidates.sort()
+    bands = {}
+    for item in candidates:
+        band = next((n for n in (1, 4, 16, 64, 256) if item[0] <= n), 2**32)
+        bands.setdefault(band, []).append(item)
+    selected = {item[2] for item in candidates[-8:]}
+    for group in bands.values():
+        count = min(8, len(group))
+        selected.update(group[i*(len(group)-1)//max(1, count-1)][2] for i in range(count))
+    tasks = [(n, names[n], ir / n, base_records[n], tuple(r.get(n) for r in rows),
+              small_plans, scalar.get(n), residual.get(n), shared_rows.get(n),
+              folder / "objects", entries[n], current["target_triple"], expected, owners)
+             for n in sorted(selected)]
+    result = []
+    with ProcessPoolExecutor(max_workers=args.jobs) as pool:
+        for row in pool.map(alignment_trial, tasks):
+            result.append(row)
+            print(f"[{len(result)}/{len(tasks)}] {row['module']}: "
+                  f"{row.get('executable_saving', 0):+,} executable bytes saved", flush=True)
+    report = {"mode": "read_only_ee_alignment_merge_pilot", "metadata_sha256": sha(meta),
+              "parent_manifest_sha256": sha(raw), "parent_library_sha256": plan["linked_library_sha256"],
+              "native_target": current["native_target"], "inventory_modules": len(names),
+              "eligible_modules": len(candidates), "eligible_call_reductions": sum(r[0] for r in candidates),
+              "selected_modules": len(result), "rewritten_modules": sum("candidate" in r for r in result),
+              "executable_saving": sum(r.get("executable_saving", 0) for r in result),
+              "object_saving": sum(r.get("object_saving", 0) for r in result),
+              "ir_bytes_saved": sum(r["ir_bytes_saved"] for r in result), "modules": result}
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, indent=2)
+        stream.write("\n")
+    return report
+
+
 def stage(args):
     started = time.monotonic()
     ir = args.ir.resolve()
@@ -231,6 +448,10 @@ def stage(args):
     out = args.output.resolve()
     shared_parent = args.revisit_from.resolve() if args.revisit_from else None
     inputs = (ir, *folders, pilot, expanded) + ((shared_parent,) if shared_parent else ())
+    if args.alignment_from:
+        if shared_parent is None:
+            raise ValueError("--alignment-from requires --revisit-from")
+        inputs += (args.alignment_from.resolve(),)
     if out.exists() or any(out.is_relative_to(p) for p in inputs):
         raise ValueError("use a new output outside input caches")
     meta = (ir / "ee_functions.json").read_bytes()
@@ -300,6 +521,9 @@ def stage(args):
         # No previous winners are recompiled; all residual modules use
         # declarations only, and the eight owner objects are unchanged.
         expanded = shared_parent
+    if args.alignment_from:
+        return alignment_pilot(args, ir, out, meta, names, base_records, rows, small_plans,
+                               scalar, expected, owners, parent_raw, manifest, records, parent_plan)
     out.mkdir(parents=True)
     staged = out / "objects"
     staged.mkdir()
@@ -384,13 +608,14 @@ def main():
                  "add-experiment", "pilot-experiment", "experiment", "output"):
         parser.add_argument("--"+flag, type=Path, required=True)
     parser.add_argument("--revisit-from", type=Path, help="accepted shared scalar overlay")
+    parser.add_argument("--alignment-from", type=Path, help="accepted residual overlay; output is a read-only alignment pilot JSON")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
         if os.name != "nt" or not 1 <= args.jobs <= 16 or os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
             raise ValueError("Windows experiment requires 1–16 jobs and disabled certificates")
         result = stage(args)
-        print(f"Shared scalar memory: {result['executable_saving']:,} executable bytes saved", flush=True)
+        print(f"EE experiment: {result['executable_saving']:,} executable bytes saved", flush=True)
     except (OSError, ValueError, RuntimeError, KeyError, TypeError, subprocess.CalledProcessError) as error:
         print(f"EE shared scalar experiment refused: {error}", file=sys.stderr)
         return 1
