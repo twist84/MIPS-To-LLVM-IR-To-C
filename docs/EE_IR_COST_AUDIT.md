@@ -1333,3 +1333,36 @@ sharing. Recompile only 1,134 affected modules, retain the other
 the actual generated multiplier header, edge values and 10,000
 deterministic random pairs, comparing all result bits and flags.
 A separate native link and matched retail replay remain required.
+
+
+### Checkpoint 4h — measured shared COP1 multiplication native link
+
+Windows helper-plan(3).json, LLVM 22.1.0 / znver2, same metadata
+and 16,252 guest modules. Parent library SHA-256 matches checkpoint
+4f. Re-emitted 1,134 modules, reused 15,118. Shared multiplier owner
+sub_0x101490_0x101490.ll. Stage wall time 106.782 s, excluding link.
+Removed 7,814,240 bytes of IR text in memory. 1,130 affected modules
+shrink in executable size, four unchanged and none grow.
+O5: 586/587 shrink, saving 445,073 executable bytes; Oz:
+544/547 shrink, saving 382,518 executable bytes. Incremental
+executable object saving 827,591 bytes and aggregate object saving
+1,107,018 bytes. Executable object bytes 79,863,788 -> 79,036,197;
+aggregate object bytes 116,783,827 -> 115,676,809.
+DLL 91,351,040 -> 90,495,488 bytes (86.30 MiB), saving 855,552
+bytes versus the immediate parent and 20,975,616 bytes (18.82%)
+versus original O5. Linked executable raw bytes 86,354,432 ->
+85,526,528. DLL SHA-256
+5442d6c4ab264c125bc1132209ac347424f57f1b9c28dbf89a0680b51f605593.
+Retail runtime remains unvalidated.
+
+### Checkpoint 4i — matched incremental multiplication comparison
+
+Use the existing four-arm synchronous replay: original O5 record
+and control, shared-quadword immediate parent, shared-COP1-multiply
+candidate. Require matching controller input, terminal budgets,
+sampled transitions, terminal reports and screenshots, and unchanged
+library hashes. Compare candidate runtime with the immediate parent.
+The shared multiplication roots use the original aggregate/scalar
+ABI but changed inlining/linkage. A successful native link alone
+does not prove cross-module execution equivalence. Production
+lowering and cache policy remain unchanged.
