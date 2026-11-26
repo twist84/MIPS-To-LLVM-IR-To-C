@@ -502,3 +502,62 @@ all four sign combinations with deterministic significands. These
 are not exhaustive mantissa combinations. LLVM may already produce
 equivalent native operations. V30 candidate versus V29; retain V25
 as the prior control. CI, retail and DLL size validation pending.
+
+## G3B — V29/V30 correctness accepted; timing neutral
+
+All five CI workflows passed at 8c37c36. ee-graphics-g3b.zip contains
+four synchronous unprofiled pairs. All eight receipt entries pass the
+40M dispatch, 3127/3127 PAD polls, 184700 reference-matched sampled
+transitions, 21910026110 attempts, 22115080673 EE cycles, 4494 fields,
+394881 native VU1 runs and 445669423 native pairs gates. Independently
+recomputed raw terminal report and screenshot SHA-256 match the prior
+reference; PAD footers and all archived sampled transition maps match
+each other. No fallback, IOP guest fault or timing observer failure.
+All 84 DLL hashes changed; matched native target and inventory, inputs
+unchanged.
+
+| Pair | V29 s | V30 s |
+|---|---:|---:|
+| 1 | 42.312 | 42.453 |
+| 2 | 42.609 | 42.859 |
+| 3 | 42.438 | 42.437 |
+| 4 | 42.391 | 42.265 |
+
+Median 42.4145 -> 42.445s, throughput -0.07186%; no established
+speed change. User-reported DLL totals: V28 7706624 bytes (-2.51%
+versus V25), V29 and V30 each 7912448 bytes (+0.097% versus V25).
+V30 has zero footprint growth over V29. These are file sizes,
+not executable-section or resident-memory sizes. Retain V30 as
+correctness-validated experimental control; no G3 speedup claim.
+Retain V25 and all previous inventories. V28 rejection stands.
+
+## G4A — VU0 synchronization attribution before elision
+
+Audit the installed runner callback. runner_vu0_sync validates inputs,
+services CMSAR1/VU1 before checking halted VU0, and only then chooses
+halted return or scheduler catch-up/wait. A halted VU0 alone does not
+prove callback elision safe. Custom callback semantics and the horizon
+observer also forbid unconditional macro-chain synchronization removal.
+No architectural or EE lowering change in this checkpoint.
+
+Install a profiling-only wrapper when SDBZ_RUNTIME_PROFILE=1. Its
+mutually exclusive entry-state scopes are vu0_sync_halted (no active
+CMSAR1, halted VU0), vu0_sync_cmsar1 (CMSAR1 active at entry, possibly
+also VU0 micro execution), vu0_sync_micro (nonhalted without CMSAR1)
+and vu0_sync_invalid (invalid arguments). The original callback remains
+installed unprofiled; the opt-in horizon wrapper preserves its
+generation count and selects profiling only when enabled. Classification
+itself is outside the timed scope. The wrapper always invokes the
+original synchronization, preserves failure and service ordering.
+Direct periodic device-service calls are not covered by these scopes.
+The nested exclusive accounting avoids adding VU1 or other existing
+child scopes twice. The receipt distinguishes missing VU0 callback
+attribution from still-unmeasured noncallback synchronization, and
+rejects partial scope inventories. Tests cover old/new/partial receipts.
+No ABI or EE/VU1 artifact changes. Build a new runner, preserving the
+previous validated runner executable, then replay with identical V30,
+graphics EE DLL, fixed RTC and recorded PAD using the existing on/off
+profiling harness (two repeats each). Review actual callback counts and
+elapsed durations before designing G4B. Profiling overhead is diagnostic
+and must not be interpreted as an optimization or as CPU time. CI and
+retail validation pending.
