@@ -385,7 +385,7 @@ public:
     }
 
     bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
-        uint32_t direct_pc, bool direct_proven)
+        uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven)
     {
         const auto suffix = std::to_string(pc);
         m_ir += "pair_" + suffix + ":\n";
@@ -477,18 +477,34 @@ public:
         {
             line("br label %dispatch");
         }
-        else if (direct_proven)
+        else if (direct_proven && alternate_pc == k_unknown_pc)
         {
             line("br label %pair_" + std::to_string(direct_pc));
         }
         else
         {
-            // Indirect transfers and ambiguous delayed NPCs are never
-            // assumed to be sequential. Guard the edge and fall back.
+            // Select using the incoming delayed NPC, never recompute the
+            // predecessor's condition from potentially overwritten VI.
             const auto matches = operation("icmp eq i32 " + m_pair_npc + ", " +
                 std::to_string(direct_pc));
+            std::string other = "dispatch";
+            if (alternate_pc != k_unknown_pc)
+            {
+                other = direct_proven ? "pair_" + std::to_string(alternate_pc) :
+                    "alternate_" + suffix;
+            }
             line("br i1 " + matches + ", label %pair_" +
-                std::to_string(direct_pc) + ", label %dispatch");
+                std::to_string(direct_pc) + ", label %" + other);
+            if (alternate_pc != k_unknown_pc && !direct_proven)
+            {
+                // Unknown indirect or third successors still use the
+                // original emitted-PC guard; both fast edges are exact.
+                m_ir += other + ":\n";
+                const auto alternate_matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                    std::to_string(alternate_pc));
+                line("br i1 " + alternate_matches + ", label %pair_" +
+                    std::to_string(alternate_pc) + ", label %dispatch");
+            }
         }
         m_ir += retire + ":\n";
         line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
@@ -1973,9 +1989,10 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     std::set<t_visit> visited;
     std::vector<t_visit> queue;
     std::bitset<2048> reached;
-    std::array<uint32_t, 2048> direct_successors;
+    std::array<uint32_t, 2048> direct_successors, alternate_successors;
     direct_successors.fill(k_unknown_pc);
-    std::bitset<2048> ambiguous_successors;
+    alternate_successors.fill(k_unknown_pc);
+    std::bitset<2048> incomplete_successors;
     bool has_indirect = false;
     const uint32_t start = address & 0x3ff8u;
     const auto enqueue = [&](uint32_t pc, uint32_t npc, bool ending)
@@ -2039,19 +2056,35 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         const auto pair_index = pc >> 3u;
         if (npc == k_unknown_pc)
         {
-            ambiguous_successors.set(pair_index);
+            incomplete_successors.set(pair_index);
         }
-        else if (direct_successors[pair_index] == k_unknown_pc)
+        else if (npc != direct_successors[pair_index] &&
+                 npc != alternate_successors[pair_index])
         {
-            direct_successors[pair_index] = npc;
-        }
-        else if (direct_successors[pair_index] != npc)
-        {
-            ambiguous_successors.set(pair_index);
-            // Prefer the ordinary sequential edge when both are possible.
-            if (npc == ((pc + 8u) & 0x3fffu))
+            auto& direct = direct_successors[pair_index];
+            auto& alternate = alternate_successors[pair_index];
+            if (direct == k_unknown_pc)
             {
-                direct_successors[pair_index] = npc;
+                direct = npc;
+            }
+            else if (alternate == k_unknown_pc)
+            {
+                alternate = npc;
+            }
+            else
+            {
+                // Bound code growth. Retain two fast targets but never
+                // assume they exhaust a larger successor set.
+                incomplete_successors.set(pair_index);
+                if (npc == ((pc + 8u) & 0x3fffu))
+                {
+                    alternate = npc;
+                }
+            }
+            // Favor fallthrough as the first comparison.
+            if (alternate == ((pc + 8u) & 0x3fffu))
+            {
+                std::swap(direct, alternate);
             }
         }
         const bool next_end = (hi & 0x40000000u) != 0u;
@@ -2095,12 +2128,17 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         }
         const uint32_t pc = index * 8u;
         const auto direct = direct_successors[index];
+        const auto alternate = alternate_successors[index];
         const bool emitted = direct != k_unknown_pc && reached.test(direct >> 3u);
+        const bool alternate_emitted = alternate != k_unknown_pc &&
+            reached.test(alternate >> 3u);
         // With no indirect branch the discovery graph conservatively
         // enumerates every incoming PC/NPC/E state from the entry.
-        const bool proven = emitted && !has_indirect && !ambiguous_successors.test(index);
+        const bool proven = emitted && !has_indirect && !incomplete_successors.test(index) &&
+            (alternate == k_unknown_pc || alternate_emitted);
         if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
-                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc, proven))
+                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
+                alternate_emitted ? alternate : k_unknown_pc, proven))
         {
             return {};
         }
