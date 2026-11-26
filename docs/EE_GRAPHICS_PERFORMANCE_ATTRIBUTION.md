@@ -174,3 +174,43 @@ The separate receipt schema ee-graphics-vu1-comparison-v1 reports candidate
 inventory, per-pair wall seconds and descriptive relative throughput.
 Default comparison is unprofiled; alternate arm order and use four repeats.
 No acceptance of speedup is automatic. No cache promotion.
+
+## G2A accepted — matched V22/V23 retail experiment
+
+All five workflows passed at 952db5f. ee-graphics-g2a.zip contains four
+interleaved pairs with profiling disabled. All eight runs reached 40M
+dispatches, 3127/3127 PAD polls, 184700 identical sampled transitions per
+run, 21910026110 guest attempts, 22115080673 EE cycles, 4494 fields,
+394881 VU1 runs, 445669423 pairs, no interpreter fallback, IOP guest fault
+or timing observer failure. Raw terminal report and GS screenshot hashes
+were independently recomputed and match across all eight archives.
+The input integrity receipt passed; all 84 library hashes changed while
+the exact filename inventory and native target match.
+
+| Pair | V22 s | V23 s |
+|---|---:|---:|
+| 1 | 43.063 | 41.782 |
+| 2 | 42.875 | 41.468 |
+| 3 | 43.047 | 41.657 |
+| 4 | 42.907 | 41.890 |
+
+Median 42.977 -> 41.7195 s: 2.93% less elapsed time, 3.01% more
+throughput. All four pairs favor V23; slowest candidate beats fastest
+control by 0.985s. This is accepted evidence for the fixed synchronous
+workload, not proof of the same improvement under async gameplay.
+V23 is the next experimental control; retain V22. No cache promotion,
+no EE lowering or runner change. The receipt's performance_accepted
+field deliberately remains false; acceptance is a separate review.
+
+## G2B — two known delayed-PC successors
+
+Record at most two distinct nonterminating incoming NPCs per emitted pair.
+For a complete two-target discovery set without reachable indirect
+branches, select either native successor with one comparison against the
+incoming NPC. Otherwise guard each known successor individually and
+retain dispatch fallback for unknown or third targets. Favor the ordinary
+fallthrough edge first. No re-evaluation of a predecessor's VI predicate
+after the delay pair, no change to guest issue, termination or validation.
+Test both direct outcomes and guarded alternatives in the interpreter
+differential fixture, including wrap and delayed branches. G2B build/CI
+and matched V23/V24 replay pending. Retain V23, use fresh V24 inventory.
