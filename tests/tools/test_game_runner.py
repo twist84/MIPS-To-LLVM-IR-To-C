@@ -4884,6 +4884,27 @@ def main():
             for state_trace in state_traces[1:]:
                 assert state_trace == state_traces[0], (state_traces[0], state_trace)
 
+            detail_run = subprocess.run(
+                [arg for arg in command if not arg.startswith("--extra-functions=")] +
+                ["--no-recompile", "--report", str(root / "detail.json")],
+                capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS="0",
+                         SDBZ_IOP_FAST_QUIET_TURNS="0", SDBZ_IDLE_SKIP="0",
+                         SDBZ_STATE_TRACE_FIRST="1", SDBZ_STATE_TRACE_LAST="16",
+                         SDBZ_STATE_TRACE_EVERY="1", SDBZ_STATE_TRACE_DETAIL="1"),
+            )
+            assert detail_run.returncode == 3, detail_run.stdout + detail_run.stderr
+            detail_lines = [line for line in detail_run.stdout.splitlines()
+                            if line.startswith("EE detail:")]
+            register_lines = [line for line in detail_run.stdout.splitlines()
+                              if line.startswith("EE detail reg:")]
+            code_lines = [line for line in detail_run.stdout.splitlines()
+                          if line.startswith("EE detail code:")]
+            assert detail_lines and len(register_lines) == 32 * len(detail_lines)
+            assert any("index=08 " in line and " gpr=" in line and " fpr=" in line
+                       and " vf=" in line for line in register_lines)
+            assert code_lines, detail_run.stdout
+
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.
         with tempfile.TemporaryDirectory(prefix="ee-invalid-loop-resume-") as tmp:
