@@ -3469,6 +3469,40 @@ int main(int argc, char** argv)
                     "(approximate, not R5900 calibrated)\n");
     }
     runtime.m_user = memory.get();
+    std::string fastmem_word_environment;
+    const char* fastmem_word_setting = read_host_environment(
+        "SDBZ_EE_FASTMEM_WORD", &fastmem_word_environment);
+    if (fastmem_word_setting != nullptr && *fastmem_word_setting != '\0' &&
+        std::strcmp(fastmem_word_setting, "0") != 0 &&
+        std::strcmp(fastmem_word_setting, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_EE_FASTMEM_WORD (expected 0 or 1)\n");
+        return 2;
+    }
+    if (fastmem_word_setting != nullptr && std::strcmp(fastmem_word_setting, "1") == 0)
+    {
+#if defined(_WIN32) || (defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+        // Restrict this prototype to the current HLE direct physical RAM
+        // model. Do not enable it for ROM0 or a future strict MMU path.
+        if (!hle_startup)
+        {
+            std::fprintf(stderr, "EE fastmem word requires HLE startup\n");
+            return 2;
+        }
+        static_assert(k_ee_ram_size <= 0x10000000u, "fastmem RAM below devices");
+        runtime.m_fastmem_word_base = memory->physical_ram_span(0u, k_ee_ram_size);
+        if (runtime.m_fastmem_word_base == nullptr)
+        {
+            std::fprintf(stderr, "EE fastmem word RAM span rejected\n");
+            return 2;
+        }
+        runtime.m_fastmem_word_size = k_ee_ram_size;
+        std::printf("EE fastmem word: enabled (direct physical RAM only)\n");
+#else
+        std::fprintf(stderr, "EE fastmem word requires little-endian host\n");
+        return 2;
+#endif
+    }
     runtime.m_vu0_state = &vu0;
     runtime.m_vu0_sync = runner_vu0_sync;
     s_runner_vu0_control vu0_control{&vif1, &hardware.dmac(), &runtime};

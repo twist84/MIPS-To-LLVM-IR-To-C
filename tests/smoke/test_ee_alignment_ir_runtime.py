@@ -145,7 +145,7 @@ def install_symbols(path):
 
 
 def execute(fixture, directory, target, mode, address, trace_enabled=True,
-            fused_store=False):
+            fused_store=False, fastmem=None):
     global ALLOW_FUSED_STORE
     ALLOW_FUSED_STORE = fused_store and not trace_enabled
     PAIRS.clear()
@@ -166,6 +166,18 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     cpu_backing, cpu = aligned_instance(EEState)
     rt_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
     set_store_trace_enabled(rt_backing, module, trace_enabled)
+    if fastmem is not None:
+        # Obtain the actual descriptor offsets from the generated gate.
+        ir = str(module)
+        check = re.search(r"fastmem_word_check_[0-9]+:.*?(?=fastmem_word_direct_)",
+                          ir, re.S)
+        require(check is not None, "missing fastmem gate")
+        offsets = re.findall(
+            r"getelementptr i8, ptr %rt, i64 ([0-9]+)", check.group())
+        require(len(offsets) == 2, "unexpected fastmem descriptor layout")
+        size_offset, base_offset = map(int, offsets)
+        ctypes.c_uint32.from_buffer(rt_backing, size_offset).value = len(fastmem)
+        ctypes.c_void_p.from_buffer(rt_backing, base_offset).value = ctypes.addressof(fastmem)
     UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
@@ -392,6 +404,34 @@ def main():
                 rf"store i64 [^\n]+, ptr {re.escape(ptr)}\b", ir))
                 for ptr in pointers)
             require(stores == 1, f"POR half {half} published {stores} times")
+
+        # Opt-in direct physical word loads/stores use the supplied span,
+        # including its final complete word. All other addresses fall back.
+        ram = ctypes.create_string_buffer(0x44)
+        ram[0x40:0x44] = bytes.fromhex("efcdab89")
+        result, cpu, _ = execute(fixture, directory, target, "ee_lw", 0x40,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and not READS and
+                cpu.gpr[8].lo == 0xffffffff89abcdef, "direct LW sign extension")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x40,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and not WRITES and
+                EVENTS == [("trace", 0x40)] and
+                ram[0x40:0x44] == bytes.fromhex("efcdab89"),
+                "direct SW lost trace or bytes")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x44,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and WRITES == [(4, 0x44, 0x89abcdef)],
+                "out-of-range word store bypassed helper")
+        for address in (0x80000040, 0x70000040, 0x10000040, 0xfffffffc):
+            result, cpu, _ = execute(fixture, directory, target, "ee_lw", address,
+                                     fastmem=ram)
+            require(result == EE_EXIT_DISPATCH and READS == [(4, address)],
+                    f"fastmem wrongly accepted {address:#x}")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x41,
+                                 fastmem=ram)
+        require(result == EE_EXIT_EXCEPTION and not WRITES and not TRACES,
+                "fastmem bypassed alignment fault")
 
         # The positive scalar word path remains operational.
         result, cpu, original = execute(

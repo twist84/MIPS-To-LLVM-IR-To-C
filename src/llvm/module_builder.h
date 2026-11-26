@@ -57,6 +57,8 @@ private:
     void header();
     void declare_memory_helpers();
     std::string emit_effective_address(const ee::s_ee_instruction& ins);
+    std::string emit_word_access(const std::string& address,
+                                 const std::string& write_value = {});
     void emit_guest_store_trace(const ee::s_ee_instruction& ins,
                                 const std::string& effective_address,
                                 const std::string& affected_address,

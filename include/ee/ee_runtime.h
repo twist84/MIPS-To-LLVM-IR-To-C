@@ -383,6 +383,13 @@ struct s_ee_runtime
     // refer to an earlier exception while EXL is set. HLE callbacks need
     // the actual nested trap's delay-slot status, alongside cpu.m_pad.
     bool m_last_exception_in_bd_slot = false;
+
+    // Opt-in direct physical RAM, not a TLB mapping. The owner must keep
+    // this little-endian span alive and stable throughout native execution.
+    // Only naturally aligned word operations may use it. A zero size or
+    // null pointer disables the path; aliases and devices remain on bus ABI.
+    uint8_t* m_fastmem_word_base = nullptr;
+    uint32_t m_fastmem_word_size = 0u;
 };
 
 // ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,

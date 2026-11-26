@@ -558,6 +558,85 @@ std::string module_builder::emit_effective_address(const ee::s_ee_instruction& i
     return address;
 }
 
+std::string module_builder::emit_word_access(const std::string& address,
+                                               const std::string& write_value)
+{
+    // The caller has already performed the architectural alignment
+    // check and, for stores, the original diagnostic observation.
+    // Only an explicitly installed physical RAM span can bypass the bus.
+    const bool write = !write_value.empty();
+    const std::string suffix = std::to_string(m_temp_counter++);
+    const std::string check = "fastmem_word_check_" + suffix;
+    const std::string direct = "fastmem_word_direct_" + suffix;
+    const std::string slow = "fastmem_word_slow_" + suffix;
+    const std::string done = "fastmem_word_done_" + suffix;
+    const std::string is_null = newtemp();
+    m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
+    m_out += "  br i1 " + is_null + ", label %" + slow + ", label %" + check + "\n";
+    m_out += check + ":\n";
+    const std::string size_ptr = newtemp();
+    const std::string size = newtemp();
+    const std::string base_ptr = newtemp();
+    const std::string base = newtemp();
+    const std::string offset = newtemp();
+    const std::string end = newtemp();
+    const std::string limit = newtemp();
+    const std::string fits = newtemp();
+    const std::string present = newtemp();
+    const std::string safe = newtemp();
+    m_out += "  " + size_ptr + " = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_fastmem_word_size)) + "\n";
+    m_out += "  " + size + " = load i32, ptr " + size_ptr + "\n";
+    m_out += "  " + base_ptr + " = getelementptr i8, ptr %rt, i64 " +
+             std::to_string(offsetof(ee::s_ee_runtime, m_fastmem_word_base)) + "\n";
+    m_out += "  " + base + " = load ptr, ptr " + base_ptr + "\n";
+    m_out += "  " + offset + " = zext i32 " + address + " to i64\n";
+    m_out += "  " + end + " = add i64 " + offset + ", 4\n";
+    m_out += "  " + limit + " = zext i32 " + size + " to i64\n";
+    m_out += "  " + fits + " = icmp ule i64 " + end + ", " + limit + "\n";
+    m_out += "  " + present + " = icmp ne ptr " + base + ", null\n";
+    m_out += "  " + safe + " = and i1 " + fits + ", " + present + "\n";
+    m_out += "  br i1 " + safe + ", label %" + direct + ", label %" + slow + "\n";
+    m_out += direct + ":\n";
+    const std::string pointer = newtemp();
+    m_out += "  " + pointer + " = getelementptr i8, ptr " + base +
+             ", i64 " + offset + "\n";
+    std::string direct_value;
+    std::string slow_value;
+    if (write)
+    {
+        m_out += "  store i32 " + write_value + ", ptr " + pointer + ", align 1\n";
+    }
+    else
+    {
+        direct_value = newtemp();
+        m_out += "  " + direct_value + " = load i32, ptr " + pointer + ", align 1\n";
+    }
+    m_out += "  br label %" + done + "\n";
+    m_out += slow + ":\n";
+    if (write)
+    {
+        m_out += "  call void @ee_mem_write32(ptr %rt, i32 " + address +
+                 ", i32 " + write_value + ")\n";
+    }
+    else
+    {
+        slow_value = newtemp();
+        m_out += "  " + slow_value + " = call i32 @ee_mem_read32(ptr %rt, i32 " +
+                 address + ")\n";
+    }
+    m_out += "  br label %" + done + "\n";
+    m_out += done + ":\n";
+    std::string result;
+    if (!write)
+    {
+        result = newtemp();
+        m_out += "  " + result + " = phi i32 [ " + direct_value + ", %" + direct +
+                 " ], [ " + slow_value + ", %" + slow + " ]\n";
+    }
+    return result;
+}
+
 void module_builder::emit_guest_store_trace(
     const ee::s_ee_instruction& ins,
     const std::string& effective_address,
@@ -1450,9 +1529,8 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
             set_gpr_lo64(ins.rt, d);
         } else {
             // LW / LWU
-            std::string w = newtemp();
+            const std::string w = emit_word_access(addr);
             std::string d = newtemp();
-            m_out += "  " + w + " = call i32 @ee_mem_read32(ptr %rt, i32 " + addr + ")\n";
             if (ins.opcode == ee::e_ee_opcode::OP_LWU)
                 m_out += "  " + d + " = zext i32 " + w + " to i64\n";
             else
@@ -1490,7 +1568,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
         } else {
             std::string v = newtemp();
             m_out += "  " + v + " = trunc i64 " + src_lo(ins.rt) + " to i32\n";
-            m_out += "  call void @ee_mem_write32(ptr %rt, i32 " + addr + ", i32 " + v + ")\n";
+            (void)emit_word_access(addr, v);
         }
         break;
     }
@@ -2361,15 +2439,14 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                                ins.opcode == ee::e_ee_opcode::OP_LWC1
                                    ? 4u : 5u);
         if (ins.opcode == ee::e_ee_opcode::OP_LWC1) {
-            std::string w = newtemp();
-            m_out += "  " + w + " = call i32 @ee_mem_read32(ptr %rt, i32 " + addr + ")\n";
+            const std::string w = emit_word_access(addr);
             store_fpr_i32(ins.rt, w);
         } else {
             std::string w = load_fpr_i32(ins.rt);
             const std::string source64 = newtemp();
             m_out += "  " + source64 + " = zext i32 " + w + " to i64\n";
             emit_guest_store_trace(ins, addr, addr, 4u, source64, 0u);
-            m_out += "  call void @ee_mem_write32(ptr %rt, i32 " + addr + ", i32 " + w + ")\n";
+            (void)emit_word_access(addr, w);
         }
         break;
     }
