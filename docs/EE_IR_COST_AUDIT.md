@@ -1836,3 +1836,11 @@ whole-object sizes separately: denser switch lowering may trade code
 for jump-table data, and LLVM may already perform similar normalization.
 No DLL, original IR mutation, cache changes or retail replay at this
 read-only pilot checkpoint. Promote only measured net benefits later.
+
+The first retail entry pilot rejected all switches because the matcher
+expected a single space before the closing bracket, whereas
+module_builder.cpp emits two. Match both spellings, preserve the
+original closing line, test actual emitter indentation and optional
+quadword scratch allocation, and report rejection counts if no
+eligible switch is found. This is a matcher-only repair: no lowering
+inputs or previously compiled native objects change.

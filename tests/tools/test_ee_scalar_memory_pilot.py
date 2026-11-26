@@ -166,7 +166,7 @@ entry:
     i32 0, label %bb_0x1000
     i32 4100, label %bb_0x1004
     i32 4294967292, label %bb_0xfffffffc
- ]
+  ]
 dispatch_unknown:
   %t2 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 7
   store i32 3, ptr %t2
@@ -184,6 +184,19 @@ bb_0xfffffffc:
         self.assertNotEqual(changed, raw)
         self.assertIn(b"i32 0, label %bb_0x1000", changed)
         self.assertIn(b"i32 1073741823, label %bb_0xfffffffc", changed)
+        self.assertIn(b"\n  ]\ndispatch_unknown:", changed)
+        # Real module_builder output closes with two spaces. Also accept
+        # the original fixture's single-space format without changing it.
+        alternate = raw.replace(b"\n  ]\n", b"\n ]\n")
+        alt_changed, alt_count = normalize_entry_switch(alternate, "guest")
+        self.assertEqual(alt_count, count)
+        self.assertEqual(alt_changed, changed.replace(b"\n  ]\n", b"\n ]\n"))
+        # The emitter may insert the quadword read scratch slot at entry.
+        quad = raw.replace(b"entry:\n", b"entry:\n  %quadword_read_slot = alloca { i64, i64 }, align 16\n", 1)
+        quad_changed, quad_count = normalize_entry_switch(quad, "guest")
+        self.assertEqual(quad_count, count)
+        self.assertIn(b"%quadword_read_slot = alloca { i64, i64 }, align 16", quad_changed)
+        self.assertIn(b"switch i32 %ee_entry_rot_key", quad_changed)
         self.assertEqual(normalize_entry_switch(raw.replace(b"i32 4100,", b"i32 4101,"), "guest")[0],
                          raw.replace(b"i32 4100,", b"i32 4101,"))
         for pc in (0, 1, 2, 3, 4096, 4100, 0xffffffff, 0xfffffffc):

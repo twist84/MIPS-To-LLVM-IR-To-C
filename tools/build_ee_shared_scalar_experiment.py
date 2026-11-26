@@ -488,7 +488,7 @@ ENTRY_SWITCH = re.compile(
     rb"  (?P<ptr>%t\d+) = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6\n"
     rb"  (?P<pc>%t\d+) = load i32, ptr (?P=ptr)\n"
     rb"(?P<switch>  switch i32 (?P=pc), label %dispatch_unknown \[\n"
-    rb"(?P<cases>(?:    i32 \d+, label %bb_0x[0-9a-fA-F]+\n)+) \]\n)"
+    rb"(?P<cases>(?:    i32 \d+, label %bb_0x[0-9a-fA-F]+\n)+)(?P<close> {1,2}\]\n))"
     rb"(?=dispatch_unknown:\n)", re.M)
 ENTRY_CASE = re.compile(rb"    i32 (\d+), label %(bb_0x[0-9a-fA-F]+)\n")
 
@@ -525,7 +525,7 @@ def normalize_entry_switch(raw, guest):
                    b"  switch i32 %ee_entry_rot_key, label %dispatch_unknown [\n")
     replacement += b"".join(b"    i32 " + str(rotate_pc(value)).encode() +
                             b", label %" + label + b"\n" for value, label in cases)
-    replacement += b" ]\n"
+    replacement += match["close"]
     new_body = body[:match.start("switch")] + replacement + body[match.end("switch"):]
     return raw.replace(body, new_body, 1), len(cases)
 
@@ -677,7 +677,8 @@ def entry_pilot(args, ir, out, meta, names, base_records, rows, small_plans, sca
             row = ordered[i*(len(ordered)-1)//max(1, count-1)]
             selected[row["module"]] = row
     if not selected:
-        raise ValueError("no canonical multi-entry switches")
+        raise ValueError(f"no canonical multi-entry switches: inventory={len(names)}, "
+                         f"canonical={len(inventory)}, skipped={dict(skipped)}")
     tasks = []
     for name, row in sorted(selected.items()):
         parent_task = (name, names[name], ir / name, base_records[name],
