@@ -115,6 +115,7 @@ class TestScalarPilot(unittest.TestCase):
                                f"declare {ty} @{fallback}(ptr, i32)").encode()
                 raw = fixture(width, write)
                 raw = raw.replace(body_of(raw, fallback), declaration, 1)
+                raw = raw.replace(b"@fallback = global i32 0\n", b"", 1)
                 local, counts = outline(raw, "guest")
                 name = f"ee_pilot_scalar_{op}{bits}"
                 owners = {name: "a"}
