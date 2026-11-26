@@ -1600,3 +1600,30 @@ link the full retained guest inventory once. Measure incremental savings
 against the 85.53 MiB scalar pilot, not the addition parent. A four-arm
 retail replay must independently validate expanded correctness and
 performance. No generated IR, production cache or lowering changes.
+
+### Checkpoint 5d — expanded scalar retail acceptance
+
+The all-trial receipt SHA-256 is
+ d8a2bc65e8ea2b79d152471fa36f11cea03e0d25d5a7469efd6c1068d178344d.
+13,695 examined, 13,669 transformed, 9,644 positive executable wins,
+4,051 rejected/unchanged, 38 previous wins retained, 2,519 non-memory
+modules. O5 2,031/2,213 wins save 4,976,003 bytes; Oz 7,613/11,482
+wins save 4,020,009 bytes. Incremental executable saving 8,996,012,
+object saving 6,369,267, removed IR text 143,136,676 bytes. All trial
+rows, sums, and winner inventory checked. Stage 409.875 s before link.
+DLL 89,680,384 -> 80,889,856 bytes (77.14 MiB), reduction 8,790,528
+bytes / 9.80% from the scalar pilot; 30,581,248 bytes / 27.43% from
+O5. Linked executable raw bytes 75,732,992; cumulative scalar executable
+saving 9,413,656 bytes; 9,682 scalar-optimized of 16,252 retained modules.
+Candidate SHA-256 89498563cb33c701988e1c1a8e15a534e78ac2a7b09c4cdc91898d097e1c6fdc.
+All four synchronous replays exit 4 at 40M dispatches; 3,176/3,176 PAD0
+polls, 185,345 matching transitions per replay, zero mismatches or
+unpaired transitions. No IOP guest fault or failed timing observer.
+Report SHA-256 c1be58fc952fac661b72bd42a79d6370a5c451ac056adf03c39b188914eea4ea,
+screenshot SHA-256 05fa8aeed9c91b85b25a95549934c2dad6ab9f71c420b074725f8fcbf7987350
+identical in all arms. EE cycles 22,277,448,204; attempts 22,068,845,060;
+reference slots 22,070,897,648; yields 3,008; fields 4,527; GPU draws
+4,626,795; presents 3,267. Wall seconds 41.797 / 41.375 / 40.922 /
+40.906 (0.039% faster than scalar pilot; noise). All five PR CI workflows
+passed on f2cfa77. Accept expanded scalar outlining for the matched retail
+workload, retaining isolated cache status.
