@@ -105,12 +105,24 @@ def extract_profile(report, stderr, enabled):
     programs = report["vu1_aot"]["program_profiles"]
     if not any(row["profiled_attempts"] for row in programs):
         raise ValueError("no profiled VU1 program attempts")
+    unattributed = ["cop1", "mmi", "vu1_dependency_scheduling"]
+    vu0_scopes = {"vu0_sync_halted", "vu0_sync_cmsar1",
+                  "vu0_sync_micro", "vu0_sync_invalid"}
+    present = vu0_scopes & p["subsystems"].keys()
+    if present and present != vu0_scopes:
+        raise ValueError("incomplete VU0 callback scope inventory")
+    if not present:
+        unattributed.insert(0, "vu0_sync")
+    else:
+        # The wrapper measures installed runtime callbacks, not direct
+        # periodic device-service calls or arithmetic outside callbacks.
+        unattributed.insert(0, "vu0_sync_noncallback")
     return {
         "runner_thread": p,
         "vu1_programs": programs,
         "vu1_worker": report["vu1_worker"],
         "intervals": intervals,
-        "unattributed": ["vu0_sync", "cop1", "mmi", "vu1_dependency_scheduling"],
+        "unattributed": unattributed,
     }
 
 
