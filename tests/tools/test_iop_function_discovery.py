@@ -685,6 +685,12 @@ fallback:
         self.assertIn("icmp ult i32 %map_offset, 16", compact)
         self.assertIn("and i32 %map_offset, 3", compact)
         self.assertIn("switch i16 %map_id, label %fallback", compact)
+        narrow = compact_split_router(router, plan, narrow_ids=True)
+        self.assertIn("[4 x i8] [\n  i8 0, i8 1, i8 -1, i8 0", narrow)
+        self.assertIn("load i8, ptr %map_ptr, align 1", narrow)
+        self.assertIn("switch i8 %map_id, label %fallback", narrow)
+        self.assertEqual(narrow[narrow.index("region_0:\n"):],
+                         router[router.index("region_0:\n"):])
         self.assertEqual(compact[compact.index("region_0:\n"):],
                          router[router.index("region_0:\n"):])
         with self.assertRaises(ValueError):
@@ -697,6 +703,21 @@ fallback:
         with self.assertRaises(ValueError):
             compact_split_router(compact, plan)
 
+    def test_narrow_router_sentinel_capacity(self):
+        for count in (255, 256):
+            # One additional unowned word must retain its sentinel.
+            plan = f"IOPREG1 0 {(count + 1) * 4} 1 {count}\n"
+            plan += "".join(f"1 {region * 4}\n" for region in range(count))
+            router = ("dispatch:\n  switch i32 %start, label %fallback [\n"
+                      + "".join(f"    i32 {region * 4}, label %region_{region}\n"
+                                for region in range(count))
+                      + "  ]\n")
+            ir = compact_split_router(router, plan, narrow_ids=True)
+            ty = "i8" if count == 255 else "i16"
+            self.assertIn(f"[{count + 1} x {ty}]", ir)
+            self.assertIn(f"{ty} -1", ir)
+            self.assertIn(f"    {ty} {count - 1}, label %region_{count - 1}", ir)
+
     @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("clang"),
                          "requires Linux host Clang for native router comparison")
     def test_compact_router_native_matches_original(self):
@@ -705,7 +726,8 @@ fallback:
             root = Path(tmp)
             functions = []
             for name, ir in (("original", router),
-                             ("compact", compact_split_router(router, plan))):
+                             ("compact", compact_split_router(router, plan)),
+                             ("narrow", compact_split_router(router, plan, narrow_ids=True))):
                 source = root / f"{name}.ll"
                 library = root / f"{name}.so"
                 source.write_text(ir)
@@ -725,6 +747,7 @@ fallback:
                         result = fn(ctx, pc)
                         outcomes.append((result, ctx.raw))
                     self.assertEqual(outcomes[0], outcomes[1], (budget, pc))
+                    self.assertEqual(outcomes[0], outcomes[2], (budget, pc))
                     expected = (0 if not budget else
                                 11 if pc in (base, base + 12) else
                                 12 if pc == base + 4 else 1)
