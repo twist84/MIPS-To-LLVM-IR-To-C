@@ -435,3 +435,47 @@ separately. Retain unresolved indirect jumps and report ownership conflicts
 without resolving them. Candidate table edges never feed the builder or
 runtime. Synthetic tests verify same-function discovery, shared ownership,
 invalid source rejection and unchanged default inventory. I11 stays pinned.
+
+## I16a — Global split compilation queue (implementation; validation pending)
+
+The split builder accepts repeated `--split-module STEM` selections or
+`--split-all` (mutually exclusive). Each selection uses the same staged
+capture naming, independent ownership plan, relocation receipt validation
+and module-specific cache provenance as the single-module path. All
+generated objects share one bounded `--jobs` compilation pool. Larger IR
+files are queued first as a deterministic cost proxy; historical
+object timing prioritization remains future work. Linking remains serial
+and preserves the original sorted region/router/table order for each IRX.
+
+For the existing relocation-backed capture:
+
+```bat
+python tools\build_iop_aot.py ^
+    --build-dir build ^
+    --capture build\iop-g8d-capture ^
+    --out build\iop-native-split-i16a ^
+    --split-all ^
+    --split-residual ^
+    --split-extended ^
+    --split-relocation-receipt iop-i10-discovery.json ^
+    --region-cache build\iop-region-cache ^
+    --opt 3 ^
+    --jobs 8
+```
+
+Use a fresh output directory. For multiple modules, the aggregate
+`split-build-receipt.json` records global compilation wall time, summed
+link time, object/cache totals and each library hash. Detailed
+`split-receipts/STEM.json` files contain the original single-module
+receipt fields; per-module compile time is the interval between its first
+object start and last completion (overlapping intervals are not
+additive). Single-module builds retain the original receipt location
+and shape.
+
+Synthetic regression cases cover case-insensitive exact selection,
+duplicate/missing selections, global largest-first scheduling with one
+worker, deterministic per-module link order, and cold/warm cache reuse.
+Real compiler/cache validation and comparison against accepted I11
+library hashes are still required. No ownership, lifter, runtime, EE or
+VU1 semantics changed. A retail replay is unnecessary only when all
+candidate library artifacts are byte-identical to accepted artifacts.
