@@ -924,7 +924,7 @@ void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags);
 
 uint32_t vu0_fmac_lane(const s_ee_u128& vector, uint32_t lane);
 
-constexpr uint32_t vu0_macro_bits(float value);
+constexpr constexpr uint32_t vu0_macro_bits(float value);
 uint32_t vu0_macro_order_key(uint32_t bits);
 uint32_t vu0_macro_ftoi(uint32_t bits, double scale);
 
