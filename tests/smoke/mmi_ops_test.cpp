@@ -171,12 +171,12 @@ static_assert(test_mmi_ops(), "packed MMI semantic regression");
 
 // Cross-check every legal QFSRV shift, including the 64-bit boundary,
 // against a per-bit reference rather than duplicating the implementation.
-consteval bool test_qfsrv_all_shifts()
+consteval bool test_qfsrv_shifts(unsigned first)
 {
     constexpr ee::s_ee_u128 a{0x1122334455667788ull, 0x99aabbccddeeff01ull};
     constexpr ee::s_ee_u128 b{0xfedcba9876543210ull, 0x0123456789abcdefull};
     constexpr uint64_t words[] = {b.m_lo, b.m_hi, a.m_lo, a.m_hi};
-    for (unsigned shift = 0u; shift < 128u; ++shift)
+    for (unsigned shift = first; shift < first + 8u; ++shift)
     {
         ee::s_ee_u128 expected{};
         for (unsigned bit = 0u; bit < 128u; ++bit)
@@ -193,7 +193,23 @@ consteval bool test_qfsrv_all_shifts()
     return true;
 }
 
-static_assert(test_qfsrv_all_shifts(), "QFSRV full shift range regression");
+// Independent small ranges stay within default MSVC constexpr budgets.
+static_assert(test_qfsrv_shifts(0u), "QFSRV shifts 0 through 7");
+static_assert(test_qfsrv_shifts(8u), "QFSRV shifts 8 through 15");
+static_assert(test_qfsrv_shifts(16u), "QFSRV shifts 16 through 23");
+static_assert(test_qfsrv_shifts(24u), "QFSRV shifts 24 through 31");
+static_assert(test_qfsrv_shifts(32u), "QFSRV shifts 32 through 39");
+static_assert(test_qfsrv_shifts(40u), "QFSRV shifts 40 through 47");
+static_assert(test_qfsrv_shifts(48u), "QFSRV shifts 48 through 55");
+static_assert(test_qfsrv_shifts(56u), "QFSRV shifts 56 through 63");
+static_assert(test_qfsrv_shifts(64u), "QFSRV shifts 64 through 71");
+static_assert(test_qfsrv_shifts(72u), "QFSRV shifts 72 through 79");
+static_assert(test_qfsrv_shifts(80u), "QFSRV shifts 80 through 87");
+static_assert(test_qfsrv_shifts(88u), "QFSRV shifts 88 through 95");
+static_assert(test_qfsrv_shifts(96u), "QFSRV shifts 96 through 103");
+static_assert(test_qfsrv_shifts(104u), "QFSRV shifts 104 through 111");
+static_assert(test_qfsrv_shifts(112u), "QFSRV shifts 112 through 119");
+static_assert(test_qfsrv_shifts(120u), "QFSRV shifts 120 through 127");
 }
 
 int main()
