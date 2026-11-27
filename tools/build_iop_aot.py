@@ -31,6 +31,7 @@ import time
 from pathlib import Path
 
 from audit_iop_function_discovery import inventory
+from iop_chain_pilot import append_chain_entry
 
 
 def safe_module_name(name):
@@ -658,6 +659,7 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
                        else "compact" if getattr(args, "split_compact_router", False)
                        else "switch"),
             "shared_memory_helpers": getattr(args, "split_shared_memory_helpers", False),
+            "chain_pilot": getattr(args, "split_chain_pilot", None),
             "compile_seconds": compile_seconds, "link_seconds": linked - link_started,
             "cache_hits": hits, "object_bytes": object_bytes,
             "library_bytes": library_bytes, "objects": observations,
@@ -715,6 +717,9 @@ def main():
                            help="Compile all staged IRXs in regions")
     parser.add_argument("--split-shared-memory-helpers", action="store_true",
                         help="Experimental: shared width-specialized memory helpers per split IRX")
+    parser.add_argument("--split-chain-pilot", nargs=2, type=lambda value: int(value, 0),
+                        metavar=("ENTRY", "RESUME"),
+                        help="Experimental single-edge chain export; requires one compact split module")
     parser.add_argument("--split-narrow-router", action="store_true",
                         help="Use i8 region IDs when compact dispatch has at most 255 regions")
     parser.add_argument("--split-compact-router", action="store_true",
@@ -739,6 +744,9 @@ def main():
     split_mode = args.split_all or bool(args.split_module)
     if args.split_shared_memory_helpers and not split_mode:
         parser.error("--split-shared-memory-helpers requires --split-module or --split-all")
+    if args.split_chain_pilot is not None and (
+            not args.split_compact_router or len(args.split_module or []) != 1):
+        parser.error("--split-chain-pilot requires one --split-module and --split-compact-router")
     if args.split_narrow_router and not args.split_compact_router:
         parser.error("--split-narrow-router requires --split-compact-router")
     if args.split_compact_router and not split_mode:
@@ -857,6 +865,11 @@ def build(args, out):
                     router_path.write_text(compact, encoding="utf-8")
                     print(f"{stem}: compact router {len(router.encode('utf-8'))} -> "
                           f"{len(compact.encode('utf-8'))} IR bytes")
+                if getattr(args, "split_chain_pilot", None) is not None:
+                    table = (ir_dir / f"{stem}.table.ll").read_text(encoding="utf-8")
+                    router_path.write_text(append_chain_entry(compact, table,
+                                                               *args.split_chain_pilot),
+                                           encoding="utf-8")
                 if args.split_shared_memory_helpers:
                     paths = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
                     original = [path.read_text(encoding="utf-8") for path in paths]
