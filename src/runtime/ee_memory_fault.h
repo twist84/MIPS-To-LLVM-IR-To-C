@@ -116,4 +116,68 @@ inline constexpr s_ee_memory_fault ee_plan_memory_fault(
     return fault;
 }
 
+// Scope: ordinary scalar data accesses and GPR LQ/SQ only. Merge
+// instructions, VU transfers, cache operations and fetch are separate.
+enum class e_ee_data_access_kind : uint8_t
+{
+    BYTE,
+    HALFWORD,
+    WORD,
+    DOUBLEWORD,
+    GPR_QUADWORD
+};
+
+struct s_ee_data_access_plan
+{
+    uint32_t m_effective_address = 0u;
+    uint32_t m_virtual_address = 0u;
+    uint32_t m_width = 0u;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// EE Instruction Set Manual v6.0: ordinary LH/LW/LD and stores require
+// natural alignment; LQ/SQ clear the low four bits before translation
+// (printed pp. 141, 287). Keep the original EA for diagnostics. A valid
+// aligned access of at most 16 bytes cannot straddle a supported page
+// or segment boundary; physical bus/backing validation is still required.
+inline constexpr s_ee_data_access_plan ee_plan_data_access(
+    const c_ee_tlb& tlb, e_ee_data_access_kind kind, bool write_access,
+    uint32_t address, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using k = e_ee_data_access_kind;
+    s_ee_data_access_plan plan{};
+    plan.m_effective_address = address;
+    plan.m_virtual_address = address;
+    switch (kind)
+    {
+    case k::BYTE: plan.m_width = 1u; break;
+    case k::HALFWORD: plan.m_width = 2u; break;
+    case k::WORD: plan.m_width = 4u; break;
+    case k::DOUBLEWORD: plan.m_width = 8u; break;
+    case k::GPR_QUADWORD:
+        plan.m_width = 16u;
+        plan.m_virtual_address &= ~15u;
+        break;
+    default:
+        break;
+    }
+    if (plan.m_width != 0u)
+    {
+        if ((plan.m_virtual_address & (plan.m_width - 1u)) != 0u)
+        {
+            plan.m_access.m_status = e_ee_access_status::ADDRESS_ERROR;
+        }
+        else
+        {
+            plan.m_access = ee_resolve_access(tlb, plan.m_virtual_address,
+                status, config, entry_hi, write_access);
+        }
+        plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+            write_access, plan.m_virtual_address, status, context, entry_hi);
+    }
+    return plan;
+}
+
 } // namespace ee

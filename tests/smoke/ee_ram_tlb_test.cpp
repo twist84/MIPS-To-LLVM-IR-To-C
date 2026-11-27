@@ -336,6 +336,86 @@ consteval bool test_scratchpad_mapping()
     return true;
 }
 
+constexpr bool test_instruction_data_access()
+{
+    using kind = ee::e_ee_data_access_kind;
+    using result = ee::e_ee_access_status;
+    ee::c_ee_tlb tlb{};
+    constexpr uint32_t virt = 0x00400000u;
+    constexpr uint32_t asid = 0xabu;
+    constexpr uint32_t context = 0xab800000u;
+    constexpr uint32_t lo0 = (0x100u << 6u) | 0x1eu;
+    constexpr uint32_t lo1 = (0x200u << 6u) | 0x1au;
+    if (!tlb.write(0u, 0u, virt | asid, lo0, lo1))
+    {
+        return false;
+    }
+    constexpr kind kinds[] =
+    {
+        kind::BYTE, kind::HALFWORD, kind::WORD, kind::DOUBLEWORD,
+        kind::GPR_QUADWORD
+    };
+    for (uint32_t i = 0u; i < 5u; ++i)
+    {
+        const uint32_t width = 1u << i;
+        for (uint32_t offset = 0u; offset < 16u; ++offset)
+        {
+            for (uint32_t store = 0u; store < 2u; ++store)
+            {
+                const uint32_t address = virt + 0xff0u + offset;
+                const auto plan = ee::ee_plan_data_access(tlb, kinds[i],
+                    store != 0u, address, 0u, 3u, context, asid);
+                const uint32_t adjusted = i == 4u ? address & ~15u : address;
+                if (plan.m_effective_address != address ||
+                    plan.m_virtual_address != adjusted || plan.m_width != width)
+                {
+                    return false;
+                }
+                if (i != 4u && (offset & (width - 1u)) != 0u)
+                {
+                    if (plan.m_access.m_status != result::ADDRESS_ERROR ||
+                        !plan.m_fault.m_valid || plan.m_fault.m_update_tlb_registers ||
+                        plan.m_fault.m_bad_vaddr != address ||
+                        plan.m_fault.m_code != (store != 0u ? ee::EX_AdES : ee::EX_AdEL))
+                    {
+                        return false;
+                    }
+                }
+                else if (plan.m_access.m_status != result::PHYSICAL ||
+                         plan.m_access.m_physical_address != 0x100000u + adjusted - virt ||
+                         plan.m_access.m_cache_mode != 3u || plan.m_fault.m_valid)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    const auto misaligned_miss = ee::ee_plan_data_access(tlb, kind::WORD,
+        false, 0x00500001u, 0u, 3u, context, asid);
+    const auto quad_miss = ee::ee_plan_data_access(tlb, kind::GPR_QUADWORD,
+        false, 0x0050000fu, 0u, 3u, context, asid);
+    const auto modified = ee::ee_plan_data_access(tlb, kind::GPR_QUADWORD,
+        true, virt + 0x100fu, 0u, 3u, context, asid);
+    const auto high = ee::ee_plan_data_access(tlb, kind::GPR_QUADWORD,
+        false, 0xffffffffu, 0u, 3u, context, asid);
+    const auto invalid = ee::ee_plan_data_access(tlb, static_cast<kind>(255u),
+        false, virt, 0u, 3u, context, asid);
+    return misaligned_miss.m_access.m_status == result::ADDRESS_ERROR &&
+           misaligned_miss.m_fault.m_code == ee::EX_AdEL &&
+           quad_miss.m_access.m_status == result::TLB_REFILL &&
+           quad_miss.m_fault.m_bad_vaddr == 0x00500000u &&
+           quad_miss.m_fault.m_update_tlb_registers &&
+           modified.m_access.m_status == result::TLB_MODIFIED &&
+           modified.m_fault.m_code == ee::EX_Mod &&
+           modified.m_fault.m_bad_vaddr == virt + 0x1000u &&
+           high.m_virtual_address == 0xfffffff0u &&
+           high.m_access.m_status == result::TLB_REFILL &&
+           invalid.m_width == 0u && invalid.m_access.m_status == result::UNMODELED &&
+           !invalid.m_fault.m_valid;
+}
+
+static_assert(test_instruction_data_access(), "instruction data access alignment regression");
+
 // Separate page sizes keep each constant-evaluation budget bounded.
 static_assert(test_tlb_page_mask(0u), "4 KiB TLB page regression");
 static_assert(test_tlb_page_mask(0x6000u), "16 KiB TLB page regression");
@@ -527,6 +607,10 @@ int main()
         return 1;
     }
 
+    if (!check(test_instruction_data_access(), "instruction data access alignment regression"))
+    {
+        return 1;
+    }
     std::puts("ee_ram_tlb_test: PASS");
     return 0;
 }

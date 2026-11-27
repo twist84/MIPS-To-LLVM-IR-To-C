@@ -212,3 +212,40 @@ readiness and ordered-module assertions. No SIF flag is synthesized.
 The present routine now reports false on acquisition/view/present failure
 instead of counting a swapchain recovery as successful FPS. The guest
 field schedule and display compute submission on recovery remain intact.
+
+## Strict memory follow-up M1: instruction-specific alignment
+
+The EE Instruction Set Manual v6.0 specifies natural alignment for scalar
+LH/LW/LD and SH/SW/SD; LQ/SQ clear the low four effective-address bits
+before address translation (printed pp. 141, 287).
+https://docs.alexrp.com/mips/ee_insns.pdf
+
+Independent source checks: pinned ps2-web-recomp codegen Lq/Sq masks
+the generated address with ~15u; pinned PCSX2 R5900OpcodeImpl.cpp
+likewise masks LQ/SQ and checks scalar LH/LW/LD alignment.
+https://github.com/twist84/ps2-web-recomp/blob/985c0ac15f2622199f90b206bac3db89268e2f22/recomp/codegen.cpp
+https://github.com/PCSX2/pcsx2/blob/34670c6151d28dee8284e90f7957e470fc03f9d3/pcsx2/R5900OpcodeImpl.cpp
+
+Add a constexpr data-access planner composing instruction width,
+alignment, segment/TLB decision and fault projection. Preserve original EA
+and normalized virtual address separately. Misaligned ordinary scalar
+accesses never fall through to a TLB lookup; LQ/SQ translate the aligned
+address, including any subsequent fault address. Tests cover all low
+nibbles for five widths and both access directions, even/odd page
+boundaries, refill versus alignment, modified, high-address alignment
+and unsupported request kinds, with static_assert and runtime checks.
+This is a pure plan, not a bus transaction or fault delivery. Fetch,
+left/right partial transfers, VU transfers, cache operations, physical
+apertures and precise state commitment remain separate tasks. No
+production caller, ABI change, timing change or retail replay required.
+
+### Next checkpoints
+
+M2: audit partial transfer byte masks and store-only permission checks.
+M3: classify instruction-fetch and scratchpad restrictions independently.
+M4: establish physical bus span and cache-policy decisions, separating
+strict translation from HLE aliases.
+M5: compose precise Level 1 fault entry and side-effect ordering.
+M6: opt-in native/interpreter integration only after matching directed
+tests and bounded retail validation. Keep cache timing and physical
+console calibration open; never substitute estimated cycles for evidence.
