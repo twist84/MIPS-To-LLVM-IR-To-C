@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_strict_reset.h"
+#include "ee_vsync_flags.h"
 #include "../tools/ee_host_timers.h"
 #include "../iop/iop_kernel.h"
 #include "../iop/iop_sif_mmio_link.h"
@@ -38,6 +39,8 @@ struct s_ee_firmware_step
     uint32_t m_interrupt_vector = 0u;
     bool m_cop0_compare_crossed = false;
     bool m_dma_completed = false;
+    bool m_vblank_started = false;
+    bool m_vblank_ended = false;
 };
 
 // Reference policy reserves two slots for supported branches and their delay
@@ -72,9 +75,9 @@ class c_ee_strict_firmware_pilot
 {
 public:
     // Keep the pilot below the unconfigured reset Timer3 HBlank compare
-    // deadline (65536 ticks at the reference NTSC line cadence). Until
-    // real scanout is connected, do not admit guest HBlank programming.
-    static constexpr uint64_t k_slot_limit = 1u << 20u;
+    // deadline (65536 ticks at the reference NTSC line cadence).
+    // Permit several fields, but no guest HBlank programming yet.
+    static constexpr uint64_t k_slot_limit = 1u << 24u;
     static_assert(k_slot_limit <
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
 
@@ -100,6 +103,30 @@ public:
 
     c_ee_strict_firmware_pilot(const c_ee_strict_firmware_pilot&) = delete;
     c_ee_strict_firmware_pilot& operator=(const c_ee_strict_firmware_pilot&) = delete;
+
+    // Select an explicit machine video configuration at reset, not a
+    // guest SetGsCrt syscall or an invented completed field. Re-anchor
+    // the reset Timer3 schedule to the selected line cadence at cycle 0.
+    bool configure_scanout(uint32_t mode, uint32_t interlace)
+    {
+        if (m_retired != 0u || m_hardware.scanout().enabled() ||
+            (mode != 2u && mode != 3u) || interlace > 1u ||
+            !m_hardware.set_gs_crt(interlace, mode, 0u, 0u))
+        {
+            return false;
+        }
+        const s_ee_u128 reset_mode{0x183u, 0u};
+        if (!c_ee_host_timers::mmio_write(&m_timers, 0x10001810u, 4u, &reset_mode))
+        {
+            std::abort();
+        }
+        return true;
+    }
+
+    uint64_t next_scanout_event() { return m_hardware.scanout().next_event_cycle(); }
+    uint64_t fields_started() { return m_hardware.scanout().fields_started(); }
+    uint64_t fields_ended() { return m_hardware.scanout().fields_ended(); }
+    uint64_t gs_csr() { return m_hardware.scanout().csr(); }
 
     // Install a second reset domain before either processor executes.
     // Only immutable ROM input is supplied; no guest RAM/register
@@ -204,7 +231,8 @@ public:
         // The reference executor commits branch+slot atomically. Refuse
         // an intervening deadline instead of processing it late or
         // committing a partial branch. An event exactly at end is legal.
-        if (m_timers.next_event() < end || next_compare_event() < end)
+        if (m_timers.next_event() < end || next_compare_event() < end ||
+            next_scanout_event() < end)
         {
             return {boundary::TIMER_DEADLINE};
         }
@@ -237,7 +265,8 @@ public:
             m_cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
         }
         m_branch_transaction = slots == 2u;
-        const s_ee_reset_mmio mmio{this, &write, &read, true, true, true, m_iop != nullptr};
+        const s_ee_reset_mmio mmio{this, &write, &read, true, true, true, m_iop != nullptr,
+            m_hardware.scanout().enabled()};
         s_ee_reset_prefix_step action{};
         if (m_retired == 0u)
         {
@@ -300,6 +329,33 @@ public:
         }
         const bool due = m_timers.next_event() <= timestamp;
         m_timers.service();
+        bool vblank_started = false;
+        bool vblank_ended = false;
+        if (m_hardware.scanout().enabled() && next_scanout_event() <= timestamp)
+        {
+            const auto serviced = m_runtime.m_ee_cycle_scheduler.service_scanout(
+                m_hardware, m_vsync_flags, m_memory);
+            if (serviced == e_ee_scheduled_event_result::INVALID_TIMESTAMP_OR_DELIVERY)
+            {
+                std::abort();
+            }
+            for (const uint8_t edge : m_hardware.scanout().delivered_vblank_edges())
+            {
+                if (edge != 0u)
+                {
+                    vblank_started = true; // scanout raised INTC 2
+                }
+                else
+                {
+                    vblank_ended = true;
+                    // ps2-web-recomp hw.cpp: VBlank end raises INTC 3.
+                    if (!m_hardware.intc().raise(3u))
+                    {
+                        std::abort();
+                    }
+                }
+            }
+        }
         const bool ip7_before = (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
         ee_cop0_clock_sync(&m_cpu, &m_runtime);
         const bool compare_crossed = !ip7_before &&
@@ -309,7 +365,8 @@ public:
         // An atomic branch has completed its slot, so EPC is its next PC
         // and BD is clear. Intra-branch deadlines still refuse above.
         const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
-        return {boundary::RETIRED, action, due, vector, compare_crossed, dma_completed};
+        return {boundary::RETIRED, action, due, vector, compare_crossed, dma_completed,
+            vblank_started, vblank_ended};
     }
 
 private:
@@ -580,6 +637,11 @@ private:
         {
             return c_ee_intc::mmio_read(&self.m_hardware.intc(), address, width, value);
         }
+        if (self.m_hardware.scanout().enabled() &&
+            (address == c_ee_hw_bus::k_gs_csr || address == c_ee_hw_bus::k_gs_csr + 4u))
+        {
+            return c_ee_hw_bus::mmio_read(&self.m_hardware, address, width, value);
+        }
         if (address == k_d_ctrl)
         {
             *value = {self.m_dmac_control, 0u};
@@ -640,6 +702,12 @@ private:
         if (address == c_ee_intc::k_mask_address || address == c_ee_intc::k_stat_address)
         {
             return c_ee_intc::mmio_write(&self.m_hardware.intc(), address, width, value);
+        }
+        if (self.m_hardware.scanout().enabled() && address == c_ee_hw_bus::k_gs_csr)
+        {
+            // Only CSR.VSINT W1C, never fake GS reset or other latches.
+            return (value->m_lo & ~8ull) == 0u &&
+                c_ee_hw_bus::mmio_write(&self.m_hardware, address, width, value);
         }
         const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
         if (address == k_d_ctrl)
@@ -733,6 +801,7 @@ private:
     c_ee_vif1 m_vif0{};
     c_ee_vif1 m_vif1{};
     c_ee_hw_bus m_hardware{};
+    c_ee_vsync_flags m_vsync_flags{};
     c_ee_host_timers m_timers{&m_runtime, &m_hardware};
     uint64_t m_retired = 0u;
     uint32_t m_dmac_control = 0u;

@@ -3760,7 +3760,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_sif_transport(), "scheduler-owned bidirectional SIF transport") ||
+    if (!check(test_strict_firmware_scanout(), "scheduler-owned GS scanout and VBlank edges") ||
+        !check(test_strict_firmware_sif_transport(), "scheduler-owned bidirectional SIF transport") ||
         !check(test_strict_firmware_sif_vif(), "scheduler-owned SIF mailbox and VIF DMA") ||
         !check(test_strict_firmware_spr_dma(), "scheduler-owned synchronous SPR DMA") ||
         !check(test_strict_firmware_cop0_clock(), "scheduler-owned COP0 Count/Compare deadlines") ||

@@ -1413,3 +1413,27 @@ guest instructions, verify pending FIFO without a receiver,
 IOP-transformed response bytes, actual D_STAT/IP3 and zero-slot
 interrupt entry. SIF1 source chains remain out of this subset.
 No production retail path changes. Pending CI.
+
+## M6E3H3D: GS scanout and VBlank edges
+
+H3C2 passed both firmware versions at a38b002a:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46059348419
+
+Explicit reset-time NTSC/PAL machine configuration installs the
+production scanout schedule without creating an event or invoking
+a guest syscall. Re-anchor reset Timer3 at cycle zero; keep guest
+HBlank programming excluded. Extend the bounded reference slot
+limit to 16 Mi slots, still below Timer3's reset deadline.
+Include scanout in branch deadline preflight. At exact committed
+deadlines call the existing cycle scheduler/scanout clock with
+owned INTC, RAM and an unregistered vsync flag object. Real
+start edges raise INTC 2 and real end edges raise INTC 3 (the
+reference hw.cpp VBlank end event). Expose read-only CSR and
+VSINT W1C, independent from INTC acknowledgement. No HLE flag
+pointers or synthetic field delivery. No GS rendering, VU/GIF,
+guest CRT setup, calibrated timing or IOP VBlank propagation
+claimed; H3E will coordinate the second clock.
+Directed ROM test retires actual instructions through NTSC
+start/end boundaries, checks branch EPC, CSR.FIELD/VSINT,
+independent acknowledgement, ERET and masked end latch; PAL
+reset cadence is separately checked. Pending CI.

@@ -708,4 +708,107 @@ bool test_strict_firmware_sif_transport()
         pilot.cycle() == 30u && pilot.cpu().m_cop0[ee::COP0_EPC] == base + 120u &&
         pilot.cpu().m_cop0[ee::COP0_Cause] == 0x800u;
 }
+
+bool test_strict_firmware_scanout()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint64_t first = 4920115u;
+    constexpr uint64_t end = first + first * 44u / 525u;
+    constexpr uint32_t base = 0xbfc00000u;
+    static_assert((first & 1u) == 1u && (end & 1u) == 1u);
+    // Nine ordinary slots then an atomic two-slot branch loop.
+    // First NTSC start is odd, at the completed branch boundary.
+    auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b000u, 0x3485f010u, 0x34020004u,
+        0xaca20000u, 0x3c020041u, 0x34420401u, 0x40826000u,
+        0x3c06b200u, 0x1000ffffu, 0u});
+    const uint32_t handler[] = {
+        0x8cc31000u, 0x34020008u, 0xacc21000u, // read CSR, W1C VSINT
+        0x3485f000u, 0x34020004u, 0xaca20000u, // acknowledge INTC 2
+        0u, 0x42000018u};
+    size_t offset = 0x400u;
+    for (const uint32_t word : handler)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset++] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    }
+    ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+    if (pilot.configure_scanout(1u, 0u) || !pilot.configure_scanout(2u, 1u) ||
+        pilot.configure_scanout(3u, 0u) || pilot.next_scanout_event() != first ||
+        pilot.gs_csr() != 0u || pilot.intc_status() != 0u)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 9u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    while (pilot.cycle() < first - 2u)
+    {
+        const auto step = pilot.step(2u);
+        if (step.m_boundary != boundary::RETIRED || step.m_vblank_started ||
+            step.m_vblank_ended || step.m_interrupt_vector != 0u)
+        {
+            return false;
+        }
+    }
+    if (pilot.gs_csr() != 0u || pilot.intc_status() != 0u ||
+        pilot.fields_started() != 0u || pilot.step(1u).m_boundary != boundary::BUDGET)
+    {
+        return false;
+    }
+    const auto start = pilot.step(2u);
+    if (start.m_boundary != boundary::RETIRED || !start.m_vblank_started ||
+        start.m_vblank_ended || start.m_interrupt_vector != base + 0x400u ||
+        pilot.cycle() != first || pilot.retired() != first || pilot.fields_started() != 1u ||
+        pilot.fields_ended() != 0u || pilot.next_scanout_event() != end ||
+        pilot.gs_csr() != 0x2008u || pilot.intc_status() != 4u ||
+        pilot.cpu().m_cop0[ee::COP0_EPC] != base + 36u)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+        if (i == 2u && (pilot.gs_csr() != 0x2000u || pilot.intc_status() != 4u))
+        {
+            return false; // CSR ack is independent from INTC ack
+        }
+    }
+    if (pilot.cpu().m_gpr[3].m_lo != 0x2008u || pilot.intc_status() != 0u ||
+        pilot.cpu().m_pc != base + 36u)
+    {
+        return false;
+    }
+    while (pilot.cycle() < end - 2u)
+    {
+        const auto step = pilot.step(2u);
+        if (step.m_boundary != boundary::RETIRED || step.m_vblank_started ||
+            step.m_vblank_ended || step.m_interrupt_vector != 0u)
+        {
+            return false;
+        }
+    }
+    const auto finish = pilot.step(2u);
+    if (finish.m_boundary != boundary::RETIRED || finish.m_vblank_started ||
+        !finish.m_vblank_ended || finish.m_interrupt_vector != 0u ||
+        pilot.cycle() != end || pilot.fields_started() != 1u ||
+        pilot.fields_ended() != 1u || pilot.intc_status() != 8u ||
+        pilot.gs_csr() != 0x2000u || (pilot.cpu().m_cop0[ee::COP0_Cause] & 0x400u) != 0u)
+    {
+        return false;
+    }
+    // PAL has an independent reset cadence. No field at configuration.
+    ee::c_ee_strict_firmware_pilot pal(make_firmware_pilot_rom({0x40806000u}));
+    return pal.configure_scanout(3u, 0u) && pal.next_scanout_event() == 5898240u &&
+        pal.fields_started() == 0u && pal.gs_csr() == 0u && pal.intc_status() == 0u;
+}
 } // namespace

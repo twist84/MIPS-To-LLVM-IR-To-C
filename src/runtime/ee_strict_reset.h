@@ -204,6 +204,7 @@ struct s_ee_reset_mmio
     bool m_scheduled_dmac = false;
     bool m_scheduled_sif_vif = false;
     bool m_scheduled_sif_dma = false;
+    bool m_scheduled_scanout = false;
 
     constexpr bool scheduled_timer_address(uint32_t address) const
     {
@@ -264,7 +265,8 @@ struct s_ee_reset_mmio
             (address == 0xb000f010u || address == 0xb000e000u || address == 0xb000f220u ||
              scheduled_timer_address(address) || scheduled_dmac_address(address) ||
              scheduled_sif_vif_address(address) ||
-             (m_scheduled_timers && address == 0xb000f000u)) &&
+             (m_scheduled_timers && address == 0xb000f000u) ||
+             (m_scheduled_scanout && (address == 0xb2001000u || address == 0xb2001004u))) &&
             bus.m_address == address - 0xa0000000u &&
             m_read(m_user, bus.m_address, bus.m_width, &value);
     }
@@ -288,7 +290,9 @@ struct s_ee_reset_mmio
             (address == 0xb000f220u || scheduled_sif_vif_address(address));
         const bool gs = bus.m_width == 4u &&
             ((address == 0xb2001000u && static_cast<uint32_t>(value.m_lo) == 0x200u) ||
-             (address == 0xb2001004u && static_cast<uint32_t>(value.m_lo) == 0u));
+             (address == 0xb2001004u && static_cast<uint32_t>(value.m_lo) == 0u) ||
+             (m_scheduled_scanout && address == 0xb2001000u &&
+              (static_cast<uint32_t>(value.m_lo) & ~8u) == 0u));
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
             (reset || fifo || intc || timer || dmac || sif || gs) && bus.m_address == address - 0xa0000000u &&
