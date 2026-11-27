@@ -5,6 +5,32 @@
 
 namespace ee
 {
+// EE Core User's Manual v6.0 p.78: IC=010 (16 KiB), DC=001
+// (8 KiB), EC=0 are fixed. K0 is undefined on reset; choose 0,
+// matching the reference reset profile. All enable bits reset clear.
+inline constexpr uint32_t k_ee_reset_config_fixed = 0x00000440u;
+inline constexpr uint32_t k_ee_reset_config_writable = 0x00073007u;
+inline constexpr uint32_t k_ee_reset_config_readonly = 0x70000fc0u;
+
+inline constexpr bool ee_strict_reset_config_write_supported(uint32_t value)
+{
+    const uint32_t k0 = value & 7u;
+    return (value & ~(k_ee_reset_config_writable | k_ee_reset_config_readonly)) == 0u &&
+        (k0 == 0u || k0 == 2u || k0 == 3u || k0 == 7u);
+}
+
+inline constexpr uint32_t ee_strict_reset_config_value(uint32_t value)
+{
+    return k_ee_reset_config_fixed | (value & k_ee_reset_config_writable);
+}
+
+static_assert(ee_strict_reset_config_value(0u) == 0x440u);
+static_assert(ee_strict_reset_config_value(0x73003u) == 0x73443u);
+static_assert(ee_strict_reset_config_value(0x70000fc0u) == 0x440u);
+static_assert(ee_strict_reset_config_write_supported(0x73443u));
+static_assert(!ee_strict_reset_config_write_supported(1u));
+static_assert(!ee_strict_reset_config_write_supported(0x80000000u));
+
 // Minimal isolated reset-prefix experiment. These are only the COP0
 // reset values relevant to the supported initial instruction (EE Core
 // User's Manual v6.0, 4.2.1). Unspecified state is initialized to zero
@@ -17,6 +43,7 @@ inline constexpr s_ee_cpu_state ee_make_strict_reset_prefix_state()
     cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
     cpu.m_cop0[COP0_Status] = STATUS_ERL | STATUS_BEV;
     cpu.m_cop0[COP0_Random] = 47u;
+    cpu.m_cop0[COP0_Config] = k_ee_reset_config_fixed;
     // Reference-compatible R5900 model/revision (PCSX2 cpuReset).
     // Not a claim that all physical EE revisions have this low byte.
     cpu.m_cop0[COP0_PRId] = 0x00002e20u;
@@ -57,7 +84,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
     if (cpu.m_pc != 0xbfc00000u ||
         cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
         cpu.m_cop0[COP0_Status] != (STATUS_ERL | STATUS_BEV) ||
-        cpu.m_cop0[COP0_Config] != 0u ||
+        cpu.m_cop0[COP0_Config] != k_ee_reset_config_fixed ||
         cpu.m_cop0[COP0_Random] != 47u ||
         cpu.m_cop0[COP0_Wired] != 0u)
     {
@@ -198,8 +225,12 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     switch (primary)
     {
     case 0u:
-        if (opcode == 0u)
+        if (opcode == 0u || opcode == 0x0000040fu || opcode == 0x0000000fu)
         {
+            // NOP / canonical SYNC.P / SYNC.L. All transfers in this
+            // isolated executor finish synchronously; there is no
+            // outstanding pipeline, cache or store-buffer work to drain.
+            // This is not a live runtime barrier implementation.
             return true;
         }
         dest = (opcode >> 11u) & 31u;
@@ -236,11 +267,28 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             cpu.m_cop0[COP0_Status] = status;
             return true;
         }
-        if ((opcode & 0xffe0ffffu) != 0x40007800u)
+        if ((opcode & 0xffe0ffffu) == 0x40808000u) // MTC0 rt,Config
+        {
+            const uint32_t config = static_cast<uint32_t>(read_gpr(cpu, rt));
+            if (!ee_strict_reset_config_write_supported(config))
+            {
+                return false;
+            }
+            cpu.m_cop0[COP0_Config] = ee_strict_reset_config_value(config);
+            return true;
+        }
+        if ((opcode & 0xffe0ffffu) == 0x40008000u) // MFC0 rt,Config
+        {
+            value = sign_extend_word(cpu.m_cop0[COP0_Config]);
+        }
+        else if ((opcode & 0xffe0ffffu) == 0x40007800u)
+        {
+            value = sign_extend_word(cpu.m_cop0[COP0_PRId]);
+        }
+        else
         {
             return false;
         }
-        value = sign_extend_word(cpu.m_cop0[COP0_PRId]);
         break;
     case 0x0cu: // ANDI
         value = read_gpr(cpu, rs) & imm;
@@ -442,5 +490,6 @@ static_assert(ee_make_strict_reset_prefix_state().m_pc == 0xbfc00000u);
 static_assert(ee_make_strict_reset_prefix_state().m_cop0[COP0_Status] ==
               (STATUS_ERL | STATUS_BEV));
 static_assert(ee_make_strict_reset_prefix_state().m_cop0[COP0_Random] == 47u);
+static_assert(ee_make_strict_reset_prefix_state().m_cop0[COP0_Config] == 0x440u);
 
 } // namespace ee

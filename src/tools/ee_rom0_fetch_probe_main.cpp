@@ -623,7 +623,44 @@ int main(int argc, char** argv)
     }
     std::putchar('\n');
 
-    const uint32_t exploration_limit = console_checkpoint + 4096u;
+    // Require the real Config read/modify/write and SYNC.P sequence.
+    // Fixed cache-size fields must survive, and cached accesses still
+    // refuse because this probe has no cache backing or timing model.
+    constexpr uint32_t expected_config = 0x00073443u;
+    const uint32_t config_checkpoint = console_checkpoint + 9u;
+    if (cpu.m_cop0[ee::COP0_Config] != 0x440u)
+    {
+        std::fprintf(stderr, "EELOAD Config reset mismatch\n");
+        return 40;
+    }
+    for (; retired < config_checkpoint;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            config_checkpoint - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > config_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD Config refused: pc=%08x opcode=%08x result=%u retired=%u\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 41;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0016218u || cpu.m_cop0[ee::COP0_Config] != expected_config ||
+        cpu.m_gpr[3].m_lo != 0x440u || cpu.m_gpr[2].m_lo != expected_config ||
+        cpu.m_cop0[ee::COP0_Status] != 0x70000000u || sio.m_count != message_size)
+    {
+        std::fprintf(stderr, "EELOAD Config checkpoint mismatch: retired=%u pc=%08x config=%08x v0=%016llx v1=%016llx\n",
+            retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Config],
+            static_cast<unsigned long long>(cpu.m_gpr[2].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
+        return 42;
+    }
+    std::printf("EELOAD Config: retired=%u pc=%08x config=%08x old=%016llx\n",
+        retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Config],
+        static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
+
+    const uint32_t exploration_limit = config_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {

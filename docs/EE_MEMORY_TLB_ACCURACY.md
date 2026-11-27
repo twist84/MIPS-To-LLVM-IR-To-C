@@ -918,3 +918,31 @@ guest-emitted byte to match it, exact retirement count 653364 +
 5*length, return to a00161f4, and unchanged stack. Report the
 actual bytes and subsequent blocker. The string and retirement
 count remain pending CI validation. No retail replay required.
+
+## Strict memory follow-up M6E3B: architectural Config fields
+
+M6E3A passed CI run 46047885667/job 140671607827. The first
+guest SIO string matched all 36 bytes, including newline:
+[openbios:ee] OpenPS2BIOS 0.6 ready
+Return at 653544 retirements, then stop at 653546 / a00161fc,
+40038000 (MFC0 v1,Config).
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46047885667/job/140671607827
+
+Correct reset Config from zero to fixed IC/DC fields 0x440 (EE
+Core User's Manual v6.0 p.78; EC=0, IC=010, DC=001). K0 is
+undefined at reset; select zero as in PCSX2. Writable fields
+DIE/ICE/DCE/NBE/BPE/K0 are mask 0x73007; fixed fields ignore
+writes, reserved bits and undefined K0 modes refuse. Canonical
+MFC0/MTC0 use low-word architectural semantics.
+
+Canonical SYNC.P/SYNC.L are admitted ONLY in the isolated,
+synchronous executor where no outstanding transfers or pipeline
+work exist. The manual requires synchronization around Config
+changes; no live pipeline hazards or cache state are modeled.
+Enabling Config does not authorize cached RAM, cached fetch,
+or accelerated access. These remain refused.
+
+Require guest Config read/modify/write and SYNC.P at 653553
+retirements, pc a0016218, Config/v0=73443, v1=440; preserve
+Status and console byte count. Pending CI. No retail replay.
+Reference: https://docs.alexrp.com/mips/ee.pdf (p.78).

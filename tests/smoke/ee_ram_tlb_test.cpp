@@ -2303,6 +2303,95 @@ bool test_strict_reset_sio_tx()
         output[2] == 0x43u && output[3] == 0xa5u;
 }
 
+bool test_strict_reset_config()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[32u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[2] = {0x1234567800073003ull, 0x9876u};
+    cpu.m_gpr[3].m_hi = 0x1234u;
+    put(0u, 0x40038000u); // mfc0 v1,Config
+    put(4u, 0x40828000u); // mtc0 v0,Config
+    put(8u, 0x0000040fu); // sync.p
+    put(12u, 0x40038000u);
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    if (step(1u).m_retired != 1u || cpu.m_gpr[3].m_lo != 0x440u ||
+        cpu.m_gpr[3].m_hi != 0x1234u || step(1u).m_retired != 1u ||
+        cpu.m_cop0[ee::COP0_Config] != 0x73443u ||
+        cpu.m_gpr[2].m_lo != 0x1234567800073003ull ||
+        cpu.m_gpr[2].m_hi != 0x9876u || step(1u).m_retired != 1u ||
+        step(1u).m_retired != 1u || cpu.m_gpr[3].m_lo != 0x73443u ||
+        cpu.m_gpr[3].m_hi != 0x1234u || cpu.m_pc != pc + 16u)
+    {
+        return false;
+    }
+    for (const uint32_t invalid : {1u, 4u, 5u, 6u, 0x80000000u, 0x8u, 0x80000u})
+    {
+        cpu.m_pc = pc + 4u;
+        cpu.m_gpr[2].m_lo = invalid;
+        const auto refused = step(1u);
+        if (refused.m_result != result::UNSUPPORTED_OPCODE || refused.m_retired != 0u ||
+            cpu.m_pc != pc + 4u || cpu.m_cop0[ee::COP0_Config] != 0x73443u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[2].m_lo = 0x70000fc0u;
+    if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_Config] != 0x440u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc + 4u;
+    cpu.m_gpr[0] = {0xffffffffffffffffull, 0x1234u};
+    put(4u, 0x40808000u); // mtc0 zero,Config
+    if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_Config] != 0x440u)
+    {
+        return false;
+    }
+    put(8u, 0x40008000u); // mfc0 zero,Config
+    if (step(1u).m_retired != 1u || cpu.m_gpr[0].m_lo != 0xffffffffffffffffull ||
+        cpu.m_gpr[0].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    put(12u, 0x40828001u); // reserved low bit
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 12u)
+    {
+        return false;
+    }
+    put(12u, 0x0000004fu); // unsupported SYNC type
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 12u)
+    {
+        return false;
+    }
+    put(12u, 0x0000000fu); // sync.l
+    if (step(1u).m_retired != 1u)
+    {
+        return false;
+    }
+    // Enabling cache controls must not enable a cached access path.
+    cpu.m_cop0[ee::COP0_Config] = 0x73443u;
+    cpu.m_gpr[4].m_lo = 0x8000001cu;
+    put(16u, 0x8c820000u);
+    const auto refused = step(1u);
+    return refused.m_result == result::DATA_UNAVAILABLE &&
+        cpu.m_pc == pc + 16u && cpu.m_cop0[ee::COP0_Config] == 0x73443u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2530,6 +2619,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_config(), "strict reset Config and serialization regression"))
     {
         return 1;
     }
