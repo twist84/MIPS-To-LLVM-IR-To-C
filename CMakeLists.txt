@@ -812,6 +812,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME iop_function_discovery
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_function_discovery.py)
+    add_test(NAME iop_exit_ownership
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_exit_ownership.py)
     # Rebuilding host-only probe headers must relink existing guest
     # objects, never force a fresh ELF-to-LLVM translation.
     add_test(NAME ee_translation_cache_input_split
