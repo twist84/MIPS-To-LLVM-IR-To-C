@@ -1178,4 +1178,51 @@ bool test_strict_firmware_gs_reset()
         pilot.gs_reset_count() == 1u && pilot.gs_upper_count() == 1u &&
         pilot.next_scanout_event() == first_field;
 }
+
+bool test_strict_firmware_jalr()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    const auto iop_rom = make_firmware_pilot_rom({0x1000ffffu, 0u});
+    // Both paths sample t9 before its slot overwrites it. Link to a
+    // non-ra register, preserving the zero-extended PC+8 semantics.
+    for (uint32_t split : {0u, 1u})
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x3c19bfc0u, 0x37390040u, 0x03203809u, 0x34190001u}));
+        if (!pilot.attach_iop(iop_rom, true))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto branch = pilot.step(split != 0u ? 1u : 2u);
+        if (branch.m_boundary != boundary::RETIRED ||
+            branch.m_instruction.m_retired != (split != 0u ? 1u : 2u) ||
+            pilot.cpu().m_gpr[7].m_lo != base + 20u ||
+            pilot.cpu().m_gpr[31].m_lo != 0u)
+        {
+            return false;
+        }
+        if (split != 0u)
+        {
+            if (!pilot.delay_slot_pending() || pilot.cpu().m_pc != base + 16u ||
+                pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (pilot.delay_slot_pending() || pilot.cycle() != 5u ||
+            pilot.cpu().m_pc != base + 64u || pilot.cpu().m_gpr[25].m_lo != 1u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace

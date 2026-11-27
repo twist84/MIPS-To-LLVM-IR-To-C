@@ -1559,3 +1559,25 @@ reset after scanout is outside this scope. Test exact reset counts,
 preserved unrelated state and deadline, and duplicate refusal.
 Require both pinned dual-domain diagnostics to advance beyond the
 measured reset stop and execute the upper-word store. Pending CI.
+
+## M6E3H3E7: JALR and the real EELOAD handoff boundary
+
+H3E6 passed both firmware versions at c372925b:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46062563763
+
+Both reached Status=70030c01, retired the previously isolated
+interrupt-enabling MTC0, printed "starting EELOAD", and then
+refused JALR opcode 0320f809 with t9=00082000.
+v0.6: 696405 EE / 87050 IOP, PC a0019144.
+v0.7: 696597 EE / 87074 IOP, PC a0019164.
+Zero IOP debt, no fabricated interrupt or field.
+
+Share the native strict JALR encoding predicate, retaining the
+native lowering's prior semantics. Add atomic and scheduler-split
+JALR retirement with arbitrary nonzero rd, zero rd suppression,
+target sampling, zero-extended link and high-half preservation.
+Refuse reserved encodings and undefined rs==rd. Atomic slot
+refusals roll back the link; split slots retain the committed link.
+No change to mapped/cached instruction fetch: diagnose the actual
+target boundary before enabling a new fetch domain. Require real
+dual-domain execution beyond the observed JALR stops. Pending CI.

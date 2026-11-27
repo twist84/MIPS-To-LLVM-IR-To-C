@@ -2119,6 +2119,64 @@ bool test_strict_reset_direct_jumps()
         cpu.m_gpr[31].m_lo == link && cpu.m_gpr[31].m_hi == 0x1234u;
 }
 
+
+bool test_strict_reset_jalr()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[32u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[25].m_lo = pc + 16u;
+    cpu.m_gpr[7] = {0xfedcba9876543210ull, 0x1234u};
+    put(0u, 0x03203809u); // JALR a3,t9
+    put(4u, 0x00e01026u); // unsupported XOR
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+        step(2u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc ||
+        cpu.m_gpr[7].m_lo != 0xfedcba9876543210ull || cpu.m_gpr[7].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    put(4u, 0x00e01025u); // OR v0,a3,zero
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
+        cpu.m_gpr[7].m_lo != pc + 8u || cpu.m_gpr[7].m_hi != 0x1234u ||
+        cpu.m_gpr[2].m_lo != pc + 8u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x03200009u); // JALR zero,t9
+    put(4u, 0u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u || cpu.m_gpr[0].m_lo != 0u)
+    {
+        return false;
+    }
+    for (uint32_t invalid : {0x0320c809u, 0x0321f809u, 0x0320f849u})
+    {
+        cpu.m_pc = pc;
+        put(0u, invalid);
+        if (step(2u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc ||
+            cpu.m_gpr[25].m_lo != pc + 16u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_reset_ram_scalar()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -3760,7 +3818,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
+    if (!check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
+        !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||
         !check(test_strict_firmware_serial(), "scheduler-owned serial byte transport") ||
         !check(test_strict_firmware_split_slots(), "scheduler-owned resumable branch slots") ||
@@ -4029,7 +4088,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
+    if (!check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
+        !check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
     {
         return 1;
     }

@@ -11,6 +11,21 @@ inline constexpr bool ee_strict_jr_supported(uint32_t opcode)
     return (opcode & 0xfc1fffffu) == 8u;
 }
 
+// Sony EE instruction manual pp.65–68: JALR rs == rd is undefined.
+inline constexpr bool ee_strict_jalr_supported(uint32_t opcode)
+{
+    return (opcode & 0xfc1f07ffu) == 9u &&
+        ((opcode >> 21u) & 31u) != ((opcode >> 11u) & 31u);
+}
+
+static_assert(ee_strict_jalr_supported(0x0320f809u));
+static_assert(ee_strict_jalr_supported(0x00a03809u));
+static_assert(ee_strict_jalr_supported(0x00a00009u));
+static_assert(!ee_strict_jalr_supported(0x00a02809u));
+static_assert(!ee_strict_jalr_supported(0x0321f809u));
+static_assert(!ee_strict_jalr_supported(0x0320f849u));
+static_assert(!ee_strict_jalr_supported(0x0720f809u));
+
 // Direct J/JAL use the high nibble of the delay-slot PC, not the
 // branch PC. R5900 links zero-extend the 32-bit PC+8 into GPR[63:0].
 inline constexpr uint32_t ee_strict_direct_jump_target(uint32_t pc, uint32_t opcode)

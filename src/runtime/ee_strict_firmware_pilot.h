@@ -52,13 +52,15 @@ inline constexpr uint32_t ee_firmware_reference_slots(uint32_t opcode)
 {
     const uint32_t primary = opcode >> 26u;
     return primary == 2u || primary == 3u || primary == 4u ||
-        primary == 5u || ee_strict_jr_supported(opcode) ? 2u : 1u;
+        primary == 5u || ee_strict_jr_supported(opcode) ||
+        ee_strict_jalr_supported(opcode) ? 2u : 1u;
 }
 
 static_assert(ee_firmware_reference_slots(0u) == 1u);
 static_assert(ee_firmware_reference_slots(0x10000001u) == 2u);
 static_assert(ee_firmware_reference_slots(0x0ff00010u) == 2u);
 static_assert(ee_firmware_reference_slots(0x03e00008u) == 2u);
+static_assert(ee_firmware_reference_slots(0x0320f809u) == 2u);
 
 // Count advances modulo 2^32 under the existing compatibility clock.
 // Starting at equality is not a new compare event until a full wrap.
@@ -476,10 +478,15 @@ private:
             strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u);
         const uint32_t imm = opcode & 0xffffu;
         const uint32_t disp = (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) << 2u;
-        if (ee_strict_jr_supported(opcode))
+        if (ee_strict_jr_supported(opcode) || ee_strict_jalr_supported(opcode))
         {
             m_delay_target = static_cast<uint32_t>(
                 strict_reset_detail::read_gpr(m_cpu, (opcode >> 21u) & 31u));
+            const uint32_t link_reg = ee_strict_jalr_supported(opcode) ? (opcode >> 11u) & 31u : 0u;
+            if (link_reg != 0u)
+            {
+                m_cpu.m_gpr[link_reg].m_lo = ee_strict_link_address(pc);
+            }
         }
         else if (primary == 2u || primary == 3u)
         {

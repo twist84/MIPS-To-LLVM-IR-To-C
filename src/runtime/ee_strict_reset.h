@@ -800,7 +800,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 
 // Isolated post-Status-clear ROM and uncached RAM execution. The caller
 // owns all backing/state and excludes pending clock/device effects.
-// BEQ/BNE/J/JAL/JR and supported register/ROM/RAM transfer slots are
+// BEQ/BNE/J/JAL/JR/JALR and supported register/ROM/RAM transfer slots are
 // a single bounded transaction. A refused slot changes no state.
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
@@ -835,10 +835,11 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     }
     const uint32_t opcode = ee_read_instruction_word(code);
     const uint32_t primary = opcode >> 26u;
-    const bool jr = ee_strict_jr_supported(opcode);
+    const bool jalr = ee_strict_jalr_supported(opcode);
+    const bool indirect = ee_strict_jr_supported(opcode) || jalr;
     const bool direct_jump = primary == 2u || primary == 3u;
-    const bool link = primary == 3u;
-    if (primary == 4u || primary == 5u || jr || direct_jump)
+    const uint32_t link_reg = primary == 3u ? 31u : jalr ? (opcode >> 11u) & 31u : 0u;
+    if (primary == 4u || primary == 5u || indirect || direct_jump)
     {
         if (budget < 2u)
         {
@@ -852,7 +853,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         const uint32_t disp = (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) << 2u;
         // Sample the indirect target before the delay slot. Its
         // alignment and backing are checked only on the next fetch.
-        const uint32_t next = jr
+        const uint32_t next = indirect
             ? static_cast<uint32_t>(strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u))
             : direct_jump ? ee_strict_direct_jump_target(pc, opcode)
             : taken ? pc + 4u + disp : pc + 8u;
@@ -863,18 +864,18 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         }
         // The link must be visible to the delay slot. This isolated
         // executor has only host refusals, so restore it on rejection.
-        const uint64_t old_link = cpu.m_gpr[31].m_lo;
-        if (link)
+        const uint64_t old_link = cpu.m_gpr[link_reg].m_lo;
+        if (link_reg != 0u)
         {
-            cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
+            cpu.m_gpr[link_reg].m_lo = ee_strict_link_address(pc);
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
             pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb, mmio, cold_cache);
         if (action.m_result != result::COMMITTED)
         {
-            if (link)
+            if (link_reg != 0u)
             {
-                cpu.m_gpr[31].m_lo = old_link;
+                cpu.m_gpr[link_reg].m_lo = old_link;
             }
             return action;
         }
