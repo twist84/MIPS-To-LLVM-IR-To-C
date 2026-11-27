@@ -657,6 +657,9 @@ def test_recovery_timing_report_is_opt_in_and_preserves_failures():
                 metrics.observe_line(
                     "ee_recomp timings: discovery=200.0ms coverage=30.0ms IR=10.0ms",
                     "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=8 modules=128", "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=2 modules=2", "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=99 modules=128", "ee_recomp")
             metrics.observe_line(metrics.CHILD_PREFIX + json.dumps({
                 "tool": "verify_ir", "stages": {"native_compile_wall": 2.0},
                 "worker_seconds": 3.5, "cache_hits": 4, "cache_misses": 2,
@@ -681,6 +684,10 @@ def test_recovery_timing_report_is_opt_in_and_preserves_failures():
         assert report["slowest_modules"][0]["path"] == "example.ll"
         assert report["counts"]["verify_ir_invocations"] == 1
         assert report["counts"]["recompiler_timing_records"] == 1
+        assert report["counts"]["parallel_ir_batches"] == 2
+        assert report["counts"]["parallel_ir_modules"] == 130
+        assert report["counts"]["parallel_ir_worker_launches"] == 10
+        assert report["counts"]["parallel_ir_peak_workers"] == 8
         assert metrics.active() is None
         failure = root / "failed.json"
         try:

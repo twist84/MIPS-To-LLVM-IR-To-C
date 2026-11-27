@@ -78,6 +78,17 @@ def observe_line(line, command_kind):
                                    match.groups()):
                 add(name, float(value) / 1000.0)
             count("recompiler_timing_records")
+        parallel = re.fullmatch(
+            r"ee_recomp parallel IR: workers=(\d+) modules=(\d+)", line.strip())
+        if parallel:
+            workers, modules = map(int, parallel.groups())
+            if 1 <= workers <= 32 and workers <= modules <= 128:
+                count("parallel_ir_batches")
+                count("parallel_ir_modules", modules)
+                count("parallel_ir_worker_launches", workers)
+                counters = report["counts"]
+                counters["parallel_ir_peak_workers"] = max(
+                    counters.get("parallel_ir_peak_workers", 0), workers)
     elif command_kind in {"verify_ir", "link_native_objects"} and line.startswith(CHILD_PREFIX):
         try:
             data = json.loads(line[len(CHILD_PREFIX):])
