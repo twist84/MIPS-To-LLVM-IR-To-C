@@ -276,18 +276,28 @@ def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
 
     def compile_one(source):
         obj = obj_dir / (source.stem + ".o")
+        start = time.monotonic()
         hit = cached_split_object(source, obj, args.region_cache, provenance,
                                   compile_object)
-        return obj, hit
+        return obj, {
+            "source": source.name, "object": obj.name, "cached": hit,
+            "seconds": time.monotonic() - start,
+            "ir_bytes": source.stat().st_size, "object_bytes": obj.stat().st_size,
+        }
 
-    objects = []
+    completed = {}
     hits = 0
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        for obj, hit in pool.map(compile_one, sources):
-            objects.append(obj)
-            hits += int(hit)
-            print(f"IOP objects [{len(objects)}/{len(sources)}]: {obj.name}"
-                  + (" (cached)" if hit else ""))
+        futures = [pool.submit(compile_one, source) for source in sources]
+        for future in concurrent.futures.as_completed(futures):
+            obj, observation = future.result()
+            completed[observation["source"]] = (obj, observation)
+            hits += int(observation["cached"])
+            print(f"IOP objects [{len(completed)}/{len(sources)}]: {obj.name}"
+                  + (" (cached)" if observation["cached"] else ""))
+    # Completion order is deliberately not the linker input order.
+    objects = [completed[source.name][0] for source in sources]
+    observations = [completed[source.name][1] for source in sources]
     print(f"split cache: {hits} reused, {len(objects) - hits} compiled")
     compiled = time.monotonic()
     library = lib_dir / f"{stem}{suffix}"
@@ -296,10 +306,27 @@ def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
     if os.name == "nt":
         command += ["-nostdlib", "-Wl,/noentry"]
     subprocess.run(command, check=True)
+    linked = time.monotonic()
+    object_bytes = sum(obj.stat().st_size for obj in objects)
+    library_bytes = library.stat().st_size
     print(f"split compile {compiled - started:.3f}s, "
-          f"link {time.monotonic() - compiled:.3f}s, "
-          f"{sum(obj.stat().st_size for obj in objects)} object bytes, "
-          f"{library.stat().st_size} library bytes")
+          f"link {linked - compiled:.3f}s, "
+          f"{object_bytes} object bytes, {library_bytes} library bytes")
+    slowest = sorted(observations, key=lambda row: (-row["seconds"], row["source"]))
+    for row in slowest[:5]:
+        print(f"split slow object: {row['source']} {row['seconds']:.3f}s, "
+              f"{row['ir_bytes']} IR bytes, {row['object_bytes']} object bytes"
+              + (" (cached)" if row["cached"] else ""))
+    receipt = lib_dir.parent / "split-build-receipt.json"
+    with receipt.open("x", encoding="utf-8") as stream:
+        json.dump({
+            "schema": 1, "module": stem, "opt": args.opt, "jobs": args.jobs,
+            "compile_seconds": compiled - started, "link_seconds": linked - compiled,
+            "cache_hits": hits, "object_bytes": object_bytes,
+            "library_bytes": library_bytes, "objects": observations,
+            "library_sha256": sha256_file(library),
+        }, stream, indent=2)
+        stream.write("\n")
     return library
 
 

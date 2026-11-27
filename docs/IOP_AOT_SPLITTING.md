@@ -311,3 +311,13 @@ reports full ownership/conflicts and capture identity, and discards
 shadow output for ambiguous original ELF matches. Unmatched metadata
 now reports actual differing fields, including ARKD_DVD. No build path,
 runner, or existing I7 artifact changes.
+
+## I9b: split build attribution
+
+The experimental split builder reports completion order (rather than
+submission order) while retaining deterministic object order at link time.
+It writes split-build-receipt.json in the fresh output root with per-object
+IR size, object size, elapsed compile/cache time, reuse status, wall-stage
+timings and linked library SHA256. The five slowest objects print to the
+console. This measures the suspected CRI_ADXI residual bottleneck rather
+than assuming it. No emitted IR or runtime changes; old outputs stay intact.
