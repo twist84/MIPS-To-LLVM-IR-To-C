@@ -1077,3 +1077,41 @@ all native libraries active, equal retired native instructions and
 fewer host native entries in each matched pair. No exit profiling
 in this mode. Single pair is a correctness/entry-count checkpoint,
 not performance acceptance. Latest CI and retail behavior pending.
+
+## I17f acceptance and IOP workstream closeout
+
+Archive `ee-iop-i17f.zip` SHA-256
+`46488438eb50b3025e84b47a51d36a16f16f71df3082fb6e656409a1a8aa5f48`.
+The paired replay reports unchanged pinned inputs and identical seven-DLL
+inventories, with ARKD_DVD matching the I17f build receipt. Both arms
+reached 40M dispatches, consumed 3,127/3,127 polls, and matched all
+184,700 trace samples against the reference, with zero divergent or
+unpaired samples. The full reports and PPMs were independently compared
+byte-for-byte and their SHA-256 hashes match the pinned reference.
+Terminal native counters in both stderr logs reconcile with the receipt.
+
+Chaining off/on: 12,611,093 / 10,958,742 entries, 67,846,006 retired
+instructions in both arms, all seven modules active. Eliminated
+1,652,351 host native entries (13.10%); translated time 596.4 / 548.9 ms,
+refresh 1.7 / 1.8 ms, process wall 42.219 / 40.922 s. Correctness and
+entry-count acceptance passed; performance acceptance remains false
+(single paired observation). The experiment remains explicitly opt-in
+via SDBZ_IOP_AOT_CHAIN; no default runtime change.
+
+The primary goal was faster IOP compilation, not unrestricted native
+chaining. Deterministic region splitting, bounded residual partitions,
+parallel compilation and exact-IR object reuse meet that goal.
+MCMAN's worst residual compilation fell from 17.906 to 2.672 s
+in different build workloads; the I17a three-module incremental build
+reused 700/703 objects (0.781 s compile, 0.483 s link).
+I17c2's accepted aggregate DLL size is 4,198,400 bytes, 22.82% below I17b.
+Keep I17c2 as the non-chaining rollback inventory and retain the I17f
+candidate for optional chaining. These remain experimental build
+inventories, not a new universal production build policy.
+
+Stop further IOP optimization at user direction. No additional retail
+replay or recompilation required for this documentation closeout.
+Revisit only if a correctness regression or concrete new requirement
+arises. Four workflows passed at ffc0122; Build and test was still
+running when checked. Closeout does not establish final CI completion
+or exhaustive hardware accuracy.
