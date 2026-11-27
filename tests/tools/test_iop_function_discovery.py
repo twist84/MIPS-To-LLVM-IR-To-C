@@ -278,6 +278,36 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result["observations"], [])
         self.assertEqual(len(result["unresolved"]), 1)
 
+    def test_indirect_producer_audit_classifies_memory_without_reading(self):
+        # lui t0,1; lw v0,0x20(t0); sw v0,0(sp); jalr v0
+        meta, data = capture([0x3c080001, 0x8d020020, 0xafa20000,
+                              0x0040f809, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        self.assertEqual(result["observations"], [])
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "constant_address_load")
+        self.assertEqual(producer["definitions"][-1]["constant_address"], BASE + 32)
+        self.assertEqual([x["pc"] for x in producer["definitions"]],
+                         [BASE, BASE + 4])
+
+    def test_indirect_producer_audit_scaled_index_and_gp(self):
+        # sll v0,a0,2; lui v1,1; addu v0,v0,v1; lw v0,16(v0);
+        # move t9,v0; jr t9; nop
+        meta, data = capture([0x00041080, 0x3c030001, 0x00431021,
+                              0x8c420010, 0x0040c821, 0x03200008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "scaled_index_load")
+        self.assertEqual(len(producer["definitions"]), 5)
+        meta, data = capture([0x8f828004, 0x0040f809, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "gp_relative_load")
+        self.assertEqual(producer["definitions"][0]["offset"], -32764)
+
     def test_indirect_jump_is_not_function_root(self):
         meta, data = capture([0x3c080001, 0x35080010, 0x01000008, 0,
                               0x03e00008, 0])

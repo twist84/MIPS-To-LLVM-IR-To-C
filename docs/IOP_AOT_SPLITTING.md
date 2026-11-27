@@ -374,3 +374,22 @@ are not treated as new function roots. This is shadow-only: existing
 CFG may omit indirect incoming edges, and no runtime or lowering uses
 these observations. Tests cover delay ordering, alternate entry,
 unknown loads and jump/call separation.
+
+## I12a measured result / I12b producer shadow
+
+I12a receipt iop-i12-indirect.json SHA256
+3acc01e3624c78c0861301f93d76bbee9d00fecc9fbebfe2d07f600af77bf9a0:
+zero recovered constant targets, 91 unresolved sites (81 indirect calls,
+10 jumps), 85 use v0 and six v1. Calls: CRI_ADXI 61, PADMAN 14,
+SIO2MAN 4, LIBSD 2. Jumps: ARKD_DVD 4, MCMAN 2, LIBSD 4.
+Do not infer a pointer's source solely from its register number.
+
+I12b adds optional `--audit-producers` to the same offline audit. It
+records a bounded flat definition DAG for the same unique sequential
+predecessor window, tracks known GPR writes and stores, and classifies
+load addresses (constant, GP-relative live-in, scaled index or unknown
+register address). Register moves are followed for classification.
+No guest memory is dereferenced; no GP value or table bounds assumed.
+Unknown incoming paths and producer values outside the window remain
+unresolved. This is diagnostic only; existing constant audit results,
+I11 build, runner, ABI and EE/VU1 artifacts are unchanged.
