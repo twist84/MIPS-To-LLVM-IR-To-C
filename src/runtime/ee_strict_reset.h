@@ -379,6 +379,10 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return false;
         }
         break;
+    case 0x0bu: // SLTIU: unsigned low 64-bit comparison, signed immediate
+        value = read_gpr(cpu, rs) <
+            sign_extend_word(imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) ? 1u : 0u;
+        break;
     case 0x0cu: // ANDI
         value = read_gpr(cpu, rs) & imm;
         break;

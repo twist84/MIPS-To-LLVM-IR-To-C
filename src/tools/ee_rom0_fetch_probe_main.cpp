@@ -39,6 +39,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     ee::c_ee_tlb tlb{};
     bool entered_ram = false;
     bool first_tlb_write = false;
+    uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
     {
         const uint32_t pc = cpu.m_pc;
@@ -57,6 +58,10 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (action.m_opcode == 0x42000002u)
+        {
+            ++tlb_write_count;
+        }
         if (!first_tlb_write && action.m_opcode == 0x42000002u)
         {
             ee::s_ee_tlb_entry entry{};
@@ -70,6 +75,11 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
             std::printf("EE exploration first TLBWI: retired=%u pc=%08x index=%u mask=%08x hi=%08x lo0=%08x lo1=%08x\n",
                 retired, cpu.m_pc, index, entry.m_page_mask, entry.m_entry_hi,
                 entry.m_entry_lo0, entry.m_entry_lo1);
+        }
+        if (action.m_opcode == 0x42000002u && tlb_write_count == 13u)
+        {
+            std::printf("EE exploration initial TLB writes: retired=%u count=%u\n",
+                retired, tlb_write_count);
         }
         if (!entered_ram && cpu.m_pc >= 0xa0000000u && cpu.m_pc < 0xa2000000u)
         {
@@ -1070,7 +1080,88 @@ int main(int argc, char** argv)
     }
     std::printf("EELOAD first TLBWI return: retired=%u pc=%08x\n", retired, cpu.m_pc);
 
-    const uint32_t exploration_limit = tlb_return_done + 4096u;
+    // Twelve more table entries are programmed before the next
+    // mapping helper. The four ROM words per entry are PageMask,
+    // EntryHi, EntryLo0 and EntryLo1 in that order.
+    constexpr uint32_t initial_count = 13u;
+    constexpr uint32_t initial_table_offset = 0x0001a0d4u - destination;
+    static_assert(initial_table_offset + initial_count * 16u <= image_size);
+    const uint32_t initial_done = tlb_return_done + 272u;
+    for (; retired < initial_done;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            initial_done - retired, ram, &sio, &tlb);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > initial_done - retired)
+        {
+            std::fprintf(stderr, "EELOAD initial TLB setup refused: pc=%08x opcode=%08x retired=%u\n",
+                cpu.m_pc, action.m_opcode, retired);
+            return 66;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0016470u || cpu.m_gpr[1].m_lo != 0u ||
+        cpu.m_gpr[17].m_lo != 0x80000u || cpu.m_gpr[16].m_lo != 0x1fu)
+    {
+        std::fprintf(stderr, "EELOAD initial TLB checkpoint mismatch: pc=%08x\n", cpu.m_pc);
+        return 67;
+    }
+    for (uint32_t i = 0u; i < ee::c_ee_tlb::k_entry_count; ++i)
+    {
+        ee::s_ee_tlb_entry actual{};
+        const bool present = tlb.read(i, &actual);
+        if (i >= initial_count)
+        {
+            if (present)
+            {
+                std::fprintf(stderr, "EELOAD unexpected TLB entry: index=%u\n", i);
+                return 68;
+            }
+            continue;
+        }
+        const uint8_t* expected = bytes.data() + source_offset + initial_table_offset + i * 16u;
+        if (!present || actual.m_page_mask != ee::ee_read_instruction_word(expected) ||
+            actual.m_entry_hi != ee::ee_read_instruction_word(expected + 4u) ||
+            actual.m_entry_lo0 != ee::ee_read_instruction_word(expected + 8u) ||
+            actual.m_entry_lo1 != ee::ee_read_instruction_word(expected + 12u))
+        {
+            std::fprintf(stderr, "EELOAD initial TLB entry mismatch: index=%u mask=%08x hi=%08x lo0=%08x lo1=%08x\n",
+                i, actual.m_page_mask, actual.m_entry_hi, actual.m_entry_lo0, actual.m_entry_lo1);
+            return 69;
+        }
+        std::printf("EELOAD initial TLB entry: index=%u mask=%08x hi=%08x lo0=%08x lo1=%08x\n",
+            i, actual.m_page_mask, actual.m_entry_hi, actual.m_entry_lo0, actual.m_entry_lo1);
+    }
+    std::printf("EELOAD initial TLB table: retired=%u pc=%08x count=%u\n", retired, cpu.m_pc, initial_count);
+
+    // Verify the observed SLTIU branches and generated stack argument.
+    // s1=0x80000; the selected sizes are 0x100000 and 0x40000.
+    const uint32_t compare_done = initial_done + 11u;
+    for (; retired < compare_done;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            compare_done - retired, ram, &sio, &tlb);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > compare_done - retired)
+        {
+            std::fprintf(stderr, "EELOAD TLB mapping comparison refused: pc=%08x opcode=%08x\n", cpu.m_pc, action.m_opcode);
+            return 70;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa00164a4u || cpu.m_gpr[1].m_lo != 0x301fu ||
+        cpu.m_gpr[2].m_lo != 0x100000u || cpu.m_gpr[3].m_lo != 0x40000u ||
+        ee::ee_read_instruction_word(ram_bytes.data() + 0x7ff40u) != 0x301fu)
+    {
+        std::fprintf(stderr, "EELOAD TLB mapping comparison mismatch: pc=%08x at=%016llx v0=%016llx v1=%016llx\n",
+            cpu.m_pc, static_cast<unsigned long long>(cpu.m_gpr[1].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[2].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
+        return 71;
+    }
+    std::printf("EELOAD TLB mapping comparison: retired=%u pc=%08x argument=0000301f\n", retired, cpu.m_pc);
+
+    const uint32_t exploration_limit = compare_done + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {

@@ -1042,3 +1042,22 @@ check all entry fields and scratchpad classification, then
 return at 653660 / a0016388. v0.7 independently must emit the
 same first TLBWI entry at 653849 / a001976c. These predicted
 checkpoints require CI. No production runtime or retail changes.
+
+## M6E3D2: initial TLB table and unsigned immediate comparison
+
+Both v0.6/v0.7 passed M6E3D1 on 3a101fd4:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46050590530
+First scratchpad TLBWI matched at 653657 / 653849; the
+13-entry initial loop reached SLTIU at 653932 / 654124,
+PC a0016470 / a0016490, opcode 2c210001, at=0.
+Verify all 13 v0.6 entries against original ROM table at
+EELOAD physical 1a0d4, including absent entries 13–47.
+Require v0.7 thirteenth guest TLBWI at 654101.
+
+Implement SLTIU using a sign-extended 16-bit immediate and
+unsigned low-64-bit comparison, preserve upper GPR half and
+architectural zero. Directed tests cover negative immediates,
+64-bit boundaries and delay-slot budget refusal. Require v0.6
+mapping argument construction at 653943 / a00164a4, stack
+physical 7ff40 contains 301f; then bounded exploration.
+Predicted new checkpoints require CI. No retail replay.
