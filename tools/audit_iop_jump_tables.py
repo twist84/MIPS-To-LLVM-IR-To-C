@@ -113,6 +113,36 @@ def table_candidates(metadata, linked, parsed, original, discovery, indirect,
     return result
 
 
+def cap_adjacent_tables(tables):
+    """Cap a pointer run at a separately recovered, relocation-backed start.
+
+    This is a conservative candidate boundary, not proof of an index
+    bound. Keep equal-base sites and unvalidated table starts separate.
+    """
+    starts = collections.defaultdict(set)
+    for table in tables:
+        if table["entries"]:
+            starts[table["table_base"]].add(table["site"])
+    result = []
+    for table in tables:
+        record = dict(table, entries=list(table["entries"]))
+        slots = {entry["slot"] for entry in record["entries"]}
+        adjacent = [address for address in starts
+                    if address > record["table_base"] and address in slots] if slots else []
+        if adjacent:
+            boundary = min(adjacent)
+            record["uncapped_entry_count"] = len(record["entries"])
+            record["uncapped_stop"] = record["stop"]
+            record["entries"] = [entry for entry in record["entries"]
+                                 if entry["slot"] < boundary]
+            record["adjacent_table_base"] = boundary
+            record["adjacent_table_sites"] = sorted(starts[boundary])
+            record["stop"] = "adjacent_table_candidate"
+            record["bound_proven"] = False
+        result.append(record)
+    return result
+
+
 def discover_table_edges(metadata, linked, discovery, roots, tables):
     """Reconstruct a shadow CFG with non-exhaustive table candidate edges.
 
@@ -154,6 +184,8 @@ def main():
                         help="Shadow CFG with non-exhaustive table candidate edges")
     parser.add_argument("--cross-block", action="store_true",
                         help="Use shadow non-call CFG predecessor/delay-slot producer evidence")
+    parser.add_argument("--cap-adjacent-tables", action="store_true",
+                        help="Limit pointer runs at separately recovered table starts (candidate only)")
     args = parser.parse_args()
     try:
         receipt = json.loads(args.relocation_receipt.read_text(encoding="utf-8"))
@@ -185,6 +217,8 @@ def main():
                                                  audit_producers=True,
                                                  cross_block=args.cross_block)
             tables = table_candidates(metadata, linked, parsed, original, discovery, indirect)
+            if args.cap_adjacent_tables:
+                tables = cap_adjacent_tables(tables)
             new_targets = sorted({e["target"] for t in tables for e in t["entries"]
                                   if not e["already_ordinary"] and not e["already_delay"]})
             module = {"capture_stem": path.stem, "base": metadata["base"],
@@ -201,7 +235,9 @@ def main():
             raise ValueError("no captures")
         with args.out.open("x", encoding="utf-8") as output:
             json.dump({"schema": 1, "kind": "iop_jump_table_shadow",
-                       "cross_block": args.cross_block, "modules": modules},
+                       "cross_block": args.cross_block,
+                       "cap_adjacent_tables": args.cap_adjacent_tables,
+                       "modules": modules},
                       output, indent=2)
             output.write("\n")
         for module in modules:
