@@ -15,7 +15,9 @@
 // it reports is identical to a full native slice: same PC, registers, exit
 // reason, dispatch count, and guest instruction/reference-slot totals.
 
+#include <concepts>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace ee
@@ -216,8 +218,21 @@ inline constexpr uint64_t extend_load(uint32_t w, uint64_t raw)
 // move forward to non-delay-slot instructions; no store, call, jump, syscall,
 // coprocessor, trapping or branch-likely instruction is accepted; and no
 // register may carry a value from one iteration into the next.
-template <typename t_read_word>
-s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
+template <typename t_read>
+concept t_ee_instruction_reader = requires(t_read& read, uint32_t pc, uint32_t* word)
+{
+    { read(pc, word) } -> std::same_as<bool>;
+};
+
+template <typename t_load>
+concept t_ee_idle_load_reader = requires(t_load& load, uint32_t address,
+                                        uint32_t width, uint64_t* raw)
+{
+    { load(address, width, raw) } -> std::same_as<bool>;
+};
+
+template <t_ee_instruction_reader t_read_word>
+constexpr s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
                                    bool allow_forward_branches = false)
 {
     using namespace idle_loop_detail;
@@ -397,9 +412,9 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
 // to the header. gpr holds the low 64 bits of each guest GPR. load(address,
 // width, &raw) must return false for any address whose value could change
 // during a native slice or whose read has side effects.
-template <typename t_load>
-e_idle_iteration predict_idle_iteration(
-    const s_idle_loop_shape& shape, const uint64_t (&gpr_in)[32], t_load load,
+template <t_ee_idle_load_reader t_load>
+constexpr e_idle_iteration predict_idle_iteration(
+    const s_idle_loop_shape& shape, std::span<const uint64_t, 32> gpr_in, t_load load,
     uint32_t* loop_instruction_count = nullptr)
 {
     using namespace idle_loop_detail;
