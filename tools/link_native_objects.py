@@ -746,7 +746,7 @@ def main():
             "-I" + str(source_root / "include/ee"),
             "-I" + str(source_root / "src/runtime"),
         ]
-        compile_flags = ["-std=c++17", f"-O{args.dispatcher_opt}"]
+        compile_flags = ["-std=c++23", f"-O{args.dispatcher_opt}"]
         if sys.platform in ("linux", "darwin"):
             compile_flags.append("-fPIC")
         if args.pdb:
@@ -756,7 +756,7 @@ def main():
         # Runtime sources do not depend on the number of translated guest
         # functions. Cache their compiled objects so boot auto-expansion does
         # not rebuild the same six translation units on every relink.
-        runtime_flags = ["-std=c++17", "-O2"]
+        runtime_flags = ["-std=c++23", "-O2"]
         if sys.platform in ("linux", "darwin"):
             runtime_flags.append("-fPIC")
         if args.pdb:
@@ -821,7 +821,7 @@ def main():
 
         command = [
             args.cxx,
-            "-std=c++17",
+            "-std=c++23",
             "-O2",
         ]
         if sys.platform == "linux":
