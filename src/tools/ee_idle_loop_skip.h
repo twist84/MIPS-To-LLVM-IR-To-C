@@ -15,6 +15,8 @@
 // it reports is identical to a full native slice: same PC, registers, exit
 // reason, dispatch count, and guest instruction/reference-slot totals.
 
+#include "../architecture/ee_scalar_constant.h"
+
 #include <concepts>
 #include <cstdint>
 #include <span>
@@ -57,7 +59,7 @@ inline constexpr int64_t simm(uint32_t w) { return static_cast<int16_t>(w & 0xff
 inline constexpr uint64_t zimm(uint32_t w) { return w & 0xffffu; }
 inline constexpr uint64_t sext32(uint64_t v)
 {
-    return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)));
+    return scalar_constant::sign_extend<32>(v);
 }
 
 enum class e_kind : uint8_t
@@ -166,27 +168,27 @@ inline constexpr uint64_t alu(uint32_t w, const uint64_t* gpr)
         {
         case 0x00u: return sext32(static_cast<uint32_t>(t) << sa(w));
         case 0x02u: return sext32(static_cast<uint32_t>(t) >> sa(w));
-        case 0x03u: return sext32(static_cast<uint32_t>(static_cast<int32_t>(t) >> sa(w)));
+        case 0x03u: return sext32(scalar_constant::arithmetic_right<32>(t, sa(w)));
         case 0x38u: return t << sa(w);
         case 0x3au: return t >> sa(w);
-        case 0x3bu: return static_cast<uint64_t>(static_cast<int64_t>(t) >> sa(w));
+        case 0x3bu: return scalar_constant::arithmetic_right<64>(t, sa(w));
         case 0x3cu: return t << (sa(w) + 32u);
         case 0x3eu: return t >> (sa(w) + 32u);
-        case 0x3fu: return static_cast<uint64_t>(static_cast<int64_t>(t) >> (sa(w) + 32u));
+        case 0x3fu: return scalar_constant::arithmetic_right<64>(t, sa(w) + 32u);
         case 0x21u: return sext32(s + t);
         case 0x23u: return sext32(s - t);
         case 0x24u: return s & t;
         case 0x25u: return s | t;
         case 0x26u: return s ^ t;
         case 0x27u: return ~(s | t);
-        case 0x2au: return static_cast<int64_t>(s) < static_cast<int64_t>(t) ? 1u : 0u;
+        case 0x2au: return scalar_constant::signed_less(s, t) ? 1u : 0u;
         case 0x2bu: return s < t ? 1u : 0u;
         case 0x2du: return s + t;
         case 0x2fu: return s - t;
         default: return 0u;
         }
     case 0x09u: return sext32(s + static_cast<uint64_t>(simm(w)));
-    case 0x0au: return static_cast<int64_t>(s) < simm(w) ? 1u : 0u;
+    case 0x0au: return scalar_constant::signed_less(s, scalar_constant::sign_extend<16>(w)) ? 1u : 0u;
     case 0x0bu: return s < static_cast<uint64_t>(simm(w)) ? 1u : 0u;
     case 0x0cu: return s & zimm(w);
     case 0x0du: return s | zimm(w);
@@ -201,8 +203,8 @@ inline constexpr uint64_t extend_load(uint32_t w, uint64_t raw)
 {
     switch (op(w))
     {
-    case 0x20u: return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw)));
-    case 0x21u: return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw)));
+    case 0x20u: return scalar_constant::sign_extend<8>(raw);
+    case 0x21u: return scalar_constant::sign_extend<16>(raw);
     case 0x23u: return sext32(raw);
     case 0x24u: return raw & 0xffu;
     case 0x25u: return raw & 0xffffu;
