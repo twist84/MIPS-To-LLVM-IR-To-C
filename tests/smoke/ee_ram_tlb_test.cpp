@@ -2920,6 +2920,145 @@ bool test_strict_reset_sltiu()
         cpu.m_gpr[1].m_hi == 0xabcdefu;
 }
 
+bool test_strict_reset_slti()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[8u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    struct s_case
+    {
+        uint64_t m_source;
+        uint32_t m_immediate;
+        uint64_t m_expected;
+    };
+    constexpr s_case cases[] =
+    {
+        {0u, 1u, 1u},
+        {1u, 1u, 0u},
+        {0x100000000ull, 1u, 0u},
+        {0x8000000000000000ull, 0x7fffu, 1u},
+        {0x7fffffffffffffffull, 0x7fffu, 0u},
+        {0u, 0xffffu, 0u},
+        {0xfffffffffffffffeull, 0xffffu, 1u},
+        {0xffffffffffffffffull, 0xffffu, 0u},
+        {0x0000000000008000ull, 0x8000u, 0u},
+        {0xffffffffffff7fffull, 0x8000u, 1u},
+        {0xffffffffffff8000ull, 0x8000u, 0u},
+        {0xffffffff00000000ull, 0u, 1u},
+        {0x00000000ffffffffull, 0u, 0u},
+        {0u, 0u, 0u}
+    };
+    for (const auto& item : cases)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[1] = {item.m_source, 0xabcdefu};
+        put(0u, 0x28210000u | item.m_immediate);
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+        if (step.m_result != result::COMMITTED || step.m_retired != 1u ||
+            cpu.m_pc != pc + 4u || cpu.m_gpr[1].m_lo != item.m_expected ||
+            cpu.m_gpr[1].m_hi != 0xabcdefu)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[0] = {0xffffffffffffffffull, 0x1234u};
+    cpu.m_pc = pc;
+    put(0u, 0x28010001u); // slti at,zero,1
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_retired != 1u ||
+        cpu.m_gpr[1].m_lo != 1u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x28200002u); // slti zero,at,2
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_retired != 1u ||
+        cpu.m_gpr[0].m_lo != 0xffffffffffffffffull || cpu.m_gpr[0].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    // Test the instruction in a branch delay slot with budget refusal.
+    cpu.m_pc = pc;
+    cpu.m_gpr[1].m_lo = 0u;
+    put(0u, 0x10000001u);
+    put(4u, 0x28210001u);
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::BUDGET_EXHAUSTED ||
+        cpu.m_pc != pc || cpu.m_gpr[1].m_lo != 0u)
+    {
+        return false;
+    }
+    return ee::ee_execute_strict_rom_register_step(cpu, {}, 2u, ram).m_retired == 2u &&
+        cpu.m_pc == pc + 8u && cpu.m_gpr[1].m_lo == 1u &&
+        cpu.m_gpr[1].m_hi == 0xabcdefu;
+}
+
+bool test_strict_reset_cached_slti()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    using cache = ee::c_ee_reset_instruction_cache;
+    constexpr uint32_t pc = 0x0008203cu;
+    uint8_t bytes[128u]{};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    put(60u, 0x10000001u); // BEQ zero,zero,+1
+    put(64u, 0x2888ffffu); // SLTI t0,a0,-1, next I-cache line
+    ee::c_ee_tlb tlb;
+    if (!tlb.write(0u, 0u, pc & ~0xfffu, 0x1bu, 0x5bu))
+    {
+        return false;
+    }
+    cache lines;
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_cop0[ee::COP0_Config] = 0x20440u;
+    cpu.m_gpr[4].m_lo = 0xfffffffffffffffeull;
+    cpu.m_gpr[8] = {0u, 0xabcdefu};
+    {
+        cache::c_transaction refused(&lines);
+        const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, &refused};
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram,
+            nullptr, &tlb);
+        if (step.m_result != result::BUDGET_EXHAUSTED ||
+            cpu.m_pc != pc || cpu.m_gpr[8].m_lo != 0u)
+        {
+            return false;
+        }
+    }
+    if (lines.resident_count() != 0u)
+    {
+        return false;
+    }
+    {
+        cache::c_transaction accepted(&lines);
+        const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, &accepted};
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, {}, 2u, ram,
+            nullptr, &tlb);
+        if (step.m_result != result::COMMITTED || step.m_retired != 2u ||
+            cpu.m_pc != pc + 8u || cpu.m_gpr[8].m_lo != 1u ||
+            cpu.m_gpr[8].m_hi != 0xabcdefu || lines.resident_count() != 0u)
+        {
+            return false;
+        }
+        accepted.commit();
+    }
+    return lines.resident_count() == 2u;
+}
+
 bool test_strict_reset_vif_devices()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4183,7 +4322,9 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_sltiu(), "strict reset SLTIU regression"))
+    if (!check(test_strict_reset_slti(), "strict reset SLTI regression") ||
+        !check(test_strict_reset_cached_slti(), "strict reset cached SLTI transaction") ||
+        !check(test_strict_reset_sltiu(), "strict reset SLTIU regression"))
     {
         return 1;
     }

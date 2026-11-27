@@ -1628,3 +1628,28 @@ cache latency or speculative fills. Commit only on retired
 instruction/atomic pair; refused slot/budget discards staged fills.
 Assert real progress through the intentional NOP sled and JAL.
 Pending CI; not a full R5900 cache model.
+
+## M6E3H3E9A: EELOAD signed immediate comparison
+
+H3E8B passed both pinned releases at 516091e9:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46063890489
+Both stopped at cached EELOAD main 00082100, opcode 28880002
+(SLTI t0,a0,2), after 696448 / 696640 retirements; three
+I-cache lines were resident and the refused fourth fill rolled back.
+The actual firmware-installed backing and serial output remain required.
+
+Implement SLTI in the bounded reset register executor using the existing
+architecture signed comparison and immediate sign-extension helpers.
+The result is 0/1 in the low 64-bit GPR half; upper halves and zero are
+preserved. PCSX2 R5900OpcodeImpl.cpp confirms these semantics; the
+ps2-web-recomp primary opcode table and existing production decoder/lift
+already include SLTI. No production/native lowering is changed.
+Directed tests cover signed 64-bit and immediate boundaries, aliases,
+zero and slot budget refusal; a mapped cache regression verifies two
+transactional fills across a branch/SLTI slot boundary.
+The known adjacent EELOAD BNE/BEQ, NOP, ADDU, LUI, ORI and ADDIU
+already have executor coverage. LW is supported only within the existing
+bounded data contract; do not bypass cached data access or syscall entry.
+Require real-ROM progress beyond 696448 / 696640, retaining the original
+isolated regressions and all backing assertions. Pending firmware CI.
+No retail replay required; do not claim syscall execution or full boot.

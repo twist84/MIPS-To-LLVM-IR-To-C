@@ -3,6 +3,7 @@
 #include "ee_strict_rom0.h"
 #include "ee_strict_partial_merge.h"
 #include "ee_strict_branch.h"
+#include "../architecture/ee_scalar_constant.h"
 
 namespace ee
 {
@@ -717,6 +718,10 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return false;
         }
         break;
+    case 0x0au: // SLTI: signed low 64-bit comparison, signed immediate
+        value = scalar_constant::signed_less(read_gpr(cpu, rs),
+            scalar_constant::sign_extend<16>(imm)) ? 1u : 0u;
+        break;
     case 0x0bu: // SLTIU: unsigned low 64-bit comparison, signed immediate
         value = read_gpr(cpu, rs) <
             sign_extend_word(imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) ? 1u : 0u;
@@ -750,6 +755,19 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     }
     return true;
 }
+
+// Exercise the actual register executor at compile time, including
+// signed 64-bit ordering, negative immediates and the upper GPR half.
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[4] = {0x8000000000000000ull, 0u};
+    cpu.m_gpr[8] = {0u, 0xabcdefu};
+    return execute_register_word(cpu, 0x2888ffffu, nullptr) &&
+        cpu.m_gpr[8].m_lo == 1u && cpu.m_gpr[8].m_hi == 0xabcdefu &&
+        execute_register_word(cpu, 0x2908ffffu, nullptr) &&
+        cpu.m_gpr[8].m_lo == 0u && cpu.m_gpr[8].m_hi == 0xabcdefu;
+}());
 
 // LBU/LW/LQ read ROM or explicitly backed uncached RAM; SB/SW/SQ write RAM.
 // SB to the exact SIO TX register additionally requires an explicit sink.

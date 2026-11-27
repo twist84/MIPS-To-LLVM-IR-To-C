@@ -83,7 +83,7 @@ jobs:
           log = Path("dual-rom0-v06.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 696407 + 40, log
+          assert stop and int(stop[1]) > 696448, log
           assert serial and int(serial[1]) > 0, log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
@@ -313,7 +313,7 @@ jobs:
           log = Path("dual-rom0-v07.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 696599 + 40, log
+          assert stop and int(stop[1]) > 696640, log
           assert serial and int(serial[1]) > 0, log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
