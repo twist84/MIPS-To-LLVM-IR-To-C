@@ -17,7 +17,7 @@ from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatch
 
 
 from audit_iop_indirect_targets import constant_indirect_targets
-from audit_iop_jump_tables import indexed_load_base, table_candidates
+from audit_iop_jump_tables import indexed_load_base, table_candidates, discover_table_edges
 
 
 BASE = 0x10000
@@ -339,12 +339,35 @@ class DiscoveryTest(unittest.TestCase):
         self.assertFalse(table["bound_proven"])
         self.assertFalse(table["entries"][0]["linked_word_verified"])
         self.assertFalse(table["entries"][0]["already_ordinary"])
+        shadow = discover_table_edges(meta, linked, discovery, [], tables)
+        self.assertEqual(shadow["candidate_edges"], [
+            {"site": BASE + 16, "target": BASE + 24}])
+        self.assertEqual(shadow["newly_reached_pcs"], [BASE + 24, BASE + 28])
+        self.assertEqual(shadow["new_function_entries"], [])
+        self.assertIn(BASE + 24, shadow["inventory"]["regions"][0]["ordinary_pcs"])
+        self.assertIn("indirect_jump", {x["kind"] for x in shadow["inventory"]["unresolved"]})
+        self.assertFalse(shadow["bounds_proven"])
+        self.assertEqual(inventory(meta, linked, extended=True), discovery)
+        with self.assertRaises(ValueError):
+            inventory(meta, linked, extended=True, candidate_jump_edges=[(BASE, BASE + 24)])
         parsed["relocations"].append({"offset": 36, "type": 2})
         self.assertEqual(len(table_candidates(meta, linked, parsed, original,
                                               discovery, indirect)[0]["entries"]), 1)
         parsed["sections"][1]["flags"] = 6
         self.assertEqual(table_candidates(meta, linked, parsed, original,
                                           discovery, indirect)[0]["entries"], [])
+
+    def test_table_shadow_reports_shared_ownership(self):
+        # Two independently seeded JR paths reach the same return block.
+        meta, data = capture([0x00400008, 0, 0x00600008, 0, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        baseline = inventory(meta, data, extended=True)
+        tables = [{"site": site, "entries": [{"target": BASE + 16}]}
+                  for site in (BASE, BASE + 8)]
+        shadow = discover_table_edges(meta, data, baseline, [], tables)
+        self.assertEqual(shadow["inventory"]["shared_ordinary_pcs"],
+                         [{"pc": BASE + 16, "entries": [BASE, BASE + 8]}])
+        self.assertEqual(shadow["new_function_entries"], [])
 
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:

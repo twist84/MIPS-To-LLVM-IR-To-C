@@ -113,12 +113,45 @@ def table_candidates(metadata, linked, parsed, original, discovery, indirect,
     return result
 
 
+def discover_table_edges(metadata, linked, discovery, roots, tables):
+    """Reconstruct a shadow CFG with non-exhaustive table candidate edges.
+
+    Retain unresolved indirect jumps; do not promote targets into roots.
+    Report conflicts instead of silently choosing an owner.
+    """
+    pairs = sorted({(table["site"], entry["target"])
+                    for table in tables for entry in table["entries"]})
+    sites = {row["pc"] for row in discovery["unresolved"]
+             if row["kind"] == "indirect_jump"}
+    if any(site not in sites for site, _ in pairs):
+        raise ValueError("table candidate source not in baseline indirect inventory")
+    expanded = inventory(metadata, linked, extended=True,
+                         relocated_call_entries=roots, candidate_jump_edges=pairs)
+    old = {pc for region in discovery["regions"]
+           for pc in region["ordinary_pcs"] + region["delay_pcs"]}
+    new = {pc for region in expanded["regions"]
+           for pc in region["ordinary_pcs"] + region["delay_pcs"]}
+    old_entries = {region["entry"] for region in discovery["regions"]}
+    new_entries = {region["entry"] for region in expanded["regions"]}
+    return {
+        "candidate_edges": [{"site": site, "target": target} for site, target in pairs],
+        "newly_reached_pcs": sorted(new - old),
+        "new_function_entries": sorted(new_entries - old_entries),
+        "previous_candidate_count": discovery["candidate_count"],
+        "previous_unvisited_words": discovery["unvisited_aligned_words"],
+        "inventory": expanded,
+        "bounds_proven": False,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--disc-root", type=Path, required=True)
     parser.add_argument("--relocation-receipt", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--discover-targets", action="store_true",
+                        help="Shadow CFG with non-exhaustive table candidate edges")
     args = parser.parse_args()
     try:
         receipt = json.loads(args.relocation_receipt.read_text(encoding="utf-8"))
@@ -151,10 +184,14 @@ def main():
             tables = table_candidates(metadata, linked, parsed, original, discovery, indirect)
             new_targets = sorted({e["target"] for t in tables for e in t["entries"]
                                   if not e["already_ordinary"] and not e["already_delay"]})
-            modules.append({"capture_stem": path.stem, "base": metadata["base"],
-                            "text_size": len(linked), "hash": metadata["hash"],
-                            "elf_sha256": match["elf_sha256"], "tables": tables,
-                            "new_jump_candidates": new_targets})
+            module = {"capture_stem": path.stem, "base": metadata["base"],
+                      "text_size": len(linked), "hash": metadata["hash"],
+                      "elf_sha256": match["elf_sha256"], "tables": tables,
+                      "new_jump_candidates": new_targets}
+            if args.discover_targets:
+                module["table_discovery"] = discover_table_edges(
+                    metadata, linked, discovery, roots, tables)
+            modules.append(module)
         if not modules:
             raise ValueError("no captures")
         with args.out.open("x", encoding="utf-8") as output:
@@ -172,6 +209,15 @@ def main():
                 print(f"  JR {t['site']:08x}: "
                       f"{format(address, '08x') if address is not None else 'unknown'} "
                       f"{len(t['entries'])} slots; {t['stop']}")
+            if args.discover_targets:
+                shadow = module["table_discovery"]
+                inv = shadow["inventory"]
+                print(f"  CFG shadow: {len(shadow['candidate_edges'])} edges, "
+                      f"{len(shadow['newly_reached_pcs'])} new words, "
+                      f"{len(shadow['new_function_entries'])} new function roots, "
+                      f"{len(inv['shared_ordinary_pcs'])} shared PCs, "
+                      f"{len(inv['ordinary_delay_overlap'])} delay overlaps, "
+                      f"{inv['unvisited_aligned_words']} unvisited words")
         print(f"Receipt: {args.out}")
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         parser.exit(1, f"IOP jump table audit: {exc}\n")

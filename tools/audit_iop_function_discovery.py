@@ -104,9 +104,10 @@ def frame_candidates(base, data, excluded):
                 break
 
 
-def inventory(metadata, data, extended=False, relocated_call_entries=()):
-    if relocated_call_entries and not extended:
-        raise ValueError("relocation roots require extended discovery")
+def inventory(metadata, data, extended=False, relocated_call_entries=(),
+              candidate_jump_edges=()):
+    if (relocated_call_entries or candidate_jump_edges) and not extended:
+        raise ValueError("additional roots and edges require extended discovery")
     base, size = metadata["base"], metadata["text_size"]
     digest = metadata["hash"]
     if (type(base) is not int or type(size) is not int or base & 3 or
@@ -124,6 +125,12 @@ def inventory(metadata, data, extended=False, relocated_call_entries=()):
 
     def word_at(pc):
         return struct.unpack_from("<I", data, pc - base)[0]
+
+    jump_targets = collections.defaultdict(set)
+    for site, target in candidate_jump_edges:
+        if not contains(site) or not contains(target) or classify(word_at(site)) != "indirect_jump":
+            raise ValueError("invalid candidate indirect jump edge")
+        jump_targets[site].add(target)
 
     seeds = collections.defaultdict(set)
     rejected = []
@@ -218,6 +225,16 @@ def inventory(metadata, data, extended=False, relocated_call_entries=()):
             unresolved.add((pc, pc, kind))
             if kind == "indirect_call":
                 edge(pc, resume, "call_resume")
+            elif kind == "indirect_jump":
+                # Candidate edges extend the originating function; they
+                # are neither function roots nor exhaustive runtime targets.
+                for target in sorted(jump_targets[pc]):
+                    edge(pc, target, "candidate_table_jump")
+
+    if any(site not in graph or not any(
+            (site, target, "candidate_table_jump") in edges
+            for target in targets) for site, targets in jump_targets.items() if targets):
+        raise ValueError("candidate indirect jump site not traversable")
 
     owners = collections.defaultdict(set)
     regions = []

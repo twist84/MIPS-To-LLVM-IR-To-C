@@ -415,3 +415,23 @@ ownership and the first stopping reason. These are pointer-run candidates,
 not proven switch bounds or immutable live values. No automatic roots,
 CFG changes, builder changes or runtime changes. Missing scale/base
 producers and indirect calls remain outside this audit.
+
+## I13a measured result / I13b table-edge shadow
+
+I13a receipt SHA256 36fc70a48053374f76686da93ff89557be178999a596b0889f4ac2c7e829435d.
+Six candidate .rodata tables out of ten indirect JR sites; 138 slots,
+51 distinct source-target edges, 46 previously unreached destinations.
+ARKD_DVD: four tables (18/50/33/8 slots), 30 new destinations.
+LIBSD: two tables (9/20 slots), 16 new destinations. Remaining two
+MCMAN and two LIBSD sites have unsupported address expressions.
+All slots outside linked capture; no live word verification or proven bounds.
+
+I13b adds --discover-targets to the table audit. Recompute candidates
+from the same pinned original ELF and capture, deduplicate site-target
+pairs, validate aligned in-text indirect jump sources/targets, and add
+candidate CFG edges to the existing recursive ownership walk. They are
+not function entry roots; any newly found direct call roots are reported
+separately. Retain unresolved indirect jumps and report ownership conflicts
+without resolving them. Candidate table edges never feed the builder or
+runtime. Synthetic tests verify same-function discovery, shared ownership,
+invalid source rejection and unchanged default inventory. I11 stays pinned.
