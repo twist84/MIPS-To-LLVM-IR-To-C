@@ -662,9 +662,10 @@ constexpr bool test_data_bus_spans()
         }
     }
     const auto span = [](uint32_t address, uint32_t width,
-                         uint64_t size = 0x02000000u)
+                         uint64_t size = 0x02000000u,
+                         uint64_t iop_size = 0u)
     {
-        return ee::ee_classify_physical_span(address, width, size);
+        return ee::ee_classify_physical_span(address, width, size, iop_size);
     };
     if (span(0u, 16u) != region::RAM ||
         span(ram - 16u, 16u) != region::RAM ||
@@ -684,6 +685,12 @@ constexpr bool test_data_bus_spans()
         span(0x11003fffu, 2u) != region::INVALID_SPAN ||
         span(0x11005000u, 4u) != region::DEVICE ||
         span(0x12ffffffu, 2u) != region::INVALID_SPAN ||
+        span(0x1bffffffu, 2u, ram, ee::k_iop_ram_backing_size) != region::INVALID_SPAN ||
+        span(0x1c000000u, 16u, ram, ee::k_iop_ram_backing_size) != region::IOP_RAM ||
+        span(0x1c000000u, 4u, ram, 0u) != region::IOP_RAM_BACKING_UNAVAILABLE ||
+        span(0x1c7fffffu, 1u, ram, ee::k_iop_ram_backing_size) != region::IOP_RAM ||
+        span(0x1c7fffffu, 2u, ram, ee::k_iop_ram_backing_size) != region::INVALID_SPAN ||
+        span(0x1c800000u, 1u, ram, ee::k_iop_ram_backing_size) != region::UNMODELED ||
         span(0x1fbfffffu, 2u) != region::INVALID_SPAN ||
         span(0x1fc00000u, 4u) != region::ROM0 ||
         span(0x1fffffffu, 2u) != region::INVALID_SPAN ||
@@ -698,6 +705,9 @@ constexpr bool test_data_bus_spans()
     const auto last = ee::ee_plan_data_bus_span(scratch, 1u, dce, ram);
     const auto crossed = ee::ee_plan_data_bus_span(scratch, 2u, dce, ram);
     const auto fault = ee::ee_plan_data_bus_span({result::TLB_REFILL}, 4u, dce, ram);
+    const auto iop_ram_access = ee::ee_plan_data_bus_span(
+        {result::PHYSICAL, 0x1c042f00u, 2u}, 4u, 0u, ram,
+        ee::k_iop_ram_backing_size);
     ee::c_ee_tlb tlb{};
     const auto left = ee::ee_plan_partial_access(tlb,
         ee::e_ee_partial_access_kind::WORD_LEFT, true,
@@ -711,6 +721,10 @@ constexpr bool test_data_bus_spans()
            last.m_address == 0x3fffu && last.m_cache_policy == policy::SCRATCHPAD &&
            crossed.m_region == region::INVALID_SPAN &&
            fault.m_region == region::UNMODELED && fault.m_cache_policy == policy::UNMODELED &&
+           iop_ram_access.m_region == region::IOP_RAM &&
+           iop_ram_access.m_address == 0x1c042f00u &&
+           iop_ram_access.m_width == 4u &&
+           iop_ram_access.m_cache_policy == policy::UNCACHED &&
            left_span.m_region == region::RAM && left_span.m_address == 0x1000u &&
            left_span.m_width == 3u && left_span.m_cache_policy == policy::UNCACHED &&
            right_span.m_region == region::RAM && right_span.m_address == 0x1002u &&

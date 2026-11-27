@@ -66,12 +66,18 @@ enum class e_ee_bus_region : uint8_t
     INVALID_SPAN,
     RAM,
     RAM_BACKING_UNAVAILABLE,
+    IOP_RAM,
+    IOP_RAM_BACKING_UNAVAILABLE,
     SCRATCHPAD,
     VU0_CODE,
     VU0_DATA,
     DEVICE,
     ROM0
 };
+
+inline constexpr uint32_t k_ee_iop_ram_aperture_base = 0x1c000000u;
+inline constexpr uint32_t k_ee_iop_ram_aperture_size = 0x00800000u;
+inline constexpr uint32_t k_iop_ram_backing_size = 0x00200000u;
 
 struct s_ee_bus_span_plan
 {
@@ -92,7 +98,8 @@ inline constexpr bool ee_bus_span_inside(uint32_t address, uint32_t width,
 }
 
 inline constexpr e_ee_bus_region ee_classify_physical_span(
-    uint32_t address, uint32_t width, uint64_t ram_backing_size)
+    uint32_t address, uint32_t width, uint64_t ram_backing_size,
+    uint64_t iop_ram_backing_size = 0u)
 {
     using region = e_ee_bus_region;
     constexpr uint64_t end32 = uint64_t{1} << 32u;
@@ -102,6 +109,9 @@ inline constexpr e_ee_bus_region ee_classify_physical_span(
     constexpr uint64_t vu_code = 0x11000000u;
     constexpr uint64_t vu_data = 0x11004000u;
     constexpr uint64_t vu_size = 0x1000u;
+    constexpr uint64_t iop_ram_first = k_ee_iop_ram_aperture_base;
+    constexpr uint64_t iop_ram_end =
+        iop_ram_first + k_ee_iop_ram_aperture_size;
     constexpr uint64_t rom_first = 0x1fc00000u;
     constexpr uint64_t rom_end = 0x20000000u;
     const uint64_t end = static_cast<uint64_t>(address) + width;
@@ -125,6 +135,15 @@ inline constexpr e_ee_bus_region ee_classify_physical_span(
     }
     else if ((address < vu_code + vu_size && end > vu_code) ||
              (address < vu_data + vu_size && end > vu_data))
+    {
+        value = region::INVALID_SPAN;
+    }
+    else if (ee_bus_span_inside(address, width, iop_ram_first, iop_ram_end))
+    {
+        value = iop_ram_backing_size >= k_iop_ram_backing_size
+            ? region::IOP_RAM : region::IOP_RAM_BACKING_UNAVAILABLE;
+    }
+    else if (address < iop_ram_end && end > iop_ram_first)
     {
         value = region::INVALID_SPAN;
     }
@@ -152,7 +171,8 @@ inline constexpr e_ee_bus_region ee_classify_physical_span(
 // architectural DBE is invented for an unimplemented host region.
 inline constexpr s_ee_bus_span_plan ee_plan_data_bus_span(
     const s_ee_access_decision& access, uint32_t width,
-    uint32_t config, uint64_t ram_backing_size)
+    uint32_t config, uint64_t ram_backing_size,
+    uint64_t iop_ram_backing_size = 0u)
 {
     using region = e_ee_bus_region;
     using result = e_ee_access_status;
@@ -163,7 +183,7 @@ inline constexpr s_ee_bus_span_plan ee_plan_data_bus_span(
     {
         plan.m_address = access.m_physical_address;
         plan.m_region = ee_classify_physical_span(plan.m_address, width,
-                                                ram_backing_size);
+            ram_backing_size, iop_ram_backing_size);
     }
     else if (access.m_status == result::SCRATCHPAD)
     {
@@ -179,7 +199,7 @@ inline constexpr s_ee_bus_span_plan ee_plan_data_bus_span(
 // byte (LEFT). Derive the physical span from the aligned container.
 inline constexpr s_ee_bus_span_plan ee_plan_partial_bus_span(
     const s_ee_partial_access_plan& partial, uint32_t config,
-    uint64_t ram_backing_size)
+    uint64_t ram_backing_size, uint64_t iop_ram_backing_size = 0u)
 {
     auto access = partial.m_access;
     if (partial.m_width != 4u && partial.m_width != 8u)
@@ -203,7 +223,7 @@ inline constexpr s_ee_bus_span_plan ee_plan_partial_bus_span(
             partial.m_memory_first_lane;
     }
     return ee_plan_data_bus_span(access, partial.m_lane_count, config,
-                                 ram_backing_size);
+        ram_backing_size, iop_ram_backing_size);
 }
 
 } // namespace ee
