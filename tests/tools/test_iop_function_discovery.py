@@ -497,6 +497,62 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual({row["pc"] for row in capped["inventory"]["unresolved"]
                           if row["kind"] == "indirect_jump"}, {BASE, BASE + 8})
 
+    def test_cross_block_table_backed_plan_is_opt_in(self):
+        meta, linked = capture([jump(2, BASE + 12), 0x00041080, 0,
+                                0x3c030001, 0x00431021, 0x8c42002c, 0,
+                                0x00400008, 0, 0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = linked + struct.pack("<I", 36)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [
+                      {"name": ".text", "type": 1, "flags": 6,
+                       "address": 0, "size": len(linked)},
+                      {"name": ".rodata", "type": 1, "flags": 2,
+                       "address": len(linked), "size": 4}],
+                  "relocations": [{"offset": len(linked), "type": 2}]}
+        baseline = inventory(meta, linked, extended=True)
+        indirect = constant_indirect_targets(meta, linked, baseline,
+                                             audit_producers=True, cross_block=True)
+        context = indirect["unresolved"][0]["context_instructions"]
+        self.assertEqual(context[:2], [
+            {"pc": BASE, "word": f"{jump(2, BASE + 12):08x}"},
+            {"pc": BASE + 4, "word": "00041080"}])
+        comparison = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, comparison, baseline)
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{
+                       "path": "module.irx", "elf_sha256": hashlib.sha256(original).hexdigest(),
+                       "metadata": parsed, "comparison": comparison,
+                       "relocation_discovery": shadow}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            disc = root / "disc"
+            disc.mkdir()
+            (disc / "module.irx").write_bytes(original)
+            (root / "CANONICAL.json").write_text(json.dumps(dict(meta, name="CANONICAL")))
+            (root / "CANONICAL.bin").write_bytes(linked)
+            with patch("audit_iop_irx_metadata.parse_irx", return_value=(parsed, original)):
+                local = prepare_split_pilot(root, "CANONICAL", root / "local",
+                                            residual=True, extended=True,
+                                            relocation_receipt=receipt, table_disc_root=disc)
+                cross = prepare_split_pilot(root, "CANONICAL", root / "cross",
+                                            residual=True, extended=True,
+                                            relocation_receipt=receipt, table_disc_root=disc,
+                                            cross_block_tables=True)
+                local_rows = [list(map(int, line.split()))[1:]
+                              for line in local.read_text().splitlines()[1:]]
+                cross_rows = [list(map(int, line.split()))[1:]
+                              for line in cross.read_text().splitlines()[1:]]
+                self.assertIn(BASE + 36, local_rows[-1])
+                self.assertIn(BASE + 36, cross_rows[0])
+                self.assertNotIn(BASE + 36, cross_rows[-1])
+                self.assertEqual(sorted(pc for row in cross_rows for pc in row),
+                                 list(range(BASE, BASE + len(linked), 4)))
+            with self.assertRaisesRegex(ValueError, "requires original ELF table discovery"):
+                prepare_split_pilot(root, "CANONICAL", root / "missing",
+                                    residual=True, extended=True, cross_block_tables=True)
+
     def test_table_shadow_reports_shared_ownership(self):
         # Two independently seeded JR paths reach the same return block.
         meta, data = capture([0x00400008, 0, 0x00600008, 0, 0x03e00008, 0],
