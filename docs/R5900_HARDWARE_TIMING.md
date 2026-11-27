@@ -75,3 +75,8 @@ linked executable body's alignment, length and exact instruction bytes
 against the generator before uploading the ELF, traces and provenance.
 No SDK is required for ordinary host builds. Successful cross-compilation
 and opcode verification still do not constitute hardware execution.
+
+Strict candidate CSV export now rejects an empty stream, a missing ordinary or
+likely delay slot, an illegal executed nested branch, and a trace ending with an
+unresolved delay slot even if its footer says non-truncated. Partial valid
+prefixes remain available to offline analysis but are not complete timelines.

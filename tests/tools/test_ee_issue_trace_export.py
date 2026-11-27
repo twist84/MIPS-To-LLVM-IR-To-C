@@ -368,6 +368,27 @@ def main() -> int:
             qfsrv.stdout, qfsrv.stderr
         )
 
+        # A footer alone cannot certify an empty trace or unresolved delay.
+        for label, body in (
+            ("empty", ""),
+            ("ordinary-dangling", "1,0x00001000,0x11090001,0,1,0\n"),
+            ("likely-dangling", "1,0x00001000,0x51600001,0,1,0\n"),
+            ("ordinary-missing-slot", "1,0x00001000,0x11090001,0,1,0\n"
+                                      "2,0x00001008,0x00000000,0,2,0\n"),
+            ("branch-in-slot", "1,0x00001000,0x11090001,0,1,0\n"
+                               "2,0x00001004,0x11090001,0,2,0\n"),
+        ):
+            trace = root / f"{label}.csv"
+            trace.write_text("attempt,pc,opcode_word,kind,reference_slot,hle_service\n"
+                             + body + "# truncated=false range=0x00001000:0x00001008\n",
+                             encoding="utf-8")
+            output_path = root / f"{label}-candidate.csv"
+            invalid = subprocess.run([str(binary), str(trace), "1", "3",
+                                      f"--candidate-events={output_path}"],
+                                     capture_output=True, text=True)
+            assert invalid.returncode == 3, invalid.stdout + invalid.stderr
+            assert not output_path.exists()
+
         # The replay must refuse HLE transitions and a partial trace,
         # without producing a deceptively complete candidate CSV.
         original = fixture.read_text(encoding="utf-8")

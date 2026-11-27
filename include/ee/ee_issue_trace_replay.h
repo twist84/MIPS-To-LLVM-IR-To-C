@@ -136,6 +136,7 @@ public:
         m_failed = false;
         m_next_slot = 1u;
         m_next_attempt = 1u;
+        m_pending_delay_slot = false;
         m_pending_likely_slot = false;
         m_delay_pc = 0u;
         m_failure_pc = 0u;
@@ -168,7 +169,7 @@ public:
         {
             return fail(e_ee_issue_replay_status::INCOMPLETE_STREAM, entry.m_pc);
         }
-        if (m_pending_likely_slot && entry.m_pc != m_delay_pc)
+        if (m_pending_delay_slot && entry.m_pc != m_delay_pc)
         {
             return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
         }
@@ -180,6 +181,7 @@ public:
             {
                 return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
             }
+            m_pending_delay_slot = false;
             m_pending_likely_slot = false;
             m_last_event_cycle = m_probe.estimated_cycles() - 1u;
             ++m_next_slot;
@@ -193,6 +195,12 @@ public:
         }
 
         const s_ee_instruction decoded = decode(entry.m_pc, entry.m_opcode_word);
+        // EE Core Manual section 1.3.6: a branch in an executed branch
+        // delay slot is illegal. Do not synthesize its successor timeline.
+        if (m_pending_delay_slot && decoded.has_delay_slot)
+        {
+            return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
+        }
         s_ee_probe_instruction instruction{};
         if (decoded.valid != e_ee_valid::VALID ||
             !classify(decoded, &instruction))
@@ -206,6 +214,7 @@ public:
         }
         m_last_event_cycle = issue_cycle;
 
+        m_pending_delay_slot = decoded.has_delay_slot;
         m_pending_likely_slot = decoded.branch_likely;
         m_delay_pc = decoded.pc + 4u;
         ++m_next_slot;
@@ -214,6 +223,11 @@ public:
     }
 
     bool usable_prefix() const { return m_configured && !m_failed; }
+    bool complete_stream() const
+    {
+        return usable_prefix() && !m_pending_delay_slot &&
+               m_probe.instructions_issued() != 0u;
+    }
     uint64_t candidate_cycles() const { return m_probe.estimated_cycles(); }
     const s_ee_probe_cycle_breakdown& cycle_breakdown() const
     {
@@ -1028,6 +1042,7 @@ private:
     s_ee_issue_replay_profile m_profile{};
     bool m_configured = false;
     bool m_failed = false;
+    bool m_pending_delay_slot = false;
     bool m_pending_likely_slot = false;
     uint32_t m_delay_pc = 0u;
     uint32_t m_failure_pc = 0u;

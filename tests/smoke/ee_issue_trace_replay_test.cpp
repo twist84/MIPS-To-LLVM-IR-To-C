@@ -83,6 +83,36 @@ int main()
           e_ee_issue_replay_status::INVALID_SLOT,
           "annulment requires exact preceding branch-likely delay address");
 
+    constexpr uint32_t beq = 0x11090001u;
+    replay.configure({1u, 3u});
+    check(!replay.complete_stream() &&
+          replay.observe(record(1u, 0x1000u, beq, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+          replay.usable_prefix() && !replay.complete_stream() &&
+          replay.observe(record(2u, 0x1004u, 0u, 2u, 2u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+          replay.complete_stream(),
+          "ordinary branch requires executed delay slot, even across native/RAM");
+    replay.configure({1u, 3u});
+    check(replay.observe(record(1u, 0x1000u, beq, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(2u, 0x1008u, 0u, 0u, 2u)) ==
+              e_ee_issue_replay_status::INVALID_SLOT &&
+          !replay.complete_stream(),
+          "ordinary branch cannot skip its executed delay slot");
+    replay.configure({1u, 3u});
+    check(replay.observe(record(1u, 0x1000u, beq, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(1u, 0x1004u, 0u, 1u, 2u)) ==
+              e_ee_issue_replay_status::INVALID_SLOT,
+          "ordinary branch cannot annul its delay slot");
+    replay.configure({1u, 3u});
+    check(replay.observe(record(1u, 0x1000u, beq, 0u, 1u)) ==
+              e_ee_issue_replay_status::ISSUED &&
+          replay.observe(record(2u, 0x1004u, beq, 0u, 2u)) ==
+              e_ee_issue_replay_status::INVALID_SLOT,
+          "executed nested branch delay slot is illegal");
+
     replay.configure({1u, 3u});
     check(replay.observe(record(1u, 0x1000u, 0x0000000cu, 0u, 1u)) ==
           e_ee_issue_replay_status::UNMODELED_INSTRUCTION,

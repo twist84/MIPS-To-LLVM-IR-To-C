@@ -329,10 +329,10 @@ int main(int argc, char** argv)
         }
         ++event_count;
     }
-    if (!complete_footer || std::getline(input, line))
+    if (!complete_footer || !replay.complete_stream() || std::getline(input, line))
     {
         std::fprintf(stderr,
-            "trace is truncated or lacks a complete footer "
+            "trace is empty, truncated, ends in an unresolved delay slot or lacks a complete footer "
             "(NO absolute timing claimed)\n");
         return 3;
     }
