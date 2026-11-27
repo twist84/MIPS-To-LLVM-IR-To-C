@@ -322,8 +322,20 @@ bool c_hw::process_sio2_packet()
                 // PS2 pad button bits are active-low: Cross is bit 14,
                 // the upper byte's bit 6. Only a genuine guest 0x42
                 // read on a connected port-0 pad consumes the probe.
-                uint16_t buttons = m_pad0_buttons;
                 ++m_sio2_pad0_poll_count;
+                s_pad0_poll input{};
+                input.m_poll = m_sio2_pad0_poll_count;
+                input.m_mode = pad.m_mode | (pad.m_config ? 0x100u : 0u);
+                input.m_input_size = in_size;
+                input.m_output_size = out_size;
+                input.m_buttons = m_pad0_buttons;
+                std::copy_n(m_pad0_axes, 4u, input.m_axes);
+                if (m_pad0_poll != nullptr &&
+                    !m_pad0_poll(m_pad0_poll_user, input))
+                {
+                    return false;
+                }
+                uint16_t buttons = input.m_buttons;
                 if (m_sio2_pad0_cross_poll_count != 0u &&
                     m_sio2_pad0_poll_count >=
                         m_sio2_pad0_cross_first_poll &&
@@ -357,7 +369,7 @@ bool c_hw::process_sio2_packet()
                 {
                     for (uint32_t index = 0u; index < 4u; ++index)
                     {
-                        put(5u + index, m_pad0_axes[index]);
+                        put(5u + index, input.m_axes[index]);
                     }
                 }
                 if (pad.m_mode == 0x79u)
@@ -368,7 +380,7 @@ bool c_hw::process_sio2_packet()
                     for (uint32_t index = 0u; index < sizeof(pressure_bits); ++index)
                     {
                         put(9u + index,
-                            (m_pad0_buttons & (1u << pressure_bits[index])) != 0u ?
+                            (input.m_buttons & (1u << pressure_bits[index])) != 0u ?
                                 0xffu : 0u);
                     }
                 }
@@ -749,22 +761,22 @@ void c_hw::start_spu2_dma(uint32_t core)
         m_spu2_dma_remaining[core]);
 }
 
-uint32_t c_hw::spu2_dma_cycles_remaining() const
+uint32_t c_hw::spu2_dma_refill_cycles_remaining() const
 {
-    uint32_t earliest = 0u;
-    for (uint32_t core = 0u; core < 2u; ++core)
+    // Ordinary DMA uses only two countdowns. The refill query is
+    // needed solely for an active AutoDMA transfer with bytes left.
+    uint32_t first = m_spu2_dma_remaining[0u];
+    uint32_t second = m_spu2_dma_remaining[1u];
+    if (m_spu2_auto[0u].m_active && m_spu2_auto[0u].m_bytes != 0u)
     {
-        uint32_t left = m_spu2_dma_remaining[core];
-        if (m_spu2_auto[core].m_active && m_spu2_auto[core].m_bytes != 0u)
-        {
-            left = m_spu2.input_refill_cycles(core);
-        }
-        if (left != 0u && (earliest == 0u || left < earliest))
-        {
-            earliest = left;
-        }
+        first = m_spu2.input_refill_cycles(0u);
     }
-    return earliest;
+    if (m_spu2_auto[1u].m_active && m_spu2_auto[1u].m_bytes != 0u)
+    {
+        second = m_spu2.input_refill_cycles(1u);
+    }
+    return first == 0u ? second :
+        (second == 0u ? first : std::min(first, second));
 }
 
 void c_hw::feed_spu2_input(uint32_t core)
@@ -1765,6 +1777,61 @@ uint32_t c_hw::cache_control() const
     return m_cache_control;
 }
 
+uint64_t c_hw::idle_event_cycles_remaining() const
+{
+    constexpr uint64_t none = UINT64_MAX;
+    if (pending_interrupts() != 0u || m_cdvd_ncmd_pending)
+    {
+        return 0u;
+    }
+    // AutoDMA may refill at a sample batch boundary. Do not attempt
+    // to look past its externally initiated transfer state.
+    if (m_spu2_auto[0u].m_active || m_spu2_auto[1u].m_active)
+    {
+        return 0u;
+    }
+    uint64_t next = none;
+    // AutoDMA was rejected above. Only the ordinary two countdowns
+    // can contribute here; no input-refill query or generic DMA scan.
+    const uint32_t dma0 = m_spu2_dma_remaining[0u];
+    const uint32_t dma1 = m_spu2_dma_remaining[1u];
+    if (dma0 != 0u)
+    {
+        next = dma0;
+    }
+    if (dma1 != 0u)
+    {
+        next = std::min(next, static_cast<uint64_t>(dma1));
+    }
+    // Even with IRQs disabled the mixer can write guest sound RAM.
+    // Stop at the next sample, not only at a predicted voice IRQ.
+    if (m_spu2.clock_active())
+    {
+        next = std::min(next, static_cast<uint64_t>(
+            c_spu2::k_cycles_per_sample - m_spu2.sample_phase()));
+    }
+    // Mode zero has a unit divisor and cannot compare or raise an IRQ.
+    // Mode/count writes reset the prescaler remainder.
+    if (m_timer5_mode == 0u)
+    {
+        return std::min(next, (uint64_t{1u} << 32u) - m_timer5_count);
+    }
+    // Mirror the modeled Timer5 compare condition. A counter already
+    // past target must reach rollover before a later compare is possible.
+    // Stop at rollover as well; partitioning across it is not assumed
+    // equivalent to one large advance in the current device model.
+    constexpr uint32_t shifts[4] = {0u, 3u, 4u, 8u};
+    const uint32_t shift = shifts[(m_timer5_mode >> 13u) & 3u];
+    uint64_t ticks = (uint64_t{1u} << 32u) - m_timer5_count;
+    if ((m_timer5_mode & 0x08u) != 0u &&
+        m_timer5_target != 0u && m_timer5_count < m_timer5_target)
+    {
+        ticks = m_timer5_target - m_timer5_count;
+    }
+    next = std::min(next, (ticks << shift) - m_timer5_remainder);
+    return next;
+}
+
 void c_hw::advance_cycles(uint32_t cycles)
 {
     if (cycles == 0u)
@@ -1785,6 +1852,13 @@ void c_hw::advance_cycles(uint32_t cycles)
         {
             (void)raise_interrupt(c_spu2::k_irq_line);
         }
+    }
+    // The unconfigured unit-rate counter only wraps modulo 2^32.
+    // No prescaler remainder or compare state can survive a mode-zero write.
+    if (m_timer5_mode == 0u)
+    {
+        m_timer5_count += cycles;
+        return;
     }
     // All Timer 5 divisors are powers of two. Keep the exact quotient
     // and fractional remainder without a variable 64-bit division.

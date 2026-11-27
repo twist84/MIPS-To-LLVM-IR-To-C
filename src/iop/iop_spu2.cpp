@@ -64,6 +64,7 @@ void c_spu2::report_signal_path() const
 
 void c_spu2::reset()
 {
+    m_irq_deadline_valid = false;
     m_clock_active = false;
     m_clock_cycles = 0u;
     m_decoded_blocks = 0u;
@@ -228,6 +229,10 @@ void c_spu2::check_effect_irq(uint32_t address)
     const uint32_t prior = irq_latches();
     check_input_irq(address, 1u);
     const uint32_t raised = irq_latches() & ~prior;
+    if (raised != 0u)
+    {
+        m_irq_deadline_valid = false;
+    }
     m_effect_irq_events += (raised & 1u) + ((raised >> 1u) & 1u);
 }
 
@@ -536,13 +541,19 @@ void c_spu2::advance_effect(uint32_t core, const int32_t (&input)[2],
 uint32_t c_spu2::effect_irq_cycles_remaining() const
 {
     uint64_t earliest = 0u;
+    const uint32_t sample_remainder = sample_phase();
+    const uint32_t next_sample = k_cycles_per_sample - sample_remainder;
     // Solve the circular tap address for each physical IRQA alias and
     // alternating channel. No RAM transaction or IRQ is generated here.
     for (uint32_t core = 0u; core < 2u; ++core)
     {
+        if (!effect_enabled(core))
+        {
+            continue;
+        }
         const uint32_t start = effect_start(core);
         const uint32_t end = effect_end(core);
-        if (!effect_enabled(core) || start >= end)
+        if (start >= end)
         {
             continue;
         }
@@ -550,6 +561,19 @@ uint32_t c_spu2::effect_irq_cycles_remaining() const
         for (const s_core& candidate : m_cores)
         {
             if ((candidate.m_attr & 0x40u) == 0u || candidate.m_irq)
+            {
+                continue;
+            }
+            // Physical sound RAM is mirrored in the logical effect area.
+            // Find the first alias in the work area before reading taps;
+            // a target outside it cannot be touched by any channel.
+            uint32_t first_alias = candidate.m_irqa;
+            if (first_alias < start)
+            {
+                first_alias += ((start - first_alias + k_ram_words - 1u) /
+                    k_ram_words) * k_ram_words;
+            }
+            if (first_alias > end)
             {
                 continue;
             }
@@ -571,23 +595,24 @@ uint32_t c_spu2::effect_irq_cycles_remaining() const
                     apf2, apf2 - effect_tap_offset(core, 0x2e8u)};
                 const uint64_t parity = (m_mixed_frames & 1u) ^ channel;
                 const uint64_t step = (m_mixed_frames + parity) >> 1u;
-                for (uint32_t alias = candidate.m_irqa; alias <= end; alias += k_ram_words)
+                const int64_t step_in_ring = static_cast<int64_t>(step % length);
+                for (uint32_t alias = first_alias; alias <= end; alias += k_ram_words)
                 {
-                    if (alias < start)
-                    {
-                        continue;
-                    }
                     for (int64_t tap : taps)
                     {
                         int64_t distance = static_cast<int64_t>(alias - start) -
-                            static_cast<int64_t>(step % length) - tap % length;
+                            step_in_ring - tap % length;
                         distance %= length;
                         if (distance < 0)
                         {
                             distance += length;
                         }
                         const uint64_t cycles = (static_cast<uint64_t>(distance) * 2u +
-                            parity + 1u) * k_cycles_per_sample - sample_phase();
+                            parity + 1u) * k_cycles_per_sample - sample_remainder;
+                        if (cycles == next_sample)
+                        {
+                            return next_sample;
+                        }
                         if (earliest == 0u || cycles < earliest)
                         {
                             earliest = cycles;
@@ -1084,6 +1109,7 @@ bool c_spu2::push_input(uint32_t core, const uint8_t* data, uint32_t bytes)
     {
         return false;
     }
+    m_irq_deadline_valid = false;
     s_core& state = m_cores[core];
     const uint32_t frames = bytes / 4u;
     const uint32_t base = 0x2000u + core * 0x400u;
@@ -1371,7 +1397,17 @@ void c_spu2::mix_frames(uint64_t samples)
     }
 }
 
-uint32_t c_spu2::voice_irq_cycles_remaining() const
+uint32_t c_spu2::refresh_voice_irq_deadline(uint32_t phase) const
+{
+    const uint32_t remaining = compute_voice_irq_cycles_remaining();
+    m_irq_deadline_phase = phase;
+    m_irq_deadline_remaining = remaining;
+    // A saturated result cannot safely be decremented with phase.
+    m_irq_deadline_valid = remaining != 0xffffffffu;
+    return remaining;
+}
+
+uint32_t c_spu2::compute_voice_irq_cycles_remaining() const
 {
     if (!m_clock_active ||
         (((m_cores[0].m_attr & 0x40u) == 0u || m_cores[0].m_irq) &&
@@ -1380,6 +1416,8 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         return 0u;
     }
     constexpr uint32_t block_length = 28u << 12u;
+    const uint32_t sample_remainder = sample_phase();
+    const uint32_t next_sample = k_cycles_per_sample - sample_remainder;
     uint32_t earliest = 0u;
     for (const s_core& core : m_cores)
     {
@@ -1387,16 +1425,17 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         {
             continue;
         }
-        for (uint32_t index = 0u; index < 24u; ++index)
+        const uint32_t pmon = static_cast<uint32_t>(core.m_registers[0x180u / 2u]) |
+            (static_cast<uint32_t>(core.m_registers[0x182u / 2u]) << 16u);
+        for (uint32_t index = 0u, active = core.m_key_mask & 0x00ffffffu;
+            active != 0u; ++index, active >>= 1u)
         {
-            if ((core.m_key_mask & (1u << index)) == 0u)
+            if ((active & 1u) == 0u)
             {
                 continue;
             }
             const s_voice& voice = core.m_voices[index];
             uint32_t samples = 0u;
-            const uint32_t pmon = static_cast<uint32_t>(core.m_registers[0x180u / 2u]) |
-                (static_cast<uint32_t>(core.m_registers[0x182u / 2u]) << 16u);
             if (voice.m_pending || (index != 0u && (pmon & (1u << index)) != 0u))
             {
                 // Modulation may alter the next sample's cursor step.
@@ -1411,9 +1450,16 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
                     samples = (block_length - voice.m_position + pitch - 1u) / pitch;
                 }
             }
+            // Every candidate below (including effect taps and mixer
+            // rings) is evaluated at a sample boundary. Nothing can
+            // shorten a deadline already at the very next sample.
+            if (samples == 1u)
+            {
+                return next_sample;
+            }
             if (samples != 0u)
             {
-                const uint32_t cycles = samples * k_cycles_per_sample - sample_phase();
+                const uint32_t cycles = samples * k_cycles_per_sample - sample_remainder;
                 if (earliest == 0u || cycles < earliest)
                 {
                     earliest = cycles;
@@ -1438,7 +1484,7 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
             if (distance < state.m_input_count)
             {
                 const uint32_t cycles = (distance + 1u) * k_cycles_per_sample -
-                    sample_phase();
+                    sample_remainder;
                 if (earliest == 0u || cycles < earliest)
                 {
                     earliest = cycles;
@@ -1463,7 +1509,7 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
         const uint32_t distance = (target + k_input_frames - next_tick) %
             k_input_frames;
         const uint32_t cycles = (next_tick - phase + distance) *
-            k_cycles_per_sample - sample_phase();
+            k_cycles_per_sample - sample_remainder;
         if (earliest == 0u || cycles < earliest)
         {
             earliest = cycles;
@@ -1479,22 +1525,11 @@ uint32_t c_spu2::voice_irq_cycles_remaining() const
     return earliest;
 }
 
-uint32_t c_spu2::advance_cycles(uint32_t cycles)
+uint32_t c_spu2::advance_sample_edges(uint64_t samples)
 {
-    uint32_t raised = 0u;
-    if (m_clock_active)
-    {
-        const uint64_t before = m_clock_cycles;
-        m_clock_cycles += cycles;
-        const uint64_t samples = elapsed_samples() - before / k_cycles_per_sample;
-        if (samples != 0u)
-        {
-            const uint32_t prior = irq_latches();
-            mix_frames(samples);
-            raised = irq_latches() & ~prior;
-        }
-    }
-    return raised;
+    const uint32_t prior = irq_latches();
+    mix_frames(samples);
+    return irq_latches() & ~prior;
 }
 
 uint32_t c_spu2::set_hi(uint32_t address, uint32_t value)
@@ -1546,6 +1581,7 @@ bool c_spu2::copy_dma(
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t halfwords = static_cast<uint32_t>(data.size() / 2u);
     s_core& selected = m_cores[core];
@@ -1595,6 +1631,7 @@ bool c_spu2::read(uint32_t address, uint32_t width, uint32_t* value)
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t offset = address - k_base;
     uint16_t low = 0u;
@@ -1623,6 +1660,7 @@ bool c_spu2::write(uint32_t address, uint32_t width, uint32_t value)
         return false;
     }
 
+    m_irq_deadline_valid = false;
     m_clock_active = true;
     const uint32_t offset = address - k_base;
     if (!write16(offset, static_cast<uint16_t>(value)))

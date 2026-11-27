@@ -26,6 +26,16 @@ struct s_iop_ir_module
 std::string iop_lift_module_ir(const s_iop_ir_module& module,
                                const std::string& symbol);
 
+// Experimental split lowering: each sorted, disjoint list contains ordinary
+// resume PCs; delay slots still read the original linked image. Outputs
+// one IR module per region plus a module-entry dispatcher. Unowned PCs
+// fall back, and transfers between regions return to the CPU scheduler.
+// On invalid input neither output is modified. No descriptor ABI change.
+bool iop_lift_regions_ir(const s_iop_ir_module& module,
+    const std::vector<std::vector<uint32_t>>& regions,
+    const std::string& symbol, std::vector<std::string>* code,
+    std::string* dispatcher);
+
 // Text of the table module: exports iop_aot_module_count/iop_aot_modules
 // for the given (module, symbol, hash) list.
 struct s_iop_ir_table_entry

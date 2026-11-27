@@ -404,6 +404,18 @@ int main()
                   &compiled.functions[2],
               "dispatch index maps PC zero to the first entry/zero owner");
 
+        const ee::t_ee_translated_entry overlapping_entries[] =
+        {
+            caller_entry, callee_entry, null_return_entry, host_yield_entry
+        };
+        const ee::s_ee_dispatch_table overlapping{
+            &compiled, overlapping_entries, 4u};
+        check(ee::ee_resolve_dispatch_owner_vaddr(overlapping, index,
+                  0x00100008u, caller_entry) == compiled.functions[0].vaddr &&
+              ee::ee_resolve_dispatch_owner_vaddr(overlapping, index,
+                  0x00100008u, callee_entry) == 0u,
+              "native identity uses first owner at overlapping PC");
+
         // An indexed table dispatches the same way as an unindexed one.
         ee::s_recompiled_elf calls{};
         calls.functions.push_back(
@@ -521,6 +533,22 @@ int main()
               result.guest_pc == 0x00102000u,
               "single-slice dispatch preserves budget, terminal exits and exact ownership");
 
+        check(ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100008u, caller_entry) == 0x00100000u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100010u, callee_entry) == 0x00100010u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100008u, callee_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100004u, caller_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0x00100050u, nullptr) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr(table, index,
+                  0u, caller_entry) == 0u &&
+              ee::ee_resolve_dispatch_owner_vaddr({}, index,
+                  0x00100000u, caller_entry) == 0u,
+              "native owner identity rejects wrong pointers, holes and sentinel");
+
         bool direct_same = true;
         for (uint32_t pc : {0u, 0x00100000u, 0x00100008u, 0x00100010u,
                             0x00100020u, 0x00100030u, 0x00100040u})
@@ -625,6 +653,48 @@ int main()
               "native target cache preserves exact keys, misses and invalidation");
     }
 
+    // A certificate is tied to an exact PC, callable owner and source
+    // bound. Negative results are reusable only for the same loaded owner.
+    {
+        ee::c_native_alu_identity_cache cache(true);
+        ee::c_native_alu_identity_cache disabled(false);
+        constexpr uint32_t a = 0x00100000u;
+        constexpr uint32_t b = a + 65536u * 4u;
+        uint32_t lookups = 0u;
+        const auto verify = [&](uint32_t pc, ee::t_ee_translated_entry entry,
+            uint32_t slots) -> ee::s_native_alu_identity
+        {
+            ++lookups;
+            if (pc == a && entry == caller_entry && slots == 2u)
+            {
+                return {a, true};
+            }
+            if (pc == b && entry == callee_entry)
+            {
+                return {b, false};
+            }
+            return {0u, true}; // A failed owner can never certify a path.
+        };
+        const bool ok =
+            !disabled.resolve(a, caller_entry, 2u, verify).m_certified &&
+            !cache.resolve(0u, caller_entry, 2u, verify).m_certified &&
+            !cache.resolve(a, nullptr, 2u, verify).m_certified &&
+            !cache.resolve(a, caller_entry, 0u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_owner == a &&
+            !cache.resolve(a, caller_entry, 3u, verify).m_certified &&
+            !cache.resolve(a, caller_entry, 3u, verify).m_certified &&
+            !cache.resolve(a, callee_entry, 2u, verify).m_certified &&
+            cache.resolve(b, callee_entry, 2u, verify).m_owner == b &&
+            !cache.resolve(b, callee_entry, 2u, verify).m_certified &&
+            cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+            cache.hits() == 3u && cache.misses() == 5u && lookups == 5u;
+        cache.clear();
+        check(ok && cache.resolve(a, caller_entry, 2u, verify).m_certified &&
+              cache.misses() == 6u && lookups == 6u,
+              "native ALU identity cache preserves exact proof keys and lifetime");
+    }
+
     // Exhaust all control-bit combinations and individual interrupt lines,
     // with the pending line either masked or unmasked.
     bool eligibility_same = !ee::ee_interrupts_enabled_inline(nullptr);
@@ -645,7 +715,8 @@ int main()
                     ee::s_ee_cpu_state cpu{};
                     cpu.m_cop0[ee::COP0_Status] = control | (unmasked ? mask : 0u);
                     cpu.m_cop0[ee::COP0_Cause] = pending ? mask : 0u;
-                    const bool expected = bits == 3u && unmasked && pending;
+                    const bool implemented = line == 2u || line == 3u || line == 7u;
+                    const bool expected = implemented && bits == 3u && unmasked && pending;
                     eligibility_same = eligibility_same &&
                         ee::ee_interrupts_enabled_inline(&cpu) == expected &&
                         ee::ee_interrupts_enabled(&cpu) == expected;

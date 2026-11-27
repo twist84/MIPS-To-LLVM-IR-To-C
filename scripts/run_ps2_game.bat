@@ -65,6 +65,10 @@ if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"
 set "MAX_DISPATCHES=40000000"
 set "MAX_EXPANSION_DISPATCHES=40000000"
 set "MAX_REPLAY_DISPATCHES=40000000"
+rem Optional short diagnostic budget; normal P40 remains 40 million.
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
+if defined SDBZ_P40_MAX_DISPATCHES set "MAX_REPLAY_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
 set "BOOT_TIMEOUT_SECONDS=600"
 
 rem Preserve full profiling by default, but allow a profiler-off control.
@@ -80,6 +84,9 @@ set "SDBZ_WINDOW_PUMP_STRIDE=64"
 set "SDBZ_EE_DIRECT_DISPATCH=1"
 set "SDBZ_VU1_ASYNC=1"
 set "SDBZ_GS_ASYNC=1"
+rem Diagnostic controls: preserve the P40 workload while isolating host workers.
+if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"
+if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"
 rem Retail-validated experimental mode; regular runner defaults remain unchanged.
 set "SDBZ_GS_GPU_VRAM=1"
 rem Disable byte-wise image hashing, retain committed event/QWC counters.
@@ -543,7 +550,7 @@ if /I "%EE_WEBGPU_SNAPSHOT%"=="1" set "EE_WEBGPU_RUN_ARG=--gs-webgpu-snapshot=%W
 if "%SDBZ_EE_OPT%"=="4" (
     echo EE native object optimization: O2 IR pipeline + O2 backend
 ) else if "%SDBZ_EE_OPT%"=="5" (
-    echo EE native object optimization: host-native O2 backend
+    echo EE native object optimization: host-native O2 backend + selective VU0 FMAC IR passes
 ) else (
     echo EE native object optimization: O%SDBZ_EE_OPT%
 )
@@ -605,7 +612,7 @@ rem Clear only presentation outputs before a full replay, so that a
 rem cancelled run cannot accidentally archive old GS images as new ones.
 rem NEVER remove the guest IR, translated DLL, or object cache here.
 if /I "%REPORT_NAME%"=="first-boot.json" (
-    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm) do (
+    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json) do (
         if exist "%WORK_DIR%\%%F" del /q "%WORK_DIR%\%%F"
     )
 )
@@ -629,6 +636,7 @@ rem Display live LLVM IR file count and percentage in both quick and full
 rem sessions; the orchestrator keeps in-place updates out of boot logs.
 python tools\run_boot_session.py "%GAME_ELF%" ^
     --ll-progress ^
+    --replay-provenance ^
     --disc-root "%DISC_ROOT%" ^
     --disc-folder "%DISC_ROOT%" ^
     --build-dir build ^
@@ -674,7 +682,7 @@ exit /b %EXIT_CODE%
 rem Match the files formerly selected by the manual PowerShell command.
 rem Never include guest .ll/.o files in these small diagnostic archives.
 rem Distinct neutral/Cross names prevent overwriting experiment evidence.
-powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
+powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','replay-provenance.json','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
 if errorlevel 1 (
     echo WARNING: Diagnostic archive failed; original logs remain in "%WORK_DIR%".
     exit /b 1

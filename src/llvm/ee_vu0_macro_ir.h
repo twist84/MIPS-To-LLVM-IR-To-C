@@ -581,6 +581,65 @@ inline void replace_vu0_ir_operand(std::string& ir, const std::string& name,
     }
 }
 
+// For a known single active lane, use the exact scalar FMAC tuple and
+// rebuild the vector-shaped result. No inactive lane reaches arithmetic;
+// status, ACC latch, disabled lanes and synchronization stay in the template.
+inline void specialize_vu0_fmac_lanes(std::string& clone, unsigned kind,
+                                     unsigned active_mask)
+{
+    if (kind >= 5u || (active_mask & (active_mask - 1u)) != 0u)
+    {
+        return;
+    }
+    const std::string shape = "{ <4 x i32>, <4 x i1>, <4 x i1>, <4 x i32> }";
+    const std::string marker = "  %tuple = call " + shape + " @vu_fmac4(";
+    const auto start = clone.find(marker);
+    const auto end = clone.find('\n', start);
+    if (start == std::string::npos || end == std::string::npos)
+    {
+        throw std::logic_error("missing VU0 FMAC tuple template");
+    }
+    std::string replacement;
+    if (active_mask == 0u)
+    {
+        replacement = "  %tuple = insertvalue " + shape +
+            " zeroinitializer, <4 x i32> zeroinitializer, 0";
+    }
+    else
+    {
+        unsigned lane = 0u;
+        for (; (active_mask & (8u >> lane)) == 0u; ++lane) {}
+        const std::string index = ", i32 " + std::to_string(lane);
+        const std::string scalar = "{ i32, i1, i1, i32 }";
+        replacement = "  %one_a = extractelement <4 x i32> %safe_a" + index +
+            "\n  %one_b = extractelement <4 x i32> %safe_b" + index +
+            "\n  %one_acc = extractelement <4 x i32> %acc" + index +
+            "\n  %one_latch = extractelement <4 x i1> %latched" + index +
+            "\n  %one_tuple = call " + scalar + " @vu_fmac(i32 " +
+            std::to_string(kind) + ", i32 %one_acc, i32 %one_a, i32 %one_b, i1 %one_latch)\n";
+        std::string previous = "zeroinitializer";
+        for (unsigned field = 0; field < 4; ++field)
+        {
+            const std::string suffix = std::to_string(field);
+            const std::string type = field == 0u || field == 3u ? "i32" : "i1";
+            const std::string vector = "<4 x " + type + ">";
+            replacement += "  %one_field" + suffix + " = extractvalue " + scalar +
+                " %one_tuple, " + suffix + "\n";
+            replacement += "  %one_vec" + suffix + " = insertelement " + vector +
+                " zeroinitializer, " + type + " %one_field" + suffix + index + "\n";
+            const std::string result = field == 3u ? "%tuple" : "%one_result" + suffix;
+            replacement += "  " + result + " = insertvalue " + shape + " " +
+                previous + ", " + vector + " %one_vec" + suffix + ", " + suffix;
+            if (field != 3u)
+            {
+                replacement += "\n";
+            }
+            previous = result;
+        }
+    }
+    clone.replace(start, end - start, replacement);
+}
+
 inline void append_vu0_macro_ir(std::string& module)
 {
     const std::string helpers = make_vu0_macro_ir();
@@ -627,6 +686,7 @@ inline void append_vu0_macro_ir(std::string& module)
             replace_vu0_ir_operand(clone, "%source", std::to_string(source));
             replace_vu0_ir_operand(clone, "%bc", std::to_string(bc));
             replace_vu0_ir_operand(clone, "%to_acc", acc);
+            specialize_vu0_fmac_lanes(clone, kind, mask & (source == 4u ? 14u : 15u));
             specialized.emplace(name, clone);
         }
         const std::string replacement = "call i32 @" + name +

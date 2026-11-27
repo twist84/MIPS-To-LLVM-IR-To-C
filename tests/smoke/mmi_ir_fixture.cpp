@@ -98,7 +98,11 @@ int main(int argc, char** argv)
         make_mmi(8, 9, 13, 0x13, 0x09),    // pxor $t5,$t0,$t1 sees new $t0
         make_mmi(27, 28, 0, 0, 0x19),      // multu1 $zero,$k1,$gp
         make_mmi(0, 0, 27, 0, 0x10),       // mfhi1 $k1
-        make_mmi(0, 0, 28, 0, 0x12)        // mflo1 $gp
+        make_mmi(0, 0, 28, 0, 0x12),       // mflo1 $gp
+        make_mmi(8, 9, 31, 0x12, 0x09),    // pand $ra,$t0,$t1
+        make_i(0x09, 0, 31, 0x1234),       // scalar overwrite keeps high half
+        make_mmi(31, 9, 31, 0x13, 0x09),   // pxor $ra,$ra,$t1
+        make_mmi(31, 9, 0, 0x12, 0x09)     // suppress packed write to zero
     };
 
     std::map<uint32_t, ee::s_ee_instruction> insn_map;

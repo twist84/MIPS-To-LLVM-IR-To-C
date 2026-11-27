@@ -24,6 +24,28 @@ enum class e_thread_status
     faulted
 };
 
+// Optional host-only attribution of a sampled HLE kernel invocation.
+// Phases are disjoint but not exhaustive; CPU time includes retirement
+// and attached device work. Never use timings for guest scheduling.
+enum class e_kernel_phase : uint32_t
+{
+    wake_irq,
+    ready,
+    idle_deadline,
+    idle_advance,
+    guest_context,
+    guest_cpu,
+    count
+};
+
+struct s_kernel_phase_sample
+{
+    static constexpr uint32_t k_count =
+        static_cast<uint32_t>(e_kernel_phase::count);
+    uint64_t m_calls[k_count]{};
+    uint64_t m_ns[k_count]{};
+};
+
 enum class e_kernel_stop
 {
     budget_exhausted,
@@ -223,7 +245,8 @@ public:
         m_module_loaded = std::move(callback);
     }
     s_module_load_result load_module(
-        const std::vector<uint8_t>& bytes
+        const std::vector<uint8_t>& bytes,
+        const std::string& source_name = {}
     );
     const s_kernel_module* module(uint32_t id) const;
     const std::map<uint32_t, s_kernel_module>& modules() const;
@@ -282,6 +305,15 @@ public:
     // Only scheduled guest work permits an HLE transport-triggered
     // IOP execution turn; absent modules cannot advance IOP time.
     bool has_guest_work() const;
+    // Relative IOP cycles before any currently modeled autonomous event.
+    // Zero for runnable work or a scheduling barrier. Externally driven
+    // EE/SIF operations must be checked separately by the caller.
+    uint64_t idle_event_cycles_remaining() const;
+
+    // Host-only fast service for a strictly pre-event idle interval.
+    // A false return leaves guest time and architectural state untouched.
+    // The caller still owns EE/IOP RPC ordering and cycle debt accounting.
+    bool try_advance_quiet_cycles(uint32_t cycles);
 
     // Timers use the same bounded virtual-clock domain as sleep_current.
     // Callback return values of zero disarm, otherwise they reschedule by
@@ -308,7 +340,8 @@ public:
     // Explicit IOP cycle budget. The EE must eventually provide this from
     // guest execution timing, never by counting native dispatches.
     s_kernel_run_result run(
-        uint64_t cycle_budget, uint32_t quantum = 128u
+        uint64_t cycle_budget, uint32_t quantum = 128u,
+        s_kernel_phase_sample* sample = nullptr
     );
 
 private:

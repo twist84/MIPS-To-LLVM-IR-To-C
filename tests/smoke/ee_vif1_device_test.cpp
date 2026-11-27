@@ -561,6 +561,46 @@ int main()
         return 1;
     }
 
+    // Narrow contiguous V4 fast paths versus the masked scalar path.
+    for (uint32_t vl : {1u, 2u})
+    {
+        for (bool unsigned_value : {false, true})
+        {
+            for (uint32_t count : {1u, 3u, 256u})
+            {
+                ee::c_ee_vif1 fast{}, reference{};
+                if (!check(send(fast, {0x01000404u, 0u, 0u, 0u}) &&
+                           send(reference, {0x01000404u, 0u, 0u, 0u}),
+                           "narrow V4 setup rejected"))
+                {
+                    return 1;
+                }
+                std::vector<uint32_t> packet{
+                    (0x6cu + vl) << 24u | ((count & 255u) << 16u) |
+                    (unsigned_value ? 0x4000u : 0u) | 1022u};
+                for (uint32_t i = 0; i < count * (vl == 1u ? 2u : 1u); ++i)
+                {
+                    packet.push_back(0x80ff7f01u ^ (i * 0x1020304u));
+                }
+                while ((packet.size() & 3u) != 0u)
+                {
+                    packet.push_back(0u);
+                }
+                auto masked = packet;
+                masked[0] |= 0x10000000u;
+                if (!check(send(fast, packet) && send(reference, masked),
+                           "narrow V4 transfer rejected") ||
+                    !check(std::memcmp(fast.vu1_data(), reference.vu1_data(),
+                              ee::c_ee_vif1::k_vu1_memory_size) == 0 &&
+                           fast.diagnostic().m_unpack_commands == 1u,
+                           "narrow V4 SIMD differs from reference"))
+                {
+                    return 1;
+                }
+            }
+        }
+    }
+
     // STROW/STCOL, STMASK and masked UNPACK: data/row/col/skip.
     if (!check(send(vif1, {0x30000000u, 9u, 8u, 7u,
                           6u, 0x31000000u, 11u, 12u,
@@ -936,6 +976,8 @@ int main()
 
     // Detached VU execution must not expose partial VIF state or GIF
     // output, even if the worker finishes before the controller polls.
+    // Both overlap instrumentation modes must preserve publication.
+    for (bool overlap_profile : {true, false})
     {
         using result = ee::c_ee_vif1::e_deferred_result;
         ee::c_ee_vif1 deferred{};
@@ -947,7 +989,8 @@ int main()
             0x4a030000u, vi1_two, nop_upper,
             0x80000efcu, 0x400002ffu, nop_lower, nop_upper, 0u,
             0x14000000u, 0x10000000u, 0x14000000u, 0u});
-        if (!check(deferred.enable_deferred(), "enable deferred worker") ||
+        if (!check(deferred.enable_deferred({}, false, overlap_profile),
+                   "enable deferred worker") ||
             !check(ee::c_ee_vif1::mmio_write(
                 &deferred, ee::c_ee_vif1::k_vu1_data_base + 32u,
                 16u, &kick_tag) &&
@@ -975,7 +1018,15 @@ int main()
         }
 
         const auto bad = pack_words({0x14000000u, 0x09000000u, 0u, 0u});
-        if (!check(deferred.begin_deferred(bad.data(), 1u) == result::pending &&
+        deferred.native_execution_begin();
+        const auto bad_start = deferred.begin_deferred(bad.data(), 1u);
+        deferred.native_execution_end();
+        // The pending job may already be finished on the host, but only
+        // the explicit controller checkpoint can publish its result.
+        deferred.native_execution_begin();
+        deferred.native_execution_end();
+        if (!check(bad_start == result::pending && deferred.deferred_busy() &&
+                deferred_capture.m_calls == 1u &&
                 deferred.wait_deferred() == result::rejected &&
                 deferred_capture.m_calls == 1u &&
                 deferred.diagnostic().m_committed_opcodes[0x14u] == 2u,

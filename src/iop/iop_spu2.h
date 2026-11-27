@@ -31,10 +31,58 @@ public:
     // Start on the first valid-width SPU2 access, like the reference.
     // Count elapsed guest cycles, not generated audio frames or host time.
     // Returns newly latched playback IRQ core bits (zero if none).
-    uint32_t advance_cycles(uint32_t cycles);
+    uint32_t advance_cycles(uint32_t cycles)
+    {
+        if (!m_clock_active)
+        {
+            return 0u;
+        }
+        const uint64_t before = m_clock_cycles;
+        m_clock_cycles += cycles;
+        const uint64_t samples_before = before / k_cycles_per_sample;
+        const uint64_t samples_after = elapsed_samples();
+        if (m_clock_cycles < before || samples_after != samples_before)
+        {
+            m_irq_deadline_valid = false;
+        }
+        if (samples_before == samples_after)
+        {
+            return 0u;
+        }
+        return advance_sample_edges(samples_after - samples_before);
+    }
     // Earliest possible voice/input fetch, mixer-ring or effect IRQ edge.
     // Zero means no pending playback IRQ opportunity.
-    uint32_t voice_irq_cycles_remaining() const;
+    uint32_t voice_irq_cycles_remaining() const
+    {
+        if (!m_irq_deadline_cache_enabled)
+        {
+            return compute_voice_irq_cycles_remaining();
+        }
+        // A valid zero result remains zero throughout the same sample.
+        // Every clock reset/wrap, sample crossing and relevant mutation
+        // invalidates the cache, so no phase calculation is needed here.
+        if (m_irq_deadline_valid && m_irq_deadline_remaining == 0u)
+        {
+            return 0u;
+        }
+        const uint32_t phase = sample_phase();
+        if (m_irq_deadline_valid && phase >= m_irq_deadline_phase)
+        {
+            const uint32_t elapsed = phase - m_irq_deadline_phase;
+            if (m_irq_deadline_remaining > elapsed)
+            {
+                return m_irq_deadline_remaining - elapsed;
+            }
+        }
+        return refresh_voice_irq_deadline(phase);
+    }
+    // Host-only reference control for exact deadline-cache comparisons.
+    void enable_irq_deadline_cache(bool enabled)
+    {
+        m_irq_deadline_cache_enabled = enabled;
+        m_irq_deadline_valid = false;
+    }
     uint64_t playback_irq_events() const { return m_playback_irq_events; }
     // Decode one PS2 16-byte ADPCM block (8 little-endian halfwords).
     // History is shared between consecutive blocks of a voice.
@@ -251,10 +299,13 @@ private:
     void check_effect_irq(uint32_t address);
     int64_t effect_tap_offset(uint32_t core, uint32_t reg) const;
     uint32_t effect_irq_cycles_remaining() const;
+    uint32_t compute_voice_irq_cycles_remaining() const;
+    uint32_t refresh_voice_irq_deadline(uint32_t phase) const;
     bool read_disabled_effect(uint32_t core, uint32_t channel, uint64_t step,
         int16_t* output);
     void advance_effect(uint32_t core, const int32_t (&input)[2], int16_t (&output)[2]);
     void advance_input(uint32_t samples, int32_t (&sum)[2][k_input_batch][2]);
+    uint32_t advance_sample_edges(uint64_t samples);
     void mix_frames(uint64_t samples);
     void write_mixer_rings();
     void count_mixer_irq(uint32_t address, uint32_t words);
@@ -284,6 +335,11 @@ private:
     s_audio_profile_counter m_profile_sink{};
     s_audio_profile_counter m_profile_silent_rings{};
 
+    // Valid only until the next sample or guest-visible mutation.
+    bool m_irq_deadline_cache_enabled = true;
+    mutable bool m_irq_deadline_valid = false;
+    mutable uint32_t m_irq_deadline_phase = 0u;
+    mutable uint32_t m_irq_deadline_remaining = 0u;
     bool m_clock_active = false;
     uint64_t m_clock_cycles = 0u;
     uint64_t m_decoded_blocks = 0u;

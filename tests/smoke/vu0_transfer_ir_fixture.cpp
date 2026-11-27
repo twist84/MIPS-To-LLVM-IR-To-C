@@ -56,6 +56,66 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
     if (mode.rfind("ee_", 0u) == 0u)
     {
         std::string operation = mode.substr(3u);
+        if (operation == "sw_trace_context" || operation == "sq_trace_context")
+        {
+            // Dirty SP before the store; FP is consumed after the cold arm.
+            const uint32_t op = operation == "sw_trace_context" ? 0x2bu : 0x1fu;
+            const uint32_t store = (op << 26u) | (9u << 21u) | (8u << 16u);
+            words = {make_addiu(29u, 29u, -16), store,
+                     make_addiu(30u, 10u, 1), make_jr(31u), 0u};
+            return true;
+        }
+        if (operation == "likely_clean_gprs")
+        {
+            // POR r11,r8,zero commits both halves before BEQL. The
+            // taken delay slot reads the already-published SP and
+            // changes only r10. Both successor paths return to RA.
+            const uint32_t por = (0x1cu << 26u) | (8u << 21u) |
+                (11u << 11u) | (0x12u << 6u) | 0x29u;
+            const uint32_t beql = (0x14u << 26u) | (9u << 21u) | 3u;
+            words = {por, make_addiu(29u, 29u, -16), beql,
+                     make_addiu(29u, 10u, 1),
+                     make_jr(31u), 0u, make_jr(31u), 0u};
+            return true;
+        }
+        if (operation == "known_aligned" || operation == "known_misaligned" ||
+            operation == "partially_aligned")
+        {
+            // SLL r9,r9,2 (or 1); ADDIU r9,r9,-4; LW r8,4(r9).
+            // The value is dynamic, but the alignment can be proven in
+            // the first mode. The other modes still use the fault gate.
+            const uint32_t sll = (9u << 16u) | (9u << 11u) |
+                ((operation == "partially_aligned" ? 1u : 2u) << 6u);
+            const uint32_t lw = (0x23u << 26u) | (9u << 21u) | (8u << 16u) |
+                (operation == "known_misaligned" ? 5u : 4u);
+            words = {sll, make_addiu(9u, 9u, -4), lw};
+            return true;
+        }
+        if (operation == "constant_address" || operation == "constant_misaligned")
+        {
+            // LUI sign extends; ORI, XORI, ANDI and the signed immediate
+            // additions reduce the effective address to a known low word.
+            const uint32_t lui = (0x0fu << 26u) | (9u << 16u) | 0xffffu;
+            const uint32_t ori = (0x0du << 26u) | (9u << 21u) | (9u << 16u) | 0xfffcu;
+            const uint32_t daddiu = (0x19u << 26u) | (9u << 21u) | (9u << 16u) | 0x48u;
+            const uint32_t xori = (0x0eu << 26u) | (9u << 21u) | (9u << 16u) | 0x04u;
+            const uint32_t andi = (0x0cu << 26u) | (9u << 21u) | (9u << 16u) | 0xffffu;
+            const uint32_t lw = (0x23u << 26u) | (9u << 21u) | (8u << 16u) |
+                (operation == "constant_misaligned" ? 1u : 0u);
+            words = {lui, ori, daddiu, xori, andi, lw};
+            return true;
+        }
+        if (operation == "lw_wrap_positive" || operation == "sw_wrap_negative" ||
+            operation == "lw_absolute")
+        {
+            const bool store = operation == "sw_wrap_negative";
+            const uint32_t base = operation == "lw_absolute" ? 0u : 9u;
+            const uint16_t offset = store ? 0xfffcu :
+                (base == 0u ? 0x40u : 0x44u);
+            words = {((store ? 0x2bu : 0x23u) << 26u) |
+                     (base << 21u) | (8u << 16u) | offset};
+            return true;
+        }
         const bool delay = operation.find("_delay") != std::string::npos;
         if (delay)
         {
@@ -64,8 +124,9 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
         static const std::map<std::string, uint32_t> k_load_store_opcodes =
         {
             {"lq", 0x1eu}, {"sq", 0x1fu},
-            {"lh", 0x21u}, {"lw", 0x23u},
-            {"sh", 0x29u}, {"sw", 0x2bu},
+            {"lb", 0x20u}, {"lbu", 0x24u},
+            {"lh", 0x21u}, {"lhu", 0x25u}, {"lw", 0x23u},
+            {"sb", 0x28u}, {"sh", 0x29u}, {"sw", 0x2bu},
             {"lwc1", 0x31u}, {"ld", 0x37u},
             {"swc1", 0x39u}, {"sd", 0x3fu}
         };
@@ -158,6 +219,11 @@ bool build_words(const std::string& mode, std::vector<uint32_t>& words)
         const uint32_t mask = mode == "ir_vmove_mask" ? 10u : 15u;
         const uint32_t ft = mode == "ir_vmr32_alias" ? 1u : 2u;
         words = {vu_special(op, mask, 1u, ft)};
+        return true;
+    }
+    if (mode == "ir_vmul_x" || mode == "ir_vmul_empty")
+    {
+        words = {vu_macro(0x2au, mode == "ir_vmul_x" ? 8u : 0u, 1u, 2u, 3u)};
         return true;
     }
     if (mode == "ir_vmul" || mode == "ir_vadd" || mode == "ir_vmula_madd" ||

@@ -101,21 +101,30 @@ struct s_ee_hot_loop_state
 class c_ee_dispatch_hotspots
 {
 public:
-    static constexpr size_t k_pc_capacity = 4096u;
-    static constexpr size_t k_edge_capacity = 8192u;
+    // Retail P40 exhausted the previous 4096/8192 limits during
+    // startup, losing approximately half of later dispatch observations.
+    // Keep the maps bounded but allow a larger exact working set. The
+    // independent hot counter caches remain unchanged.
+    static constexpr size_t k_pc_capacity = 32768u;
+    static constexpr size_t k_edge_capacity = 65536u;
     static constexpr size_t k_change_capacity = 32u;
     static constexpr size_t k_top_count = 16u;
 
     explicit c_ee_dispatch_hotspots(
         size_t pc_capacity = k_pc_capacity,
-        size_t edge_capacity = k_edge_capacity)
-        : m_pc_capacity(pc_capacity),
-          m_edge_capacity(edge_capacity),
-          m_pc_cache(k_pc_cache_size),
-          m_edge_cache(k_edge_cache_size)
+        size_t edge_capacity = k_edge_capacity,
+        bool enabled = true)
+        : m_pc_capacity(enabled ? pc_capacity : 0u),
+          m_edge_capacity(enabled ? edge_capacity : 0u),
+          m_pc_cache(enabled ? k_pc_cache_size : 0u),
+          m_edge_cache(enabled ? k_edge_cache_size : 0u),
+          m_enabled(enabled)
     {
-        m_pcs.reserve(pc_capacity);
-        m_edges.reserve(edge_capacity);
+        if (enabled)
+        {
+            m_pcs.reserve(pc_capacity);
+            m_edges.reserve(edge_capacity);
+        }
     }
 
     // The counter caches retain stable pointers into the owning maps.
@@ -126,6 +135,10 @@ public:
     void record(uint64_t dispatch, uint32_t from_pc, uint32_t to_pc,
                 const s_ee_hot_loop_state& state)
     {
+        if (!m_enabled)
+        {
+            return;
+        }
         ++m_observations;
         // Keep the full PC/edge keys for equality, including zero and
         // unaligned addresses. Fold high address bits into the cache index.
@@ -154,6 +167,8 @@ public:
         }
     }
 
+    bool enabled() const { return m_enabled; }
+
     uint64_t observations() const
     {
         return m_observations;
@@ -176,6 +191,7 @@ public:
     {
         std::fprintf(output,
             "{\n    \"schema\": \"ee-m2-dispatch-hotspots-v1\","
+            "\n    \"enabled\": %s,"
             "\n    \"observation_unit\": \"native_dispatch_boundary\","
             "\n    \"observations\": %llu,"
             "\n    \"pc_capacity\": %zu, \"edge_capacity\": %zu,"
@@ -185,6 +201,7 @@ public:
             "\n    \"total_state_changes\": %llu,"
             "\n    \"pc_cache_slots\": %zu, \"edge_cache_slots\": %zu,"
             "\n    \"pc_cache_misses\": %llu, \"edge_cache_misses\": %llu",
+            m_enabled ? "true" : "false",
             static_cast<unsigned long long>(m_observations),
             m_pc_capacity, m_edge_capacity, m_pcs.size(), m_edges.size(),
             static_cast<unsigned long long>(m_untracked_pc_samples),
@@ -313,7 +330,11 @@ private:
     {
         std::vector<std::pair<t_key, uint64_t>> sorted(
             counts.begin(), counts.end());
-        std::sort(sorted.begin(), sorted.end(),
+        // Only the first k_top_count entries are serialized. A partial
+        // sort retains the exact count/key ordering without sorting the
+        // thousands of entries that will be discarded.
+        const size_t selected = std::min(sorted.size(), k_top_count);
+        std::partial_sort(sorted.begin(), sorted.begin() + selected, sorted.end(),
             [](const auto& a, const auto& b)
             {
                 if (a.second != b.second)
@@ -322,10 +343,7 @@ private:
                 }
                 return a.first < b.first;
             });
-        if (sorted.size() > k_top_count)
-        {
-            sorted.resize(k_top_count);
-        }
+        sorted.resize(selected);
         return sorted;
     }
 
@@ -364,6 +382,7 @@ private:
     std::unordered_map<uint64_t, uint64_t, s_edge_hash> m_edges;
     std::vector<s_counter_cache_entry<uint32_t>> m_pc_cache;
     std::vector<s_counter_cache_entry<uint64_t>> m_edge_cache;
+    bool m_enabled = true;
     uint64_t m_pc_cache_misses = 0u;
     uint64_t m_edge_cache_misses = 0u;
     c_bounded_diagnostic_history<s_change, k_change_capacity> m_changes;

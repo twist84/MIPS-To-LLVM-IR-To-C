@@ -40,6 +40,7 @@ def verify_real_probe_location():
         assert shared_fmac_key in guest, "VU0 consumes the shared SIMD lowering template"
         assert guest[shared_fmac_key] == host[shared_fmac_key]
         assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
+        assert "src/architecture/ee_scalar_constant.h" in guest
 
 
 def verify_preservation_when_host_only_inputs_change():
@@ -55,11 +56,13 @@ def verify_preservation_when_host_only_inputs_change():
             "tools/verify_ir.py": b"verify",
             "tools/shared_ee_ir.py": b"shared source store",
             "tools/link_native_objects.py": b"link",
+            "tools/native_alu_certificate.py": b"certificate",
             "src/ee/ee_dispatcher.cpp": b"dispatch",
             "src/ee/recompiled_functions.cpp": b"dispatch map",
             "src/ee/decoder.cpp": b"decoder",
             "src/tools/ee_recomp_main.cpp": b"recomp front-end",
             "include/ee/guest_lifter_input.h": b"guest header",
+            "src/architecture/ee_scalar_constant.h": b"scalar evaluator",
             "src/runtime/ee_sdbz_pad_return_probe.h": b"first host probe",
             "src/runtime/ee_vu_fmac4_ir.h": b"shared FMAC lowering",
         }
@@ -70,6 +73,18 @@ def verify_preservation_when_host_only_inputs_change():
 
         initial_host = run_game.translation_inputs(elf, recomp, source_root)
         initial_guest = run_game.ir_generation_inputs(elf, source_root)
+        from unittest.mock import patch
+        import os
+        with patch.dict(os.environ, {"SDBZ_NATIVE_ALU_CERTIFICATES": "0"}):
+            disabled = run_game.translation_inputs(elf, recomp, source_root)
+        with patch.dict(os.environ, {"SDBZ_NATIVE_ALU_CERTIFICATES": "1"}):
+            enabled = run_game.translation_inputs(elf, recomp, source_root)
+            assert run_game.ir_generation_inputs(elf, source_root) == initial_guest
+        assert {key for key in enabled if enabled[key] != disabled[key]} == {
+            "native_alu_certificate_mode"
+        }
+        assert "tools/native_alu_certificate.py" in initial_host
+        assert "tools/native_alu_certificate.py" not in initial_guest
         work = root / "work"
         ir = work / "ir" / "function_00100000.ll"
         ir.parent.mkdir(parents=True, exist_ok=True)
@@ -158,6 +173,11 @@ def verify_preservation_when_host_only_inputs_change():
         else:
             raise AssertionError("changed shared FMAC template unexpectedly reused")
         shared_fmac.write_bytes(paths["src/runtime/ee_vu_fmac4_ir.h"])
+
+        architecture = source_root / "src/architecture/ee_scalar_constant.h"
+        architecture.write_bytes(b"changed scalar evaluator")
+        assert run_game.ir_generation_inputs(elf, source_root) != initial_guest
+        architecture.write_bytes(paths["src/architecture/ee_scalar_constant.h"])
 
         # A genuinely changed guest lowering header must still fail closed.
         (source_root / "include/ee/guest_lifter_input.h").write_bytes(

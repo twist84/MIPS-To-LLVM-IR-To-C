@@ -28,6 +28,7 @@ uint32_t read_word(const uint8_t* bytes)
 // fast-math, or out-of-range shifts. These helpers are module-local.
 constexpr const char* k_fp_ir = R"IR(
 declare i32 @llvm.ctlz.i32(i32, i1 immarg)
+declare i32 @llvm.vector.reduce.or.v4i32(<4 x i32>)
 
 ; Each ring stores the last eight writes in issue order, not timestamp
 ; order (FCSET and FSSET can publish retroactively visible values).
@@ -102,21 +103,28 @@ done:
   ret void
 }
 
-define internal void @vu_scalar_wait(ptr %current, ptr %ready, ptr %value,
+define internal i32 @vu_scalar_wait(ptr %current, ptr %ready, ptr %value,
     ptr %cycle) alwaysinline {
+entry:
   %now = load i32, ptr %cycle, align 4
   %r = load i32, ptr %ready, align 4
   %stall = icmp ugt i32 %r, %now
   %elapsed = select i1 %stall, i32 %r, i32 %now
   store i32 %elapsed, ptr %cycle, align 4
-  call void @vu_scalar_sync(ptr %current, ptr %ready, ptr %value, i32 %elapsed)
-  ret void
+  %busy = icmp ne i32 %r, 0
+  br i1 %busy, label %publish, label %done
+publish:
+  %v = load i32, ptr %value, align 4
+  store i32 %v, ptr %current, align 4
+  store i32 0, ptr %ready, align 4
+  br label %done
+done:
+  ret i32 %elapsed
 }
 
 define internal void @vu_scalar_schedule(ptr %current, ptr %ready, ptr %value,
     ptr %cycle, i32 %new_value, i32 %latency) alwaysinline {
-  call void @vu_scalar_wait(ptr %current, ptr %ready, ptr %value, ptr %cycle)
-  %now = load i32, ptr %cycle, align 4
+  %now = call i32 @vu_scalar_wait(ptr %current, ptr %ready, ptr %value, ptr %cycle)
   %at = add i32 %now, %latency
   store i32 %new_value, ptr %value, align 4
   store i32 %at, ptr %ready, align 4
@@ -153,8 +161,19 @@ define internal void @vu_q_wait(ptr %q, ptr %ready, ptr %pending,
   %stall = icmp ugt i32 %r, %now
   %elapsed = select i1 %stall, i32 %r, i32 %now
   store i32 %elapsed, ptr %cycle, align 4
-  call void @vu_q_sync(ptr %q, ptr %ready, ptr %pending,
-      ptr %status, ptr %flags, i32 %elapsed)
+  %busy = icmp ne i32 %r, 0
+  br i1 %busy, label %publish, label %done
+publish:
+  %v = load i32, ptr %pending, align 4
+  store i32 %v, ptr %q, align 4
+  %f = load i32, ptr %flags, align 4
+  %old = load i32, ptr %status, align 4
+  %cleared = and i32 %old, -49
+  %merged = or i32 %cleared, %f
+  store i32 %merged, ptr %status, align 4
+  store i32 0, ptr %ready, align 4
+  br label %done
+done:
   ret void
 }
 )IR";
@@ -301,6 +320,7 @@ public:
         bool flags, bool q, bool p, uint32_t branch_vi_mask, uint32_t flag_history_mask)
     {
         m_dynamic = true;
+        m_dynamic_local_offset = m_ir.size();
         m_branch_vi_mask = branch_vi_mask;
         m_flag_history_mask = flag_history_mask;
         m_flag_pipeline = flags;
@@ -347,24 +367,13 @@ public:
         line("store i32 0, ptr %step_count, align 4");
         line("store i32 16, ptr %cycle, align 4");
         line("store i1 false, ptr %ending, align 1");
-        line("br label %dispatch");
+        // The invocation entry is known independently of any indirect
+        // branches later in the program.
+        line("br label %pair_" + std::to_string(start));
         m_ir += "dispatch:\n";
-        line("%old_steps = load i32, ptr %step_count, align 4");
-        line("%within_budget = icmp ult i32 %old_steps, " +
-            std::to_string(c_ee_vu1::k_max_steps));
-        line("br i1 %within_budget, label %select_pc, label %fail");
-        m_ir += "select_pc:\n";
-        line("%steps = add i32 %old_steps, 1");
-        line("store i32 %steps, ptr %step_count, align 4");
+        // The fallback retains the exact emitted-PC guard. Each pair owns
+        // its budget check and prelude so a direct edge cannot bypass them.
         line("%current_pc = load i32, ptr %pc, align 4");
-        line("%npc_now = load i32, ptr %npc, align 4");
-        line("%ending_now = load i1, ptr %ending, align 1");
-        if (m_branch_vi_mask != 0u)
-        {
-            line("%previous_vi_mask_now = load i32, ptr %previous_vi_mask, align 4");
-        }
-        line("%sequential_raw = add i32 %npc_now, 8");
-        line("%sequential = and i32 %sequential_raw, 16383");
         line("switch i32 %current_pc, label %fail [");
         for (uint32_t index = 0u; index < reached.size(); ++index)
         {
@@ -377,11 +386,46 @@ public:
         line("]");
     }
 
-    bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi)
+    bool emit_dynamic_pair(uint32_t pc, uint32_t lo, uint32_t hi,
+        uint32_t direct_pc, uint32_t alternate_pc, bool direct_proven,
+        uint32_t incoming_npc, bool ending_known, bool incoming_ending)
     {
-        m_ir += "pair_" + std::to_string(pc) + ":\n";
+        const auto suffix = std::to_string(pc);
+        m_ir += "pair_" + suffix + ":\n";
+        const auto old_steps = operation("load i32, ptr %step_count, align 4");
+        const auto within_budget = operation("icmp ult i32 " + old_steps + ", " +
+            std::to_string(c_ee_vu1::k_max_steps));
+        line("br i1 " + within_budget + ", label %body_" + suffix + ", label %fail");
+        m_ir += "body_" + suffix + ":\n";
+        m_pair_steps = operation("add i32 " + old_steps + ", 1");
+        line("store i32 " + m_pair_steps + ", ptr %step_count, align 4");
+        // Only complete direct-flow discovery may specialize incoming
+        // state, including states that execute the final E-delay pair.
+        m_pair_npc = incoming_npc == k_unknown_pc ?
+            operation("load i32, ptr %npc, align 4") : std::to_string(incoming_npc);
+        const auto ending = ending_known ? std::string(incoming_ending ? "true" : "false") :
+            operation("load i1, ptr %ending, align 1");
+        if (m_branch_vi_mask != 0u)
+        {
+            m_pair_vi_mask = operation("load i32, ptr %previous_vi_mask, align 4");
+        }
+        if (incoming_npc == k_unknown_pc)
+        {
+            const auto sequential_raw = operation("add i32 " + m_pair_npc + ", 8");
+            m_pair_sequential = operation("and i32 " + sequential_raw + ", 16383");
+        }
+        else
+        {
+            m_pair_sequential = std::to_string((incoming_npc + 8u) & 0x3fffu);
+        }
         m_current_pc = pc;
-        m_next_target = "%sequential";
+        // Every pair remains a possible dispatcher target. SSA values
+        // from a different pair do not necessarily dominate this entry.
+        m_vf_lanes = {};
+        m_vf_vectors = {};
+        m_acc_lanes = {};
+        m_acc_vector.clear();
+        m_next_target = m_pair_sequential;
         m_delay_vi_writes = (hi & 0x80000000u) == 0u && !branch_delay_exempt(lo);
         m_delay_vi_mask = 0u;
 
@@ -410,7 +454,7 @@ public:
         if (m_flag_pipeline)
         {
             m_issue_cycle = cycle;
-            m_flag_time = operation("add i32 %steps, 16");
+            m_flag_time = operation("add i32 " + m_pair_steps + ", 16");
         }
         if (!emit(lo, hi))
         {
@@ -435,11 +479,57 @@ public:
             line("store i32 " + std::to_string(m_delay_vi_mask) +
                 ", ptr %previous_vi_mask, align 4");
         }
-        line("store i32 %npc_now, ptr %pc, align 4");
+        line("store i32 " + m_pair_npc + ", ptr %pc, align 4");
         line("store i32 " + m_next_target + ", ptr %npc, align 4");
         line(std::string("store i1 ") + ((hi & 0x40000000u) ? "true" : "false") +
             ", ptr %ending, align 1");
-        line("br i1 %ending_now, label %done, label %dispatch");
+        const auto retire = "retire_" + suffix;
+        const auto next = "next_" + suffix;
+        if (ending_known)
+        {
+            line("br label %" + (incoming_ending ? retire : next));
+        }
+        else
+        {
+            line("br i1 " + ending + ", label %" + retire + ", label %" + next);
+        }
+        m_ir += next + ":\n";
+        if (direct_pc == k_unknown_pc)
+        {
+            line("br label %dispatch");
+        }
+        else if (direct_proven && alternate_pc == k_unknown_pc)
+        {
+            line("br label %pair_" + std::to_string(direct_pc));
+        }
+        else
+        {
+            // Select using the incoming delayed NPC, never recompute the
+            // predecessor's condition from potentially overwritten VI.
+            const auto matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                std::to_string(direct_pc));
+            std::string other = "dispatch";
+            if (alternate_pc != k_unknown_pc)
+            {
+                other = direct_proven ? "pair_" + std::to_string(alternate_pc) :
+                    "alternate_" + suffix;
+            }
+            line("br i1 " + matches + ", label %pair_" +
+                std::to_string(direct_pc) + ", label %" + other);
+            if (alternate_pc != k_unknown_pc && !direct_proven)
+            {
+                // Unknown indirect or third successors still use the
+                // original emitted-PC guard; both fast edges are exact.
+                m_ir += other + ":\n";
+                const auto alternate_matches = operation("icmp eq i32 " + m_pair_npc + ", " +
+                    std::to_string(alternate_pc));
+                line("br i1 " + alternate_matches + ", label %pair_" +
+                    std::to_string(alternate_pc) + ", label %dispatch");
+            }
+        }
+        m_ir += retire + ":\n";
+        line("store i32 " + suffix + ", ptr %last_pc_out, align 4");
+        line("br label %done");
         return true;
     }
 
@@ -457,12 +547,18 @@ public:
         const auto cycle = operation("load i32, ptr %cycle, align 4");
         const auto elapsed = operation("sub i32 " + cycle + ", 16");
         line("store i32 " + elapsed + ", ptr %cycles_out, align 4");
-        line("store i32 %current_pc, ptr %last_pc_out, align 4");
-        line("store i32 %npc_now, ptr %tpc, align 4");
-        line("ret i32 %steps");
+        const auto next_pc = operation("load i32, ptr %pc, align 4");
+        line("store i32 " + next_pc + ", ptr %tpc, align 4");
+        const auto steps = operation("load i32, ptr %step_count, align 4");
+        flush_dynamic_vectors();
+        line("ret i32 " + steps);
         m_ir += "fail:\n";
+        // Preserve even failed invocation's staged register writes. The
+        // runtime discards the staged state on failure.
+        flush_dynamic_vectors();
         line("ret i32 0");
         m_ir += "}\n";
+        initialize_dynamic_vectors();
         return m_ir;
     }
 
@@ -473,6 +569,10 @@ public:
         m_upper_mask = 0u;
         m_upper_flags = false;
         m_upper_acc = false;
+        m_upper_vector.clear();
+        m_upper_over_vector.clear();
+        m_upper_under_vector.clear();
+        m_upper_sticky_vector.clear();
         m_pending_clip.clear();
         m_fsset = -1;
         if ((hi & 0x38000000u) != 0u || !emit_upper(hi) ||
@@ -733,7 +833,7 @@ private:
         }
         else
         {
-            line("call void @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
+            line("call i32 @vu_scalar_wait(" + scalar_args(name) + ", ptr %cycle)");
         }
     }
 
@@ -989,7 +1089,7 @@ private:
             std::to_string(index));
         const auto previous = operation("load i16, ptr " + saved + ", align 2");
         const auto current = reg(index);
-        const auto bit = operation("and i32 %previous_vi_mask_now, " +
+        const auto bit = operation("and i32 " + m_pair_vi_mask + ", " +
             std::to_string(1u << index));
         const auto delayed = operation("icmp ne i32 " + bit + ", 0");
         return operation("select i1 " + delayed + ", i16 " + previous +
@@ -1032,7 +1132,7 @@ private:
                 const auto taken = operation(std::string("icmp ") + predicate +
                     " i16 " + lhs + ", " + rhs);
                 m_next_target = operation("select i1 " + taken + ", i32 " +
-                    target + ", i32 %sequential");
+                    target + ", i32 " + m_pair_sequential);
             }
         }
         if (major == 0x21u || major == 0x25u)
@@ -1049,8 +1149,82 @@ private:
         return value;
     }
 
+    // Only the VF/ACC bank used by the emitted microprogram is staged
+    // here. AOT passes separate VF/ACC storage; its kick callback reads
+    // VU data and its EFU callback receives raw scalar operands, never VF.
+    // Non-escaping fixed-size allocas allow SROA/mem2reg across switch
+    // targets and loops without changing the dispatcher or pair timing.
+    std::string local_vf(uint32_t reg_index)
+    {
+        m_dynamic_vf_accessed.set(reg_index);
+        return "%vf_local_" + std::to_string(reg_index);
+    }
+
+    std::string acc_base()
+    {
+        if (!m_dynamic)
+        {
+            return "%acc";
+        }
+        m_dynamic_acc_accessed = true;
+        return "%acc_local";
+    }
+
+    void initialize_dynamic_vectors()
+    {
+        std::string prologue;
+        for (uint32_t reg_index = 1u; reg_index < 32u; ++reg_index)
+        {
+            if (!m_dynamic_vf_accessed.test(reg_index))
+            {
+                continue;
+            }
+            const auto suffix = std::to_string(reg_index);
+            const auto backing = "%vf_backing_" + suffix;
+            const auto initial = "%vf_initial_" + suffix;
+            const auto local = "%vf_local_" + suffix;
+            prologue += "  " + backing + " = getelementptr i32, ptr %vf, i32 " +
+                std::to_string(reg_index * 4u) + "\n";
+            prologue += "  " + initial + " = load <4 x i32>, ptr " + backing + ", align 4\n";
+            prologue += "  " + local + " = alloca <4 x i32>, align 16\n";
+            prologue += "  store <4 x i32> " + initial + ", ptr " + local + ", align 16\n";
+        }
+        if (m_dynamic_acc_accessed)
+        {
+            prologue += "  %acc_initial = load <4 x i32>, ptr %acc, align 4\n"
+                "  %acc_local = alloca <4 x i32>, align 16\n"
+                "  store <4 x i32> %acc_initial, ptr %acc_local, align 16\n";
+        }
+        m_ir.insert(m_dynamic_local_offset, prologue);
+    }
+
+    void flush_dynamic_vectors()
+    {
+        for (uint32_t reg_index = 1u; reg_index < 32u; ++reg_index)
+        {
+            if (m_dynamic_vf_written.test(reg_index))
+            {
+                const auto value = operation("load <4 x i32>, ptr " +
+                    local_vf(reg_index) + ", align 16");
+                line("store <4 x i32> " + value + ", ptr %vf_backing_" +
+                    std::to_string(reg_index) + ", align 4");
+            }
+        }
+        if (m_dynamic_acc_written)
+        {
+            const auto value = operation("load <4 x i32>, ptr " + acc_base() + ", align 16");
+            line("store <4 x i32> " + value + ", ptr %acc, align 4");
+        }
+    }
+
     std::string vf_pointer(uint32_t reg_index, uint32_t lane)
     {
+        if (m_dynamic)
+        {
+            const auto base = local_vf(reg_index);
+            return lane == 0u ? base : operation("getelementptr i32, ptr " +
+                base + ", i32 " + std::to_string(lane));
+        }
         return operation("getelementptr i32, ptr %vf, i32 " +
             std::to_string(reg_index * 4u + lane));
     }
@@ -1061,8 +1235,15 @@ private:
         {
             return lane == 3u ? "1065353216" : "0";
         }
-        return operation("load i32, ptr " + vf_pointer(reg_index, lane) +
-            ", align 4");
+        auto& cached = m_vf_lanes[reg_index][lane];
+        if (cached.empty())
+        {
+            const auto& vector = m_vf_vectors[reg_index];
+            cached = vector.empty()
+                ? operation("load i32, ptr " + vf_pointer(reg_index, lane) + ", align 4")
+                : operation("extractelement <4 x i32> " + vector + ", i32 " + std::to_string(lane));
+        }
+        return cached;
     }
 
     std::string vf_vector(uint32_t reg_index)
@@ -1071,8 +1252,15 @@ private:
         {
             return "<i32 0, i32 0, i32 0, i32 1065353216>";
         }
-        return operation("load <4 x i32>, ptr " + vf_pointer(reg_index, 0u) +
-            ", align 4");
+        auto& cached = m_vf_vectors[reg_index];
+        if (cached.empty())
+        {
+            // Writes remain published at the original architectural point.
+            // A full load therefore also sees any earlier partial writes.
+            cached = operation("load <4 x i32>, ptr " + vf_pointer(reg_index, 0u) +
+                ", align 4");
+        }
+        return cached;
     }
 
     std::string splat(const std::string& value)
@@ -1144,18 +1332,57 @@ private:
         }
     }
 
-    void write_vector(uint32_t target, uint32_t mask,
-        const std::array<std::string, 4>& values)
+    std::string assemble_vector(const std::array<std::string, 4>& values)
+    {
+        std::string result = "poison";
+        for (uint32_t lane = 0; lane < 4u; ++lane)
+        {
+            result = operation("insertelement <4 x i32> " + result + ", i32 " +
+                values[lane] + ", i32 " + std::to_string(lane));
+        }
+        return result;
+    }
+
+    void write_full_vf(uint32_t target, const std::string& value)
     {
         if (target != 0u)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            if (m_dynamic)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    line("store i32 " + values[lane] + ", ptr " +
-                        vf_pointer(target, lane) + ", align 4");
-                }
+                m_dynamic_vf_written.set(target);
+            }
+            line("store <4 x i32> " + value + ", ptr " +
+                vf_pointer(target, 0u) + ", align 4");
+            m_vf_vectors[target] = value;
+            m_vf_lanes[target] = {};
+        }
+    }
+
+    void write_vector(uint32_t target, uint32_t mask,
+        const std::array<std::string, 4>& values,
+        const std::string& vector = {})
+    {
+        if (target == 0u || mask == 0u)
+        {
+            return;
+        }
+        if (mask == 15u)
+        {
+            write_full_vf(target, vector.empty() ? assemble_vector(values) : vector);
+            return;
+        }
+        if (m_dynamic)
+        {
+            m_dynamic_vf_written.set(target);
+        }
+        m_vf_vectors[target].clear();
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                line("store i32 " + values[lane] + ", ptr " +
+                    vf_pointer(target, lane) + ", align 4");
+                m_vf_lanes[target][lane] = values[lane];
             }
         }
     }
@@ -1168,8 +1395,7 @@ private:
             // address (0x3ff0). Do not assume host data alignment.
             const auto value = operation("load <4 x i32>, ptr " +
                 data_pointer(address, 0u) + ", align 1");
-            line("store <4 x i32> " + value + ", ptr " +
-                vf_pointer(target, 0u) + ", align 4");
+            write_full_vf(target, value);
             return;
         }
         std::array<std::string, 4> values{};
@@ -1207,28 +1433,59 @@ private:
     {
         if (m_upper_acc)
         {
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            if (m_dynamic && m_upper_mask != 0u)
             {
-                if ((m_upper_mask & (8u >> lane)) != 0u)
+                m_dynamic_acc_written = true;
+            }
+            if (m_upper_mask == 15u)
+            {
+                const auto value = m_upper_vector.empty()
+                    ? assemble_vector(m_upper_values) : m_upper_vector;
+                line("store <4 x i32> " + value + ", ptr " + acc_base() + ", align 4");
+                m_acc_vector = value;
+                m_acc_lanes = {};
+            }
+            else if (m_upper_mask != 0u)
+            {
+                m_acc_vector.clear();
+                for (uint32_t lane = 0u; lane < 4u; ++lane)
                 {
-                    line("store i32 " + m_upper_values[lane] + ", ptr " +
-                        acc_pointer(lane) + ", align 4");
-                    if (m_upper_flags)
+                    if ((m_upper_mask & (8u >> lane)) != 0u)
                     {
-                        const auto latch = operation("load i32, ptr %acc_overflow, align 4");
-                        const uint32_t bit = 8u >> lane;
-                        const auto cleared = operation("and i32 " + latch + ", " + std::to_string(~bit));
-                        const auto flag = operation("select i1 " + m_upper_overflow[lane] +
-                            ", i32 " + std::to_string(bit) + ", i32 0");
-                        const auto next = operation("or i32 " + cleared + ", " + flag);
-                        line("store i32 " + next + ", ptr %acc_overflow, align 4");
+                        line("store i32 " + m_upper_values[lane] + ", ptr " +
+                            acc_pointer(lane) + ", align 4");
+                        m_acc_lanes[lane] = m_upper_values[lane];
                     }
                 }
+            }
+            if (m_upper_flags && m_upper_mask != 0u)
+            {
+                const auto latch = operation("load i32, ptr %acc_overflow, align 4");
+                auto next = operation("and i32 " + latch + ", " + std::to_string(~m_upper_mask));
+                if (!m_upper_over_vector.empty())
+                {
+                    next = operation("or i32 " + next + ", " +
+                        pack_flags(m_upper_over_vector, m_upper_mask));
+                }
+                else
+                {
+                    for (uint32_t lane = 0u; lane < 4u; ++lane)
+                    {
+                        const uint32_t bit = 8u >> lane;
+                        if ((m_upper_mask & bit) != 0u)
+                        {
+                            const auto flag = operation("select i1 " + m_upper_overflow[lane] +
+                                ", i32 " + std::to_string(bit) + ", i32 0");
+                            next = operation("or i32 " + next + ", " + flag);
+                        }
+                    }
+                }
+                line("store i32 " + next + ", ptr %acc_overflow, align 4");
             }
         }
         else
         {
-            write_vector(m_upper_target, m_upper_mask, m_upper_values);
+            write_vector(m_upper_target, m_upper_mask, m_upper_values, m_upper_vector);
         }
         if (m_upper_flags)
         {
@@ -1236,10 +1493,37 @@ private:
         }
     }
 
+    std::string pack_flags(const std::string& lanes, uint32_t mask)
+    {
+        // x,y,z,w map to guest MAC bits 8,4,2,1 respectively.
+        const auto reversed = operation("shufflevector <4 x i1> " + lanes +
+            ", <4 x i1> poison, <4 x i32> <i32 3, i32 2, i32 1, i32 0>");
+        const auto packed = operation("bitcast <4 x i1> " + reversed + " to i4");
+        const auto bits = operation("zext i4 " + packed + " to i32");
+        return mask == 15u ? bits :
+            operation("and i32 " + bits + ", " + std::to_string(mask));
+    }
+
     void emit_flags(const std::array<std::string, 4>& values, uint32_t mask)
     {
         std::string mac = "0";
-        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        if (!m_upper_vector.empty())
+        {
+            const auto exp = operation("and <4 x i32> " + m_upper_vector +
+                ", <i32 2139095040, i32 2139095040, i32 2139095040, i32 2139095040>");
+            const auto zero = operation("icmp eq <4 x i32> " + exp + ", zeroinitializer");
+            const auto sign = operation("icmp slt <4 x i32> " + m_upper_vector + ", zeroinitializer");
+            mac = pack_flags(zero, mask);
+            for (const auto& group : {std::make_pair(sign, 4u),
+                                      std::make_pair(m_upper_under_vector, 8u),
+                                      std::make_pair(m_upper_over_vector, 12u)})
+            {
+                const auto bits = pack_flags(group.first, mask);
+                const auto shifted = operation("shl i32 " + bits + ", " + std::to_string(group.second));
+                mac = operation("or i32 " + mac + ", " + shifted);
+            }
+        }
+        else for (uint32_t lane = 0u; lane < 4u; ++lane)
         {
             const uint32_t bit = 8u >> lane;
             if ((mask & bit) == 0u)
@@ -1264,11 +1548,20 @@ private:
         line("store i32 " + mac + ", ptr %mac, align 4");
         const auto old = operation("load i32, ptr %status, align 4");
         auto status = operation("and i32 " + old + ", 4080");
-        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        if (!m_upper_sticky_vector.empty() && mask == 15u)
         {
-            if ((mask & (8u >> lane)) != 0u)
+            const auto sticky = operation("call i32 @llvm.vector.reduce.or.v4i32(<4 x i32> " +
+                m_upper_sticky_vector + ")");
+            status = operation("or i32 " + status + ", " + sticky);
+        }
+        else
+        {
+            for (uint32_t lane = 0u; lane < 4u; ++lane)
             {
-                status = operation("or i32 " + status + ", " + m_upper_sticky[lane]);
+                if ((mask & (8u >> lane)) != 0u)
+                {
+                    status = operation("or i32 " + status + ", " + m_upper_sticky[lane]);
+                }
             }
         }
         for (uint32_t group = 0u; group < 4u; ++group)
@@ -1293,13 +1586,31 @@ private:
 
     std::string acc_pointer(uint32_t lane)
     {
-        return operation("getelementptr i32, ptr %acc, i32 " +
-            std::to_string(lane));
+        const auto base = acc_base();
+        return lane == 0u ? base : operation("getelementptr i32, ptr " +
+            base + ", i32 " + std::to_string(lane));
     }
 
     std::string acc(uint32_t lane)
     {
-        return operation("load i32, ptr " + acc_pointer(lane) + ", align 4");
+        auto& value = m_acc_lanes[lane];
+        if (value.empty())
+        {
+            value = m_acc_vector.empty()
+                ? operation("load i32, ptr " + acc_pointer(lane) + ", align 4")
+                : operation("extractelement <4 x i32> " + m_acc_vector + ", i32 " +
+                    std::to_string(lane));
+        }
+        return value;
+    }
+
+    std::string acc_vector()
+    {
+        if (m_acc_vector.empty())
+        {
+            m_acc_vector = operation("load <4 x i32>, ptr " + acc_base() + ", align 4");
+        }
+        return m_acc_vector;
     }
 
     std::string fp_binary(const char* helper, const std::string& lhs,
@@ -1443,9 +1754,7 @@ private:
                 lhs = operation("select <4 x i1> " + active + ", <4 x i32> " +
                     lhs + ", <4 x i32> zeroinitializer");
             }
-            const auto acc_value = mac ?
-                operation("load <4 x i32>, ptr %acc, align 4") :
-                std::string("zeroinitializer");
+            const auto acc_value = mac ? acc_vector() : std::string("zeroinitializer");
             std::string latched = "zeroinitializer";
             if (mac)
             {
@@ -1463,6 +1772,10 @@ private:
             const auto over = operation("extractvalue " + type + " " + result + ", 1");
             const auto under = operation("extractvalue " + type + " " + result + ", 2");
             const auto sticky = operation("extractvalue " + type + " " + result + ", 3");
+            m_upper_vector = bits;
+            m_upper_over_vector = over;
+            m_upper_under_vector = under;
+            m_upper_sticky_vector = sticky;
             for (uint32_t lane = 0u; lane < 4u; ++lane)
             {
                 if ((write_mask & (8u >> lane)) != 0u)
@@ -1603,6 +1916,17 @@ private:
     }
 
     std::string m_ir;
+    // Write-through SSA cache: within a dynamic pair or across the proven
+    // straight-line path. Lower writes update cache before upper retirement.
+    size_t m_dynamic_local_offset = 0u;
+    std::bitset<32> m_dynamic_vf_accessed{}, m_dynamic_vf_written{};
+    bool m_dynamic_acc_accessed = false;
+    bool m_dynamic_acc_written = false;
+    std::array<std::array<std::string, 4>, 32> m_vf_lanes{};
+    std::array<std::string, 32> m_vf_vectors{};
+    std::array<std::string, 4> m_acc_lanes{};
+    std::string m_acc_vector;
+    std::string m_upper_vector, m_upper_over_vector, m_upper_under_vector, m_upper_sticky_vector;
     std::array<std::string, 4> m_upper_values{};
     std::array<std::string, 4> m_upper_overflow{};
     std::array<std::string, 4> m_upper_underflow{};
@@ -1626,6 +1950,7 @@ private:
     int32_t m_fsset = -1;
     uint32_t m_current_pc = 0u;
     std::string m_next_target;
+    std::string m_pair_steps, m_pair_npc, m_pair_sequential, m_pair_vi_mask;
     uint32_t m_counter = 0u;
 };
 } // namespace
@@ -1685,6 +2010,17 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
     std::set<t_visit> visited;
     std::vector<t_visit> queue;
     std::bitset<2048> reached;
+    std::array<uint32_t, 2048> direct_successors, alternate_successors;
+    direct_successors.fill(k_unknown_pc);
+    alternate_successors.fill(k_unknown_pc);
+    std::bitset<2048> incomplete_successors;
+    // Incoming state facts are independent of outgoing-edge discovery:
+    // an E-delay pair still consumes NPC and publishes the final TPC.
+    std::array<uint32_t, 2048> incoming_npcs;
+    incoming_npcs.fill(k_unknown_pc);
+    std::bitset<2048> incoming_seen, incoming_npc_ambiguous;
+    std::bitset<2048> ending_seen, nonending_seen;
+    bool has_indirect = false;
     const uint32_t start = address & 0x3ff8u;
     const auto enqueue = [&](uint32_t pc, uint32_t npc, bool ending)
     {
@@ -1710,7 +2046,25 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             return {};
         }
         const auto [pc, npc, ending] = queue[index];
-        reached.set(pc >> 3u);
+        const auto pair_index = pc >> 3u;
+        reached.set(pair_index);
+        if (!incoming_seen.test(pair_index))
+        {
+            incoming_seen.set(pair_index);
+            incoming_npcs[pair_index] = npc;
+        }
+        else if (incoming_npcs[pair_index] != npc)
+        {
+            incoming_npc_ambiguous.set(pair_index);
+        }
+        if (ending)
+        {
+            ending_seen.set(pair_index);
+        }
+        else
+        {
+            nonending_seen.set(pair_index);
+        }
         const uint32_t lo = read_word(code.data() + pc);
         const uint32_t hi = read_word(code.data() + pc + 4u);
         const bool branch = is_branch(lo, hi);
@@ -1720,6 +2074,7 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         if (branch)
         {
             const uint32_t major = lo >> 25u;
+            has_indirect |= major == 0x24u || major == 0x25u;
             if (major == 0x28u || major == 0x29u ||
                 (major >= 0x2cu && major <= 0x2fu))
             {
@@ -1739,6 +2094,42 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
         {
             has_end = true;
             continue;
+        }
+        // The next executed PC is the incoming delayed NPC, not the
+        // branch target produced by this pair. Only nonterminating states
+        // contribute outgoing edges. Unknown NPCs cannot prove an edge.
+        if (npc == k_unknown_pc)
+        {
+            incomplete_successors.set(pair_index);
+        }
+        else if (npc != direct_successors[pair_index] &&
+                 npc != alternate_successors[pair_index])
+        {
+            auto& direct = direct_successors[pair_index];
+            auto& alternate = alternate_successors[pair_index];
+            if (direct == k_unknown_pc)
+            {
+                direct = npc;
+            }
+            else if (alternate == k_unknown_pc)
+            {
+                alternate = npc;
+            }
+            else
+            {
+                // Bound code growth. Retain two fast targets but never
+                // assume they exhaust a larger successor set.
+                incomplete_successors.set(pair_index);
+                if (npc == ((pc + 8u) & 0x3fffu))
+                {
+                    alternate = npc;
+                }
+            }
+            // Favor fallthrough as the first comparison.
+            if (alternate == ((pc + 8u) & 0x3fffu))
+            {
+                std::swap(direct, alternate);
+            }
         }
         const bool next_end = (hi & 0x40000000u) != 0u;
         const uint32_t sequential = npc == k_unknown_pc ?
@@ -1780,8 +2171,25 @@ s_ee_vu1_ir_program vu1_lift_program_ir(
             continue;
         }
         const uint32_t pc = index * 8u;
+        const auto direct = direct_successors[index];
+        const auto alternate = alternate_successors[index];
+        const bool emitted = direct != k_unknown_pc && reached.test(direct >> 3u);
+        const bool alternate_emitted = alternate != k_unknown_pc &&
+            reached.test(alternate >> 3u);
+        // With no indirect branch the discovery graph conservatively
+        // enumerates every incoming PC/NPC/E state from the entry.
+        const bool proven = emitted && !has_indirect && !incomplete_successors.test(index) &&
+            (alternate == k_unknown_pc || alternate_emitted);
+        // Indirect transfers may enter any emitted pair with a different
+        // delayed state. Do not infer constants for such programs.
+        const auto incoming_npc = !has_indirect && !incoming_npc_ambiguous.test(index) ?
+            incoming_npcs[index] : k_unknown_pc;
+        const bool ending_known = !has_indirect &&
+            ending_seen.test(index) != nonending_seen.test(index);
         if (!emitter.emit_dynamic_pair(pc, read_word(code.data() + pc),
-                read_word(code.data() + pc + 4u)))
+                read_word(code.data() + pc + 4u), emitted ? direct : k_unknown_pc,
+                alternate_emitted ? alternate : k_unknown_pc, proven,
+                incoming_npc, ending_known, ending_seen.test(index)))
         {
             return {};
         }

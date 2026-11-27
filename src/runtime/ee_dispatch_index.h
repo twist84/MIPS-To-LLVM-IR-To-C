@@ -45,6 +45,16 @@ t_ee_translated_entry ee_resolve_dispatch_entry(
     const s_ee_dispatch_index& index,
     uint32_t guest_pc);
 
+// Identify the first metadata owner of the actual callable native target.
+// Zero means unavailable, including the synthetic PC-zero entry, a stale
+// target pointer, an unowned PC or a malformed table. This identifies the
+// owner, not a proof of its emitted instructions or execution bound.
+uint32_t ee_resolve_dispatch_owner_vaddr(
+    const s_ee_dispatch_table& table,
+    const s_ee_dispatch_index& index,
+    uint32_t guest_pc,
+    t_ee_translated_entry entry);
+
 // Execute exactly one already-resolved entry at its original PC, with
 // the same interrupt, exit-reason and budget semantics as a one-entry
 // indexed run. The caller must retain the owning library and invalidate

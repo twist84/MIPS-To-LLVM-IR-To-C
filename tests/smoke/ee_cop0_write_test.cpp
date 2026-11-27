@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <initializer_list>
 #include <string>
 #include <vector>
 
@@ -60,6 +61,80 @@ int main()
     check(cpu.m_cop0[ee::COP0_Status] == 0x00010001u &&
           cpu.m_cop0[ee::COP0_Cause] == k_other_cause,
           "non-Compare writes retain prior register semantics");
+
+    // The R5900 Cause register is read-only and has no software
+    // interrupt lines. Exercise all eight IP positions, with genuine
+    // hardware events arriving through the host request/clear path.
+    {
+        ee::s_ee_cpu_state probe{};
+        constexpr uint32_t saved_cause = 0xf0028c34u;
+        probe.m_cop0[ee::COP0_Cause] = saved_cause;
+        ee::ee_cop0_write(&probe, ee::COP0_Cause, 0u);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "guest Cause write cannot clear saved exception or pending lines");
+        ee::ee_cop0_write(&probe, ee::COP0_Cause, 0xffffffffu);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "guest Cause write cannot manufacture exception or pending lines");
+        for (uint32_t line = 0u; line < 8u; ++line)
+        {
+            const uint32_t bit = 1u << (8u + line);
+            const bool implemented = line == 2u || line == 3u || line == 7u;
+            probe.m_cop0[ee::COP0_Status] = ee::STATUS_IE | ee::STATUS_EIE | bit;
+            probe.m_cop0[ee::COP0_Cause] = 0u;
+            ee::ee_interrupt_request(&probe, line);
+            check(probe.m_cop0[ee::COP0_Cause] == (implemented ? bit : 0u) &&
+                  ee::ee_interrupts_enabled(&probe) == implemented &&
+                  ee::ee_pending_interrupts(&probe) == (implemented ? bit : 0u),
+                  "only real EE hardware lines may be requested");
+            // A raw state image may contain legacy/reserved bits, but
+            // they must not be eligible for an architectural interrupt.
+            probe.m_cop0[ee::COP0_Cause] = bit;
+            check(ee::ee_interrupts_enabled(&probe) == implemented &&
+                  ee::ee_pending_interrupts(&probe) == (implemented ? bit : 0u),
+                  "reserved IP bits cannot dispatch an interrupt");
+            ee::ee_interrupt_clear(&probe, line);
+            check(probe.m_cop0[ee::COP0_Cause] == (implemented ? 0u : bit),
+                  "clear operates only on implemented interrupt lines");
+        }
+        probe.m_cop0[ee::COP0_Cause] = saved_cause;
+        ee::ee_interrupt_request(&probe, 32u);
+        ee::ee_interrupt_clear(&probe, 0xffffffffu);
+        check(probe.m_cop0[ee::COP0_Cause] == saved_cause,
+              "out of range IRQ line is ignored");
+    }
+
+    {
+        ee::s_ee_cpu_state probe{};
+        probe.m_cop0[ee::COP0_Random] = 17u;
+        probe.m_cop0[ee::COP0_BadVAddr] = 0x87654321u;
+        probe.m_cop0[ee::COP0_PRId] = 0x00002e20u;
+        for (uint32_t value : {0u, 0xffffffffu, 0x12345678u})
+        {
+            ee::ee_cop0_write(&probe, ee::COP0_Random, value);
+            ee::ee_cop0_write(&probe, ee::COP0_BadVAddr, value);
+            ee::ee_cop0_write(&probe, ee::COP0_PRId, value);
+            check(probe.m_cop0[ee::COP0_Random] == 17u &&
+                  probe.m_cop0[ee::COP0_BadVAddr] == 0x87654321u &&
+                  probe.m_cop0[ee::COP0_PRId] == 0x00002e20u,
+                  "guest writes preserve read-only Random, BadVAddr and PRId");
+        }
+        for (uint32_t wired = 0u; wired < 48u; ++wired)
+        {
+            probe.m_cop0[ee::COP0_Random] = wired;
+            ee::ee_cop0_write(&probe, ee::COP0_Wired, wired);
+            check(probe.m_cop0[ee::COP0_Wired] == wired &&
+                  probe.m_cop0[ee::COP0_Random] == 47u,
+                  "defined Wired writes reset Random to 47");
+        }
+        probe.m_cop0[ee::COP0_Random] = 17u;
+        ee::ee_cop0_write(&probe, ee::COP0_Wired, 48u);
+        check(probe.m_cop0[ee::COP0_Wired] == 48u &&
+              probe.m_cop0[ee::COP0_Random] == 17u,
+              "undefined Wired value retains legacy storage without invented reset");
+        ee::ee_raise_exception(&probe, nullptr, ee::EX_AdEL, 0x1000u, 0u, 0x123u);
+        check(probe.m_cop0[ee::COP0_BadVAddr] == 0x123u,
+              "architectural fault still updates read-only BadVAddr");
+    }
 
     // The existing explicit timer-tick helper is only a synthetic fixture:
     // no native execution cycle source or GS scheduling is installed.
@@ -144,7 +219,8 @@ int main()
           !ee::ee_cop0_perf_advance(&runtime, 0u, 100u),
           "compatibility source enables only its own approximate budget");
     cpu.m_cop0[ee::COP0_Status] = 0u;
-    runtime.m_guest_instruction_attempts = 23u;
+    runtime.m_guest_instruction_attempts = 20u;
+    runtime.m_reference_instruction_slots = 23u;
     check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u &&
           runtime.m_perf_counter[1] == 0u &&
           transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 23u,
@@ -154,7 +230,7 @@ int main()
     check(runtime.m_perf_counter[0] == 30u &&
           transfer(4u, 0u, 0u) == 0u,
           "idle units use same clock and stop accounts old control");
-    runtime.m_guest_instruction_attempts += 19u;
+    runtime.m_reference_instruction_slots += 19u;
     check(transfer(0u, 5u, 1u) == 0u && cpu.m_gpr[5].m_lo == 30u,
           "disabled compatibility counter remains unchanged");
     runtime.m_ee_cycle_scheduler.reset();
@@ -227,13 +303,13 @@ int main()
               "unavailable clock leaves Count unchanged");
         check(clock.m_ee_cycle_scheduler.install_reference_compatibility_source(),
               "explicit compatibility source");
-        clock.m_guest_instruction_attempts = 6u;
+        clock.m_reference_instruction_slots = 6u;
         ee::ee_cop0_clock_sync(&a, &clock);
         check(a.m_cop0[ee::COP0_Count] == 2u &&
               (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
               "Count wraps and latches Compare at the elapsed budget");
         ee::ee_cop0_clock_write(&a, &clock, ee::COP0_Compare, 10u);
-        clock.m_guest_instruction_attempts = 9u;
+        clock.m_reference_instruction_slots = 9u;
         clock.m_cop0_clock_idle = 2u;
         ee::ee_cop0_clock_sync(&b, &clock);
         check(b.m_cop0[ee::COP0_Count] == 7u &&
@@ -241,11 +317,22 @@ int main()
               (b.m_cop0[ee::COP0_Cause] & k_timer_ip) == 0u,
               "thread context cannot restore stale timer state");
         ee::ee_cop0_clock_write(&b, &clock, ee::COP0_Count, 9u);
-        clock.m_guest_instruction_attempts++;
+        clock.m_reference_instruction_slots++;
         ee::ee_cop0_clock_sync(&a, &clock);
         check(a.m_cop0[ee::COP0_Count] == 10u &&
               (a.m_cop0[ee::COP0_Cause] & k_timer_ip) != 0u,
               "Count write reanchors without double counting");
+        ee::ee_record_hle_timing_boundary(clock, 0x1000u, 0xcu, 0x44u);
+        ee::ee_cop0_clock_sync(&a, &clock);
+        check(a.m_cop0[ee::COP0_Count] == 310u &&
+              clock.m_reference_instruction_slots == 10u,
+              "recognized syscall charges reference cost without changing slots");
+        uint64_t cycle = 0u;
+        check(ee::ee_reference_compatibility_cycle(clock, cycle) && cycle == 312u,
+              "shared compatibility timeline includes slots, idle and syscall cost");
+        clock.m_hle_timing_boundaries = UINT64_MAX;
+        check(!ee::ee_reference_compatibility_cycle(clock, cycle) && cycle == 312u,
+              "reference budget overflow is rejected without changing output");
     }
     std::printf("ee_cop0_write_test: %d failure(s)\n", s_failures);
     return s_failures != 0 ? 1 : 0;

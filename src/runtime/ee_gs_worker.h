@@ -233,6 +233,16 @@ public:
         return !m_failed.load(std::memory_order_acquire);
     }
 
+    // Runner-side snapshot only. Jobs includes the executing batch, not
+    // just queued work. A failed worker is never considered quiescent.
+    // The sole producer must still guard any subsequent submission.
+    bool quiescent() const
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        return m_jobs == 0u && !m_stopping &&
+            !m_failed.load(std::memory_order_acquire);
+    }
+
     s_statistics statistics() const
     {
         std::lock_guard<std::mutex> lock(m_mutex);

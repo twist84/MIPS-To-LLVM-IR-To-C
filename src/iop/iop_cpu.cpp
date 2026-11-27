@@ -777,16 +777,18 @@ e_step_result c_cpu::step(uint32_t* opcode)
     return e_step_result::completed;
 }
 
-int c_cpu::aot_read(void* cpu, uint32_t address, uint32_t width,
-                    uint32_t* value)
+int c_cpu::aot_read(void*, uint32_t, uint32_t, uint32_t*)
 {
-    return static_cast<const c_cpu*>(cpu)->read(address, width, value) ? 1 : 0;
+    // The lifter handles aligned RAM directly. All other accesses must
+    // resume in step() with the precise instruction PC and all preceding
+    // cycles retired. A false callback result requests that fallback.
+    return 0;
 }
 
-int c_cpu::aot_write(void* cpu, uint32_t address, uint32_t width,
-                     uint32_t value)
+int c_cpu::aot_write(void*, uint32_t, uint32_t, uint32_t)
 {
-    return static_cast<c_cpu*>(cpu)->write(address, width, value) ? 1 : 0;
+    // Do not perform speculative MMIO or faulting writes here.
+    return 0;
 }
 
 s_run_result c_cpu::run(uint32_t instruction_budget)
@@ -814,11 +816,35 @@ s_run_result c_cpu::run(uint32_t instruction_budget)
                 context.m_read = &c_cpu::aot_read;
                 context.m_write = &c_cpu::aot_write;
                 context.m_budget = instruction_budget - index;
-                // SDBZ_IOP_AOT_VERIFY: replay every translated call on the
-                // interpreter from the same state and report divergence
-                // (diagnostic; MMIO side effects are repeated).
-                static const bool verify =
+                bool chain_safe = m_hardware == nullptr;
+                if (m_hardware != nullptr)
+                {
+                    // A RAM-only native batch may end at the next modeled
+                    // device transition, but not run instructions beyond it.
+                    // Unknown/immediate horizons retire at most one word.
+                    const uint64_t horizon = m_hardware->idle_event_cycles_remaining();
+                    if (horizon < context.m_budget)
+                    {
+                        context.m_budget = static_cast<uint32_t>(
+                            std::max<uint64_t>(1u, horizon));
+                    }
+                    // The legacy clock-wrap path is not partitionable.
+                    const auto& spu2 = m_hardware->spu2();
+                    if (spu2.clock_active() && context.m_budget >
+                        UINT64_MAX - spu2.clock_cycles())
+                    {
+                        context.m_budget = 1u;
+                    }
+                    // Require the complete call budget to end strictly before
+                    // the first modeled transition. Immediate and equal
+                    // horizons retain the original per-region retirement.
+                    chain_safe = horizon > context.m_budget;
+                }
+                // Legacy CPU/RAM verification cannot restore device
+                // state or retirement clocks. Never replay on live hardware.
+                static const bool verify_requested =
                     std::getenv("SDBZ_IOP_AOT_VERIFY") != nullptr;
+                const bool verify = verify_requested && m_hardware == nullptr;
                 s_cpu_state verify_state{};
                 std::vector<uint8_t> verify_ram;
                 if (verify)
@@ -827,9 +853,19 @@ s_run_result c_cpu::run(uint32_t instruction_budget)
                     verify_ram = m_ram;
                 }
                 const uint32_t entry_pc = m_state.m_pc;
+                static const bool chain_enabled =
+                    std::getenv("SDBZ_IOP_AOT_CHAIN") != nullptr;
+                t_iop_aot_entry entry = module->m_entry;
+                if (chain_enabled && chain_safe && !verify && context.m_budget > 1u)
+                {
+                    const auto chain = m_aot->chain_entry(module, m_state.m_pc);
+                    if (chain != nullptr)
+                    {
+                        entry = chain;
+                    }
+                }
                 const auto aot_started = std::chrono::steady_clock::now();
-                const uint32_t reason =
-                    module->m_entry(&context, m_state.m_pc);
+                const uint32_t reason = entry(&context, m_state.m_pc);
                 m_aot->add_time(std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - aot_started).count());
                 if (verify)
@@ -901,6 +937,13 @@ s_run_result c_cpu::run(uint32_t instruction_budget)
                     context.m_in_delay != 0u ? context.m_branch_pc : 0u;
                 m_state.m_gpr[0] = 0u;
                 m_aot->record(context.m_executed);
+                static const bool exit_profile =
+                    std::getenv("SDBZ_IOP_AOT_EXIT_PROFILE") != nullptr;
+                if (exit_profile)
+                {
+                    m_aot->record_exit(*module, entry_pc, context, reason,
+                                       instruction_budget - index);
+                }
                 if (context.m_executed != 0u)
                 {
                     m_cycles += context.m_executed;

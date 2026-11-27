@@ -38,6 +38,17 @@ int main(int argc, char** argv)
         make_cop0(0u, 13u, 12u), // mfc0 t5, Status
         make_cop0(4u, 14u, 9u),  // mtc0 t6, Count
         make_cop0(0u, 15u, 9u),  // mfc0 t7, Count
+        make_cop0(4u, 16u, 13u), // mtc0 s0, Cause (read-only)
+        make_cop0(0u, 17u, 13u), // mfc0 s1, Cause
+        make_cop0(4u, 16u, 1u),  // mtc0 s0, Random
+        make_cop0(0u, 18u, 1u),  // mfc0 s2, Random
+        make_cop0(4u, 16u, 8u),  // mtc0 s0, BadVAddr
+        make_cop0(0u, 19u, 8u),  // mfc0 s3, BadVAddr
+        make_cop0(4u, 16u, 15u), // mtc0 s0, PRId
+        make_cop0(0u, 20u, 15u), // mfc0 s4, PRId
+        make_cop0(4u, 21u, 6u),  // mtc0 s5, Wired
+        make_cop0(0u, 22u, 1u),  // mfc0 s6, Random
+        make_cop0(0u, 23u, 6u),  // mfc0 s7, Wired
     };
 
     std::map<uint32_t, ee::s_ee_instruction> instructions;

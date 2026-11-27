@@ -209,6 +209,55 @@ public:
         return (m_status & 0x03ffu) & ((m_status >> 16u) & 0x03ffu);
     }
 
+    // HLE SIF0 receive readiness is not an autonomous FIFO transfer.
+    // A caller must separately establish HLE mode, no RPC ownership,
+    // and a safe IOP deadline. Do not exempt any genuine FIFO engine,
+    // residual destination quadwords or unacknowledged completion.
+    bool sif0_receive_armed_only() const
+    {
+        return m_sif0_start == nullptr &&
+            (m_sif0_channel.m_chcr & 0x10du) == 0x104u &&
+            m_sif0_channel.m_qwc == 0u &&
+            !m_sif0_chain_end &&
+            (m_status & (1u << 5u)) == 0u;
+    }
+
+    // CHCR.STR is independent of D_STAT.CIS & CIM. A started
+    // channel can wait for an external producer, consumer or unmask
+    // without any pending interrupt. This is a conservative snapshot,
+    // not a prediction of when a transfer will make progress.
+    uint32_t started_channels() const
+    {
+        uint32_t mask = 0u;
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            if ((m_device_channels[i].m_chcr & k_chcr_str) != 0u)
+            {
+                mask |= 1u << i;
+            }
+        }
+        for (uint32_t i = 0u; i < 2u; ++i)
+        {
+            if ((m_ipu_channels[i].m_chcr & k_chcr_str) != 0u)
+            {
+                mask |= 1u << (i + 3u);
+            }
+            if ((m_spr_channels[i].m_chcr & k_chcr_str) != 0u)
+            {
+                mask |= 1u << (i + 8u);
+            }
+        }
+        if ((m_sif0_channel.m_chcr & k_chcr_str) != 0u)
+        {
+            mask |= 1u << 5u;
+        }
+        if ((m_sif1_channel.m_chcr & k_chcr_str) != 0u)
+        {
+            mask |= 1u << 6u;
+        }
+        return mask;
+    }
+
     static bool mmio_read(void* user, uint32_t address,
                           uint32_t width, s_ee_u128* value);
     static bool mmio_write(void* user, uint32_t address,

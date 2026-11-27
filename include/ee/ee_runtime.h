@@ -378,7 +378,51 @@ struct s_ee_runtime
     // counting; the validated producer continues using explicit deltas.
     uint64_t m_perf_compat_last = 0u;
     bool m_perf_compat_fault = false;
+
+    // Host-only diagnostic for the latest taken exception. Cause.BD may
+    // refer to an earlier exception while EXL is set. HLE callbacks need
+    // the actual nested trap's delay-slot status, alongside cpu.m_pad.
+    bool m_last_exception_in_bd_slot = false;
+
+    // Opt-in direct physical RAM, not a TLB mapping. The owner must keep
+    // this little-endian span alive and stable throughout native execution.
+    // Only naturally aligned word operations may use it. A zero size or
+    // null pointer disables the path; aliases and devices remain on bus ABI.
+    uint8_t* m_fastmem_word_base = nullptr;
+    uint32_t m_fastmem_word_size = 0u;
+    // Independent descriptor for byte, halfword and doubleword accesses.
+    // Same lifetime and direct physical RAM restrictions as word fastmem.
+    uint8_t* m_fastmem_other_scalar_base = nullptr;
+    uint32_t m_fastmem_other_scalar_size = 0u;
+    // Independent aligned 128-bit physical RAM experiment.
+    uint8_t* m_fastmem_quad_base = nullptr;
+    uint32_t m_fastmem_quad_size = 0u;
+
+    // Opt-in EE native-attempt timing shadow; never a scheduler timebase.
+    uint64_t m_pcsx2_shadow_eighth_cycles = 0u;
+    uint64_t m_pcsx2_shadow_attempts = 0u;
+    uint32_t m_pcsx2_shadow_failed = 0u;
 };
+
+// ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,
+// including annulled likely slots; recognized syscall HLE defaults to 300.
+// This compatibility budget is not hardware issue/retirement timing.
+// Keep the original diagnostic ordinals intact and check arithmetic.
+inline constexpr uint64_t k_reference_syscall_cost = 300u;
+
+inline bool ee_reference_compatibility_cycle(const s_ee_runtime& rt, uint64_t& out)
+{
+    const uint64_t slots = rt.m_reference_instruction_slots;
+    if (slots > UINT64_MAX - rt.m_cop0_clock_idle ||
+        rt.m_hle_timing_boundaries >
+            (UINT64_MAX - slots - rt.m_cop0_clock_idle) / k_reference_syscall_cost)
+    {
+        return false;
+    }
+    out = slots + rt.m_cop0_clock_idle +
+        rt.m_hle_timing_boundaries * k_reference_syscall_cost;
+    return true;
+}
 
 // Never infer cycles from these observations or implicitly install
 // c_ee_cycle_scheduler. A rejected event is latched for the host to detect
@@ -399,8 +443,9 @@ inline void ee_observe_timing_event(
 }
 
 
-// Record host HLE handoff without guessing a latency or advancing any
-// guest instruction/slot counter. The trace is optional and bounded.
+// Record host HLE handoff without advancing guest instruction/slot
+// ordinals. Only the reference compatibility clock charges its documented
+// approximate syscall cost. The trace is optional and bounded.
 inline void ee_record_hle_timing_boundary(
     s_ee_runtime& runtime, uint32_t pc, uint32_t opcode,
     uint32_t service)

@@ -1,5 +1,7 @@
 #include "iop_kernel.h"
 
+#include <chrono>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -662,7 +664,8 @@ bool c_kernel::estimate_module_size(
 }
 
 s_module_load_result c_kernel::load_module(
-    const std::vector<uint8_t>& bytes
+    const std::vector<uint8_t>& bytes,
+    const std::string& source_name
 )
 {
     s_module_load_result result{};
@@ -736,6 +739,7 @@ s_module_load_result c_kernel::load_module(
             item.m_ordinal, item.m_entry
         );
     }
+    image.m_source_name = source_name;
     const uint32_t id = m_next_module_id++;
     const auto inserted =
         m_modules.emplace(id, s_kernel_module{id, std::move(image)});
@@ -846,6 +850,60 @@ const s_kernel_thread* c_kernel::thread(uint32_t id) const
 const std::map<uint32_t, s_kernel_thread>& c_kernel::threads() const
 {
     return m_threads;
+}
+
+uint64_t c_kernel::idle_event_cycles_remaining() const
+{
+    constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
+    if (m_rom0_boot_active || m_current_thread_id != 0u ||
+        m_interrupts_suspended || m_critical_thread_id != 0u ||
+        m_interrupt_thread_id != 0u)
+    {
+        return 0u;
+    }
+    if (m_next_alarm_wake <= m_cycles || m_next_thread_wake <= m_cycles)
+    {
+        return 0u;
+    }
+    uint64_t wake = none;
+    if (next_ready(wake) != 0u)
+    {
+        return 0u;
+    }
+    wake = std::min(wake, m_next_thread_wake);
+    wake = std::min(wake, m_next_alarm_wake);
+    if (!m_hle_events.empty())
+    {
+        wake = std::min(wake, m_hle_events.begin()->first);
+    }
+    const uint64_t software = wake == none ? none :
+        (wake > m_cycles ? wake - m_cycles : 0u);
+    return std::min(software, m_hardware.idle_event_cycles_remaining());
+}
+
+bool c_kernel::try_advance_quiet_cycles(uint32_t cycles)
+{
+    constexpr uint64_t none = std::numeric_limits<uint64_t>::max();
+    if (cycles == 0u || m_restart_current_thread ||
+        cycles >= none - m_cycles)
+    {
+        return false;
+    }
+    const uint64_t interval = idle_event_cycles_remaining();
+    const auto& spu2 = m_hardware.spu2();
+    if (interval == none || cycles >= interval ||
+        (spu2.clock_active() && cycles >= none - spu2.clock_cycles()))
+    {
+        return false;
+    }
+
+    // The normal run() would find no runnable thread, interrupt or
+    // software/device event and advance exactly these cycles. The
+    // hardware call is identical, including fractional timer/sample
+    // phase. At equality or an unknown horizon use the normal runner.
+    m_hardware.advance_cycles(cycles);
+    m_cycles += cycles;
+    return true;
 }
 
 bool c_kernel::has_guest_work() const
@@ -1625,7 +1683,7 @@ void c_kernel::wake_due()
 }
 
 s_kernel_run_result c_kernel::run(
-    uint64_t cycle_budget, uint32_t quantum
+    uint64_t cycle_budget, uint32_t quantum, s_kernel_phase_sample* sample
 )
 {
     s_kernel_run_result result{};
@@ -1671,9 +1729,28 @@ s_kernel_run_result c_kernel::run(
         return result;
     }
 
+    using t_phase_clock = std::chrono::steady_clock;
+    t_phase_clock::time_point phase_start{};
+    const auto mark_phase = [&](e_kernel_phase phase)
+    {
+        if (sample != nullptr)
+        {
+            const auto now = t_phase_clock::now();
+            const auto index = static_cast<uint32_t>(phase);
+            ++sample->m_calls[index];
+            sample->m_ns[index] += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now - phase_start).count());
+            phase_start = now;
+        }
+    };
     uint64_t remaining = cycle_budget;
     while (remaining != 0u)
     {
+        if (sample != nullptr)
+        {
+            phase_start = t_phase_clock::now();
+        }
         // No software event can wake a thread while all three
         // conservative deadlines remain in the future. Keep the actual
         // wake ordering and interrupt-suspension checks in wake_due().
@@ -1743,8 +1820,10 @@ s_kernel_run_result c_kernel::run(
                 }
             }
         }
+        mark_phase(e_kernel_phase::wake_irq);
         uint64_t next_wake = std::numeric_limits<uint64_t>::max();
         const uint32_t id = next_ready(next_wake);
+        mark_phase(e_kernel_phase::ready);
         if (id == 0u)
         {
             if (!m_hle_events.empty() &&
@@ -1793,6 +1872,7 @@ s_kernel_run_result c_kernel::run(
                     }
                 }
             }
+            mark_phase(e_kernel_phase::idle_deadline);
             if (next_wake ==
                 std::numeric_limits<uint64_t>::max())
             {
@@ -1807,6 +1887,7 @@ s_kernel_run_result c_kernel::run(
                     to_advance -= step;
                 }
                 m_cycles += remaining;
+                mark_phase(e_kernel_phase::idle_advance);
                 result.m_stop = e_kernel_stop::idle;
                 break;
             }
@@ -1829,6 +1910,7 @@ s_kernel_run_result c_kernel::run(
                 to_advance -= quantum_cycles;
             }
             m_cycles += skipped;
+            mark_phase(e_kernel_phase::idle_advance);
             remaining -= skipped;
             continue;
         }
@@ -1849,7 +1931,9 @@ s_kernel_run_result c_kernel::run(
         const uint32_t slice = static_cast<uint32_t>(
             std::min<uint64_t>(remaining, quantum)
         );
+        mark_phase(e_kernel_phase::guest_context);
         const s_run_result step_result = m_cpu.run(slice);
+        mark_phase(e_kernel_phase::guest_cpu);
         ++thread.m_guest_slices;
         thread.m_guest_instructions += step_result.m_instructions;
         m_cycles += step_result.m_instructions;

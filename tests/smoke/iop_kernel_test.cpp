@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 namespace
@@ -100,6 +101,162 @@ bool put_program(
 
 int main()
 {
+    // The lookahead is advisory: querying it must not execute a
+    // callback, retire a guest instruction or advance a device.
+    {
+        iop::c_kernel idle;
+        auto& hw = idle.hardware();
+        constexpr uint64_t rollover = uint64_t{1u} << 32u;
+        if (idle.idle_event_cycles_remaining() != rollover ||
+            !hw.write(iop::c_hw::k_timer5_mode, 4u, 0x2058u) ||
+            !hw.write(iop::c_hw::k_timer5_target, 4u, 10u) ||
+            idle.idle_event_cycles_remaining() != 80u)
+        {
+            return fail("IOP lookahead timer divisor/compare");
+        }
+        if (!idle.try_advance_quiet_cycles(7u))
+        {
+            return fail("IOP quiet advance before timer compare");
+        }
+        if (idle.idle_event_cycles_remaining() != 73u ||
+            idle.cycles() != 7u)
+        {
+            return fail("IOP lookahead timer fractional phase");
+        }
+        uint32_t callbacks = 0u;
+        if (!idle.schedule_hle_event(3u, [&]() { ++callbacks; }) ||
+            idle.idle_event_cycles_remaining() != 3u ||
+            callbacks != 0u)
+        {
+            return fail("IOP lookahead HLE event");
+        }
+        if (idle.try_advance_quiet_cycles(0u) ||
+            idle.try_advance_quiet_cycles(3u) ||
+            idle.try_advance_quiet_cycles(4u) || idle.cycles() != 7u)
+        {
+            return fail("IOP quiet advance crossed software boundary");
+        }
+        (void)idle.run(3u);
+        if (callbacks != 0u || idle.idle_event_cycles_remaining() != 0u)
+        {
+            return fail("IOP lookahead due HLE event");
+        }
+        (void)idle.run(1u);
+        if (callbacks != 1u || idle.idle_event_cycles_remaining() != 69u)
+        {
+            return fail("IOP lookahead after HLE event");
+        }
+        const uint32_t thread = idle.create_thread(0x1800u, 0u, 8u, 0x400u);
+        if (thread == 0u || idle.idle_event_cycles_remaining() != 69u ||
+            !idle.start_thread(thread) ||
+            idle.idle_event_cycles_remaining() != 0u ||
+            idle.try_advance_quiet_cycles(1u) ||
+            !idle.stop_thread(thread) ||
+            idle.idle_event_cycles_remaining() != 69u)
+        {
+            return fail("IOP lookahead ready/dormant transition");
+        }
+        if (!hw.write(iop::c_hw::k_timer5_mode, 4u, 0u) ||
+            !hw.write(iop::c_spu2::k_base + 0x19au, 2u, 0u) ||
+            idle.idle_event_cycles_remaining() != iop::c_spu2::k_cycles_per_sample)
+        {
+            return fail("IOP lookahead SPU2 sample boundary");
+        }
+        (void)idle.run(1u);
+        if (idle.idle_event_cycles_remaining() !=
+                iop::c_spu2::k_cycles_per_sample - 1u)
+        {
+            return fail("IOP lookahead SPU2 sample phase");
+        }
+    }
+
+    // Before a known event, combining complete idle service turns must
+    // leave device clocks, software events and guest-visible state equal.
+    // The event itself is serviced with the original cadence.
+    {
+        auto baseline = std::make_unique<iop::c_kernel>();
+        auto combined = std::make_unique<iop::c_kernel>();
+        auto fast = std::make_unique<iop::c_kernel>();
+        uint32_t baseline_callbacks = 0u;
+        uint32_t combined_callbacks = 0u;
+        uint32_t fast_callbacks = 0u;
+        const auto configure = [](iop::c_kernel& kernel, uint32_t& callbacks)
+        {
+            auto& hw = kernel.hardware();
+            return hw.write(iop::c_hw::k_timer5_mode, 4u, 0x2058u) &&
+                hw.write(iop::c_hw::k_timer5_target, 4u, 10000u) &&
+                hw.write(iop::c_spu2::k_base + 0x19au, 2u, 0u) &&
+                kernel.schedule_hle_event(600u, [&callbacks]() { ++callbacks; });
+        };
+        if (!configure(*baseline, baseline_callbacks) ||
+            !configure(*combined, combined_callbacks) ||
+            !configure(*fast, fast_callbacks))
+        {
+            return fail("IOP combined idle configuration");
+        }
+        (void)baseline->run(1u, 128u);
+        (void)combined->run(1u, 128u);
+        (void)fast->run(1u, 128u);
+        const auto same_as_baseline = [&](iop::c_kernel& candidate, uint32_t callbacks)
+        {
+            auto& left = baseline->hardware();
+            auto& right = candidate.hardware();
+            uint32_t left_count = 0u;
+            uint32_t right_count = 0u;
+            return left.read(iop::c_hw::k_timer5_count, 4u, &left_count) &&
+                right.read(iop::c_hw::k_timer5_count, 4u, &right_count) &&
+                left_count == right_count &&
+                baseline->cycles() == candidate.cycles() &&
+                baseline->idle_event_cycles_remaining() ==
+                    candidate.idle_event_cycles_remaining() &&
+                left.pending_interrupts() == right.pending_interrupts() &&
+                left.spu2().clock_cycles() == right.spu2().clock_cycles() &&
+                left.spu2().elapsed_samples() == right.spu2().elapsed_samples() &&
+                left.spu2().sample_phase() == right.spu2().sample_phase() &&
+                baseline_callbacks == callbacks;
+        };
+        const auto equal = [&]()
+        {
+            return same_as_baseline(*combined, combined_callbacks) &&
+                same_as_baseline(*fast, fast_callbacks);
+        };
+        if (combined->idle_event_cycles_remaining() != 599u)
+        {
+            return fail("IOP combined idle initial event");
+        }
+        const auto first = baseline->run(256u, 128u);
+        const auto second = baseline->run(256u, 128u);
+        const auto batch = combined->run(512u, 128u);
+        if (first.m_executed != 0u || second.m_executed != 0u ||
+            batch.m_executed != 0u || batch.m_stop != second.m_stop ||
+            !fast->try_advance_quiet_cycles(512u) ||
+            !equal() || baseline_callbacks != 0u)
+        {
+            return fail("IOP combined idle before HLE and SPU2 events");
+        }
+        (void)baseline->run(87u, 128u);
+        if (fast->try_advance_quiet_cycles(87u) ||
+            fast->cycles() != 513u)
+        {
+            return fail("IOP quiet advance accepted event equality");
+        }
+        (void)combined->run(87u, 128u);
+        (void)fast->run(87u, 128u);
+        if (!equal() || baseline_callbacks != 0u ||
+            combined->idle_event_cycles_remaining() != 0u)
+        {
+            return fail("IOP combined idle reached exact HLE boundary");
+        }
+        (void)baseline->run(168u, 128u);
+        (void)combined->run(168u, 128u);
+        (void)fast->run(168u, 128u);
+        if (!equal() || baseline_callbacks != 1u ||
+            combined->hardware().spu2().elapsed_samples() != 1u)
+        {
+            return fail("IOP combined idle subsequent event delivery");
+        }
+    }
+
     // A real IOP thread stack is allocated from upper RAM downward,
     // in 256-byte multiples. Guest modules and IOPHEAP use lower RAM.
     // Releasing a dormant thread permits high-gap reuse without
@@ -485,6 +642,10 @@ int main()
     }
     const uint64_t late_wake = kernel.thread(late)->m_wake_cycle;
     const uint64_t early_wake = kernel.thread(early)->m_wake_cycle;
+    if (kernel.idle_event_cycles_remaining() != early_wake - kernel.cycles())
+    {
+        return fail("IOP lookahead did not select earliest timed thread");
+    }
     const uint64_t event_cycle = kernel.cycles() + 2u;
     uint64_t observed_event_cycle = 0u;
     if (event_cycle >= early_wake || early_wake >= late_wake ||

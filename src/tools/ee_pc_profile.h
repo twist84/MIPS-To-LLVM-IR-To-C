@@ -14,6 +14,7 @@ struct s_pc_profile
     uint64_t m_instructions = 0u;
     uint64_t m_idle_instructions = 0u;
     uint64_t m_wall_ns = 0u;
+    uint64_t m_nested_ns = 0u;
 };
 
 // Exact, uncapped per-PC accounting. Cache stable references to the
@@ -35,7 +36,8 @@ public:
     c_ee_pc_profile& operator=(const c_ee_pc_profile&) = delete;
 
     void record(uint32_t pc, uint32_t dispatches, uint64_t instructions,
-                uint64_t idle_instructions, uint64_t wall_ns)
+                uint64_t idle_instructions, uint64_t wall_ns,
+                uint64_t nested_ns = 0u)
     {
         if (!m_slots.empty())
         {
@@ -51,6 +53,7 @@ public:
             entry.m_instructions += instructions;
             entry.m_idle_instructions += idle_instructions;
             entry.m_wall_ns += wall_ns;
+            entry.m_nested_ns += nested_ns;
         }
     }
 

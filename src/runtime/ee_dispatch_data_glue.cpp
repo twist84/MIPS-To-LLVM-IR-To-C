@@ -76,6 +76,14 @@ extern "C" EE_GAME_EXPORT ee::t_ee_translated_entry ee_game_resolve_entry(
     return ee::ee_resolve_dispatch_entry(dispatch.table, dispatch.index, guest_pc);
 }
 
+extern "C" EE_GAME_EXPORT std::uint32_t ee_game_resolve_owner(
+    std::uint32_t guest_pc, ee::t_ee_translated_entry entry)
+{
+    const s_data_dispatch& dispatch = data_dispatch();
+    return ee::ee_resolve_dispatch_owner_vaddr(
+        dispatch.table, dispatch.index, guest_pc, entry);
+}
+
 extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(
     ee::s_ee_cpu_state* cpu,
     ee::s_ee_runtime* runtime,

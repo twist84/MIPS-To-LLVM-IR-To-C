@@ -1703,6 +1703,29 @@ def make_ee_timer_poll_elf(path):
     path.write_bytes(image)
 
 
+def make_iop_idle_batch_elf(path):
+    """Accumulate IOP debt in one native CFG, then dispatch twice."""
+    make_elf(path)
+    image = bytearray(path.read_bytes())
+    words = (
+        0x24080000,  # addiu t0,zero,0
+        0x25080001,  # loop: addiu t0,t0,1
+        0x29012000,  # slti at,t0,8192
+        0x1420fffd,  # bne at,zero,loop
+        0x00000000,  # delay slot
+        0x3c091000,  # lui t1,0x1000
+        0x3529c000,  # ori t1,t1,0xc000
+        0x240a0184,  # addiu t2,zero,0x184: arm HLE SIF0
+        0xad2a0000,  # sw t2,0(t1)
+        0x0c04000e,  # jal 0x00100038
+        0x00000000,
+        0x0000000d,  # break
+    )
+    struct.pack_into(f"<{len(words)}I", image, 0x108, *words)
+    struct.pack_into("<II", image, 0x138, 0x03e00008, 0)
+    path.write_bytes(image)
+
+
 def make_spin_elf(path):
     make_elf(path)
     image = bytearray(path.read_bytes())
@@ -4392,6 +4415,40 @@ def main():
             for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
                         "guest_instruction_attempts", "gpr_lo"):
                 assert sampled_state[key] == snapshot[key], key
+            lean_report = root / "lean.json"
+            lean_env = dict(env, SDBZ_RUNTIME_PROFILE="0",
+                            SDBZ_PROFILE_PCS="0", SDBZ_REPORT_HOTSPOTS="0",
+                            SDBZ_REPORT_BOUNDARY_TIMING="0",
+                            SDBZ_REPORT_PROGRESS_EVERY="256")
+            lean_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(lean_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=lean_env)
+            assert lean_run.returncode == 4, lean_run.stdout + lean_run.stderr
+            lean_state = json.loads(lean_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert lean_state[key] == snapshot[key], key
+            assert snapshot["m2_runtime"]["enabled"] is True
+            assert snapshot["m2_runtime"]["observations"] == 300
+            assert lean_state["m2_runtime"]["enabled"] is False
+            assert lean_state["m2_runtime"]["observations"] == 0
+            assert lean_state["m2_runtime"]["latest_state"] is None
+            assert lean_state["runtime_profile"]["enabled"] is False
+            assert "EE report boundary timing disabled" in lean_run.stdout
+            timing = next(line for line in lean_run.stderr.splitlines()
+                          if line.startswith("EE timing: dispatched=300"))
+            assert "native_ms=0.0" in timing and "iop_ms=0.0" in timing, timing
+            assert int(timing.rsplit("fields=", 1)[1]) == lean_state["gs_fields_started"]
+            lean_progress = [line for line in lean_run.stderr.splitlines()
+                             if line.startswith("EE progress: dispatched=")]
+            assert lean_progress, lean_run.stderr
+            fields = [int(line.rsplit("fields=", 1)[1]) for line in lean_progress]
+            assert fields == sorted(fields)
+            assert fields[-1] <= lean_state["gs_fields_started"]
+
             direct_report = root / "direct.json"
             direct_env = dict(env, SDBZ_EE_DIRECT_DISPATCH="1",
                               SDBZ_PROFILE_PCS="1", SDBZ_RUNTIME_PROFILE="1")
@@ -4422,6 +4479,27 @@ def main():
             assert sum(times) == total_native_ns, profile_entries
             attempts = sum(int(line.split("non_skipped=")[1].split()[0]) for line in profile_entries)
             assert attempts == direct_state["guest_instruction_attempts"], profile_entries
+            window_report = root / "window.json"
+            window_env = dict(direct_env, SDBZ_PROFILE_PCS_FIRST="101",
+                              SDBZ_PROFILE_PCS_LAST="200")
+            window_run = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"), str(elf),
+                "--build-dir", str(build), "--work-dir", str(root / "out"),
+                "--max-dispatches=300", "--timeout-seconds=30",
+                "--no-recompile", "--report", str(window_report),
+            ], capture_output=True, text=True, check=False, timeout=60, env=window_env)
+            assert window_run.returncode == 4, window_run.stdout + window_run.stderr
+            window_state = json.loads(window_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "history"):
+                assert window_state[key] == direct_state[key], key
+            window_entries = [line for line in window_run.stderr.splitlines()
+                              if line.startswith("EE profile: pc=")]
+            assert window_entries, window_run.stderr
+            assert sum(int(line.split("dispatches=")[1].split()[0])
+                       for line in window_entries) == 100, window_entries
+            assert sum(int(line.split("non_skipped=")[1].split()[0])
+                       for line in window_entries) == 200, window_entries
             assert sampled_state["vu1_worker"]["enabled"] is False
             worker_report = root / "worker.json"
             worker_env = dict(env, SDBZ_VU1_ASYNC="1")
@@ -4572,11 +4650,12 @@ def main():
                     "--work-dir", str(root / "out"),
                     "--functions=entry",
                     "--max-dispatches=16",
-                    "--hle-startup", "--kseg-ram",
+                    "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
                     "--report", str(report_path),
                     "--timeout-seconds=10",
                 ],
                 capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="0"),
             )
             assert result.returncode == 3, (result.stdout, result.stderr)
             snapshot = json.loads(report_path.read_text(encoding="utf-8"))
@@ -4590,6 +4669,29 @@ def main():
             assert "EE unsupported guest PC:" not in result.stderr, (
                 result.stdout, result.stderr
             )
+
+            shadow_report = root / "vu0-indexed-shadow.json"
+            shadow = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--no-recompile",
+                "--functions=entry", "--max-dispatches=16",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--report", str(shadow_report), "--timeout-seconds=10",
+            ], capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="1"))
+            assert shadow.returncode == result.returncode, shadow.stdout + shadow.stderr
+            observed = json.loads(shadow_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert observed[key] == snapshot[key], key
+            lines = [line for line in shadow.stderr.splitlines()
+                     if line.startswith("EE horizon:")]
+            assert len(lines) == 7, lines
+            horizon = dict(token.split("=") for token in lines[0].split()[2:])
+            assert int(horizon["vu_callback_boundaries"]) > 0, lines
+            assert int(horizon["cop0_changed_boundaries"]) > 0, lines
 
         # A real guest Timer0 COUNT poll must finish *inside* its native CFG.
         # Both the clock source and the device must advance; simply resuming
@@ -4614,6 +4716,7 @@ def main():
                     "--timeout-seconds=10",
                 ],
                 capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="0"),
             )
             assert result.returncode == 0 or result.returncode == 3, (
                 result.stdout, result.stderr
@@ -4629,6 +4732,70 @@ def main():
             assert "guest host loop yield cap reached" not in result.stderr, (
                 result.stdout, result.stderr
             )
+
+            assert "EE horizon:" not in result.stderr, result.stderr
+            shadow_report = root / "timer0-shadow.json"
+            shadow = subprocess.run([
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"), "--no-recompile",
+                "--functions=entry", "--max-dispatches=16",
+                "--loop-budget=5000", "--loop-yield-resumes=1",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--report", str(shadow_report), "--timeout-seconds=10",
+            ], capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_PROFILE_HORIZON="1"))
+            assert shadow.returncode == result.returncode, shadow.stdout + shadow.stderr
+            observed = json.loads(shadow_report.read_text(encoding="utf-8"))
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert observed[key] == snapshot[key], key
+            lines = [line for line in shadow.stderr.splitlines()
+                     if line.startswith("EE horizon:")]
+            assert len(lines) == 7 and "shadow_only=1" in lines[0], lines
+            horizon = dict(token.split("=") for token in lines[0].split()[2:])
+            assert (int(horizon["normal_before"]) <=
+                    int(horizon["normal_before_iop_lookahead"]) <=
+                    int(horizon["normal_before_without_iop"])), lines
+            assert int(horizon["iop_idle_candidates"]) >= 0, lines
+            assert int(horizon["iop_rpc_barriers"]) >= 0, lines
+            assert int(horizon["gs_worker_barriers"]) == 0, lines
+            assert int(horizon["dmac_started_barriers"]) >= 0, lines
+            assert int(horizon["clock_barriers"]) >= 0, lines
+            assert (int(horizon["mmio_free_direct_touched"]) +
+                    int(horizon["mmio_free_direct_quiet"]) ==
+                    int(horizon["lookahead_mmio_free"])), lines
+            assert (int(horizon["lookahead_mmio_free"]) +
+                    int(horizon["lookahead_mmio_touched"]) ==
+                    int(horizon["normal_before_iop_lookahead"])), lines
+            counts = [dict(token.split("=") for token in line.split()[2:])
+                      for line in lines[1:]]
+            total_samples = sum(int(row["samples"]) for row in counts)
+            assert total_samples > 0, lines
+            assert int(horizon["clock_barriers"]) <= total_samples, lines
+            assert (0 <= int(horizon["dmac_passive_sif0"]) <=
+                    int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), lines
+            assert int(horizon["dmac_str7"]) == 0, lines
+            vu_reasons = [int(horizon[key]) for key in
+                          ("entry_vif1_pending", "entry_cmsar1", "entry_vu0_running")]
+            assert max(vu_reasons) <= int(horizon["entry_vu"]) <= sum(vu_reasons), lines
+            assert int(horizon["alu_bound_candidates"]) == (
+                int(horizon["alu_bound_matched"]) + int(horizon["alu_bound_mismatch"])), lines
+            assert int(horizon["alu_bound_matched"]) <= int(horizon["mmio_free_direct_quiet"]), lines
+            assert (0 <= int(horizon["alu_certified_matched"]) <= int(horizon["alu_owner_matched"])
+                    <= int(horizon["alu_bound_matched"])), lines
+            assert (0 <= int(horizon["alu_certified"]) <= int(horizon["alu_owner_known"])
+                    <= int(horizon["alu_bound_candidates"])), lines
+            assert (int(horizon["alu_identity_hits"]) + int(horizon["alu_identity_misses"])
+                    <= int(horizon["alu_bound_candidates"])), lines
+            for key in ("entry_callback", "entry_idle", "entry_irq", "entry_vu",
+                        "entry_other", *(f"dmac_str{i}" for i in range(10))):
+                assert 0 <= int(horizon[key]) <= total_samples, lines
+            assert 0 <= int(horizon["vu_callback_boundaries"]) <= total_samples, lines
+            assert 0 <= int(horizon["cop0_changed_boundaries"]) <= total_samples, lines
+            assert all(int(row["samples"]) == int(row["before"]) + int(row["reached"])
+                       for row in counts), lines
 
         with tempfile.TemporaryDirectory(prefix="ee-native-idle-timer-") as tmp:
             root = Path(tmp)
@@ -4657,6 +4824,161 @@ def main():
             assert state["cop0_epc"] == 0x00100048, state
             assert state["gpr_lo"][16] == 1, state
             assert state["ee_cycles"] - state["guest_instruction_attempts"] >= 2000, state
+
+        # Compare actual runner service with and without quiet IOP batching.
+        with tempfile.TemporaryDirectory(prefix="ee-iop-idle-batch-") as tmp:
+            root = Path(tmp)
+            elf = root / "iop-idle-batch.elf"
+            make_iop_idle_batch_elf(elf)
+            disc = root / "disc"
+            disc.mkdir()
+            (disc / "SYSTEM.CNF").write_text(
+                "BOOT2 = cdrom0:\\\\SLUS_214.42;1\n", encoding="ascii"
+            )
+            command = [
+                sys.executable, str(source / "tools" / "run_game.py"),
+                str(elf), "--build-dir", str(build),
+                "--work-dir", str(root / "out"),
+                "--functions=entry", "--extra-functions=0x00100038",
+                "--max-dispatches=16", "--loop-budget=10000",
+                "--hle-startup", "--kseg-ram", "--ee-clock=reference-compat",
+                "--disc-folder", str(disc), "--timeout-seconds=10",
+            ]
+            states = []
+            clocks = []
+            checkpoints = []
+            state_traces = []
+            service_totals = []
+            for enabled, quiet in (("0", "0"), ("1", "0"), ("0", "1"), ("1", "1")):
+                report = root / f"batch-{enabled}-{quiet}.json"
+                replay = command if (enabled, quiet) == ("0", "0") else [
+                    arg for arg in command if not arg.startswith("--extra-functions=")
+                ] + ["--no-recompile"]
+                run = subprocess.run(
+                    replay + ["--report", str(report)],
+                    capture_output=True, text=True, check=False, timeout=40,
+                    env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS=enabled,
+                             SDBZ_IDLE_SKIP="0", SDBZ_PROFILE_HORIZON="1",
+                             SDBZ_EE_DIRECT_DISPATCH="1",
+                             SDBZ_NATIVE_ALU_CERTIFICATES="1",
+                             SDBZ_IOP_FAST_QUIET_TURNS=quiet,
+                             SDBZ_IOP_CHECKPOINT_TRACE="1",
+                             SDBZ_STATE_TRACE_FIRST="1", SDBZ_STATE_TRACE_LAST="16",
+                             SDBZ_STATE_TRACE_EVERY="2"),
+                )
+                assert run.returncode == 3, run.stdout + run.stderr
+                state = json.loads(report.read_text(encoding="utf-8"))
+                assert state["exit_name"] == "EXCEPTION", state
+                assert state["gpr_lo"][8] == 8192, state
+                states.append(state)
+                horizon_line = next(line for line in run.stderr.splitlines()
+                                    if line.startswith("EE horizon: shadow_only="))
+                horizon = dict(token.split("=") for token in horizon_line.split()[2:])
+                assert int(horizon["dmac_passive_sif0"]) > 0, horizon_line
+                assert (int(horizon["dmac_passive_sif0"]) <=
+                        int(horizon["dmac_sif0_only"]) <= int(horizon["dmac_str5"])), horizon_line
+                assert int(horizon["dmac_started_barriers"]) == 0, horizon_line
+                assert int(horizon["dmac_top_mask"], 16) == 0x20, horizon_line
+                assert int(horizon["dmac_top_mask_count"]) == int(horizon["dmac_sif0_only"]), horizon_line
+                assert int(horizon["alu_bound_matched"]) > 0, horizon_line
+                assert int(horizon["alu_bound_mismatch"]) == 0, horizon_line
+                assert int(horizon["alu_bound_candidates"]) == int(horizon["alu_bound_matched"]), horizon_line
+                assert int(horizon["alu_owner_known"]) == int(horizon["alu_bound_candidates"]), horizon_line
+                assert int(horizon["alu_identity_misses"]) > 0, horizon_line
+                assert (int(horizon["alu_identity_hits"]) + int(horizon["alu_identity_misses"])
+                        == int(horizon["alu_bound_candidates"])), horizon_line
+                assert int(horizon["alu_certified_matched"]) > 0, horizon_line
+                assert int(horizon["alu_certified"]) == int(horizon["alu_certified_matched"]), horizon_line
+                assert all(int(horizon[key]) == 0 for key in
+                           ("entry_vif1_pending", "entry_cmsar1", "entry_vu0_running")), horizon_line
+                clock = [line for line in run.stdout.splitlines()
+                         if line.startswith("IOP SPU2 clock:")]
+                assert len(clock) == 1, run.stdout
+                clocks.append(clock[0])
+                checkpoint_trace = [
+                    line for line in run.stderr.splitlines()
+                    if line.startswith("IOP checkpoint:")
+                ]
+                assert len(checkpoint_trace) > 1, run.stderr
+                checkpoints.append(checkpoint_trace)
+                state_trace = [line for line in run.stdout.splitlines()
+                               if line.startswith("EE state:")]
+                assert state_trace, run.stdout
+                observations = [int(dict(token.split("=") for token in line.split()[2:])
+                                    ["observations"]) for line in state_trace]
+                assert observations == sorted(set(observations)), state_trace
+                state_traces.append(state_trace)
+                totals_line = next(line for line in run.stdout.splitlines()
+                                   if line.startswith("IOP scheduler totals:"))
+                totals = {key: int(value) for key, value in
+                          (token.split("=") for token in totals_line.split()[3:])}
+                assert totals["service_batches"] == totals["kernel_runs"] + totals["quiet_advances"], totals
+                assert totals["logical_turns"] >= totals["service_batches"], totals
+                assert totals["dispatches"] == state["dispatches"], totals
+                if enabled == "0":
+                    assert totals["logical_turns"] == totals["service_batches"], totals
+                if quiet == "0":
+                    assert totals["quiet_advances"] == 0, totals
+                service_totals.append(totals)
+
+                quiet_lines = [line for line in run.stdout.splitlines()
+                               if line.startswith("IOP clock quiet:")]
+                if quiet == "1":
+                    assert len(quiet_lines) == 1, run.stdout
+                    counts = dict(token.split("=") for token in quiet_lines[0].split()[3:])
+                    assert int(counts["advanced"]) > 0, quiet_lines
+                    assert int(counts["cycles"]) > 0, quiet_lines
+                    assert int(counts["attempts"]) == (
+                        int(counts["advanced"]) + int(counts["fallback"])), quiet_lines
+                else:
+                    assert not quiet_lines, quiet_lines
+                lines = [line for line in run.stdout.splitlines()
+                         if line.startswith("IOP clock coalesce:")]
+                if enabled == "0":
+                    assert not lines, lines
+                else:
+                    assert len(lines) == 1, run.stdout
+                    counters = dict(token.split("=") for token in lines[0].split()[3:])
+                    assert int(counters["saved_turns"]) > 0, lines
+                    assert int(counters["combined_batches"]) > 0, lines
+                    assert (int(counters["physical_runs"]) + int(counters["saved_turns"]) ==
+                            int(counters["logical_turns"])), lines
+            for key in ("dispatches", "final_pc", "exit_reason", "dispatch_status",
+                        "guest_instruction_attempts", "gpr_lo", "cop0_cause",
+                        "cop0_epc", "ee_cycles"):
+                assert all(state[key] == states[0][key] for state in states[1:]), key
+            assert all(clock == clocks[0] for clock in clocks[1:]), clocks
+            for checkpoint_trace in checkpoints[1:]:
+                assert checkpoint_trace == checkpoints[0], (checkpoints[0], checkpoint_trace)
+            for state_trace in state_traces[1:]:
+                assert state_trace == state_traces[0], (state_traces[0], state_trace)
+            for key in ("dispatches", "logical_turns", "debt"):
+                assert all(totals[key] == service_totals[0][key]
+                           for totals in service_totals[1:]), service_totals
+
+
+            detail_run = subprocess.run(
+                [arg for arg in command if not arg.startswith("--extra-functions=")] +
+                ["--no-recompile", "--report", str(root / "detail.json")],
+                capture_output=True, text=True, check=False, timeout=40,
+                env=dict(os.environ, SDBZ_IOP_COALESCE_IDLE_TURNS="0",
+                         SDBZ_IOP_FAST_QUIET_TURNS="0", SDBZ_IDLE_SKIP="0",
+                         SDBZ_EE_DIRECT_DISPATCH="1",
+                         SDBZ_NATIVE_ALU_CERTIFICATES="1",
+                         SDBZ_STATE_TRACE_FIRST="1", SDBZ_STATE_TRACE_LAST="16",
+                         SDBZ_STATE_TRACE_EVERY="1", SDBZ_STATE_TRACE_DETAIL="1"),
+            )
+            assert detail_run.returncode == 3, detail_run.stdout + detail_run.stderr
+            detail_lines = [line for line in detail_run.stdout.splitlines()
+                            if line.startswith("EE detail:")]
+            register_lines = [line for line in detail_run.stdout.splitlines()
+                              if line.startswith("EE detail reg:")]
+            code_lines = [line for line in detail_run.stdout.splitlines()
+                          if line.startswith("EE detail code:")]
+            assert detail_lines and len(register_lines) == 32 * len(detail_lines)
+            assert any("index=08 " in line and " gpr=" in line and " fpr=" in line
+                       and " vf=" in line for line in register_lines)
+            assert code_lines, detail_run.stdout
 
         # Resuming without a bounded guest-loop watchdog would spin forever;
         # reject an invalid command before loading or mutating guest state.

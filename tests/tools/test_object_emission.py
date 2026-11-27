@@ -88,6 +88,25 @@ def main():
         require(object_data[:4] == b"\x7fELF",
                 "host object is not an ELF relocatable object")
 
+        # The static cost audit uses the same backend profile as the
+        # production object emitter and must not rewrite the source.
+        original_ir = ir_path.read_bytes()
+        audit_json = root / "ir-cost.json"
+        subprocess.run([
+            sys.executable, str(source_root / "tools" / "audit_ir_cost.py"),
+            str(ir_path), "--profile", "0", "--compare-dir", str(root),
+            "--json-out", str(audit_json),
+        ], check=True)
+        audit = json.loads(audit_json.read_text(encoding="utf-8"))
+        require(audit["profile"] == 0, audit)
+        row = audit["modules"][0]
+        require(row["before"] == row["after"], row)
+        require(row["before"]["object_bytes"] == len(object_data), row)
+        require(row["before"]["source_ir"] == row["before"]["pipeline_ir"], row)
+        require(row["before"]["native_assembly"]["instructions"] > 0, row)
+        require(ir_path.read_bytes() == original_ir, "cost audit rewrote source IR")
+
+
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         require(manifest["complete"], "object manifest reports incomplete emission")
         require(manifest["input_module_count"] == 1, "wrong input module count")

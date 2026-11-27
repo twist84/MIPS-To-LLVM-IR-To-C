@@ -30,6 +30,8 @@ struct s_idle_loop_shape
     // Instruction words from header_pc through the backedge delay slot.
     std::vector<uint32_t> words;
     const char* reason = "not analyzed";
+    uint32_t carried_read_pc = 0u;
+    uint32_t carried_read_register = 0u;
 };
 
 enum class e_idle_iteration : uint8_t
@@ -210,12 +212,13 @@ inline uint64_t extend_load(uint32_t w, uint64_t raw)
 
 // Decode a candidate loop at header_pc. read_word(pc, &word) returns false
 // for unmapped code. Eligible loops are single-entry straight-line bodies of
-// loads, ALU operations and non-likely branches; every branch other than the
-// final backedge must leave the loop; no store, call, jump, syscall,
+// loads, ALU operations and non-likely branches; internal branches may only
+// move forward to non-delay-slot instructions; no store, call, jump, syscall,
 // coprocessor, trapping or branch-likely instruction is accepted; and no
 // register may carry a value from one iteration into the next.
 template <typename t_read_word>
-s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word)
+s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
+                                   bool allow_forward_branches = false)
 {
     using namespace idle_loop_detail;
     s_idle_loop_shape shape{};
@@ -223,6 +226,12 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word)
     if ((header_pc & 3u) != 0u)
     {
         shape.reason = "unaligned header";
+        return shape;
+    }
+
+    if (header_pc > 0xffffffffu - 4u * k_max_words)
+    {
+        shape.reason = "loop window wraps";
         return shape;
     }
 
@@ -281,42 +290,101 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word)
     uint32_t written_anywhere = 0u;
     for (uint32_t i = 0u; i <= end; ++i)
     {
-        const uint32_t word = shape.words[i];
-        const s_decoded d = decode(word);
-        if (d.kind == e_kind::branch && i + 1u != end)
-        {
-            const uint32_t target = branch_target(header_pc + 4u * i, word);
-            if (target >= header_pc && target <= loop_end_pc)
-            {
-                shape.reason = "branch into the loop body";
-                return shape;
-            }
-        }
+        const s_decoded d = decode(shape.words[i]);
         if (d.dest != 0u)
         {
             written_anywhere |= 1u << d.dest;
         }
+        if (d.kind == e_kind::branch && i + 1u != end)
+        {
+            const uint32_t target = branch_target(header_pc + 4u * i, shape.words[i]);
+            if (target >= header_pc && target <= loop_end_pc)
+            {
+                const uint32_t index = (target - header_pc) / 4u;
+                // No secondary backedges or independent entry into a
+                // delay slot. Only acyclic forward control flow is proved.
+                if (!allow_forward_branches || index <= i + 1u ||
+                    decode(shape.words[index - 1u]).kind == e_kind::branch)
+                {
+                    shape.reason = "branch into the loop body";
+                    return shape;
+                }
+            }
+        }
     }
 
-    // Idempotency: every source register written somewhere in the loop must
-    // already have been written earlier in the same iteration.
-    uint32_t written_so_far = 0u;
-    for (uint32_t i = 0u; i <= end; ++i)
+    // Definite assignment over the acyclic body. At a merge, intersect
+    // the sets of registers written on every incoming path. A read of
+    // a register modified anywhere in the loop must be dominated by
+    // a write on every path, including branch operands and delay slots.
+    bool reached[k_max_words + 1u] = {};
+    uint32_t written[k_max_words + 1u] = {};
+    reached[0] = true;
+    const auto merge = [&](uint32_t index, uint32_t mask)
     {
-        const s_decoded d = decode(shape.words[i]);
+        if (index <= end)
+        {
+            if (reached[index])
+            {
+                written[index] &= mask;
+            }
+            else
+            {
+                reached[index] = true;
+                written[index] = mask;
+            }
+        }
+    };
+    const auto apply = [&](const s_decoded& d, uint32_t& mask, uint32_t index)
+    {
         for (uint32_t s = 0u; s < d.source_count; ++s)
         {
             const uint32_t reg = d.sources[s];
             if (reg != 0u && (written_anywhere & (1u << reg)) != 0u &&
-                (written_so_far & (1u << reg)) == 0u)
+                (mask & (1u << reg)) == 0u)
             {
-                shape.reason = "loop-carried register";
-                return shape;
+                shape.carried_read_pc = header_pc + 4u * index;
+                shape.carried_read_register = reg;
+                return false;
             }
         }
         if (d.dest != 0u)
         {
-            written_so_far |= 1u << d.dest;
+            mask |= 1u << d.dest;
+        }
+        return true;
+    };
+    for (uint32_t i = 0u; i <= end; ++i)
+    {
+        if (!reached[i])
+        {
+            continue;
+        }
+        uint32_t mask = written[i];
+        const s_decoded d = decode(shape.words[i]);
+        if (!apply(d, mask, i))
+        {
+            shape.reason = "loop-carried register";
+            return shape;
+        }
+        if (d.kind != e_kind::branch)
+        {
+            merge(i + 1u, mask);
+            continue;
+        }
+        if (!apply(decode(shape.words[i + 1u]), mask, i + 1u))
+        {
+            shape.reason = "loop-carried register";
+            return shape;
+        }
+        if (i + 1u != end)
+        {
+            merge(i + 2u, mask);
+            const uint32_t target = branch_target(header_pc + 4u * i, shape.words[i]);
+            if (target >= header_pc && target <= loop_end_pc)
+            {
+                merge((target - header_pc) / 4u, mask);
+            }
         }
     }
 
@@ -331,9 +399,14 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word)
 // during a native slice or whose read has side effects.
 template <typename t_load>
 e_idle_iteration predict_idle_iteration(
-    const s_idle_loop_shape& shape, const uint64_t (&gpr_in)[32], t_load load)
+    const s_idle_loop_shape& shape, const uint64_t (&gpr_in)[32], t_load load,
+    uint32_t* loop_instruction_count = nullptr)
 {
     using namespace idle_loop_detail;
+    if (loop_instruction_count != nullptr)
+    {
+        *loop_instruction_count = 0u;
+    }
     if (!shape.eligible || shape.words.size() < 2u)
     {
         return e_idle_iteration::unsupported;
@@ -345,15 +418,18 @@ e_idle_iteration predict_idle_iteration(
     }
     gpr[0] = 0u;
 
+    uint32_t executed = 0u;
     const uint32_t end = static_cast<uint32_t>(shape.words.size() - 1u);
     for (uint32_t i = 0u; i <= end; ++i)
     {
+        ++executed;
         const uint32_t word = shape.words[i];
         const s_decoded d = decode(word);
         if (d.kind == e_kind::branch)
         {
             // Non-likely: the delay slot executes either way, but only
             // after the branch has read its operands.
+            ++executed; // The non-likely delay slot always executes.
             const bool taken = branch_taken(word, gpr);
             const bool backedge = (i + 1u == end);
             const uint32_t slot = shape.words[i + 1u];
@@ -376,11 +452,22 @@ e_idle_iteration predict_idle_iteration(
             }
             if (backedge)
             {
+                if (taken && loop_instruction_count != nullptr)
+                {
+                    *loop_instruction_count = executed;
+                }
                 return taken ? e_idle_iteration::loops : e_idle_iteration::exits;
             }
             if (taken)
             {
-                return e_idle_iteration::exits;
+                const uint32_t target = branch_target(shape.header_pc + 4u * i, word);
+                if (target < shape.header_pc || target > shape.header_pc + 4u * end)
+                {
+                    return e_idle_iteration::exits;
+                }
+                // The analyser proved a forward target, not a delay slot.
+                i = (target - shape.header_pc) / 4u - 1u;
+                continue;
             }
             ++i;  // delay slot already executed
             continue;

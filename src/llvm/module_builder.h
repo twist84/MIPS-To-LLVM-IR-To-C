@@ -2,9 +2,11 @@
 #include "ee_instruction.h"
 #include "ee_cfg.h"
 #include "llvm_context.h"
+#include "../architecture/ee_known_bits.h"
 #include <string>
 #include <vector>
 #include <map>
+#include <utility>
 
 namespace llvm {
 
@@ -32,11 +34,14 @@ public:
                            const char* func_name);
 
     void set_opt_level(int level);
+    // Explicit fixture opt-in; production recompilation remains unchanged.
+    void set_pcsx2_shadow(bool enabled) { m_pcsx2_shadow = enabled; }
     int  opt_level() const { return m_opt_level; }
 
     std::string str() const { return m_ctx.ir(); }
 
 private:
+    bool m_pcsx2_shadow = false;
     llvm_context& m_ctx;
     std::string m_out;
     std::map<uint32_t, std::string> m_block_labels;   // pc -> LLVM label
@@ -49,6 +54,14 @@ private:
     // only to prune low-half writes and conservatively publish dirty hi.
     std::map<uint8_t, std::string> m_cur_lo, m_cur_hi;
     std::set<uint8_t> m_dirty_lo, m_dirty_hi;
+    // Packed views of exact SSA half pairs, valid only in a contiguous
+    // MMI chain. A scalar overwrite changes the key; reset on CFG edges.
+    std::map<std::pair<std::string, std::string>, std::string> m_mmi_vectors;
+    // Facts follow unique SSA values; unknown reloads do not inherit them.
+    std::map<std::string, ee::scalar_constant::s_known_bits> m_value_bits;
+    ee::scalar_constant::s_known_bits value_bits(const std::string& value) const;
+    ee::scalar_constant::s_known_bits register_bits(uint8_t reg) const;
+    void record_bits(const std::string& value, ee::scalar_constant::s_known_bits bits);
 
     // Scope of the guest instruction currently being emitted. Only used to
     // annotate read-only, SSA-based register provenance events.
@@ -56,11 +69,18 @@ private:
 
     void header();
     void declare_memory_helpers();
+    std::string emit_effective_address(const ee::s_ee_instruction& ins);
+    std::string emit_scalar_access(const std::string& address, uint32_t width,
+                                   const std::string& write_value = {});
     void emit_guest_store_trace(const ee::s_ee_instruction& ins,
                                 const std::string& effective_address,
                                 const std::string& affected_address,
                                 uint32_t width, const std::string& source_value,
                                 uint32_t source_lane);
+    std::string emit_quadword_fastmem_gate(const std::string& address,
+                                           const std::string& suffix,
+                                           const std::string& fallback,
+                                           bool write);
     void emit_quadword_read(const std::string& address,
                             const std::string& lo, const std::string& hi);
     void emit_quadword_store(const ee::s_ee_instruction& ins,
@@ -86,6 +106,12 @@ private:
     std::string vu0_lo_ptr(uint8_t reg);
     std::string vu0_hi_ptr(uint8_t reg);
     std::string state_field(int field);
+    // Write-through raw FP SSA cache, limited to consecutive COP1 S/W
+    // instructions in a single guest block (never across a helper edge).
+    bool m_cache_cop1 = false;
+    std::map<uint8_t, std::string> m_fpr_bits;
+    std::string m_cop1_acc_bits, m_cop1_acc_latch;
+    void clear_cop1_tracking();
     // COP1 helpers: load/store FPR as float / i32 bits.
     std::string load_fpr_f32(uint8_t freg);
     std::string load_fpr_i32(uint8_t freg);
@@ -114,8 +140,13 @@ private:
                     bool is_terminator = false,
                     bool guarded_loop_header = false,
                     const std::map<uint32_t, ee::s_ee_instruction>* insn_map = nullptr);
+    bool try_specialize_scalar(const ee::s_ee_instruction& ins);
+    void emit_guest_instruction_count(const ee::s_ee_instruction& ins);
     void emit_insn(const ee::s_ee_instruction& ins, bool is_last_in_block,
-                   uint32_t fallthrough_pc, bool in_delay_slot = false);
+                   uint32_t fallthrough_pc, bool in_delay_slot = false,
+                   bool count_instruction = true);
+    void emit_counted_alu_run(const std::vector<ee::s_ee_instruction>& block,
+                              size_t first, size_t end);
     void emit_mmi_insn(const ee::s_ee_instruction& ins);
 
     // IR text optimisation passes (Phase 7). Operates on the emitted LLVM IR

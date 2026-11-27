@@ -3,6 +3,7 @@
 
 import ctypes
 import pathlib
+import re
 import sys
 import tempfile
 
@@ -14,12 +15,14 @@ from test_vu0_transfer_ir_runtime import (
     UNEXPECTED_TRACES,
 )
 
+EE_EXIT_RETURN = 0
 EE_EXIT_EXCEPTION = 1
 EE_EXIT_DISPATCH = 3
 MEMORY = {}
 READS = []
 WRITES = []
 TRACES = []
+TRACE_CONTEXTS = []
 PAIRS = []
 EVENTS = []
 ALLOW_FUSED_STORE = False
@@ -38,6 +41,11 @@ def write_word(address, size, value):
         MEMORY[int(address) + i] = (int(value) >> (8 * i)) & 0xFF
 
 
+@ctypes.CFUNCTYPE(ctypes.c_uint8, ctypes.c_void_p, ctypes.c_uint32)
+def read8(_rt, addr):
+    return read_word(addr, 1)
+
+
 @ctypes.CFUNCTYPE(ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint32)
 def read16(_rt, addr):
     return read_word(addr, 2)
@@ -51,6 +59,11 @@ def read32(_rt, addr):
 @ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_void_p, ctypes.c_uint32)
 def read64(_rt, addr):
     return read_word(addr, 8)
+
+
+@ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint8)
+def write8(_rt, addr, value):
+    write_word(addr, 1, value)
 
 
 @ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint16)
@@ -113,15 +126,18 @@ def write_quadword(_rt, addr, lo, hi):
 def trace_store(_rt, pc, opcode, address, aligned, size,
                 value, slot, old0, old1, old2, old3):
     TRACES.append((int(address), int(aligned), int(size), int(slot)))
+    TRACE_CONTEXTS.append(tuple(map(int, (value, old0, old1, old2, old3))))
     EVENTS.append(("trace", int(aligned)))
 
 
 def install_symbols(path):
     library = ctypes.CDLL(str(path))
     for name, callback in (
+        ("ee_mem_read8", read8),
         ("ee_mem_read16", read16),
         ("ee_mem_read32", read32),
         ("ee_mem_read64", read64),
+        ("ee_mem_write8", write8),
         ("ee_mem_write16", write16),
         ("ee_mem_write32", write32),
         ("ee_mem_write64", write64),
@@ -141,7 +157,8 @@ def install_symbols(path):
 
 
 def execute(fixture, directory, target, mode, address, trace_enabled=True,
-            fused_store=False):
+            fused_store=False, fastmem=None, fastmem_scalar=False,
+            fastmem_quad=False):
     global ALLOW_FUSED_STORE
     ALLOW_FUSED_STORE = fused_store and not trace_enabled
     PAIRS.clear()
@@ -150,6 +167,7 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     READS.clear()
     WRITES.clear()
     TRACES.clear()
+    TRACE_CONTEXTS.clear()
     for i in range(0x40, 0x60):
         MEMORY[i] = (i * 7 + 3) & 0xFF
     before = dict(MEMORY)
@@ -161,10 +179,30 @@ def execute(fixture, directory, target, mode, address, trace_enabled=True,
     cpu_backing, cpu = aligned_instance(EEState)
     rt_backing = ctypes.create_string_buffer(RUNTIME_BACKING_BYTES)
     set_store_trace_enabled(rt_backing, module, trace_enabled)
+    if fastmem is not None:
+        # Obtain the actual descriptor offsets from the generated gate.
+        ir = str(module)
+        prefixes = ("word", "scalar") if fastmem_scalar else ("word",)
+        if fastmem_quad:
+            prefixes += ("quad",)
+        for prefix in prefixes:
+            check = re.search(rf"fastmem_{prefix}_check_[0-9]+:.*?(?=fastmem_{prefix}_direct_)",
+                              ir, re.S)
+            if check is None:
+                continue
+            offsets = re.findall(
+                r"getelementptr i8, ptr %rt, i64 ([0-9]+)", check.group())
+            require(len(offsets) == 2 or (prefix == "quad" and len(offsets) == 3),
+                    "unexpected fastmem descriptor layout")
+            size_offset, base_offset = map(int, offsets[:2])
+            ctypes.c_uint32.from_buffer(rt_backing, size_offset).value = len(fastmem)
+            ctypes.c_void_p.from_buffer(rt_backing, base_offset).value = ctypes.addressof(fastmem)
     UNEXPECTED_TRACES.clear()
     cpu.gpr[9] = U128(address, 0)
     cpu.gpr[8] = U128(0x0123456789abcdef, 0xfedcba9876543210)
     cpu.fpr[8] = 0xaabbccdd11223344
+    cpu.gpr[29] = U128(0x1000, 0)
+    cpu.gpr[30] = U128(0x2000, 0)
     cpu.gpr[31] = U128(0x00140000, 0)
     cpu.cop0[12] = 0
     result = guest(
@@ -299,6 +337,240 @@ def main():
                     cpu.gpr[8].hi == 0xfedcba9876543210 and
                     cpu.fpr[8] == 0xaabbccdd11223344,
                     f"{mode}: alignment exception modified destination")
+        # The scalar store cold arm must retain live SSA context and must
+        # not contaminate the GPR cache used after the branch rejoins.
+        for enabled in (False, True):
+            result, cpu, _ = execute(
+                fixture, directory, target, "ee_sw_trace_context", 0x40,
+                trace_enabled=enabled)
+            require(result == EE_EXIT_RETURN and
+                    cpu.gpr[29].lo == 0xff0 and cpu.gpr[10].lo == 0x2001 and
+                    WRITES == [(4, 0x40, 0x89abcdef)],
+                    f"scalar store: exit={result}, SP={cpu.gpr[29].lo:#x}, "
+                    f"r10={cpu.gpr[10].lo:#x}, writes={WRITES}")
+            require(EVENTS == ([("trace", 0x40)] if enabled else []) +
+                    [("write", 0x40)], "scalar trace/write order")
+            require(TRACE_CONTEXTS == ([
+                (0x0123456789abcdef, 0x40, 0xff0, 0x2000, 0x00140000)
+            ] if enabled else []), "scalar trace lost live GPR context")
+
+        # The quadword fast arm must bypass diagnostic materialization.
+        # Failed fusion must still preserve both lanes and SSA context.
+        for enabled, fused in ((False, True), (False, False), (True, False)):
+            result, cpu, _ = execute(
+                fixture, directory, target, "ee_sq_trace_context", 0x43,
+                trace_enabled=enabled, fused_store=fused)
+            require(result == EE_EXIT_RETURN and
+                    cpu.gpr[29].lo == 0xff0 and cpu.gpr[10].lo == 0x2001,
+                    f"SQ context: exit={result}, SP={cpu.gpr[29].lo:#x}, "
+                    f"r10={cpu.gpr[10].lo:#x}")
+            require(PAIRS == [("try_write", 0x40)], "SQ probe repeated")
+            require(bytes(MEMORY[i] for i in range(0x40, 0x50)) ==
+                    bytes.fromhex("efcdab89674523011032547698badcfe"),
+                    "SQ context lane data")
+            expected_events = [] if fused else [
+                ("write", 0x40), ("write", 0x48)]
+            if enabled:
+                expected_events = [("trace", 0x40), ("write", 0x40),
+                                   ("trace", 0x48), ("write", 0x48)]
+            require(EVENTS == expected_events, "SQ context ordering")
+            require(TRACE_CONTEXTS == ([
+                (0x0123456789abcdef, 0x43, 0xff0, 0x2000, 0x00140000),
+                (0xfedcba9876543210, 0x43, 0xff0, 0x2000, 0x00140000)
+            ] if enabled else []), "SQ context lost live GPR values")
+
+        # Dynamic values with proven low bits: retain the callback and
+        # precise publication boundary while eliminating only the check.
+        for mode, base, expected_addr, fault in (
+            ("ee_known_aligned", 0x1234567800000010, 0x40, False),
+            ("ee_known_aligned", 0x1234567840000010, 0x40, False),
+            ("ee_known_misaligned", 0x10, 0x41, True),
+            ("ee_partially_aligned", 0x20, 0x40, False),
+            ("ee_partially_aligned", 0x21, 0x42, True),
+        ):
+            raw_path = pathlib.Path(directory) / (mode + "-shape.ll")
+            import subprocess
+            subprocess.run([str(fixture), str(raw_path), mode], check=True)
+            source = raw_path.read_text(encoding="utf-8")
+            require(("memory_alignment_fault_" not in source) ==
+                    (mode == "ee_known_aligned"), mode + ": alignment proof shape")
+            result, cpu, original = execute(fixture, directory, target, mode, base)
+            if fault:
+                require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == expected_addr and
+                        cpu.cop0[14] == ENTRY_PC + 8 and not READS and not WRITES,
+                        mode + ": precise alignment exception")
+                require(cpu.gpr[8].lo == 0x0123456789abcdef,
+                        mode + ": fault overwrote destination")
+            else:
+                require(result == EE_EXIT_DISPATCH and READS == [(4, expected_addr)],
+                        mode + ": memory callback/address differs")
+                value = sum(original[expected_addr + i] << (8 * i) for i in range(4))
+                expected = value | 0xffffffff00000000 if value & 0x80000000 else value
+                require(cpu.gpr[8].lo == expected and cpu.gpr[8].hi == 0xfedcba9876543210,
+                        mode + ": load result differs")
+
+        # 32-bit effective address arithmetic must discard high GPR bits
+        # and wrap positive/negative signed offsets before memory access.
+        for mode, base in (("ee_lw_wrap_positive", 0x12345678fffffffc),
+                           ("ee_lw_absolute", 0xffffffffffffffff)):
+            result, cpu, original = execute(fixture, directory, target, mode, base)
+            word = sum(original[0x40 + i] << (8 * i) for i in range(4))
+            require(result == EE_EXIT_DISPATCH and READS == [(4, 0x40)] and
+                    cpu.gpr[8].lo == ctypes.c_int32(word).value % (1 << 64),
+                    f"{mode}: wrapped effective address or value")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_sw_wrap_negative", 0x1234567800000044)
+        require(result == EE_EXIT_DISPATCH and
+                WRITES == [(4, 0x40, 0x89abcdef)] and
+                TRACES == [(0x40, 0x40, 4, 0)] and
+                TRACE_CONTEXTS[0][1] == 0x1234567800000044,
+                "negative displacement lost address or full base provenance")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_sw_wrap_negative", 0x1234567800000047)
+        require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == 0x43 and
+                not WRITES and not TRACES, "wrapped alignment fault")
+
+        # A branch-likely common flush already commits both POR halves.
+        # The taken ALU slot must retain cached SP, without repeating
+        # unchanged stores. The annulled path must not write r10.
+        for taken in (False, True):
+            result, cpu, _ = execute(fixture, directory, target,
+                                     "ee_likely_clean_gprs", 0 if taken else 1)
+            require(result == EE_EXIT_RETURN and cpu.pc == 0x00140000 and
+                    cpu.gpr[11].lo == 0x0123456789abcdef and
+                    cpu.gpr[11].hi == 0xfedcba9876543210 and
+                    cpu.gpr[29].lo == 0xff0 and
+                    cpu.gpr[10].lo == (0xff1 if taken else 0),
+                    "branch-likely clean GPR state")
+        ir = (pathlib.Path(directory) / "ee_likely_clean_gprs.ll").read_text(
+            encoding="utf-8")
+        require("bl_taken_" in ir, "fixture did not lower an internal likely branch")
+        for half in (0, 1):
+            pointers = re.findall(
+                rf"(%t[0-9]+) = getelementptr %ee_cpu_state, ptr %cpu, "
+                rf"i32 0, i32 0, i32 11, i32 {half}\b", ir)
+            stores = sum(len(re.findall(
+                rf"store i64 [^\n]+, ptr {re.escape(ptr)}\b", ir))
+                for ptr in pointers)
+            require(stores == 1, f"POR half {half} published {stores} times")
+
+        # Opt-in direct physical word loads/stores use the supplied span,
+        # including its final complete word. All other addresses fall back.
+        ram = ctypes.create_string_buffer(0x44)
+        ram[0x40:0x44] = bytes.fromhex("efcdab89")
+        result, cpu, _ = execute(fixture, directory, target, "ee_lw", 0x40,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and not READS and
+                cpu.gpr[8].lo == 0xffffffff89abcdef, "direct LW sign extension")
+        ram[0x40:0x44] = bytes.fromhex("10203040")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x40,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and not WRITES and
+                EVENTS == [("trace", 0x40)] and
+                ram[0x40:0x44] == bytes.fromhex("efcdab89"),
+                "direct SW lost trace or bytes")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x44,
+                                 fastmem=ram)
+        require(result == EE_EXIT_DISPATCH and WRITES == [(4, 0x44, 0x89abcdef)],
+                "out-of-range word store bypassed helper")
+        short_ram = ctypes.create_string_buffer(0x43)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x40,
+                                 fastmem=short_ram)
+        require(result == EE_EXIT_DISPATCH and WRITES == [(4, 0x40, 0x89abcdef)] and
+                short_ram[0x40:0x43] == bytes(3), "partial span must fall back")
+        for address in (0x80000040, 0x70000040, 0x10000040, 0xfffffffc):
+            result, cpu, _ = execute(fixture, directory, target, "ee_lw", address,
+                                     fastmem=ram)
+            require(result == EE_EXIT_DISPATCH and READS == [(4, address)],
+                    f"fastmem wrongly accepted {address:#x}")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sw", 0x41,
+                                 fastmem=ram)
+        require(result == EE_EXIT_EXCEPTION and not WRITES and not TRACES,
+                "fastmem bypassed alignment fault")
+
+        # Other scalar widths are independently opt-in, including signed
+        # extension, exact store widths, final byte and final aligned span.
+        for load, store, width, signed in (
+                ("lb", "sb", 1, True), ("lbu", "sb", 1, False),
+                ("lh", "sh", 2, True), ("lhu", "sh", 2, False),
+                ("ld", "sd", 8, False)):
+            address = 0x40
+            ram = ctypes.create_string_buffer(address + width)
+            ram[address:address + width] = bytes([0x80] * width)
+            expected = int.from_bytes(bytes([0x80] * width), "little", signed=signed)
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + load,
+                                     address, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and not READS and
+                    cpu.gpr[8].lo == expected % (1 << 64) and
+                    cpu.gpr[8].hi == 0xfedcba9876543210,
+                    f"direct {load} value")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + load,
+                                     address, fastmem=ram)
+            require(result == EE_EXIT_DISPATCH and READS == [(width, address)],
+                    f"{load} must fall back with only word fastmem")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + store,
+                                     address, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and not WRITES and
+                    EVENTS == [("trace", address)] and
+                    ram[address:address + width] ==
+                    bytes.fromhex("efcdab8967452301")[:width], f"direct {store} bytes")
+            result, cpu, _ = execute(fixture, directory, target, "ee_" + store,
+                                     address + width, fastmem=ram, fastmem_scalar=True)
+            require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
+                    WRITES[0][:2] == (width, address + width),
+                    f"{store} out-of-range fallback")
+
+        # A 128-bit direct access is optional and preserves masking, both
+        # lanes, whole-span rejection, and the existing traced/FIFO fallback.
+        ram = ctypes.create_string_buffer(0x50)
+        payload = bytes.fromhex("efcdab89674523011032547698badcfe")
+        ram[0x40:0x50] = payload
+        result, cpu, _ = execute(fixture, directory, target, "ee_lq", 0x43,
+                                 fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and not PAIRS and not READS and
+                cpu.gpr[8].lo == 0x0123456789abcdef and
+                cpu.gpr[8].hi == 0xfedcba9876543210, "direct LQ lanes/mask")
+        ram[0x40:0x50] = bytes(16)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 trace_enabled=False, fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and not PAIRS and not WRITES and
+                not TRACES and ram[0x40:0x50] == payload, "direct SQ lanes/mask")
+        ram[0x40:0x50] = bytes(16)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and ram[0x40:0x50] == bytes(16) and
+                EVENTS == [("trace", 0x40), ("write", 0x40),
+                           ("trace", 0x48), ("write", 0x48)], "traced SQ fallback")
+        short_ram = ctypes.create_string_buffer(0x4f)
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x43,
+                                 trace_enabled=False, fastmem=short_ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and len(WRITES) == 2 and
+                short_ram[0x40:0x4f] == bytes(15), "partial quadword fallback")
+        result, cpu, _ = execute(fixture, directory, target, "ee_sq", 0x10005003,
+                                 trace_enabled=False, fastmem=ram, fastmem_quad=True)
+        require(result == EE_EXIT_DISPATCH and len(WRITES) == 1 and
+                WRITES[0][0:2] == (16, 0x10005000), "quad fastmem split FIFO")
+
+        # Constant propagation must retain the instruction accounting and
+        # prior GPR publication, but omit the provably aligned fault arm.
+        result, cpu, original = execute(fixture, directory, target,
+                                         "ee_constant_address", 0)
+        expected = int.from_bytes(bytes(original[i] for i in range(0x40, 0x44)),
+                                  "little", signed=True) % (1 << 64)
+        require(result == EE_EXIT_DISPATCH and READS == [(4, 0x40)] and
+                cpu.gpr[9].lo == 0x40 and cpu.gpr[8].lo == expected,
+                "constant address folding changed architectural state")
+        ir = (pathlib.Path(directory) / "ee_constant_address.ll").read_text(
+            encoding="utf-8")
+        require("memory_alignment_fault_" not in ir and
+                "call i32 @ee_mem_read32(ptr %rt, i32 64)" in ir,
+                "constant aligned access still emits dynamic address/exception")
+        result, cpu, _ = execute(fixture, directory, target,
+                                 "ee_constant_misaligned", 0)
+        require(result == EE_EXIT_EXCEPTION and cpu.cop0[8] == 0x41 and
+                cpu.gpr[9].lo == 0x40 and not READS and not WRITES,
+                "constant misaligned access lost precise exception")
+
         # The positive scalar word path remains operational.
         result, cpu, original = execute(
             fixture, directory, target, "ee_lw", 0x40)

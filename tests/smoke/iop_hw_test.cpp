@@ -1,5 +1,8 @@
 #include "iop_hw.h"
+#include "iop_cdvd_rtc.h"
 #include "iop_kernel.h"
+#include "iop_pad_poll_replay.h"
+#include <sstream>
 #include "iop_memory_card.h"
 
 #include <array>
@@ -25,6 +28,194 @@ void put32(std::vector<uint8_t>& data, uint32_t at, uint32_t value)
         data[at + index] =
             static_cast<uint8_t>(value >> (8u * index));
     }
+}
+
+bool test_cdvd_rtc()
+{
+    std::time_t utc{};
+    iop::t_cdvd_rtc rtc{};
+    const iop::t_cdvd_rtc expected{0u, 0x45u, 0x40u, 0x14u, 0u, 0x26u, 0x11u, 0x26u};
+    if (!iop::parse_fixed_cdvd_rtc("1795671645", utc) ||
+        !iop::encode_cdvd_rtc(utc, rtc) || rtc != expected)
+    {
+        return false;
+    }
+    // 2024-12-31 15:00 UTC is 2025-01-01 00:00 JST.
+    const iop::t_cdvd_rtc new_year{0u, 0u, 0u, 0u, 0u, 1u, 1u, 0x25u};
+    if (!iop::parse_fixed_cdvd_rtc("1735657200", utc) ||
+        !iop::encode_cdvd_rtc(utc, rtc) || rtc != new_year)
+    {
+        return false;
+    }
+    const char* invalid[] = {nullptr, "", "-1", "0", "1795671645x",
+        " 1795671645", "4102444800", "18446744073709551615"};
+    for (const char* text : invalid)
+    {
+        if (iop::parse_fixed_cdvd_rtc(text, utc))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool test_pad_poll_stream()
+{
+    // Sequence spans guest resets; the poll number may restart.
+    constexpr const char* trace =
+        "PAD0 input: 1 1 121 21 21 16384 1 2 3 4\n"
+        "PAD0 input: 2 2 121 21 21 32 5 6 7 8\n"
+        "PAD0 input: 3 1 65 5 5 0 128 128 128 128\n"
+        "PAD0 input summary: record 3\n";
+    iop::c_pad_poll_replay replay;
+    std::istringstream input(trace);
+    if (!replay.load(input) || replay.total() != 3u ||
+        replay.consumed() != 0u || replay.finished())
+    {
+        return false;
+    }
+    iop::c_hw::s_pad0_poll sample{};
+    sample.m_poll = 1u;
+    sample.m_mode = 121u;
+    sample.m_input_size = 21u;
+    sample.m_output_size = 21u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        sample.m_buttons != 16384u || sample.m_axes[0u] != 1u ||
+        sample.m_axes[1u] != 2u || sample.m_axes[2u] != 3u ||
+        sample.m_axes[3u] != 4u)
+    {
+        return false;
+    }
+    sample.m_poll = 2u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        sample.m_buttons != 32u || sample.m_axes[3u] != 8u)
+    {
+        return false;
+    }
+    sample.m_poll = 1u;
+    sample.m_mode = 65u;
+    sample.m_input_size = 5u;
+    sample.m_output_size = 5u;
+    if (!iop::c_pad_poll_replay::poll(&replay, sample) ||
+        !replay.finished() || sample.m_buttons != 0u ||
+        sample.m_axes[0u] != 128u)
+    {
+        return false;
+    }
+    const char* invalid[] = {
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\n",
+        "PAD0 input: 2 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 1\n",
+        "PAD0 input: 1 1 65 5 5 0 128 256 128 128\nPAD0 input summary: record 1\n",
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 2\n",
+        "PAD0 input: 1 1 65 5 5 0 128 128 128 128\nPAD0 input summary: record 1\nPAD0 input summary: record 1\n",
+    };
+    for (const char* text : invalid)
+    {
+        iop::c_pad_poll_replay rejected;
+        std::istringstream stream(text);
+        if (rejected.load(stream) || rejected.enabled())
+        {
+            return false;
+        }
+    }
+    iop::c_pad_poll_replay mismatch;
+    std::istringstream second(trace);
+    if (!mismatch.load(second) ||
+        iop::c_pad_poll_replay::poll(&mismatch, sample) ||
+        !mismatch.failed() || mismatch.consumed() != 0u)
+    {
+        return false;
+    }
+    return true;
+}
+
+bool test_timer5_free_running_clock()
+{
+    iop::c_hw hw{};
+    constexpr uint32_t count = iop::c_hw::k_timer5_count;
+    constexpr uint32_t mode = iop::c_hw::k_timer5_mode;
+    constexpr uint32_t target = iop::c_hw::k_timer5_target;
+    uint32_t actual = 0u;
+
+    // A target value does not enable comparison in mode zero.
+    if (!hw.write(target, 4u, 3u) ||
+        !hw.write(count, 4u, 0xfffffffeu) ||
+        hw.idle_event_cycles_remaining() != 2u)
+    {
+        return false;
+    }
+    hw.advance_cycles(0u);
+    hw.advance_cycles(1u);
+    if (!hw.read(count, 4u, &actual) || actual != 0xffffffffu ||
+        hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(5u);
+    if (!hw.read(count, 4u, &actual) || actual != 4u ||
+        hw.pending_interrupts() != 0u ||
+        !hw.read(mode, 4u, &actual) || actual != 0x400u ||
+        hw.idle_event_cycles_remaining() != (uint64_t{1u} << 32u) - 4u)
+    {
+        return false;
+    }
+
+    // Switch through a prescaled mode with a fractional remainder;
+    // the mode-zero write must reset that remainder and count.
+    if (!hw.write(mode, 4u, 0x6058u))
+    {
+        return false;
+    }
+    hw.advance_cycles(257u);
+    if (!hw.read(count, 4u, &actual) || actual != 1u ||
+        hw.idle_event_cycles_remaining() != 511u ||
+        !hw.write(mode, 4u, 0u))
+    {
+        return false;
+    }
+    hw.advance_cycles(0xffffffffu);
+    hw.advance_cycles(2u);
+    if (!hw.read(count, 4u, &actual) || actual != 1u ||
+        hw.pending_interrupts() != 0u)
+    {
+        return false;
+    }
+
+    // Reset and re-enter compare mode: the ordinary path still
+    // advances to the modeled target and delivers its IRQ.
+    hw.reset();
+    if (!hw.write(target, 4u, 3u) ||
+        !hw.write(mode, 4u, 0x0058u))
+    {
+        return false;
+    }
+    hw.advance_cycles(2u);
+    if (hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    const auto first = hw.scheduler_checkpoint();
+    const auto second = hw.scheduler_checkpoint();
+    const uint32_t irq = 1u << iop::c_hw::k_timer5_irq;
+    // A masked IRQ and the read-clear Timer5 status must survive
+    // repeated diagnostics, as must the read-clear global I_CTRL.
+    if (first.m_irq_stat != irq || first.m_irq_mask != 0u ||
+        first.m_irq_ctrl != 1u || first.m_timer_count != 0u ||
+        first.m_timer_mode != 0x0858u || first.m_timer_target != 3u ||
+        first.m_timer_remainder != 0u || !first.m_timer_armed ||
+        hw.pending_interrupts() != 0u ||
+        second.m_timer_mode != first.m_timer_mode ||
+        second.m_irq_stat != first.m_irq_stat ||
+        second.m_irq_ctrl != first.m_irq_ctrl ||
+        !hw.read(mode, 4u, &actual) || actual != 0x0c58u ||
+        hw.scheduler_checkpoint().m_timer_mode != 0x0058u ||
+        !hw.read(iop::c_hw::k_i_ctrl, 4u, &actual) || actual != 1u ||
+        hw.scheduler_checkpoint().m_irq_ctrl != 0u)
+    {
+        return false;
+    }
+    return true;
 }
 
 bool test_spu2_sample_clock()
@@ -58,6 +249,38 @@ bool test_spu2_sample_clock()
     {
         return false;
     }
+    // The clock-only hot path and mixer edge path must agree for
+    // different partitions, including zero, exact and multi-sample steps.
+    {
+        iop::c_hw partitioned{};
+        if (!partitioned.write(spu + 0x760u, 2u, 1u))
+        {
+            return false;
+        }
+        uint32_t left = 4u * period + 17u;
+        uint32_t seed = 0x12345678u;
+        while (left != 0u)
+        {
+            seed = seed * 1664525u + 1013904223u;
+            const uint32_t step = std::min(left, 1u + (seed % 137u));
+            partitioned.advance_cycles(0u);
+            partitioned.advance_cycles(step);
+            left -= step;
+            const uint64_t reached = 4u * period + 17u - left;
+            if (partitioned.spu2().clock_cycles() != reached ||
+                partitioned.spu2().elapsed_samples() != reached / period ||
+                partitioned.spu2().sample_phase() != reached % period)
+            {
+                return false;
+            }
+        }
+        if (partitioned.spu2().mixed_frames() != hw.spu2().mixed_frames() ||
+            partitioned.spu2().playback_irq_events() != hw.spu2().playback_irq_events() ||
+            partitioned.pending_interrupts() != hw.pending_interrupts())
+        {
+            return false;
+        }
+    }
     // Large advance must retain the fractional phase without u32 overflow.
     hw.advance_cycles(0xffffffffu);
     const uint64_t total = uint64_t{4u * period + 17u} + 0xffffffffu;
@@ -67,9 +290,31 @@ bool test_spu2_sample_clock()
         return false;
     }
     hw.reset();
-    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u)
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u ||
+        hw.spu2().sample_phase() != 0u ||
+        !hw.write(spu + 0x760u, 2u, 1u))
     {
         return false;
+    }
+    // Cross every fractional phase with zero, unit, exact-period and
+    // multi-period advances. The absolute clock remains the reference.
+    uint64_t expected_clock = 0u;
+    for (uint32_t phase = 0u; phase < period; ++phase)
+    {
+        const uint32_t adjustment = static_cast<uint32_t>(
+            (phase + period - expected_clock % period) % period);
+        const uint32_t steps[] = {adjustment, 0u, 1u, period, 2u * period + 7u};
+        for (const uint32_t step : steps)
+        {
+            hw.advance_cycles(step);
+            expected_clock += step;
+            if (hw.spu2().clock_cycles() != expected_clock ||
+                hw.spu2().elapsed_samples() != expected_clock / period ||
+                hw.spu2().sample_phase() != expected_clock % period)
+            {
+                return false;
+            }
+        }
     }
 
     // The attached CPU and kernel share the same hardware. A running
@@ -570,6 +815,53 @@ bool test_authentic_spu2_dma()
         return false;
     }
 
+    // The idle horizon must select the earlier ordinary DMA deadline,
+    // including when both channels are armed or one is cancelled.
+    hw.reset();
+    if (!kernel.attach_hle_hardware() ||
+        !hw.write(dma4, 4u, source) ||
+        !hw.write(dma4 + 4u, 4u, 0x00010004u) ||
+        !cpu.write32(0xbf8010c8u, 0x01000001u) ||
+        hw.spu2_dma_cycles_remaining() != 65u ||
+        hw.idle_event_cycles_remaining() != 65u ||
+        !hw.write(dma7, 4u, dest) ||
+        !hw.write(dma7 + 4u, 4u, 0x00010002u) ||
+        !cpu.write32(0xbf801508u, 0x01000000u) ||
+        hw.spu2_dma_cycles_remaining() != 64u ||
+        hw.idle_event_cycles_remaining() != 64u ||
+        !hw.write(dma7 + 8u, 4u, 0u) ||
+        hw.spu2_dma_cycles_remaining() != 65u ||
+        hw.idle_event_cycles_remaining() != 65u ||
+        !cpu.write32(0xbf801508u, 0x01000000u))
+    {
+        return false;
+    }
+    hw.advance_cycles(63u);
+    if (hw.spu2_dma_cycles_remaining() != 1u ||
+        hw.idle_event_cycles_remaining() != 1u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (!hw.write(iop::c_hw::k_i_stat, 4u,
+                  ~(1u << iop::c_hw::k_dma_irq)) ||
+        hw.spu2_dma_cycles_remaining() != 1u ||
+        hw.idle_event_cycles_remaining() != 1u ||
+        !hw.read(dma7 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u ||
+        !hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) == 0u)
+    {
+        return false;
+    }
+    hw.advance_cycles(1u);
+    if (hw.spu2_dma_cycles_remaining() != 0u ||
+        !hw.read(dma4 + 8u, 4u, &actual) ||
+        (actual & iop::c_hw::k_spu2_dma_str_bit) != 0u)
+    {
+        return false;
+    }
+
     // Small AutoDMA fits in the input ring immediately, and completes
     // after 32 cycles, without changing TSA.
     hw.reset();
@@ -577,7 +869,8 @@ bool test_authentic_spu2_dma()
         !hw.write(spu2 + 0x1b0u, 2u, 1u) ||
         !hw.write(dma4, 4u, source) ||
         !hw.write(dma4 + 4u, 4u, 0x00010004u) ||
-        !cpu.write32(0xbf8010c8u, 0x01000001u))
+        !cpu.write32(0xbf8010c8u, 0x01000001u) ||
+        hw.idle_event_cycles_remaining() != 0u)
     {
         return false;
     }
@@ -1167,6 +1460,30 @@ bool test_spu2_effect_allpass()
 
 bool test_spu2_effect_clock()
 {
+    // No physical alias of 0x7000 is in the logical work area.
+    // Reprogramming IRQA into the mirrored region must immediately
+    // restore the exact seven-sample deadline.
+    {
+        iop::c_spu2 spu;
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        if (!spu.write(base + 0x2e0u, 2u, 0x1fu) ||
+            !spu.write(base + 0x2e2u, 2u, 0xfff8u) ||
+            !spu.write(base + 0x33cu, 2u, 0x1fu) ||
+            !spu.write(base + 0x59eu, 2u, 0x7000u) ||
+            !spu.write(base + 0x59au, 2u, 0x40u) ||
+            !spu.write(base + 0x19au, 2u, 0x80u) ||
+            spu.voice_irq_cycles_remaining() != 0u ||
+            !spu.write(base + 0x59cu, 2u, 0x0fu) ||
+            !spu.write(base + 0x59eu, 2u, 0xfffbu) ||
+            spu.voice_irq_cycles_remaining() != 7u * period ||
+            spu.advance_cycles(7u * period - 1u) != 0u ||
+            spu.voice_irq_cycles_remaining() != 1u ||
+            spu.advance_cycles(1u) != 2u)
+        {
+            return false;
+        }
+    }
     constexpr uint32_t base = iop::c_spu2::k_base;
     constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
     constexpr uint32_t irq = 1u << iop::c_spu2::k_irq_line;
@@ -1229,6 +1546,7 @@ bool test_spu2_effect_fast_path()
     iop::c_spu2 reference;
     iop::c_spu2 fast;
     reference.enable_effect_fast_path(false);
+    reference.enable_irq_deadline_cache(false);
     std::vector<int16_t> pcm[2];
     iop::c_spu2* models[] = {&reference, &fast};
     for (uint32_t model = 0u; model < 2u; ++model)
@@ -1921,6 +2239,100 @@ bool test_spu2_auto_dma()
 
 bool test_spu2_playback_irq()
 {
+    // Compare cached and uncached queries at every sub-sample phase,
+    // including invalidation after guest register and input changes.
+    {
+        iop::c_spu2 reference;
+        iop::c_spu2 cached;
+        reference.enable_irq_deadline_cache(false);
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        iop::c_spu2* models[] = {&reference, &cached};
+        for (auto* model : models)
+        {
+            if (model->voice_irq_cycles_remaining() != 0u ||
+                !model->write(base + 0x19au, 2u, 0x40u) ||
+                !model->write(base + 0x19eu, 2u, 0x2000u) ||
+                model->voice_irq_cycles_remaining() != 0u)
+            {
+                return false;
+            }
+        }
+        for (uint32_t i = 0u; i < 2u * period; ++i)
+        {
+            if (i == 17u)
+            {
+                const uint8_t input[] = {0u, 0u, 0u, 0u};
+                for (auto* model : models)
+                {
+                    if (!model->push_input(0u, input, sizeof(input)) ||
+                        model->voice_irq_cycles_remaining() != period - i)
+                    {
+                        return false;
+                    }
+                }
+            }
+            if (i == period + 13u)
+            {
+                for (auto* model : models)
+                {
+                    if (!model->write(base + 0x19au, 2u, 0u) ||
+                        !model->write(base + 0x19eu, 2u, 0x7000u) ||
+                        !model->write(base + 0x19au, 2u, 0x40u) ||
+                        !model->write(base + 0x1a0u, 2u, 1u) ||
+                        model->voice_irq_cycles_remaining() != period - 13u)
+                    {
+                        return false;
+                    }
+                }
+            }
+            // Repeated queries must preserve both zero and positive cache
+            // hits; toggling the cache must not alter the underlying horizon.
+            const uint32_t expected = reference.voice_irq_cycles_remaining();
+            if (i % 97u == 0u)
+            {
+                cached.enable_irq_deadline_cache(false);
+                if (cached.voice_irq_cycles_remaining() != expected)
+                {
+                    return false;
+                }
+                cached.enable_irq_deadline_cache(true);
+            }
+            if (cached.voice_irq_cycles_remaining() != expected ||
+                cached.voice_irq_cycles_remaining() != expected ||
+                reference.advance_cycles(1u) != cached.advance_cycles(1u) ||
+                reference.irq_latches() != cached.irq_latches())
+            {
+                return false;
+            }
+        }
+        for (auto* model : models)
+        {
+            model->reset();
+            if (model->voice_irq_cycles_remaining() != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    // Highest legal voice index in the second core, with no lower
+    // active voices. Its pending decode bounds the IRQ opportunity
+    // to the next sample even with a distant IRQA and fractional phase.
+    {
+        iop::c_spu2 spu;
+        constexpr uint32_t base = iop::c_spu2::k_base;
+        constexpr uint32_t period = iop::c_spu2::k_cycles_per_sample;
+        if (!spu.write(base + 0x59au, 2u, 0x40u) ||
+            !spu.write(base + 0x59eu, 2u, 0x7000u) ||
+            !spu.write(base + 0x5a2u, 2u, 0x80u) ||
+            spu.voice_irq_cycles_remaining() != period ||
+            spu.advance_cycles(period - 1u) != 0u ||
+            spu.voice_irq_cycles_remaining() != 1u ||
+            spu.irq_latches() != 0u)
+        {
+            return false;
+        }
+    }
     iop::c_kernel kernel;
     if (!kernel.attach_hle_hardware())
     {
@@ -2569,6 +2981,63 @@ bool test_guest_sio2_controller()
         return false;
     }
 
+    // A replay sample overrides host input only when an actual connected
+    // port-0 poll is decoded. Its raw active-high bits become wire bytes.
+    {
+        iop::c_kernel replay_kernel;
+        if (!replay_kernel.attach_hle_hardware())
+        {
+            return false;
+        }
+        auto& hw = replay_kernel.hardware();
+        iop::c_pad_poll_replay replay;
+        std::istringstream samples(
+            "unrelated log line\n"
+            "PAD0 input: 1 1 65 5 5 2080 11 22 33 44\n"
+            "PAD0 input summary: record 1\n");
+        if (!replay.load(samples) || replay.finished())
+        {
+            return false;
+        }
+        hw.bind_pad0_poll(&replay, iop::c_pad_poll_replay::poll);
+        hw.set_sio2_pad0_input(0xffffu, 255u, 255u, 255u, 255u);
+        if (replay.consumed() != 0u ||
+            !hw.write(ctrl, 4u, 0x0cu) ||
+            !hw.write(send3, 4u, (5u << 8u) | (5u << 18u)))
+        {
+            return false;
+        }
+        for (const uint8_t byte : poll)
+        {
+            if (!hw.write(tx, 1u, byte))
+            {
+                return false;
+            }
+        }
+        for (uint32_t index = 0u; index < 5u; ++index)
+        {
+            const uint32_t expected = index == 3u ? 0xdfu :
+                (index == 4u ? 0xf7u : neutral_reply[index]);
+            if (!hw.read(rx, 1u, &status) || status != expected)
+            {
+                return false;
+            }
+        }
+        if (!replay.finished() || replay.consumed() != 1u ||
+            !hw.write(ctrl, 4u, 0x03bdu) ||
+            hw.sio2_completed_transfers() != 1u)
+        {
+            return false;
+        }
+        // No silently substituted neutral input when the stream ends.
+        iop::c_hw::s_pad0_poll extra{};
+        if (iop::c_pad_poll_replay::poll(&replay, extra) ||
+            !replay.failed() || replay.finished())
+        {
+            return false;
+        }
+    }
+
     // A deliberate host Cross press is delivered ONLY in genuine
     // connected port-0 SIO2 0x42 reply bytes, for a bounded number of
     // guest pad polls. No new packet/IRQ is created by configuration,
@@ -2800,6 +3269,18 @@ int main()
     if (!test_spu2_adpcm_voice_progression())
     {
         return fail("SPU2 ADPCM decoding, pitch, loop or NAX progression");
+    }
+    if (!test_cdvd_rtc())
+    {
+        return fail("CDVD RTC fixed UTC parsing and JST calendar conversion");
+    }
+    if (!test_pad_poll_stream())
+    {
+        return fail("pad poll stream validation and replay");
+    }
+    if (!test_timer5_free_running_clock())
+    {
+        return fail("Timer5 free-running clock, wrap or mode transition");
     }
     if (!test_spu2_sample_clock())
     {

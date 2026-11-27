@@ -215,7 +215,8 @@ bool c_ee_raylib_window::initialize()
 void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     const s_ee_gs_display_registers& registers,
     uint32_t crt_mode, uint64_t field_count,
-    c_ee_gs_presentation_probe* probe, iop::c_hw* iop_hardware)
+    c_ee_gs_presentation_probe* probe, iop::c_hw* iop_hardware,
+    const s_ee_performance_counters& counters)
 {
     if (!m_ready || m_closed)
     {
@@ -266,6 +267,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         ToggleBorderlessWindowed();
     }
+    if (IsKeyPressed(KEY_F9))
+    {
+        m_performance_overlay.toggle();
+        ps2::gs::gpu::set_performance_overlay(m_performance_overlay.visible()
+            ? &m_performance_overlay.text() : nullptr);
+    }
     if (WindowShouldClose())
     {
         if (iop_hardware != nullptr)
@@ -297,6 +304,18 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         return;
     }
 
+    if (m_performance_overlay.visible())
+    {
+        auto current = counters;
+        current.m_crt_mode = crt_mode;
+        current.m_fields = field_count;
+        current.m_presentations = m_presentations;
+        if (m_performance_overlay.sample(now, current))
+        {
+            ps2::gs::gpu::set_performance_overlay(&m_performance_overlay.text());
+        }
+    }
+
     if (advanced)
     {
         m_last_fields = field_count;
@@ -304,6 +323,10 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         // count. A native surface/present failure is not a guest event.
         const bool supported = bridge.supports_display(registers, crt_mode);
         const bool presented = bridge.present(registers, crt_mode, field_count);
+        if (supported && presented)
+        {
+            ++m_presentations;
+        }
         if (probe != nullptr)
         {
             probe->record_present(

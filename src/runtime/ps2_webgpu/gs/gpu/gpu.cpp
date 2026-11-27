@@ -1,5 +1,6 @@
 #include "gpu.hpp"
 #include "../../../ee_runtime_profile.h"
+#include "../../../ee_performance_overlay.h"
 #include "native_viewport.hpp"
 #include "native_deinterlace.hpp"
 // Native-only WebGPU backend adapted from ps2-web-recomp:SDBZ (MIT).
@@ -100,6 +101,10 @@ std::uint32_t g_surface_width = 0, g_surface_height = 0;
 WGPURenderPipeline g_blit = nullptr;
 WGPUBindGroup g_blit_group = nullptr;
 WGPUBuffer g_blit_params = nullptr;
+WGPUBuffer g_overlay_buffer = nullptr;
+ee::s_ee_overlay_text g_overlay_text{};
+bool g_overlay_visible = false;
+bool g_overlay_dirty = false;
 std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
 std::uint64_t g_last_guest_field = 0u;
@@ -2094,15 +2099,18 @@ bool attach_surface(const SurfaceTarget &target) {
     WGPUShaderModuleDescriptor md = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
     md.nextInChain = &source.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &md);
-    WGPUBindGroupLayoutEntry le[2] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
+    WGPUBindGroupLayoutEntry le[3] = {WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT, WGPU_BIND_GROUP_LAYOUT_ENTRY_INIT};
     le[0].binding = 0;
     le[0].visibility = WGPUShaderStage_Fragment;
     le[0].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
     le[1].binding = 1;
     le[1].visibility = WGPUShaderStage_Fragment;
     le[1].buffer.type = WGPUBufferBindingType_Uniform;
+    le[2].binding = 2;
+    le[2].visibility = WGPUShaderStage_Fragment;
+    le[2].buffer.type = WGPUBufferBindingType_ReadOnlyStorage;
     WGPUBindGroupLayoutDescriptor ld = WGPU_BIND_GROUP_LAYOUT_DESCRIPTOR_INIT;
-    ld.entryCount = 2;
+    ld.entryCount = 3;
     ld.entries = le;
     WGPUBindGroupLayout layout = wgpuDeviceCreateBindGroupLayout(g_device, &ld);
     WGPUPipelineLayoutDescriptor pld = WGPU_PIPELINE_LAYOUT_DESCRIPTOR_INIT;
@@ -2125,20 +2133,24 @@ bool attach_surface(const SurfaceTarget &target) {
     wgpuShaderModuleRelease(module);
     wgpuPipelineLayoutRelease(pipeline_layout);
     g_blit_params = make_buffer(48, WGPUBufferUsage_Uniform | WGPUBufferUsage_CopyDst);
-    WGPUBindGroupEntry be[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+    g_overlay_buffer = make_buffer(sizeof(g_overlay_text.m_words), WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst);
+    WGPUBindGroupEntry be[3] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
     be[0].binding = 0;
     be[0].buffer = g_scratch;
     be[0].size = WGPU_WHOLE_SIZE;
     be[1].binding = 1;
     be[1].buffer = g_blit_params;
     be[1].size = 48;
+    be[2].binding = 2;
+    be[2].buffer = g_overlay_buffer;
+    be[2].size = sizeof(g_overlay_text.m_words);
     WGPUBindGroupDescriptor bd = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
     bd.layout = layout;
-    bd.entryCount = 2;
+    bd.entryCount = 3;
     bd.entries = be;
     g_blit_group = wgpuDeviceCreateBindGroup(g_device, &bd);
     wgpuBindGroupLayoutRelease(layout);
-    return g_blit != nullptr;
+    return g_blit != nullptr && g_overlay_buffer != nullptr && g_blit_group != nullptr;
 }
 
 void resize_surface(std::uint32_t width, std::uint32_t height) {
@@ -2149,6 +2161,16 @@ void resize_surface(std::uint32_t width, std::uint32_t height) {
 }
 
 bool has_surface() { return g_surface != nullptr; }
+
+void set_performance_overlay(const ee::s_ee_overlay_text* text)
+{
+    g_overlay_visible = text != nullptr;
+    if (text != nullptr)
+    {
+        g_overlay_text = *text;
+        g_overlay_dirty = true;
+    }
+}
 
 bool present(const DisplaySource &src) {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_present_cpu);
@@ -2216,7 +2238,13 @@ bool present(const DisplaySource &src) {
         static_cast<std::uint32_t>(field.m_method),
         static_cast<std::uint32_t>(g_present_viewport.width), static_cast<std::uint32_t>(g_present_viewport.height),
         std::getenv("EE_WEBGPU_NEAREST") ? 1u : 0u,
-        0u, g_scale, field.m_parity, field.m_history ? 1u : 0u};
+        g_overlay_visible ? 2u : 0u, g_scale, field.m_parity, field.m_history ? 1u : 0u};
+    if (g_overlay_visible && g_overlay_dirty)
+    {
+        wgpuQueueWriteBuffer(g_queue, g_overlay_buffer, 0, g_overlay_text.m_words.data(),
+            sizeof(g_overlay_text.m_words));
+        g_overlay_dirty = false;
+    }
     wgpuQueueWriteBuffer(g_queue, g_blit_params, 0, blit, sizeof blit);
     ++g_field;
     g_have_previous = true;
@@ -2231,16 +2259,24 @@ bool present(const DisplaySource &src) {
         if (st.texture) wgpuTextureRelease(st.texture);
         submit();
         configure_surface();
-        return true;
+        return false;
     }
     WGPUTextureView target = wgpuTextureCreateView(st.texture, nullptr);
+    if (target == nullptr) {
+        submit();
+        wgpuTextureRelease(st.texture);
+        configure_surface();
+        return false;
+    }
     submit(target);
 #ifndef __EMSCRIPTEN__
-    wgpuSurfacePresent(g_surface);
+    const bool presented = wgpuSurfacePresent(g_surface) == WGPUStatus_Success;
+#else
+    const bool presented = true;
 #endif
     wgpuTextureViewRelease(target);
     wgpuTextureRelease(st.texture);
-    return true;
+    return presented;
 }
 
 ee::s_gpu_timestamp_profile timestamp_profile()
@@ -2420,16 +2456,19 @@ bool change_render_scale(std::uint32_t scale)
     if (g_blit)
     {
         const auto layout = wgpuRenderPipelineGetBindGroupLayout(g_blit, 0);
-        WGPUBindGroupEntry entries[2] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
+        WGPUBindGroupEntry entries[3] = {WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT, WGPU_BIND_GROUP_ENTRY_INIT};
         entries[0].binding = 0;
         entries[0].buffer = g_scratch;
         entries[0].size = WGPU_WHOLE_SIZE;
         entries[1].binding = 1;
         entries[1].buffer = g_blit_params;
         entries[1].size = 48;
+        entries[2].binding = 2;
+        entries[2].buffer = g_overlay_buffer;
+        entries[2].size = sizeof(g_overlay_text.m_words);
         WGPUBindGroupDescriptor descriptor = WGPU_BIND_GROUP_DESCRIPTOR_INIT;
         descriptor.layout = layout;
-        descriptor.entryCount = 2;
+        descriptor.entryCount = 3;
         descriptor.entries = entries;
         if (g_blit_group) wgpuBindGroupRelease(g_blit_group);
         g_blit_group = wgpuDeviceCreateBindGroup(g_device, &descriptor);

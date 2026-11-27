@@ -27,6 +27,11 @@ public:
     // Opt-in only, after adapter and any native window are initialized.
     bool enable_async();
     bool worker_healthy() const;
+    // Host-thread observation, not a guest DMA or GPU completion fence.
+    bool worker_quiescent() const
+    {
+        return !m_host_failed && (m_worker == nullptr || m_worker->quiescent());
+    }
     bool flush_committed();
     bool resize_surface(uint32_t width, uint32_t height);
     void write_worker_statistics(FILE* output) const;

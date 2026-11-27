@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Native dispatcher chunks preserve ownership order and stable cache inputs."""
 import importlib.util
+import hashlib
 from pathlib import Path
 import unittest
 import tempfile
@@ -12,6 +13,36 @@ SPEC = importlib.util.spec_from_file_location(
 )
 linker = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(linker)
+CERT_SPEC = importlib.util.spec_from_file_location(
+    "native_alu_certificate", ROOT / "tools" / "native_alu_certificate.py"
+)
+certificate = importlib.util.module_from_spec(CERT_SPEC)
+CERT_SPEC.loader.exec_module(certificate)
+
+
+def certificate_ir():
+    return """define i32 @guest_fn_00100000(ptr %cpu, ptr %rt) {
+entry:
+  %t1 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6
+  %t2 = load i32, ptr %t1
+  switch i32 %t2, label %dispatch_unknown [
+    i32 1048576, label %bb_0x100000
+    i32 0, label %bb_0x100000
+  ]
+dispatch_unknown:
+  ret i32 3
+bb_0x100000:
+  %t3 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 0, i32 31, i32 0
+  %t4 = load i64, ptr %t3
+  call void @ee_count_guest_instruction(ptr %rt, i32 1048576, i32 65011720)
+  ; 0x00100004: nop
+  call void @ee_count_guest_instruction(ptr %rt, i32 1048580, i32 0)
+  %t5 = trunc i64 %t4 to i32
+  %t6 = getelementptr %ee_cpu_state, ptr %cpu, i32 0, i32 6
+  store i32 %t5, ptr %t6
+  ret i32 0
+}
+"""
 
 
 def make_function(index):
@@ -47,6 +78,11 @@ class ChunkDispatcherTests(unittest.TestCase):
         self.assertIn("ee_dispatch_chunk_0001(", after)
         self.assertIn("entries.data()", after)
         self.assertIn("ee_game_resolve_entry(", after)
+        self.assertIn("ee_game_resolve_owner(", after)
+        self.assertIn("ee::ee_resolve_dispatch_owner_vaddr(g_dispatch_table, g_dispatch.index, guest_pc, entry)", after)
+        legacy = linker.build_dispatch_source(meta, base)
+        self.assertIn("ee_game_resolve_owner(", legacy)
+        self.assertIn("ee::ee_resolve_dispatch_owner_vaddr(g_dispatch_table, g_index, guest_pc, entry)", legacy)
         self.assertIn("ee::ee_resolve_dispatch_entry(g_dispatch_table, g_dispatch.index, guest_pc)", after)
         self.assertIn("ee_dispatch_run_indexed(", after)
         self.assertIn("cpu, runtime, g_dispatch_table, g_dispatch.index,", after)
@@ -171,6 +207,50 @@ class ChunkDispatcherTests(unittest.TestCase):
                         entries.index("guest_fn_00100020"))
         with self.assertRaises(ValueError):
             linker.build_dispatch_data_source({"entry_point": "0x0"}, [])
+
+    def test_native_certificate_exact_block_and_rejections(self):
+        ir = certificate_ir()
+        symbol = "guest_fn_00100000"
+        expected = {0x100000: (0x03e00008, 0)}
+        self.assertEqual(certificate.extract_bounds(ir, symbol, [0x100000, 0, 0x100004]),
+                         expected)
+        for altered in (
+            ir.replace("i32 1048576, label %bb_0x100000",
+                       "i32 1048576, label %bb_0x100004"),
+            ir.replace("i32 1048580, i32 0", "i32 1048584, i32 0"),
+            ir.replace("i32 65011720", "i32 0"),
+            ir.replace("load i64, ptr %t3", "load i64, ptr %rt"),
+            ir.replace("i32 31, i32 0", "i32 32, i32 0"),
+            ir.replace("i32 0, i32 31, i32 0", "i32 9, i32 31"),
+            ir.replace("ret i32 0", "br label %bb_0x100000"),
+            ir.replace("ret i32 0", "call void @device(ptr %rt)\n  ret i32 0"),
+            ir.replace("entry:", "entry:\n  call void @device(ptr %rt)"),
+        ):
+            self.assertEqual(certificate.extract_bounds(altered, symbol, [0x100000]),
+                             {}, altered)
+
+    def test_native_certificate_requires_exact_ir_digest_and_unique_owner(self):
+        with tempfile.TemporaryDirectory(prefix="ee-native-certificate-") as tmp:
+            root = Path(tmp)
+            fn = make_function(0)
+            path = root / fn["ir_path"]
+            ir = certificate_ir().encode()
+            path.write_bytes(ir)
+            manifest = {"objects": [{"input": str(path),
+                                    "ir_sha256": hashlib.sha256(ir).hexdigest()}]}
+            metadata = root / "ee_functions.json"
+            expected = [(0x100000, 0x100000, (0x03e00008, 0))]
+            self.assertEqual(certificate.verified_bounds(metadata, [fn], manifest), expected)
+            source = certificate.build_certificate_source(expected)
+            self.assertIn("ee_game_alu_words(", source)
+            self.assertIn("ee_game_resolve_owner(pc, entry)", source)
+            self.assertIn("{0x00100000u, 0x00100000u, 0u, 2u}", source)
+            self.assertIn("0x03e00008u, 0x00000000u", source)
+            self.assertEqual(certificate.verified_bounds(metadata, [fn, fn], manifest), [])
+            path.write_bytes(ir + b"; altered")
+            self.assertEqual(certificate.verified_bounds(metadata, [fn], manifest), [])
+            path.unlink()
+            self.assertEqual(certificate.verified_bounds(metadata, [fn], manifest), [])
 
     def test_cpp_escaping(self):
         item = make_function(0)

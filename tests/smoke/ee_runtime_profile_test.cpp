@@ -1,4 +1,5 @@
 #include "ee_runtime_profile.h"
+#include "ee_performance_overlay.h"
 #include "../../src/tools/ee_pc_profile.h"
 
 #include <cstdio>
@@ -7,13 +8,100 @@
 int main()
 {
     using ee::e_runtime_profile_id;
+    {
+        ee::c_ee_performance_overlay overlay;
+        ee::s_ee_performance_counters counters{};
+        if (overlay.visible() || overlay.sample(0.0, counters))
+        {
+            return 11;
+        }
+        overlay.toggle();
+        counters.m_clock_available = true;
+        counters.m_crt_mode = 2u;
+        if (!overlay.visible() || !overlay.sample(1.0, counters) ||
+            overlay.sample(1.1, counters))
+        {
+            return 12;
+        }
+        counters.m_cycles = 147456000u;
+        counters.m_presentations = 30u;
+        counters.m_fields = 30u;
+        counters.m_dispatches = 500000u;
+        counters.m_instructions = 147000000u;
+        counters.m_draws = 50000u;
+        if (!overlay.sample(1.5, counters))
+        {
+            return 13;
+        }
+        ee::s_ee_overlay_text expected{};
+        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(1u, "SPEED       100.0% / UNLIMITED");
+        expected.set_line(2u, "PRESENT      60.0 / 59.94 FPS");
+        expected.set_line(3u, "GUEST        60.0 / 59.94 F/S");
+        expected.set_line(4u, "EE          294.0 M INST/S");
+        expected.set_line(5u, "DISPATCH   1000.0 K/S");
+        expected.set_line(6u, "GS          100.0 K DRAWS/S");
+        expected.set_line(7u, "CPU PROFILE OFF");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 14;
+        }
+        // Changing CRT mode reanchors sampling; PAL uses its own nominal rate.
+        counters.m_crt_mode = 3u;
+        if (!overlay.sample(1.5, counters))
+        {
+            return 19;
+        }
+        counters.m_cycles += 147456000u;
+        counters.m_presentations += 20u;
+        counters.m_fields += 25u;
+        if (!overlay.sample(2.0, counters))
+        {
+            return 20;
+        }
+        expected.set_line(2u, "PRESENT      40.0 / 50.00 FPS");
+        expected.set_line(3u, "GUEST        50.0 / 50.00 F/S");
+        expected.set_line(4u, "EE            0.0 M INST/S");
+        expected.set_line(5u, "DISPATCH      0.0 K/S");
+        expected.set_line(6u, "GS            0.0 K DRAWS/S");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 21;
+        }
+        // Counter reset must not manufacture enormous rates.
+        counters.m_fields = 0u;
+        if (!overlay.sample(2.1, counters))
+        {
+            return 15;
+        }
+        expected = {};
+        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(1u, "SAMPLING...");
+        if (overlay.text().m_words != expected.m_words)
+        {
+            return 16;
+        }
+        overlay.toggle();
+        if (overlay.visible() || overlay.sample(3.0, counters) ||
+            overlay.text().m_words != ee::s_ee_overlay_text{}.m_words)
+        {
+            return 17;
+        }
+        // Last row of A is 10001; first row is 01110.
+        const auto a = ee::ee_overlay_glyph('A');
+        if ((a[0] & 31u) != 14u || a[1] != 17u)
+        {
+            return 18;
+        }
+    }
+
     // A tiny cache forces collisions, including zero, unaligned and
     // full-width PCs. Rehashing the owning map must preserve references.
     ee::c_ee_pc_profile<4u> pcs(true);
     ee::c_ee_pc_profile<4u> disabled(false);
     disabled.record(0u, 1u, 2u, 0u, 3u);
     pcs.record(0u, 0u, 0u, 0u, 7u);
-    pcs.record(0u, 1u, 10u, 2u, 11u);
+    pcs.record(0u, 1u, 10u, 2u, 11u, 3u);
     pcs.record(1u, 1u, 3u, 0u, 13u);
     pcs.record(16u, 1u, 4u, 0u, 17u);
     pcs.record(0xffffffffu, 1u, 5u, 1u, 19u);
@@ -25,12 +113,13 @@ int main()
     {
         pcs.record(i * 16u + 4u, 1u, 1u, 0u, 1u);
     }
-    pcs.record(0u, 1u, 30u, 4u, 29u);
+    pcs.record(0u, 1u, 30u, 4u, 29u, 7u);
     const auto& entry = pcs.entries().at(0u);
     if (!disabled.entries().empty() || &entry != zero ||
         pcs.entries().size() != 4100u || entry.m_calls != 4u ||
         entry.m_dispatches != 3u || entry.m_instructions != 60u ||
         entry.m_idle_instructions != 14u || entry.m_wall_ns != 70u ||
+        entry.m_nested_ns != 10u || pcs.entries().at(1u).m_nested_ns != 0u ||
         pcs.entries().at(1u).m_wall_ns != 13u ||
         pcs.entries().at(16u).m_wall_ns != 17u ||
         pcs.entries().at(0xffffffffu).m_idle_instructions != 1u)
@@ -76,6 +165,7 @@ int main()
     }
     ee::runtime_profile_begin(true);
     uint32_t steps = 0u;
+    uint64_t root_child_ns = 0u;
     {
         ee::c_runtime_profile_scope root(e_runtime_profile_id::ee_native_boundary);
         {
@@ -87,12 +177,15 @@ int main()
             child.stop();
             child.stop();
         }
+        root.stop();
+        root_child_ns = root.child_ns();
     }
     const auto& state = ee::g_runtime_profile;
     const auto& root = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::ee_native_boundary)];
     const auto& child = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::vu1_run)];
     const auto& kick = state.m_counters[static_cast<std::size_t>(e_runtime_profile_id::vu1_xgkick)];
     if (root.m_calls != 1u || child.m_calls != 1u || kick.m_calls != 1u ||
+        root_child_ns != child.m_inclusive_ns ||
         root.m_inclusive_ns != root.m_exclusive_ns + child.m_inclusive_ns ||
         child.m_inclusive_ns != child.m_exclusive_ns + kick.m_inclusive_ns ||
         state.m_covered_ns != root.m_exclusive_ns + child.m_exclusive_ns + kick.m_exclusive_ns ||

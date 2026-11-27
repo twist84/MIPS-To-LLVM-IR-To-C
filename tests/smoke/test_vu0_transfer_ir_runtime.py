@@ -239,7 +239,7 @@ def register_runtime_symbols(library_path):
     return library
 
 
-def compile_jit(fixture, temp_dir, mode, target):
+def compile_jit(fixture, temp_dir, mode, target, optimized=False):
     ir_path = temp_dir / f"{mode}.ll"
     subprocess.run([str(fixture), str(ir_path), mode], check=True)
 
@@ -284,10 +284,19 @@ def compile_jit(fixture, temp_dir, mode, target):
 
     module = llvm.parse_assembly(ir_text)
     module.verify()
-    target_machine = target.create_target_machine(opt=0)
+    target_machine = (target.create_target_machine(
+        opt=2, cpu=llvm.get_host_cpu_name(),
+        features=llvm.get_host_cpu_features().flatten()) if optimized else
+        target.create_target_machine(opt=0))
     module.triple = llvm.get_default_triple()
     module.data_layout = str(target_machine.target_data)
     module.verify()
+    if optimized:
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "tools"))
+        import verify_ir
+        require(verify_ir.uses_ir_pipeline(5, ir_text.encode()),
+                "fixture does not select the native VU0 pipeline")
+        verify_ir.optimize_guest_ir(module, target_machine)
 
     engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), target_machine)
     engine.add_module(module)
@@ -328,10 +337,10 @@ def make_runtime(vu0, sync_result=VU0_SYNC_COMPLETE,
 def run_guest(fixture, temp_dir, target, mode, setup=None,
               sync_result=VU0_SYNC_COMPLETE,
               control_result=VU0_SYNC_COMPLETE,
-              vu0_state_available=True):
+              vu0_state_available=True, optimized=False):
     print("VU0 JIT: compile/execute mode=", mode, flush=True)
     guest_fn, engine, module, target_machine, counter_offset = compile_jit(
-        fixture, temp_dir, mode, target
+        fixture, temp_dir, mode, target, optimized=optimized
     )
     cpu_backing, cpu = aligned_instance(EEState)
     vu0_backing, vu0 = aligned_instance(VU0State)
@@ -588,6 +597,25 @@ def main():
                 and vu0.mac_flags == 0x1404 and vu0.status_flags == 0x34d,
                 "direct VU0 VMUL result and true range flags")
         check_sync(sync, 1, ENTRY_PC, "direct VMUL")
+        for mode, mask in (("ir_vmul_x", 8), ("ir_vmul_empty", 0)):
+            def init_partial(cpu, vu0):
+                init_mul(cpu, vu0)
+                set_vf(cpu, 3, (1, 2, 3, 4))
+                vu0.mac_flags = 0xffff
+            for optimized in (False, True):
+                result, cpu, vu0, sync, _, keep = run_guest(
+                    fixture, temp_dir, target, mode, init_partial, optimized=optimized)
+                require(result == EE_EXIT_DISPATCH and
+                        vf_words(cpu, 3) == ((0x3ffffffe if mask else 1), 2, 3, 4)
+                        and vu0.mac_flags == 0,
+                        "masked VU0 FMAC changed inactive lanes or MAC flags")
+                check_sync(sync, 1, ENTRY_PC, mode)
+            raw = (temp_dir / f"{mode}.ll").read_text(encoding="utf-8")
+            name = f"define internal i32 @ee_vu0_ir_fmac_s2_0_0_{mask}_false("
+            body = raw.split(name, 1)[1].split("\n}\n", 1)[0]
+            require("@vu_fmac4(" not in body and
+                    ("@vu_fmac(" in body) == bool(mask),
+                    mode + ": FMAC component specialization missing")
 
         def init_add(cpu, vu0):
             set_vf(cpu, 1, (0x8080002c, 0x80800036, 0x80c1aa65, 0x3f800000))
@@ -674,6 +702,30 @@ def main():
                 "direct VU0 ACC overflow latch and MAC sticky")
         require(sync["calls"] == [(1, ENTRY_PC), (1, ENTRY_PC + 4)],
                 "each direct FMAC synchronizes")
+
+        # Compare the actual specialized guest FMAC entries under the
+        # native O2 pipeline, including a failed synchronization boundary.
+        for mode, setup, sync_result in (
+                ("ir_vmul", init_mul, VU0_SYNC_COMPLETE),
+                ("ir_vadd", init_add, VU0_SYNC_COMPLETE),
+                ("ir_vmula_madd", init_mac, VU0_SYNC_COMPLETE),
+                ("ir_vmul", init_mul, VU0_SYNC_FAILED)):
+            baseline = run_guest(fixture, temp_dir, target, mode, setup,
+                                 sync_result=sync_result)
+            native = run_guest(fixture, temp_dir, target, mode, setup,
+                               sync_result=sync_result, optimized=True)
+            require(baseline[0] == native[0] and
+                    bytes(baseline[1]) == bytes(native[1]) and
+                    bytes(baseline[2]) == bytes(native[2]) and
+                    baseline[3:5] == native[3:5],
+                    f"{mode}: native pipeline changed VU0 state or callback order")
+            source = (temp_dir / f"{mode}.ll").read_text(encoding="utf-8")
+            for field in ("counter_ptr", "ref_counter_ptr"):
+                match = re.search(rf"%{field} = getelementptr i8, ptr %rt, i64 ([0-9]+)", source)
+                offset = int(match.group(1))
+                require(ctypes.c_uint64.from_buffer(baseline[5][2], offset).value ==
+                        ctypes.c_uint64.from_buffer(native[5][2], offset).value,
+                        f"{mode}: native pipeline changed {field}")
 
         for mode, numerator, denominator, expected, flags in (
             ("ir_vdiv_wait", 0x3f800000, 0x3fffffff, 0x3f000001, 0),

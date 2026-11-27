@@ -288,6 +288,61 @@ int main()
         }
     }
 
+    // A nested Level 1 exception changes the cause but not the original
+    // architectural restart address/BD pair. The host diagnostic records
+    // the *current* exception independently for HLE interrupt callbacks.
+    for (bool bev : {false, true})
+    {
+        for (bool first_delay : {false, true})
+        {
+            for (bool nested_delay : {false, true})
+            {
+                ee::s_ee_cpu_state cpu{};
+                ee::s_ee_runtime runtime{};
+                constexpr uint32_t original_pc = 0x00102004u;
+                constexpr uint32_t nested_pc = 0x80003504u;
+                constexpr uint32_t level2 = 0x40020000u;
+                const uint32_t original_status = ee::STATUS_IE |
+                    (2u << 3u) | (bev ? ee::STATUS_BEV : 0u);
+                const uint32_t vector = bev ? 0xbfc00380u : 0x80000180u;
+                cpu.m_cop0[ee::COP0_Status] = original_status;
+                cpu.m_cop0[ee::COP0_Cause] = level2 | k_dmac_ip;
+                cpu.m_cop0[ee::COP0_ErrorEPC] = 0x00104000u;
+                const uint32_t original_epc = original_pc - (first_delay ? 4u : 0u);
+                if (ee::ee_raise_exception(&cpu, &runtime, ee::EX_AdEL,
+                        original_pc, first_delay, 0x123u) != vector ||
+                    cpu.m_cop0[ee::COP0_EPC] != original_epc ||
+                    cpu.m_cop0[ee::COP0_Cause] !=
+                        (level2 | k_dmac_ip | (ee::EX_AdEL << 2u) |
+                         (first_delay ? ee::CAUSE_BD : 0u)) ||
+                    cpu.m_pad != original_pc ||
+                    runtime.m_last_exception_in_bd_slot != first_delay)
+                {
+                    return fail("outer Level 1 exception restart state");
+                }
+                if (ee::ee_raise_exception(&cpu, &runtime, ee::EX_Sys,
+                        nested_pc, nested_delay, 0u) != vector ||
+                    cpu.m_cop0[ee::COP0_EPC] != original_epc ||
+                    cpu.m_cop0[ee::COP0_Cause] !=
+                        (level2 | k_dmac_ip | (ee::EX_Sys << 2u) |
+                         (first_delay ? ee::CAUSE_BD : 0u)) ||
+                    cpu.m_cop0[ee::COP0_BadVAddr] != 0x123u ||
+                    cpu.m_cop0[ee::COP0_ErrorEPC] != 0x00104000u ||
+                    cpu.m_cop0[ee::COP0_Status] != (original_status | ee::STATUS_EXL) ||
+                    cpu.m_pad != nested_pc ||
+                    runtime.m_last_exception_in_bd_slot != nested_delay)
+                {
+                    return fail("nested Level 1 exception must preserve original BD/EPC");
+                }
+                if (ee::ee_exception_return(&cpu) != original_epc ||
+                    cpu.m_cop0[ee::COP0_Status] != original_status)
+                {
+                    return fail("ERET must resume original architectural restart");
+                }
+            }
+        }
+    }
+
     // ERET clears EXL. A still-pending level interrupt must be sampled
     // immediately at the next translated boundary, before EPC executes.
     {

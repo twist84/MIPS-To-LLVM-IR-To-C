@@ -46,6 +46,167 @@ def aligned_buffer(size):
     return backing, ptr
 
 
+def check_alu_count_run(fixture, root, target):
+    # MCJIT takes ownership of its target machine. Never share one across
+    # engines; disposing either engine can invalidate the other.
+    machine = target.create_target_machine(opt=0)
+    path = root / "alu.ll"
+    emitted = subprocess.run([str(fixture), "alu_count_run", str(path)],
+                             text=True, capture_output=True, check=True)
+    layout = next(line.split() for line in emitted.stdout.splitlines()
+                  if line.startswith("ALU_COUNT_LAYOUT "))
+    (size, user, callback, failed, attempts, slots, trace, capacity,
+     used, last_pc, entry_size) = map(int, layout[1:])
+    ir = path.read_text(encoding="utf-8")
+    assert "call i1 @ee_try_count_alu_run(ptr %rt, i64 4)" in ir
+    module = llvm.parse_assembly(ir)
+    module.verify()
+    module.triple = llvm.get_default_triple()
+    module.data_layout = str(machine.target_data)
+    engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+    engine.add_module(module)
+    engine.finalize_object()
+    address = engine.get_function_address("guest_alu_count_run")
+    assert address
+    guest = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.POINTER(EEState),
+                             ctypes.c_void_p)(address)
+
+    def run(mode):
+        state_backing, state_ptr = aligned_buffer(ctypes.sizeof(EEState))
+        state = ctypes.cast(state_ptr, ctypes.POINTER(EEState)).contents
+        state.pc = 0x100000
+        state.gpr[31].lo = 0x120000
+        state.gpr[8].lo = 7
+        for reg in (2, 8, 9, 10, 11):
+            state.gpr[reg].hi = 0xFEED0000 + reg
+        runtime_backing, rt = aligned_buffer(size)
+        ctypes.c_uint64.from_address(rt + attempts).value = 10
+        ctypes.c_uint64.from_address(rt + slots).value = 20
+        events = []
+        token = ctypes.c_uint64(42)
+
+        trace_buffer = ctypes.create_string_buffer(entry_size * 16)
+
+        @OBSERVER
+        def observe(arg, pc, opcode, kind, service, attempt, slot):
+            events.append((arg, pc, kind, attempt, slot,
+                           ctypes.c_uint64.from_address(rt + attempts).value,
+                           ctypes.c_uint64.from_address(rt + slots).value))
+            if mode == "install_trace" and len(events) == 1:
+                ctypes.c_void_p.from_address(rt + trace).value = ctypes.addressof(trace_buffer)
+                ctypes.c_uint32.from_address(rt + capacity).value = 16
+                ctypes.c_uint32.from_address(rt + last_pc).value = 0xffffffff
+            return mode != "reject"
+
+        if mode in ("observe", "reject", "both", "install_trace"):
+            ctypes.c_void_p.from_address(rt + user).value = ctypes.addressof(token)
+            ctypes.c_void_p.from_address(rt + callback).value = ctypes.cast(
+                observe, ctypes.c_void_p).value
+        if mode in ("trace", "both"):
+            ctypes.c_void_p.from_address(rt + trace).value = ctypes.addressof(trace_buffer)
+            ctypes.c_uint32.from_address(rt + capacity).value = 16
+            ctypes.c_uint32.from_address(rt + last_pc).value = 0xffffffff
+
+        result = guest(ctypes.pointer(state), None if mode == "null" else rt)
+        assert result == 0 and state.pc == 0x120000, (result, state.pc)
+        for reg, expected in ((8, 78), (9, 72), (10, 80), (2, 78), (11, 81)):
+            assert state.gpr[reg].lo == expected, (mode, reg, state.gpr[reg].lo)
+            assert state.gpr[reg].hi == 0xFEED0000 + reg
+        if mode != "null":
+            assert ctypes.c_uint64.from_address(rt + attempts).value == 17
+            assert ctypes.c_uint64.from_address(rt + slots).value == 27
+        if mode in ("observe", "reject", "both", "install_trace"):
+            count = 1 if mode == "reject" else 7
+            assert events == [(ctypes.addressof(token), 0x100000 + 4*i, 0,
+                               11+i, 21+i, 11+i, 21+i) for i in range(count)], events
+        else:
+            assert not events
+        assert ctypes.c_uint32.from_address(rt + failed).value == (mode == "reject")
+        if mode in ("trace", "both", "install_trace"):
+            assert ctypes.c_uint32.from_address(rt + used).value == 7
+            # m_attempt is the first uint64 field in every trace entry.
+            assert [ctypes.c_uint64.from_address(ctypes.addressof(trace_buffer) +
+                                                i * entry_size).value
+                    for i in range(7)] == list(range(11, 18))
+        else:
+            assert ctypes.c_uint32.from_address(rt + used).value == 0
+        return bytes(state)
+
+    results = [run(mode) for mode in ("fast", "observe", "reject", "trace", "both", "install_trace", "null")]
+    assert all(result == results[0] for result in results)
+
+
+def check_pcsx2_shadow(fixture, root, target):
+    for mode, symbol in (("alu_count_run", "guest_alu_count_run"),
+                         ("bltzall", "guest_bltzall_delay_test")):
+        path = root / ("shadow_" + mode + ".ll")
+        emitted = subprocess.run([str(fixture), "shadow_" + mode, str(path)],
+                                 text=True, capture_output=True, check=True)
+        layout = next(line.split() for line in emitted.stdout.splitlines()
+                      if line.startswith("SHADOW_LAYOUT "))
+        size, cycles, charged, failed, attempts, slots, callback = map(int, layout[1:])
+        ir = path.read_text(encoding="utf-8")
+        if mode == "alu_count_run":
+            assert "@ee_try_count_alu_run(ptr %rt, i64 4, ptr %cpu, i64 36)" in ir
+        machine = target.create_target_machine(opt=0)
+        module = llvm.parse_assembly(ir)
+        module.verify()
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(machine.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+        engine.add_module(module)
+        engine.finalize_object()
+        address = engine.get_function_address(symbol)
+        assert address
+        guest = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.POINTER(EEState),
+                                 ctypes.c_void_p)(address)
+
+        def run(die, observed=False, taken=False, overflow=False, null=False):
+            state_backing, ptr = aligned_buffer(ctypes.sizeof(EEState))
+            state = ctypes.cast(ptr, ctypes.POINTER(EEState)).contents
+            state.pc = 0x100000
+            state.cop0[16] = (1 << 18) if die else 0
+            state.gpr[31].lo = 0x120000
+            state.gpr[8].lo = 7
+            state.gpr[2].lo = 0xffffffffffffffff if taken else 1
+            runtime_backing, rt = aligned_buffer(size)
+            start = (1 << 64) - 2 if overflow else 0
+            ctypes.c_uint64.from_address(rt + cycles).value = start
+
+            @OBSERVER
+            def observe(user, pc, opcode, kind, service, attempt, slot):
+                return True
+
+            if observed:
+                ctypes.c_void_p.from_address(rt + callback).value = ctypes.cast(
+                    observe, ctypes.c_void_p).value
+            result = guest(ctypes.pointer(state), None if null else rt)
+            if mode == "alu_count_run":
+                assert result == 0 and state.pc == 0x120000
+                assert state.gpr[2].lo == 78
+                count, slot_count, weight = 7, 7, 63
+            else:
+                assert result == 3
+                assert state.pc == (0x100014 if taken else 0x100008)
+                assert state.gpr[8].lo == (0x100008 if taken else 7)
+                count, slot_count, weight = (2, 2, 20) if taken else (1, 2, 11)
+            u64 = lambda offset: ctypes.c_uint64.from_address(rt + offset).value
+            assert u64(attempts) == (0 if null else count)
+            assert u64(slots) == (0 if null else slot_count)
+            assert u64(cycles) == (start if overflow or null else weight * (1 if die else 2))
+            assert u64(charged) == (0 if overflow or null else count)
+            assert ctypes.c_uint32.from_address(rt + failed).value == int(overflow)
+            return bytes(state)
+
+        for die in (False, True):
+            for taken in ((False, True) if mode == "bltzall" else (False,)):
+                baseline = run(die, taken=taken)
+                assert run(die, observed=True, taken=taken) == baseline
+                assert run(die, taken=taken, overflow=True) == baseline
+                assert run(die, observed=True, taken=taken, overflow=True) == baseline
+                assert run(die, taken=taken, null=True) == baseline
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: test_ee_timing_observer_ir_runtime.py fixture")
@@ -131,6 +292,9 @@ def main():
         assert failed == 1 and observed == [
             (0x00100000, 0x04520004, 0, 0, 1, 1)
         ], (observed, failed)
+
+        check_alu_count_run(fixture, pathlib.Path(tmp), target)
+        check_pcsx2_shadow(fixture, pathlib.Path(tmp), target)
 
     print("ee_timing_observer_ir_runtime: PASS")
 

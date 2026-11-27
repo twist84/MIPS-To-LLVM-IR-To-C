@@ -164,6 +164,12 @@ def build_dispatch_source(metadata, functions):
         "    return ee::ee_resolve_dispatch_entry(g_dispatch_table, g_index, guest_pc);",
         "}",
         "",
+        'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_resolve_owner(',
+        "    std::uint32_t guest_pc, ee::t_ee_translated_entry entry)",
+        "{",
+        "    return ee::ee_resolve_dispatch_owner_vaddr(g_dispatch_table, g_index, guest_pc, entry);",
+        "}",
+        "",
         'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(',
         "    ee::s_ee_cpu_state* cpu,",
         "    ee::s_ee_runtime* runtime,",
@@ -337,6 +343,12 @@ def build_chunked_dispatch_source(metadata, functions, chunk_count):
         '    return ee::ee_resolve_dispatch_entry(g_dispatch_table, g_dispatch.index, guest_pc);',
         '}',
         '',
+        'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_resolve_owner(',
+        '    std::uint32_t guest_pc, ee::t_ee_translated_entry entry)',
+        '{',
+        '    return ee::ee_resolve_dispatch_owner_vaddr(g_dispatch_table, g_dispatch.index, guest_pc, entry);',
+        '}',
+        '',
         'extern "C" EE_GAME_EXPORT std::uint32_t ee_game_run(',
         '    ee::s_ee_cpu_state* cpu,',
         '    ee::s_ee_runtime* runtime,',
@@ -452,9 +464,10 @@ def load_inputs(metadata_path, object_dir):
     object_manifest = json.loads(object_manifest_path.read_text(encoding="utf-8"))
     if (object_manifest.get("optimization_level") == 5 or
             object_manifest.get("native_target") is not None):
-        from verify_ir import native_target_identity
+        from verify_ir import native_target_identity, ir_pipeline_id
         if (object_manifest.get("optimization_level") != 5 or
-                object_manifest.get("native_target") != native_target_identity(5)):
+                object_manifest.get("native_target") != native_target_identity(5) or
+                object_manifest.get("ir_pipeline") != ir_pipeline_id(5)):
             raise ValueError("host-native object manifest CPU target mismatch")
     if not object_manifest.get("complete"):
         raise ValueError("objects.json does not report a complete emission")
@@ -776,6 +789,22 @@ def main():
                 include_args, compile_flags
             )
 
+        certificate_count = None
+        if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
+            from native_alu_certificate import verified_bounds, build_certificate_source
+            bounds = verified_bounds(args.functions_json.resolve(), functions, object_manifest)
+            certificate_count = len(bounds)
+            certificate_source = args.output.with_suffix(args.output.suffix + ".alu-certificate.cpp")
+            certificate_object = args.output.with_suffix(args.output.suffix + ".alu-certificate.o")
+            certificate_source.write_text(build_certificate_source(bounds), encoding="utf-8")
+            subprocess.run(
+                [args.cxx, *runtime_flags, *include_args, "-c", str(certificate_source),
+                 "-o", str(certificate_object)], check=True,
+            )
+            dispatch_objects.append(certificate_object)
+            print(f"link_native_objects: {certificate_count} verified ALU entry certificates",
+                  flush=True)
+
         runtime_objects = cached_runtime_objects(
             cache_base, required_sources, source_root, args.cxx,
             include_args, runtime_flags
@@ -846,6 +875,7 @@ def main():
             "library_size_bytes": len(linked_data),
             "library_sha256": hashlib.sha256(linked_data).hexdigest(),
             "dispatcher_entry": "ee_game_run",
+            "alu_certificate_count": certificate_count,
             "dispatch_glue": dispatch_source.name,
             "dispatch_object": dispatch_object.name,
             "dispatch_chunk_objects": [path.name for path in dispatch_objects[1:]],

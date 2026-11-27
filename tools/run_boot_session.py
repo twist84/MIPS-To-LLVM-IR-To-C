@@ -6,6 +6,7 @@ invalidates its ELF/object provenance cache, while changing orchestration
 must not throw away previously compiled guest functions.
 """
 import argparse
+import hashlib
 import json
 import locale
 import os
@@ -20,6 +21,7 @@ import time
 
 from iop_disc_catalog import build_catalog, reconcile_runtime_loadfile
 from shared_ee_ir import ir_directory
+from ee_discovery_evidence import EVIDENCE_NAME, record as record_discovery_evidence
 
 
 LINKED_COUNT_PATTERN = re.compile(
@@ -44,6 +46,71 @@ def read_report(path):
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
         return {}
+
+
+# Only capture settings needed for reproducible retail comparisons.
+# Never dump the process environment, credentials, or local file paths.
+PROVENANCE_ENV = (
+    "SDBZ_EE_OPT", "SDBZ_SPEED_PERCENT", "SDBZ_RUNTIME_PROFILE",
+    "SDBZ_PROFILE_HORIZON", "SDBZ_PROFILE_PCS",
+    "SDBZ_PROFILE_PCS_FIRST", "SDBZ_PROFILE_PCS_LAST", "SDBZ_NATIVE_ALU_CERTIFICATES",
+    "SDBZ_IOP_COALESCE_IDLE_TURNS", "SDBZ_IOP_FAST_QUIET_TURNS",
+    "SDBZ_IOP_CHECKPOINT_TRACE", "SDBZ_IDLE_SKIP", "SDBZ_IDLE_SKIP_FORWARD_BRANCHES",
+    "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", "SDBZ_VU1_ASYNC", "SDBZ_GS_ASYNC",
+    "SDBZ_EE_DIRECT_DISPATCH", "SDBZ_GS_GPU_VRAM", "SDBZ_GIF_IMAGE_DIGEST",
+    "SDBZ_EE_FASTMEM_WORD", "SDBZ_EE_FASTMEM_SCALAR", "SDBZ_EE_FASTMEM_QUAD", "PS2_SCALE",
+    "SDBZ_HOST_AUDIO", "SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT",
+    "SDBZ_PAD0_SCRIPT", "SDBZ_PAD0_RECORD", "SDBZ_TRACE_BUFFERED", "SDBZ_DISPATCH_TRACE_EVERY",
+    "SDBZ_REPORT_PROGRESS_EVERY", "SDBZ_REPORT_SNAPSHOT_MS",
+    "SDBZ_STATE_TRACE_FIRST", "SDBZ_STATE_TRACE_LAST",
+    "SDBZ_STATE_TRACE_EVERY",
+    "SDBZ_STATE_TRACE_DETAIL",
+    "SDBZ_RTC_FIXED_UTC",
+    "SDBZ_REPORT_HOTSPOTS", "SDBZ_REPORT_BOUNDARY_TIMING",
+    "SDBZ_WINDOW_PUMP_STRIDE", "EE_WEBGPU_WINDOW", "EE_WEBGPU_SNAPSHOT",
+)
+
+
+def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
+    def git(*args):
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(repo), *args],
+                capture_output=True, text=True, check=False, timeout=10,
+            )
+            return result.stdout.strip() if result.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    head = git("rev-parse", "HEAD")
+    dirty = git("status", "--porcelain", "--untracked-files=no")
+    replay_input = env.get("SDBZ_PAD0_REPLAY")
+    replay_sha256 = None
+    if replay_input:
+        try:
+            with open(replay_input, "rb") as stream:
+                digest = hashlib.sha256()
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+                replay_sha256 = digest.hexdigest()
+        except OSError:
+            pass
+    return {
+        "schema": "ee-retail-replay-provenance-v1",
+        "pad0_replay_configured": bool(replay_input),
+        "pad0_replay_source_sha256": replay_sha256,
+        "git_head": head,
+        "tracked_tree_dirty": None if dirty is None else bool(dirty),
+        "max_expansion_dispatches": expansion_limit,
+        "max_replay_dispatches": replay_limit,
+        "environment": {key: env.get(key) for key in PROVENANCE_ENV},
+        "limitations": [
+            "source_head_not_a_binary_hash",
+            "untracked_files_not_checked",
+            "environment_values_not_effective_runtime_defaults",
+            "controller_input_reproduction_requires_valid_pad0_stream",
+        ],
+    }
 
 
 class c_ll_file_progress:
@@ -223,6 +290,8 @@ def main(argv=None):
         "--replay-after-expand", action="store_true",
         help="Legacy mode: restart the guest after each cache miss instead of resuming live",
     )
+    parser.add_argument("--replay-provenance", action="store_true",
+                        help="Record source revision and selected replay environment")
     parser.add_argument("--no-recompile", action="store_true")
     parser.add_argument("--skip-headless-expansion", action="store_true",
                         help="Cached graphics replay: skip the preliminary boot; "
@@ -286,14 +355,22 @@ def main(argv=None):
         parser.error(f"driver does not exist: {args.driver}")
 
     work = args.work_dir.resolve()
+    def preserve_discovery(output):
+        try:
+            record_discovery_evidence(work, args.elf, output)
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"EE discovery evidence unavailable: {exc}", file=sys.stderr, flush=True)
     report = args.report.resolve()
     catalog_path = work / ("quick-probe-iop-disc-catalog.json" if args.quick_probe
                            else "iop-disc-catalog.json")
     boot_log = work / ("quick-probe.log" if args.quick_probe else "boot.log")
     expansion_log = boot_log if args.quick_probe else work / "expansion.log"
     metadata_path = ir_directory(work) / "ee_functions.json"
+    provenance_path = work / ("quick-probe-provenance.json" if args.quick_probe
+                              else "replay-provenance.json")
     if report in (args.elf.resolve(), args.driver.resolve(), catalog_path,
-                  boot_log, expansion_log, metadata_path, work / "translation-cache.json"):
+                  boot_log, expansion_log, metadata_path, provenance_path, work / "translation-cache.json",
+                  work / EVIDENCE_NAME):
         parser.error("report path must be distinct from inputs, logs, and cache metadata")
     work.mkdir(parents=True, exist_ok=True)
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -372,9 +449,20 @@ def main(argv=None):
         path.resolve() for _, path in snapshots if path is not None
     ]
     if len(requested_paths) != len(set(requested_paths)) or any(
-            path in (report, expansion_log, boot_log, catalog_path)
+            path in (report, expansion_log, boot_log, catalog_path, provenance_path, work / EVIDENCE_NAME)
             for path in requested_paths):
         parser.error("GS snapshot paths must be distinct from diagnostic outputs")
+    if args.replay_provenance:
+        # Replace evidence before executing any replay, never archive an
+        # old revision/settings record from a previous run.
+        provenance_path.unlink(missing_ok=True)
+        provenance = capture_replay_provenance(
+            Path(__file__).resolve().parents[1], os.environ,
+            expansion_limit, replay_limit,
+        )
+        provenance_path.write_text(
+            json.dumps(provenance, indent=2) + "\n", encoding="utf-8",
+        )
     expansion_log.write_text("", encoding="utf-8")
     base = [
         sys.executable, str(args.driver.resolve()), str(args.elf.resolve()),
@@ -407,6 +495,7 @@ def main(argv=None):
         code, output, elapsed = run_session(
             command, expansion_log, append=True, **progress_kwargs
         )
+        preserve_discovery(output)
         state = read_report(report)
         replays = REPLAY_PATTERN.findall(output)
         last_replay = int(replays[-1]) if replays else -1
@@ -522,6 +611,7 @@ def main(argv=None):
     code, final_output, elapsed = run_session(
         final_command, boot_log, **progress_kwargs
     )
+    preserve_discovery(final_output)
     if code == 130:
         print(
             "Native final replay cancelled by user (Ctrl+C); "

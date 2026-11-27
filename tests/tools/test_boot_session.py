@@ -561,7 +561,50 @@ def test_guest_rpc_snapshots_in_cached_probe():
     assert "index < 129u" in runner
 
 
+def test_replay_provenance():
+    env = {"SDBZ_IOP_FAST_QUIET_TURNS": "1", "SDBZ_EE_OPT": "5",
+           "UNRELATED_SECRET": "must-not-be-captured"}
+    with patch.object(SESSION.subprocess, "run", side_effect=[
+        SimpleNamespace(returncode=0, stdout="a" * 40 + "\n"),
+        SimpleNamespace(returncode=0, stdout=" M src/file.cpp\n"),
+    ]) as run:
+        record = SESSION.capture_replay_provenance(ROOT, env, 10, 40)
+    assert record["git_head"] == "a" * 40
+    assert record["tracked_tree_dirty"] is True
+    assert record["max_replay_dispatches"] == 40
+    assert record["max_expansion_dispatches"] == 10
+    assert record["environment"]["SDBZ_IOP_FAST_QUIET_TURNS"] == "1"
+    assert record["environment"]["SDBZ_IOP_COALESCE_IDLE_TURNS"] is None
+    assert "UNRELATED_SECRET" not in record["environment"]
+    assert run.call_args_list[1].args[0][-1] == "--untracked-files=no"
+    with patch.object(SESSION.subprocess, "run", side_effect=OSError("no git")):
+        unavailable = SESSION.capture_replay_provenance(ROOT, {}, None, None)
+    assert unavailable["git_head"] is None
+    assert unavailable["tracked_tree_dirty"] is None
+    with patch.object(SESSION.subprocess, "run", return_value=
+                      SimpleNamespace(returncode=0, stdout="")):
+        clean = SESSION.capture_replay_provenance(ROOT, {}, None, None)
+    assert clean["tracked_tree_dirty"] is False
+    assert not clean["pad0_replay_configured"]
+    assert clean["pad0_replay_source_sha256"] is None
+    with tempfile.TemporaryDirectory(prefix="pad-replay-provenance-") as folder:
+        source = Path(folder) / "recorded.log"
+        source.write_bytes(b"abc")
+        replay_env = {"SDBZ_PAD0_REPLAY": str(source), "SDBZ_PAD0_RECORD": "0"}
+        with patch.object(SESSION.subprocess, "run", return_value=
+                          SimpleNamespace(returncode=0, stdout="")):
+            replay = SESSION.capture_replay_provenance(ROOT, replay_env, 10, 40)
+        assert replay["pad0_replay_configured"] is True
+        assert replay["pad0_replay_source_sha256"] == (
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        )
+        assert replay["environment"]["SDBZ_PAD0_RECORD"] == "0"
+        assert "SDBZ_PAD0_REPLAY" not in replay["environment"]
+        assert str(source) not in json.dumps(replay)
+
+
 def main():
+    test_replay_provenance()
     # Independent phase limits, legacy fallback, and quick probe routing.
     for limits in (
         ("--max-expansion-dispatches=2000", "--max-replay-dispatches=4000"),
@@ -841,6 +884,10 @@ def main():
         "set \"EE_WEBGPU_SNAPSHOT=1\"",
         "set \"EE_WEBGPU_WINDOW=1\"",
     ]
+    for budget in ("MAX_DISPATCHES", "MAX_EXPANSION_DISPATCHES", "MAX_REPLAY_DISPATCHES"):
+        assert f'if defined SDBZ_P40_MAX_DISPATCHES set "{budget}=%SDBZ_P40_MAX_DISPATCHES%"' in preset
+    assert 'if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"' in preset
+    assert 'if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"' in preset
     assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
     assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
             '    set "SDBZ_SPEED_PERCENT=100"\n'
@@ -848,6 +895,8 @@ def main():
             ')\n'
             'if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=0"') in preset
     assert 'call "%~f0" %*\nexit /b %ERRORLEVEL%' in launcher_text
+    assert "--replay-provenance ^" in launcher_text
+    assert "'first-boot.json','replay-provenance.json'" in launcher_text
 
     # Exercise real CMD backward jumps through all three launcher options.
     # Resolve-only uses a synthetic disc and stops before configuring tools,
@@ -874,6 +923,7 @@ def main():
                 preset_env = dict(env)
                 preset_env.pop("SDBZ_P40_LISTEN", None)
                 preset_env.pop("SDBZ_HOST_AUDIO", None)
+                preset_env.pop("SDBZ_P40_MAX_DISPATCHES", None)
                 result = subprocess.run(
                     ["cmd.exe", "/d", "/c", fr"call scripts\run_ps2_game.bat {option} --overwrite-ir"],
                     cwd=ROOT, env=preset_env, capture_output=True, text=True, timeout=30,
@@ -881,6 +931,14 @@ def main():
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
+            short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000")
+            short_env.pop("SDBZ_P40_LISTEN", None)
+            short = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
+                cwd=ROOT, env=short_env, capture_output=True, text=True, timeout=30,
+            )
+            assert short.returncode == 0, short.stdout + short.stderr
+            assert "opt=5 dispatches=7505000" in short.stdout, short.stdout
             help_result = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,

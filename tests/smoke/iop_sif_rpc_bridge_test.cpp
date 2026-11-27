@@ -264,7 +264,7 @@ bool test_arkd_deferred_bind(const std::filesystem::path& disc_root)
     {
         return false;
     }
-    if (rpc.pending_binds() != 1u)
+    if (rpc.pending_binds() != 1u || !rpc.scheduler_barrier())
     {
         return false;
     }
@@ -317,6 +317,26 @@ bool test_arkd_deferred_bind(const std::filesystem::path& disc_root)
         memory.read32(k_receive + 36u) !=
             (k_server ^ iop::c_sif_rpc_bridge::k_server_xor) ||
         (dmac.status() & (1u << 5u)) == 0u)
+    {
+        return false;
+    }
+
+    // Even with no pending replies and no enabled DMA IRQ, an
+    // unacknowledged DMA5 completion owns the receiver. After ack,
+    // receive-busy independently retains the advisory barrier.
+    if (!rpc.scheduler_barrier() || dmac.pending() != 0u ||
+        rpc.pending_replies() != 0u)
+    {
+        return false;
+    }
+    rpc.set_ee_receive_busy(true);
+    dmac.acknowledge(5u);
+    if (!rpc.scheduler_barrier())
+    {
+        return false;
+    }
+    rpc.set_ee_receive_busy(false);
+    if (rpc.scheduler_barrier())
     {
         return false;
     }

@@ -284,6 +284,76 @@ def run_arithmetic_cases(fixture, temp_dir, target, mode, cases, opt=0):
                          f"expected 0x{expected_fcsr:08x}")
 
 
+def verify_add_identity_fast_path(fixture, temp_dir, target):
+    """Compare the exact identity path against the unshortened integer adder."""
+    path = temp_dir / "add_identity.ll"
+    subprocess.run([str(fixture), str(path), "add_s"], check=True)
+    ir = path.read_text(encoding="utf-8")
+    match = re.search(
+        r"define internal \{ i32, i1, i1 \} @ee_cop1_add_bits\([^\n]*\) \{\n.*?\n\}",
+        ir, re.S)
+    require(match is not None, "missing shared addition helper")
+    guard = "br i1 %identity, label %identity_result, label %arithmetic"
+    reference = match.group(0).replace("@ee_cop1_add_bits(", "@test_add_reference(", 1)
+    require(guard in reference, "missing ADD/SUB identity guard")
+    reference = reference.replace(guard, "br i1 false, label %identity_result, label %arithmetic")
+    ir += "\n" + reference + "\n"
+    for name, callee in (("test_add_fast", "ee_cop1_add_bits"),
+                         ("test_add_full", "test_add_reference")):
+        ir += f"""
+define i64 @{name}(i32 %a, i32 %b, i32 %sub) {{
+entry:
+  %subtract = icmp ne i32 %sub, 0
+  %r = call {{ i32, i1, i1 }} @{callee}(i32 %a, i32 %b, i1 %subtract)
+  %bits = extractvalue {{ i32, i1, i1 }} %r, 0
+  %o = extractvalue {{ i32, i1, i1 }} %r, 1
+  %u = extractvalue {{ i32, i1, i1 }} %r, 2
+  %bits64 = zext i32 %bits to i64
+  %o64 = zext i1 %o to i64
+  %u64 = zext i1 %u to i64
+  %of = shl i64 %o64, 32
+  %uf = shl i64 %u64, 33
+  %flags = or i64 %of, %uf
+  %out = or i64 %bits64, %flags
+  ret i64 %out
+}}
+"""
+    edges = [0, 1, 0x7fffff, 0x80000000, 0x807fffff,
+             0x00800000, 0x00800001, 0x3f800000, 0x3fffffff,
+             0x7f800000, 0x7fffffff, 0xffffffff]
+    pairs = [(a, b) for a in edges for b in edges]
+    for ea in range(256):
+        for eb in range(256):
+            a = (ea << 23) | ((ea * 65537 + eb * 17) & 0x7fffff)
+            b = (eb << 23) | ((eb * 65537 + ea * 17) & 0x7fffff)
+            for sa in (0, 0x80000000):
+                for sb in (0, 0x80000000):
+                    pairs.append((a | sa, b | sb))
+    rng = random.Random(0xadd)
+    pairs.extend((rng.getrandbits(32), rng.getrandbits(32)) for _ in range(16384))
+    signature = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint32,
+                                 ctypes.c_uint32, ctypes.c_uint32)
+    for opt in (0, 3):
+        module = llvm.parse_assembly(ir)
+        module.verify()
+        machine = target.create_target_machine(opt=opt)
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(machine.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+        engine.add_module(module)
+        engine.finalize_object()
+        addresses = [engine.get_function_address(name)
+                     for name in ("test_add_fast", "test_add_full")]
+        require(all(addresses), "missing addition comparison entry")
+        fast, full = map(signature, addresses)
+        for a, b in pairs:
+            for sub in (0, 1):
+                got, expected = fast(a, b, sub), full(a, b, sub)
+                if got != expected:
+                    raise AssertionError((opt, hex(a), hex(b), sub, hex(got), hex(expected)))
+        print(f"ADD/SUB identity: {len(pairs) * 2} tuples at O{opt} match full adder")
+
+
 def verify_mul_correction_fast_path(fixture, temp_dir, target):
     """Compare every result bit and O/U flag against unconditional correction."""
     path = temp_dir / "mul_fast_path.ll"
@@ -844,6 +914,34 @@ def run_rsqrt_cases(fixture, temp_dir, target, operand_pairs, opt):
         require(state.fcsr == expected_fcsr,
                 prefix + f"FCSR got 0x{state.fcsr:08x}, "
                          f"expected 0x{expected_fcsr:08x}")
+
+
+def check_matrix_chain(fixture, temp_dir, target):
+    for opt in (0, 3):
+        fn, engine, module, machine = compile_jit(
+            fixture, temp_dir, "matrix_chain", target, opt)
+        raw = (temp_dir / "matrix_chain.ll").read_text(encoding="utf-8")
+        guest = raw.split("define i32 @guest_fpu_compare_test(", 1)[1].split("\n}\n", 1)[0]
+        # Only the two incoming FPRs require loads, ACC and latch are
+        # already written by MULA.S. No float round-trip for MOV.S.
+        require(len(re.findall(r" = load i64, ptr ", guest)) == 2,
+                "matrix chain reloaded raw FPR inputs")
+        require("bitcast i32" not in guest, "MOV.S used host FP")
+        backing, state = aligned_state()
+        state.fpr[1] = 0xdeadbeef40000000
+        state.fpr[2] = 0x1234567840400000
+        state.fcsr = 0x0000c008
+        require(fn(ctypes.pointer(state), None) == 3, "matrix chain exit")
+        require(state.pc == ENTRY_PC + 20, "matrix chain PC")
+        require(state.fpr[6] == f32_bits(6) and
+                state.fpu_acc == f32_bits(12) and
+                state.fpr[7] == state.fpr[8] == f32_bits(24),
+                "matrix chain FPR/ACC result")
+        require(state.fpu_acc_overflow == 0 and state.fcsr == 8,
+                "matrix chain flags")
+        require(state.fpr[1] == 0xdeadbeef40000000 and
+                state.fpr[2] == 0x1234567840400000, "matrix chain sources")
+        _ = backing, engine, module, machine
 
 
 def main():
@@ -1566,6 +1664,7 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix="ee-fpu-compare-") as directory:
         temp_dir = pathlib.Path(directory)
+        check_matrix_chain(fixture, temp_dir, target)
         for opt in (0, 3):
             for mode, lhs, rhs, expected in cases:
                 run_case(fixture, temp_dir, target, mode, lhs, rhs, expected, opt)
@@ -1595,6 +1694,7 @@ def main():
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "add_s", add_cases, opt)
             run_arithmetic_cases(fixture, temp_dir, target, "sub_s", sub_cases, opt)
+        verify_add_identity_fast_path(fixture, temp_dir, target)
         verify_mul_correction_fast_path(fixture, temp_dir, target)
         for opt in (0, 3):
             run_arithmetic_cases(fixture, temp_dir, target, "mul_s", mul_cases, opt)

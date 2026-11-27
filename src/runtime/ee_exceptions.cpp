@@ -82,26 +82,38 @@ extern "C" uint32_t ee_raise_exception(s_ee_cpu_state* cpu,
     // set (e.g. a syscall within a genuine DMA5 guest callback). Reuse the
     // previously unused CPU state pad; the guest cannot observe this field.
     cpu->m_pad = pc;
+    if (rt != nullptr)
+    {
+        rt->m_last_exception_in_bd_slot = in_bd_slot != 0u;
+    }
     // Vector selection depends on the exception level *before* this entry.
     // In particular, the first TLBL/TLBS must use the TLB refill vector.
     const uint32_t pre_entry_status = status;
 
     const s_ee_exception_info* info = ee_exception_info(excode);
 
-    // Cause: preserve IP bits (15..8), set ExcCode and BD.
-    uint32_t new_cause = cause & CAUSE_IP_MASK;
+    // Manual section 4.1.2 pseudocode: nested Level 1 entry updates
+    // ExcCode but must preserve the EPC/BD restart pair. BD2/EXC2
+    // belong to Level 2 and are not overwritten by this entry.
+    constexpr uint32_t level2_cause = (1u << 30u) | (7u << 16u);
+    uint32_t new_cause = cause & (CAUSE_IP_MASK | level2_cause);
     new_cause |= (excode & 0x1fu) << 2;
-    if (in_bd_slot)
+    const bool nested = (pre_entry_status & STATUS_EXL) != 0u;
+    if (nested)
+    {
+        new_cause |= cause & CAUSE_BD;
+    }
+    else if (in_bd_slot)
+    {
         new_cause |= CAUSE_BD;
-    else
-        new_cause &= ~CAUSE_BD;
+    }
     cause = new_cause;
 
     if (info && info->sets_badvaddr)
         cpu->m_cop0[COP0_BadVAddr] = badvaddr;
 
     // EPC only updated when not already in exception level.
-    if ((status & STATUS_EXL) == 0)
+    if (!nested)
     {
         if (in_bd_slot)
             epc = pc - 4;
@@ -147,8 +159,9 @@ extern "C" uint32_t ee_exception_return(s_ee_cpu_state* cpu)
 // EE Core User's Manual v6.0, section 3.2, Compare (printed p.72):
 // writing Compare acknowledges the timer interrupt by clearing Cause.IP7.
 // This action is independent of a Count tick or a scheduler deadline.
-// Until individually audited, all other guest-writable COP0 registers keep
-// their prior raw assignment semantics instead of inventing bit masks.
+// Cause is read-only (manual p. 75); guest writes cannot acknowledge or
+// manufacture an interrupt or change the saved exception restart state.
+// Other unaudited COP0 registers retain their existing assignment semantics.
 extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
                               uint32_t reg,
                               uint32_t value)
@@ -158,11 +171,23 @@ extern "C" void ee_cop0_write(s_ee_cpu_state* cpu,
         return;
     }
 
+    // Section 3.2, pp. 64, 69, 75, 77: these registers are read-only.
+    if (reg == COP0_Cause || reg == COP0_Random ||
+        reg == COP0_BadVAddr || reg == COP0_PRId)
+    {
+        return;
+    }
     cpu->m_cop0[reg] = value;
 
     if (reg == COP0_Compare)
     {
         ee_interrupt_clear(cpu, INT_TIMER);
+    }
+    else if (reg == COP0_Wired && value < 48u)
+    {
+        // A defined Wired write resets Random to the upper bound. Its
+        // subsequent cycle-driven decrement remains unimplemented.
+        cpu->m_cop0[COP0_Random] = 47u;
     }
 }
 
@@ -184,12 +209,11 @@ extern "C" void ee_cop0_clock_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
         // Within a translated function the host's last publication can
         // lag the reached-instruction budget. Observe the same budget
         // directly at Count/Compare accesses, never host wall time.
-        if (rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+        if (!ee_reference_compatibility_cycle(*rt, now))
         {
             rt->m_perf_compat_fault = true;
             return;
         }
-        now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
         // This path does not turn the reference budget into a validated
         // hardware clock. Faults are observed by the runner/next transfer.
         (void)perf_compat_sync(cpu, rt);
@@ -272,13 +296,12 @@ bool perf_compat_sync(s_ee_cpu_state* cpu, s_ee_runtime* rt)
     {
         return true;
     }
-    if (rt->m_perf_compat_fault ||
-        rt->m_guest_instruction_attempts > UINT64_MAX - rt->m_cop0_clock_idle)
+    uint64_t now = 0u;
+    if (rt->m_perf_compat_fault || !ee_reference_compatibility_cycle(*rt, now))
     {
         rt->m_perf_compat_fault = true;
         return false;
     }
-    const uint64_t now = rt->m_guest_instruction_attempts + rt->m_cop0_clock_idle;
     if (now < rt->m_perf_compat_last ||
         !perf_advance_interval(rt, cpu->m_cop0[COP0_Status],
                                now - rt->m_perf_compat_last))
@@ -401,13 +424,13 @@ extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
 
 extern "C" void ee_interrupt_request(s_ee_cpu_state* cpu, uint32_t line)
 {
-    if (!cpu || line > 7) return;
+    if (!cpu || !ee_is_hardware_interrupt_line(line)) return;
     cpu->m_cop0[COP0_Cause] |= (1u << (CAUSE_IP_SHIFT + line));
 }
 
 extern "C" void ee_interrupt_clear(s_ee_cpu_state* cpu, uint32_t line)
 {
-    if (!cpu || line > 7) return;
+    if (!cpu || !ee_is_hardware_interrupt_line(line)) return;
     cpu->m_cop0[COP0_Cause] &= ~(1u << (CAUSE_IP_SHIFT + line));
 }
 
@@ -421,7 +444,7 @@ extern "C" uint32_t ee_pending_interrupts(const s_ee_cpu_state* cpu)
     if (!cpu) return 0;
     const uint32_t status = cpu->m_cop0[COP0_Status];
     const uint32_t cause  = cpu->m_cop0[COP0_Cause];
-    return (cause & status & CAUSE_IP_MASK);
+    return (cause & status & k_ee_hardware_ip_mask);
 }
 
 extern "C" uint32_t ee_check_interrupts(s_ee_cpu_state* cpu,

@@ -132,11 +132,16 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
             manifest, entries = run_known_replays.read_manifest(candidate)
             if manifest["inputs"]["ELF"] != expected_elf:
                 continue
-            # Profile 4 optimizes in memory during object emission, not
-            # the source .ll files. All six known profiles hash raw IR.
+            # Recovery selects raw guest entry inventories, never native
+            # objects. Legacy backend-only O5 and selective O5 both hash
+            # the same source IR; accept the known legacy identity here
+            # without relaxing native object/link provenance elsewhere.
             profile = manifest.get("emit_opt")
-            if (profile not in range(6) or
-                    manifest.get("ir_pipeline") != run_game.ir_pipeline_id(profile)):
+            if profile not in range(6):
+                continue
+            pipeline = manifest.get("ir_pipeline")
+            if (pipeline != run_game.ir_pipeline_id(profile) and
+                    not (profile == 5 and pipeline is None)):
                 continue
             if candidate.parent == history_dir(base_work):
                 # Early snapshots serialized the IR map with sorted keys,

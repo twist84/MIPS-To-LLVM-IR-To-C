@@ -66,6 +66,7 @@ int main(int argc, char** argv)
     else if (std::strcmp(mode, "min_s") == 0) funct = 0x29;
     else if (std::strcmp(mode, "abs_s") == 0) funct = 0x05;
     else if (std::strcmp(mode, "neg_s") == 0) funct = 0x07;
+    else if (std::strcmp(mode, "matrix_chain") == 0) funct = 0;
     else if (fcr_read_group ||
              std::strcmp(mode, "mfc1") == 0 ||
              std::strcmp(mode, "mtc1") == 0 ||
@@ -141,6 +142,26 @@ int main(int argc, char** argv)
                 decoded.opcode != ee::e_ee_opcode::OP_COP1)
             {
                 std::fprintf(stderr, "FCR read alias %u not decoded\n", base + i);
+                return 3;
+            }
+            insn_map.emplace(pc, decoded);
+        }
+    }
+    else if (std::strcmp(mode, "matrix_chain") == 0)
+    {
+        const uint32_t words[] = {
+            make_cop1_s(2, 1, 6, 0x02), // MUL.S f6,f1,f2
+            make_cop1_s(2, 1, 0, 0x1a), // MULA.S
+            make_cop1_s(2, 1, 0, 0x1e), // MADDA.S
+            make_cop1_s(1, 6, 7, 0x1c), // MADD.S f7,f6,f1
+            make_cop1_s(0, 7, 8, 0x06), // MOV.S f8,f7
+        };
+        for (size_t i = 0; i < sizeof(words) / sizeof(words[0]); ++i)
+        {
+            const auto pc = entry_pc + static_cast<uint32_t>(i * 4u);
+            const auto decoded = ee::decode(pc, words[i]);
+            if (decoded.valid != ee::e_ee_valid::VALID)
+            {
                 return 3;
             }
             insn_map.emplace(pc, decoded);
@@ -223,7 +244,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "FCR read group fixture CFG analysis failed\n");
         return 4;
     }
+    if (std::strcmp(mode, "matrix_chain") == 0 &&
+        (functions[0].blocks.size() != 1 ||
+         functions[0].blocks[0].insn_indices.size() != 5))
+    {
+        std::fprintf(stderr, "matrix-chain COP1 fixture CFG analysis failed\n");
+        return 4;
+    }
     if (!fcr_read_group &&
+        std::strcmp(mode, "matrix_chain") != 0 &&
         std::strcmp(mode, "ctc1_after_branch") != 0 &&
         std::strcmp(mode, "bc1_t_delay") != 0 &&
         std::strcmp(mode, "bc1_fl_annul") != 0 &&

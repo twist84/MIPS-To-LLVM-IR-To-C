@@ -44,7 +44,11 @@ CACHE_SCHEMA = "ee-translation-cache-v1"
 
 def ir_pipeline_id(profile):
     # Keep this provenance identifier in sync with verify_ir.py.
-    return "llvm-default-O2-v1" if profile == 4 else None
+    if profile == 4:
+        return "llvm-default-O2-v1"
+    if profile == 5:
+        return "llvm-vu0-fmac-selective-O2-v1"
+    return None
 
 
 def native_target_identity(profile):
@@ -72,6 +76,8 @@ def translation_inputs(elf, recomp, source_root):
         ("tools/shared_ee_ir.py", source_root / "tools" / "shared_ee_ir.py"),
         ("tools/link_native_objects.py",
          source_root / "tools" / "link_native_objects.py"),
+        ("tools/native_alu_certificate.py",
+         source_root / "tools" / "native_alu_certificate.py"),
         ("src/ee/ee_dispatcher.cpp",
          source_root / "src" / "ee" / "ee_dispatcher.cpp"),
         ("src/ee/recompiled_functions.cpp",
@@ -82,7 +88,12 @@ def translation_inputs(elf, recomp, source_root):
         for path in sorted(directory.rglob("*")):
             if path.is_file() and path.suffix in (".h", ".hpp", ".cpp"):
                 paths.append((path.relative_to(source_root).as_posix(), path))
-    return {name: sha256_path(path) for name, path in paths}
+    inputs = {name: sha256_path(path) for name, path in paths}
+    # Certificate mode changes only the linked host library. Never reuse
+    # a DLL from the opposite mode as if it contained the requested table.
+    mode = b"1" if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1" else b"0"
+    inputs["native_alu_certificate_mode"] = hashlib.sha256(mode).hexdigest()
+    return inputs
 
 
 
@@ -94,7 +105,7 @@ def ir_generation_inputs(elf, source_root):
         "function_analyzer.cpp", "ee_recomp.cpp"
     }
     for directory in ("include/ee", "src/ee", "src/elf",
-                      "src/lift", "src/llvm"):
+                      "src/lift", "src/llvm", "src/architecture"):
         for item in sorted((source_root / directory).rglob("*")):
             if not item.is_file() or item.suffix not in (".h", ".hpp", ".cpp"):
                 continue
@@ -1358,7 +1369,7 @@ def main(argv=None):
                         help="Generate game-translated.pdb using Windows Clang/LLD")
     parser.add_argument("--emit-opt", type=int, choices=range(6), default=0,
                         metavar="{0,1,2,3,4,5}",
-                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend")
+                        help="LLVM backend O0..O3; 4=O2 IR + O2 backend; 5=host-native O2 backend + selective VU0 FMAC O2 IR")
     parser.add_argument("--emit-jobs", type=int, default=2,
                         help="parallel LLVM object-emission processes (default: 2)")
     parser.add_argument("--max-dispatches", type=int, default=10000)

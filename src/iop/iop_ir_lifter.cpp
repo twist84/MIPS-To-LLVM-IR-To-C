@@ -1,6 +1,8 @@
 #include "iop_ir_lifter.h"
 
+#include <algorithm>
 #include <cstdio>
+#include <set>
 #include <functional>
 
 namespace iop
@@ -111,10 +113,35 @@ struct s_fail
 class c_emitter
 {
 public:
-    c_emitter(const s_iop_ir_module& module, std::string& out)
-        : m_module(module), m_out(out)
+    c_emitter(const s_iop_ir_module& module, std::string& out,
+              const std::vector<uint32_t>* pcs = nullptr)
+        : m_module(module), m_out(out), m_region_pcs(pcs)
     {
         m_size = static_cast<uint32_t>(module.m_text.size() & ~size_t(3));
+    }
+
+    bool owns(uint32_t pc) const
+    {
+        return m_region_pcs == nullptr ? contains(pc) :
+            std::binary_search(m_region_pcs->begin(), m_region_pcs->end(), pc);
+    }
+
+    void for_each_pc(const std::function<void(uint32_t)>& callback) const
+    {
+        if (m_region_pcs != nullptr)
+        {
+            for (uint32_t pc : *m_region_pcs)
+            {
+                callback(pc);
+            }
+        }
+        else
+        {
+            for (uint32_t pc = m_module.m_base; pc < m_module.m_base + m_size; pc += 4u)
+            {
+                callback(pc);
+            }
+        }
     }
 
     bool contains(uint32_t pc) const
@@ -163,10 +190,10 @@ public:
         line("dispatch:");
         line("  %pcv = load i32, ptr %pcs");
         std::string cases;
-        for (uint32_t pc = m_module.m_base; pc < m_module.m_base + m_size; pc += 4u)
+        for_each_pc([&](uint32_t pc)
         {
             cases += "    i32 " + c32(pc) + ", label %L_" + hex8(pc) + "\n";
-        }
+        });
         line("  switch i32 %pcv, label %unknown [\n" + cases + "  ]");
         line("unknown:");
         {
@@ -175,11 +202,11 @@ public:
             exit_to("%pcv", next, "0", "0", 0);
         }
 
-        for (uint32_t pc = m_module.m_base; pc < m_module.m_base + m_size; pc += 4u)
+        for_each_pc([&](uint32_t pc)
         {
             line("L_" + hex8(pc) + ":");
             emit_instruction(pc);
-        }
+        });
 
         line("done:");
         line("  %nv = load i32, ptr %n");
@@ -283,14 +310,13 @@ private:
     // Unconditional transfer to a constant target (terminates the block).
     void jump(uint32_t source, uint32_t target)
     {
-        if (!contains(target))
+        if (!owns(target))
         {
             exit_const(target);
             return;
         }
-        // Check the slice budget on every internal transfer (not only
-        // backward ones) so translated code overshoots the kernel quantum
-        // by at most one straight-line run of instructions.
+        // Check the slice budget on every internal transfer. Branch
+        // retirement checks separately before executing its delay slot.
         (void)source;
         const std::string nv = tmp();
         const std::string over = tmp();
@@ -535,6 +561,21 @@ private:
         add_n(1u);
     }
 
+    // A branch can consume the last available instruction. Preserve
+    // the selected successor and delay-slot identity for the interpreter
+    // instead of executing the slot beyond the kernel slice budget.
+    void check_delay_budget(uint32_t branch_pc, const std::string& next)
+    {
+        const std::string nv = tmp(), over = tmp();
+        const std::string stop = label(), execute = label();
+        line("  " + nv + " = load i32, ptr %n");
+        line("  " + over + " = icmp uge i32 " + nv + ", %budget");
+        line("  br i1 " + over + ", label %" + stop + ", label %" + execute);
+        line(stop + ":");
+        exit_to(c32(branch_pc + 4u), next, "1", c32(branch_pc), 0);
+        line(execute + ":");
+    }
+
     void emit_instruction(uint32_t pc)
     {
         const uint32_t w = word(pc);
@@ -564,6 +605,7 @@ private:
                 set(f.rd, c32(fall));
             }
             add_n(1u);
+            check_delay_budget(pc, target);
             emit_simple(delay_pc, delay, s_fail{delay_pc, target, true, pc});
             line("  store i32 " + target + ", ptr %pcs");
             const std::string nv = tmp(), over = tmp(), next = tmp();
@@ -584,6 +626,7 @@ private:
                 set(31u, c32(fall));
             }
             add_n(1u);
+            check_delay_budget(pc, c32(target));
             emit_simple(delay_pc, delay, s_fail{delay_pc, c32(target), true, pc});
             jump(pc, target);
             return;
@@ -611,6 +654,7 @@ private:
         const std::string next = tmp();
         line("  " + next + " = select i1 " + taken + ", i32 " + c32(target) +
              ", i32 " + c32(fall));
+        check_delay_budget(pc, next);
         emit_simple(delay_pc, delay, s_fail{delay_pc, next, true, pc});
         const std::string yes = label();
         const std::string no = label();
@@ -623,6 +667,7 @@ private:
 
     const s_iop_ir_module& m_module;
     std::string& m_out;
+    const std::vector<uint32_t>* m_region_pcs = nullptr;
     uint32_t m_size = 0u;
     uint64_t m_counter = 0u;
 };
@@ -781,6 +826,88 @@ std::string iop_lift_module_ir(const s_iop_ir_module& module,
     c_emitter emitter(module, out);
     emitter.emit_function(symbol);
     return out;
+}
+
+bool iop_lift_regions_ir(const s_iop_ir_module& module,
+    const std::vector<std::vector<uint32_t>>& regions,
+    const std::string& symbol, std::vector<std::string>* code,
+    std::string* dispatcher)
+{
+    if (code == nullptr || dispatcher == nullptr || regions.empty() ||
+        module.m_text.empty() || (module.m_base & 3u) != 0u ||
+        (module.m_text.size() & 3u) != 0u ||
+        static_cast<uint64_t>(module.m_base) + module.m_text.size() > UINT32_MAX)
+    {
+        return false;
+    }
+    std::set<uint32_t> owned;
+    for (const auto& region : regions)
+    {
+        if (region.empty() || !std::is_sorted(region.begin(), region.end()))
+        {
+            return false;
+        }
+        for (uint32_t pc : region)
+        {
+            if ((pc & 3u) != 0u || pc < module.m_base ||
+                static_cast<uint64_t>(pc) + 4u >
+                    static_cast<uint64_t>(module.m_base) + module.m_text.size() ||
+                !owned.insert(pc).second)
+            {
+                return false;
+            }
+        }
+    }
+
+    std::vector<std::string> generated;
+    std::string router = "; Split IOP module dispatcher. No cross-region chaining.\n";
+    for (size_t i = 0u; i < regions.size(); ++i)
+    {
+        const std::string name = symbol + "_region_" + std::to_string(i);
+        std::string ir = k_helpers;
+        c_emitter emitter(module, ir, &regions[i]);
+        emitter.emit_function(name);
+        generated.push_back(std::move(ir));
+        router += "declare i32 @" + name + "(ptr, i32)\n";
+    }
+    router += "define dso_local i32 @" + symbol + "(ptr %c, i32 %start) {\n"
+        "entry:\n"
+        "  %budgetp = getelementptr i8, ptr %c, i64 " + std::to_string(k_ctx_budget) + "\n"
+        "  %budget = load i32, ptr %budgetp\n"
+        "  %empty = icmp eq i32 %budget, 0\n"
+        "  br i1 %empty, label %fallback, label %dispatch\n"
+        "dispatch:\n"
+        "  switch i32 %start, label %fallback [\n";
+    for (size_t i = 0u; i < regions.size(); ++i)
+    {
+        for (uint32_t pc : regions[i])
+        {
+            router += "    i32 " + c32(pc) + ", label %region_" + std::to_string(i) + "\n";
+        }
+    }
+    router += "  ]\n";
+    for (size_t i = 0u; i < regions.size(); ++i)
+    {
+        const std::string n = std::to_string(i);
+        router += "region_" + n + ":\n  %result_" + n + " = call i32 @" +
+            symbol + "_region_" + n + "(ptr %c, i32 %start)\n"
+            "  ret i32 %result_" + n + "\n";
+    }
+    router += "fallback:\n  %next = add i32 %start, 4\n";
+    const auto store = [&](const char* name, int offset, const char* value)
+    {
+        router += "  %" + std::string(name) + " = getelementptr i8, ptr %c, i64 " +
+            std::to_string(offset) + "\n  store i32 " + value + ", ptr %" + name + "\n";
+    };
+    store("executedp", k_ctx_executed, "0");
+    store("pcp", k_ctx_pc, "%start");
+    store("nextp", k_ctx_next_pc, "%next");
+    store("delayp", k_ctx_in_delay, "0");
+    store("branchp", k_ctx_branch_pc, "0");
+    router += "  %reason = select i1 %empty, i32 0, i32 1\n  ret i32 %reason\n}\n";
+    *code = std::move(generated);
+    *dispatcher = std::move(router);
+    return true;
 }
 
 std::string iop_table_module_ir(const std::vector<s_iop_ir_table_entry>& entries,

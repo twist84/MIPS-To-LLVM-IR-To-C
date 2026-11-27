@@ -1,0 +1,998 @@
+#!/usr/bin/env python3
+import json
+import hashlib
+import ctypes
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parents[2] / "tools"
+sys.path.insert(0, str(TOOLS))
+from audit_iop_function_discovery import fnv1a, inventory
+from build_iop_aot import (prepare_split_pilot, cached_split_object, split_cache_key,
+                           relocation_receipt_roots, select_split_stems,
+                           split_compile_schedule, compile_split_modules,
+                           compact_split_router, shared_split_memory_helpers)
+from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
+                                    discover_relocation_roots)
+
+
+from audit_iop_indirect_targets import constant_indirect_targets
+from audit_iop_jump_tables import (indexed_load_base, table_candidates,
+                                   cap_adjacent_tables, discover_table_edges)
+
+
+BASE = 0x10000
+
+
+def jump(op, target):
+    return (op << 26) | (target >> 2)
+
+
+def capture(words, entry=BASE, exports=()):
+    data = struct.pack("<" + "I" * len(words), *words)
+    return {"name": "synthetic", "base": BASE, "text_size": len(data),
+            "hash": f"{fnv1a(data):016x}", "entry": entry,
+            "exports": list(exports)}, data
+
+
+class DiscoveryTest(unittest.TestCase):
+    def test_calls_delay_and_unreachable_data(self):
+        meta, data = capture([
+            jump(3, BASE + 24), 0, 0x03e00008, 0,
+            jump(3, BASE + 32), 0, 0x03e00008, 0,
+            0x03e00008, 0,
+        ])
+        report = inventory(meta, data)
+        self.assertEqual([r["entry"] for r in report["regions"]],
+                         [BASE, BASE + 24])
+        self.assertEqual(report["ordinary_count"], 3)
+        self.assertEqual(report["delay_count"], 3)
+        self.assertEqual(report["unvisited_aligned_words"], 4)
+        self.assertEqual(report["regions"][0]["ordinary_pcs"], [BASE, BASE + 8])
+        self.assertEqual(report["ordinary_delay_overlap"], [])
+        self.assertEqual(inventory(meta, data), report)
+
+    def test_shared_tail_and_delay_entry(self):
+        meta, data = capture([
+            jump(2, BASE + 16), 0, jump(2, BASE + 16), 0,
+            0x03e00008, 0,
+        ], exports=(BASE + 8, BASE + 20, BASE + 1, BASE + 48))
+        report = inventory(meta, data)
+        self.assertEqual(report["shared_ordinary_pcs"],
+                         [{"pc": BASE + 16, "entries": [BASE, BASE + 8]}])
+        self.assertEqual(report["ordinary_delay_overlap"], [BASE + 20])
+        self.assertEqual(len(report["rejected_seeds"]), 2)
+
+    def test_unsupported_delay_and_indirect(self):
+        meta, data = capture([
+            jump(3, BASE + 16), jump(2, BASE + 16),
+            0x0320f809, 0, 0x03e00008, 0,
+        ], exports=(BASE + 8,))
+        report = inventory(meta, data)
+        self.assertEqual(report["candidate_count"], 2)
+        self.assertIn("unsupported_delay", {x["kind"] for x in report["unresolved"]})
+        self.assertIn("indirect_call", {x["kind"] for x in report["unresolved"]})
+        self.assertIn("return", {x["kind"] for x in report["unresolved"]})
+
+    def test_split_plan_is_identity_bound_and_excludes_unsupported(self):
+        meta, data = capture([0, 0x0000000c, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "SIO2MAN.json").write_text(json.dumps(meta))
+            (root / "SIO2MAN.bin").write_bytes(data)
+            plan = prepare_split_pilot(root, "sio2man", root / "pilot")
+            self.assertEqual(plan.read_text().splitlines(),
+                             [f"IOPREG1 {BASE} 16 {fnv1a(data)} 2",
+                              f"1 {BASE}", f"1 {BASE + 8}"])
+            self.assertEqual((root / "pilot" / "SIO2MAN.bin").read_bytes(), data)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "unknown", root / "bad")
+            meta["exports"].append(BASE + 12)
+            (root / "SIO2MAN.json").write_text(json.dumps(meta))
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "SIO2MAN", root / "ambiguous")
+
+    def test_extended_frames_and_interpreter_continuations(self):
+        meta, data = capture([
+            0x88820000,  # LWL: native audit stops, interpreter can continue
+            0x03e00008, 0,
+            0x27bdfff0, 0xafb00008, 0xafbf000c,  # separate stack frame
+            0x03e00008, 0x27bd0010,
+            0x27bdfff0, 0xafbf0014,  # RA outside frame: reject
+            0x0000000c,  # syscall: no invented continuation
+        ])
+        baseline = inventory(meta, data)
+        self.assertEqual(baseline["candidate_count"], 1)
+        self.assertEqual(baseline["ordinary_count"], 1)
+        report = inventory(meta, data, extended=True)
+        extra = report["extended"]
+        self.assertEqual(report["candidate_count"], 2)
+        self.assertEqual(extra["heuristic_frame_seeds"],
+                         [{"entry": BASE + 12, "ra_save_pc": BASE + 20}])
+        self.assertEqual(extra["interpreter_linear_pcs"], [BASE])
+        self.assertEqual(extra["newly_reached_pcs"],
+                         list(range(BASE + 4, BASE + 32, 4)))
+        self.assertEqual(inventory(meta, data), baseline)
+
+    def test_extended_interpreter_delay_preserves_control_flow(self):
+        meta, data = capture([jump(2, BASE + 12), 0x88820000, 0,
+                              0x03e00008, 0])
+        baseline = inventory(meta, data)
+        self.assertEqual(baseline["ordinary_count"], 1)
+        report = inventory(meta, data, extended=True)
+        self.assertEqual(report["ordinary_count"], 2)
+        self.assertEqual(report["extended"]["interpreter_linear_pcs"], [BASE + 4])
+        self.assertIn("unsupported_delay", {x["kind"] for x in report["unresolved"]})
+        self.assertNotIn(BASE + 8, report["extended"]["newly_reached_pcs"])
+
+    def test_residual_plan_preserves_legacy_dispatch_domain(self):
+        # Unsupported ordinary word, inline delay word and an unvisited
+        # tail are all residual entries, not inferred function ownership.
+        meta, data = capture([0, 0x0000000c, 0x03e00008, 0, 0, 0],
+                             exports=(BASE + 8,))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(data)
+            plan = prepare_split_pilot(root, "MCMAN", root / "pilot", residual=True)
+            lines = plan.read_text().splitlines()
+            self.assertEqual(lines[0], f"IOPREG1 {BASE} 24 {fnv1a(data)} 3")
+            self.assertEqual(lines[1:], [f"1 {BASE}", f"1 {BASE + 8}",
+                f"4 {BASE + 4} {BASE + 12} {BASE + 16} {BASE + 20}"])
+            pcs = [int(pc) for line in lines[1:] for pc in line.split()[1:]]
+            self.assertEqual(sorted(pcs), list(range(BASE, BASE + len(data), 4)))
+            self.assertEqual(len(pcs), len(set(pcs)))
+            meta["exports"].append(BASE + 12)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "MCMAN", root / "ambiguous", residual=True)
+
+    def test_bounded_residual_partitions_keep_function_ids_and_all_pcs(self):
+        meta, data = capture([0, 0x0000000c, 0x03e00008, 0, 0, 0],
+                             exports=(BASE + 8,))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(data)
+            old = prepare_split_pilot(root, "MCMAN", root / "old", residual=True)
+            for limit, expected in ((1, [1, 1, 1, 1]), (3, [3, 1]),
+                                    (4, [4]), (8, [4])):
+                plan = prepare_split_pilot(root, "MCMAN", root / f"cap-{limit}",
+                                           residual=True, residual_max_pcs=limit)
+                rows = [list(map(int, line.split()))[1:]
+                        for line in plan.read_text().splitlines()[1:]]
+                old_rows = [list(map(int, line.split()))[1:]
+                            for line in old.read_text().splitlines()[1:]]
+                self.assertEqual(rows[:2], old_rows[:2])
+                self.assertEqual([len(row) for row in rows[2:]], expected)
+                self.assertEqual([pc for row in rows[2:] for pc in row], old_rows[-1])
+                self.assertEqual(sorted(pc for row in rows for pc in row),
+                                 list(range(BASE, BASE + len(data), 4)))
+                self.assertEqual(int(plan.read_text().splitlines()[0].split()[-1]),
+                                 len(rows))
+            for limit in (0, -1, True, 1.5):
+                with self.assertRaises(ValueError):
+                    prepare_split_pilot(root, "MCMAN", root / "invalid",
+                                        residual=True, residual_max_pcs=limit)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "MCMAN", root / "invalid",
+                                    residual_max_pcs=2)
+
+    def test_extended_plan_retains_full_dispatch_domain(self):
+        meta, data = capture([
+            0x88820000, 0x03e00008, 0,
+            0x27bdfff0, 0xafbf000c, 0x03e00008, 0x27bd0010,
+            0,
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(data)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "MCMAN", root / "invalid", extended=True)
+            plan = prepare_split_pilot(root, "MCMAN", root / "pilot",
+                                       residual=True, extended=True)
+            lines = plan.read_text().splitlines()
+            self.assertEqual(lines[0], f"IOPREG1 {BASE} 32 {fnv1a(data)} 3")
+            self.assertEqual(lines[1:], [
+                f"1 {BASE + 4}",
+                f"3 {BASE + 12} {BASE + 16} {BASE + 20}",
+                f"4 {BASE} {BASE + 8} {BASE + 24} {BASE + 28}",
+            ])
+            pcs = [int(pc) for line in lines[1:] for pc in line.split()[1:]]
+            self.assertEqual(sorted(pcs), list(range(BASE, BASE + len(data), 4)))
+            self.assertEqual(len(pcs), len(set(pcs)))
+
+    def test_original_irx_metadata_and_verified_relocated_call(self):
+        original_words = [jump(3, 8), 0, 0x03e00008, 0]
+        original = struct.pack("<4I", *original_words)
+        # ELF32 + two program headers + one REL section (loader offsets).
+        raw = bytearray(0x200)
+        raw[:6] = b"\x7fELF\x01\x01"
+        struct.pack_into("<HHIIIIIHHHHHH", raw, 16, 0xff80, 8, 1, 0,
+                         52, 0x140, 0, 52, 32, 2, 40, 2, 0)
+        struct.pack_into("<8I", raw, 52, 1, 0x100, 0, 0, 16, 16, 5, 4)
+        struct.pack_into("<8I", raw, 84, 0x70000080, 0xc0, 0, 0, 48, 48, 0, 4)
+        struct.pack_into("<6I", raw, 0xc0, 0, 0, 0x80, 16, 0, 0)
+        raw[0xda:0xda + 10] = b"synthetic\0"
+        raw[0x100:0x110] = original
+        struct.pack_into("<10I", raw, 0x168, 0, 9, 0, 0, 0x1c0, 8, 0, 0, 4, 8)
+        struct.pack_into("<II", raw, 0x1c0, 0, 4)
+        parsed, text = parse_irx(bytes(raw))
+        self.assertEqual(text, original)
+        self.assertEqual(parsed["relocations"], [{"offset": 0, "type": 4,
+                                                  "symbol_index": 0}])
+        meta, linked = capture([jump(3, BASE + 8), 0, 0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        match = compare_capture(meta, linked, parsed, text, inventory(meta, linked))
+        self.assertEqual(match["verified_relocated_calls"],
+                         [{"site": BASE, "target": BASE + 8, "site_reached": True}])
+        self.assertEqual(match["nonrelocation_changed_word_count"], 0)
+        self.assertTrue(match["metadata_match_only"])
+        self.assertIsNone(compare_capture(dict(meta, gp=0), linked, parsed, text,
+                                          inventory(meta, linked)))
+        with self.assertRaises(ValueError):
+            parse_irx(bytes(raw[:100]))
+
+    def test_relocation_shadow_discovers_unvisited_leaf(self):
+        meta, linked = capture([0x03e00008, 0, jump(3, BASE + 16), 0,
+                                0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = struct.pack("<6I", 0x03e00008, 0, jump(3, 16), 0,
+                               0x03e00008, 0)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [{"flags": 4, "address": 0, "size": len(linked)}],
+                  "relocations": [{"offset": 8, "type": 4}]}
+        baseline = inventory(meta, linked, extended=True)
+        match = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, match, baseline)
+        self.assertEqual(shadow["new_roots"], [{"entry": BASE + 16,
+                                               "call_sites": [BASE + 8]}])
+        self.assertEqual(shadow["newly_reached_pcs"], [BASE + 16, BASE + 20])
+        self.assertEqual(shadow["inventory"]["regions"][1]["origins"],
+                         ["verified_relocated_jal"])
+        self.assertEqual(shadow["inventory"]["unvisited_aligned_words"], 2)
+        self.assertEqual(inventory(meta, linked, extended=True), baseline)
+        self.assertEqual(capture_mismatches(dict(meta, gp=0), linked, parsed),
+                         {"gp": {"captured": 0, "elf": BASE + 0x80}})
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{"metadata": parsed, "comparison": match,
+                                              "relocation_discovery": shadow}]}}
+        self.assertEqual(relocation_receipt_roots(receipt, meta, linked, baseline),
+                         [BASE + 16])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(linked)
+            plan = prepare_split_pilot(root, "MCMAN", root / "pilot", residual=True,
+                                       extended=True, relocation_receipt=receipt)
+            self.assertEqual(plan.read_text().splitlines()[1:], [
+                f"1 {BASE}", f"1 {BASE + 16}",
+                f"4 {BASE + 4} {BASE + 8} {BASE + 12} {BASE + 20}"])
+        changed = bytearray(linked)
+        struct.pack_into("<I", changed, 8, jump(3, BASE + 12))
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, meta, changed, baseline)
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, dict(meta, hash="0"), linked, baseline)
+        self.assertEqual(capture_mismatches(
+            dict(meta, name="ARIKA_IOP_Control_Driver"), linked,
+            dict(parsed, name="ARIKA IOP-Control-Driver")), {})
+        parsed["sections"][0]["flags"] = 0
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, meta, linked, baseline)
+        self.assertEqual(discover_relocation_roots(meta, linked, parsed, match,
+                                                   baseline)["new_roots"], [])
+        with self.assertRaises(ValueError):
+            inventory(meta, linked, relocated_call_entries=[BASE + 16])
+
+    def test_indirect_target_shadow_and_delay_slot(self):
+        # LUI/ADDIU builds t9; JALR captures it before the delay overwrites t9.
+        meta, data = capture([0x3c190001, 0x27390018, 0x0320f809,
+                              0x24190000, 0x03e00008, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        result = constant_indirect_targets(meta, data, report)
+        self.assertEqual(result["new_call_candidates"], [BASE + 24])
+        self.assertEqual(result["observations"][0]["producer_pcs"], [BASE, BASE + 4])
+        self.assertEqual(result["unresolved"], [])
+        # An alternative entry invalidates the unique predecessor chain.
+        meta["exports"] = [BASE + 4]
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True))
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(len(result["unresolved"]), 1)
+
+    def test_cross_block_indirect_target_in_predecessor_delay_slot(self):
+        # LUI t9,1; j BASE+16; addiu t9,t9,24 (delay); unreachable;
+        # jr t9; nop; jr ra; nop.
+        meta, data = capture([0x3c190001, jump(2, BASE + 16), 0x27390018,
+                              0, 0x03200008, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        local = constant_indirect_targets(meta, data, report, audit_producers=True)
+        self.assertEqual(local["new_jump_targets"], [])
+        cross = constant_indirect_targets(meta, data, report, audit_producers=True,
+                                          cross_block=True)
+        self.assertEqual(cross["new_jump_targets"], [BASE + 24])
+        self.assertEqual(cross["observations"][0]["producer_pcs"], [BASE, BASE + 8])
+        self.assertEqual(cross["observations"][0]["crossed_edges"], [
+            {"pc": BASE + 4, "target": BASE + 16, "kind": "jump",
+             "delay_pc": BASE + 8}])
+        self.assertEqual(inventory(meta, data, extended=True), report)
+
+    def test_cross_block_stops_at_call_and_ambiguous_predecessor(self):
+        # JAL does not imply a unique register state at the resume PC.
+        meta, data = capture([0x3c190001, jump(3, BASE + 24), 0x27390018,
+                              0x03200008, 0, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           cross_block=True)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(result["unresolved"][0]["crossed_edges"], [])
+        # Both conditional branch outcomes reach the same successor.
+        meta, data = capture([0x3c190001, 0x10800001, 0x27390018,
+                              0x03200008, 0, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           cross_block=True)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(result["unresolved"][0]["crossed_edges"], [])
+
+    def test_indirect_target_shadow_does_not_assume_load_values(self):
+        meta, data = capture([0x3c190001, 0x37390018, 0x8f390000,
+                              0x0320f809, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        result = constant_indirect_targets(meta, data, report)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(len(result["unresolved"]), 1)
+
+    def test_indirect_producer_audit_classifies_memory_without_reading(self):
+        # lui t0,1; lw v0,0x20(t0); sw v0,0(sp); jalr v0
+        meta, data = capture([0x3c080001, 0x8d020020, 0xafa20000,
+                              0x0040f809, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        self.assertEqual(result["observations"], [])
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "constant_address_load")
+        self.assertEqual(producer["definitions"][-1]["constant_address"], BASE + 32)
+        self.assertEqual([x["pc"] for x in producer["definitions"]],
+                         [BASE, BASE + 4])
+
+    def test_indirect_producer_audit_scaled_index_and_gp(self):
+        # sll v0,a0,2; lui v1,1; addu v0,v0,v1; lw v0,16(v0);
+        # move t9,v0; jr t9; nop
+        meta, data = capture([0x00041080, 0x3c030001, 0x00431021,
+                              0x8c420010, 0x0040c821, 0x03200008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "scaled_index_load")
+        self.assertEqual(len(producer["definitions"]), 5)
+        meta, data = capture([0x8f828004, 0x0040f809, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           audit_producers=True)
+        producer = result["unresolved"][0]["producer"]
+        self.assertEqual(producer["classification"], "gp_relative_load")
+        self.assertEqual(producer["definitions"][0]["offset"], -32764)
+
+    def test_indirect_jump_is_not_function_root(self):
+        meta, data = capture([0x3c080001, 0x35080010, 0x01000008, 0,
+                              0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True))
+        self.assertEqual(result["new_jump_targets"], [BASE + 16])
+        self.assertEqual(result["new_call_candidates"], [])
+
+    def test_jump_table_shadow_outside_linked_text(self):
+        # index=a0, table=BASE+32, JR v0; two unvisited return targets.
+        meta, linked = capture([0x00041080, 0x3c030001, 0x00431021,
+                                 0x8c420020, 0x00400008, 0,
+                                 0x03e00008, 0])
+        discovery = inventory(meta, linked, extended=True)
+        indirect = constant_indirect_targets(meta, linked, discovery,
+                                             audit_producers=True)
+        self.assertEqual(indexed_load_base(indirect["unresolved"][0]["producer"]),
+                         BASE + 32)
+        original = linked + struct.pack("<3I", 24, 24, 24)
+        parsed = {"sections": [
+            {"name": ".text", "type": 1, "flags": 6, "address": 0, "size": 32},
+            {"name": ".data", "type": 1, "flags": 3, "address": 32, "size": 12}],
+            "relocations": [{"offset": 32, "type": 2}, {"offset": 36, "type": 2}]}
+        tables = table_candidates(meta, linked, parsed, original, discovery, indirect)
+        self.assertEqual(len(tables), 1)
+        table = tables[0]
+        self.assertEqual([x["target"] for x in table["entries"]], [BASE + 24] * 2)
+        self.assertEqual(table["stop"], "missing_or_ambiguous_r_mips_32")
+        self.assertFalse(table["bound_proven"])
+        self.assertFalse(table["entries"][0]["linked_word_verified"])
+        self.assertFalse(table["entries"][0]["already_ordinary"])
+        shadow = discover_table_edges(meta, linked, discovery, [], tables)
+        self.assertEqual(shadow["candidate_edges"], [
+            {"site": BASE + 16, "target": BASE + 24}])
+        self.assertEqual(shadow["newly_reached_pcs"], [BASE + 24, BASE + 28])
+        self.assertEqual(shadow["new_function_entries"], [])
+        self.assertIn(BASE + 24, shadow["inventory"]["regions"][0]["ordinary_pcs"])
+        self.assertIn("indirect_jump", {x["kind"] for x in shadow["inventory"]["unresolved"]})
+        self.assertFalse(shadow["bounds_proven"])
+        self.assertEqual(inventory(meta, linked, extended=True), discovery)
+        with self.assertRaises(ValueError):
+            inventory(meta, linked, extended=True, candidate_jump_edges=[(BASE, BASE + 24)])
+        parsed["relocations"].append({"offset": 36, "type": 2})
+        self.assertEqual(len(table_candidates(meta, linked, parsed, original,
+                                              discovery, indirect)[0]["entries"]), 1)
+        parsed["sections"][1]["flags"] = 6
+        self.assertEqual(table_candidates(meta, linked, parsed, original,
+                                          discovery, indirect)[0]["entries"], [])
+
+    def test_table_backed_plan_recomputes_edges_and_preserves_residual(self):
+        meta, linked = capture([0x00041080, 0x3c030001, 0x00431021,
+                                0x8c420020, 0x00400008, 0,
+                                0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = linked + struct.pack("<2I", 24, 24)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [
+                      {"name": ".text", "type": 1, "flags": 6,
+                       "address": 0, "size": 32},
+                      {"name": ".rodata", "type": 1, "flags": 2,
+                       "address": 32, "size": 8}],
+                  "relocations": [{"offset": 32, "type": 2},
+                                  {"offset": 36, "type": 2}]}
+        baseline = inventory(meta, linked, extended=True)
+        comparison = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, comparison, baseline)
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{
+                       "path": "module.irx", "elf_sha256": hashlib.sha256(original).hexdigest(),
+                       "metadata": parsed, "comparison": comparison,
+                       "relocation_discovery": shadow}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            disc = root / "disc"
+            disc.mkdir()
+            elf = disc / "module.irx"
+            elf.write_bytes(original)
+            # Staging changes descriptor name but not linked identity.
+            (root / "CANONICAL.json").write_text(json.dumps(dict(meta, name="CANONICAL")))
+            (root / "CANONICAL.bin").write_bytes(linked)
+            old_plan = prepare_split_pilot(root, "CANONICAL", root / "old",
+                                           residual=True, extended=True,
+                                           relocation_receipt=receipt)
+            with patch("audit_iop_irx_metadata.parse_irx", return_value=(parsed, original)):
+                new_plan = prepare_split_pilot(root, "CANONICAL", root / "new",
+                                               residual=True, extended=True,
+                                               relocation_receipt=receipt,
+                                               table_disc_root=disc)
+                old_rows = [list(map(int, line.split()))[1:]
+                            for line in old_plan.read_text().splitlines()[1:]]
+                new_rows = [list(map(int, line.split()))[1:]
+                            for line in new_plan.read_text().splitlines()[1:]]
+                self.assertIn(BASE + 24, old_rows[-1])
+                self.assertIn(BASE + 24, new_rows[0])
+                self.assertNotIn(BASE + 24, new_rows[-1])
+                self.assertEqual(sorted(pc for row in new_rows for pc in row),
+                                 list(range(BASE, BASE + len(linked), 4)))
+                elf.write_bytes(original + b"changed")
+                with self.assertRaisesRegex(ValueError, "original ELF changed"):
+                    prepare_split_pilot(root, "CANONICAL", root / "bad",
+                                        residual=True, extended=True,
+                                        relocation_receipt=receipt, table_disc_root=disc)
+            with self.assertRaisesRegex(ValueError, "requires relocation evidence"):
+                prepare_split_pilot(root, "CANONICAL", root / "missing",
+                                    residual=True, extended=True, table_disc_root=disc)
+
+    def test_adjacent_table_cap_is_candidate_only(self):
+        def table(site, address, targets):
+            return {"site": site, "table_base": address, "bound_proven": False,
+                    "stop": "missing_or_ambiguous_r_mips_32",
+                    "entries": [{"slot": address + 4 * i, "target": target}
+                                for i, target in enumerate(targets)]}
+
+        tables = [table(BASE, BASE + 64, [BASE + 16, BASE + 24, BASE + 28]),
+                  table(BASE + 8, BASE + 68, [BASE + 24, BASE + 28]),
+                  table(BASE + 12, BASE + 68, [BASE + 24, BASE + 28]),
+                  table(BASE + 4, BASE + 72, [])]
+        capped = cap_adjacent_tables(tables)
+        self.assertEqual(len(tables[0]["entries"]), 3)
+        self.assertEqual(len(capped[0]["entries"]), 1)
+        self.assertEqual(capped[0]["uncapped_entry_count"], 3)
+        self.assertEqual(capped[0]["adjacent_table_base"], BASE + 68)
+        self.assertEqual(capped[0]["adjacent_table_sites"], [BASE + 8, BASE + 12])
+        self.assertEqual(capped[0]["stop"], "adjacent_table_candidate")
+        self.assertFalse(capped[0]["bound_proven"])
+        self.assertEqual(capped[1:], tables[1:])
+
+    def test_adjacent_cap_eliminates_spurious_shared_ownership(self):
+        meta, data = capture([0x00400008, 0, 0x00600008, 0,
+                              0x03e00008, 0, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        baseline = inventory(meta, data, extended=True)
+        def table(site, address, targets):
+            return {"site": site, "table_base": address, "bound_proven": False,
+                    "stop": "missing_or_ambiguous_r_mips_32",
+                    "entries": [{"slot": address + 4 * i, "target": target}
+                                for i, target in enumerate(targets)]}
+        tables = [table(BASE, BASE + 64, [BASE + 16, BASE + 24]),
+                  table(BASE + 8, BASE + 68, [BASE + 24])]
+        uncapped = discover_table_edges(meta, data, baseline, [], tables)
+        capped = discover_table_edges(meta, data, baseline, [],
+                                      cap_adjacent_tables(tables))
+        self.assertTrue(uncapped["inventory"]["shared_ordinary_pcs"])
+        self.assertEqual(capped["inventory"]["shared_ordinary_pcs"], [])
+        self.assertEqual(uncapped["newly_reached_pcs"], capped["newly_reached_pcs"])
+        self.assertEqual(capped["new_function_entries"], [])
+        self.assertFalse(capped["bounds_proven"])
+        self.assertEqual({row["pc"] for row in capped["inventory"]["unresolved"]
+                          if row["kind"] == "indirect_jump"}, {BASE, BASE + 8})
+
+    def test_cross_block_table_backed_plan_is_opt_in(self):
+        meta, linked = capture([jump(2, BASE + 12), 0x00041080, 0,
+                                0x3c030001, 0x00431021, 0x8c42002c, 0,
+                                0x00400008, 0, 0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = linked + struct.pack("<I", 36)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [
+                      {"name": ".text", "type": 1, "flags": 6,
+                       "address": 0, "size": len(linked)},
+                      {"name": ".rodata", "type": 1, "flags": 2,
+                       "address": len(linked), "size": 4}],
+                  "relocations": [{"offset": len(linked), "type": 2}]}
+        baseline = inventory(meta, linked, extended=True)
+        indirect = constant_indirect_targets(meta, linked, baseline,
+                                             audit_producers=True, cross_block=True)
+        context = indirect["unresolved"][0]["context_instructions"]
+        self.assertEqual(context[:2], [
+            {"pc": BASE, "word": f"{jump(2, BASE + 12):08x}"},
+            {"pc": BASE + 4, "word": "00041080"}])
+        comparison = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, comparison, baseline)
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{
+                       "path": "module.irx", "elf_sha256": hashlib.sha256(original).hexdigest(),
+                       "metadata": parsed, "comparison": comparison,
+                       "relocation_discovery": shadow}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            disc = root / "disc"
+            disc.mkdir()
+            (disc / "module.irx").write_bytes(original)
+            (root / "CANONICAL.json").write_text(json.dumps(dict(meta, name="CANONICAL")))
+            (root / "CANONICAL.bin").write_bytes(linked)
+            with patch("audit_iop_irx_metadata.parse_irx", return_value=(parsed, original)):
+                local = prepare_split_pilot(root, "CANONICAL", root / "local",
+                                            residual=True, extended=True,
+                                            relocation_receipt=receipt, table_disc_root=disc)
+                cross = prepare_split_pilot(root, "CANONICAL", root / "cross",
+                                            residual=True, extended=True,
+                                            relocation_receipt=receipt, table_disc_root=disc,
+                                            cross_block_tables=True)
+                local_rows = [list(map(int, line.split()))[1:]
+                              for line in local.read_text().splitlines()[1:]]
+                cross_rows = [list(map(int, line.split()))[1:]
+                              for line in cross.read_text().splitlines()[1:]]
+                self.assertIn(BASE + 36, local_rows[-1])
+                self.assertIn(BASE + 36, cross_rows[0])
+                self.assertNotIn(BASE + 36, cross_rows[-1])
+                self.assertEqual(sorted(pc for row in cross_rows for pc in row),
+                                 list(range(BASE, BASE + len(linked), 4)))
+            with self.assertRaisesRegex(ValueError, "require original ELF table discovery"):
+                prepare_split_pilot(root, "CANONICAL", root / "missing",
+                                    residual=True, extended=True, cross_block_tables=True)
+
+    def test_table_shadow_reports_shared_ownership(self):
+        # Two independently seeded JR paths reach the same return block.
+        meta, data = capture([0x00400008, 0, 0x00600008, 0, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        baseline = inventory(meta, data, extended=True)
+        tables = [{"site": site, "entries": [{"target": BASE + 16}]}
+                  for site in (BASE, BASE + 8)]
+        shadow = discover_table_edges(meta, data, baseline, [], tables)
+        self.assertEqual(shadow["inventory"]["shared_ordinary_pcs"],
+                         [{"pc": BASE + 16, "entries": [BASE, BASE + 8]}])
+        self.assertEqual(shadow["new_function_entries"], [])
+
+    def test_region_cache_hits_invalidation_and_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            cache.mkdir()
+            source = root / "region.ll"
+            source.write_text("first IR")
+            obj = root / "region.o"
+            calls = []
+
+            def compile_object(src, dst):
+                calls.append(src.read_bytes())
+                dst.write_bytes(b"object:" + src.read_bytes())
+
+            context = {"target": "test", "options": ["-O3"], "plan": "a"}
+            self.assertFalse(cached_split_object(source, obj, cache, context, compile_object))
+            obj.unlink()
+            self.assertTrue(cached_split_object(source, obj, cache, context, compile_object))
+            self.assertEqual(obj.read_bytes(), b"object:first IR")
+            self.assertEqual(len(calls), 1)
+            changed = dict(context, options=["-O2"])
+            self.assertFalse(cached_split_object(source, obj, cache, changed, compile_object))
+            source.write_text("second IR")
+            self.assertFalse(cached_split_object(source, obj, cache, context, compile_object))
+            self.assertEqual(len(calls), 3)
+            entry = cache / split_cache_key(source, context)
+            (entry / "object.o").write_bytes(b"corrupt")
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, context, compile_object)
+            self.assertEqual(len(calls), 3)
+
+    @staticmethod
+    def compact_router_fixture():
+        base = 0x80000000
+        plan = f"IOPREG1 {base} 16 1 2\n2 {base} {base + 12}\n1 {base + 4}\n"
+        router = """define i32 @region0(ptr %c, i32 %start) {
+entry:
+  ret i32 11
+}
+define i32 @region1(ptr %c, i32 %start) {
+entry:
+  ret i32 12
+}
+define i32 @router(ptr %c, i32 %start) {
+entry:
+  %budgetp = getelementptr i8, ptr %c, i64 56
+  %budget = load i32, ptr %budgetp
+  %empty = icmp eq i32 %budget, 0
+  br i1 %empty, label %fallback, label %dispatch
+dispatch:
+  switch i32 %start, label %fallback [
+    i32 -2147483648, label %region_0
+    i32 -2147483636, label %region_0
+    i32 -2147483644, label %region_1
+  ]
+region_0:
+  %r0 = call i32 @region0(ptr %c, i32 %start)
+  ret i32 %r0
+region_1:
+  %r1 = call i32 @region1(ptr %c, i32 %start)
+  ret i32 %r1
+fallback:
+  %next = add i32 %start, 4
+  %executedp = getelementptr i8, ptr %c, i64 60
+  store i32 0, ptr %executedp
+  %pcp = getelementptr i8, ptr %c, i64 64
+  store i32 %start, ptr %pcp
+  %nextp = getelementptr i8, ptr %c, i64 68
+  store i32 %next, ptr %nextp
+  %delayp = getelementptr i8, ptr %c, i64 72
+  store i32 0, ptr %delayp
+  %branchp = getelementptr i8, ptr %c, i64 76
+  store i32 0, ptr %branchp
+  %reason = select i1 %empty, i32 0, i32 1
+  ret i32 %reason
+}
+"""
+        return base, plan, router
+
+    def test_compact_router_checks_ownership_and_keeps_fallback(self):
+        base, plan, router = self.compact_router_fixture()
+        compact = compact_split_router(router, plan)
+        self.assertIn("[4 x i16] [\n  i16 0, i16 1, i16 -1, i16 0", compact)
+        self.assertIn("icmp ult i32 %map_offset, 16", compact)
+        self.assertIn("and i32 %map_offset, 3", compact)
+        self.assertIn("switch i16 %map_id, label %fallback", compact)
+        narrow = compact_split_router(router, plan, narrow_ids=True)
+        self.assertIn("[4 x i8] [\n  i8 0, i8 1, i8 -1, i8 0", narrow)
+        self.assertIn("load i8, ptr %map_ptr, align 1", narrow)
+        self.assertIn("switch i8 %map_id, label %fallback", narrow)
+        self.assertEqual(narrow[narrow.index("region_0:\n"):],
+                         router[router.index("region_0:\n"):])
+        self.assertEqual(compact[compact.index("region_0:\n"):],
+                         router[router.index("region_0:\n"):])
+        with self.assertRaises(ValueError):
+            compact_split_router(router.replace("label %region_1\n", "label %region_0\n"),
+                                 plan)
+        with self.assertRaises(ValueError):
+            compact_split_router(router, plan.replace(str(base + 4), str(base)))
+        with self.assertRaises(ValueError):
+            compact_split_router(router, plan.replace(str(base + 4), str(base + 1)))
+        with self.assertRaises(ValueError):
+            compact_split_router(compact, plan)
+
+    def test_narrow_router_sentinel_capacity(self):
+        for count in (255, 256):
+            # One additional unowned word must retain its sentinel.
+            plan = f"IOPREG1 0 {(count + 1) * 4} 1 {count}\n"
+            plan += "".join(f"1 {region * 4}\n" for region in range(count))
+            router = ("dispatch:\n  switch i32 %start, label %fallback [\n"
+                      + "".join(f"    i32 {region * 4}, label %region_{region}\n"
+                                for region in range(count))
+                      + "  ]\n")
+            ir = compact_split_router(router, plan, narrow_ids=True)
+            ty = "i8" if count == 255 else "i16"
+            self.assertIn(f"[{count + 1} x {ty}]", ir)
+            self.assertIn(f"{ty} -1", ir)
+            self.assertIn(f"    {ty} {count - 1}, label %region_{count - 1}", ir)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("clang"),
+                         "requires Linux host Clang for native router comparison")
+    def test_compact_router_native_matches_original(self):
+        base, plan, router = self.compact_router_fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            functions = []
+            for name, ir in (("original", router),
+                             ("compact", compact_split_router(router, plan)),
+                             ("narrow", compact_split_router(router, plan, narrow_ids=True))):
+                source = root / f"{name}.ll"
+                library = root / f"{name}.so"
+                source.write_text(ir)
+                subprocess.run(["clang", "-O3", "-shared", "-fPIC",
+                                "-Wno-override-module", str(source), "-o",
+                                str(library)], check=True)
+                fn = ctypes.CDLL(str(library)).router
+                fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                fn.restype = ctypes.c_uint32
+                functions.append(fn)
+            for budget in (0, 1, 100):
+                for pc in (0, base - 4, *range(base, base + 17), 0xffffffff):
+                    outcomes = []
+                    for fn in functions:
+                        ctx = ctypes.create_string_buffer(b"Z" * 80, 80)
+                        struct.pack_into("<I", ctx, 56, budget)
+                        result = fn(ctx, pc)
+                        outcomes.append((result, ctx.raw))
+                    self.assertEqual(outcomes[0], outcomes[1], (budget, pc))
+                    self.assertEqual(outcomes[0], outcomes[2], (budget, pc))
+                    expected = (0 if not budget else
+                                11 if pc in (base, base + 12) else
+                                12 if pc == base + 4 else 1)
+                    self.assertEqual(outcomes[1][0], expected)
+
+    @staticmethod
+    def shared_memory_fixture():
+        source = (TOOLS.parent / "src/iop/iop_ir_lifter.cpp").read_text(encoding="utf-8")
+        prefix = source.split('const char* k_helpers = R"IR(', 1)[1].split(')IR";', 1)[0]
+        regions = []
+        for index, width in enumerate((1, 2, 4)):
+            regions.append(prefix + f"""define dso_local i32 @iop_aot_fn_region_{index}(ptr %c, i32 %start) {{
+entry:
+  %ldv = alloca i32
+  %t0 = add i32 %start, 0
+  %t1 = call i1 @iop_ld(ptr %c, i32 %t0, i32 {width}, ptr %ldv)
+  br i1 %t1, label %store, label %fail
+store:
+  %t2 = load i32, ptr %ldv
+  %t3 = add i32 %t2, 1
+  %t4 = call i1 @iop_st(ptr %c, i32 %t0, i32 {width}, i32 %t3)
+  br i1 %t4, label %done, label %fail
+done:
+  ret i32 %t2
+fail:
+  ret i32 -1
+}}
+""")
+        regions.append(prefix + """define dso_local i32 @iop_aot_fn_region_3(ptr %c, i32 %start) {
+entry:
+  ret i32 0
+}
+""")
+        return regions
+
+    def test_shared_memory_helper_outlining(self):
+        regions = self.shared_memory_fixture()
+        rewritten, helper = shared_split_memory_helpers(regions)
+        self.assertEqual(rewritten[-1], regions[-1])
+        for index, width in enumerate((1, 2, 4)):
+            self.assertIn(f"declare hidden i1 @iop_shared_ld_{width}(ptr, i32, ptr)", rewritten[index])
+            self.assertIn(f"call i1 @iop_shared_st_{width}(ptr %c, i32 %t0, i32 %t3)", rewritten[index])
+            self.assertIn(f"define hidden i1 @iop_shared_ld_{width}", helper)
+            self.assertIn(f"define hidden i1 @iop_shared_st_{width}", helper)
+        self.assertEqual(shared_split_memory_helpers(regions[-1:]), (regions[-1:], None))
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers(rewritten)
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers([regions[0], "; different\n" + regions[1]])
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers([regions[0].replace("i32 1, ptr %ldv)", "i32 3, ptr %ldv)")])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("clang"),
+                         "requires Linux host Clang for native helper comparison")
+    def test_shared_memory_helpers_native_ram_and_callbacks(self):
+        regions = self.shared_memory_fixture()
+        rewritten, helper = shared_split_memory_helpers(regions)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            libs = []
+            for label, units in (("inline", regions), ("shared", rewritten + [helper])):
+                paths = []
+                for index, ir in enumerate(units):
+                    path = root / f"{label}-{index}.ll"
+                    path.write_text(ir)
+                    paths.append(str(path))
+                lib = root / f"{label}.so"
+                subprocess.run(["clang", "-O3", "-shared", "-fPIC",
+                                "-Wno-override-module", *paths, "-o", str(lib)], check=True)
+                libs.append(ctypes.CDLL(str(lib)))
+
+            read_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p,
+                                        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+            write_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32)
+            for index, width in enumerate((1, 2, 4)):
+                for address in (0, 0x80000000, 0xa0200000, 1, 0x1f801000):
+                    for permit in (False, True):
+                        outcomes = []
+                        for lib in libs:
+                            events = []
+
+                            @read_type
+                            def read(cpu, addr, size, out):
+                                events.append(("read", addr, size))
+                                if permit:
+                                    ctypes.cast(out, ctypes.POINTER(ctypes.c_uint32))[0] = 0x12
+                                return int(permit)
+
+                            @write_type
+                            def write(cpu, addr, size, value):
+                                events.append(("write", addr, size, value))
+                                return int(permit)
+
+                            ram = ctypes.create_string_buffer(b"Z" * 16, 16)
+                            ctx = ctypes.create_string_buffer(80)
+                            struct.pack_into("P", ctx, 24, ctypes.addressof(ram))
+                            struct.pack_into("P", ctx, 40, ctypes.cast(read, ctypes.c_void_p).value)
+                            struct.pack_into("P", ctx, 48, ctypes.cast(write, ctypes.c_void_p).value)
+                            fn = getattr(lib, f"iop_aot_fn_region_{index}")
+                            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                            fn.restype = ctypes.c_uint32
+                            outcomes.append((fn(ctx, address), ram.raw, events))
+                        self.assertEqual(outcomes[0], outcomes[1], (width, address, permit))
+
+    def test_exact_ir_cache_reuses_across_plans_and_validates_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            cache.mkdir()
+            source = root / "region.ll"
+            source.write_bytes(b"exact IR")
+            obj = root / "region.o"
+            calls = []
+
+            def compile_object(src, dst):
+                calls.append(src.read_bytes())
+                dst.write_bytes(b"object:" + src.read_bytes())
+
+            old = {"plan_sha256": "plan-a", "capture_sha256": "capture",
+                   "metadata_sha256": "metadata", "lifter_sha256": "lifter",
+                   "compiler_sha256": "compiler", "options": ["-O3"]}
+            new = dict(old, plan_sha256="plan-b")
+            self.assertNotEqual(split_cache_key(source, old), split_cache_key(source, new))
+            self.assertEqual(split_cache_key(source, old, True),
+                             split_cache_key(source, new, True))
+            self.assertFalse(cached_split_object(source, obj, cache, old, compile_object))
+            legacy = cache / split_cache_key(source, old)
+            self.assertTrue(cached_split_object(source, obj, cache, old, compile_object,
+                                                reuse_ir=True))
+            self.assertTrue(legacy.is_dir())
+            self.assertTrue(cached_split_object(source, obj, cache, new, compile_object,
+                                                reuse_ir=True))
+            self.assertEqual(len(calls), 1)
+            for key in ("capture_sha256", "metadata_sha256", "lifter_sha256",
+                        "compiler_sha256", "options"):
+                changed = dict(new, **{key: "changed"})
+                self.assertNotEqual(split_cache_key(source, new, True),
+                                    split_cache_key(source, changed, True))
+            renamed = root / "other.ll"
+            renamed.write_bytes(source.read_bytes())
+            self.assertNotEqual(split_cache_key(source, new, True),
+                                split_cache_key(renamed, new, True))
+            entry = cache / split_cache_key(source, new, True)
+            (entry / "object.o").write_bytes(b"corrupt")
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, new, compile_object, reuse_ir=True)
+            (legacy / "object.o").write_bytes(b"corrupt")
+            import shutil
+            shutil.rmtree(entry)
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, old, compile_object, reuse_ir=True)
+            self.assertEqual(len(calls), 1)
+
+    def test_multi_split_selection_and_global_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("Alpha", "Beta"):
+                (root / f"{name}.json").touch()
+            self.assertEqual(select_split_stems(root, ["beta", "ALPHA"]),
+                             ["Alpha", "Beta"])
+            self.assertEqual(select_split_stems(root, None, True), ["Alpha", "Beta"])
+            for selection in (["Alpha", "alpha"], ["missing"]):
+                with self.assertRaises(ValueError):
+                    select_split_stems(root, selection)
+            a, b, c = (root / name for name in ("a.ll", "b.ll", "c.ll"))
+            for source, size in ((a, 2), (b, 9), (c, 2)):
+                source.write_bytes(b"x" * size)
+            self.assertEqual(split_compile_schedule({"Alpha": [a, b], "Beta": [c]}),
+                             [("Alpha", b), ("Alpha", a), ("Beta", c)])
+
+    def test_multi_split_global_queue_link_order_and_warm_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ir = root / "ir"
+            cache = root / "cache"
+            ir.mkdir()
+            cache.mkdir()
+            stems = ["Alpha", "Beta"]
+            sizes = {"Alpha.region.0.ll": 2, "Alpha.region.1.ll": 9,
+                     "Alpha.ll": 3, "Alpha.table.ll": 1,
+                     "Beta.region.0.ll": 12, "Beta.ll": 4, "Beta.table.ll": 1}
+            for name, size in sizes.items():
+                (ir / name).write_bytes(b"x" * size)
+            args = SimpleNamespace(opt="3", jobs=1, region_cache=cache)
+            provenance = {stem: {"module": stem} for stem in stems}
+            compiled, linked = [], []
+
+            def fake_run(command, check):
+                self.assertTrue(check)
+                output = Path(command[command.index("-o") + 1])
+                if "-c" in command:
+                    source = Path(command[command.index("-o") - 1])
+                    compiled.append(source.name)
+                    output.write_bytes(b"object:" + source.name.encode())
+                else:
+                    objects = [Path(arg) for arg in command if arg.endswith(".o")]
+                    linked.append([obj.name for obj in objects])
+                    output.write_bytes(b"".join(obj.read_bytes() for obj in objects))
+
+            def build(name):
+                out = root / name
+                obj, lib = out / "obj", out / "modules"
+                obj.mkdir(parents=True)
+                lib.mkdir()
+                with patch("build_iop_aot.subprocess.run", side_effect=fake_run):
+                    libraries = compile_split_modules(
+                        args, "clang", ir, obj, lib, stems, ".so", provenance)
+                aggregate = json.loads((out / "split-build-receipt.json").read_text())
+                return aggregate, [path.read_bytes() for path in libraries]
+
+            cold, cold_bytes = build("cold")
+            self.assertEqual(compiled[:2], ["Beta.region.0.ll", "Alpha.region.1.ll"])
+            self.assertEqual(len(compiled), len(sizes))
+            self.assertEqual(linked, [
+                ["Alpha.region.0.o", "Alpha.region.1.o", "Alpha.o", "Alpha.table.o"],
+                ["Beta.region.0.o", "Beta.o", "Beta.table.o"]])
+            self.assertEqual(cold["object_count"], len(sizes))
+            self.assertEqual(cold["cache_hits"], 0)
+            for row in cold["modules"]:
+                receipt = json.loads((root / "cold" / row["receipt"]).read_text())
+                self.assertEqual(receipt["library_sha256"], row["library_sha256"])
+            compiled.clear()
+            warm, warm_bytes = build("warm")
+            self.assertEqual(compiled, [])
+            self.assertEqual(warm["cache_hits"], len(sizes))
+            self.assertEqual(cold_bytes, warm_bytes)
+
+    def test_capture_identity_and_exclusive_receipt(self):
+        meta, data = capture([0x03e00008, 0])
+        with self.assertRaises(ValueError):
+            inventory(meta, data + b"\0")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "module.json").write_text(json.dumps(meta))
+            (root / "module.bin").write_bytes(data)
+            out = root / "receipt.txt"
+            cmd = [sys.executable, str(TOOLS / "audit_iop_function_discovery.py"),
+                   "--capture", str(root), "--out", str(out)]
+            subprocess.run(cmd, check=True, capture_output=True)
+            receipt = out.read_bytes()
+            self.assertNotEqual(subprocess.run(cmd, capture_output=True).returncode, 0)
+            self.assertEqual(out.read_bytes(), receipt)
+            self.assertEqual((root / "module.bin").read_bytes(), data)
+
+
+if __name__ == "__main__":
+    unittest.main()

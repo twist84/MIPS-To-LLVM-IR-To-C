@@ -48,6 +48,9 @@ def test_incremental_parallel_emission():
         assert "reused 0/2" in out, out
         assert manifest["complete"] and manifest["object_count"] == 2
         assert len({item["sha256"] for item in manifest["objects"]}) == 2
+        assert "Largest native objects (file bytes):" in out, out
+        for item in manifest["objects"]:
+            assert f"{item['size_bytes']:,}" in out and item["object"] in out, out
 
         first_object = object_dir / (first.stem + ".o")
         second_object = object_dir / (second.stem + ".o")
@@ -57,6 +60,8 @@ def test_incremental_parallel_emission():
         os.utime(first_object, ns=(1000000000000000000, 1000000000000000000))
         out, manifest = run_emitter(ir_dir, object_dir)
         assert "reused 2/2" in out, out
+        assert "Largest native objects (file bytes):" in out, out
+        assert all(item["object"] in out for item in manifest["objects"]), out
         assert first_object.stat().st_mtime_ns == 1000000000000000000
         assert manifest["complete"]
 
@@ -251,7 +256,7 @@ def test_native_target_profile():
         assert "reused 0/1" in out and "host-native O2 CPU=" in out
         assert native["optimization_level"] == 5
         assert native["backend_optimization_level"] == 2
-        assert native["ir_pipeline"] is None
+        assert native["ir_pipeline"] == "llvm-vu0-fmac-selective-O2-v1"
         assert native["native_target"]["cpu"]
         assert native["native_target"]["features"] is not None
         assert native["objects"][0]["ir_sha256"] == baseline["objects"][0]["ir_sha256"]
@@ -274,6 +279,121 @@ def test_native_target_profile():
         assert "reused 0/2" in out and fixed["object_count"] == 2
         assert first.read_bytes() == original
         print("PASS: host-native O2 profile, CPU provenance and immutable IR")
+
+
+def test_selective_native_pipeline():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import verify_ir
+    import run_game
+    assert verify_ir.ir_pipeline_id(5) == run_game.ir_pipeline_id(5)
+    helper = """define internal i32 @ee_vu0_ir_fmac_s0_fixture(i32 %x) alwaysinline {
+entry:
+  %slot = alloca i32
+  store i32 %x, ptr %slot
+  %value = load i32, ptr %slot
+  ret i32 %value
+}
+"""
+    scalar = helper + "define i32 @guest_scalar(i32 %x) { ret i32 %x }\n"
+    vector = helper + """define i32 @guest_vector(i32 %x) {
+entry:
+  %result = call i32 @ee_vu0_ir_fmac_s0_fixture(i32 %x)
+  ret i32 %result
+}
+"""
+    assert not verify_ir.uses_ir_pipeline(5, scalar.encode())
+    assert verify_ir.uses_ir_pipeline(5, vector.encode())
+    assert not verify_ir.uses_ir_pipeline(2, vector.encode())
+    assert verify_ir.uses_ir_pipeline(4, scalar.encode())
+
+    with tempfile.TemporaryDirectory(prefix="ee-selective-o5-") as temp:
+        root = Path(temp)
+        ir = root / "ir"
+        ir.mkdir()
+        scalar_path = ir / "scalar.ll"
+        vector_path = ir / "vector.ll"
+        scalar_path.write_text(scalar, encoding="utf-8")
+        vector_path.write_text(vector, encoding="utf-8")
+        objects = root / "objects"
+        _, manifest = run_emitter(ir, objects, opt=5)
+        assert manifest["ir_pipeline"] == verify_ir.ir_pipeline_id(5)
+        by_name = {Path(item["input"]).name: item for item in manifest["objects"]}
+        assert "ee_vu0_ir_fmac_s0_fixture" in by_name["scalar.ll"]["defined_symbols"]
+        assert "ee_vu0_ir_fmac_s0_fixture" not in by_name["vector.ll"]["defined_symbols"]
+        assert scalar_path.read_text() == scalar and vector_path.read_text() == vector
+        out, _ = run_emitter(ir, objects, opt=5)
+        assert "reused 2/2" in out, out
+        # A previous backend-only O5 manifest must not be silently adopted.
+        manifest["ir_pipeline"] = None
+        manifest_path = objects / "objects.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        out, fresh = run_emitter(ir, objects, opt=5)
+        assert "reused 0/2" in out, out
+        assert fresh["ir_pipeline"] == verify_ir.ir_pipeline_id(5)
+        assert scalar_path.read_text() == scalar and vector_path.read_text() == vector
+    print("PASS: selective O5 pipeline, native object invalidation and immutable source")
+
+
+def test_native_pipeline_upgrade():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import build_optimized_cache as optimized
+    import shared_ee_ir as shared
+    import run_game
+
+    with tempfile.TemporaryDirectory(prefix="ee-pipeline-upgrade-") as temp:
+        root = Path(temp)
+        ir = root / "ir"
+        ir.mkdir()
+        work = root / "O5"
+        work.mkdir()
+        source = ir / "guest.ll"
+        write_ir(source, 1)
+        original = source.read_bytes()
+        metadata = ir / "ee_functions.json"
+        shared.write_json(metadata, {
+            "function_count": 1,
+            "functions": [{"ir_path": str(source), "vaddr": "0x100000",
+                           "host_symbol": "guest", "block_pcs": ["0x100000"]}],
+        })
+        sources = {"ELF": "synthetic"}
+        hashes = {source.name: shared.digest(source)}
+        shared.publish(metadata, sources, hashes)
+        shared.attach(work, ir)
+        cache = work / "translation-cache.json"
+        shared.write_json(cache, {"schema": run_game.CACHE_SCHEMA,
+                                  "emit_opt": 5, "ir_pipeline": None,
+                                  "ir_sources": sources})
+        library = work / "guest.so"
+
+        # Simulate the legacy native cache being rejected while the shared
+        # source is still authenticated. No guest recompilation or relink
+        # of the old objects is permitted on this transition.
+        with patch.object(run_game, "validate_translation_cache",
+                          side_effect=[ValueError("old pipeline"), None]), \
+             patch.object(run_game, "build_linked_library") as emit, \
+             patch.object(run_game, "write_translation_cache") as save, \
+             patch.object(run_game, "main", side_effect=AssertionError("relift or relink")):
+            optimized.refresh_profile(root / "game.elf", root, "Release",
+                                      work, 5, 1, {}, library,
+                                      ir_sources=sources, verified_ir_hashes=hashes)
+            assert emit.call_count == save.call_count == 1
+            assert emit.call_args.args[2] == metadata
+            assert emit.call_args.args[3] == work / "objects"
+        assert source.read_bytes() == original
+
+        source.write_text("changed guest IR", encoding="utf-8")
+        with patch.object(run_game, "validate_translation_cache",
+                          side_effect=ValueError("old pipeline")), \
+             patch.object(run_game, "build_linked_library") as emit:
+            try:
+                optimized.refresh_profile(root / "game.elf", root, "Release",
+                                          work, 5, 1, {}, library,
+                                          ir_sources=sources)
+            except ValueError as error:
+                assert "guest module hashes changed" in str(error), error
+            else:
+                raise AssertionError("pipeline upgrade accepted tampered IR")
+            emit.assert_not_called()
 
 
 def test_relocated_object_manifest():
@@ -398,6 +518,8 @@ if __name__ == "__main__":
     test_nested_profile_reuses_matching_backup_objects()
     test_shared_ir_provenance()
     test_native_target_profile()
+    test_selective_native_pipeline()
+    test_native_pipeline_upgrade()
     test_pipeline_worker_recycling()
     test_pipeline_binding_preflight()
     test_incremental_parallel_emission()

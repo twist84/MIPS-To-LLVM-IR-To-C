@@ -234,6 +234,7 @@ target_link_libraries(ee_host_timer_deadline_test PRIVATE ee_core)
 add_executable(ee_issue_timing_probe_test tests/smoke/ee_issue_timing_probe_test.cpp)
 target_link_libraries(ee_issue_timing_probe_test PRIVATE ee_core)
 add_executable(ee_runtime_profile_test tests/smoke/ee_runtime_profile_test.cpp)
+add_executable(ee_iop_service_attribution_test tests/smoke/ee_iop_service_attribution_test.cpp)
 target_link_libraries(ee_runtime_profile_test PRIVATE ee_core)
 
 add_executable(ee_cycle_scheduler_test tests/smoke/ee_cycle_scheduler_test.cpp)
@@ -281,6 +282,9 @@ add_executable(ee_recomp
     src/ee/ee_recomp.cpp
 )
 target_link_libraries(ee_recomp PRIVATE ee_core)
+
+add_executable(ee_discovery_audit src/tools/ee_discovery_audit.cpp)
+target_link_libraries(ee_discovery_audit PRIVATE ee_core)
 
 # Standalone captured VU1 microprogram LLVM translator.
 add_executable(vu1_recomp src/tools/vu1_recomp_main.cpp)
@@ -350,6 +354,9 @@ add_test(NAME ee_irq_syscall_services COMMAND ee_irq_syscall_services_test)
 add_executable(ee_isa_inventory_test tests/smoke/ee_isa_inventory_test.cpp)
 target_link_libraries(ee_isa_inventory_test PRIVATE ee_core)
 add_test(NAME ee_isa_inventory COMMAND ee_isa_inventory_test)
+add_executable(ee_pcsx2_timing_test tests/smoke/ee_pcsx2_timing_test.cpp)
+target_link_libraries(ee_pcsx2_timing_test PRIVATE ee_core)
+add_test(NAME ee_pcsx2_timing COMMAND ee_pcsx2_timing_test)
 
 add_executable(ee_reached_isa_inventory_test
     tests/smoke/ee_reached_isa_inventory_test.cpp)
@@ -534,6 +541,9 @@ endif()
 
 add_executable(ee_ram_interpreter_test tests/smoke/ee_ram_interpreter_test.cpp)
 target_link_libraries(ee_ram_interpreter_test PRIVATE ee_core)
+add_executable(ee_scalar_constant_test tests/smoke/ee_scalar_constant_test.cpp)
+target_link_libraries(ee_scalar_constant_test PRIVATE ee_core)
+target_include_directories(ee_scalar_constant_test PRIVATE ${CMAKE_SOURCE_DIR}/src/architecture)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
 target_link_libraries(ee_ram_tlb_test PRIVATE ee_core)
 
@@ -723,6 +733,8 @@ target_link_libraries(ee_control_flow_ir_fixture PRIVATE ee_core)
 # Scalar 64-bit signed/unsigned comparison lowering regression.
 add_executable(ee_compare_ir_fixture tests/smoke/compare_ir_fixture.cpp)
 target_link_libraries(ee_compare_ir_fixture PRIVATE ee_core)
+add_executable(ee_scalar_specialize_ir_fixture tests/smoke/scalar_specialize_ir_fixture.cpp)
+target_link_libraries(ee_scalar_specialize_ir_fixture PRIVATE ee_core)
 
 add_executable(ee_cop0_write_ir_fixture tests/smoke/cop0_write_ir_fixture.cpp)
 target_link_libraries(ee_cop0_write_ir_fixture PRIVATE ee_core)
@@ -794,6 +806,18 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME boot_session_orchestration
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_boot_session.py)
+    add_test(NAME iop_aot_export_names
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_aot_names.py)
+    add_test(NAME iop_function_discovery
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_function_discovery.py)
+    add_test(NAME iop_exit_ownership
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_exit_ownership.py)
+    add_test(NAME iop_chain_pilot
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_iop_chain_pilot.py)
     # Rebuilding host-only probe headers must relink existing guest
     # objects, never force a fresh ELF-to-LLVM translation.
     add_test(NAME ee_translation_cache_input_split
@@ -822,6 +846,20 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_recomp_discovery_cache.py
                 $<TARGET_FILE:ee_recomp>)
+    add_test(NAME ee_function_overlap
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_function_overlap.py
+                $<TARGET_FILE:ee_recomp> $<TARGET_FILE:ee_discovery_audit>)
+    add_test(NAME ee_entry_shadow
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_entry_shadow.py
+                $<TARGET_FILE:ee_recomp>)
+    add_test(NAME ee_dedup_experiment
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_dedup_experiment.py)
+    add_test(NAME ee_dedup_replay
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_dedup_replay.py)
     add_test(NAME ee_pointer_table_expansion
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_function_pointer_tables.py)
@@ -829,10 +867,40 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_chunked_dispatcher.py)
     if(EE_HAVE_LLVM_JIT_TEST)
+        add_test(NAME ee_scalar_memory_pilot
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_scalar_memory_pilot.py)
+        add_test(NAME ee_shared_cop1_add_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_shared_cop1_add.py)
+        add_test(NAME ee_shared_cop1_mul_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_shared_cop1_mul.py)
+        add_test(NAME ee_shared_quadword_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_shared_quadword.py)
+        add_test(NAME ee_shared_observation_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_shared_observation.py)
+        add_test(NAME ee_helper_inventory_llvm_coff
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_helper_inventory.py --llvm)
+        add_test(NAME ee_native_size_experiment
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_experiment.py)
+        add_test(NAME ee_native_size_pilot
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_pilot.py)
         add_test(NAME verify_ir_incremental
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_verify_ir_incremental.py)
     endif()
+    add_test(NAME ee_lowering_cost_audit
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_lowering_cost.py)
+    add_test(NAME ee_helper_inventory
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_helper_inventory.py)
     add_test(NAME ee_instruction_trace_comparator
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_compare_ee_instruction_traces.py
@@ -923,6 +991,7 @@ add_test(NAME ee_gs_download_dma COMMAND ee_gs_download_dma_test)
 add_test(NAME ee_gs_hwreg COMMAND ee_gs_hwreg_test)
 add_test(NAME ee_gs_hwreg_gif_dma COMMAND ee_gs_hwreg_gif_dma_test)
 add_test(NAME ee_ram_interpreter COMMAND ee_ram_interpreter_test)
+add_test(NAME ee_scalar_constant COMMAND ee_scalar_constant_test)
 add_test(NAME ee_ram_tlb COMMAND ee_ram_tlb_test)
 add_test(NAME ee_scratchpad COMMAND ee_scratchpad_test)
 add_test(NAME ee_vu0_memory_map COMMAND ee_vu0_memory_map_test)
@@ -935,6 +1004,7 @@ add_test(NAME ee_scanout_clock COMMAND ee_scanout_clock_test)
 add_test(NAME ee_host_timer_deadline COMMAND ee_host_timer_deadline_test)
 add_test(NAME ee_issue_timing_probe COMMAND ee_issue_timing_probe_test)
 add_test(NAME ee_runtime_profile COMMAND ee_runtime_profile_test)
+add_test(NAME ee_iop_service_attribution COMMAND ee_iop_service_attribution_test)
 add_test(NAME ee_cycle_scheduler COMMAND ee_cycle_scheduler_test)
 add_test(NAME ee_issue_trace_replay COMMAND ee_issue_trace_replay_test)
 add_test(NAME ee_issue_trace_candidate COMMAND ee_issue_trace_candidate ${CMAKE_SOURCE_DIR}/tests/fixtures/ee_issue_trace_candidate.csv 1 3)
@@ -985,6 +1055,16 @@ if(EE_HAVE_LLVM_JIT_TEST)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_compare_ir_runtime.py
                 $<TARGET_FILE:ee_compare_ir_fixture>)
+    add_test(NAME scalar_specialize_ir_runtime
+                COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_scalar_specialize_ir_runtime.py
+                $<TARGET_FILE:ee_scalar_specialize_ir_fixture>)
+    add_test(NAME ee_source_lowering_comparison
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_compare_ee_source_lowering.py)
+    add_test(NAME ee_packed_native_audit
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_audit_ee_packed_native.py)
     add_test(NAME cop0_write_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_cop0_write_ir_runtime.py

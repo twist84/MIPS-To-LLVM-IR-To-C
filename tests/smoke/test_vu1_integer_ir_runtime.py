@@ -14,6 +14,22 @@ def verify_fmac(ir):
     # Exercise the generated result/exception tuple independently of
     # the interpreter differential, at both optimization levels.
     assert "@vu_fmac(" in ir
+    # Correction eligibility depends on bits 15..22 of the product.
+    # Keep the packed comparison narrow and the normalization shift fixed.
+    add4 = ir.split(" @vu_add4(", 1)[1].split("\n}", 1)[0]
+    assert "@llvm.umax.v4i32" in add4 and "@llvm.umin.v4i32" in add4
+    assert "@llvm.abs.v4i32" in add4
+    assert "%sign_source = select <4 x i1> %zero" in add4
+    mul4 = ir.split(" @vu_mul4(", 1)[1].split("\n}", 1)[0]
+    assert "trunc <4 x i64> %full to <4 x i32>" in mul4
+    assert "icmp eq <4 x i32> %boundary_bits, zeroinitializer" in mul4
+    assert "lshr <4 x i32> %sig, %shift" not in mul4
+    # Exhaust every possible low-23-bit remainder mathematically by
+    # testing all upper eight bits with representative lower 15 bits.
+    for upper in range(256):
+        for lower in (0, 1, 0x3fff, 0x7fff):
+            rem = (upper << 15) | lower
+            assert (rem < 32768) == ((rem & 0x7f8000) == 0)
     wrapper = """
 define void @test_fmac(i32 %op, i32 %acc, i32 %a, i32 %b, i32 %latch, ptr %out) {
   %latched = icmp ne i32 %latch, 0
@@ -122,6 +138,24 @@ define void @test_fmac4(i32 %op, ptr %in, ptr %out) {
             clz((word * 4)(*lanes), clz_out)
             expected = tuple(32 - n.bit_length() for n in lanes)
             assert tuple(clz_out) == expected, (opt, lanes, tuple(clz_out), expected)
+        # Exhaust exponent-pair combinations, including alignment
+        # distances 24/25, signed zeros, cancellation and exponent 255.
+        # Each vector tests all four input-sign combinations.
+        for ea in range(256):
+            for eb in range(256):
+                fa = (ea * 65537 + eb * 17) & 0x7fffff
+                fb = fa if ea == eb else (eb * 65537 + ea * 17) & 0x7fffff
+                a = (ea << 23) | fa
+                b = (eb << 23) | fb
+                words = [0] * 4 + [a, a, a | 0x80000000, a | 0x80000000] + [
+                    b, b | 0x80000000, b, b | 0x80000000] + [0] * 4
+                for op in (0, 1):
+                    vector(op, (word * 16)(*words), vector_out)
+                    for lane in range(4):
+                        function(op, 0, words[4 + lane], words[8 + lane], 0, out)
+                        actual = tuple(vector_out[4 * field + lane] for field in range(4))
+                        assert actual == tuple(out), (opt, op, ea, eb, lane, actual, tuple(out))
+        print(f"VU1 ADD/SUB SIMD: 524288 exponent/sign lane tuples at O{opt} match scalar IR")
         rng = random.Random(0x5900)
         edges = [0, 0x80000000, 1, 0x807fffff, 0x00800000, 0x0080008b,
                  0x008000ea, 0x3f800000, 0x3f800001, 0x3f807fff, 0x3f808000,
@@ -193,11 +227,38 @@ def main():
     llvm.initialize_native_target()
     llvm.initialize_native_asmprinter()
     with tempfile.TemporaryDirectory() as directory:
-        for case in ("integer", "normal", "wrap", "stores", "branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags", "q", "random"):
+        for case in ("integer", "normal", "wrap", "stores", "branches", "direct-branches", "branch-wrap", "acc", "acc-branches", "conversions", "flags", "q", "random"):
             path = pathlib.Path(directory) / f"{case}.ll"
             expected = list(map(int, subprocess.check_output(
                 [sys.argv[1], str(path), case], text=True).split()))
             ir = path.read_text(encoding="utf-8")
+            if case in ("branches", "direct-branches", "branch-wrap"):
+                import re
+                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
+                assert "switch i32 %current_pc" in guest
+                entry = guest.split("dispatch:\n", 1)[0]
+                assert re.search(r"br label %pair_\d+\n$", entry)
+                bodies = re.findall(r"body_\d+:\n(.*?)(?=\n(?:body|pair|next|retire)_\d+:)",
+                                    guest, re.S)
+                assert bodies
+                if case == "direct-branches":
+                    assert any("load i32, ptr %npc" not in body for body in bodies)
+                    assert any("load i32, ptr %npc" in body for body in bodies)
+                    assert any("load i1, ptr %ending" not in body for body in bodies)
+                    assert re.search(r"br label %retire_\d+\n", guest)
+                else:
+                    assert all("load i32, ptr %npc" in body for body in bodies)
+                    assert all("load i1, ptr %ending" in body for body in bodies)
+                assert re.search(r"pair_\d+:\n.*?icmp ult i32.*?\n.*?label %body_\d+, label %fail", guest, re.S)
+                if case == "direct-branches":
+                    assert re.search(r"next_\d+:\n  br label %pair_\d+", guest)
+                    assert re.search(r"next_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %pair_\d+", guest)
+                else:
+                    assert re.search(r"next_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %alternate_\d+", guest)
+                    assert re.search(r"alternate_\d+:\n  %\w+ = icmp eq i32 .*?\n"
+                                     r"  br i1 .*?, label %pair_\d+, label %dispatch", guest)
             if case == "stores":
                 # The full-width memory path must be explicit in the
                 # emitted IR, not dependent on backend scalar combining.
@@ -205,6 +266,12 @@ def main():
                            for line in ir.splitlines())
                 assert any("store <4 x i32> " in line and line.endswith(", align 1")
                            for line in ir.splitlines())
+            if case == "acc-branches":
+                guest = ir.split("define dso_local i32 @ee_vu1_program(", 1)[1]
+                assert "%acc_local = alloca <4 x i32>" in guest
+                assert "%vf_local_" in guest
+                assert "ptr %vf_backing_" in guest
+                assert "store <4 x i32>" in guest
             if case == "acc":
                 verify_fmac(ir)
                 verify_minmax(ir)

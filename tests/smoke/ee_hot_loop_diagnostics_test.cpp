@@ -82,6 +82,73 @@ int main()
     assert(edge_a < edge_b && edge_b < edge_c && edge_c < edge_d &&
         edge_d != std::string::npos);
 
+    // More than sixteen distinct keys: highest counts first, then
+    // ascending full-width keys at the cutoff, independent of insertion.
+    ee::c_ee_dispatch_hotspots cutoff;
+    uint64_t dispatch = 0u;
+    for (uint32_t i = 32u; i != 0u; --i)
+    {
+        const uint32_t visits = i % 5u == 0u ? 3u : 1u;
+        for (uint32_t j = 0u; j < visits; ++j)
+        {
+            cutoff.record(++dispatch, i * 4u, i * 4u + 4u, {});
+        }
+    }
+    const std::string cutoff_json = serialize(cutoff);
+    size_t pc_offset = cutoff_json.find("\"hot_pcs\": [");
+    size_t edge_offset = cutoff_json.find("\"hot_transitions\": [");
+    const size_t pc_end = edge_offset;
+    const size_t edge_end = cutoff_json.find("\"latest_state\":");
+    const auto check_rank = [&](uint32_t i, uint32_t visits)
+    {
+        const std::string count = std::to_string(visits);
+        const std::string pc = std::to_string(i * 4u);
+        pc_offset = cutoff_json.find(
+            "{\"pc\": " + pc + ", \"visits\": " + count + "}", pc_offset);
+        edge_offset = cutoff_json.find(
+            "{\"from_pc\": " + pc + ", \"to_pc\": " +
+            std::to_string(i * 4u + 4u) + ", \"visits\": " + count + "}", edge_offset);
+        assert(pc_offset < pc_end && edge_offset < edge_end);
+        ++pc_offset;
+        ++edge_offset;
+    };
+    for (uint32_t i = 5u; i <= 30u; i += 5u)
+    {
+        check_rank(i, 3u);
+    }
+    uint32_t remaining = 10u;
+    for (uint32_t i = 1u; remaining != 0u; ++i)
+    {
+        if (i % 5u != 0u)
+        {
+            check_rank(i, 1u);
+            --remaining;
+        }
+    }
+    assert(cutoff_json.find("{\"pc\":", pc_offset) >= pc_end);
+    assert(cutoff_json.find("{\"from_pc\":", edge_offset) >= edge_end);
+    assert(cutoff.observations() == 44u);
+
+    // Exercise the expanded default working set beyond both old
+    // limits, including a second pass through the full counter caches.
+    ee::c_ee_dispatch_hotspots retail;
+    for (uint32_t pass = 0u; pass < 2u; ++pass)
+    {
+        for (uint32_t i = 0u; i < 9000u; ++i)
+        {
+            retail.record(pass * 9000u + i + 1u, i * 4u,
+                0x100000u + i * 4u, {});
+        }
+    }
+    assert(retail.observations() == 18000u);
+    assert(retail.untracked_pc_samples() == 0u);
+    assert(retail.untracked_edge_samples() == 0u);
+    const auto retail_json = serialize(retail);
+    assert(retail_json.find("\"tracked_pcs\": 9000") != std::string::npos);
+    assert(retail_json.find("\"tracked_edges\": 9000") != std::string::npos);
+    assert(retail_json.find("\"pc\": 0, \"visits\": 2") != std::string::npos);
+    assert(retail_json.find("\"from_pc\": 0, \"to_pc\": 1048576, \"visits\": 2") != std::string::npos);
+
     ee::c_ee_dispatch_hotspots empty;
     const std::string baseline = serialize(empty);
     assert(baseline.find("\"schema\": \"ee-m2-dispatch-hotspots-v1\"") != std::string::npos);
