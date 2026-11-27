@@ -94,7 +94,6 @@ add_library(iop_cpu STATIC
     src/iop/iop_sif_rpc_bridge.cpp
 )
 target_include_directories(iop_cpu PUBLIC ${CMAKE_SOURCE_DIR}/src/iop)
-target_link_libraries(ee_ram_tlb_test PRIVATE iop_cpu ee_core)
 add_executable(iop_cpu_test tests/smoke/iop_cpu_test.cpp)
 target_link_libraries(iop_cpu_test PRIVATE iop_cpu)
 add_executable(iop_guest_fault_probe_test
@@ -564,7 +563,7 @@ target_include_directories(ee_scalar_constant_test PRIVATE ${CMAKE_SOURCE_DIR}/s
 add_executable(ee_rom0_fetch_probe src/tools/ee_rom0_fetch_probe_main.cpp)
 target_link_libraries(ee_rom0_fetch_probe PRIVATE ee_core)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
-target_link_libraries(ee_ram_tlb_test PRIVATE ee_core)
+target_link_libraries(ee_ram_tlb_test PRIVATE iop_cpu ee_core)
 
 add_executable(ee_memory_alias_test tests/smoke/ee_memory_alias_test.cpp)
 target_link_libraries(ee_memory_alias_test PRIVATE ee_core)
