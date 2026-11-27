@@ -221,9 +221,12 @@ struct s_ee_reset_mmio
         const bool dmac = bus.m_width == 4u && address == 0xb000e000u &&
             (static_cast<uint32_t>(value.m_lo) & ~1u) == 0u;
         const bool sif = bus.m_width == 4u && address == 0xb000f220u;
+        const bool gs = bus.m_width == 4u &&
+            ((address == 0xb2001000u && static_cast<uint32_t>(value.m_lo) == 0x200u) ||
+             (address == 0xb2001004u && static_cast<uint32_t>(value.m_lo) == 0u));
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
-            (reset || fifo || intc || timer || dmac || sif) && bus.m_address == address - 0xa0000000u &&
+            (reset || fifo || intc || timer || dmac || sif || gs) && bus.m_address == address - 0xa0000000u &&
             m_write(m_user, bus.m_address, bus.m_width, &value);
     }
 };

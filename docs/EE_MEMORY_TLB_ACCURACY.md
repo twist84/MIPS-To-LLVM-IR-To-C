@@ -1165,3 +1165,22 @@ Extend v0.6 bound to 65536 instructions and reduce per-step
 printing before the new boundary. Tests verify readback,
 enable/disable, rejected unsupported mode/width/address and
 MSFLAG accumulation. No production scheduler change. Pending CI.
+
+## M6E3E6: isolated cold GS CSR reset
+
+M6E3E5 passed on c7def708:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46053842140
+Both versions reached GS CSR b2001000, SW value 200:
+v0.6 690820 / a001624c, v0.7 691012 / a001626c.
+Bit 9 is RESET (PS2SDK gs_privileged.h). Reuse c_ee_gs_state::reset
+only on the disconnected cold GS, with no prior GIF/VRAM/GPU
+operation. General CSR reset is not modeled: existing reset clears
+VRAM whereas hardware soft reset behavior is more complex
+(PCSX2 GSState.cpp). Do not change production GS behavior.
+Accept the subsequent reserved upper-word zero write only after
+reset. Refuse other CSR operations, repeated resets, status reads
+and timing-dependent state. Require exact retirement and next PC
+690821/a0016250, 690822/a0016254 and 691013/a0016270,
+691014/a0016274 respectively. Directed rejection tests.
+Next guest JAL is to a0010234 with ROM0 and 4 MiB arguments;
+explore rather than fabricate its return. Pending CI.

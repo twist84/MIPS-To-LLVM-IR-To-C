@@ -51,6 +51,10 @@ public:
         return value;
     }
 
+    uint32_t gs_reset_count() const { return m_gs_reset_count; }
+    uint32_t gs_upper_count() const { return m_gs_upper_count; }
+    uint64_t gs_siglblid() const { return m_gs.siglblid(); }
+
     uint32_t intc_mask() const { return m_intc.mask(); }
     uint32_t intc_status() const { return m_intc.status(); }
     uint32_t intc_read_count() const { return m_intc_read_count; }
@@ -122,6 +126,30 @@ private:
             return false;
         }
         auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
+        if (width == 4u && address == 0x12001000u)
+        {
+            // Cold disconnected GS only: no GIF input, VRAM writes,
+            // GPU authority or scanout clock have been attached.
+            if (static_cast<uint32_t>(value->m_lo) != 0x200u ||
+                self.m_gs_reset_count != 0u)
+            {
+                return false;
+            }
+            self.m_gs.reset();
+            ++self.m_gs_reset_count;
+            return true;
+        }
+        if (width == 4u && address == 0x12001004u)
+        {
+            // Reserved upper word has no control bits.
+            if (static_cast<uint32_t>(value->m_lo) != 0u ||
+                self.m_gs_reset_count != 1u || self.m_gs_upper_count != 0u)
+            {
+                return false;
+            }
+            ++self.m_gs_upper_count;
+            return true;
+        }
         if (width == 4u && address == 0x1000e000u)
         {
             const uint32_t word = static_cast<uint32_t>(value->m_lo);
@@ -212,6 +240,9 @@ private:
     uint32_t m_fifo_count[2]{};
     s_ee_u128 m_last_fifo[2]{};
     c_ee_intc m_intc{};
+    c_ee_gs_state m_gs{};
+    uint32_t m_gs_reset_count = 0u;
+    uint32_t m_gs_upper_count = 0u;
     // Cold isolated D_CTRL.DMAE, not the live DMA scheduler.
     uint32_t m_dmac_control = 0u;
     uint32_t m_dmac_read_count = 0u;

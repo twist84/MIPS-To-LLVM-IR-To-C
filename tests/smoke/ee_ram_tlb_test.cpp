@@ -3209,6 +3209,84 @@ bool test_strict_reset_dmac_sif()
         devices.intc_status() == 0u;
 }
 
+bool test_strict_reset_gs_csr()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[8u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    ee::c_ee_reset_vif_devices devices;
+    const auto mmio = devices.transport();
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t opcode)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[i] = static_cast<uint8_t>(opcode >> (i * 8u));
+        }
+    };
+    const auto step = [&]()
+    {
+        cpu.m_pc = pc;
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram,
+            nullptr, nullptr, &mmio);
+    };
+    put(0xac820000u);
+    cpu.m_gpr[4].m_lo = 0xb2001004u;
+    cpu.m_gpr[2].m_lo = 0u;
+    if (step().m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+        devices.gs_upper_count() != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xb2001000u;
+    for (const uint32_t value : {0u, 0x100u, 0x201u, 0x400u})
+    {
+        cpu.m_gpr[2].m_lo = value;
+        if (step().m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+            devices.gs_reset_count() != 0u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[2] = {0x200u, 0x1234u};
+    if (step().m_retired != 1u || devices.gs_reset_count() != 1u ||
+        devices.gs_siglblid() != 0u || devices.intc_status() != 0u)
+    {
+        return false;
+    }
+    // Another reset is outside the cold initialization subset.
+    if (step().m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xb2001004u;
+    if (step().m_result != result::DATA_UNAVAILABLE || devices.gs_upper_count() != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[2].m_lo = 0u;
+    if (step().m_retired != 1u || devices.gs_upper_count() != 1u)
+    {
+        return false;
+    }
+    for (const uint32_t address : {0xb2001001u, 0xb2001010u, 0x92001000u})
+    {
+        cpu.m_gpr[4].m_lo = address;
+        cpu.m_gpr[2].m_lo = 0x200u;
+        if (step().m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[4].m_lo = 0xb2001000u;
+    put(0x8c820000u); // no CSR status/timing read
+    return step().m_result == result::DATA_UNAVAILABLE &&
+        cpu.m_pc == pc && devices.gs_reset_count() == 1u &&
+        devices.gs_upper_count() == 1u && devices.intc_status() == 0u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3436,6 +3514,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_gs_csr(), "strict reset cold GS CSR regression"))
     {
         return 1;
     }

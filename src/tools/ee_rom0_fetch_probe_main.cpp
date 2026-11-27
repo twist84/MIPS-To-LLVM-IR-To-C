@@ -44,6 +44,8 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     uint32_t timer_logged = 0u;
     bool dmac_logged = false;
     bool sif_logged = false;
+    bool gs_logged = false;
+    bool gs_upper_logged = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
@@ -64,6 +66,19 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!gs_logged && vif_devices.gs_reset_count() != 0u)
+        {
+            gs_logged = true;
+            std::printf("EE exploration GS reset: retired=%u pc=%08x count=%u siglblid=%016llx\n",
+                retired, cpu.m_pc, vif_devices.gs_reset_count(),
+                static_cast<unsigned long long>(vif_devices.gs_siglblid()));
+        }
+        if (!gs_upper_logged && vif_devices.gs_upper_count() != 0u)
+        {
+            gs_upper_logged = true;
+            std::printf("EE exploration GS CSR upper: retired=%u pc=%08x count=%u\n",
+                retired, cpu.m_pc, vif_devices.gs_upper_count());
+        }
         if (!dmac_logged && vif_devices.dmac_write_count() != 0u)
         {
             dmac_logged = true;
@@ -1225,6 +1240,10 @@ int main(int argc, char** argv)
     uint32_t sif_pc = 0u;
     uint32_t dmac_value = 0u;
     uint32_t sif_flags = 0u;
+    uint32_t gs_retired = 0u;
+    uint32_t gs_pc = 0u;
+    uint32_t gs_upper_retired = 0u;
+    uint32_t gs_upper_pc = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -1241,6 +1260,21 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (gs_retired == 0u && vif_devices.gs_reset_count() != 0u)
+        {
+            gs_retired = retired;
+            gs_pc = cpu.m_pc;
+            std::printf("EELOAD GS reset: retired=%u pc=%08x count=%u siglblid=%016llx\n",
+                retired, cpu.m_pc, vif_devices.gs_reset_count(),
+                static_cast<unsigned long long>(vif_devices.gs_siglblid()));
+        }
+        if (gs_upper_retired == 0u && vif_devices.gs_upper_count() != 0u)
+        {
+            gs_upper_retired = retired;
+            gs_upper_pc = cpu.m_pc;
+            std::printf("EELOAD GS CSR upper: retired=%u pc=%08x count=%u\n",
+                retired, cpu.m_pc, vif_devices.gs_upper_count());
+        }
         if (dmac_retired == 0u && vif_devices.dmac_write_count() != 0u)
         {
             dmac_retired = retired;
@@ -1378,6 +1412,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "EELOAD DMAE/MSFLAG checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
             retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
         return 79;
+    }
+    if (gs_retired != 690821u || gs_pc != 0xa0016250u ||
+        gs_upper_retired != 690822u || gs_upper_pc != 0xa0016254u ||
+        vif_devices.gs_reset_count() != 1u || vif_devices.gs_upper_count() != 1u ||
+        vif_devices.gs_siglblid() != 0u)
+    {
+        std::fprintf(stderr, "EELOAD GS reset checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 80;
     }
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
