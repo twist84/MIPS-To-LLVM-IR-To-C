@@ -67,6 +67,7 @@ void c_spu2::reset()
     m_irq_deadline_valid = false;
     m_clock_active = false;
     m_clock_cycles = 0u;
+    m_sample_phase = 0u;
     m_decoded_blocks = 0u;
     m_voice_starts = 0u;
     m_voice_end_events = 0u;
