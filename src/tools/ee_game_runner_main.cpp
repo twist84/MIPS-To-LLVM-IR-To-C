@@ -4268,7 +4268,7 @@ int main(int argc, char** argv)
             return runner_vu0_control(user, cpu, vu0, reg, value, pc);
         };
     }
-    constexpr size_t horizon_sources = static_cast<size_t>(
+    constexpr size_t horizon_sources = std::to_underlying(
         ee::e_ee_horizon_source::count);
     uint64_t horizon_samples[horizon_sources]{};
     uint64_t horizon_before[horizon_sources]{};
@@ -6179,7 +6179,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                const auto source = static_cast<size_t>(horizon.m_source);
+                const size_t source = std::to_underlying(horizon.m_source);
                 ++horizon_samples[source];
                 const bool vu_touched = vu0_control.m_callback_generation != horizon_vu_start;
                 const bool cop0_changed = ee::ee_horizon_cop0_snapshot(cpu, runtime) !=
