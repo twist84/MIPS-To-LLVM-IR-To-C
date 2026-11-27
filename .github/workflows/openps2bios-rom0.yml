@@ -301,50 +301,7 @@ jobs:
           grep -Fx 'EE exploration GS reset: retired=691013 pc=a0016270 count=1 siglblid=0000000000000000' ee-rom0-v07.log
           grep -Fx 'EE exploration GS CSR upper: retired=691014 pc=a0016274 count=1' ee-rom0-v07.log
           grep -Fx 'EE exploration ROM bounds: retired=691104 pc=a00102c4 result=0000000000000001' ee-rom0-v07.log
-          grep -E '^EE exploration ROM word: retired=691172 pc=a00102f0 value=[0-9a-f]{8} matched=1
-          echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
-
-      - name: Explore authentic v0.7 IOP reset execution
-        if: success() || failure()
-        run: |
-          set -euo pipefail
-          test -f rom0-v07-verified.sha256
-          sha256sum --check rom0-v07-verified.sha256
-          status=0
-          ./build-rom0/iop_rom0_runner OpenPS2BIOS-0.7.bin \
-            --instructions=10000000 --trace-tail=64 \
-            --report=rom0-v07-report.json >rom0-v07-trace.log 2>&1 || status=$?
-          cat rom0-v07-trace.log
-          echo "IOP v0.7 diagnostic exit: $status"
-          test "$status" -eq 3 -o "$status" -eq 4
-          python3 - <<'PY'
-          import json
-          with open("rom0-v07-report.json", encoding="utf-8") as file:
-              report = json.load(file)
-          assert report["rom0_bytes"] == 4194304, report
-          assert report["reset_pc"] == 0xBFC00000, report
-          assert report["romdir_has_iopboot"], report
-          assert 0 < report["executed"] <= 10000000, report
-          print("IOP v0.7 observed stop:", report["stop"])
-          print("IOP v0.7 executed:", report["executed"])
-          print("IOP v0.7 PC: 0x%08X" % report["pc"])
-          print("IOP v0.7 memory fault:", report["memory_fault"])
-          PY
-          echo "::notice::IOP v0.7 diagnostic captured; full boot is not asserted."
-
-      - name: Preserve v0.7 execution evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: openps2bios-v07-rom0-execution
-          path: |
-            rom0-v07-verified.sha256
-            ee-rom0-v07.log
-            rom0-v07-report.json
-            rom0-v07-trace.log
-          if-no-files-found: warn
-          retention-days: 7
- ee-rom0-v07.log
+          grep -E '^EE exploration ROM word: retired=691172 pc=a00102f0 value=[0-9a-f]{8} matched=1$' ee-rom0-v07.log
           echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
 
       - name: Explore authentic v0.7 IOP reset execution
