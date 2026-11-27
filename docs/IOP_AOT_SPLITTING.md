@@ -988,3 +988,57 @@ plans offline; only positive-progress, ordinary, non-interpreter
 exits with remaining budget are potential chaining candidates.
 This is a candidate attribution pass, not a chaining implementation.
 Latest CI pending.
+
+## I17d acceptance and I17e shadow ownership attribution
+
+Archive `ee-iop-i17d(1).zip` SHA-256
+`72a1f1a9da31dbb66f36b5dac5f3eef918d773d0fbe530642d90c156d44867fa`.
+All five workflows passed at 5462b5a. Replay receipt accepts correctness:
+40M dispatches, 184,700 identical traces with zero divergent/unpaired,
+3,127/3,127 polls, seven active native modules, identical full JSON and PPM,
+no IOP guest fault. 40,995 distinct profile keys, zero dropped;
+12,611,093 entries and 67,846,006 retired instructions reconcile exactly.
+Control 42.797 s, candidate 41.781 s, native translation 595.8 ms,
+refresh 1.7 ms. Diagnostic timing is not performance evidence.
+
+Budget exhaustion: 6,294,123 calls; reduced device-horizon budget:
+2,429,238 calls (not necessarily horizon exits); pending delay slot:
+720,058 calls; fallback: 409,141; zero progress: 126,092.
+Counters overlap. Normal, delay-clear, positive-progress calls with
+remaining budget: 5,907,829, before checking dispatch ownership.
+ARKD_DVD has 8,621,737 entries (68.37%); CRI_ADXI 1,449,846;
+PADMAN 1,330,312; SIO2MAN 1,085,653; LIBSD 122,324;
+MCMAN 1,077; MCSERV 144.
+
+I17e adds read-only `tools/audit_iop_exit_ownership.py`. It reads the
+existing diagnostic archive and the retained compact router and descriptor
+IR from the three actual I17c/I17c2 source builds. It verifies each DLL
+against the replay inventory and source build receipt, checks the router
+dimensions, region domain and module identity, reconciles the profile,
+and reports same-region, cross-region and external/unowned counts.
+The receipts do not cryptographically bind the retained IR to DLL bytes;
+the audit records router/table hashes but is advisory, not authorization
+for a chaining fast path. Horizon and budget flags lack joint counts;
+nonhorizon lower bounds subtract the entire horizon count from eligible
+calls, clamped to zero. No scheduling, native code or cache changes.
+
+From the Windows repository root (substitute the original archive path
+if different):
+
+```bat
+git pull --ff-only
+python tools\audit_iop_exit_ownership.py ^
+    --archive "ee-iop-i17d(1).zip" ^
+    --build-root build\iop-native-split-i17c2-partitioned ^
+    --build-root build\iop-native-split-i17c2-remaining ^
+    --build-root build\iop-native-split-i17c ^
+    --out iop-i17e-ownership.json
+```
+
+Upload only the JSON. No new retail replay, IR generation or relink
+required for this attribution pass. Directed parser, counter and
+classification regression registered in CTest; new-head CI and real
+retained-router validation pending. Only after examining the mapped
+edges should we implement an opt-in budget-preserving chaining path,
+retaining exact per-instruction MMIO/device/interrupt boundaries and
+interpreter fallback.
