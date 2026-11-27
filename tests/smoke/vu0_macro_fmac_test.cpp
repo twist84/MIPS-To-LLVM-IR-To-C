@@ -1,4 +1,6 @@
 #include "ee_runtime.h"
+#include "ee_vu_fmac_fp.h"
+#include "ee_vu_scalar_fp.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -6,6 +8,43 @@
 
 namespace
 {
+// The production integer models must preserve the R5900 word-level
+// semantics at compile time as well as through the runtime VU pipelines.
+consteval bool test_fmac_cancellation()
+{
+    for (uint32_t bit = 0u; bit < 23u; ++bit)
+    {
+        const uint32_t a = 0x3f800000u | (1u << bit);
+        const auto positive = ee::vu_fmac_fp::add(a, 0x3f800000u, true);
+        const auto negative = ee::vu_fmac_fp::add(0x3f800000u, a, true);
+        const uint32_t expected = (104u + bit) << 23u;
+        if (positive.m_bits != expected || positive.m_underflow ||
+            positive.m_overflow || negative.m_bits != (expected | 0x80000000u) ||
+            negative.m_underflow || negative.m_overflow)
+        {
+            return false;
+        }
+    }
+    const auto underflow = ee::vu_fmac_fp::add(0x00800003u, 0x00800000u, true);
+    const auto overflow = ee::vu_fmac_fp::add(0x7fffffffu, 0x7fffffffu, false);
+    return underflow.m_bits == 0x00400000u && underflow.m_underflow &&
+        !underflow.m_overflow && overflow.m_bits == 0x7fffffffu &&
+        overflow.m_overflow && !overflow.m_underflow;
+}
+
+static_assert(test_fmac_cancellation(), "VU FMAC cancellation and normalization");
+static_assert(ee::vu_fmac_fp::mul(0x3fffffffu, 0x3f800000u).m_bits == 0x3fffffffu);
+static_assert(ee::vu_fmac_fp::mul(0x3f800000u, 0x3fffffffu).m_bits == 0x3ffffffeu);
+static_assert(ee::vu_fmac_fp::mul(0x3fffffffu, 0x3fffffffu).m_bits == 0x407ffffeu);
+static_assert(ee::vu_scalar_fp::root(0x41800000u) == 0x40800000u);
+static_assert(ee::vu_scalar_fp::root(0x3f80efd3u) == 0x3f8077b1u);
+static_assert(ee::vu_scalar_fp::root(0x7fffffffu) == 0x5fb504f3u);
+static_assert(ee::vu_scalar_fp::quotient(0x40800000u, 0xc0000000u) == 0xc0000000u);
+static_assert(ee::vu_scalar_fp::quotient(0x3f800000u, 0x3fffffffu) == 0x3f000001u);
+static_assert(ee::vu_scalar_fp::quotient(0x3f800000u, 0x80000000u) == 0xffffffffu);
+static_assert(ee::vu_scalar_fp::current_flags(0u, 0u, false, false) == 0x10u);
+static_assert(ee::vu_scalar_fp::update_status(0x820u, 0x10u) == 0xc10u);
+
 int g_failures = 0;
 
 void check(bool condition, const char* description)

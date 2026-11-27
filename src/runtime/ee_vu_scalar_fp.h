@@ -14,7 +14,7 @@ struct s_step
     int32_t m_digit;
 };
 
-inline s_step step(uint32_t sum, uint32_t carry, uint32_t magnitude, int32_t digit)
+inline constexpr s_step step(uint32_t sum, uint32_t carry, uint32_t magnitude, int32_t digit)
 {
     const uint32_t term = digit > 0 ? ~magnitude : digit < 0 ? magnitude : 0u;
     const uint32_t adjusted = carry + static_cast<uint32_t>(digit > 0);
@@ -30,12 +30,12 @@ inline s_step step(uint32_t sum, uint32_t carry, uint32_t magnitude, int32_t dig
     return {next_sum << 1u, next_carry << 1u, positive ? 1 : negative ? -1 : 0};
 }
 
-inline uint32_t exponent(uint32_t bits)
+inline constexpr uint32_t exponent(uint32_t bits)
 {
     return (bits >> 23u) & 255u;
 }
 
-inline uint32_t root(uint32_t bits)
+inline constexpr uint32_t root(uint32_t bits)
 {
     const uint32_t e = exponent(bits);
     if (e == 0u)
@@ -54,7 +54,7 @@ inline uint32_t root(uint32_t bits)
     return (((e + 127u) >> 1u) << 23u) | ((result >> 2u) & 0x7fffffu);
 }
 
-inline uint32_t quotient(uint32_t a, uint32_t b)
+inline constexpr uint32_t quotient(uint32_t a, uint32_t b)
 {
     const int ea = static_cast<int>(exponent(a));
     const int eb = static_cast<int>(exponent(b));
@@ -89,7 +89,7 @@ inline uint32_t quotient(uint32_t a, uint32_t b)
         ((result >> static_cast<uint32_t>(wide)) & 0x7fffffu);
 }
 
-inline uint32_t current_flags(uint32_t a, uint32_t b, bool is_sqrt, bool is_rsqrt)
+inline constexpr uint32_t current_flags(uint32_t a, uint32_t b, bool is_sqrt, bool is_rsqrt)
 {
     uint32_t flags = (is_sqrt || is_rsqrt) && (b & 0x80000000u) ? 0x10u : 0u;
     if (!is_sqrt && exponent(b) == 0u)
@@ -99,7 +99,7 @@ inline uint32_t current_flags(uint32_t a, uint32_t b, bool is_sqrt, bool is_rsqr
     return flags;
 }
 
-inline uint32_t update_status(uint32_t status, uint32_t current)
+inline constexpr uint32_t update_status(uint32_t status, uint32_t current)
 {
     return (status & ~0x30u) | current | (current << 6u);
 }

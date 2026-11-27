@@ -4,6 +4,7 @@
 #include "ee_vu1_dependency.h"
 
 #include <array>
+#include <bit>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -20,6 +21,90 @@ struct s_pair
     uint32_t m_lower = k_lower_nop;
     uint32_t m_upper = k_upper_nop;
 };
+
+consteval bool test_dependency_capacity()
+{
+    ee::s_ee_vu1_use full{};
+    for (uint32_t reg = 0u; reg < 16u; ++reg)
+    {
+        full.read_vi(reg);
+        full.read_vi(reg);
+    }
+    for (uint32_t reg = 1u; reg <= 4u; ++reg)
+    {
+        full.read(reg, 15u);
+        full.write(reg, 15u);
+    }
+    return full.m_vi_index_count == 15u &&
+        std::popcount(full.m_vi_reads) == 15 &&
+        full.m_read_lane_count == 16u &&
+        full.m_write_lane_count == 8u;
+}
+
+static_assert(test_dependency_capacity(), "VU1 expanded lane capacity and VI deduplication");
+
+consteval bool test_lane_lists()
+{
+    for (uint32_t mask = 0u; mask < 16u; ++mask)
+    {
+        ee::s_ee_vu1_use use{};
+        use.read(3u, mask);
+        use.write(4u, mask);
+        uint32_t index = 0u;
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                if (use.m_read_lanes[index] != 12u + lane ||
+                    use.m_write_lanes[index] != 16u + lane)
+                {
+                    return false;
+                }
+                ++index;
+            }
+        }
+        if (use.m_read_lane_count != index || use.m_write_lane_count != index ||
+            index != static_cast<uint32_t>(std::popcount(mask)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(test_lane_lists(), "all VU1 lane masks expand in X-to-W order");
+
+static_assert(ee::vu1_fp::leading_zeroes(0u) == 32);
+static_assert(ee::vu1_fp::leading_zeroes(1u) == 31);
+static_assert(ee::vu1_fp::leading_zeroes(0x80000000u) == 0);
+static_assert(ee::vu1_fp::bit_copy<uint64_t>(-0.0) == 0x8000000000000000ull);
+static_assert(ee::vu1_fp::from_double(ee::vu1_fp::to_double(0x7fffffffu)) == 0x7fffffffu);
+static_assert(ee::vu1_fp::from_double(ee::vu1_fp::to_double(0x80000001u)) == 0x80000000u);
+static_assert(ee::vu1_fp::max(0x80000000u, 0u) == 0u);
+static_assert(ee::vu1_fp::min(0x80000000u, 0u) == 0x80000000u);
+static_assert(ee::vu1_fp::cvt_w_s(0x40000000u) == 2u);
+static_assert(ee::vu1_fp::cvt_s_w(0xfffffffeu) == 0xc0000000u);
+
+
+consteval bool test_dependency_scoreboard()
+{
+    ee::s_ee_vu1_use producer{};
+    producer.write(4u, 8u);
+    producer.m_vi_load = 9u;
+    ee::s_ee_vu1_dependency scoreboard{};
+    scoreboard.retire(producer, 10u);
+    ee::s_ee_vu1_use consumer{};
+    consumer.read(4u, 8u);
+    consumer.read_vi(9u);
+    ee::s_ee_vu1_use independent{};
+    independent.read(4u, 1u);
+    independent.read_vi(0u);
+    return scoreboard.issue(consumer, 11u) == 14u &&
+        scoreboard.issue(consumer, 15u) == 15u &&
+        scoreboard.issue(independent, 11u) == 11u;
+}
+
+static_assert(test_dependency_scoreboard(), "VU1 lane-selective scoreboard timing");
 
 bool check(bool condition, const char* message)
 {
@@ -564,26 +649,7 @@ int main()
                 return 1;
             }
         }
-        // Exercise the full representable metadata capacity, including
-        // duplicates and suppressed writes to the constant registers.
-        ee::s_ee_vu1_use full{};
-        for (uint32_t reg = 0u; reg < 16u; ++reg)
-        {
-            full.read_vi(reg);
-            full.read_vi(reg);
-        }
-        for (uint32_t reg = 1u; reg <= 4u; ++reg)
-        {
-            full.read(reg, 15u);
-            full.write(reg, 15u);
-        }
-        if (!check(full.m_vi_index_count == 15u &&
-                   full.m_read_lane_count == 16u &&
-                   full.m_write_lane_count == 8u,
-                   "expanded scoreboard capacity or VI deduplication"))
-        {
-            return 1;
-        }
+
     }
 
     // A resident decode cache must not retain stale dependency metadata

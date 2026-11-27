@@ -15,7 +15,11 @@
 // it reports is identical to a full native slice: same PC, registers, exit
 // reason, dispatch count, and guest instruction/reference-slot totals.
 
+#include "../architecture/ee_scalar_constant.h"
+
+#include <concepts>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace ee
@@ -45,17 +49,17 @@ namespace idle_loop_detail
 {
 constexpr uint32_t k_max_words = 32u;
 
-inline uint32_t op(uint32_t w) { return w >> 26; }
-inline uint32_t rs(uint32_t w) { return (w >> 21) & 31u; }
-inline uint32_t rt(uint32_t w) { return (w >> 16) & 31u; }
-inline uint32_t rd(uint32_t w) { return (w >> 11) & 31u; }
-inline uint32_t sa(uint32_t w) { return (w >> 6) & 31u; }
-inline uint32_t funct(uint32_t w) { return w & 63u; }
-inline int64_t simm(uint32_t w) { return static_cast<int16_t>(w & 0xffffu); }
-inline uint64_t zimm(uint32_t w) { return w & 0xffffu; }
-inline uint64_t sext32(uint64_t v)
+inline constexpr uint32_t op(uint32_t w) { return w >> 26; }
+inline constexpr uint32_t rs(uint32_t w) { return (w >> 21) & 31u; }
+inline constexpr uint32_t rt(uint32_t w) { return (w >> 16) & 31u; }
+inline constexpr uint32_t rd(uint32_t w) { return (w >> 11) & 31u; }
+inline constexpr uint32_t sa(uint32_t w) { return (w >> 6) & 31u; }
+inline constexpr uint32_t funct(uint32_t w) { return w & 63u; }
+inline constexpr int64_t simm(uint32_t w) { return static_cast<int16_t>(w & 0xffffu); }
+inline constexpr uint64_t zimm(uint32_t w) { return w & 0xffffu; }
+inline constexpr uint64_t sext32(uint64_t v)
 {
-    return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)));
+    return scalar_constant::sign_extend<32>(v);
 }
 
 enum class e_kind : uint8_t
@@ -75,7 +79,7 @@ struct s_decoded
     uint32_t width = 0u;        // load width in bytes
 };
 
-inline s_decoded decode(uint32_t w)
+inline constexpr s_decoded decode(uint32_t w)
 {
     s_decoded d{};
     auto set = [&](e_kind kind, uint32_t dest,
@@ -132,12 +136,12 @@ inline s_decoded decode(uint32_t w)
     return d;
 }
 
-inline uint32_t branch_target(uint32_t pc, uint32_t w)
+inline constexpr uint32_t branch_target(uint32_t pc, uint32_t w)
 {
     return pc + 4u + static_cast<uint32_t>(simm(w) * 4);
 }
 
-inline bool branch_taken(uint32_t w, const uint64_t* gpr)
+inline constexpr bool branch_taken(uint32_t w, const uint64_t* gpr)
 {
     const uint64_t a = gpr[rs(w)];
     const uint64_t b = gpr[rt(w)];
@@ -153,7 +157,7 @@ inline bool branch_taken(uint32_t w, const uint64_t* gpr)
     }
 }
 
-inline uint64_t alu(uint32_t w, const uint64_t* gpr)
+inline constexpr uint64_t alu(uint32_t w, const uint64_t* gpr)
 {
     const uint64_t s = gpr[rs(w)];
     const uint64_t t = gpr[rt(w)];
@@ -164,27 +168,27 @@ inline uint64_t alu(uint32_t w, const uint64_t* gpr)
         {
         case 0x00u: return sext32(static_cast<uint32_t>(t) << sa(w));
         case 0x02u: return sext32(static_cast<uint32_t>(t) >> sa(w));
-        case 0x03u: return sext32(static_cast<uint32_t>(static_cast<int32_t>(t) >> sa(w)));
+        case 0x03u: return sext32(scalar_constant::arithmetic_right<32>(t, sa(w)));
         case 0x38u: return t << sa(w);
         case 0x3au: return t >> sa(w);
-        case 0x3bu: return static_cast<uint64_t>(static_cast<int64_t>(t) >> sa(w));
+        case 0x3bu: return scalar_constant::arithmetic_right<64>(t, sa(w));
         case 0x3cu: return t << (sa(w) + 32u);
         case 0x3eu: return t >> (sa(w) + 32u);
-        case 0x3fu: return static_cast<uint64_t>(static_cast<int64_t>(t) >> (sa(w) + 32u));
+        case 0x3fu: return scalar_constant::arithmetic_right<64>(t, sa(w) + 32u);
         case 0x21u: return sext32(s + t);
         case 0x23u: return sext32(s - t);
         case 0x24u: return s & t;
         case 0x25u: return s | t;
         case 0x26u: return s ^ t;
         case 0x27u: return ~(s | t);
-        case 0x2au: return static_cast<int64_t>(s) < static_cast<int64_t>(t) ? 1u : 0u;
+        case 0x2au: return scalar_constant::signed_less(s, t) ? 1u : 0u;
         case 0x2bu: return s < t ? 1u : 0u;
         case 0x2du: return s + t;
         case 0x2fu: return s - t;
         default: return 0u;
         }
     case 0x09u: return sext32(s + static_cast<uint64_t>(simm(w)));
-    case 0x0au: return static_cast<int64_t>(s) < simm(w) ? 1u : 0u;
+    case 0x0au: return scalar_constant::signed_less(s, scalar_constant::sign_extend<16>(w)) ? 1u : 0u;
     case 0x0bu: return s < static_cast<uint64_t>(simm(w)) ? 1u : 0u;
     case 0x0cu: return s & zimm(w);
     case 0x0du: return s | zimm(w);
@@ -195,12 +199,12 @@ inline uint64_t alu(uint32_t w, const uint64_t* gpr)
     }
 }
 
-inline uint64_t extend_load(uint32_t w, uint64_t raw)
+inline constexpr uint64_t extend_load(uint32_t w, uint64_t raw)
 {
     switch (op(w))
     {
-    case 0x20u: return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int8_t>(raw)));
-    case 0x21u: return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int16_t>(raw)));
+    case 0x20u: return scalar_constant::sign_extend<8>(raw);
+    case 0x21u: return scalar_constant::sign_extend<16>(raw);
     case 0x23u: return sext32(raw);
     case 0x24u: return raw & 0xffu;
     case 0x25u: return raw & 0xffffu;
@@ -216,8 +220,21 @@ inline uint64_t extend_load(uint32_t w, uint64_t raw)
 // move forward to non-delay-slot instructions; no store, call, jump, syscall,
 // coprocessor, trapping or branch-likely instruction is accepted; and no
 // register may carry a value from one iteration into the next.
-template <typename t_read_word>
-s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
+template <typename t_read>
+concept t_ee_instruction_reader = requires(t_read& read, uint32_t pc, uint32_t* word)
+{
+    { read(pc, word) } -> std::same_as<bool>;
+};
+
+template <typename t_load>
+concept t_ee_idle_load_reader = requires(t_load& load, uint32_t address,
+                                        uint32_t width, uint64_t* raw)
+{
+    { load(address, width, raw) } -> std::same_as<bool>;
+};
+
+template <t_ee_instruction_reader t_read_word>
+constexpr s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
                                    bool allow_forward_branches = false)
 {
     using namespace idle_loop_detail;
@@ -397,9 +414,9 @@ s_idle_loop_shape analyze_idle_loop(uint32_t header_pc, t_read_word read_word,
 // to the header. gpr holds the low 64 bits of each guest GPR. load(address,
 // width, &raw) must return false for any address whose value could change
 // during a native slice or whose read has side effects.
-template <typename t_load>
-e_idle_iteration predict_idle_iteration(
-    const s_idle_loop_shape& shape, const uint64_t (&gpr_in)[32], t_load load,
+template <t_ee_idle_load_reader t_load>
+constexpr e_idle_iteration predict_idle_iteration(
+    const s_idle_loop_shape& shape, std::span<const uint64_t, 32> gpr_in, t_load load,
     uint32_t* loop_instruction_count = nullptr)
 {
     using namespace idle_loop_detail;

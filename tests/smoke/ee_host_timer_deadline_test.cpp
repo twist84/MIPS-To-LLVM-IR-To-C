@@ -4,17 +4,245 @@
 
 #include <cstdio>
 #include <limits>
+#include <span>
+#include <vector>
 
 namespace
 {
-bool check(bool condition, const char* message)
+constexpr bool check(bool condition, const char* message)
 {
-    if (!condition)
+    if !consteval
     {
-        std::fprintf(stderr, "EE timer deadline: %s\n", message);
+        if (!condition)
+        {
+            std::fprintf(stderr, "EE timer deadline: %s\n", message);
+        }
     }
     return condition;
 }
+
+consteval bool test_iop_clock_boundaries()
+{
+    using t_iop_clock = ee::c_ee_iop_clock;
+    using e_result = t_iop_clock::e_result;
+    t_iop_clock clock;
+    if (!check(!clock.active() && clock.next_cycle() == t_iop_clock::k_no_deadline,
+            "unanchored IOP clock has no usable deadline") ||
+        !check(clock.observe(100u) == e_result::accepted &&
+            clock.active() && clock.due() == 0u && clock.next_cycle() == 108u,
+            "IOP clock initial anchor") ||
+        !check(clock.observe(107u) == e_result::accepted &&
+            clock.due() == 0u && clock.next_cycle() == 108u,
+            "fractional IOP deadline") ||
+        !check(clock.cycle_after_iop(1u) == 108u &&
+            clock.cycle_after_iop(10u) == 180u &&
+            clock.cycle_after_iop(t_iop_clock::k_no_deadline) ==
+                t_iop_clock::k_no_deadline &&
+            clock.cycle_after_iop(t_iop_clock::k_no_deadline / 8u + 1u) ==
+                t_iop_clock::k_no_deadline,
+            "IOP lookahead projection preserves fractional cycles and overflow") ||
+        !check(clock.observe(106u) == e_result::nonmonotonic &&
+            clock.next_cycle() == 108u,
+            "nonmonotonic IOP timestamp changed state") ||
+        !check(clock.observe(109u) == e_result::accepted &&
+            clock.due() == 1u && clock.next_cycle() == 109u,
+            "IOP debt is immediately due") ||
+        !check(clock.cycle_after_iop(10u) == 109u,
+            "IOP backlog prevents future projection") ||
+        !check(!clock.consume(2u) && clock.due() == 1u &&
+            clock.consume(1u) && clock.next_cycle() == 116u,
+            "IOP debt consumption lost fractional remainder"))
+    {
+        return false;
+    }
+
+    // A large EE slice may leave a backlog after 64 turns of 256.
+    // Later boundaries must preserve that debt, even at the same cycle.
+    const uint64_t cycle = 109u + 8u * 20000u;
+    if (!check(clock.observe(cycle) == e_result::accepted &&
+            clock.due() == 20000u &&
+            clock.consume(64u * 256u) && clock.due() == 3616u &&
+            clock.next_cycle() == cycle &&
+            clock.observe(cycle) == e_result::accepted &&
+            clock.due() == 3616u && clock.consume(3616u) &&
+            clock.next_cycle() == cycle + 7u,
+            "IOP backlog across bounded service turns"))
+    {
+        return false;
+    }
+
+    t_iop_clock near_limit;
+    if (!check(near_limit.observe(t_iop_clock::k_no_deadline - 3u) ==
+            e_result::accepted && near_limit.next_cycle() == t_iop_clock::k_no_deadline &&
+            near_limit.observe(t_iop_clock::k_no_deadline) == e_result::accepted &&
+            near_limit.due() == 0u,
+            "IOP deadline overflow must not wrap"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_iop_clock_boundaries(), "IOP clock boundary regression");
+
+consteval bool test_iop_service_batch_boundaries()
+{
+    const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
+    const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
+    const auto unknown = ee::ee_iop_service_batch(1024u, 64u, UINT64_MAX);
+    const auto exact = ee::ee_iop_service_batch(1024u, 64u, 512u);
+    const auto before = ee::ee_iop_service_batch(1024u, 64u, 513u);
+    const auto tail = ee::ee_iop_service_batch(257u, 64u, 258u);
+    const auto capped = ee::ee_iop_service_batch(UINT64_MAX, 64u, 100000u);
+    const auto last = ee::ee_iop_service_batch(1024u, 1u, 10000u);
+    if (!check(empty.m_cycles == 0u && empty.m_turns == 0u &&
+            exhausted.m_cycles == 0u && exhausted.m_turns == 0u &&
+            unknown.m_cycles == 256u && unknown.m_turns == 1u &&
+            exact.m_cycles == 256u && exact.m_turns == 1u &&
+            before.m_cycles == 512u && before.m_turns == 2u &&
+            tail.m_cycles == 257u && tail.m_turns == 2u &&
+            capped.m_cycles == 16384u && capped.m_turns == 64u &&
+            last.m_cycles == 256u && last.m_turns == 1u,
+            "IOP idle batch planning at exact event, tail and service cap"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_iop_service_batch_boundaries(), "IOP service batch boundary regression");
+
+// C++23 requires this fixture to execute during compilation, including
+// the temporary vector storage and the instruction reader callback.
+consteval bool test_bounded_alu_horizon()
+{
+    const auto slots = [](const std::vector<uint32_t>& words,
+        uint32_t base = 0x1000u)
+    {
+        return ee::ee_horizon_alu_exit_slots(base,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (pc < base || (pc - base) / 4u >= words.size())
+                {
+                    return false;
+                }
+                *word = words[(pc - base) / 4u];
+                return true;
+            });
+    };
+    if (!check(slots({0x25080001u, 0x03e00008u, 0x00000000u}) == 3u &&
+            slots({0x0c04000cu, 0x24020007u}) == 2u &&
+            slots({0x0320f809u, 0x00000000u}) == 2u &&
+            slots({0x03e10008u, 0u}) == 0u &&
+            slots({0x03e00008u, 0x8c020000u}) == 0u &&
+            slots({0x8c020000u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x40826000u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x1000ffffu, 0u}) == 0u &&
+            slots({0x20020001u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x03e00008u}) == 0u &&
+            slots({0x03e00008u, 0u}, 0u) == 0u &&
+            slots({0x03e00008u, 0u}, 0xfffffffcu) == 0u &&
+            slots(std::vector<uint32_t>(32u, 0u)) == 0u &&
+            ee::ee_horizon_bound_fits(10u, 14u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 13u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 9u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, UINT64_MAX, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 14u, 0u),
+            "bounded ALU paths and strict deadline"))
+    {
+        return false;
+    }
+    std::vector<uint32_t> limit(32u, 0u);
+    limit[30] = 0x03e00008u;
+    if (!check(slots(limit) == 32u,
+            "maximum bounded ALU path includes delay slot"))
+    {
+        return false;
+    }
+    limit[30] = 0u;
+    limit[31] = 0x03e00008u;
+    limit.push_back(0u);
+    if (!check(slots(limit) == 0u, "delay slot exceeds bounded path"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_bounded_alu_horizon(), "bounded ALU horizon regression");
+
+consteval bool test_horizon_rejection_reasons()
+{
+    using error = ee::e_ee_horizon_rejection;
+    const auto analyze = [](uint32_t base, std::span<const uint32_t> words)
+    {
+        return ee::ee_horizon_analyze_alu_exit(base,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (pc < base || (pc - base) / 4u >= words.size())
+                {
+                    return false;
+                }
+                *word = words[(pc - base) / 4u];
+                return true;
+            });
+    };
+    constexpr uint32_t valid[] = {0x03e00008u, 0u};
+    constexpr uint32_t missing[] = {0x03e00008u};
+    constexpr uint32_t unsafe[] = {0x8c020000u, 0x03e00008u, 0u};
+    constexpr uint32_t unsafe_delay[] = {0x03e00008u, 0x8c020000u};
+    constexpr uint32_t no_exit[32]{};
+
+    const auto accepted = analyze(0x1000u, valid);
+    const auto zero = analyze(0u, valid);
+    const auto unaligned = analyze(0x1001u, valid);
+    const auto unreadable = analyze(0x1000u, missing);
+    const auto bad = analyze(0x1000u, unsafe);
+    const auto delay = analyze(0x1000u, unsafe_delay);
+    const auto wrap = analyze(0xfffffffcu, valid);
+    const auto exhausted = analyze(0x1000u, no_exit);
+
+    return accepted && *accepted == 2u &&
+        !zero && zero.error() == error::invalid_entry &&
+        !unaligned && unaligned.error() == error::invalid_entry &&
+        !unreadable && unreadable.error() == error::instruction_unavailable &&
+        !bad && bad.error() == error::unsafe_instruction &&
+        !delay && delay.error() == error::unsafe_delay_slot &&
+        !wrap && wrap.error() == error::address_wrap &&
+        !exhausted && exhausted.error() == error::slot_limit;
+}
+
+static_assert(test_horizon_rejection_reasons(), "typed ALU horizon rejection reasons");
+
+
+consteval bool test_horizon_event_priority()
+{
+    using e_source = ee::e_ee_horizon_source;
+    constexpr uint64_t none = ee::k_ee_no_deadline;
+    const auto timer = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, false);
+    const auto scanout = ee::ee_execution_horizon(100u, none, 120u, 130u, 140u, false);
+    const auto cop0 = ee::ee_execution_horizon(100u, none, none, 130u, 140u, false);
+    const auto iop = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 101u, false);
+    const auto due = ee::ee_execution_horizon(100u, 99u, none, none, none, false);
+    const auto blocked = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, true);
+    const auto empty = ee::ee_execution_horizon(100u, none, none, none, none, false);
+    const auto tied = ee::ee_execution_horizon(100u, 110u, 110u, 110u, 110u, false);
+    if (!check(timer.m_cycle == 110u && timer.m_source == e_source::timer &&
+            scanout.m_cycle == 120u && scanout.m_source == e_source::scanout &&
+            cop0.m_cycle == 130u && cop0.m_source == e_source::cop0 &&
+            iop.m_cycle == 101u && iop.m_source == e_source::iop &&
+            due.m_cycle == 100u && due.m_source == e_source::timer &&
+            blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
+            empty.m_cycle == none && empty.m_source == e_source::none &&
+            tied.m_cycle == 110u && tied.m_source == e_source::timer,
+            "unified horizon chooses earliest known event or barrier"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_horizon_event_priority(), "earliest deadline and tie priority");
 
 bool write_timer(ee::c_ee_host_timers& timers, uint32_t index,
     uint32_t offset, uint32_t value)
@@ -30,52 +258,6 @@ int main()
     using t_iop_clock = ee::c_ee_iop_clock;
     using e_result = t_iop_clock::e_result;
     {
-        t_iop_clock clock;
-        if (!check(!clock.active() && clock.next_cycle() == t_iop_clock::k_no_deadline,
-                "unanchored IOP clock has no usable deadline") ||
-            !check(clock.observe(100u) == e_result::accepted &&
-                clock.active() && clock.due() == 0u && clock.next_cycle() == 108u,
-                "IOP clock initial anchor") ||
-            !check(clock.observe(107u) == e_result::accepted &&
-                clock.due() == 0u && clock.next_cycle() == 108u,
-                "fractional IOP deadline") ||
-            !check(clock.cycle_after_iop(1u) == 108u &&
-                clock.cycle_after_iop(10u) == 180u &&
-                clock.cycle_after_iop(t_iop_clock::k_no_deadline) ==
-                    t_iop_clock::k_no_deadline &&
-                clock.cycle_after_iop(t_iop_clock::k_no_deadline / 8u + 1u) ==
-                    t_iop_clock::k_no_deadline,
-                "IOP lookahead projection preserves fractional cycles and overflow") ||
-            !check(clock.observe(106u) == e_result::nonmonotonic &&
-                clock.next_cycle() == 108u,
-                "nonmonotonic IOP timestamp changed state") ||
-            !check(clock.observe(109u) == e_result::accepted &&
-                clock.due() == 1u && clock.next_cycle() == 109u,
-                "IOP debt is immediately due") ||
-            !check(clock.cycle_after_iop(10u) == 109u,
-                "IOP backlog prevents future projection") ||
-            !check(!clock.consume(2u) && clock.due() == 1u &&
-                clock.consume(1u) && clock.next_cycle() == 116u,
-                "IOP debt consumption lost fractional remainder"))
-        {
-            return 1;
-        }
-
-        // A large EE slice may leave a backlog after 64 turns of 256.
-        // Later boundaries must preserve that debt, even at the same cycle.
-        const uint64_t cycle = 109u + 8u * 20000u;
-        if (!check(clock.observe(cycle) == e_result::accepted &&
-                clock.due() == 20000u &&
-                clock.consume(64u * 256u) && clock.due() == 3616u &&
-                clock.next_cycle() == cycle &&
-                clock.observe(cycle) == e_result::accepted &&
-                clock.due() == 3616u && clock.consume(3616u) &&
-                clock.next_cycle() == cycle + 7u,
-                "IOP backlog across bounded service turns"))
-        {
-            return 1;
-        }
-
         // Compare partitioned elapsed budgets against one large advance.
         t_iop_clock partitioned;
         t_iop_clock combined;
@@ -105,93 +287,11 @@ int main()
         {
             return 1;
         }
-        t_iop_clock near_limit;
-        if (!check(near_limit.observe(t_iop_clock::k_no_deadline - 3u) ==
-                e_result::accepted && near_limit.next_cycle() == t_iop_clock::k_no_deadline &&
-                near_limit.observe(t_iop_clock::k_no_deadline) == e_result::accepted &&
-                near_limit.due() == 0u,
-                "IOP deadline overflow must not wrap"))
-        {
-            return 1;
-        }
-    }
-    // Source-level bounded paths accept only nontrapping GPR ALU
-    // operations and a dispatcher exit with a safe mandatory delay slot.
-    {
-        const auto slots = [](const std::vector<uint32_t>& words,
-            uint32_t base = 0x1000u)
-        {
-            return ee::ee_horizon_alu_exit_slots(base,
-                [&](uint32_t pc, uint32_t* word)
-                {
-                    if (pc < base || (pc - base) / 4u >= words.size())
-                    {
-                        return false;
-                    }
-                    *word = words[(pc - base) / 4u];
-                    return true;
-                });
-        };
-        if (!check(slots({0x25080001u, 0x03e00008u, 0x00000000u}) == 3u &&
-                slots({0x0c04000cu, 0x24020007u}) == 2u &&
-                slots({0x0320f809u, 0x00000000u}) == 2u &&
-                slots({0x03e10008u, 0u}) == 0u &&
-                slots({0x03e00008u, 0x8c020000u}) == 0u &&
-                slots({0x8c020000u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x40826000u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x1000ffffu, 0u}) == 0u &&
-                slots({0x20020001u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x03e00008u}) == 0u &&
-                slots({0x03e00008u, 0u}, 0u) == 0u &&
-                slots({0x03e00008u, 0u}, 0xfffffffcu) == 0u &&
-                slots(std::vector<uint32_t>(32u, 0u)) == 0u &&
-                ee::ee_horizon_bound_fits(10u, 14u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 13u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 9u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, UINT64_MAX, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 14u, 0u),
-                "bounded ALU paths and strict deadline"))
-        {
-            return 1;
-        }
-        std::vector<uint32_t> limit(32u, 0u);
-        limit[30] = 0x03e00008u;
-        if (!check(slots(limit) == 32u,
-                "maximum bounded ALU path includes delay slot"))
-        {
-            return 1;
-        }
-        limit[30] = 0u;
-        limit[31] = 0x03e00008u;
-        limit.push_back(0u);
-        if (!check(slots(limit) == 0u, "delay slot exceeds bounded path"))
-        {
-            return 1;
-        }
+
     }
     // Each combined batch must be exactly the concatenation of legacy
     // turns and end strictly before the predicted autonomous event.
     {
-        const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
-        const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
-        const auto unknown = ee::ee_iop_service_batch(1024u, 64u, UINT64_MAX);
-        const auto exact = ee::ee_iop_service_batch(1024u, 64u, 512u);
-        const auto before = ee::ee_iop_service_batch(1024u, 64u, 513u);
-        const auto tail = ee::ee_iop_service_batch(257u, 64u, 258u);
-        const auto capped = ee::ee_iop_service_batch(UINT64_MAX, 64u, 100000u);
-        const auto last = ee::ee_iop_service_batch(1024u, 1u, 10000u);
-        if (!check(empty.m_cycles == 0u && empty.m_turns == 0u &&
-                exhausted.m_cycles == 0u && exhausted.m_turns == 0u &&
-                unknown.m_cycles == 256u && unknown.m_turns == 1u &&
-                exact.m_cycles == 256u && exact.m_turns == 1u &&
-                before.m_cycles == 512u && before.m_turns == 2u &&
-                tail.m_cycles == 257u && tail.m_turns == 2u &&
-                capped.m_cycles == 16384u && capped.m_turns == 64u &&
-                last.m_cycles == 256u && last.m_turns == 1u,
-                "IOP idle batch planning at exact event, tail and service cap"))
-        {
-            return 1;
-        }
         for (uint32_t due = 1u; due < 1400u; due += 17u)
         {
             for (uint32_t interval = 0u; interval < 1400u; interval += 19u)
@@ -264,26 +364,6 @@ int main()
             return 1;
         }
 
-        const auto timer = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, false);
-        const auto scanout = ee::ee_execution_horizon(100u, none, 120u, 130u, 140u, false);
-        const auto cop0 = ee::ee_execution_horizon(100u, none, none, 130u, 140u, false);
-        const auto iop = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 101u, false);
-        const auto due = ee::ee_execution_horizon(100u, 99u, none, none, none, false);
-        const auto blocked = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, true);
-        const auto empty = ee::ee_execution_horizon(100u, none, none, none, none, false);
-        const auto tied = ee::ee_execution_horizon(100u, 110u, 110u, 110u, 110u, false);
-        if (!check(timer.m_cycle == 110u && timer.m_source == e_source::timer &&
-                scanout.m_cycle == 120u && scanout.m_source == e_source::scanout &&
-                cop0.m_cycle == 130u && cop0.m_source == e_source::cop0 &&
-                iop.m_cycle == 101u && iop.m_source == e_source::iop &&
-                due.m_cycle == 100u && due.m_source == e_source::timer &&
-                blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
-                empty.m_cycle == none && empty.m_source == e_source::none &&
-                tied.m_cycle == 110u && tied.m_source == e_source::timer,
-                "unified horizon chooses earliest known event or barrier"))
-        {
-            return 1;
-        }
         runtime.m_cop0_clock_initialized = false;
         runtime.m_cop0_clock_last = 0u;
         runtime.m_cop0_clock_count = 0u;
