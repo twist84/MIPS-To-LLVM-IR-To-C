@@ -1729,3 +1729,25 @@ Reviewed remaining unsupported-opcode checks in both strict pilot
 and RAM/TLB test files for collisions with the new opcode families.
 No executor or firmware threshold changes. Pending CI.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46065615191
+
+## M6E3H3E9B3: remaining nontrapping scalar integer operations
+
+H3E9B2 passed both pinned ROMs at 161d8a7, workflow 46065875198.
+Both retired 70 further instructions after MFHI, completed initial
+context saves, entered the actual C exception handler and stopped
+at XOR v0,s4,at 02811026 (a0016d54 / a0016d74), with 696573 /
+696765 EE retirements, seven I-cache lines and zero IOP debt.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46065875198
+
+Complete the remaining pure nontrapping scalar_constant operation
+families in the bounded reset executor: XOR, SLT, DADDU, DSUBU,
+DADDIU, SLLV/SRLV/SRAV, DSLLV/DSRLV/DSRAV and DSLL/DSRL/DSRA
+plus DSLL32/DSRL32/DSRA32. Use the existing scalar evaluator for
+masked shifts and signed bit ordering. Opcode assignments match
+ps2-web-recomp recomp/r5900.cpp. Preserve upper GPR halves, zero
+suppression and reserved-field checks. Add compile-time execution
+assertions and directed ordinary/branch-slot regressions, including
+budget refusal and boundary shift counts. No trapping arithmetic,
+new data routes, HLE service or production lowering changes.
+Require both ROMs to advance beyond their observed XOR stop,
+retaining all prior entry/backing/clock assertions. Pending CI.

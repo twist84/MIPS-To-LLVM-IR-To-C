@@ -2355,6 +2355,91 @@ bool test_strict_reset_mapped_fetch()
     return true;
 }
 
+bool test_strict_reset_scalar_completion()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[8u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    struct s_case
+    {
+        uint32_t m_word;
+        uint64_t m_rs;
+        uint64_t m_rt;
+        uint64_t m_expected;
+        uint32_t m_reserved;
+    };
+    constexpr uint32_t rr = (4u << 21u) | (5u << 16u) | (2u << 11u);
+    constexpr uint32_t ir = (5u << 16u) | (2u << 11u);
+    const s_case cases[] = {
+        {rr | 0x26u, 0xfedcba9876543210ull, 0x0123456789abcdefull, ~0ull, 0x40u},
+        {rr | 0x2au, 0x8000000000000000ull, 1u, 1u, 0x40u},
+        {rr | 0x2au, 1u, 0x8000000000000000ull, 0u, 0x40u},
+        {rr | 0x2du, ~0ull, 1u, 0u, 0x40u},
+        {rr | 0x2fu, 0u, 1u, ~0ull, 0x40u},
+        {rr | 4u, 63u, 1u, 0xffffffff80000000ull, 0x40u},
+        {rr | 6u, 32u, 0x1234567880000000ull, 0xffffffff80000000ull, 0x40u},
+        {rr | 7u, 33u, 0x80000000u, 0xffffffffc0000000ull, 0x40u},
+        {rr | 0x14u, 127u, 1u, 0x8000000000000000ull, 0x40u},
+        {rr | 0x16u, 64u, 0x8000000000000000ull, 0x8000000000000000ull, 0x40u},
+        {rr | 0x17u, 63u, 0x8000000000000000ull, ~0ull, 0x40u},
+        {ir | (31u << 6u) | 0x38u, 0u, 1u, 0x80000000u, 1u << 21u},
+        {ir | (31u << 6u) | 0x3au, 0u, 0x8000000000000000ull, 0x100000000ull, 1u << 21u},
+        {ir | 0x3bu, 0u, 0x8000000000000000ull, 0x8000000000000000ull, 1u << 21u},
+        {ir | (31u << 6u) | 0x3cu, 0u, 1u, 0x8000000000000000ull, 1u << 21u},
+        {ir | 0x3eu, 0u, 0x8000000000000000ull, 0x80000000u, 1u << 21u},
+        {ir | (31u << 6u) | 0x3fu, 0u, 0x8000000000000000ull, ~0ull, 1u << 21u}
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    const auto step = [&](uint32_t word)
+    {
+        cpu.m_pc = pc;
+        put(0u, word);
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+    };
+    for (const auto& item : cases)
+    {
+        cpu.m_gpr[4].m_lo = item.m_rs;
+        cpu.m_gpr[5].m_lo = item.m_rt;
+        cpu.m_gpr[2] = {0x55u, 0x1234u};
+        cpu.m_gpr[0] = {0x66u, 0x77u};
+        if (step(item.m_word).m_retired != 1u ||
+            cpu.m_gpr[2].m_lo != item.m_expected || cpu.m_gpr[2].m_hi != 0x1234u ||
+            step(item.m_word & ~0xf800u).m_retired != 1u ||
+            cpu.m_gpr[0].m_lo != 0x66u || cpu.m_gpr[0].m_hi != 0x77u ||
+            step(item.m_word | item.m_reserved).m_result != result::UNSUPPORTED_OPCODE ||
+            cpu.m_pc != pc || cpu.m_gpr[2].m_lo != item.m_expected)
+        {
+            return false;
+        }
+        // Execute in a branch slot, with no change on insufficient budget.
+        cpu.m_gpr[2].m_lo = 0x55u;
+        put(0u, 0x10000001u);
+        put(4u, item.m_word);
+        if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::BUDGET_EXHAUSTED ||
+            cpu.m_pc != pc || cpu.m_gpr[2].m_lo != 0x55u ||
+            ee::ee_execute_strict_rom_register_step(cpu, {}, 2u, ram).m_retired != 2u ||
+            cpu.m_pc != pc + 8u || cpu.m_gpr[2].m_lo != item.m_expected ||
+            cpu.m_gpr[2].m_hi != 0x1234u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[4] = {0u, 0x1234u};
+    return step(0x6484ffffu).m_retired == 1u && cpu.m_gpr[4].m_lo == ~0ull &&
+        step(0x64840001u).m_retired == 1u && cpu.m_gpr[4].m_lo == 0u &&
+        cpu.m_gpr[4].m_hi == 0x1234u &&
+        step(0x6480ffffu).m_retired == 1u && cpu.m_gpr[0].m_lo == 0x66u;
+}
+
 bool test_strict_reset_exception_context()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4493,7 +4578,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_exception_context(), "strict reset exception context transfers") ||
+    if (!check(test_strict_reset_scalar_completion(), "strict reset remaining nontrapping scalar operations") ||
+        !check(test_strict_reset_exception_context(), "strict reset exception context transfers") ||
         !check(test_strict_reset_ram_scalar(), "strict reset RAM scalar transfer regression"))
     {
         return 1;

@@ -596,6 +596,40 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             value = sign_extend_word(shifted);
             break;
         }
+        // Non-trapping variable shifts and doubleword immediate shifts.
+        // The shared scalar evaluator defines masked counts and signed
+        // bit-pattern arithmetic without host signed overflow.
+        using scalar_op = scalar_constant::e_op;
+        if (function == 4u || function == 6u || function == 7u ||
+            function == 0x14u || function == 0x16u || function == 0x17u)
+        {
+            if ((opcode & 0x7c0u) != 0u)
+            {
+                return false;
+            }
+            const auto op = function == 4u ? scalar_op::sllv :
+                function == 6u ? scalar_op::srlv :
+                function == 7u ? scalar_op::srav :
+                function == 0x14u ? scalar_op::dsllv :
+                function == 0x16u ? scalar_op::dsrlv : scalar_op::dsrav;
+            value = *scalar_constant::evaluate(op, read_gpr(cpu, rt), read_gpr(cpu, rs));
+            break;
+        }
+        if (function == 0x38u || function == 0x3au || function == 0x3bu ||
+            function == 0x3cu || function == 0x3eu || function == 0x3fu)
+        {
+            if (rs != 0u)
+            {
+                return false;
+            }
+            const auto op = function == 0x38u ? scalar_op::dsll :
+                function == 0x3au ? scalar_op::dsrl :
+                function == 0x3bu ? scalar_op::dsra :
+                function == 0x3cu ? scalar_op::dsll32 :
+                function == 0x3eu ? scalar_op::dsrl32 : scalar_op::dsra32;
+            value = *scalar_constant::evaluate(op, read_gpr(cpu, rt), (opcode >> 6u) & 31u);
+            break;
+        }
         // SPECIAL register transfers require all unused fields zero.
         if (function == 0x10u || function == 0x12u || function == 0x28u)
         {
@@ -624,8 +658,20 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         case 0x25u: // OR: both low 64-bit operands
             value = read_gpr(cpu, rs) | read_gpr(cpu, rt);
             break;
+        case 0x26u: // XOR: both low 64-bit operands
+            value = read_gpr(cpu, rs) ^ read_gpr(cpu, rt);
+            break;
         case 0x27u: // NOR: both low 64-bit operands
             value = ~(read_gpr(cpu, rs) | read_gpr(cpu, rt));
+            break;
+        case 0x2au: // SLT: signed comparison of both low 64-bit halves
+            value = scalar_constant::signed_less(read_gpr(cpu, rs), read_gpr(cpu, rt)) ? 1u : 0u;
+            break;
+        case 0x2du: // DADDU: wrapping 64-bit sum
+            value = read_gpr(cpu, rs) + read_gpr(cpu, rt);
+            break;
+        case 0x2fu: // DSUBU: wrapping 64-bit difference
+            value = read_gpr(cpu, rs) - read_gpr(cpu, rt);
             break;
         case 0x2bu: // SLTU: unsigned comparison of both low 64-bit halves
             value = read_gpr(cpu, rs) < read_gpr(cpu, rt) ? 1u : 0u;
@@ -765,6 +811,9 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         value = sign_extend_word(imm << 16u);
         break;
+    case 0x19u: // DADDIU: signed immediate, wrapping 64-bit sum
+        value = read_gpr(cpu, rs) + scalar_constant::sign_extend<16>(imm);
+        break;
     case 0x09u: // ADDIU (32-bit wrapping, sign-extended result)
         value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
             (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)));
@@ -806,6 +855,21 @@ static_assert([]()
         execute_register_word(cpu, 0x0000d828u, nullptr) &&
         cpu.m_gpr[27].m_lo == 15u && cpu.m_gpr[27].m_hi == 0xabcdefu &&
         !execute_register_word(cpu, 0x0020d810u, nullptr);
+}());
+
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[4] = {0x8000000000000000ull, 0u};
+    cpu.m_gpr[5] = {1u, 0u};
+    cpu.m_gpr[2] = {0u, 0x1234u};
+    return execute_register_word(cpu, 0x00851026u, nullptr) &&
+        cpu.m_gpr[2].m_lo == 0x8000000000000001ull &&
+        execute_register_word(cpu, 0x0085102au, nullptr) &&
+        cpu.m_gpr[2].m_lo == 1u &&
+        execute_register_word(cpu, 0x0004103fu, nullptr) &&
+        cpu.m_gpr[2].m_lo == 0xffffffff80000000ull &&
+        cpu.m_gpr[2].m_hi == 0x1234u;
 }());
 
 // LBU/LW/LD/LQ read ROM or explicitly backed uncached RAM; SB/SW/SD/SQ write RAM.
