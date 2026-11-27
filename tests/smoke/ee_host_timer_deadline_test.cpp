@@ -7,7 +7,7 @@
 
 namespace
 {
-bool check(bool condition, const char* message)
+constexpr bool check(bool condition, const char* message)
 {
     if (!condition)
     {
@@ -15,6 +15,97 @@ bool check(bool condition, const char* message)
     }
     return condition;
 }
+
+constexpr bool test_iop_clock_boundaries()
+{
+    using t_iop_clock = ee::c_ee_iop_clock;
+    using e_result = t_iop_clock::e_result;
+    t_iop_clock clock;
+    if (!check(!clock.active() && clock.next_cycle() == t_iop_clock::k_no_deadline,
+            "unanchored IOP clock has no usable deadline") ||
+        !check(clock.observe(100u) == e_result::accepted &&
+            clock.active() && clock.due() == 0u && clock.next_cycle() == 108u,
+            "IOP clock initial anchor") ||
+        !check(clock.observe(107u) == e_result::accepted &&
+            clock.due() == 0u && clock.next_cycle() == 108u,
+            "fractional IOP deadline") ||
+        !check(clock.cycle_after_iop(1u) == 108u &&
+            clock.cycle_after_iop(10u) == 180u &&
+            clock.cycle_after_iop(t_iop_clock::k_no_deadline) ==
+                t_iop_clock::k_no_deadline &&
+            clock.cycle_after_iop(t_iop_clock::k_no_deadline / 8u + 1u) ==
+                t_iop_clock::k_no_deadline,
+            "IOP lookahead projection preserves fractional cycles and overflow") ||
+        !check(clock.observe(106u) == e_result::nonmonotonic &&
+            clock.next_cycle() == 108u,
+            "nonmonotonic IOP timestamp changed state") ||
+        !check(clock.observe(109u) == e_result::accepted &&
+            clock.due() == 1u && clock.next_cycle() == 109u,
+            "IOP debt is immediately due") ||
+        !check(clock.cycle_after_iop(10u) == 109u,
+            "IOP backlog prevents future projection") ||
+        !check(!clock.consume(2u) && clock.due() == 1u &&
+            clock.consume(1u) && clock.next_cycle() == 116u,
+            "IOP debt consumption lost fractional remainder"))
+    {
+        return false;
+    }
+
+    // A large EE slice may leave a backlog after 64 turns of 256.
+    // Later boundaries must preserve that debt, even at the same cycle.
+    const uint64_t cycle = 109u + 8u * 20000u;
+    if (!check(clock.observe(cycle) == e_result::accepted &&
+            clock.due() == 20000u &&
+            clock.consume(64u * 256u) && clock.due() == 3616u &&
+            clock.next_cycle() == cycle &&
+            clock.observe(cycle) == e_result::accepted &&
+            clock.due() == 3616u && clock.consume(3616u) &&
+            clock.next_cycle() == cycle + 7u,
+            "IOP backlog across bounded service turns"))
+    {
+        return false;
+    }
+
+    t_iop_clock near_limit;
+    if (!check(near_limit.observe(t_iop_clock::k_no_deadline - 3u) ==
+            e_result::accepted && near_limit.next_cycle() == t_iop_clock::k_no_deadline &&
+            near_limit.observe(t_iop_clock::k_no_deadline) == e_result::accepted &&
+            near_limit.due() == 0u,
+            "IOP deadline overflow must not wrap"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_iop_clock_boundaries(), "IOP clock boundary regression");
+
+constexpr bool test_iop_service_batch_boundaries()
+{
+    const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
+    const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
+    const auto unknown = ee::ee_iop_service_batch(1024u, 64u, UINT64_MAX);
+    const auto exact = ee::ee_iop_service_batch(1024u, 64u, 512u);
+    const auto before = ee::ee_iop_service_batch(1024u, 64u, 513u);
+    const auto tail = ee::ee_iop_service_batch(257u, 64u, 258u);
+    const auto capped = ee::ee_iop_service_batch(UINT64_MAX, 64u, 100000u);
+    const auto last = ee::ee_iop_service_batch(1024u, 1u, 10000u);
+    if (!check(empty.m_cycles == 0u && empty.m_turns == 0u &&
+            exhausted.m_cycles == 0u && exhausted.m_turns == 0u &&
+            unknown.m_cycles == 256u && unknown.m_turns == 1u &&
+            exact.m_cycles == 256u && exact.m_turns == 1u &&
+            before.m_cycles == 512u && before.m_turns == 2u &&
+            tail.m_cycles == 257u && tail.m_turns == 2u &&
+            capped.m_cycles == 16384u && capped.m_turns == 64u &&
+            last.m_cycles == 256u && last.m_turns == 1u,
+            "IOP idle batch planning at exact event, tail and service cap"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_iop_service_batch_boundaries(), "IOP service batch boundary regression");
 
 bool write_timer(ee::c_ee_host_timers& timers, uint32_t index,
     uint32_t offset, uint32_t value)
@@ -30,52 +121,6 @@ int main()
     using t_iop_clock = ee::c_ee_iop_clock;
     using e_result = t_iop_clock::e_result;
     {
-        t_iop_clock clock;
-        if (!check(!clock.active() && clock.next_cycle() == t_iop_clock::k_no_deadline,
-                "unanchored IOP clock has no usable deadline") ||
-            !check(clock.observe(100u) == e_result::accepted &&
-                clock.active() && clock.due() == 0u && clock.next_cycle() == 108u,
-                "IOP clock initial anchor") ||
-            !check(clock.observe(107u) == e_result::accepted &&
-                clock.due() == 0u && clock.next_cycle() == 108u,
-                "fractional IOP deadline") ||
-            !check(clock.cycle_after_iop(1u) == 108u &&
-                clock.cycle_after_iop(10u) == 180u &&
-                clock.cycle_after_iop(t_iop_clock::k_no_deadline) ==
-                    t_iop_clock::k_no_deadline &&
-                clock.cycle_after_iop(t_iop_clock::k_no_deadline / 8u + 1u) ==
-                    t_iop_clock::k_no_deadline,
-                "IOP lookahead projection preserves fractional cycles and overflow") ||
-            !check(clock.observe(106u) == e_result::nonmonotonic &&
-                clock.next_cycle() == 108u,
-                "nonmonotonic IOP timestamp changed state") ||
-            !check(clock.observe(109u) == e_result::accepted &&
-                clock.due() == 1u && clock.next_cycle() == 109u,
-                "IOP debt is immediately due") ||
-            !check(clock.cycle_after_iop(10u) == 109u,
-                "IOP backlog prevents future projection") ||
-            !check(!clock.consume(2u) && clock.due() == 1u &&
-                clock.consume(1u) && clock.next_cycle() == 116u,
-                "IOP debt consumption lost fractional remainder"))
-        {
-            return 1;
-        }
-
-        // A large EE slice may leave a backlog after 64 turns of 256.
-        // Later boundaries must preserve that debt, even at the same cycle.
-        const uint64_t cycle = 109u + 8u * 20000u;
-        if (!check(clock.observe(cycle) == e_result::accepted &&
-                clock.due() == 20000u &&
-                clock.consume(64u * 256u) && clock.due() == 3616u &&
-                clock.next_cycle() == cycle &&
-                clock.observe(cycle) == e_result::accepted &&
-                clock.due() == 3616u && clock.consume(3616u) &&
-                clock.next_cycle() == cycle + 7u,
-                "IOP backlog across bounded service turns"))
-        {
-            return 1;
-        }
-
         // Compare partitioned elapsed budgets against one large advance.
         t_iop_clock partitioned;
         t_iop_clock combined;
@@ -105,15 +150,7 @@ int main()
         {
             return 1;
         }
-        t_iop_clock near_limit;
-        if (!check(near_limit.observe(t_iop_clock::k_no_deadline - 3u) ==
-                e_result::accepted && near_limit.next_cycle() == t_iop_clock::k_no_deadline &&
-                near_limit.observe(t_iop_clock::k_no_deadline) == e_result::accepted &&
-                near_limit.due() == 0u,
-                "IOP deadline overflow must not wrap"))
-        {
-            return 1;
-        }
+
     }
     // Source-level bounded paths accept only nontrapping GPR ALU
     // operations and a dispatcher exit with a safe mandatory delay slot.
@@ -172,26 +209,6 @@ int main()
     // Each combined batch must be exactly the concatenation of legacy
     // turns and end strictly before the predicted autonomous event.
     {
-        const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
-        const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
-        const auto unknown = ee::ee_iop_service_batch(1024u, 64u, UINT64_MAX);
-        const auto exact = ee::ee_iop_service_batch(1024u, 64u, 512u);
-        const auto before = ee::ee_iop_service_batch(1024u, 64u, 513u);
-        const auto tail = ee::ee_iop_service_batch(257u, 64u, 258u);
-        const auto capped = ee::ee_iop_service_batch(UINT64_MAX, 64u, 100000u);
-        const auto last = ee::ee_iop_service_batch(1024u, 1u, 10000u);
-        if (!check(empty.m_cycles == 0u && empty.m_turns == 0u &&
-                exhausted.m_cycles == 0u && exhausted.m_turns == 0u &&
-                unknown.m_cycles == 256u && unknown.m_turns == 1u &&
-                exact.m_cycles == 256u && exact.m_turns == 1u &&
-                before.m_cycles == 512u && before.m_turns == 2u &&
-                tail.m_cycles == 257u && tail.m_turns == 2u &&
-                capped.m_cycles == 16384u && capped.m_turns == 64u &&
-                last.m_cycles == 256u && last.m_turns == 1u,
-                "IOP idle batch planning at exact event, tail and service cap"))
-        {
-            return 1;
-        }
         for (uint32_t due = 1u; due < 1400u; due += 17u)
         {
             for (uint32_t interval = 0u; interval < 1400u; interval += 19u)
