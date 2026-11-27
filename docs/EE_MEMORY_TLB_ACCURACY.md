@@ -1236,3 +1236,25 @@ all indices, repeats, absent state, invalid op/address, slot budget.
 Require complete actual sweeps at predicted retirement
 695317/696217 and 695509/696409. No runtime cache changes.
 Pending CI; no retail replay.
+
+## M6E3G2: explicit interrupt scheduler handoff
+
+M6E3G1 passed both releases on 3578b066:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46055649575
+All 128 data and 256 instruction cache lines were visited.
+v0.7 emitted "[openbios:ee] starting EELOAD" through guest SIO.
+Both reached MFC0 v1,Status at a0014a40 (696390/696582).
+Implement canonical Status read and preserve the register high half.
+The following OR/SYNC.L produce a real requested Status 70030c01.
+Recognize canonical kernel-mode IE+EIE-enabling writes as a distinct
+host refusal, INTERRUPT_SCHEDULER_REQUIRED, without retiring the
+write, changing Status/Cause, or leaking a JAL link in a delay slot.
+Require the exact boundary at a0014a4c, 696393/696585 retirements.
+Keep existing disabled-interrupt Status support. No synthetic
+pending sources or clock advancement. The explicit next workstream
+is to replace this isolated probe domain with scheduler-owned CPU,
+RAM/TLB and devices; account elapsed EE/IOP time and pending timer/
+INTC/DMAC/SIF sources, implement precise Status commit and interrupt
+entry, and verify against real firmware traces. Do not just relax
+status_supported. Native LLVM execution and real cache coherence
+remain separate required milestones. Pending CI; no retail replay.

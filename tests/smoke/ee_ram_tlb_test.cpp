@@ -3629,6 +3629,91 @@ bool test_strict_reset_cold_cache()
         cache.instruction_count() == 256u && cpu.m_gpr[8].m_hi == 0x1234u;
 }
 
+bool test_strict_reset_interrupt_boundary()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[32u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_cop0[ee::COP0_Cause] = 0x400u;
+    cpu.m_gpr[2] = {0x30c01u, 0x1234u};
+    cpu.m_gpr[3] = {~uint64_t{0}, 0x5678u};
+    cpu.m_pc = pc;
+    const auto put = [&](uint32_t offset, uint32_t opcode)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(opcode >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    put(0u, 0x40036000u);
+    put(4u, 0x00621025u);
+    put(8u, 0x0000000fu);
+    put(12u, 0x40826000u);
+    for (uint32_t i = 0u; i < 3u; ++i)
+    {
+        if (step(1u).m_result != result::COMMITTED)
+        {
+            return false;
+        }
+    }
+    const auto refused = step(1u);
+    if (refused.m_result != result::INTERRUPT_SCHEDULER_REQUIRED ||
+        refused.m_retired != 0u || refused.m_detail_pc != pc + 12u ||
+        cpu.m_pc != pc + 12u || cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_cop0[ee::COP0_Cause] != 0x400u ||
+        cpu.m_gpr[2].m_lo != 0x70030c01u || cpu.m_gpr[2].m_hi != 0x1234u ||
+        cpu.m_gpr[3].m_lo != 0x70000000u || cpu.m_gpr[3].m_hi != 0x5678u)
+    {
+        return false;
+    }
+    // A reserved MFC0 encoding is not silently accepted.
+    cpu.m_pc = pc;
+    put(0u, 0x40036001u);
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    // Architectural zero suppresses the register write.
+    put(0u, 0x40006000u);
+    cpu.m_gpr[0] = {~uint64_t{0}, ~uint64_t{0}};
+    if (step(1u).m_retired != 1u || cpu.m_gpr[0].m_lo != ~uint64_t{0} ||
+        cpu.m_gpr[0].m_hi != ~uint64_t{0})
+    {
+        return false;
+    }
+    // Refuse an enabling write in a JAL delay slot without leaking
+    // either the link update or a partial status transition.
+    cpu.m_pc = pc;
+    cpu.m_gpr[31] = {0x12345678u, 0xabcd};
+    put(0u, 0x0c000004u);
+    put(4u, 0x40826000u);
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    const auto slot = step(2u);
+    if (slot.m_result != result::INTERRUPT_SCHEDULER_REQUIRED ||
+        slot.m_detail_pc != pc + 4u || slot.m_retired != 0u || cpu.m_pc != pc ||
+        cpu.m_gpr[31].m_lo != 0x12345678u || cpu.m_gpr[31].m_hi != 0xabcdu ||
+        cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_cop0[ee::COP0_Cause] != 0x400u)
+    {
+        return false;
+    }
+    // Existing interrupt-disabled Status writes remain supported.
+    put(0u, 0x40826000u);
+    cpu.m_gpr[2].m_lo = 0x60000000u;
+    return step(1u).m_retired == 1u && cpu.m_pc == pc + 4u &&
+        cpu.m_cop0[ee::COP0_Status] == 0x60000000u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3856,6 +3941,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_interrupt_boundary(), "strict reset Status read and interrupt scheduler boundary"))
     {
         return 1;
     }

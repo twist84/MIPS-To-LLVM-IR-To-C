@@ -182,6 +182,14 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     std::printf("EE exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x entered_ram=%u\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address, static_cast<unsigned>(entered_ram));
+    if (stop.m_result == ee::e_ee_reset_prefix_result::INTERRUPT_SCHEDULER_REQUIRED)
+    {
+        const uint32_t rt = (stop.m_opcode >> 16u) & 31u;
+        std::printf("EE exploration interrupt boundary: retired=%u pc=%08x current=%08x requested=%08x cause=%08x intc_mask=%08x intc_stat=%08x\n",
+            retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Status],
+            static_cast<uint32_t>(rt == 0u ? 0u : cpu.m_gpr[rt].m_lo),
+            cpu.m_cop0[ee::COP0_Cause], vif_devices.intc_mask(), vif_devices.intc_status());
+    }
     std::printf("EE exploration VIF resets: vif0=%u vif1=%u\n",
         vif_devices.reset_count(0u), vif_devices.reset_count(1u));
     std::printf("EE exploration VIF FIFO: vif0=%u vif1=%u\n",
@@ -1514,6 +1522,22 @@ int main(int argc, char** argv)
             retired, cpu.m_pc, stop.m_opcode);
         return 81;
     }
+    if (retired != 696393u || cpu.m_pc != 0xa0014a4cu ||
+        stop.m_result != ee::e_ee_reset_prefix_result::INTERRUPT_SCHEDULER_REQUIRED ||
+        stop.m_opcode != 0x40826000u || stop.m_detail_pc != cpu.m_pc ||
+        cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_gpr[2].m_lo != 0x70030c01u || cpu.m_gpr[3].m_lo != 0x70000000u ||
+        cpu.m_cop0[ee::COP0_Cause] != 0u ||
+        vif_devices.intc_mask() != 0x1002u || vif_devices.intc_status() != 0u)
+    {
+        std::fprintf(stderr, "EELOAD interrupt boundary mismatch: retired=%u pc=%08x opcode=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode);
+        return 84;
+    }
+    std::printf("EELOAD interrupt boundary: retired=%u pc=%08x current=%08x requested=%08x cause=%08x intc_mask=%08x intc_stat=%08x\n",
+        retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Status],
+        static_cast<uint32_t>(cpu.m_gpr[2].m_lo), cpu.m_cop0[ee::COP0_Cause],
+        vif_devices.intc_mask(), vif_devices.intc_status());
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);

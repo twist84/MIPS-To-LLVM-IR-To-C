@@ -58,7 +58,8 @@ enum class e_ee_reset_prefix_result : uint8_t
     FETCH_UNAVAILABLE,
     UNSUPPORTED_OPCODE,
     BUDGET_EXHAUSTED,
-    DATA_UNAVAILABLE
+    DATA_UNAVAILABLE,
+    INTERRUPT_SCHEDULER_REQUIRED
 };
 
 struct s_ee_reset_prefix_step
@@ -303,6 +304,22 @@ static_assert(!status_supported(STATUS_BEV));
 static_assert(!status_supported(0x70000001u));
 static_assert(!status_supported(0x80000000u));
 
+// A canonical kernel-mode Status write enabling interrupt delivery
+// cannot retire in this executor: it has neither an authoritative
+// clock nor the real pending-source/exception scheduling contract.
+inline constexpr bool status_requires_interrupt_scheduler(uint32_t status)
+{
+    constexpr uint32_t enable = STATUS_IE | STATUS_EIE;
+    constexpr uint32_t edi = 1u << 17u;
+    constexpr uint32_t supported_handoff_bits = 0x70000000u | enable | edi | STATUS_IM_MASK;
+    return (status & enable) == enable &&
+        (status & ~supported_handoff_bits) == 0u;
+}
+static_assert(status_requires_interrupt_scheduler(0x70030c01u));
+static_assert(!status_requires_interrupt_scheduler(0x70000000u));
+static_assert(!status_requires_interrupt_scheduler(0x70000001u));
+static_assert(!status_requires_interrupt_scheduler(0x70030c03u));
+
 // No memory, branches, clocks or general COP0 side effects.
 inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode,
     c_ee_tlb* persistent_tlb)
@@ -455,7 +472,11 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             cpu.m_cop0[COP0_Config] = ee_strict_reset_config_value(config);
             return true;
         }
-        if ((opcode & 0xffe0ffffu) == 0x40008000u) // MFC0 rt,Config
+        if ((opcode & 0xffe0ffffu) == 0x40006000u) // MFC0 rt,Status
+        {
+            value = sign_extend_word(cpu.m_cop0[COP0_Status]);
+        }
+        else if ((opcode & 0xffe0ffffu) == 0x40008000u) // MFC0 rt,Config
         {
             value = sign_extend_word(cpu.m_cop0[COP0_Config]);
         }
@@ -520,6 +541,12 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
+    if ((opcode & 0xffe0ffffu) == 0x40806000u &&
+        status_requires_interrupt_scheduler(static_cast<uint32_t>(
+            read_gpr(cpu, (opcode >> 16u) & 31u))))
+    {
+        return {result::INTERRUPT_SCHEDULER_REQUIRED, opcode, 0u, pc};
+    }
     if (primary == 0x2fu)
     {
         const uint32_t imm = opcode & 0xffffu;
