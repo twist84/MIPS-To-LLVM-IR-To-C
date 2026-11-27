@@ -43,6 +43,49 @@ consteval bool test_dependency_capacity()
 
 static_assert(test_dependency_capacity(), "VU1 expanded lane capacity and VI deduplication");
 
+consteval bool test_lane_lists()
+{
+    for (uint32_t mask = 0u; mask < 16u; ++mask)
+    {
+        ee::s_ee_vu1_use use{};
+        use.read(3u, mask);
+        use.write(4u, mask);
+        uint32_t index = 0u;
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                if (use.m_read_lanes[index] != 12u + lane ||
+                    use.m_write_lanes[index] != 16u + lane)
+                {
+                    return false;
+                }
+                ++index;
+            }
+        }
+        if (use.m_read_lane_count != index || use.m_write_lane_count != index ||
+            index != static_cast<uint32_t>(std::popcount(mask)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(test_lane_lists(), "all VU1 lane masks expand in X-to-W order");
+
+static_assert(ee::vu1_fp::leading_zeroes(0u) == 32);
+static_assert(ee::vu1_fp::leading_zeroes(1u) == 31);
+static_assert(ee::vu1_fp::leading_zeroes(0x80000000u) == 0);
+static_assert(ee::vu1_fp::bit_copy<uint64_t>(-0.0) == 0x8000000000000000ull);
+static_assert(ee::vu1_fp::from_double(ee::vu1_fp::to_double(0x7fffffffu)) == 0x7fffffffu);
+static_assert(ee::vu1_fp::from_double(ee::vu1_fp::to_double(0x80000001u)) == 0x80000000u);
+static_assert(ee::vu1_fp::max(0x80000000u, 0u) == 0u);
+static_assert(ee::vu1_fp::min(0x80000000u, 0u) == 0x80000000u);
+static_assert(ee::vu1_fp::cvt_w_s(0x40000000u) == 2u);
+static_assert(ee::vu1_fp::cvt_s_w(0xfffffffeu) == 0xc0000000u);
+
+
 consteval bool test_dependency_scoreboard()
 {
     ee::s_ee_vu1_use producer{};
