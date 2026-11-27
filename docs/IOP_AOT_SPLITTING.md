@@ -636,3 +636,62 @@ with `--discover-targets --cross-block --cap-adjacent-tables` and run
 the pinned 40M-dispatch retail replay. I13c remains the accepted
 correctness baseline until that validation passes. No EE/VU1/runtime
 changes or EE rebuild are needed.
+
+## I14c acceptance and range-guard evidence
+
+Archive `ee-iop-i14c.zip`, SHA-256
+`0c898bf802832ca2e928c9aa672e53127bc5d2e06589d60e0a9737ade7b565aa`.
+The capped shadow exactly confirms the predicted inventory: 1,074
+candidate roots, ten tables, 190 slots, 85 distinct edges, 49,627 reached
+words, 41,013 eligible ordinary PCs and 15,655 residual PCs, with no
+ownership conflicts, delay overlaps or rejected seeds. No dynamic target
+exhaustiveness claim is made.
+
+Retail correctness accepted: `build/iop-native-split-i14c-candidate/modules`.
+The 40M-dispatch replay has 184,700 matching samples, zero divergent
+or unpaired samples, 3,127/3,127 polls, 7/7 active modules, 67,846,006
+retired native IOP instructions and 12,611,090 native entries. Report
+and framebuffer independently match byte-for-byte. Inputs unchanged.
+Both replacement DLL hashes match the receipt and all five reused hashes
+match I13c. Both replacement COFF timestamps are zero, validating the
+I16b linker option on Windows (not yet a repeat-link reproducibility test).
+Control 41.062 s, candidate 40.172 s, translated execution 591.5 ms,
+refresh 1.7 ms. No performance acceptance on a single pair.
+
+The uploaded predecessor contexts also show an SLTIU index comparison
+and a BEQ-to-zero guard on the fallthrough path into the index shift
+at each of the ten table sites. The immediate bounds match the
+capped pointer counts: ARKD_DVD 18,50,33,8; MCMAN 16,7; LIBSD 9,20,20,9.
+In particular LIBSD 0x4eb44 compares the index against 20 before the
+branch at 0x4eb48, supporting the independently recovered boundary at
+0x50330. This is static path evidence, not proof that all dynamic
+arrivals obey the guard or that table memory is immutable.
+
+## I16c — Bounded residual dispatch partition pilot
+
+MCMAN and LIBSD I14c compilation: 296 objects, zero cache hits,
+17.906 s compile, 0.281 s link. The MCMAN residual object alone took
+17.906 s (2,069,643 IR bytes, 727,140 object bytes). Remaining residual
+counts: CRI_ADXI 4,549; MCMAN 4,506; PADMAN 3,060; ARKD_DVD 1,655;
+LIBSD 1,046; SIO2MAN 427; MCSERV 412.
+
+The opt-in `--split-residual-max-pcs N` requires residual splitting.
+It slices the ascending residual PC list into deterministic chunks
+of at most N dispatch PCs after the existing function regions, with
+no change to function discovery or function-region IDs. The full
+aligned dispatch domain is checked for exact coverage without
+duplicates. No lifter or runtime change; delay-slot emission remains
+the lifter's responsibility. Default plans remain unchanged.
+These chunks are dispatch partitions, not discovered functions.
+More boundaries may increase dispatcher exits or code size; retail
+correctness and compile/run performance must be measured separately.
+
+Initial pilot: 1,024 residual PCs per partition for CRI_ADXI, MCMAN,
+PADMAN (5, 5, 3 partitions respectively). Keep the four unaffected
+I14c libraries. Retain original ELF/relocation and cross-block table
+options. Use a fresh output path and existing region cache; changing
+the plan SHA invalidates the current plan-bound object cache even for
+unchanged function IR. Do not compare warm and cold times as if
+equivalent. Regression fixtures cover limits of 1, 3, 4 and 8, invalid
+limits, unchanged function IDs, exact coverage and default behavior.
+Latest CI and real candidate validation pending.
