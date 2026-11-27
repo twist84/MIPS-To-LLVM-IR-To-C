@@ -825,9 +825,21 @@ No production runtime changes.
 Require the Status checkpoint at 251578 retirements, pc a0010008.
 Execute the authentic guest clear loop with the existing BEQ/SB/
 ADDIU implementation. Require 653348 retirements at a001003c,
-stack a007ffe0 and 80352 zero bytes in [0002a3b0,0003dd90), with
+stack a007ffe0 and 80352 zero bytes in [0001a3b0,0002dd90), with
 both adjacent sentinels intact and the copied image unchanged.
 Check the initial range is entirely sentinel-filled. These values
 are predictions from the observed instruction stream, pending CI.
 Do not replace the loop with a host memset. Report the next actual
 stop and bounded live lookahead. No retail replay required.
+
+M6E2G1 CI run 46045990404/job 140665290554 confirmed the Status
+checkpoint at 251578 retirements and reached a001003c, but the
+clear assertion counted only 14816/80352 bytes. The independently
+predicted addresses incorrectly treated the ADDIU immediates a3b0
+and dd90 as unsigned. They are -5c50 and -2270 respectively,
+so the actual physical range is [0001a3b0,0002dd90). The observed
+14816 bytes equal the overlap of the two ranges. The retirement
+count, loop size, stack expectation and all integrity checks
+remain unchanged; the interpreter itself is not modified.
+The corrected regression still requires authentic CI validation.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46045990404/job/140665290554

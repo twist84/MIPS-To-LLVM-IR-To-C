@@ -360,8 +360,13 @@ int main(int argc, char** argv)
     std::printf("EELOAD Status: retired=%u pc=%08x status=%08x\n",
         retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Status]);
 
-    constexpr uint32_t clear_begin = 0x0002a3b0u;
-    constexpr uint32_t clear_end = 0x0003dd90u;
+    // ADDIU sign-extends a3b0 (-5c50) and dd90 (-2270).
+    // Compute the physical endpoints independently of the executor.
+    constexpr uint32_t clear_begin = 0x00020000u - 0x5c50u;
+    constexpr uint32_t clear_end = 0x00030000u - 0x2270u;
+    static_assert(clear_begin == 0x0001a3b0u);
+    static_assert(clear_end == 0x0002dd90u);
+    static_assert(clear_begin > destination + image_size);
     constexpr uint32_t clear_size = clear_end - clear_begin;
     // Ten initial instructions, five per byte, then the final taken
     // BEQ and its slot. Check the whole region before and after.
@@ -399,14 +404,19 @@ int main(int argc, char** argv)
         }
     }
     if (cpu.m_pc != 0xa001003cu || cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
-        cpu.m_gpr[8].m_lo != 0xffffffffa003dd90ull ||
-        cpu.m_gpr[9].m_lo != 0xffffffffa003dd90ull ||
+        cpu.m_gpr[8].m_lo != 0xffffffffa002dd90ull ||
+        cpu.m_gpr[9].m_lo != 0xffffffffa002dd90ull ||
         cpu.m_gpr[29].m_lo != 0xffffffffa007ffe0ull ||
         cleared != clear_size || ram_bytes[clear_begin - 1u] != 0xa5u ||
         ram_bytes[clear_end] != 0xa5u)
     {
-        std::fprintf(stderr, "EELOAD clear checkpoint mismatch: pc=%08x cleared=%u/%u\n",
-            cpu.m_pc, cleared, clear_size);
+        std::fprintf(stderr, "EELOAD clear checkpoint mismatch: retired=%u pc=%08x status=%08x cleared=%u/%u t0=%016llx t1=%016llx sp=%016llx guard_before=%02x guard_after=%02x\n",
+            retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Status], cleared, clear_size,
+            static_cast<unsigned long long>(cpu.m_gpr[8].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[9].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[29].m_lo),
+            static_cast<unsigned>(ram_bytes[clear_begin - 1u]),
+            static_cast<unsigned>(ram_bytes[clear_end]));
         return 26;
     }
     for (uint32_t i = 0u; i < image_size; ++i)
