@@ -418,6 +418,62 @@ def compact_split_router(router, plan, narrow_ids=False):
     return table + router.replace(old, replacement, 1)
 
 
+def shared_split_memory_helpers(regions):
+    """Outline width-specialized RAM/MMIO helpers into one object per IRX.
+
+    Reuse the lifter's exact helper definitions; keep guards, retirement
+    and fault exits at the original call sites. Do not alter unused regions.
+    """
+    if not regions:
+        raise ValueError("shared memory helpers need region IR")
+    prefix = None
+    rewritten = []
+    used = set()
+    for ir in regions:
+        match = re.search(r"(?m)^define dso_local i32 @iop_aot_fn_region_\d+\(", ir)
+        if not match or "@iop_shared_" in ir:
+            raise ValueError("unexpected region IR for shared memory helpers")
+        head, body = ir[:match.start()], ir[match.start():]
+        if prefix is None:
+            prefix = head
+        if head != prefix:
+            raise ValueError("inconsistent lifter helper definitions")
+        declarations = set()
+
+        def rewrite(call):
+            kind, address, width, operand = call.groups()
+            signature = (kind, int(width))
+            used.add(signature)
+            declarations.add(signature)
+            return (f"@iop_shared_{kind}_{width}(ptr %c, i32 {address}, "
+                    f"{operand})")
+
+        changed = re.sub(
+            r"@iop_(ld|st)\(ptr %c, i32 (%t\d+), i32 ([124]), (ptr %ldv|i32 (?:%t\d+|0))\)",
+            rewrite, body)
+        if re.search(r"@iop_(ld|st)\(", changed):
+            raise ValueError("unrecognized lifter memory helper call")
+        decls = "".join(
+            f"declare hidden i1 @iop_shared_{kind}_{width}(ptr, i32, "
+            f"{'ptr' if kind == 'ld' else 'i32'})\n"
+            for kind, width in sorted(declarations))
+        rewritten.append(head + decls + changed if declarations else ir)
+
+    if not used:
+        return rewritten, None
+    wrappers = []
+    for kind, width in sorted(used):
+        operand = "ptr" if kind == "ld" else "i32"
+        wrappers.append(
+            f"define hidden i1 @iop_shared_{kind}_{width}(ptr %c, i32 %a, "
+            f"{operand} %value) noinline {{\n"
+            "entry:\n"
+            f"  %ok = call i1 @iop_{kind}(ptr %c, i32 %a, i32 {width}, "
+            f"{operand} %value)\n"
+            "  ret i1 %ok\n}\n")
+    return rewritten, prefix + "\n".join(wrappers)
+
+
 def split_cache_key(source, provenance, reuse_ir=False):
     payload = {"schema": 1, "ir_sha256": sha256_file(source),
                "provenance": provenance}
@@ -524,6 +580,9 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
         if not sources:
             raise ValueError(f"split pilot emitted no region IR: {stem}")
         sources += [ir_dir / f"{stem}.ll", ir_dir / f"{stem}.table.ll"]
+        helper = ir_dir / f"{stem}.helpers.ll"
+        if getattr(args, "split_shared_memory_helpers", False) and helper.is_file():
+            sources.append(helper)
         sources_by_stem[stem] = sources
 
     jobs = split_compile_schedule(sources_by_stem)
@@ -598,6 +657,7 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
             "router": ("compact-narrow" if getattr(args, "split_narrow_router", False)
                        else "compact" if getattr(args, "split_compact_router", False)
                        else "switch"),
+            "shared_memory_helpers": getattr(args, "split_shared_memory_helpers", False),
             "compile_seconds": compile_seconds, "link_seconds": linked - link_started,
             "cache_hits": hits, "object_bytes": object_bytes,
             "library_bytes": library_bytes, "objects": observations,
@@ -653,6 +713,8 @@ def main():
                            help="Compile an exact staged IRX stem in regions (repeatable)")
     selection.add_argument("--split-all", action="store_true",
                            help="Compile all staged IRXs in regions")
+    parser.add_argument("--split-shared-memory-helpers", action="store_true",
+                        help="Experimental: shared width-specialized memory helpers per split IRX")
     parser.add_argument("--split-narrow-router", action="store_true",
                         help="Use i8 region IDs when compact dispatch has at most 255 regions")
     parser.add_argument("--split-compact-router", action="store_true",
@@ -675,6 +737,8 @@ def main():
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
     split_mode = args.split_all or bool(args.split_module)
+    if args.split_shared_memory_helpers and not split_mode:
+        parser.error("--split-shared-memory-helpers requires --split-module or --split-all")
     if args.split_narrow_router and not args.split_compact_router:
         parser.error("--split-narrow-router requires --split-compact-router")
     if args.split_compact_router and not split_mode:
@@ -793,6 +857,17 @@ def build(args, out):
                     router_path.write_text(compact, encoding="utf-8")
                     print(f"{stem}: compact router {len(router.encode('utf-8'))} -> "
                           f"{len(compact.encode('utf-8'))} IR bytes")
+                if args.split_shared_memory_helpers:
+                    paths = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
+                    original = [path.read_text(encoding="utf-8") for path in paths]
+                    rewritten, helper = shared_split_memory_helpers(original)
+                    for path, before, after in zip(paths, original, rewritten):
+                        if before != after:
+                            path.write_text(after, encoding="utf-8")
+                    if helper is not None:
+                        (ir_dir / f"{stem}.helpers.ll").write_text(helper, encoding="utf-8")
+                    print(f"{stem}: outlined memory helpers in "
+                          f"{sum(a != b for a, b in zip(original, rewritten))} regions")
                 provenance_by_stem[stem] = (
                     {**common_provenance,
                      "plan_sha256": sha256_file(plan),
