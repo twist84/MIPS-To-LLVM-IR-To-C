@@ -12,12 +12,14 @@ import recover_translation_cache as recovery
 import run_game
 import run_known_replays as known
 import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
 
 
 PROFILE_DIRS = {0: "", 1: "O1", 2: "O2", 3: "O3",
                 4: "IR-O2", 5: "O2-native"}
 
 
+@metrics.measure("manifest_selection")
 def active_manifest(elf, base):
     """Use the actual shared inventory, not a possibly stale O0 snapshot."""
     metadata_path = base / "ir" / "ee_functions.json"
@@ -83,6 +85,8 @@ def refresh(elf, build, config, base, opt, jobs):
             comparison = known.reconstruct(
                 manifest, entries, elf, build, config, stage, jobs, True,
                 ir_only=True)
+            metrics.details("known_modules", len(entries))
+            metrics.details("ir_comparison", comparison)
             if comparison["missing"] or comparison["extra"]:
                 raise ValueError("re-emitted module inventory changed")
             staged_meta = staged_ir / "ee_functions.json"
@@ -96,10 +100,11 @@ def refresh(elf, build, config, base, opt, jobs):
             metadata["elf"] = shared_ir.relative_path(elf, ir)
             shared_ir.write_json(staged_meta, metadata)
             shared_ir.publish(staged_meta, sources, hashes)
-            ir.rename(previous)
-            old_moved = True
-            staged_ir.rename(ir)
-            active_replaced = True
+            with metrics.stage("cache_promotion"):
+                ir.rename(previous)
+                old_moved = True
+                staged_ir.rename(ir)
+                active_replaced = True
             metadata_path = ir / "ee_functions.json"
             if shared_ir.elf_path(metadata, ir) != elf:
                 raise ValueError("re-emitted ELF reference changed")
@@ -117,7 +122,8 @@ def refresh(elf, build, config, base, opt, jobs):
                                           library, opt, emit_jobs=jobs)
             run_game.write_translation_cache(cache, inputs, opt, metadata_path,
                                              library, sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata_path, library)
+            with metrics.stage("cache_validation"):
+                run_game.validate_translation_cache(cache, inputs, opt, metadata_path, library)
         except BaseException:
             # Do not authorize a replay on failure. Restore source and its
             # old snapshot; modified native objects still need validation.
@@ -146,12 +152,18 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", required=True, type=Path)
     parser.add_argument("--emit-opt", type=int, choices=range(6), required=True)
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--timings-report", type=Path,
+                        help="new JSON report path; default is beside the cache")
     args = parser.parse_args(argv)
     if not 1 <= args.emit_jobs <= 32:
         parser.error("--emit-jobs must be in 1..32")
     try:
-        refresh(args.elf, args.build_dir, args.config, args.base_work_dir,
-                args.emit_opt, args.emit_jobs)
+        output = args.timings_report or metrics.default_report(args.base_work_dir, "refresh")
+        with metrics.report("refresh", output, cache=str(args.base_work_dir.resolve()),
+                            elf=str(args.elf.resolve()), jobs=args.emit_jobs,
+                            profile=args.emit_opt):
+            refresh(args.elf, args.build_dir, args.config, args.base_work_dir,
+                    args.emit_opt, args.emit_jobs)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             subprocess.SubprocessError) as error:
         print(f"EE IR overwrite failed; replay not started: {error}", file=sys.stderr)

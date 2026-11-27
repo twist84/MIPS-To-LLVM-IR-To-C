@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager, ExitStack
+import recovery_metrics as metrics
 
 
 def seven_zip():
@@ -79,6 +80,7 @@ def verify_ir_backup(root):
     return inventory
 
 
+@metrics.measure("backup_creation")
 def partition_backup(backup, preserved_profiles=()):
     """After successful promotion, separate recovery artifacts from old native data.
 
@@ -165,6 +167,7 @@ def partition_backup(backup, preserved_profiles=()):
     return ir_backup
 
 
+@metrics.measure("backup_archive_total")
 def compress_backup(backup, *, level=1):
     """Archive only after promotion succeeds; preserve the directory on failure."""
     if level not in (1, 3, 5, 7, 9):
@@ -191,15 +194,19 @@ def compress_backup(backup, *, level=1):
                             "-ms=on", "-y", str(pending), "*"],
                            cwd=backup, check=True)
             compression_seconds = time.monotonic() - started
+            metrics.add("backup_compression", compression_seconds)
             started = time.monotonic()
             subprocess.run([executable, "t", str(pending)], check=True)
             verification_seconds = time.monotonic() - started
+            metrics.add("backup_verification", verification_seconds)
             if archive.exists():
                 raise FileExistsError(archive)
             pending.rename(archive)
         except (OSError, subprocess.CalledProcessError) as error:
             print(f"WARNING: 7-Zip backup failed ({error}); retained: {backup}", flush=True)
             return backup
+    metrics.details("backup", {"compression_level": level, "input_bytes": total_bytes,
+                               "archive_bytes": archive.stat().st_size})
     print(f"Backup compression: level={level} input_bytes={total_bytes} "
           f"archive_bytes={archive.stat().st_size} "
           f"compression={compression_seconds:.3f}s "

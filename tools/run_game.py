@@ -30,6 +30,7 @@ _tools_path = str(Path(__file__).resolve().parent)
 if _tools_path not in sys.path:
     sys.path.insert(0, _tools_path)
 import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
 
 
 STOP_PATTERN = re.compile(
@@ -66,6 +67,7 @@ def sha256_path(path):
     return digest.hexdigest()
 
 
+@metrics.measure("native_input_fingerprints")
 def translation_inputs(elf, recomp, source_root):
     """Fingerprint the ELF and every local input that builds translated code."""
     paths = [
@@ -97,6 +99,7 @@ def translation_inputs(elf, recomp, source_root):
 
 
 
+@metrics.measure("source_fingerprints")
 def ir_generation_inputs(elf, source_root):
     """Separate guest lowering source fingerprints from host-only runtime code."""
     paths = [("ELF", elf)]
@@ -125,6 +128,7 @@ def ir_generation_inputs(elf, source_root):
     return shared_ir.fingerprint_sources(paths, binary_keys={"ELF"})
 
 
+@metrics.measure("ir_hash_verification")
 def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
     """Hash every module, resolving the ordinary directory only once.
 
@@ -462,6 +466,7 @@ def validate_preserved_translation(path, inputs, ir_sources,
     return [], True
 
 
+@metrics.measure("manifest_archive")
 def archive_known_function_manifest(path, snapshot):
     """Save verified entry/hash snapshots outside the disposable guest cache.
 
@@ -512,6 +517,7 @@ def archive_known_function_manifest(path, snapshot):
         temporary.unlink(missing_ok=True)
 
 
+@metrics.measure("translation_receipt_publication")
 def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
                             ir_sources=None):
     """Commit provenance only after the complete translated library is linked."""
@@ -927,8 +933,35 @@ def parse_trace_v0(value):
 
 def run(command, capture=False, timeout_seconds=None):
     print("+ " + subprocess.list2cmdline([str(item) for item in command]), flush=True)
+    argv = [str(item) for item in command]
+    kind = Path(argv[0]).stem
+    if kind.startswith("python") and len(argv) > 1:
+        kind = Path(argv[1]).stem
+    measured = metrics.active() is not None and kind in {
+        "ee_recomp", "verify_ir", "link_native_objects"}
+    if measured:
+        metrics.count(kind + "_invocations")
+    # Recovery tools have no subprocess timeout; stream their progress as
+    # before, while retaining only the small timing records. Leave ordinary
+    # guest execution and capture/timeout behavior untouched.
+    if measured and not capture and timeout_seconds is None:
+        with metrics.stage(kind + "_process_wall"):
+            with subprocess.Popen(argv, text=True, stdout=subprocess.PIPE,
+                                  env=dict(os.environ, EE_RECOVERY_TIMINGS="1")) as child:
+                try:
+                    for line in child.stdout:
+                        print(line, end="", flush=True)
+                        metrics.observe_line(line, kind)
+                    code = child.wait()
+                except BaseException:
+                    child.kill()
+                    child.wait()
+                    raise
+                if code:
+                    raise subprocess.CalledProcessError(code, argv)
+            return subprocess.CompletedProcess(argv, code)
     result = subprocess.run(
-        [str(item) for item in command],
+        argv,
         text=True,
         capture_output=capture,
         check=not capture,
@@ -966,6 +999,7 @@ def native_executable(build_dir, name, config="Release"):
     return executable
 
 
+@metrics.measure("python_coverage")
 def covered_pcs(metadata):
     return {
         int(pc, 0)
@@ -974,6 +1008,7 @@ def covered_pcs(metadata):
     }
 
 
+@metrics.measure("batch_transaction")
 def batch_append_functions(recomp, elf, work, metadata_path, addresses,
                            *, reserved_entries=()):
     """Translate a group of newly reachable entries in one discovery pass.
@@ -983,7 +1018,8 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     translations and preserving existing guest block-PC ownership.
     Return the exact NEW IR paths for incremental object emission.
     """
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    with metrics.stage("metadata_read_parse"):
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     shared_state = None
     if shared_ir.active(metadata_path):
         recorded = shared_ir.read_json(metadata_path.parent / shared_ir.PROVENANCE)
@@ -1011,9 +1047,10 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     if discovery_cache.is_file():
         command.append(f"--discovery-cache={discovery_cache}")
     run(command)
-    extra_metadata = json.loads(
-        (output_dir / "ee_functions.json").read_text(encoding="utf-8")
-    )
+    with metrics.stage("metadata_read_parse"):
+        extra_metadata = json.loads(
+            (output_dir / "ee_functions.json").read_text(encoding="utf-8")
+        )
     raw_functions = extra_metadata.get("functions")
     if not isinstance(raw_functions, list):
         raise ValueError("batch recompiler emitted invalid function metadata")
@@ -1101,9 +1138,10 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
         )
         metadata["function_count"] = len(metadata["functions"])
         tmp_meta = metadata_path.with_name(metadata_path.name + ".tmp")
-        tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
-                            encoding="utf-8")
-        tmp_meta.replace(metadata_path)
+        with metrics.stage("metadata_serialization_publication"):
+            tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
+                                encoding="utf-8")
+            tmp_meta.replace(metadata_path)
     except (OSError, ValueError):
         for temporary, _ in staged:
             temporary.unlink(missing_ok=True)
@@ -1155,6 +1193,7 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
         return False
 
 
+@metrics.measure("native_build_total")
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
                          appended_ir=None, cache_base=None, emit_only=False):

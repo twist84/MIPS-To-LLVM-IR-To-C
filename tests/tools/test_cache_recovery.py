@@ -14,6 +14,7 @@ import refresh_known_ir as refresh
 import run_game
 import shared_ee_ir as shared_ir
 import cache_backup
+import recovery_metrics as metrics
 import subprocess
 
 
@@ -517,6 +518,39 @@ def test_backup_benchmark_payload_selection_and_timings():
         assert not list(root.glob(".ee-backup-benchmark-*"))
 
 
+def test_recovery_timing_report_is_opt_in_and_preserves_failures():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "timings.json"
+        with metrics.report("test", output, jobs=2):
+            with metrics.stage("outer"):
+                metrics.count("ee_recomp_invocations")
+                metrics.observe_line(
+                    "ee_recomp timings: discovery=200.0ms coverage=30.0ms IR=10.0ms",
+                    "ee_recomp")
+            metrics.observe_line(metrics.CHILD_PREFIX + json.dumps({
+                "tool": "verify_ir", "stages": {"native_compile_wall": 2.0},
+                "worker_seconds": 3.5, "cache_hits": 4, "cache_misses": 2,
+            }), "verify_ir")
+        report = json.loads(output.read_text(encoding="utf-8"))
+        assert report["status"] == "success"
+        assert report["stages"]["discovery"]["seconds"] == 0.2
+        assert report["stages"]["native_compile_wall"]["seconds"] == 2.0
+        assert report["child_reports"][0]["worker_seconds"] == 3.5
+        assert report["counts"]["recompiler_timing_records"] == 1
+        assert metrics.active() is None
+        failure = root / "failed.json"
+        try:
+            with metrics.report("test", failure):
+                raise ValueError("fixture failure")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("timing instrumentation suppressed an error")
+        assert json.loads(failure.read_text(encoding="utf-8"))["status"] == "failed"
+        assert metrics.active() is None
+
+
 def test_verified_maximum_compression_backup():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -700,6 +734,7 @@ def main():
     test_overwrite_launcher_routes_before_preflight()
     test_ir_only_backup_partition_preserves_native_and_authenticates()
     test_backup_benchmark_payload_selection_and_timings()
+    test_recovery_timing_report_is_opt_in_and_preserves_failures()
     test_verified_maximum_compression_backup()
     test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()

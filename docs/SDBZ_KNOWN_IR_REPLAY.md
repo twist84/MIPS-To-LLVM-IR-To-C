@@ -263,3 +263,21 @@ integrity, exact-ELF scoping, changed-source opt-in, safe active pointers,
 failure preservation, and activation only after validation. Its fixtures
 are synthetic; testing against a real user-owned 1,296-function cache
 remains an end-to-end acceptance step.
+
+
+## Recovery and known-IR refresh timings (R3)
+
+Actual recovery and overwrite-IR operations publish a console stage summary
+and a timestamped JSON report beside the canonical cache. The Python tools
+also accept `--timings-report PATH` (must be a new file). Stage times are
+inclusive, not additive. Child recompiler discovery, coverage and LLVM IR
+emission times use the existing native timing output; process wall time
+includes startup, ELF loading and other overhead. Native verification reports
+cache hits/misses, worker count, total worker time, per-worker parse/verify,
+emission and I/O/hash sums, compile wall time, throughput and slowest module.
+Link and backup timing records distinguish preparation, actual linker time,
+compression and archive testing. Failed operations report failure without
+suppressing the original exception. No extra IR scan is performed for timing.
+The existing native discovery timing cannot separately resolve ELF loading
+or internal metadata serialization; the Python metadata timings cover the
+instrumented Python operations. A report is not execution or cache provenance.

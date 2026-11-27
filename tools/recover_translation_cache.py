@@ -28,6 +28,7 @@ import run_game
 import run_known_replays
 import shared_ee_ir as shared_ir
 import cache_backup
+import recovery_metrics as metrics
 
 
 def history_dir(base_work):
@@ -117,13 +118,15 @@ def manifest_candidates(base_work):
     return list(dict.fromkeys(candidates))
 
 
+@metrics.measure("manifest_selection")
 def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
     """Pick the largest authentic-ELF known-function inventory available.
 
     Prefer same-lowering-source snapshots at equal function counts. A source
     change requires explicit opt-in and never weakens the ELF hash guard.
     """
-    expected_elf = run_game.sha256_path(elf)
+    with metrics.stage("elf_hashing"):
+        expected_elf = run_game.sha256_path(elf)
     selected = []
     for candidate in manifest_candidates(base_work):
         if not candidate.is_file():
@@ -229,6 +232,7 @@ def migrate_source_fingerprints(elf, base_work, source_root):
         return changed
 
 
+@metrics.measure("verified_ir_copy")
 def stage_verified_ir(elf, source, work, manifest, ir_sources):
     """Copy a verified map and byte-identical modules, never re-lift them."""
     metadata_path = shared_ir.ir_directory(source) / "ee_functions.json"
@@ -263,6 +267,7 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
             "expected": len(hashes), "observed": len(hashes), "matching": len(hashes)}
 
 
+@metrics.measure("cache_promotion")
 def promote_canonical(base_work, work, validate, *, elf=None,
                       preserved_profiles=()):
     """Promote a child staging cache, retaining old contents and legacy profiles.
@@ -359,6 +364,7 @@ def promote_pointer(base_work, work):
         temporary.unlink(missing_ok=True)
 
 
+@metrics.measure("cache_validation")
 def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
     """Authenticate the relocated guest IR and native objects before publication."""
     from link_native_objects import load_inputs
@@ -419,6 +425,9 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
     candidate, manifest, entries, same_sources = select_manifest(
         base_work, elf, ir_sources, allow_ir_changes
     )
+    metrics.details("selected_manifest", str(candidate))
+    metrics.details("known_modules", len(entries))
+    metrics.details("lowering_sources_match", same_sources)
     previous_cache = active_work(base_work)
     work = new_recovery_work(base_work)
     print(
@@ -479,6 +488,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
         if comparison is None:
             comparison = run_known_replays.reconstruct(
                 manifest, entries, elf, build, config, work, jobs, allow_ir_changes)
+        metrics.details("ir_comparison", comparison)
         (work / "ir-comparison.json").write_text(
             json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
         validate(work)
@@ -541,6 +551,8 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", type=Path,
                         default=Path("build/ps2-game-hle"))
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--timings-report", type=Path,
+                        help="new JSON report path; default is beside the cache")
     parser.add_argument("--full-native-backup", action="store_true",
                         help="also archive displaced native objects, libraries and reports")
     parser.add_argument("--allow-ir-changes", action="store_true",
@@ -573,8 +585,13 @@ def main(argv=None):
             print(f"EE source preflight: {count} known functions; "
                   "current lowering and metadata match", flush=True)
         else:
-            recover(elf, build, args.config, base_work, args.emit_jobs,
-                    args.allow_ir_changes, full_native_backup=args.full_native_backup)
+            report = args.timings_report or metrics.default_report(base_work, "recovery")
+            with metrics.report("recovery", report, cache=str(base_work),
+                                elf=str(elf), jobs=args.emit_jobs, profile=0,
+                                allow_ir_changes=args.allow_ir_changes,
+                                full_native_backup=args.full_native_backup):
+                recover(elf, build, args.config, base_work, args.emit_jobs,
+                        args.allow_ir_changes, full_native_backup=args.full_native_backup)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
                   else "EE source preflight refused" if args.check_active_source

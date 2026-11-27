@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import recovery_metrics as metrics
 
 MARKER = "shared-ir.json"
 PROVENANCE = ".shared-ir-provenance.json"
@@ -12,6 +13,7 @@ MARKER_SCHEMA = "ee-shared-ir-v2"
 _held = set()
 
 
+@metrics.measure("metadata_read_parse")
 def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -46,7 +48,8 @@ def fingerprint_sources(paths, *, binary_keys):
     result = SourceFingerprints()
     for name, path in paths:
         if name in binary_keys:
-            result[name] = digest(path)
+            with metrics.stage("elf_hashing" if name == "ELF" else "native_binary_hashing"):
+                result[name] = digest(path)
             continue
         raw = path.read_bytes()
         normalized = normalized_source_bytes(raw)
@@ -79,6 +82,7 @@ def matching_sources(saved, current):
                     for name, value in saved.items()))
 
 
+@metrics.measure("metadata_serialization_publication")
 def write_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -211,6 +215,7 @@ def active(metadata_path):
     return (metadata_path.parent / PROVENANCE).is_file()
 
 
+@metrics.measure("shared_provenance_validation")
 def current_state(metadata_path, ir_sources, hashes=None):
     path = metadata_path.parent / PROVENANCE
     if not path.is_file():
@@ -234,6 +239,7 @@ def current_state(metadata_path, ir_sources, hashes=None):
     return state
 
 
+@metrics.measure("shared_provenance_publication")
 def publish(metadata_path, ir_sources, hashes, alias=None):
     """Publish verified IR only; previously recorded maps must be prefixes."""
     metadata = read_json(metadata_path)

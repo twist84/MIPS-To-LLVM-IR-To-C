@@ -28,6 +28,7 @@ import sys
 import zipfile
 
 import run_game
+import recovery_metrics as metrics
 
 
 IR_NAME = re.compile(r"sub_0x([0-9a-fA-F]{1,8})_0x([0-9a-fA-F]{1,8})\.ll")
@@ -36,6 +37,7 @@ CROSS_PC = "0x00109d50"
 DEFAULT_WORK = Path("build/ps2-game-hle")
 
 
+@metrics.measure("manifest_read_validation")
 def read_manifest(path):
     """Accept a translation-cache.json or one diagnostic ZIP containing it."""
     path = Path(path)
@@ -83,6 +85,7 @@ def read_manifest(path):
     return data, entries
 
 
+@metrics.measure("ir_hash_verification")
 def compare_ir(work_dir, hashes):
     """Compare the precise named module set and contents, not just a count."""
     ir_dir = Path(work_dir) / "ir"
@@ -102,6 +105,7 @@ def compare_ir(work_dir, hashes):
     }
 
 
+@metrics.measure("explicit_entry_restoration")
 def restore_missing_entries(recomp, elf, work, metadata_path, entries,
                             allow_mismatches):
     """Re-lift missing explicit entries without stealing existing block PCs.
@@ -167,6 +171,7 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
           "known function entries retained", flush=True)
 
 
+@metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 allow_mismatches, *, ir_only=False):
     """Build known guest entries without any intermediate game execution."""
@@ -180,7 +185,8 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 "Choose a new --work-dir; existing IR is never replaced."
             )
     expected_elf = manifest["inputs"]["ELF"]
-    actual_elf = run_game.sha256_path(elf)
+    with metrics.stage("elf_hashing"):
+        actual_elf = run_game.sha256_path(elf)
     if expected_elf != actual_elf:
         raise ValueError("ELF SHA-256 differs from archived translation manifest")
     recomp = run_game.native_executable(build, "ee_recomp", config)
@@ -201,6 +207,7 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
     restore_missing_entries(recomp, elf, work, metadata_path, entries,
                             allow_mismatches)
     comparison = compare_ir(work, manifest["ir_hashes"])
+    metrics.details("ir_comparison", comparison)
     print("Known IR SHA-256 verification: "
           f"{comparison['matching']}/{comparison['expected']} identical; "
           f"mismatches={len(comparison['mismatched_sha256'])}; "

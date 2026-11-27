@@ -25,6 +25,7 @@ _tools_path = str(Path(__file__).resolve().parent)
 if _tools_path not in sys.path:
     sys.path.insert(0, _tools_path)
 import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
 
 
 def select_native_link_compiler(requested=None, platform=None, environment=None):
@@ -764,6 +765,7 @@ def main():
             )
             if "clang" not in (compiler_info.stdout + compiler_info.stderr).lower():
                 raise ValueError("--pdb requires clang++ (with lld), not GCC")
+        validation_started = time.monotonic()
         metadata, object_manifest, functions, objects = load_inputs(
             args.functions_json.resolve(), args.object_dir.resolve()
         )
@@ -897,6 +899,10 @@ def main():
         )
         link_started = time.monotonic()
         subprocess.run(command, check=True)
+        link_seconds = time.monotonic() - link_started
+        metrics.emit_child({"tool": "link_native_objects",
+                            "stages": {"native_link": link_seconds,
+                                       "link_input_and_host_preparation": link_started - validation_started}})
         print(
             f"link_native_objects: guest DLL linked "
             f"({time.monotonic() - link_started:.2f}s)",

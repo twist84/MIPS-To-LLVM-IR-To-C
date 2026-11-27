@@ -34,6 +34,11 @@ from pathlib import Path
 
 import llvmlite.binding as llvm
 
+_tools_path = str(Path(__file__).resolve().parent)
+if _tools_path not in sys.path:
+    sys.path.insert(0, _tools_path)
+import recovery_metrics as metrics
+
 
 _worker_machines = {}
 
@@ -139,8 +144,11 @@ entry:
 
 def compile_module(filename, emit_opt, emit_dir, target_triple):
     started = time.monotonic()
+    verification = emission = io_hashing = 0.0
     try:
         ir_bytes = Path(filename).read_bytes()
+        io_hashing += time.monotonic() - started
+        verify_started = time.monotonic()
         # The global LLVM context may retain uniqued types/metadata across
         # thousands of modules. Release each optimized module and its
         # private context before processing the next input.
@@ -149,20 +157,26 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
         with context_scope as context, llvm.parse_assembly(
                 ir_bytes.decode("utf-8"), context=context) as module:
             module.verify()
+            verification += time.monotonic() - verify_started
             entry = None
             object_size = 0
             if emit_opt is not None:
                 target_machine = get_target_machine(emit_opt, target_triple)
                 # The MIPS/Windows-targeted guest IR must be emitted for the
                 # current host, not the ELF's guest address-space layout.
+                verify_started = time.monotonic()
                 module.triple = target_triple
                 module.data_layout = str(target_machine.target_data)
                 module.verify()
+                verification += time.monotonic() - verify_started
+                emit_started = time.monotonic()
                 if use_pipeline:
                     optimize_guest_ir(module, target_machine)
                 object_data = target_machine.emit_object(module)
+                emission += time.monotonic() - emit_started
                 object_size = len(object_data)
                 if emit_dir is not None:
+                    io_started = time.monotonic()
                     object_name = Path(filename).stem + ".o"
                     write_atomic(Path(emit_dir) / object_name, object_data)
                     entry = {
@@ -175,7 +189,11 @@ def compile_module(filename, emit_opt, emit_dir, target_triple):
                             fn.name for fn in module.functions if not fn.is_declaration
                         ],
                     }
+                    io_hashing += time.monotonic() - io_started
         return {
+            "worker_stages": {"ir_parse_verify_worker_seconds": verification,
+                              "native_emit_worker_seconds": emission,
+                              "object_io_hash_worker_seconds": io_hashing},
             "valid": True, "entry": entry, "object_size": object_size,
             "elapsed": time.monotonic() - started, "filename": filename,
         }
@@ -392,6 +410,7 @@ def main():
     except (OSError, ValueError, KeyError, TypeError) as exc:
         print(f"verify_ir: append-only refused: {exc}", file=sys.stderr)
         return 1
+    reuse_seconds = time.monotonic() - start
     pending = (files if append_only else
                [filename for filename in files if filename not in reused])
     total_count = len(reused) + len(pending)
@@ -417,9 +436,13 @@ def main():
     errors = collections.Counter()
     first = {}
     slowest = (0.0, "")
+    worker_seconds = 0.0
+    worker_stages = collections.Counter()
 
     def record(result):
-        nonlocal ok, bad, object_bytes, slowest
+        nonlocal ok, bad, object_bytes, slowest, worker_seconds
+        worker_seconds += result["elapsed"]
+        worker_stages.update(result.get("worker_stages", {}))
         if result["valid"]:
             ok += 1
             object_bytes += result["object_size"]
@@ -450,6 +473,7 @@ def main():
     # worker per ~6 modules measured fastest (25 modules: 1.51 s with one
     # worker, 0.87 s with four, 1.14 s with sixteen).
     workers = min(jobs, len(pending), max(1, len(pending) // 6))
+    compile_started = time.monotonic()
     if emit_opt in (IR_PIPELINE_PROFILE, HOST_NATIVE_PROFILE) and (
             workers > 1 or len(pending) > IR_PIPELINE_WORKER_MODULES):
         # Pool.maxtasksperchild reclaims native allocations even when
@@ -475,6 +499,8 @@ def main():
         for filename in pending:
             record(compile_module(filename, emit_opt, emit_dir, target_triple))
 
+    compilation_wall = time.monotonic() - compile_started
+    manifest_started = time.monotonic()
     if not pending:
         record_progress = f"[{ok}/{total_count}] valid={ok} invalid={bad} elapsed={time.monotonic() - start:.1f}s"
         print(record_progress, flush=True)
@@ -501,6 +527,18 @@ def main():
             (json.dumps(manifest, indent=2) + "\n").encode("utf-8"),
         )
 
+    metrics.emit_child({
+        "tool": "verify_ir", "profile": emit_opt, "workers": workers,
+        "total_modules": total_count, "cache_hits": len(reused),
+        "cache_misses": len(pending), "valid_modules": ok, "invalid_modules": bad,
+        "object_bytes": object_bytes, "worker_seconds": worker_seconds,
+        "throughput_modules_per_second": len(pending) / compilation_wall if compilation_wall else 0.0,
+        "slowest_module": {"path": slowest[1], "seconds": slowest[0]},
+        "worker_stages": dict(worker_stages),
+        "stages": {"native_object_reuse": reuse_seconds,
+                   "native_compile_wall": compilation_wall,
+                   "object_manifest_serialization": time.monotonic() - manifest_started},
+    })
     print(
         f"LLVM {llvm.llvm_version_info}: {ok}/{total_count} valid, {bad} invalid"
         + (f", {object_bytes / 1e6:.2f} MB object code (opt={emit_opt})"
