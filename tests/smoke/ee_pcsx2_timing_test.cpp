@@ -67,12 +67,31 @@ static_assert(check_accumulator());
 int main()
 {
     // Exercise the real decoder gate independently from raw selector tests.
-    if (ee::pcsx2_opcode_weight(ee::decode(0x1000u, 0x24020001u)) != 9u ||
-        ee::pcsx2_opcode_weight(ee::decode(0x1004u, 0x00003028u)) != 0u ||
-        ee::pcsx2_opcode_weight(ee::decode(0x1008u, 0xe0850000u)) != 0u)
+    struct s_case
     {
-        std::fprintf(stderr, "PCSX2 timing decoder gate mismatch\n");
-        return 1;
+        uint32_t m_word;
+        e_ee_valid m_validity;
+        uint32_t m_weight;
+    };
+    constexpr s_case cases[] =
+    {
+        {0x24020001u, e_ee_valid::VALID, 9u},        // ADDIU
+        {0x00003028u, e_ee_valid::VALID, 9u},        // MFSA r6
+        {0x00203028u, e_ee_valid::UNSUPPORTED, 0u},  // MFSA with reserved rs
+        {0xe0850000u, e_ee_valid::INVALID, 0u},      // SC (not on EE)
+    };
+    for (const auto& item : cases)
+    {
+        const auto decoded = ee::decode(0x1000u, item.m_word);
+        const auto weight = ee::pcsx2_opcode_weight(decoded);
+        if (decoded.valid != item.m_validity || weight != item.m_weight)
+        {
+            std::fprintf(stderr,
+                "PCSX2 timing decoder gate mismatch: word=%08x valid=%u/%u weight=%u/%u\n",
+                item.m_word, static_cast<unsigned>(decoded.valid),
+                static_cast<unsigned>(item.m_validity), weight, item.m_weight);
+            return 1;
+        }
     }
     return 0;
 }
