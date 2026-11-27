@@ -2,6 +2,7 @@
 #include "ee_memory.h"
 #include "ee_address_route.h"
 #include "ee_memory_fault.h"
+#include "ee_memory_bus_plan.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 
@@ -623,6 +624,95 @@ constexpr bool test_instruction_fetch_plans()
 
 static_assert(test_instruction_fetch_plans(), "instruction fetch planning regression");
 
+constexpr bool test_data_bus_spans()
+{
+    using region = ee::e_ee_bus_region;
+    using policy = ee::e_ee_data_cache_policy;
+    using result = ee::e_ee_access_status;
+    constexpr uint32_t ram = 0x02000000u;
+    constexpr uint32_t dce = 1u << 16u;
+    constexpr uint32_t ice = 1u << 17u;
+    constexpr policy disabled[] =
+    {
+        policy::CACHE_DISABLED, policy::UNMODELED, policy::UNCACHED,
+        policy::CACHE_DISABLED, policy::UNMODELED, policy::UNMODELED,
+        policy::UNMODELED, policy::UNCACHED_ACCELERATED
+    };
+    constexpr policy enabled[] =
+    {
+        policy::CACHED_NO_WRITEBACK_ALLOCATE, policy::UNMODELED, policy::UNCACHED,
+        policy::CACHED_WRITEBACK_ALLOCATE, policy::UNMODELED, policy::UNMODELED,
+        policy::UNMODELED, policy::UNCACHED_ACCELERATED
+    };
+    for (uint32_t mode = 0u; mode < 8u; ++mode)
+    {
+        const ee::s_ee_access_decision access{result::PHYSICAL, 0x1000u, mode};
+        if (ee::ee_classify_data_cache(access, 0u) != disabled[mode] ||
+            ee::ee_classify_data_cache(access, ice) != disabled[mode] ||
+            ee::ee_classify_data_cache(access, dce) != enabled[mode] ||
+            ee::ee_classify_data_cache(access, dce | ice) != enabled[mode])
+        {
+            return false;
+        }
+    }
+    const auto span = [](uint32_t address, uint32_t width,
+                         uint64_t size = 0x02000000u)
+    {
+        return ee::ee_classify_physical_span(address, width, size);
+    };
+    if (span(0u, 16u) != region::RAM ||
+        span(ram - 16u, 16u) != region::RAM ||
+        span(ram - 1u, 2u) != region::INVALID_SPAN ||
+        span(0u, 1u, 0u) != region::RAM_BACKING_UNAVAILABLE ||
+        span(0x1000u, 4u, 0x1003u) != region::RAM_BACKING_UNAVAILABLE ||
+        span(ram, 4u, uint64_t{1} << 32u) != region::UNMODELED ||
+        span(0x20001000u, 4u) != region::UNMODELED ||
+        span(0x80001000u, 4u) != region::UNMODELED ||
+        span(0x70000000u, 4u) != region::UNMODELED ||
+        span(0x10000000u, 4u) != region::DEVICE ||
+        span(0x0fffffffu, 2u) != region::INVALID_SPAN ||
+        span(0x11000000u, 16u) != region::VU0_CODE ||
+        span(0x11000fffu, 2u) != region::INVALID_SPAN ||
+        span(0x10ffffffu, 2u) != region::INVALID_SPAN ||
+        span(0x11004000u, 16u) != region::VU0_DATA ||
+        span(0x11003fffu, 2u) != region::INVALID_SPAN ||
+        span(0x11005000u, 4u) != region::DEVICE ||
+        span(0x12ffffffu, 2u) != region::INVALID_SPAN ||
+        span(0x1fbfffffu, 2u) != region::INVALID_SPAN ||
+        span(0x1fc00000u, 4u) != region::ROM0 ||
+        span(0x1fffffffu, 2u) != region::INVALID_SPAN ||
+        span(0xffffffffu, 1u) != region::UNMODELED ||
+        span(0xffffffffu, 2u) != region::INVALID_SPAN ||
+        span(0u, 0u) != region::INVALID_SPAN ||
+        span(0u, 17u) != region::INVALID_SPAN)
+    {
+        return false;
+    }
+    const ee::s_ee_access_decision scratch{result::SCRATCHPAD, 0u, 2u, 0x3fffu};
+    const auto last = ee::ee_plan_data_bus_span(scratch, 1u, dce, ram);
+    const auto crossed = ee::ee_plan_data_bus_span(scratch, 2u, dce, ram);
+    const auto fault = ee::ee_plan_data_bus_span({result::TLB_REFILL}, 4u, dce, ram);
+    ee::c_ee_tlb tlb{};
+    const auto left = ee::ee_plan_partial_access(tlb,
+        ee::e_ee_partial_access_kind::WORD_LEFT, true,
+        0xa0001002u, 0u, 3u, 0u, 0u);
+    const auto right = ee::ee_plan_partial_access(tlb,
+        ee::e_ee_partial_access_kind::WORD_RIGHT, false,
+        0xa0001002u, 0u, 3u, 0u, 0u);
+    const auto left_span = ee::ee_plan_partial_bus_span(left, dce, ram);
+    const auto right_span = ee::ee_plan_partial_bus_span(right, dce, ram);
+    return last.m_region == region::SCRATCHPAD &&
+           last.m_address == 0x3fffu && last.m_cache_policy == policy::SCRATCHPAD &&
+           crossed.m_region == region::INVALID_SPAN &&
+           fault.m_region == region::UNMODELED && fault.m_cache_policy == policy::UNMODELED &&
+           left_span.m_region == region::RAM && left_span.m_address == 0x1000u &&
+           left_span.m_width == 3u && left_span.m_cache_policy == policy::UNCACHED &&
+           right_span.m_region == region::RAM && right_span.m_address == 0x1002u &&
+           right_span.m_width == 2u;
+}
+
+static_assert(test_data_bus_spans(), "strict physical span and cache policy regression");
+
 // Separate page sizes keep each constant-evaluation budget bounded.
 static_assert(test_tlb_page_mask(0u), "4 KiB TLB page regression");
 static_assert(test_tlb_page_mask(0x6000u), "16 KiB TLB page regression");
@@ -823,6 +913,10 @@ int main()
         return 1;
     }
     if (!check(test_instruction_fetch_plans(), "instruction fetch planning regression"))
+    {
+        return 1;
+    }
+    if (!check(test_data_bus_spans(), "strict physical span and cache policy regression"))
     {
         return 1;
     }

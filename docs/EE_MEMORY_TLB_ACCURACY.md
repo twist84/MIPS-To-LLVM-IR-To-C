@@ -304,3 +304,36 @@ ASID, privilege, ERL, reserved mode and scratchpad edges. Compile-time
 and runtime checks share the constexpr fixture. No instruction bytes
 are read, no cache lines or ITLB timing simulated, and no production
 caller is enabled. No retail replay required for M3; CI pending.
+
+## Strict memory follow-up M4: physical spans and cache policies
+
+EE Core User's Manual v6.0 Config (p.78), 5.2.6 (p.126) and
+6.3.8 (p.138) distinguish DCE, K0=0, ordinary uncached, cached
+writeback/allocate and accelerated UCAB/WBB behavior. Data policy
+classification preserves the mapping attribute when DCE is disabled;
+it never equates bypassing the data cache with bypassing all ordering
+or buffer effects.
+https://docs.alexrp.com/mips/ee.pdf
+
+Add a separate constexpr bus-span planner for an already translated
+data access, using a bounded 32 MiB retail main RAM aperture plus
+caller-supplied backing size. The map is intentionally conservative:
+the reference memory.cpp mirrors RAM throughout the low 256 MiB and
+normalizes HLE aliases, neither of which is adopted here. The local
+runtime's VU0 apertures and broad device dispatch window are recognized
+as candidate regions, not proof that the device/width is implemented.
+The reference also recognizes the 4 MiB ROM0 aperture.
+https://github.com/twist84/ps2-web-recomp/blob/985c0ac15f2622199f90b206bac3db89268e2f22/runtime/src/memory.cpp
+https://psi-rockin.github.io/ps2tek/index.html
+
+A scratchpad offset is separate from any physical address. Unknown
+regions, absent host RAM backing, invalid widths, wraparound and
+aperture crossings cannot silently become RAM. Partial transfers use
+only their enabled contiguous byte lanes. Compile-time/runtime tests
+cover cache encodings and enable bits, each modeled aperture boundary,
+missing backing, alias rejection and partial transfer spans.
+
+No pointer, bus transaction, read/modify/write, cache contents,
+writeback, ordering, device permission or synthesized DBE is provided.
+The classification is not a complete physical bus map. No production
+memory or ABI changes; no retail replay required for M4. CI pending.
