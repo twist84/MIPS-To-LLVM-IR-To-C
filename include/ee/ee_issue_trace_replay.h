@@ -63,6 +63,7 @@ struct s_ee_issue_replay_profile
     // LWC1 is not an integer load: EE manual section 2.12 specifies
     // a distinct cache-hit result latency through the C1/LS pipes.
     uint32_t m_fpu_load_latency = 0u;
+    bool m_cop1_a_stage_pairing = false;
 };
 
 // Manual-based, cache-hit candidate, not a validated clock. Leave
@@ -125,7 +126,8 @@ public:
         if (!m_probe.configure_waw_policy(
                 profile.m_allow_ordered_waw_overlap
                     ? e_ee_probe_waw_policy::ORDERED_OVERLAP
-                    : e_ee_probe_waw_policy::WAIT_FOR_RESULT))
+                    : e_ee_probe_waw_policy::WAIT_FOR_RESULT) ||
+            !m_probe.configure_cop1_a_stage_pairing(profile.m_cop1_a_stage_pairing))
         {
             return false;
         }
@@ -217,6 +219,7 @@ public:
     {
         return m_probe.cycle_breakdown();
     }
+    uint64_t cop1_a_stage_pairs() const { return m_probe.cop1_a_stage_pairs(); }
     // Distinct from issue time and NOT hardware retirement.
     uint64_t last_candidate_completion_cycle() const
     {
@@ -999,7 +1002,8 @@ private:
             {
                 return false;
             }
-            instruction->m_pipe = e_ee_probe_pipe::LOAD;
+            // Tables 1-1/1-3 classify COP1 memory transfers as COP1 Move.
+            instruction->m_pipe = e_ee_probe_pipe::COPROCESSOR_MOVE;
             instruction->m_gpr_read_mask = rs;
             instruction->m_fpr_write_mask = fpr_mask(decoded.rt);
             instruction->m_fpr_result_latency = m_profile.m_fpu_load_latency;

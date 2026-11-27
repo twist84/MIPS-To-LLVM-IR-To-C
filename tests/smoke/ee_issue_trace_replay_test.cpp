@@ -125,6 +125,26 @@ int main()
               replay.last_event_candidate_cycle() == 2u &&
               replay.last_candidate_completion_cycle() == 4u,
               "manual LWC1 cache-hit dependency reaches FPR0 after two cycles");
+        constexpr uint32_t independent_add_s = 0x46010100u;
+        constexpr uint32_t independent_lwc1 = (0x31u << 26u) | (8u << 21u) | (3u << 16u);
+        check(replay.configure(profile) &&
+              replay.observe(record(1u, 0x1000u, independent_add_s, 0u, 1u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x1004u, independent_lwc1, 0u, 2u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 1u,
+              "LWC1 is COP1 Move and defaults to conservative Y serialization");
+        auto a_stage_profile = profile;
+        a_stage_profile.m_cop1_a_stage_pairing = true;
+        check(replay.configure(a_stage_profile) &&
+              replay.observe(record(1u, 0x1000u, independent_add_s, 0u, 1u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.observe(record(2u, 0x1004u, independent_lwc1, 0u, 2u)) ==
+                  e_ee_issue_replay_status::ISSUED &&
+              replay.last_event_candidate_cycle() == 0u &&
+              replay.last_candidate_completion_cycle() == 3u &&
+              replay.cop1_a_stage_pairs() == 1u,
+              "explicit COP1 Y candidate applies to LWC1 as a move");
         check(replay.configure({1u, 1u}) &&
               replay.observe(record(1u, 0x1000u, lwc1, 0u, 1u)) ==
                   e_ee_issue_replay_status::UNMODELED_INSTRUCTION,

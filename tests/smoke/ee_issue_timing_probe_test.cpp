@@ -205,6 +205,39 @@ int main()
           "COP1 operate/move Y resource-stall pairing stays unmodeled");
 
     clock.reset();
+    fpu_op.m_result_latency = 4u;
+    fpu_move.m_result_latency = 2u;
+    fpu_move.m_gpr_write_mask = 1u << 8u;
+    uint64_t completion_a_stage = 99u;
+    const s_ee_probe_instruction a_stage_reader{1u << 8u, 1u << 9u};
+    check(clock.configure_cop1_a_stage_pairing(true) &&
+          clock.issue(fpu_op, &at, &completion_a_stage) && at == 0u &&
+          completion_a_stage == 4u &&
+          clock.issue(fpu_move, &at, &completion_a_stage) && at == 0u &&
+          completion_a_stage == 3u && clock.cop1_a_stage_pairs() == 1u &&
+          clock.cycle_breakdown().m_dual_issue == 1u &&
+          clock.issue(a_stage_reader, &at) && at == 3u,
+          "COP1 Y candidate pairs at R and delays second result by one A cycle");
+    check(!clock.configure_cop1_a_stage_pairing(false),
+          "A-stage candidate cannot change during a stream");
+
+    clock.reset();
+    check(clock.configure_cop1_a_stage_pairing(true) &&
+          clock.issue(fpu_move, &at) && at == 0u &&
+          clock.issue(fpu_op, &at, &completion_a_stage) && at == 0u &&
+          completion_a_stage == 5u && clock.cop1_a_stage_pairs() == 1u,
+          "COP1 reverse Y order delays the operation instead of the move");
+    clock.reset();
+    fpu_op.m_fpr_write_mask = 1u << 1u;
+    fpu_move.m_fpr_read_mask = 1u << 1u;
+    check(clock.configure_cop1_a_stage_pairing(true) &&
+          clock.issue(fpu_op, &at) && at == 0u &&
+          clock.issue(fpu_move, &at) && at == 4u &&
+          clock.cop1_a_stage_pairs() == 0u,
+          "COP1 RAW prevents Y pairing even in explicit A-stage candidate");
+    clock.reset();
+
+    clock.reset();
     s_ee_probe_instruction invalid_pipe{};
     invalid_pipe.m_pipe = static_cast<e_ee_probe_pipe>(255u);
     check(!clock.issue(invalid_pipe) && clock.instructions_issued() == 0u,

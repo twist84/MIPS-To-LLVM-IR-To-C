@@ -59,6 +59,29 @@ def main() -> int:
         )
         assert conflict.returncode == 2, conflict.stdout + conflict.stderr
 
+        # Independent COP1 op and move: compare conservative and Y policies.
+        cop1_trace = root / "cop1-y.csv"
+        cop1_trace.write_text(
+            "attempt,pc,opcode_word,kind,reference_slot,hle_service\n"
+            "1,0x00001000,0x46010100,0,1,0\n"
+            "2,0x00001004,0x440a1000,0,2,0\n"
+            "# truncated=false range=0x00001000:0x00001004\n",
+            encoding="utf-8"
+        )
+        for enabled, expected_issue in ((False, 1), (True, 0)):
+            cop1_output = root / f"cop1-y-{enabled}.csv"
+            args = [str(binary), str(cop1_trace), "--manual-cache-hit"]
+            if enabled:
+                args.append("--cop1-a-stage-pairing")
+            args.append(f"--candidate-completions={cop1_output}")
+            cop1 = subprocess.run(args, capture_output=True, text=True)
+            assert cop1.returncode == 0, cop1.stdout + cop1.stderr
+            assert f"candidate_cop1_a_stage_pairs={int(enabled)}" in cop1.stdout
+            with cop1_output.open(newline="") as stream:
+                cop1_rows = list(csv.DictReader(stream))
+            assert int(cop1_rows[1]["candidate_issue_cycle"]) == expected_issue
+            assert int(cop1_rows[1]["candidate_completion_cycle"]) == 3
+
         # Completion is a *separate* candidate result deadline. Annulled
         # likely slots do not have an instruction result to timestamp.
         completion_output = root / "completions.csv"

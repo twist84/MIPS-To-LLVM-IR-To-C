@@ -50,3 +50,18 @@ The report records the capture hash and caller-declared provenance (not
 independently authenticated). No automatic calibration or clock activation
 is permitted, even if slopes match. Synthetic importer tests are not console
 evidence.
+
+## COP1 A-stage resource-hazard candidate
+
+EE Core User's Manual v6.0 tables 1-1 to 1-3 (pp. 23–26) classify COP1
+loads/stores as COP1 Move and permit COP1 Operate/Move to enter R together,
+with a one-cycle resource hazard delaying the second instruction in A.
+The default probe keeps conservative serialization. The optional
+`--cop1-a-stage-pairing` candidate records the shared R issue, shifts the
+second result and its unit deadline by one, and reports the number of such
+pairs separately from disjoint issue-window counters. LWC1 is correctly
+classified as COP1 Move even in the default policy. The option does NOT
+model subsequent pipeline backpressure or prove a hardware issue timeline.
+The comparator can evaluate both policies without activating guest timing.
+
+https://docs.alexrp.com/mips/ee.pdf

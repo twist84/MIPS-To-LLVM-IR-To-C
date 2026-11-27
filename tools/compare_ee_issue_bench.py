@@ -45,7 +45,7 @@ def parse_counter_log(text: str) -> dict:
     return samples
 
 
-def candidate_totals(binary: Path, *, ordered_overlap=False) -> dict:
+def candidate_totals(binary: Path, *, ordered_overlap=False, cop1_a_stage=False) -> dict:
     result = {}
     with tempfile.TemporaryDirectory(prefix="ee-counter-candidate-") as directory:
         out = Path(directory)
@@ -54,6 +54,8 @@ def candidate_totals(binary: Path, *, ordered_overlap=False) -> dict:
                        "--manual-cache-hit"]
             if ordered_overlap:
                 command.append("--ordered-waw-overlap")
+            if cop1_a_stage:
+                command.append("--cop1-a-stage-pairing")
             run = subprocess.run(command, capture_output=True, text=True, timeout=30)
             if run.returncode:
                 raise ValueError(f"{row['symbol']}: candidate rejected: {run.stderr.strip()}")
@@ -107,6 +109,7 @@ def main():
     parser.add_argument("--toolchain", required=True)
     parser.add_argument("--loader", required=True)
     parser.add_argument("--ordered-waw-overlap", action="store_true")
+    parser.add_argument("--cop1-a-stage-pairing", action="store_true")
     args = parser.parse_args()
     if any(not value.strip() for value in
            (args.console, args.bios, args.toolchain, args.loader)):
@@ -115,13 +118,15 @@ def main():
         raw = args.log.read_bytes()
         samples = parse_counter_log(raw.decode("utf-8"))
         candidates = candidate_totals(args.candidate,
-                                      ordered_overlap=args.ordered_waw_overlap)
+                                      ordered_overlap=args.ordered_waw_overlap,
+                                      cop1_a_stage=args.cop1_a_stage_pairing)
         print("Declared capture provenance (not independently authenticated): "
               f"console={args.console!r} bios={args.bios!r} "
               f"toolchain={args.toolchain!r} loader={args.loader!r}")
         print(f"capture_sha256={hashlib.sha256(raw).hexdigest()}")
         print(f"candidate_profile=manual-cache-hit "
-              f"ordered_waw_overlap={args.ordered_waw_overlap}")
+              f"ordered_waw_overlap={args.ordered_waw_overlap} "
+              f"cop1_a_stage_pairing={args.cop1_a_stage_pairing}")
         compare(samples, candidates)
         print("Observational comparison only; no validated clock or retirement trace.")
     except (ValueError, OSError, UnicodeError, subprocess.SubprocessError) as error:
