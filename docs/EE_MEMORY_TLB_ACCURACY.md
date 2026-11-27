@@ -994,3 +994,27 @@ Require the actual Wired write, SYNC.P and JR/NOP return at
 653638 retirements, pc a001635c, Wired=0, Random=47 and
 SP ffffffffa007ff60. Continue bounded exploration from there.
 These new acceptance criteria are pending CI; no retail replay.
+
+## OpenPS2BIOS v0.7 parallel diagnostics
+
+Keep the complete v0.6 pinned SHA-256 and all existing EE/IOP,
+SIF and RPC acceptance checkpoints unchanged. Add a separate v0.7
+job to the same workflow using the official versioned image and
+upstream checksum companion, checking the exact 4 MiB size.
+
+The version-independent EE probe mode (--explore) executes from
+ROM0 reset with explicit isolated RAM and SIO backing, a two-million
+instruction bound, a 64-entry trace tail, actual RAM handoff evidence,
+COP0/GPR state, stop opcode/lookahead and captured guest serial bytes.
+No v0.6 addresses, directory sizes, or checkpoints are transplanted.
+The v0.7 IOP runner independently collects a ten-million instruction
+diagnostic report. Expected diagnostic stop/budget exit codes are
+not a claim of successful firmware boot. Failed downloads, integrity
+checks, unexpected host exits and missing reports fail CI.
+
+First v0.7 run establishes the actual baseline; the observed checksum
+and traces must be reviewed before pinning v0.7-specific acceptance
+criteria or extending its SIF/RPC integration. v0.6 remains the
+strict end-to-end regression target in parallel. No production
+runtime changes or retail replay required for this diagnostic batch.
+https://github.com/TamaribaEmu/OpenPS2BIOS/releases/tag/v0.7

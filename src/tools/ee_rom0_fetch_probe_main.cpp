@@ -2,27 +2,136 @@
 #include "ee_decoder.h"
 #include "ee_exceptions.h"
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
+// Version-independent diagnostic: do not apply v0.6 layout or
+// retirement assertions to other releases. This is not a boot pass.
+static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
+{
+    constexpr uint32_t budget = 2000000u;
+    constexpr uint32_t tail_size = 64u;
+    struct s_trace
+    {
+        uint32_t m_pc;
+        uint32_t m_opcode;
+        uint32_t m_next;
+        uint32_t m_retired;
+    };
+    s_trace tail[tail_size]{};
+    uint32_t trace_count = 0u;
+    std::vector<uint8_t> ram_bytes(0x02000000u, 0xa5u);
+    std::vector<uint8_t> tx_bytes(65536u, 0u);
+    const ee::s_ee_reset_ram_view ram{ram_bytes.data(), ram_bytes.size()};
+    ee::s_ee_reset_sio_tx sio{tx_bytes.data(), tx_bytes.size(), 0u};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    const auto first = ee::ee_execute_strict_reset_prefix(cpu, rom);
+    if (first.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+        first.m_retired != 1u || cpu.m_pc != 0xbfc00004u)
+    {
+        std::fprintf(stderr, "EE exploration reset refused: result=%u opcode=%08x pc=%08x\n",
+            static_cast<unsigned>(first.m_result), first.m_opcode, cpu.m_pc);
+        return 5;
+    }
+    uint32_t retired = first.m_retired;
+    ee::s_ee_reset_prefix_step stop{ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
+    const ee::c_ee_tlb tlb{};
+    bool entered_ram = false;
+    for (; retired < budget;)
+    {
+        const uint32_t pc = cpu.m_pc;
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            budget - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
+        {
+            stop = action;
+            break;
+        }
+        if (action.m_retired == 0u || action.m_retired > budget - retired)
+        {
+            std::fprintf(stderr, "EE exploration invalid retirement count\n");
+            return 6;
+        }
+        retired += action.m_retired;
+        tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
+        ++trace_count;
+        if (!entered_ram && cpu.m_pc >= 0xa0000000u && cpu.m_pc < 0xa2000000u)
+        {
+            entered_ram = true;
+            std::printf("EE exploration RAM handoff: retired=%u pc=%08x\n", retired, cpu.m_pc);
+        }
+    }
+    const uint32_t start = trace_count > tail_size ? trace_count - tail_size : 0u;
+    for (uint32_t i = start; i < trace_count; ++i)
+    {
+        const auto& item = tail[i % tail_size];
+        std::printf("EE exploration step: pc=%08x opcode=%08x next=%08x retired=%u\n",
+            item.m_pc, item.m_opcode, item.m_next, item.m_retired);
+    }
+    std::printf("EE exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x entered_ram=%u\n",
+        retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
+        stop.m_opcode, stop.m_data_address, static_cast<unsigned>(entered_ram));
+    std::printf("EE exploration COP0: status=%08x config=%08x wired=%u random=%u\n",
+        cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+        cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
+    for (uint32_t i = 0u; i < 32u; ++i)
+    {
+        std::printf("EE exploration GPR: r%02u=%016llx\n", i,
+            static_cast<unsigned long long>(i == 0u ? 0u : cpu.m_gpr[i].m_lo));
+    }
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        const uint32_t pc = cpu.m_pc + i * 4u;
+        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+            cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+        const uint8_t* code = ee::ee_fetch_strict_reset_word(plan, rom, ram);
+        if (code == nullptr)
+        {
+            break;
+        }
+        const uint32_t opcode = ee::ee_read_instruction_word(code);
+        std::printf("EE exploration lookahead: pc=%08x opcode=%08x decoded=%s\n",
+            pc, opcode, ee::decode(pc, opcode).mnemonic);
+    }
+    std::printf("EE exploration SIO: bytes=%zu hex=", sio.m_count);
+    for (size_t i = 0u; i < sio.m_count; ++i)
+    {
+        std::printf("%02x", static_cast<unsigned>(tx_bytes[i]));
+    }
+    std::putchar('\n');
+    std::printf("EE exploration SIO text: ");
+    for (size_t i = 0u; i < sio.m_count; ++i)
+    {
+        const uint8_t byte = tx_bytes[i];
+        std::putchar(byte >= 32u && byte <= 126u ? byte : '.');
+    }
+    std::putchar('\n');
+    // As with the IOP diagnostic runner, distinguish an observed stop
+    // or budget from actual boot completion and unexpected host errors.
+    return stop.m_result == ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED ? 4 : 3;
+}
+
 int main(int argc, char** argv)
 {
-    if (argc != 2)
+    const bool explore = argc == 3 && std::strcmp(argv[2], "--explore") == 0;
+    if (argc != 2 && !explore)
     {
-        std::fprintf(stderr, "usage: ee_rom0_fetch_probe ROM0.bin\n");
+        std::fprintf(stderr, "usage: ee_rom0_fetch_probe ROM0.bin [--explore]\n");
         return 2;
     }
     std::ifstream file(argv[1], std::ios::binary | std::ios::ate);
     if (!file || file.tellg() != static_cast<std::streamoff>(ee::s_ee_strict_rom0_view::k_size))
     {
         std::fprintf(stderr, "expected exactly 4 MiB ROM0\n");
-        return 3;
+        return 2;
     }
     std::vector<uint8_t> bytes(ee::s_ee_strict_rom0_view::k_size);
     file.seekg(0);
     if (!file.read(reinterpret_cast<char*>(bytes.data()), static_cast<std::streamsize>(bytes.size())))
     {
-        return 3;
+        return 2;
     }
     const ee::s_ee_strict_rom0_view rom{bytes.data(), bytes.size()};
     const ee::c_ee_tlb tlb{};
@@ -35,7 +144,7 @@ int main(int argc, char** argv)
         const uint8_t* code = rom.fetch_span(fetch);
         if (code != bytes.data() + (pc - 0xbfc00000u))
         {
-            return 4;
+            return explore ? 2 : 4;
         }
         const uint32_t word = ee::ee_read_instruction_word(code);
         const auto ins = ee::decode(pc, word);
@@ -44,6 +153,10 @@ int main(int argc, char** argv)
             static_cast<unsigned>(ins.valid));
     }
     std::puts("EE ROM0 fetch probe: PASS (no instructions retired during fetch probe)");
+    if (explore)
+    {
+        return explore_rom0(rom);
+    }
     auto cpu = ee::ee_make_strict_reset_prefix_state();
     const auto step = ee::ee_execute_strict_reset_prefix(cpu, rom);
     if (step.m_result != ee::e_ee_reset_prefix_result::COMMITTED)

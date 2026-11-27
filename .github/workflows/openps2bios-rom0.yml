@@ -236,3 +236,94 @@ jobs:
             rom0-sif-integration.log
           if-no-files-found: ignore
           retention-days: 7
+
+  diagnose-v07:
+    name: OpenPS2BIOS v0.7 firmware diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
+
+      - name: Build strict EE and IOP firmware diagnostics
+        run: |
+          cmake -S . -B build-rom0 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-rom0 --parallel 2 --target ee_rom0_fetch_probe ee_ram_tlb_test iop_rom0_runner
+          ctest --test-dir build-rom0 --output-on-failure -R '^ee_ram_tlb$'
+
+      - name: Download and verify official OpenPS2BIOS v0.7 ROM0
+        run: |
+          set -euo pipefail
+          base="https://github.com/TamaribaEmu/OpenPS2BIOS/releases/download/v0.7"
+          image="OpenPS2BIOS-0.7.bin"
+          curl --fail --location --retry 3 --retry-all-errors --output "$image" "$base/$image"
+          curl --fail --location --retry 3 --retry-all-errors --output "$image.sha256" "$base/$image.sha256"
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tools")
+          from ensure_openps2bios import ROM0_SIZE, parse_sha256, sha256_file
+          image = Path("OpenPS2BIOS-0.7.bin")
+          expected = parse_sha256(Path(str(image) + ".sha256").read_bytes(), image.name)
+          actual = sha256_file(image)
+          if image.stat().st_size != ROM0_SIZE or expected != actual:
+              raise SystemExit("OpenPS2BIOS v0.7 size or SHA-256 mismatch")
+          print("Verified OpenPS2BIOS v0.7 SHA-256:", actual)
+          Path("rom0-v07-verified.sha256").write_text(f"{actual}  {image.name}\n")
+          PY
+
+      - name: Explore authentic v0.7 EE reset execution
+        run: |
+          set -euo pipefail
+          status=0
+          ./build-rom0/ee_rom0_fetch_probe OpenPS2BIOS-0.7.bin --explore >ee-rom0-v07.log 2>&1 || status=$?
+          cat ee-rom0-v07.log
+          echo "EE v0.7 diagnostic exit: $status"
+          test "$status" -eq 3 -o "$status" -eq 4
+          grep -q '^EE exploration stop:' ee-rom0-v07.log
+          echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
+
+      - name: Explore authentic v0.7 IOP reset execution
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          test -f rom0-v07-verified.sha256
+          sha256sum --check rom0-v07-verified.sha256
+          status=0
+          ./build-rom0/iop_rom0_runner OpenPS2BIOS-0.7.bin \
+            --instructions=10000000 --trace-tail=64 \
+            --report=rom0-v07-report.json >rom0-v07-trace.log 2>&1 || status=$?
+          cat rom0-v07-trace.log
+          echo "IOP v0.7 diagnostic exit: $status"
+          test "$status" -eq 3 -o "$status" -eq 4
+          python3 - <<'PY'
+          import json
+          with open("rom0-v07-report.json", encoding="utf-8") as file:
+              report = json.load(file)
+          assert report["rom0_bytes"] == 4194304, report
+          assert report["reset_pc"] == 0xBFC00000, report
+          assert report["romdir_has_iopboot"], report
+          assert 0 < report["executed"] <= 10000000, report
+          print("IOP v0.7 observed stop:", report["stop"])
+          print("IOP v0.7 executed:", report["executed"])
+          print("IOP v0.7 PC: 0x%08X" % report["pc"])
+          print("IOP v0.7 memory fault:", report["memory_fault"])
+          PY
+          echo "::notice::IOP v0.7 diagnostic captured; full boot is not asserted."
+
+      - name: Preserve v0.7 execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openps2bios-v07-rom0-execution
+          path: |
+            rom0-v07-verified.sha256
+            ee-rom0-v07.log
+            rom0-v07-report.json
+            rom0-v07-trace.log
+          if-no-files-found: warn
+          retention-days: 7
