@@ -72,13 +72,52 @@ bool write_file(const std::filesystem::path& path, const std::string& text)
     output << text;
     return static_cast<bool>(output);
 }
+// Private plan format emitted from a freshly hash-validated capture.
+bool read_regions(const std::filesystem::path& path, uint64_t base,
+                  uint64_t size, uint64_t hash,
+                  std::vector<std::vector<uint32_t>>* regions)
+{
+    std::ifstream input(path);
+    std::string magic;
+    uint64_t plan_base = 0u, plan_size = 0u, plan_hash = 0u, count = 0u;
+    if (!(input >> magic >> plan_base >> plan_size >> plan_hash >> count) ||
+        magic != "IOPREG1" || base != plan_base || size != plan_size ||
+        hash != plan_hash || count == 0u || count > size / 4u)
+    {
+        return false;
+    }
+    uint64_t remaining = size / 4u;
+    for (uint64_t i = 0u; i < count; ++i)
+    {
+        uint64_t length = 0u;
+        if (!(input >> length) || length == 0u || length > remaining)
+        {
+            return false;
+        }
+        std::vector<uint32_t> region;
+        for (uint64_t j = 0u; j < length; ++j)
+        {
+            uint64_t pc = 0u;
+            if (!(input >> pc) || pc > UINT32_MAX)
+            {
+                return false;
+            }
+            region.push_back(static_cast<uint32_t>(pc));
+        }
+        regions->push_back(std::move(region));
+        remaining -= length;
+    }
+    std::string trailing;
+    return !(input >> trailing) && input.eof();
+}
 } // namespace
 
 int main(int argc, char** argv)
 {
-    if (argc != 3)
+    const bool split = argc == 4;
+    if (argc != 3 && !split)
     {
-        std::fprintf(stderr, "usage: %s CAPTURE_DIR OUT_DIR\n", argv[0]);
+        std::fprintf(stderr, "usage: %s CAPTURE_DIR OUT_DIR [REGION_PLAN]\n", argv[0]);
         return 2;
     }
     const std::filesystem::path capture = argv[1];
@@ -98,6 +137,12 @@ int main(int argc, char** argv)
     if (metas.empty())
     {
         std::fprintf(stderr, "iop_recomp: no captured modules in %s\n", argv[1]);
+        return 1;
+    }
+
+    if (split && metas.size() != 1u)
+    {
+        std::fprintf(stderr, "iop_recomp: split pilot requires exactly one capture\n");
         return 1;
     }
 
@@ -147,7 +192,33 @@ int main(int argc, char** argv)
         const std::string symbol = "iop_aot_fn";
         const std::filesystem::path ll = output / (stem + ".ll");
         const std::filesystem::path table_ll = output / (stem + ".table.ll");
-        if (!write_file(ll, iop::iop_lift_module_ir(module, symbol)) ||
+        std::string entry_ir;
+        if (split)
+        {
+            std::vector<std::vector<uint32_t>> regions;
+            std::vector<std::string> code;
+            if (base > UINT32_MAX || bytes.size() != module.m_text.size() ||
+                !read_regions(argv[3], base, bytes.size(), hash, &regions) ||
+                !iop::iop_lift_regions_ir(module, regions, symbol, &code, &entry_ir))
+            {
+                std::fprintf(stderr, "iop_recomp: refused split ownership plan\n");
+                return 1;
+            }
+            for (size_t i = 0u; i < code.size(); ++i)
+            {
+                if (!write_file(output / (stem + ".region." + std::to_string(i) + ".ll"),
+                                code[i]))
+                {
+                    return 1;
+                }
+            }
+            std::printf("iop_recomp: %s: %zu split regions\n", name.c_str(), code.size());
+        }
+        else
+        {
+            entry_ir = iop::iop_lift_module_ir(module, symbol);
+        }
+        if (!write_file(ll, entry_ir) ||
             !write_file(table_ll, iop::iop_table_module_ir(
                 {{name, module.m_base, static_cast<uint32_t>(module.m_text.size()),
                   hash, symbol}}, windows_exports)))

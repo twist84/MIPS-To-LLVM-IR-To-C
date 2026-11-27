@@ -144,3 +144,24 @@ connected yet; the synthetic AOT differential compiles four regions plus
 router/table into one library and checks budgets 1–17, cross-region calls
 and returns, missing ownership, overlapping regions and Timer5/MMIO.
 No retail build/replay until CI validates the synthetic split path.
+
+## I3b/I4a: opt-in single-module build pilot
+
+The builder now supports `--split-module SIO2MAN` with a fresh output
+folder. It resolves the exact staged canonical stem (case insensitive),
+recomputes the discovery from linked bytes, refuses overlaps/rejected
+seeds, excludes unsupported boundaries and writes a private base/size/hash
+bound ownership plan. The C++ tool rechecks plan identity and validates
+all region PCs before generating separate code IR, a dispatcher and a
+normal descriptor table. The default whole-module path is unchanged.
+One bounded compiler worker pool compiles region, router and table
+objects; link once, retaining one library and original identity. Stage
+and compile/link timing and byte counts are printed. No incremental cache
+or native chaining yet. This builds only the selected pilot IRX, not all
+seven libraries, and must not overwrite accepted G8D.1 outputs.
+
+Synthetic tests and CI precede any retail split acceptance. The first
+retail comparison should copy the six original non-pilot libraries to a
+fresh directory alongside the replacement SIO2MAN library and verify
+all seven identities. Use the unchanged G8D.2 runner, EE/VU1 images and
+recorded input, not the new EE timing shadow. No EE IR rebuild needed.

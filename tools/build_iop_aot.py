@@ -29,6 +29,8 @@ import tempfile
 import time
 from pathlib import Path
 
+from audit_iop_function_discovery import inventory
+
 
 def safe_module_name(name):
     name = re.sub(r"[^A-Za-z0-9_]", "_", name) or "module"
@@ -133,6 +135,74 @@ def prepare_captures(capture, destination):
     return len(records)
 
 
+def prepare_split_pilot(staged, selected, pilot):
+    """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
+    candidates = [path for path in staged.glob("*.json")
+                  if path.stem.casefold() == selected.casefold()]
+    if len(candidates) != 1:
+        raise ValueError(f"split pilot must select one exact staged IRX stem: {selected}")
+    meta = candidates[0]
+    binary = meta.with_suffix(".bin")
+    metadata = json.loads(meta.read_text(encoding="utf-8"))
+    data = binary.read_bytes()
+    report = inventory(metadata, data)
+    if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"] or
+            report["rejected_seeds"] or len(data) % 4):
+        raise ValueError("split pilot refuses ambiguous or invalid ownership")
+    # A conservative classifier stop is not permission to execute that
+    # encoding natively. Keep unsupported boundaries on the interpreter.
+    rejected = {item["pc"] for item in report["unresolved"]
+                if item["kind"] in ("unsupported", "unsupported_delay", "missing_delay")}
+    regions = [[pc for pc in region["ordinary_pcs"] if pc not in rejected]
+               for region in report["regions"]]
+    regions = [region for region in regions if region]
+    if not regions:
+        raise ValueError("split pilot has no eligible regions")
+    pilot.mkdir()
+    shutil.copyfile(meta, pilot / meta.name)
+    shutil.copyfile(binary, pilot / binary.name)
+    plan = pilot / "ownership.regions"
+    lines = [f"IOPREG1 {report['base']} {report['text_size']} "
+             f"{int(report['hash'], 16)} {len(regions)}"]
+    lines.extend(" ".join(map(str, [len(region), *region])) for region in regions)
+    plan.write_text("\n".join(lines) + "\n", encoding="ascii")
+    print(f"split pilot: {meta.stem}, {len(regions)} regions, "
+          f"{sum(map(len, regions))} ordinary PCs")
+    return plan
+
+
+def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix):
+    sources = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
+    if not sources:
+        raise ValueError("split pilot emitted no region IR")
+    sources += [ir_dir / f"{stem}.ll", ir_dir / f"{stem}.table.ll"]
+    started = time.monotonic()
+
+    def compile_one(source):
+        obj = obj_dir / (source.stem + ".o")
+        subprocess.run([clang, f"-O{args.opt}", "-c", "-Wno-override-module",
+                        str(source), "-o", str(obj)], check=True)
+        return obj
+
+    objects = []
+    with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
+        for obj in pool.map(compile_one, sources):
+            objects.append(obj)
+            print(f"IOP objects [{len(objects)}/{len(sources)}]: {obj.name}")
+    compiled = time.monotonic()
+    library = lib_dir / f"{stem}{suffix}"
+    command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library),
+               *map(str, objects)]
+    if os.name == "nt":
+        command += ["-nostdlib", "-Wl,/noentry"]
+    subprocess.run(command, check=True)
+    print(f"split compile {compiled - started:.3f}s, "
+          f"link {time.monotonic() - compiled:.3f}s, "
+          f"{sum(obj.stat().st_size for obj in objects)} object bytes, "
+          f"{library.stat().st_size} library bytes")
+    return library
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
@@ -142,7 +212,13 @@ def main():
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--bootstrap", action="store_true",
                         help="Build missing libraries without clearing existing output files")
+    parser.add_argument("--split-module",
+                        help="Experimental: compile one exact staged IRX stem in regions")
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be positive")
+    if args.split_module and (args.bootstrap or args.out.exists()):
+        parser.error("split pilot requires a fresh output directory, without --bootstrap")
 
     if args.bootstrap:
         # Generate into a private directory, then publish only completed
@@ -191,11 +267,24 @@ def build(args, out):
     with tempfile.TemporaryDirectory(prefix="iop-named-captures-") as temporary:
         staged = Path(temporary)
         prepare_captures(args.capture, staged)
-        subprocess.run([str(recomp), str(staged), str(ir_dir)], check=True)
+        if args.split_module:
+            pilot = staged / "pilot"
+            plan = prepare_split_pilot(staged, args.split_module, pilot)
+            subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
+        else:
+            subprocess.run([str(recomp), str(staged), str(ir_dir)], check=True)
     stems = sorted(p.name[:-len(".table.ll")] for p in ir_dir.glob("*.table.ll"))
     if not stems:
         sys.exit("build_iop_aot: no translated IRX modules")
     suffix = ".dll" if os.name == "nt" else ".so"
+
+    if args.split_module:
+        if len(stems) != 1:
+            raise ValueError("split pilot emitted multiple module tables")
+        library = compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir,
+                                      stems[0], suffix)
+        print(f"build_iop_aot: {library} ({time.monotonic() - started:.1f}s total)")
+        return 0
 
     def build_one(stem):
         objects = []

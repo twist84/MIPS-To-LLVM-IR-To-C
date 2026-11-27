@@ -10,6 +10,7 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
+from build_iop_aot import prepare_split_pilot
 
 
 BASE = 0x10000
@@ -64,6 +65,25 @@ class DiscoveryTest(unittest.TestCase):
         self.assertIn("unsupported_delay", {x["kind"] for x in report["unresolved"]})
         self.assertIn("indirect_call", {x["kind"] for x in report["unresolved"]})
         self.assertIn("return", {x["kind"] for x in report["unresolved"]})
+
+    def test_split_plan_is_identity_bound_and_excludes_unsupported(self):
+        meta, data = capture([0, 0x0000000c, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "SIO2MAN.json").write_text(json.dumps(meta))
+            (root / "SIO2MAN.bin").write_bytes(data)
+            plan = prepare_split_pilot(root, "sio2man", root / "pilot")
+            self.assertEqual(plan.read_text().splitlines(),
+                             [f"IOPREG1 {BASE} 16 {fnv1a(data)} 2",
+                              f"1 {BASE}", f"1 {BASE + 8}"])
+            self.assertEqual((root / "pilot" / "SIO2MAN.bin").read_bytes(), data)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "unknown", root / "bad")
+            meta["exports"].append(BASE + 12)
+            (root / "SIO2MAN.json").write_text(json.dumps(meta))
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "SIO2MAN", root / "ambiguous")
 
     def test_capture_identity_and_exclusive_receipt(self):
         meta, data = capture([0x03e00008, 0])
