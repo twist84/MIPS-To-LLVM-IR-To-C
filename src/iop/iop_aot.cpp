@@ -42,8 +42,52 @@ uint64_t iop_aot_hash(const uint8_t* bytes, size_t size)
     return hash;
 }
 
+void c_iop_aot::record_exit(const s_iop_aot_module& module, uint32_t entry,
+                           const s_iop_aot_context& context, uint32_t reason,
+                           uint32_t requested_budget)
+{
+    const t_exit_key key{module.m_base, module.m_hash, entry, context.m_pc,
+                         reason, context.m_in_delay};
+    auto it = m_exit_counts.find(key);
+    if (it == m_exit_counts.end())
+    {
+        constexpr size_t k_max_exit_keys = 262144u;
+        if (m_exit_counts.size() >= k_max_exit_keys)
+        {
+            ++m_exit_dropped;
+            return;
+        }
+        it = m_exit_counts.emplace(key, s_exit_counts{}).first;
+    }
+    s_exit_counts& counts = it->second;
+    ++counts.m_entries;
+    counts.m_retired += context.m_executed;
+    counts.m_budget_exhausted += context.m_executed >= context.m_budget ? 1u : 0u;
+    counts.m_horizon_limited += context.m_budget < requested_budget ? 1u : 0u;
+    counts.m_zero_progress += context.m_executed == 0u ? 1u : 0u;
+}
+
 c_iop_aot::~c_iop_aot()
 {
+    if (!m_exit_counts.empty() || m_exit_dropped != 0u)
+    {
+        std::fprintf(stderr, "IOP EXIT PROFILE: keys=%zu dropped=%llu\n",
+                     m_exit_counts.size(), static_cast<unsigned long long>(m_exit_dropped));
+        for (const auto& [key, counts] : m_exit_counts)
+        {
+            const auto& [base, hash, entry, resume, reason, delay] = key;
+            std::fprintf(stderr,
+                "IOP EXIT ROW: base=%08x hash=%016llx entry=%08x resume=%08x "
+                "reason=%u delay=%u entries=%llu retired=%llu budget=%llu "
+                "horizon=%llu zero=%llu\n",
+                base, static_cast<unsigned long long>(hash), entry, resume, reason, delay,
+                static_cast<unsigned long long>(counts.m_entries),
+                static_cast<unsigned long long>(counts.m_retired),
+                static_cast<unsigned long long>(counts.m_budget_exhausted),
+                static_cast<unsigned long long>(counts.m_horizon_limited),
+                static_cast<unsigned long long>(counts.m_zero_progress));
+        }
+    }
     for (void* library : m_libraries)
     {
 #if defined(_WIN32)
