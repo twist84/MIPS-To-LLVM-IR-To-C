@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import statistics
@@ -126,11 +127,67 @@ def extract_profile(report, stderr, enabled):
     }
 
 
+def iop_library_identity(directory):
+    suffix = ".dll" if os.name == "nt" else ".so"
+    if not directory.is_dir():
+        raise ValueError("IOP AOT directory missing")
+    libraries = {path.name: sha(path) for path in sorted(directory.iterdir())
+                 if path.is_file() and path.suffix == suffix}
+    if not libraries:
+        raise ValueError("IOP AOT directory has no libraries")
+    return libraries
+
+
+def iop_capture_identity(directory):
+    records = {}
+    binaries = {path.stem for path in directory.glob("*.bin")}
+    metadata = {path.stem for path in directory.glob("*.json")}
+    if not metadata or metadata != binaries:
+        raise ValueError("missing or unpaired IOP captures")
+    for stem in sorted(metadata):
+        descriptor = directory / (stem + ".json")
+        binary = directory / (stem + ".bin")
+        data = binary.read_bytes()
+        meta = read_json(descriptor)
+        digest = 14695981039346656037
+        for byte in data:
+            digest = ((digest ^ byte) * 1099511628211) & 0xffffffffffffffff
+        if not data or len(data) != meta["text_size"] or digest != int(meta["hash"], 16):
+            raise ValueError("IOP capture size/hash mismatch: " + stem)
+        records[stem] = {"metadata": meta, "metadata_sha256": sha(descriptor),
+                         "binary_sha256": sha(binary)}
+    return records
+
+
+def iop_aot_observation(stderr, expected_libraries):
+    with stderr.open(encoding="utf-8", errors="replace") as stream:
+        lines = [line.strip() for line in stream if line.startswith("IOP AOT:")]
+    if not expected_libraries:
+        if lines:
+            raise ValueError("unexpected IOP AOT in interpreter arm")
+        return None
+    pattern = (r"IOP AOT: modules=(\d+) active=(\d+) entries=(\d+) "
+               r"instructions=(\d+) translated_ms=([\d.]+) refresh_ms=([\d.]+)")
+    matches = [match for line in lines if (match := re.fullmatch(pattern, line))]
+    if len(matches) != 1:
+        raise ValueError("missing terminal IOP AOT statistics")
+    modules, active, entries, instructions = map(int, matches[0].groups()[:4])
+    if modules != expected_libraries or not 0 < active <= modules or not entries or not instructions:
+        raise ValueError("IOP AOT incomplete load or no native retirement")
+    return {"modules": modules, "active": active, "entries": entries,
+            "instructions": instructions,
+            "translated_ms": float(matches[0][5]), "refresh_ms": float(matches[0][6])}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("runner", "elf", "disc", "profile", "source", "source-receipt",
                    "vu1", "recording", "reference", "output"):
         parser.add_argument("--" + option, type=Path, required=True)
+    parser.add_argument("--capture-iop", type=Path,
+                        help="single interpreter replay capturing linked IRX text outside archive")
+    parser.add_argument("--candidate-iop-aot", type=Path,
+                        help="compare interpreter against one IOP AOT library directory")
     parser.add_argument("--candidate-runner", type=Path,
                         help="matched alternative runner; same EE and VU1 images")
     parser.add_argument("--control-runner-sha256",
@@ -158,7 +215,8 @@ def main():
         if bool(args.candidate_source) != bool(args.candidate_source_receipt):
             raise ValueError("candidate EE source and receipt must be supplied together")
         if sum(bool(x) for x in (args.candidate_source, args.candidate_vu1,
-                                  args.candidate_runner)) > 1:
+                                  args.candidate_runner, args.candidate_iop_aot,
+                                  args.capture_iop)) > 1:
             raise ValueError("compare one changed component at a time")
         if bool(args.candidate_runner) != bool(args.control_runner_sha256):
             raise ValueError("runner comparison requires pinned control runner hash")
@@ -166,6 +224,15 @@ def main():
                                       sha(args.candidate_runner) == sha(args.runner)):
             raise ValueError("runner identities differ from comparison requirements")
         protected = (args.profile, args.source, args.vu1, args.disc, args.reference)
+        if args.candidate_iop_aot is not None:
+            protected += (args.candidate_iop_aot,)
+        if args.capture_iop is not None:
+            if args.repeats != 1 or args.capture_iop.exists() or any(
+                    args.capture_iop.is_relative_to(path) or path.is_relative_to(args.capture_iop)
+                    for path in (*protected, args.output, args.runner, args.recording,
+                                 args.elf, args.source_receipt, args.output.with_suffix(".zip"))):
+                raise ValueError("capture requires one replay and a fresh separate directory")
+            protected += (args.capture_iop,)
         if args.candidate_source:
             protected += (args.candidate_source, args.candidate_source_receipt)
         if args.candidate_vu1 is not None:
@@ -188,8 +255,10 @@ def main():
             if (candidate_original != original or candidate_library == library or
                     candidate_hashes["dedup"] == sha(library)):
                 raise ValueError("candidate EE image must differ from control")
+        iop_inventory = (iop_library_identity(args.candidate_iop_aot)
+                         if args.candidate_iop_aot is not None else None)
         comparison = (candidate_inventory is not None or candidate_library is not None
-                      or args.candidate_runner is not None)
+                      or args.candidate_runner is not None or iop_inventory is not None)
         second_arm = "candidate" if comparison else "profiled"
         if not terminal_budget(args.reference, args.max_dispatches):
             raise ValueError("reference did not reach terminal dispatch budget")
@@ -200,6 +269,10 @@ def main():
                    SDBZ_PAD0_REPLAY=str(args.recording), SDBZ_VU1_AOT=str(args.vu1),
                    SDBZ_PROFILE_PCS="0", SDBZ_REPORT_BOUNDARY_TIMING="0",
                    SDBZ_REPORT_HOTSPOTS="0")
+        if args.capture_iop or iop_inventory is not None:
+            for key in ("SDBZ_IOP_AOT", "SDBZ_IOP_AOT_VERIFY", "SDBZ_IOP_AOT_CAPTURE",
+                        "SDBZ_IOP_AOT_BUILD_OUT"):
+                env.pop(key, None)
         paths = {"runner": args.runner, "elf": args.elf, "library": library,
                  "original_library": original, "source_receipt": args.source_receipt,
                  "recording": args.recording, "reference_report": args.reference / "report.json",
@@ -232,10 +305,22 @@ def main():
         elif args.candidate_runner is not None:
             receipt["schema"] = "ee-graphics-runner-comparison-v1"
             receipt["profile_both_arms"] = False
+        elif iop_inventory is not None:
+            receipt["schema"] = "ee-graphics-iop-aot-comparison-v1"
+            receipt["candidate_iop_inventory"] = iop_inventory
+            receipt["profile_both_arms"] = False
+        elif args.capture_iop is not None:
+            receipt["schema"] = "ee-graphics-iop-capture-v1"
+            receipt["runs"] = {"capture": []}
+            receipt["capture_directory"] = str(args.capture_iop)
         args.output.mkdir(parents=True)
         try:
+            if args.capture_iop:
+                args.capture_iop.mkdir(parents=True)
             for repetition in range(args.repeats):
                 order = ("control", second_arm) if repetition % 2 == 0 else (second_arm, "control")
+                if args.capture_iop:
+                    order = ("capture",)
                 for name in order:
                     enabled = args.profile_vu1 if comparison else name == "profiled"
                     aot = args.candidate_vu1 if name == "candidate" and candidate_inventory else args.vu1
@@ -245,9 +330,13 @@ def main():
                     arm_args = argparse.Namespace(**vars(args))
                     if name == "candidate" and args.candidate_runner:
                         arm_args.runner = args.candidate_runner
-                    run = run_one(arm_args, image, directory,
-                                  dict(env, SDBZ_RUNTIME_PROFILE="1" if enabled else "0",
-                                       SDBZ_VU1_AOT=str(aot)))
+                    arm_env = dict(env, SDBZ_RUNTIME_PROFILE="1" if enabled else "0",
+                                   SDBZ_VU1_AOT=str(aot))
+                    if args.capture_iop:
+                        arm_env["SDBZ_IOP_AOT_CAPTURE"] = str(args.capture_iop)
+                    if iop_inventory is not None and name == "candidate":
+                        arm_env["SDBZ_IOP_AOT"] = str(args.candidate_iop_aot)
+                    run = run_one(arm_args, image, directory, arm_env)
                     receipt["runs"][name].append(run)
                     run["directory"] = directory.name
                     run["profile_enabled"] = enabled
@@ -257,6 +346,11 @@ def main():
                     if report["vu1_worker"]["enabled"]:
                         raise ValueError("asynchronous VU1 not permitted in G1A")
                     run["attribution"] = extract_profile(report, directory / "stderr.log", enabled)
+                    if args.capture_iop or iop_inventory is not None:
+                        run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
+                            len(iop_inventory) if iop_inventory and name == "candidate" else 0)
+            if args.capture_iop:
+                receipt["captures"] = iop_capture_identity(args.capture_iop)
             receipt["median_wall_seconds"] = {
                 name: statistics.median(run["wall_seconds"] for run in runs)
                 for name, runs in receipt["runs"].items()}
@@ -267,7 +361,7 @@ def main():
                     {"control": control["wall_seconds"], "candidate": candidate["wall_seconds"]}
                     for control, candidate in zip(receipt["runs"]["control"],
                                                   receipt["runs"]["candidate"])]
-            else:
+            elif not args.capture_iop:
                 receipt["profiling_overhead_ratio"] = medians["profiled"] / medians["control"] - 1
             receipt["correctness_accepted"] = True
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -276,7 +370,8 @@ def main():
             receipt["inputs_unchanged"] = (
                 all(sha(path) == hashes[key] for key, path in paths.items()) and
                 aot_identity(args.vu1) == inventory and
-                (candidate_inventory is None or aot_identity(args.candidate_vu1) == candidate_inventory))
+                (candidate_inventory is None or aot_identity(args.candidate_vu1) == candidate_inventory) and
+                (iop_inventory is None or iop_library_identity(args.candidate_iop_aot) == iop_inventory))
             if not receipt["inputs_unchanged"]:
                 receipt["correctness_accepted"] = False
             (args.output / "profiling-receipt.json").write_text(
