@@ -58,10 +58,11 @@ public:
 
     // Only explicitly exported alternative entries of non-overlapping active
     // modules are eligible. The CPU must still authorize a device-safe budget.
-    t_iop_aot_entry chain_entry(const s_iop_aot_module* module) const
+    t_iop_aot_entry chain_entry(const s_iop_aot_module* module, uint32_t pc) const
     {
         const auto it = m_active_chain_entries.find(module);
-        return it == m_active_chain_entries.end() ? nullptr : it->second;
+        return it == m_active_chain_entries.end() || it->second.first != pc
+            ? nullptr : it->second.second;
     }
 
     size_t module_count() const { return m_modules.size(); }
@@ -97,8 +98,8 @@ private:
     std::vector<void*> m_libraries;
     std::vector<const s_iop_aot_module*> m_modules;
     std::vector<const s_iop_aot_module*> m_active;
-    std::map<const s_iop_aot_module*, t_iop_aot_entry> m_chain_entries;
-    std::map<const s_iop_aot_module*, t_iop_aot_entry> m_active_chain_entries;
+    std::map<const s_iop_aot_module*, std::pair<uint32_t, t_iop_aot_entry>> m_chain_entries;
+    std::map<const s_iop_aot_module*, std::pair<uint32_t, t_iop_aot_entry>> m_active_chain_entries;
     uint64_t m_entries = 0u;
     uint64_t m_instructions = 0u;
     double m_milliseconds = 0.0;
