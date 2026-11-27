@@ -811,4 +811,99 @@ bool test_strict_firmware_scanout()
     return pal.configure_scanout(3u, 0u) && pal.next_scanout_event() == 5898240u &&
         pal.fields_started() == 0u && pal.gs_csr() == 0u && pal.intc_status() == 0u;
 }
+
+bool test_strict_firmware_iop_clock()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    // IOP guest publishes SMFLAG only on its fourth instruction.
+    // EE guest observes it at the first subsequent instruction.
+    const auto iop_rom = make_firmware_pilot_rom({
+        0x3c08bd00u, 0x35080030u, 0x24090012u, 0xad090000u,
+        0x1000ffffu, 0u});
+    auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b000u, 0x3484f230u});
+    const auto put_word = [&rom](uint32_t index, uint32_t word)
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            rom[index * 4u + lane] = static_cast<uint8_t>(word >> (lane * 8u));
+        }
+    };
+    put_word(30u, 0x8c850000u);
+    put_word(32u, 0x8c860000u);
+    ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+    if (!pilot.attach_iop(iop_rom, true) || pilot.advance_iop(1u).has_value() ||
+        pilot.next_iop_event() != 8u || pilot.iop_cycles() != 0u)
+    {
+        return false;
+    }
+    for (uint32_t i = 1u; i <= 33u; ++i)
+    {
+        const auto step = pilot.step(1u);
+        if (step.m_boundary != boundary::RETIRED || step.m_iop_executed != (i % 8u == 0u ? 1u : 0u) ||
+            pilot.iop_cycles() != i / 8u || pilot.iop_debt() != 0u || pilot.cycle() != i)
+        {
+            return false;
+        }
+    }
+    if (pilot.cpu().m_gpr[5].m_lo != 0u || pilot.cpu().m_gpr[6].m_lo != 0x12u)
+    {
+        return false;
+    }
+
+    // Branch from cycle 7 to 9 crosses the IOP deadline at 8.
+    // Neither guest state nor clock may move on refusal.
+    auto branch_rom = make_firmware_pilot_rom({0x40806000u, 0u, 0u, 0u, 0u, 0u, 0u,
+        0x1000ffffu, 0u});
+    ee::c_ee_strict_firmware_pilot branch(std::move(branch_rom));
+    if (!branch.attach_iop(iop_rom, true))
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 7u; ++i)
+    {
+        if (branch.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    if (branch.step(2u).m_boundary != boundary::TIMER_DEADLINE ||
+        branch.cycle() != 7u || branch.iop_cycles() != 0u || branch.iop_debt() != 0u ||
+        branch.cpu().m_pc != 0xbfc0001cu)
+    {
+        return false;
+    }
+
+    // PAL start and end are both even timestamps, permitting an
+    // aligned two-slot EE loop without crossing any IOP deadline.
+    constexpr uint64_t start = 5898240u;
+    constexpr uint64_t end = start + start * 44u / 625u;
+    ee::c_ee_strict_firmware_pilot scanout(make_firmware_pilot_rom({
+        0x40806000u, 0u, 0x1000ffffu, 0u}));
+    if (!scanout.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true) ||
+        !scanout.configure_scanout(3u, 0u) ||
+        scanout.step(1u).m_boundary != boundary::RETIRED ||
+        scanout.step(1u).m_boundary != boundary::RETIRED)
+    {
+        return false;
+    }
+    while (scanout.cycle() < end)
+    {
+        const auto step = scanout.step(2u);
+        const uint64_t now = scanout.cycle();
+        if (step.m_boundary != boundary::RETIRED || scanout.iop_cycles() != now / 8u ||
+            scanout.iop_debt() != 0u || step.m_vblank_started != (now == start) ||
+            step.m_vblank_ended != (now == end))
+        {
+            return false;
+        }
+        const uint32_t expected = (now >= start ? 1u : 0u) | (now >= end ? 1u << 11u : 0u);
+        if ((scanout.iop_irq_status() & 0x801u) != expected)
+        {
+            return false;
+        }
+    }
+    return scanout.fields_started() == 1u && scanout.fields_ended() == 1u &&
+        scanout.intc_status() == 12u && !scanout.sif_faulted();
+}
 } // namespace

@@ -3,6 +3,7 @@
 #include "ee_strict_reset.h"
 #include "ee_vsync_flags.h"
 #include "../tools/ee_host_timers.h"
+#include "../tools/ee_iop_clock.h"
 #include "../iop/iop_kernel.h"
 #include "../iop/iop_sif_mmio_link.h"
 #include "../iop/iop_sif0_dma_transport.h"
@@ -41,6 +42,7 @@ struct s_ee_firmware_step
     bool m_dma_completed = false;
     bool m_vblank_started = false;
     bool m_vblank_ended = false;
+    uint32_t m_iop_executed = 0u;
 };
 
 // Reference policy reserves two slots for supported branches and their delay
@@ -131,7 +133,7 @@ public:
     // Install a second reset domain before either processor executes.
     // Only immutable ROM input is supplied; no guest RAM/register
     // prepopulation or HLE service bootstrap.
-    bool attach_iop(const std::vector<uint8_t>& rom)
+    bool attach_iop(const std::vector<uint8_t>& rom, bool synchronized = false)
     {
         if (m_retired != 0u || m_iop != nullptr)
         {
@@ -143,6 +145,11 @@ public:
             return false;
         }
         m_iop = std::move(iop);
+        m_iop_synchronized = synchronized;
+        if (synchronized && m_iop_clock.observe(0u) != c_ee_iop_clock::e_result::accepted)
+        {
+            std::abort();
+        }
         iop::c_sif_mmio_link::bind(m_iop->hardware(), m_hardware.sif());
         m_sif0 = std::make_unique<iop::c_sif0_dma_transport>(
             m_memory, m_hardware.dmac(), m_iop->cpu(), m_iop->hardware());
@@ -156,7 +163,7 @@ public:
     // samples resulting interrupt levels before fetching any opcode.
     std::optional<iop::s_kernel_run_result> advance_iop(uint32_t budget)
     {
-        if (m_iop == nullptr || budget == 0u || budget > k_slot_limit || sif_faulted())
+        if (m_iop == nullptr || m_iop_synchronized || budget == 0u || budget > k_slot_limit || sif_faulted())
         {
             return std::nullopt;
         }
@@ -166,6 +173,14 @@ public:
             m_iop_stopped = true;
         }
         return run;
+    }
+
+    uint64_t iop_cycles() const { return m_iop != nullptr ? m_iop->cycles() : 0u; }
+    uint64_t iop_debt() const { return m_iop_clock.due(); }
+    uint64_t next_iop_event() const { return m_iop_clock.next_cycle(); }
+    uint32_t iop_irq_status() const
+    {
+        return m_iop != nullptr ? m_iop->hardware().scheduler_checkpoint().m_irq_stat : 0u;
     }
 
     bool sif_faulted() const
@@ -232,7 +247,8 @@ public:
         // an intervening deadline instead of processing it late or
         // committing a partial branch. An event exactly at end is legal.
         if (m_timers.next_event() < end || next_compare_event() < end ||
-            next_scanout_event() < end)
+            next_scanout_event() < end ||
+            (m_iop_synchronized && next_iop_event() < end))
         {
             return {boundary::TIMER_DEADLINE};
         }
@@ -341,6 +357,12 @@ public:
             }
             for (const uint8_t edge : m_hardware.scanout().delivered_vblank_edges())
             {
+                // Raw IOP hardware IRQ latches, not HLE callbacks. The
+                // PCSX2 IopCounters reference uses start IRQ0/end IRQ11.
+                if (m_iop_synchronized && !m_iop->hardware().raise_interrupt(edge != 0u ? 0u : 11u))
+                {
+                    std::abort();
+                }
                 if (edge != 0u)
                 {
                     vblank_started = true; // scanout raised INTC 2
@@ -356,6 +378,31 @@ public:
                 }
             }
         }
+        // Deterministic same-timestamp order: EE store/DMA, timers,
+        // scanout edges, one due IOP instruction, then EE IRQ sampling.
+        // At most one IOP slot is due under the branch preflight rule.
+        uint32_t iop_executed = 0u;
+        if (m_iop_synchronized)
+        {
+            if (m_iop_clock.observe(timestamp) != c_ee_iop_clock::e_result::accepted ||
+                m_iop_clock.due() > 1u)
+            {
+                std::abort();
+            }
+            if (m_iop_clock.due() != 0u && !sif_faulted())
+            {
+                const auto run = m_iop->run(1u, 1u);
+                if (run.m_executed > 1u || !m_iop_clock.consume(run.m_executed))
+                {
+                    std::abort();
+                }
+                iop_executed = static_cast<uint32_t>(run.m_executed);
+                if (run.m_stop != iop::e_kernel_stop::budget_exhausted || iop_executed != 1u)
+                {
+                    m_iop_stopped = true;
+                }
+            }
+        }
         const bool ip7_before = (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
         ee_cop0_clock_sync(&m_cpu, &m_runtime);
         const bool compare_crossed = !ip7_before &&
@@ -366,7 +413,7 @@ public:
         // and BD is clear. Intra-branch deadlines still refuse above.
         const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
         return {boundary::RETIRED, action, due, vector, compare_crossed, dma_completed,
-            vblank_started, vblank_ended};
+            vblank_started, vblank_ended, iop_executed};
     }
 
 private:
@@ -809,6 +856,8 @@ private:
     uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
     bool m_iop_stopped = false;
+    bool m_iop_synchronized = false;
+    c_ee_iop_clock m_iop_clock{};
     // Destruction order detaches FIFO callbacks before either endpoint.
     std::unique_ptr<iop::c_kernel> m_iop;
     std::unique_ptr<iop::c_sif0_dma_transport> m_sif0;

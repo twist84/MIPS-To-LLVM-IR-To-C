@@ -1437,3 +1437,28 @@ Directed ROM test retires actual instructions through NTSC
 start/end boundaries, checks branch EPC, CSR.FIELD/VSINT,
 independent acknowledgement, ERET and masked end latch; PAL
 reset cadence is separately checked. Pending CI.
+
+## M6E3H3E1: bounded synchronized EE/IOP execution
+
+H3D passed both firmware versions at 3ca7e2cd:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46059745015
+
+An opt-in synchronized reset domain reuses c_ee_iop_clock
+(8 EE compatibility slots per IOP instruction), anchored at zero.
+Accrue fractional debt only after actual EE retirement and consume
+only actual IOP progress. No independent IOP slices in this mode.
+Refuse an atomic EE branch crossing the next IOP slot; equality
+at the completed branch boundary is accepted. Same-time order:
+EE store/DMA, EE timers, scanout, IOP slot, COP0/EE IRQ sampling.
+Actual scanout edges raise raw IOP I_STAT IRQ0/IRQ11, following
+PCSX2 IopCounters.cpp; no HLE callback or synthetic event.
+IOP stop preserves unconsumed debt and blocks future EE progress.
+The committed EE transaction is not rolled back after an IOP stop.
+Directed ROMs test fractional accounting, exact mailbox visibility,
+branch refusal and PAL VBlank start/end in both clock domains.
+This is reference timing and serialized ownership, not calibrated
+timing or parallel execution. Atomic branch interior deadlines
+remain a blocker for unrestricted firmware execution; next
+checkpoint must address branch/slot scheduling and real-ROM
+dual-domain diagnostics before claiming authentic boot progress.
+No retail changes. Pending CI.
