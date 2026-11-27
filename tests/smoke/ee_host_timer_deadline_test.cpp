@@ -4,19 +4,23 @@
 
 #include <cstdio>
 #include <limits>
+#include <vector>
 
 namespace
 {
 constexpr bool check(bool condition, const char* message)
 {
-    if (!condition)
+    if !consteval
     {
-        std::fprintf(stderr, "EE timer deadline: %s\n", message);
+        if (!condition)
+        {
+            std::fprintf(stderr, "EE timer deadline: %s\n", message);
+        }
     }
     return condition;
 }
 
-constexpr bool test_iop_clock_boundaries()
+consteval bool test_iop_clock_boundaries()
 {
     using t_iop_clock = ee::c_ee_iop_clock;
     using e_result = t_iop_clock::e_result;
@@ -80,7 +84,7 @@ constexpr bool test_iop_clock_boundaries()
 
 static_assert(test_iop_clock_boundaries(), "IOP clock boundary regression");
 
-constexpr bool test_iop_service_batch_boundaries()
+consteval bool test_iop_service_batch_boundaries()
 {
     const auto empty = ee::ee_iop_service_batch(0u, 64u, 1024u);
     const auto exhausted = ee::ee_iop_service_batch(500u, 0u, 1024u);
@@ -106,6 +110,65 @@ constexpr bool test_iop_service_batch_boundaries()
 }
 
 static_assert(test_iop_service_batch_boundaries(), "IOP service batch boundary regression");
+
+// C++23 requires this fixture to execute during compilation, including
+// the temporary vector storage and the instruction reader callback.
+consteval bool test_bounded_alu_horizon()
+{
+    const auto slots = [](const std::vector<uint32_t>& words,
+        uint32_t base = 0x1000u)
+    {
+        return ee::ee_horizon_alu_exit_slots(base,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (pc < base || (pc - base) / 4u >= words.size())
+                {
+                    return false;
+                }
+                *word = words[(pc - base) / 4u];
+                return true;
+            });
+    };
+    if (!check(slots({0x25080001u, 0x03e00008u, 0x00000000u}) == 3u &&
+            slots({0x0c04000cu, 0x24020007u}) == 2u &&
+            slots({0x0320f809u, 0x00000000u}) == 2u &&
+            slots({0x03e10008u, 0u}) == 0u &&
+            slots({0x03e00008u, 0x8c020000u}) == 0u &&
+            slots({0x8c020000u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x40826000u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x1000ffffu, 0u}) == 0u &&
+            slots({0x20020001u, 0x03e00008u, 0u}) == 0u &&
+            slots({0x03e00008u}) == 0u &&
+            slots({0x03e00008u, 0u}, 0u) == 0u &&
+            slots({0x03e00008u, 0u}, 0xfffffffcu) == 0u &&
+            slots(std::vector<uint32_t>(32u, 0u)) == 0u &&
+            ee::ee_horizon_bound_fits(10u, 14u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 13u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 9u, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, UINT64_MAX, 3u) &&
+            !ee::ee_horizon_bound_fits(10u, 14u, 0u),
+            "bounded ALU paths and strict deadline"))
+    {
+        return false;
+    }
+    std::vector<uint32_t> limit(32u, 0u);
+    limit[30] = 0x03e00008u;
+    if (!check(slots(limit) == 32u,
+            "maximum bounded ALU path includes delay slot"))
+    {
+        return false;
+    }
+    limit[30] = 0u;
+    limit[31] = 0x03e00008u;
+    limit.push_back(0u);
+    if (!check(slots(limit) == 0u, "delay slot exceeds bounded path"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_bounded_alu_horizon(), "bounded ALU horizon regression");
 
 bool write_timer(ee::c_ee_host_timers& timers, uint32_t index,
     uint32_t offset, uint32_t value)
@@ -151,60 +214,6 @@ int main()
             return 1;
         }
 
-    }
-    // Source-level bounded paths accept only nontrapping GPR ALU
-    // operations and a dispatcher exit with a safe mandatory delay slot.
-    {
-        const auto slots = [](const std::vector<uint32_t>& words,
-            uint32_t base = 0x1000u)
-        {
-            return ee::ee_horizon_alu_exit_slots(base,
-                [&](uint32_t pc, uint32_t* word)
-                {
-                    if (pc < base || (pc - base) / 4u >= words.size())
-                    {
-                        return false;
-                    }
-                    *word = words[(pc - base) / 4u];
-                    return true;
-                });
-        };
-        if (!check(slots({0x25080001u, 0x03e00008u, 0x00000000u}) == 3u &&
-                slots({0x0c04000cu, 0x24020007u}) == 2u &&
-                slots({0x0320f809u, 0x00000000u}) == 2u &&
-                slots({0x03e10008u, 0u}) == 0u &&
-                slots({0x03e00008u, 0x8c020000u}) == 0u &&
-                slots({0x8c020000u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x40826000u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x1000ffffu, 0u}) == 0u &&
-                slots({0x20020001u, 0x03e00008u, 0u}) == 0u &&
-                slots({0x03e00008u}) == 0u &&
-                slots({0x03e00008u, 0u}, 0u) == 0u &&
-                slots({0x03e00008u, 0u}, 0xfffffffcu) == 0u &&
-                slots(std::vector<uint32_t>(32u, 0u)) == 0u &&
-                ee::ee_horizon_bound_fits(10u, 14u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 13u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 9u, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, UINT64_MAX, 3u) &&
-                !ee::ee_horizon_bound_fits(10u, 14u, 0u),
-                "bounded ALU paths and strict deadline"))
-        {
-            return 1;
-        }
-        std::vector<uint32_t> limit(32u, 0u);
-        limit[30] = 0x03e00008u;
-        if (!check(slots(limit) == 32u,
-                "maximum bounded ALU path includes delay slot"))
-        {
-            return 1;
-        }
-        limit[30] = 0u;
-        limit[31] = 0x03e00008u;
-        limit.push_back(0u);
-        if (!check(slots(limit) == 0u, "delay slot exceeds bounded path"))
-        {
-            return 1;
-        }
     }
     // Each combined batch must be exactly the concatenation of legacy
     // turns and end strictly before the predicted autonomous event.
