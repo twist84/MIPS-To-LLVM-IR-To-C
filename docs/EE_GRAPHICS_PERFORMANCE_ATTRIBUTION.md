@@ -1040,3 +1040,29 @@ state and restored G8B SPU2 production implementation (a3fb546,
 85274ba) to avoid maintaining an extra invariant without benefit.
 Retain fractional-phase regression and runner-only replay tooling.
 G8B remains pinned control.
+
+## G8C.2 — inline existing device deadline fast paths
+
+Use the G8B production clock (G8C.1 reverted). The idle-deadline
+phase calls both SPU2 DMA and voice IRQ horizon queries on each
+idle scheduler iteration. Move the existing cache-enabled
+zero/positive voice deadline hit paths into the header; retain the
+same uncached compute and cache refresh/invalidation logic out of
+line. Inline the ordinary two DMA countdown minimum; defer to the
+unchanged AutoDMA refill logic when either active transfer has
+remaining bytes. Preserve zero-as-no-deadline, mixed DMA/AutoDMA,
+ties, disabled-cache behavior and every existing horizon. No
+persistent state, guest ordering, budget or device advancement
+change. Compiler inlining is not guaranteed; these changes are
+a candidate, not an established speedup. Existing hardware tests
+cover overlapping DMA, AutoDMA and cached versus uncached IRQ
+queries across sub-sample phases; add repeated queries and
+cache-enable transitions. No EE lowering or VU1 changes.
+
+Rebuild runner and hardware/kernel fixtures; run the same four
+unprofiled matched pairs as G8C.1, output ee-iop-g8c2, **against
+the preserved G8B runner** (not the rejected G8C.1 candidate).
+Keep fixed G6A/V30, PAD/RTC, quiet/coalescing off. Final CI and
+retail validation pending. If neutral again, move away from
+deadline micro-optimizations and measure active guest execution
+(AOT/interpreter coverage and dispatch cost) before structural work.
