@@ -589,3 +589,50 @@ python tools\audit_iop_jump_tables.py ^
 
 Compare against I12/I13b before enabling any new candidate edges in
 production. No native rebuild or replay is needed for this audit.
+
+## I14b/c — Adjacent table candidate boundaries
+
+I14a receipt archive `MIPS-To-LLVM-IR-To-C.zip` (SHA-256
+`2740935db404a0775ed209236a04a6f2e8181c054f47237767a31b655f8d4800`)
+identifies producers for all 91 unresolved indirect sites: 69
+register-address loads, 14 scaled-index loads, eight constant-address
+loads, no live-in-only producers. No constant dynamic targets are proven.
+All four formerly unsupported jump table expressions were recovered.
+MCMAN adds two tables (16 and seven slots), 123 reached words and 83
+eligible ordinary PCs. LIBSD adds two table expressions (40 and nine
+slots), but the first run overlaps the independently recovered table at
+0x50330: JR 0x4eb60, start 0x502e0, crosses into the table for JR 0x4ed50.
+The uncapped shadow reports 168 shared ordinary PCs between owners
+0x4eaec and 0x4ecd8.
+
+Re-traversing the uploaded graph with that run capped at 0x50330
+removes 12 candidate edges and all 168 shared ordinary ownership
+conflicts without losing any reached ordinary PCs or adding roots.
+The expected capped inventory has ten tables, 190 pointer slots,
+85 distinct candidate edges, 890 additional reached words relative
+to the relocation-only inventory (49,627/56,668 in total), 41,013
+eligible ordinary PCs and 15,655 residual dispatch PCs. These are
+offline predictions, not a new accepted capture recomputation.
+
+`--cap-adjacent-tables` in the shadow audit caps a contiguous run at a
+separately recovered, nonempty, relocation-backed table base. Equal-base
+sites and empty candidates do not impose caps. The receipt retains the
+uncapped count and stop reason, the candidate boundary and its sites.
+Neither switch index bounds nor runtime table contents are proven.
+Cross-block audits also record the original instruction window including
+branch and delay-slot words for future range-guard analysis.
+
+`--split-cross-block-tables` enables both cross-block producer traversal
+and adjacent candidate caps in the builder's existing original-ELF
+validation path. The builder still rejects ambiguous ownership and
+preserves residual dispatch, dynamic JR/JALR handling and the default
+I13c behavior. Synthetic tests cover adjacent table overlap, unchanged
+reachability, unresolved dynamic jumps, opt-in cross-block ownership,
+instruction context and exact residual partition preservation.
+
+Only MCMAN and LIBSD require rebuilding for the candidate; retain the
+other five accepted I13c libraries. Validate the new shadow receipt
+with `--discover-targets --cross-block --cap-adjacent-tables` and run
+the pinned 40M-dispatch retail replay. I13c remains the accepted
+correctness baseline until that validation passes. No EE/VU1/runtime
+changes or EE rebuild are needed.
