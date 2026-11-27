@@ -27,8 +27,8 @@ int main(int argc, char** argv)
     llvm::llvm_context context("ee_strict_word");
     const bool emitted = instructions.size() == 1u
         ? llvm::emit_strict_word_entry(context, instructions.front())
-        : instructions.size() == 2u && ee::ee_strict_branch_supported(instructions.front().opcode_word)
-            ? llvm::emit_strict_memory_branch(context, instructions[0], instructions[1])
+        : ee::ee_strict_branch_supported(instructions[instructions.size() - 2u].opcode_word)
+            ? llvm::emit_strict_memory_terminated_block(context, instructions)
             : llvm::emit_strict_memory_sequence(context, instructions);
     if (!emitted)
     {

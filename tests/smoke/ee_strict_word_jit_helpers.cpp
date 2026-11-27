@@ -455,4 +455,160 @@ extern "C" uint32_t ee_test_strict_native_branch(native_entry entry,
     return 17u;
 }
 
+
+extern "C" uint32_t ee_test_strict_native_jump(native_entry entry,
+    uint32_t opcode, uint32_t slot, uint32_t with_prefix)
+{
+    if (entry == nullptr || !ee_strict_branch_supported(opcode) || with_prefix > 1u)
+    {
+        return 0u;
+    }
+    constexpr uint32_t pc = 0x00400ffcu;
+    constexpr uint32_t data = 0x00600000u;
+    constexpr uint32_t target = 0x0040100cu;
+    constexpr uint32_t link_value = pc + 8u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t code_lo0 = (1u << 6u) | 0x16u;
+    constexpr uint32_t code_lo1 = (2u << 6u) | 0x16u;
+    constexpr uint32_t data_lo = (3u << 6u) | 0x16u;
+    constexpr uint64_t marker = 0x1122334455667788ull;
+    constexpr uint64_t upper = 0xfedcba9876543210ull;
+    constexpr uint32_t original = 0x80ff8180u;
+    constexpr uint32_t prefix_word = 0xac820004u; // SW r2,4(r4)
+    const uint32_t primary = opcode >> 26u;
+    const bool indirect = primary == 0u;
+    const uint32_t link = primary == 3u ? 31u :
+        indirect && (opcode & 63u) == 9u ? (opcode >> 11u) & 31u : 0u;
+    const uint32_t rt = (slot >> 16u) & 31u;
+    const uint32_t rs = (slot >> 21u) & 31u;
+    const bool store = (slot >> 26u) == 0x2bu;
+    for (uint32_t scenario = 0u; scenario < 10u; ++scenario)
+    {
+        ee_memory memory(0x4000u);
+        if (!memory.tlb().write(0u, 0u, (pc & ~0x1fffu) | 0xabu,
+            scenario == 5u ? code_lo0 & ~2u : code_lo0,
+            scenario == 2u ? code_lo1 & ~2u : code_lo1) ||
+            !memory.tlb().write(1u, 0u, data | 0xabu, data_lo, 0x12u))
+        {
+            return 0u;
+        }
+        memory.write32(0x1ff8u, prefix_word);
+        memory.write32(0x1ffcu, scenario == 4u ? 0u : opcode);
+        memory.write32(0x2000u, scenario == 3u ? 0u : slot);
+        memory.write32(0x2004u, original);
+        memory.write32(0x3000u, original);
+        memory.write32(0x3004u, original);
+        s_ee_cpu_state cpu{};
+        cpu.m_pc = pc - 4u * with_prefix;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[COP0_Status] = 0x10u;
+        cpu.m_cop0[COP0_EntryHi] = 0xabu;
+        cpu.m_gpr[2] = {marker, upper};
+        cpu.m_gpr[4].m_lo = scenario == 1u ? data + 1u :
+            scenario == 6u ? 0x00800000u : data;
+        cpu.m_gpr[5] = {0x1234567800000000ull | (scenario == 7u ? target + 1u : target), upper};
+        cpu.m_gpr[7] = {marker, upper};
+        cpu.m_gpr[31] = {marker, upper};
+        cpu.m_gpr[0] = {marker, upper};
+        if (scenario == 8u && with_prefix == 0u)
+        {
+            cpu.m_pc += 4u;
+        }
+        const auto before = cpu;
+        bool delay = true;
+        s_ee_strict_native_word_context context{&memory, &delay, {scenario != 9u, true}};
+        const auto actual = static_cast<result>(entry(&cpu, &context));
+        const bool prefix_fault = with_prefix != 0u && (scenario == 1u || scenario == 5u || scenario == 6u);
+        const bool fetch_fault = scenario == 2u || scenario == 5u;
+        const bool data_fault = rs == 4u && (scenario == 1u || scenario == 6u);
+        const bool refusal = scenario == 3u || scenario == 4u ||
+            (scenario == 8u && with_prefix == 0u) || scenario == 9u;
+        const bool fault = prefix_fault || fetch_fault || data_fault;
+        const bool slot_executed = !fault && !refusal;
+        const bool branch_completed = !prefix_fault && scenario != 4u &&
+            scenario != 5u && scenario != 3u &&
+            !(scenario == 8u && with_prefix == 0u) && scenario != 9u;
+        const bool link_written = branch_completed && link != 0u;
+        result expected = result::COMMITTED;
+        if (fault)
+        {
+            expected = result::FAULT_COMMITTED;
+        }
+        else if (refusal)
+        {
+            expected = scenario == 3u || scenario == 4u
+                ? result::UNSUPPORTED_INSTRUCTION : result::UNSAFE_BOUNDARY;
+        }
+        if (actual != expected)
+        {
+            std::fprintf(stderr, "strict jump mismatch: opcode=%08x slot=%08x prefix=%u scenario=%u actual=%u expected=%u\n",
+                opcode, slot, with_prefix, scenario, static_cast<unsigned>(actual), static_cast<unsigned>(expected));
+            return 0u;
+        }
+        // Compare complete register state, with slot effects applied
+        // after the completed link, including a load overwriting it.
+        for (uint32_t reg = 0u; reg < 32u; ++reg)
+        {
+            uint64_t lo = before.m_gpr[reg].m_lo;
+            if (link_written && reg == link)
+            {
+                lo = link_value;
+            }
+            if (slot_executed && !store && rt != 0u && reg == rt)
+            {
+                lo = 0xffffffff80ff8180ull;
+            }
+            if (cpu.m_gpr[reg].m_lo != lo || cpu.m_gpr[reg].m_hi != before.m_gpr[reg].m_hi)
+            {
+                return 0u;
+            }
+        }
+        const uint64_t source = rt == 0u ? 0u : rt == link && link_written ?
+            link_value : before.m_gpr[rt].m_lo;
+        if (memory.read32(0x3000u) !=
+            (slot_executed && store && rs == 4u ? static_cast<uint32_t>(source) : original) ||
+            memory.read32(0x3004u) !=
+            (with_prefix && !prefix_fault && scenario != 9u ? static_cast<uint32_t>(marker) : original) ||
+            memory.read32(0x2004u) !=
+            (slot_executed && store && rs != 4u ? static_cast<uint32_t>(source) : original))
+        {
+            return 0u;
+        }
+        if (fault)
+        {
+            const bool bd = !prefix_fault && scenario != 5u;
+            const uint32_t code = fetch_fault ? EX_TLBL :
+                scenario == 1u ? (prefix_fault || store ? EX_AdES : EX_AdEL) :
+                (prefix_fault || store ? EX_TLBS : EX_TLBL);
+            const uint32_t address = fetch_fault ?
+                (scenario == 2u ? pc + 4u : pc - 4u * with_prefix) :
+                scenario == 1u ? data + 1u + (prefix_fault ? 4u : 0u) :
+                0x00800000u + (prefix_fault ? 4u : 0u);
+            const uint32_t epc = prefix_fault ? pc - 4u : pc;
+            if (cpu.m_exit_reason != exception ||
+                cpu.m_pc != (scenario == 6u ? VEC_TLB_REFILL_BEV0 : VEC_COMMON_BEV0) ||
+                cpu.m_cop0[COP0_EPC] != epc ||
+                cpu.m_cop0[COP0_BadVAddr] != address ||
+                cpu.m_cop0[COP0_Cause] != ((code << 2u) | (bd ? CAUSE_BD : 0u)) ||
+                cpu.m_pad != (bd ? pc + 4u : epc) || delay != bd)
+            {
+                return 0u;
+            }
+        }
+        else
+        {
+            const uint32_t expected_pc = slot_executed ?
+                (indirect && scenario == 7u ? target + 1u : target) :
+                scenario == 9u || (scenario == 8u && !with_prefix) ? before.m_pc : pc;
+            if (cpu.m_pc != expected_pc || cpu.m_exit_reason != dispatch ||
+                cpu.m_cop0[COP0_Status] != before.m_cop0[COP0_Status] || !delay)
+            {
+                return 0u;
+            }
+        }
+    }
+    return 10u;
+}
+
 } // namespace ee

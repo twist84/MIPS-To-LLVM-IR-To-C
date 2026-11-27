@@ -571,3 +571,29 @@ This is not general CFG lowering: linking/indirect branches, arbitrary
 slot instructions, integrated prefix/branch blocks, timing accounting,
 actual BIOS/retail dispatch, cache/device state remain open. No default
 path or production runtime ABI change. CI pending.
+
+## Strict memory follow-up M6D3C: restartable jumps and terminated blocks
+
+Extend the isolated branch emitter with J/JAL/JR/JALR. The EE
+Instruction Set Manual v6.0, printed pp.65–68, specifies zero-extended
+PC+8 links, distinct JALR source/destination registers, and target
+alignment exceptions at subsequent fetch rather than at the jump.
+https://studylib.net/doc/28989088/ee-insns
+
+Capture indirect targets before the slot. Publish the low-half link
+before the slot, preserve it on a guest exception (it is an earlier
+restartable architectural effect), restore it on host refusal, and
+leave upper halves and register zero untouched. Reject undefined
+same-register JALR and reserved fields. No target fetch is invented.
+Compose an existing bounded contiguous memory prefix with an existing
+branch pair, keeping all per-instruction checked exits. This is
+single-terminator block lowering, not arbitrary CFG joins/loops.
+
+Extend directed native MCJIT tests with direct/indirect jumps, links
+and zero-link destination, slot consumption/overwrite of the link,
+target capture, misaligned target deferral, guest faults and host
+refusals, both with and without a memory prefix, at O0/O2. The
+existing single instruction, sequence and equality-branch tests
+remain. No default lowering or production ABI change. CI pending;
+conditional link branches, general CFG, device/cache/ROM handling,
+clock accounting and actual BIOS dispatch remain open.

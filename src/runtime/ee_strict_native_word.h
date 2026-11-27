@@ -64,22 +64,40 @@ static_assert(ee_decode_strict_transfer(0x2du << 26u).m_store &&
               ee_decode_strict_transfer(0x2du << 26u).m_partial);
 static_assert(ee_decode_strict_transfer(0u).m_width == 0u);
 
-// The branch pilot admits only non-linking integer equality branches.
-// Their condition is evaluated before the slot, with no GPR mutation.
+// Integer equality branches and restartable direct/indirect jumps.
+// Sony EE instruction manual pp.65–68: JALR rs == rd is undefined.
+// Reserved fields in JR/JALR are not silently accepted.
 inline constexpr bool ee_strict_branch_supported(uint32_t opcode)
 {
     const uint32_t primary = opcode >> 26u;
-    return primary == 4u || primary == 5u || primary == 0x14u || primary == 0x15u;
+    if (primary == 2u || primary == 3u || primary == 4u || primary == 5u ||
+        primary == 0x14u || primary == 0x15u)
+    {
+        return true;
+    }
+    if (primary == 0u)
+    {
+        const uint32_t function = opcode & 63u;
+        const uint32_t rs = (opcode >> 21u) & 31u;
+        const uint32_t rd = (opcode >> 11u) & 31u;
+        return (function == 8u && (opcode & 0x001fffc0u) == 0u) ||
+            (function == 9u && (opcode & 0x001f07c0u) == 0u && rs != rd);
+    }
+    return false;
 }
 
 static_assert(ee_strict_branch_supported(0x10000000u));
 static_assert(ee_strict_branch_supported(0x54000000u));
-static_assert(!ee_strict_branch_supported(0x0c000000u));
+static_assert(ee_strict_branch_supported(0x0c000000u));
+static_assert(ee_strict_branch_supported(0x00a03809u));
+static_assert(!ee_strict_branch_supported(0x00a02809u));
 
 // Check the live branch fetch without executing it. A generated branch
 // pair must call this first, evaluate the condition, and call the delay
-// helper only if the slot is executed. The non-linking branch leaves
-// cpu.m_pc at its own PC until the pair succeeds or commits a fault.
+// helper only if the slot is executed. The branch leaves cpu.m_pc at
+// its own PC until the pair succeeds or commits a fault. A completed,
+// restartable link is visible to the slot and preserved on a guest
+// exception; generated code restores it on host refusal.
 // These are internal experimental entry contracts, not guest callbacks.
 extern "C" uint32_t ee_strict_native_check_branch(
     s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,

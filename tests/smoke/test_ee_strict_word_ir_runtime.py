@@ -107,12 +107,45 @@ def main():
                         if not address or branch_test(address, branch, slot) != 17:
                             raise RuntimeError(f"strict native branch failed: {branch:#x}/{slot:#x} O{opt}")
                         count += 17
+        jump_test = helper.ee_test_strict_native_jump
+        jump_test.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32]
+        jump_test.restype = ctypes.c_uint32
+        jumps = (
+            (0x08100403, 0), (0x0c100403, 31),
+            (0x00a00008, 0), (0x00a03809, 7), (0x00a00009, 0),
+        )
+        for opcode, link in jumps:
+            slots = [0x8c850000, 0xac800000 | ((link or 5) << 16)]
+            if link:
+                slots += [0x8c800000 | (link << 16),
+                          0x8c800000 | (link << 21) | (2 << 16)]
+            for slot in slots:
+                for prefix in (0, 1):
+                    words = ([0xac820004] if prefix else []) + [opcode, slot]
+                    subprocess.run([str(fixture), str(path), hex(0x00400ffc - 4 * prefix),
+                                    *[hex(word) for word in words]], check=True)
+                    source = path.read_text(encoding="utf-8")
+                    for opt in (0, 2):
+                        machine = target.create_target_machine(opt=opt)
+                        module = llvm.parse_assembly(source)
+                        module.triple = llvm.get_default_triple()
+                        module.data_layout = str(machine.target_data)
+                        module.verify()
+                        if opt:
+                            optimize_guest_ir(module, machine)
+                        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+                        engine.add_module(module)
+                        engine.finalize_object()
+                        address = engine.get_function_address("guest_strict_word")
+                        if not address or jump_test(address, opcode, slot, prefix) != 10:
+                            raise RuntimeError(f"strict jump failed: {opcode:#x}/{slot:#x} prefix={prefix} O{opt}")
+                        count += 10
         # A branch in a memory sequence, unsupported opcode, or wrapping sequence must not
         # silently enter the straight-line lowering.
         for pc, words in (
             ("0x00400000", ["0xac820000", "0x10000000"]),
             ("0x00400000", ["0x10000000", "0x10000000"]),
-            ("0x00400000", ["0x0c100000", "0xac820000"]),
+            ("0x00400000", ["0x00a02809", "0xac820000"]),
             ("0x00400000", ["0xac820000", "0x0"]),
             ("0xfffffffc", ["0xac820000", "0x8cc50000"]),
         ):

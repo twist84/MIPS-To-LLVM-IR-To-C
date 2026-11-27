@@ -37,7 +37,9 @@ enum class e_ee_memory_fault_commit_result : uint8_t
 
 // Caller owns the EE execution thread, has accounted preceding clock and
 // device work, and has prevented/restored all effects of the faulting
-// instruction (including a branch's effects if it must be restarted).
+// instruction. Earlier architecturally completed effects (including a
+// restartable branch link) must be retained; nonarchitectural speculative
+// effects must be restored before entry.
 // The TLB must be the current table. This is not a rollback mechanism.
 inline constexpr e_ee_memory_fault_commit_result ee_commit_memory_fault_at_boundary(
     s_ee_cpu_state& cpu, bool& actual_delay_slot, const c_ee_tlb& tlb,

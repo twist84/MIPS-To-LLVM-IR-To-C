@@ -235,7 +235,7 @@ inline bool emit_strict_memory_sequence(llvm_context& ctx,
 }
 
 // A bounded branch terminator and exactly one integer memory delay
-// instruction. No link/branch-in-slot, no speculative target fetch.
+// instruction. No branch-in-slot or speculative target fetch.
 // Both branch operands are sampled before the delay instruction. An
 // ordinary not-taken branch still executes its slot; a not-taken likely
 // branch skips the slot helper entirely, including its fetch checks.
@@ -250,8 +250,14 @@ inline bool emit_strict_memory_branch(llvm_context& ctx,
         return false;
     }
     const uint32_t primary = branch.opcode_word >> 26u;
-    const bool likely = (primary & 0x10u) != 0u;
-    if (branch.flow != (likely ? ee::e_ee_flow::FLOW_BRANCH_LIKELY : ee::e_ee_flow::FLOW_BRANCH))
+    const bool indirect = primary == 0u;
+    const bool jump = indirect || primary == 2u || primary == 3u;
+    const bool likely = !jump && (primary & 0x10u) != 0u;
+    const bool link = primary == 3u || (indirect && (branch.opcode_word & 63u) == 9u);
+    const uint32_t link_reg = !link ? 0u : indirect ? (branch.opcode_word >> 11u) & 31u : 31u;
+    if ((!jump && branch.flow != (likely ? ee::e_ee_flow::FLOW_BRANCH_LIKELY : ee::e_ee_flow::FLOW_BRANCH)) ||
+        (jump && branch.flow != ee::e_ee_flow::FLOW_JUMP &&
+         branch.flow != ee::e_ee_flow::FLOW_CALL && branch.flow != ee::e_ee_flow::FLOW_RETURN))
     {
         return false;
     }
@@ -282,11 +288,33 @@ inline bool emit_strict_memory_branch(llvm_context& ctx,
             << "  %" << name << " = load i64, ptr %" << name << "_ptr, align 8\n";
         return "%" + name;
     };
-    const auto left = operand((branch.opcode_word >> 21u) & 31u, "lhs");
-    const auto right = operand((branch.opcode_word >> 16u) & 31u, "rhs");
-    out << "  %taken = icmp " << ((primary & 1u) == 0u ? "eq" : "ne")
-        << " i64 " << left << ", " << right << "\n"
-        << "  %next = select i1 %taken, i32 " << target << ", i32 " << fallthrough << "\n";
+    std::string next = "%next";
+    if (indirect)
+    {
+        const auto source = operand((branch.opcode_word >> 21u) & 31u, "jump_source");
+        out << "  %next = trunc i64 " << source << " to i32\n";
+    }
+    else if (jump)
+    {
+        next = std::to_string(((branch.pc + 4u) & 0xf0000000u) |
+            ((branch.opcode_word & 0x03ffffffu) << 2u));
+    }
+    else
+    {
+        const auto left = operand((branch.opcode_word >> 21u) & 31u, "lhs");
+        const auto right = operand((branch.opcode_word >> 16u) & 31u, "rhs");
+        out << "  %taken = icmp " << ((primary & 1u) == 0u ? "eq" : "ne")
+            << " i64 " << left << ", " << right << "\n"
+            << "  %next = select i1 %taken, i32 " << target << ", i32 " << fallthrough << "\n";
+    }
+    if (link_reg != 0u)
+    {
+        const size_t offset = offsetof(ee::s_ee_cpu_state, m_gpr) +
+            link_reg * sizeof(ee::s_ee_u128) + offsetof(ee::s_ee_u128, m_lo);
+        out << "  %link_ptr = getelementptr i8, ptr %cpu, i64 " << offset << "\n"
+            << "  %old_link = load i64, ptr %link_ptr, align 8\n"
+            << "  store i64 " << fallthrough << ", ptr %link_ptr, align 8\n";
+    }
     if (likely)
     {
         out << "  br i1 %taken, label %delay, label %complete\n";
@@ -298,10 +326,88 @@ inline bool emit_strict_memory_branch(llvm_context& ctx,
     out << "delay:\n  %slot_status = call i32 @strict_delay(ptr %cpu, ptr %context)\n"
         << "  %slot_ready = icmp eq i32 %slot_status, 0\n"
         << "  br i1 %slot_ready, label %complete, label %slot_stop\n"
-        << "slot_stop:\n  ret i32 %slot_status\n"
+        << "slot_stop:\n";
+    if (link_reg != 0u)
+    {
+        // Guest faults preserve the already completed link. Host-only
+        // refusal leaves the entire branch restart state untouched.
+        out << "  %guest_fault = icmp eq i32 %slot_status, "
+            << static_cast<uint32_t>(ee::e_ee_strict_ram_step_result::FAULT_COMMITTED) << "\n"
+            << "  br i1 %guest_fault, label %slot_exit, label %restore_link\n"
+            << "restore_link:\n  store i64 %old_link, ptr %link_ptr, align 8\n"
+            << "  br label %slot_exit\nslot_exit:\n";
+    }
+    out << "  ret i32 %slot_status\n"
         << "complete:\n  %pc = getelementptr i8, ptr %cpu, i64 "
         << offsetof(ee::s_ee_cpu_state, m_pc) << "\n"
-        << "  store i32 %next, ptr %pc, align 4\n  ret i32 0\n}\n";
+        << "  store i32 " << next << ", ptr %pc, align 4\n  ret i32 0\n}\n";
+    ctx.ir(out.str());
+    return true;
+}
+
+// Combine a contiguous memory prefix and a branch pair. Reuse the
+// existing checked step and branch emitters rather than duplicate
+// either instruction semantics. No arbitrary CFG joins or loops.
+inline bool emit_strict_memory_terminated_block(llvm_context& ctx,
+    const std::vector<ee::s_ee_instruction>& instructions)
+{
+    if (instructions.size() < 2u || instructions.size() > 256u)
+    {
+        return false;
+    }
+    const size_t prefix_count = instructions.size() - 2u;
+    const uint64_t first = instructions.front().pc;
+    for (size_t i = 0u; i < instructions.size(); ++i)
+    {
+        if (static_cast<uint64_t>(instructions[i].pc) != first + i * 4u ||
+            (i < prefix_count && !strict_transfer_ir::supported_instruction(instructions[i])))
+        {
+            return false;
+        }
+    }
+    llvm_context terminator("strict_terminator");
+    if (!emit_strict_memory_branch(terminator, instructions[prefix_count], instructions.back()))
+    {
+        return false;
+    }
+    if (prefix_count == 0u)
+    {
+        ctx.ir(terminator.ir());
+        return true;
+    }
+    // The branch module owns the checked branch declarations. Add the
+    // ordinary transfer declaration and internalize its single entry.
+    std::string branch_ir = terminator.ir();
+    const std::string public_entry = "define i32 @guest_strict_word(";
+    const auto position = branch_ir.find(public_entry);
+    if (position == std::string::npos)
+    {
+        return false;
+    }
+    branch_ir.replace(position, public_entry.size(), "define internal i32 @strict_terminator(");
+    std::ostringstream out;
+    strict_transfer_ir::declare_prepare(out);
+    out << branch_ir;
+    for (size_t i = 0u; i < prefix_count; ++i)
+    {
+        strict_transfer_ir::emit_transfer_function(out, instructions[i],
+            "strict_prefix_" + std::to_string(i), true);
+    }
+    out << "define i32 @guest_strict_word(ptr %cpu, ptr %context) {\n"
+        << "entry:\n  br label %prefix0\n";
+    for (size_t i = 0u; i < prefix_count; ++i)
+    {
+        out << "prefix" << i << ":\n"
+            << "  %status" << i << " = call i32 @strict_prefix_" << i
+            << "(ptr %cpu, ptr %context)\n"
+            << "  %ok" << i << " = icmp eq i32 %status" << i << ", 0\n"
+            << "  br i1 %ok" << i << ", label %"
+            << (i + 1u == prefix_count ? "terminator" : "prefix" + std::to_string(i + 1u))
+            << ", label %stop" << i << "\n"
+            << "stop" << i << ":\n  ret i32 %status" << i << "\n";
+    }
+    out << "terminator:\n  %last = call i32 @strict_terminator(ptr %cpu, ptr %context)\n"
+        << "  ret i32 %last\n}\n";
     ctx.ir(out.str());
     return true;
 }
