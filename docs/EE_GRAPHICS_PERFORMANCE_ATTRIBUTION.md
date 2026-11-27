@@ -927,3 +927,82 @@ Preserve G8A runner, build ee_game_runner and iop_scheduler_cache_test
 G8A on/off matched replay with SDBZ_PROFILE_IOP_KERNEL=1 added,
 new output ee-iop-g8b, both quiet/coalescing disabled. Two repeats;
 retain G6A/V30, fixed RTC and PAD stream. Final CI pending.
+
+## G8B — matched retail kernel attribution accepted
+
+All five CI workflows passed at fc59bd100c726ee3f936559e9be3d4143e69d440.
+Archive ee-iop-g8b.zip SHA-256:
+6beedbc8cbeac3a2294bde0975782358ec3db24e8d1d96d061f0387b6420fde9.
+Runner SHA-256:
+a02d72ff2844dd6c86059e3deb9629b57b88dc6f63b1306211c29c06964016c8.
+G6A EE image, V30 inventory, fixed RTC, PAD stream and reference
+identities match G8A. All four arms reached 40M dispatches with
+3127/3127 valid PAD polls, 184700 matched unique dispatch samples,
+21910026110 EE attempts, 22115080673 EE cycles, 4494 fields,
+3221 presentations, 394881 VU1 runs, 445669423 native pairs,
+zero fallback, IOP faults, timing observer failures and IOP debt.
+Both raw unprofiled reports, all four PPMs, normalized reports,
+184719 trace lines (184700 unique keys) and PAD footers independently
+verified. Receipt reports input integrity; original binaries absent.
+
+| Pair | Control s | Profiled s |
+|---|---:|---:|
+| 1 | 41.078 | 48.625 |
+| 2 | 41.172 | 48.359 |
+
+Median 41.125 -> 48.492s, combined profile overhead 17.91%.
+Mean profiled runner wall 44.81346915s; exclusive IOP 7.7539528s
+(17.30%). No performance gain claimed. Both profiled arms retain
+G8A exact service counts: 42578752 batches, 37351298 no-guest,
+5227454 guest, 80966947 guest instructions and 166323 samples.
+Neither control emitted IOP profile lines.
+
+Pooled mean elapsed ns per phase invocation (not per batch):
+
+| Phase | No guest | Guest |
+|---|---:|---:|
+| Wake/IRQ | 27.27 | 49.19 |
+| Ready | 28.35 | 66.32 |
+| Idle deadline | 36.59 | 32.38 |
+| Idle advance | 59.49 | 43.26 |
+| Guest context | n/a | 35.80 |
+| Guest CPU | n/a | 309.29 |
+
+Per profiled arm, each idle phase was invoked 146223 times in
+145939 sampled no-guest batches (284 additional iterations).
+Guest batches: 38130 wake/ready, 9326 idle deadline/advance,
+28804 guest context/CPU phase calls. Idle advance and deadline
+calculation are the largest measured no-guest phases. Timer reads
+are substantial relative to the durations, and these samples do
+not identify SPU2 arithmetic alone as the bottleneck. Do not sum
+with outer scopes or extrapolate guaranteed wall savings.
+
+## G8C.1 — incremental SPU2 sample phase
+
+In c_spu2, retain the absolute guest clock and derive the sample
+remainder incrementally. In the common non-crossing case a widened
+phase addition and range check replace absolute clock divisions;
+sample_phase() reads the cached remainder, including for the
+existing IRQ-deadline cache. When crossing, derive the exact edge
+count and remainder from old phase plus cycles. Reset the cached
+remainder with the absolute clock. Preserve the existing unsigned
+clock-wrap behavior via the original quotient-difference fallback.
+Invalidate the IRQ-deadline cache on exactly the old edge/wrap
+conditions. No new scheduler shortcuts, no device work omitted,
+no SPU2 rate change, no guest instruction lowering or EE runtime
+ABI change. The existing hardware fixture covers partitioned,
+zero, exact, multi-period, large uint32 advances and attached
+CPU/kernel clocks; add all 768 fractional phase positions and
+reset checks. Full audio/IRQ regressions and retail replay pending.
+
+Add mutually exclusive --candidate-runner and required
+--control-runner-sha256 to replay_ee_graphics_profile.py, retaining
+the same EE/VU1 images, fixed PAD/RTC, receipt hash checks and
+interleaved unprofiled comparisons. Mocked replay regression covers
+pinned runner mismatch, combined comparison refusal, arm order,
+runner hashes and unchanged image. Preserve G8B runner before
+rebuilding. Run four matched pairs, both runtime/IOP profiles off
+and quiet/coalescing disabled. Use G6A EE source, V30 inventory,
+same reference and output ee-iop-g8c1. Compare median and spread
+before retaining any performance claim. No EE IR, native EE or
+VU1 rebuild required. CI pending.
