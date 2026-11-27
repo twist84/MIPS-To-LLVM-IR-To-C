@@ -177,9 +177,15 @@ bool c_iop_aot::open(const std::string& path, std::string* error)
     add_modules(descriptors, module_count);
     const auto chain = reinterpret_cast<t_iop_aot_entry>(
         lookup("iop_aot_chain_entry_v1"));
-    if (chain != nullptr && module_count == 1u)
+    const auto chain_pc = reinterpret_cast<t_iop_aot_module_count>(
+        lookup("iop_aot_chain_entry_pc_v1"));
+    if (chain != nullptr && chain_pc != nullptr && module_count == 1u)
     {
-        m_chain_entries.emplace(descriptors, chain);
+        const uint32_t pc = chain_pc();
+        if ((pc & 3u) == 0u && pc - descriptors->m_base < descriptors->m_size)
+        {
+            m_chain_entries.emplace(descriptors, std::make_pair(pc, chain));
+        }
     }
     return true;
 }
