@@ -800,3 +800,44 @@ retail performance must be measured. Reuse the four unaffected I16c
 libraries and run the pinned retail replay. Do not accept the new
 router on static size alone. I16c remains the accepted correctness
 baseline until validation.
+
+## I17a acceptance
+
+Archive `ee-iop-i17a.zip` SHA-256
+`69591dcd5c6fba3089295a64c5ae786dbabf71b49be3faa57922f172be02580d`.
+Accept `build/iop-native-split-i17a-candidate/modules` for retail
+correctness and size. Pinned input hashes, VU1 inventory and environment
+match I16c. Three replacement DLL hashes verified against build and replay
+receipts; other four hashes unchanged. Report and framebuffer byte-identical
+to control. 184,700 matching trace samples, zero divergent/unpaired,
+3,127/3,127 polls, 7/7 active modules, 67,846,006 retired native IOP
+instructions and 12,611,093 entry attempts. No runtime speedup established:
+control 40.875 s, candidate 40.031 s, translated execution 579.4 ms,
+refresh 1.7 ms; one matched pair, performance acceptance false.
+
+700/703 objects reused; only three routers compiled. Compile 0.781 s,
+link 0.483 s. Combined router objects 581,056 -> 126,975 B (-78.15%).
+Affected DLLs 3,889,152 -> 3,814,400 B (-74,752 B, -1.92%).
+CRI_ADXI 1,299,968 B, MCMAN 1,708,544 B, PADMAN 805,888 B.
+Object file bytes include relocations and other metadata, so object
+size reduction is not directly equivalent to linked DLL reduction.
+I16c remains rollback baseline.
+
+## I17b — Narrow region maps and compact router rollout
+
+Optional `--split-narrow-router` requires `--split-compact-router`.
+Select i8 region IDs for up to 255 regions (IDs 0..254); reserve
+the all-ones sentinel for holes. Larger modules retain i16 and the
+existing i16 sentinel. No ownership, ABI or region code changes.
+Fixtures cover 255/256 boundary, hole sentinel, range/alignment,
+fallback and native equivalence with original switch.
+
+Pilot on MCMAN/PADMAN with accepted 1,024-PC partitions, plus
+ARKD_DVD/LIBSD/MCSERV/SIO2MAN with their accepted unpartitioned
+residual plans. Preserve CRI_ADXI's I17a compact i16 router. Use
+`--region-cache-ir-key` in both builds. Assemble all six replacements
+with the unchanged CRI_ADXI DLL and run one pinned retail replay.
+This is a router-only experiment; legacy cache promotion on the
+four newly compact modules depends on retained cache provenance.
+Require unchanged native retirement/entry counts and exact retail
+trace/report/framebuffer before adoption; measure linked size separately.
