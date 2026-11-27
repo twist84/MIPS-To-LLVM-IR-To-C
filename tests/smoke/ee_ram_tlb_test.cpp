@@ -2178,6 +2178,60 @@ bool test_strict_reset_jalr()
 }
 
 
+
+bool test_strict_reset_instruction_cache()
+{
+    using cache = ee::c_ee_reset_instruction_cache;
+    constexpr uint32_t pc = 0x82000u;
+    uint8_t bytes[0x4080u]{};
+    bytes[0] = 0x11u;
+    bytes[64] = 0x22u;
+    cache lines;
+    {
+        cache::c_transaction refused(&lines);
+        if (refused.fetch(pc, 0u, bytes, sizeof(bytes)) == nullptr ||
+            refused.fetch(pc + 64u, 64u, bytes, sizeof(bytes)) == nullptr)
+        {
+            return false;
+        }
+        // Host refusal discards both staged fills.
+    }
+    if (lines.resident_count() != 0u)
+    {
+        return false;
+    }
+    {
+        cache::c_transaction accepted(&lines);
+        if (*accepted.fetch(pc, 0u, bytes, sizeof(bytes)) != 0x11u ||
+            *accepted.fetch(pc + 64u, 64u, bytes, sizeof(bytes)) != 0x22u)
+        {
+            return false;
+        }
+        accepted.commit();
+    }
+    bytes[0] = 0x33u; // uncached backing write must not change I-cache hit
+    {
+        cache::c_transaction next(&lines);
+        const auto* hit = next.fetch(pc, 0u, bytes, sizeof(bytes));
+        if (hit == nullptr || *hit != 0x11u ||
+            next.fetch(pc + 0x2000u, 0x2000u, bytes, sizeof(bytes)) == nullptr)
+        {
+            return false;
+        }
+        next.commit();
+    }
+    {
+        cache::c_transaction conflict(&lines);
+        if (conflict.fetch(pc + 0x4000u, 0x4000u, bytes, sizeof(bytes)) != nullptr ||
+            conflict.fetch(pc + 64u, 0u, bytes, sizeof(bytes)) != nullptr ||
+            conflict.fetch(pc + 0x4040u, 0x4040u, bytes, 0x4060u) != nullptr)
+        {
+            return false;
+        }
+    }
+    return lines.resident_count() == 3u;
+}
+
 bool test_strict_reset_mapped_fetch()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4157,7 +4211,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
+    if (!check(test_strict_reset_instruction_cache(), "strict reset transactional I-cache fills") ||
+        !check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
         !check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
         !check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
     {

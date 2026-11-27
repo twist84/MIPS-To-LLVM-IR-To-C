@@ -1604,3 +1604,27 @@ Add passive stop diagnostics for Config, EntryHi, TLB index/status,
 cache route and physical backing instruction (not an executed word).
 Do not require progress beyond 00082000 until actual fetch evidence
 supports the next cache or fault model. Pending CI.
+
+## M6E3H3E8B: cold instruction cache and guest-installed EELOAD
+
+H3E8A passed both pinned versions at a0eaa399:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46063467975
+
+Both reached 00082000, TLB entry 13, 256 KiB page, physical
+00082000, cache 3, Config 00073443, no translation fault.
+The entry backing word was zero. Upstream source confirms this
+is intentional: ob_ee_install_eeload zeros the initial region,
+writes JAL at +9c, main at +100, exec at +2b8, marker at +600,
+path at +680, then flushes both caches.
+https://github.com/TamaribaEmu/OpenPS2BIOS/blob/v0.6/src/ee/kernel.c
+https://github.com/TamaribaEmu/OpenPS2BIOS/blob/v0.7/src/ee/kernel.c
+
+Validate passive backing markers in both CI runs. No host installation.
+Introduce bounded 16 KiB two-way, 64-byte line cold I-cache with
+transactional fills after a complete guest IXIN sweep. Retain hits
+despite uncached RAM writes. Refuse replacement, color aliases,
+live cache maintenance, non-RAM and unproven mappings; no D-cache,
+cache latency or speculative fills. Commit only on retired
+instruction/atomic pair; refused slot/budget discards staged fills.
+Assert real progress through the intentional NOP sled and JAL.
+Pending CI; not a full R5900 cache model.

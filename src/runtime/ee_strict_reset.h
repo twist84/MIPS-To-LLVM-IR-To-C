@@ -112,6 +112,131 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
     return {result::COMMITTED, opcode, 1u};
 }
 
+// Bounded cold I-cache subset. The owner supplies an explicit completed
+// IXIN sweep before admitting fills. No replacement, speculative fetch,
+// timing penalties or live CACHE maintenance are modeled here.
+class c_ee_reset_instruction_cache
+{
+public:
+    static constexpr uint32_t k_line_size = 64u;
+    static constexpr uint32_t k_sets = 128u;
+    static constexpr uint32_t k_ways = 2u;
+    static_assert(k_line_size * k_sets * k_ways == 16384u);
+
+    struct s_line
+    {
+        uint32_t m_tag = 0u;
+        bool m_valid = false;
+        uint8_t m_bytes[k_line_size]{};
+    };
+
+    class c_transaction
+    {
+    public:
+        constexpr explicit c_transaction(c_ee_reset_instruction_cache* cache)
+            : m_cache(cache)
+        {
+        }
+
+        constexpr bool has_resident() const
+        {
+            return m_cache != nullptr && (m_cache->m_count != 0u || m_pending_count != 0u);
+        }
+
+        constexpr const uint8_t* fetch(uint32_t pc, uint32_t physical,
+            const uint8_t* ram, size_t size)
+        {
+            if (m_cache == nullptr || ram == nullptr || (pc & 3u) != 0u ||
+                (physical & 3u) != 0u)
+            {
+                return nullptr;
+            }
+            const uint32_t base = physical & ~(k_line_size - 1u);
+            const uint32_t set = (pc / k_line_size) & (k_sets - 1u);
+            // Restrict alias colors until the virtual-index/tag behavior
+            // is validated independently. TLB still owns translation.
+            if (set != ((physical / k_line_size) & (k_sets - 1u)) ||
+                ee_classify_physical_span(base, 16u, size) != e_ee_bus_region::RAM ||
+                ee_classify_physical_span(base + 48u, 16u, size) != e_ee_bus_region::RAM)
+            {
+                return nullptr;
+            }
+            const uint32_t offset = physical & (k_line_size - 1u);
+            for (uint32_t way = 0u; way < k_ways; ++way)
+            {
+                const auto& line = m_cache->m_lines[set][way];
+                if (line.m_valid && line.m_tag == base)
+                {
+                    return line.m_bytes + offset;
+                }
+            }
+            for (uint32_t i = 0u; i < m_pending_count; ++i)
+            {
+                if (m_pending[i].m_set == set && m_pending[i].m_line.m_tag == base)
+                {
+                    return m_pending[i].m_line.m_bytes + offset;
+                }
+            }
+            // At most two requested instructions per transaction. Never
+            // evict a resident line using an unvalidated replacement rule.
+            if (m_pending_count == 2u)
+            {
+                return nullptr;
+            }
+            for (uint32_t way = 0u; way < k_ways; ++way)
+            {
+                bool occupied = m_cache->m_lines[set][way].m_valid;
+                for (uint32_t i = 0u; i < m_pending_count; ++i)
+                {
+                    occupied = occupied || (m_pending[i].m_set == set && m_pending[i].m_way == way);
+                }
+                if (!occupied)
+                {
+                    auto& entry = m_pending[m_pending_count++];
+                    entry.m_set = set;
+                    entry.m_way = way;
+                    entry.m_line.m_tag = base;
+                    entry.m_line.m_valid = true;
+                    for (uint32_t i = 0u; i < k_line_size; ++i)
+                    {
+                        entry.m_line.m_bytes[i] = ram[base + i];
+                    }
+                    return entry.m_line.m_bytes + offset;
+                }
+            }
+            return nullptr;
+        }
+
+        constexpr void commit()
+        {
+            for (uint32_t i = 0u; i < m_pending_count; ++i)
+            {
+                const auto& entry = m_pending[i];
+                m_cache->m_lines[entry.m_set][entry.m_way] = entry.m_line;
+                ++m_cache->m_count;
+            }
+            m_pending_count = 0u;
+        }
+
+    private:
+        struct s_pending
+        {
+            uint32_t m_set = 0u;
+            uint32_t m_way = 0u;
+            s_line m_line{};
+        };
+        c_ee_reset_instruction_cache* m_cache = nullptr;
+        s_pending m_pending[2]{};
+        uint32_t m_pending_count = 0u;
+    };
+
+    constexpr uint32_t resident_count() const { return m_count; }
+
+private:
+    s_line m_lines[k_sets][k_ways]{};
+    uint32_t m_count = 0u;
+};
+
 // Explicit caller-owned, isolated main RAM backing for the reset copy.
 // The physical bus planner excludes aliases, ROM and device windows;
 // The isolated default permits only canonical uncached RAM fetch.
@@ -121,11 +246,19 @@ struct s_ee_reset_ram_view
     uint8_t* m_bytes = nullptr;
     size_t m_size = 0u;
     bool m_mapped_fetch = false;
+    c_ee_reset_instruction_cache::c_transaction* m_instruction_cache = nullptr;
 
     constexpr const uint8_t* fetch_span(const s_ee_fetch_plan& fetch) const
     {
         const uint32_t address = fetch.m_access.m_physical_address;
         const uint32_t cache = fetch.m_access.m_cache_mode;
+        if (m_mapped_fetch && m_instruction_cache != nullptr &&
+            fetch.m_pc < 0x80000000u && !fetch.m_fault.m_valid &&
+            fetch.m_route == e_ee_fetch_route::CACHED_PHYSICAL &&
+            fetch.m_access.m_status == e_ee_access_status::PHYSICAL && cache == 3u)
+        {
+            return m_instruction_cache->fetch(fetch.m_pc, address, m_bytes, m_size);
+        }
         const bool canonical = cache == 2u && fetch.m_pc >= 0xa0000000u &&
             fetch.m_pc < 0xa2000000u && address == fetch.m_pc - 0xa0000000u;
         // A mapped cache-3 fetch bypasses ICE only when the planner
@@ -643,7 +776,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, (opcode >> 21u) & 31u)) +
             (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
         const uint32_t op = (opcode >> 16u) & 31u;
-        if (cold_cache == nullptr || !cold_cache->invalidate(op, address))
+        if ((ram.m_instruction_cache != nullptr && ram.m_instruction_cache->has_resident()) ||
+            cold_cache == nullptr || !cold_cache->invalidate(op, address))
         {
             return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc, address};
         }

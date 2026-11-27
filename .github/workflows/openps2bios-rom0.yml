@@ -83,10 +83,12 @@ jobs:
           log = Path("dual-rom0-v06.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 696405, log
+          assert stop and int(stop[1]) > 696407 + 40, log
           assert serial and int(serial[1]) > 0, log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
+          assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
+          assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
           PY
 
       - name: Execute guest IOP reset vector and capture stop
@@ -311,10 +313,12 @@ jobs:
           log = Path("dual-rom0-v07.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 696597, log
+          assert stop and int(stop[1]) > 696599 + 40, log
           assert serial and int(serial[1]) > 0, log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
+          assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
+          assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
           PY
 
       - name: Explore authentic v0.7 EE reset execution

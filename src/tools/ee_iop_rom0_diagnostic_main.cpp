@@ -153,6 +153,25 @@ int main(int argc, char** argv)
         std::printf("Dual ROM0 physical backing: address=%08x word=%08x decoded=%s\n",
             fetch.m_access.m_physical_address, word, ee::decode(cpu.m_pc, word).mnemonic);
     }
+    std::printf("Dual ROM0 I-cache: resident=%u\n", pilot.instruction_cache_lines());
+    // Version-pinned workflow checks the guest-installed EELOAD layout.
+    // These are passive RAM reads, never a host installation.
+    constexpr uint32_t eeload = 0x82000u;
+    if (ram.size() >= eeload + 0xc00u)
+    {
+        std::printf("Dual ROM0 EELOAD backing: entry=%08x call=%08x main=%08x exec=%08x syscall=%08x marker=%08x path=",
+            ee::ee_read_instruction_word(ram.data() + eeload),
+            ee::ee_read_instruction_word(ram.data() + eeload + 0x9cu),
+            ee::ee_read_instruction_word(ram.data() + eeload + 0x100u),
+            ee::ee_read_instruction_word(ram.data() + eeload + 0x2b8u),
+            ee::ee_read_instruction_word(ram.data() + eeload + 0x2c0u),
+            ee::ee_read_instruction_word(ram.data() + eeload + 0x600u));
+        for (uint32_t i = 0u; i < 12u; ++i)
+        {
+            std::printf("%02x", static_cast<unsigned>(ram[eeload + 0x680u + i]));
+        }
+        std::printf("\n");
+    }
     std::printf("Dual ROM0 clocks: ee=%llu iop=%llu debt=%llu next_iop=%llu interrupts=%llu\n",
         static_cast<unsigned long long>(pilot.cycle()), static_cast<unsigned long long>(pilot.iop_cycles()),
         static_cast<unsigned long long>(pilot.iop_debt()), static_cast<unsigned long long>(pilot.next_iop_event()),
