@@ -260,4 +260,69 @@ inline constexpr s_ee_partial_access_plan ee_plan_partial_access(
     return plan;
 }
 
+// Instruction fetch is not a data load: its cache enable is ICE, and
+// a scratchpad mapping must not be silently read through physical RAM.
+// These routes classify the access only; none guarantees that a bus
+// transaction or instruction-cache hit is available or executable.
+enum class e_ee_fetch_route : uint8_t
+{
+    UNMODELED,
+    FAULT,
+    CACHED_PHYSICAL,
+    CACHE_BYPASS_PHYSICAL,
+    SCRATCHPAD_UNVALIDATED
+};
+
+struct s_ee_fetch_plan
+{
+    uint32_t m_pc = 0u;
+    e_ee_fetch_route m_route = e_ee_fetch_route::UNMODELED;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// EE Core User's Manual v6.0, sections 4.2.7-4.2.9, Config p.78.
+// One architecturally requested instruction (not speculative fetch,
+// an entire cache line or a dual-issue pair). Read permission suffices;
+// the TLB dirty bit does not prohibit fetch. Preserve raw cache mode
+// even when ICE disables the instruction cache. SPRAM selection is
+// described at stage 2Q (p.19), but actual fetch semantics are deferred.
+inline constexpr s_ee_fetch_plan ee_plan_instruction_fetch(
+    const c_ee_tlb& tlb, uint32_t pc, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using route = e_ee_fetch_route;
+    using result = e_ee_access_status;
+    s_ee_fetch_plan plan{};
+    plan.m_pc = pc;
+    if ((pc & 3u) != 0u)
+    {
+        plan.m_access.m_status = result::ADDRESS_ERROR;
+    }
+    else
+    {
+        plan.m_access = ee_resolve_access(tlb, pc, status, config,
+                                          entry_hi, false);
+    }
+    plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+        false, pc, status, context, entry_hi);
+    if (plan.m_fault.m_valid)
+    {
+        plan.m_route = route::FAULT;
+    }
+    else if (plan.m_access.m_status == result::SCRATCHPAD)
+    {
+        plan.m_route = route::SCRATCHPAD_UNVALIDATED;
+    }
+    else if (plan.m_access.m_status == result::PHYSICAL)
+    {
+        constexpr uint32_t config_ice = 1u << 17u;
+        const uint32_t cache = plan.m_access.m_cache_mode;
+        plan.m_route = (config & config_ice) != 0u &&
+                       (cache == 0u || cache == 3u)
+            ? route::CACHED_PHYSICAL : route::CACHE_BYPASS_PHYSICAL;
+    }
+    return plan;
+}
+
 } // namespace ee

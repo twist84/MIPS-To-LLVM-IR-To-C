@@ -505,6 +505,124 @@ constexpr bool test_partial_access_plans()
 
 static_assert(test_partial_access_plans(), "left/right partial access regression");
 
+constexpr bool test_instruction_fetch_plans()
+{
+    using route = ee::e_ee_fetch_route;
+    using result = ee::e_ee_access_status;
+    constexpr uint32_t ice = 1u << 17u;
+    constexpr uint32_t dce = 1u << 16u;
+    constexpr uint32_t virt = 0x00400000u;
+    constexpr uint32_t asid = 0xabu;
+    constexpr uint32_t context = 0xab800000u;
+    ee::c_ee_tlb tlb{};
+    // Clean cached even page, invalid odd page.
+    if (!tlb.write(0u, 0u, virt | asid, (0x100u << 6u) | 0x1au,
+                   (0x200u << 6u) | 0x18u) ||
+        !tlb.write(1u, 0u, 0x70000000u | asid, 0x8000001au, 0x1au))
+    {
+        return false;
+    }
+    for (uint32_t mode = 0u; mode < 8u; ++mode)
+    {
+        for (uint32_t enables = 0u; enables < 4u; ++enables)
+        {
+            const uint32_t config = mode | (enables << 16u);
+            const auto kseg0 = ee::ee_plan_instruction_fetch(tlb, 0x80000ffcu,
+                0u, config, context, asid);
+            const auto kseg1 = ee::ee_plan_instruction_fetch(tlb, 0xa0000ffcu,
+                0u, config, context, asid);
+            const bool valid = mode == 0u || mode == 2u || mode == 3u || mode == 7u;
+            const bool cached = (config & ice) != 0u && (mode == 0u || mode == 3u);
+            if (kseg0.m_route != (!valid ? route::UNMODELED :
+                    cached ? route::CACHED_PHYSICAL : route::CACHE_BYPASS_PHYSICAL) ||
+                kseg0.m_fault.m_valid ||
+                (valid && (kseg0.m_access.m_physical_address != 0xffcu ||
+                           kseg0.m_access.m_cache_mode != mode)) ||
+                kseg1.m_route != route::CACHE_BYPASS_PHYSICAL ||
+                kseg1.m_access.m_physical_address != 0xffcu ||
+                kseg1.m_access.m_cache_mode != 2u || kseg1.m_fault.m_valid)
+            {
+                return false;
+            }
+        }
+    }
+    const auto clean = ee::ee_plan_instruction_fetch(tlb, virt + 0xffcu,
+        0x10u, ice, context, asid);
+    const auto disabled = ee::ee_plan_instruction_fetch(tlb, virt,
+        0x10u, dce, context, asid);
+    if (clean.m_route != route::CACHED_PHYSICAL ||
+        clean.m_access.m_physical_address != 0x100ffcu ||
+        clean.m_access.m_cache_mode != 3u || clean.m_fault.m_valid ||
+        disabled.m_route != route::CACHE_BYPASS_PHYSICAL ||
+        disabled.m_access.m_cache_mode != 3u)
+    {
+        return false;
+    }
+    for (uint32_t flags = 0u; flags < 4u; ++flags)
+    {
+        const uint32_t status = ((flags & 1u) ? ee::STATUS_EXL : 0u) |
+                                ((flags & 2u) ? ee::STATUS_BEV : 0u);
+        const uint32_t common = (flags & 2u) ? ee::VEC_COMMON_BEV1 : ee::VEC_COMMON_BEV0;
+        const uint32_t refill = (flags & 1u) ? common :
+            ((flags & 2u) ? ee::VEC_TLB_REFILL_BEV1 : ee::VEC_TLB_REFILL_BEV0);
+        const auto invalid = ee::ee_plan_instruction_fetch(tlb, virt + 0x1000u,
+            status, ice, context, asid);
+        const auto miss = ee::ee_plan_instruction_fetch(tlb, virt,
+            status, ice, context, asid + 1u);
+        if (invalid.m_route != route::FAULT ||
+            invalid.m_access.m_status != result::TLB_INVALID ||
+            invalid.m_fault.m_code != ee::EX_TLBL ||
+            invalid.m_fault.m_vector != common ||
+            !invalid.m_fault.m_update_tlb_registers ||
+            invalid.m_fault.m_bad_vaddr != virt + 0x1000u ||
+            miss.m_route != route::FAULT ||
+            miss.m_access.m_status != result::TLB_REFILL ||
+            miss.m_fault.m_code != ee::EX_TLBL ||
+            miss.m_fault.m_vector != refill ||
+            !miss.m_fault.m_update_tlb_registers ||
+            miss.m_fault.m_bad_vaddr != virt ||
+            miss.m_fault.m_entry_hi != (virt | (asid + 1u)))
+        {
+            return false;
+        }
+        for (uint32_t offset = 1u; offset < 4u; ++offset)
+        {
+            const uint32_t pc = 0x00500000u + offset;
+            const auto misaligned = ee::ee_plan_instruction_fetch(tlb, pc,
+                status, ice, context, asid);
+            if (misaligned.m_pc != pc || misaligned.m_route != route::FAULT ||
+                misaligned.m_fault.m_code != ee::EX_AdEL ||
+                misaligned.m_fault.m_bad_vaddr != pc ||
+                misaligned.m_fault.m_vector != common ||
+                misaligned.m_fault.m_update_tlb_registers)
+            {
+                return false;
+            }
+        }
+    }
+    const auto scratch = ee::ee_plan_instruction_fetch(tlb, 0x70003ffcu,
+        0x10u, ice, context, asid);
+    const auto alias_miss = ee::ee_plan_instruction_fetch(tlb, 0x70004000u,
+        0u, ice, context, asid);
+    const auto privilege = ee::ee_plan_instruction_fetch(tlb, 0x80000000u,
+        0x10u, ice, context, asid);
+    const auto erl = ee::ee_plan_instruction_fetch(tlb, virt,
+        ee::STATUS_ERL, ice, context, asid);
+    const auto reserved = ee::ee_plan_instruction_fetch(tlb, virt,
+        0x18u, ice, context, asid);
+    return scratch.m_route == route::SCRATCHPAD_UNVALIDATED &&
+           scratch.m_access.m_status == result::SCRATCHPAD &&
+           scratch.m_access.m_scratchpad_offset == 0x3ffcu && !scratch.m_fault.m_valid &&
+           alias_miss.m_route == route::FAULT &&
+           alias_miss.m_access.m_status == result::TLB_REFILL &&
+           privilege.m_route == route::FAULT && privilege.m_fault.m_code == ee::EX_AdEL &&
+           erl.m_route == route::CACHE_BYPASS_PHYSICAL &&
+           erl.m_access.m_physical_address == virt &&
+           reserved.m_route == route::UNMODELED && !reserved.m_fault.m_valid;
+}
+
+static_assert(test_instruction_fetch_plans(), "instruction fetch planning regression");
+
 // Separate page sizes keep each constant-evaluation budget bounded.
 static_assert(test_tlb_page_mask(0u), "4 KiB TLB page regression");
 static_assert(test_tlb_page_mask(0x6000u), "16 KiB TLB page regression");
@@ -701,6 +819,10 @@ int main()
         return 1;
     }
     if (!check(test_partial_access_plans(), "left/right partial access regression"))
+    {
+        return 1;
+    }
+    if (!check(test_instruction_fetch_plans(), "instruction fetch planning regression"))
     {
         return 1;
     }

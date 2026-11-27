@@ -277,3 +277,30 @@ This planner does not issue bus transactions, perform register merges,
 change HLE aliases or enable strict memory execution. Cache/bus lane
 semantics and precise commitment still require separate validation.
 No retail replay required for M2; CI pending.
+
+## Strict memory follow-up M3: instruction fetch classification
+
+EE Core User's Manual v6.0 sections 4.2.7-4.2.9 define word-aligned
+instruction addresses and fetch/load TLB fault codes. Config (p.78)
+sets ICE at bit 17, overriding the segment/TLB cache attribute when
+disabled; DCE is independent. Stage 2Q (p.19) describes instruction
+selection via the SPRAM S bit. Sections 5.2.5 and 6.4 establish SPRAM
+mapping and data access, not a validated instruction-fetch model.
+https://docs.alexrp.com/mips/ee.pdf
+
+Add a constexpr single-instruction fetch planner with explicit
+cached-physical, instruction-cache-bypass physical, fault and unmodeled
+routes. Dirty is not a fetch permission; retain the original PC and
+raw cache attribute. ICE does not override privilege or translation
+faults. Do not assume accelerated data-buffer behavior for instruction
+fetch, or treat speculative/pair/line fetches as architectural requests.
+Valid SPRAM translations are retained separately as unvalidated fetch
+routes rather than redirected to RAM or assigned an invented exception.
+Unmapped HLE scratchpad aliases do not bypass strict translation.
+
+Tests cover all K0 encodings and ICE/DCE combinations, clean cached
+fetches, misalignment before lookup, invalid/refill and nested vectors,
+ASID, privilege, ERL, reserved mode and scratchpad edges. Compile-time
+and runtime checks share the constexpr fixture. No instruction bytes
+are read, no cache lines or ITLB timing simulated, and no production
+caller is enabled. No retail replay required for M3; CI pending.
