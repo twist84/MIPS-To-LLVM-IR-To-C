@@ -1048,6 +1048,9 @@ if(EE_HAVE_LLVM_JIT_TEST)
     add_test(NAME ee_source_lowering_comparison
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_compare_ee_source_lowering.py)
+    add_test(NAME ee_packed_native_audit
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_audit_ee_packed_native.py)
     add_test(NAME cop0_write_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_cop0_write_ir_runtime.py
