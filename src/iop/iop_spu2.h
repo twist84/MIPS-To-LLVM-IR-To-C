@@ -39,30 +39,17 @@ public:
         }
         const uint64_t before = m_clock_cycles;
         m_clock_cycles += cycles;
-        // The cached remainder is exact. Most advances do not cross
-        // a sample boundary, so avoid repeated absolute clock division.
-        const uint64_t phase = static_cast<uint64_t>(m_sample_phase) + cycles;
-        if (m_clock_cycles < before)
+        const uint64_t samples_before = before / k_cycles_per_sample;
+        const uint64_t samples_after = elapsed_samples();
+        if (m_clock_cycles < before || samples_after != samples_before)
         {
-            // Retain the legacy unsigned clock-wrap behavior, including
-            // its edge count and deadline invalidation.
-            m_sample_phase = static_cast<uint32_t>(
-                m_clock_cycles % k_cycles_per_sample);
             m_irq_deadline_valid = false;
-            const uint64_t samples_before = before / k_cycles_per_sample;
-            const uint64_t samples_after = elapsed_samples();
-            return samples_before == samples_after ? 0u :
-                advance_sample_edges(samples_after - samples_before);
         }
-        if (phase < k_cycles_per_sample)
+        if (samples_before == samples_after)
         {
-            m_sample_phase = static_cast<uint32_t>(phase);
             return 0u;
         }
-        const uint64_t samples = phase / k_cycles_per_sample;
-        m_sample_phase = static_cast<uint32_t>(phase % k_cycles_per_sample);
-        m_irq_deadline_valid = false;
-        return advance_sample_edges(samples);
+        return advance_sample_edges(samples_after - samples_before);
     }
     // Earliest possible voice/input fetch, mixer-ring or effect IRQ edge.
     // Zero means no pending playback IRQ opportunity.
@@ -94,7 +81,7 @@ public:
     uint64_t elapsed_samples() const { return m_clock_cycles / k_cycles_per_sample; }
     uint32_t sample_phase() const
     {
-        return m_sample_phase;
+        return static_cast<uint32_t>(m_clock_cycles % k_cycles_per_sample);
     }
 
     // Physical IOP bus addresses. 16- and 32-bit transfers only.
@@ -331,7 +318,6 @@ private:
     mutable uint32_t m_irq_deadline_remaining = 0u;
     bool m_clock_active = false;
     uint64_t m_clock_cycles = 0u;
-    uint32_t m_sample_phase = 0u;
     uint64_t m_decoded_blocks = 0u;
     uint64_t m_voice_starts = 0u;
     uint64_t m_voice_end_events = 0u;
