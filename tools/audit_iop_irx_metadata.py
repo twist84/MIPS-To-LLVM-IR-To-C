@@ -105,12 +105,21 @@ def parse_irx(data):
             "function_symbols": symbols, "relocations": relocations}, text
 
 
+def capture_mismatches(metadata, linked, parsed):
+    base = metadata["base"]
+    fields = {
+        "name": (metadata["name"], parsed["name"]),
+        "text_size": (len(linked), parsed["text_size"]),
+        "entry": (metadata.get("entry"), base + parsed["entry_offset"]),
+        "gp": (metadata.get("gp"), base + parsed["gp_offset"]),
+    }
+    return {name: {"captured": values[0], "elf": values[1]}
+            for name, values in fields.items() if values[0] != values[1]}
+
+
 def compare_capture(metadata, linked, parsed, original, discovery):
     base = metadata["base"]
-    if (parsed["name"] != metadata["name"] or
-            parsed["text_size"] != len(linked) or
-            base + parsed["entry_offset"] != metadata.get("entry") or
-            base + parsed["gp_offset"] != metadata.get("gp")):
+    if capture_mismatches(metadata, linked, parsed):
         return None
     known = {r["entry"] for r in discovery["regions"]}
     reached = {pc for r in discovery["regions"]
@@ -153,11 +162,48 @@ def compare_capture(metadata, linked, parsed, original, discovery):
                                          - known)}
 
 
+def discover_relocation_roots(metadata, linked, parsed, comparison, discovery):
+    """Read-only shadow: use verified JALs in executable section ranges.
+
+    No R_MIPS_32 values, unmatched ELFs, or already reached delay slots
+    are promoted. Even a relocation-backed call is candidate evidence.
+    """
+    base = metadata["base"]
+    ranges = [(base + s["address"], base + s["address"] + s["size"])
+              for s in parsed["sections"] if s["flags"] & 4 and s["size"]]
+
+    def executable(pc):
+        return any(lo <= pc and pc + 4 <= hi for lo, hi in ranges)
+
+    sites = {}
+    for call in comparison["relocation_target_candidates"]:
+        if (call["kind"] == "relocated_jal" and not call["already_reached"] and
+                executable(call["site"]) and executable(call["target"])):
+            sites.setdefault(call["target"], set()).add(call["site"])
+    roots = sorted(sites)
+    expanded = inventory(metadata, linked, extended=True, relocated_call_entries=roots)
+    old = {pc for r in discovery["regions"]
+           for pc in r["ordinary_pcs"] + r["delay_pcs"]}
+    new = {pc for r in expanded["regions"]
+           for pc in r["ordinary_pcs"] + r["delay_pcs"]}
+    return {
+        "capture_identity": {"base": base, "text_size": len(linked),
+                             "hash": metadata["hash"]},
+        "new_roots": [{"entry": pc, "call_sites": sorted(sites[pc])} for pc in roots],
+        "newly_reached_pcs": sorted(new - old),
+        "previous_candidate_count": discovery["candidate_count"],
+        "previous_unvisited_words": discovery["unvisited_aligned_words"],
+        "inventory": expanded,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--disc-root", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--discover-relocations", action="store_true",
+                        help="Shadow discovery from verified executable JAL relocations")
     args = parser.parse_args()
     try:
         captures = []
@@ -170,6 +216,7 @@ def main():
             raise ValueError("capture or disc root missing")
         results = {path.stem: [] for path, _, _, _ in captures}
         errors = []
+        unmatched_diagnostics = {path.stem: [] for path, _, _, _ in captures}
         scanned = 0
         # Search loose IRX files only. Do not infer identity from filenames.
         for path in sorted(args.disc_root.rglob("*")):
@@ -185,13 +232,30 @@ def main():
             for capture, meta, linked, discovery in captures:
                 match = compare_capture(meta, linked, parsed, original, discovery)
                 if match is not None:
-                    results[capture.stem].append({
+                    record = {
                         "path": str(path.relative_to(args.disc_root)),
                         "elf_sha256": hashlib.sha256(raw).hexdigest(),
                         "metadata": parsed, "comparison": match,
+                    }
+                    if args.discover_relocations:
+                        record["relocation_discovery"] = discover_relocation_roots(
+                            meta, linked, parsed, match, discovery)
+                    results[capture.stem].append(record)
+                else:
+                    unmatched_diagnostics[capture.stem].append({
+                        "path": str(path.relative_to(args.disc_root)),
+                        "mismatches": capture_mismatches(meta, linked, parsed),
                     })
         receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
-                   "scanned_irxs": scanned, "parse_errors": errors, "matches": results}
+                   "scanned_irxs": scanned, "parse_errors": errors, "matches": results,
+                   "unmatched_diagnostics": {name: unmatched_diagnostics[name]
+                                             for name, matches in results.items() if not matches}}
+        # Keep ambiguous source matches in the audit, but do not publish
+        # their alternative ownership inventories as accepted evidence.
+        for matches in results.values():
+            if len(matches) != 1:
+                for match in matches:
+                    match.pop("relocation_discovery", None)
         with args.out.open("x", encoding="utf-8") as output:
             json.dump(receipt, output, indent=2)
             output.write("\n")
@@ -203,6 +267,20 @@ def main():
                       f"{len(m['relocations'])} relocations, "
                       f"{len(c['verified_relocated_calls'])} verified relocated JALs, "
                       f"{len(c['relocation_target_candidates'])} in-text target candidates")
+                if "relocation_discovery" in match:
+                    shadow = match["relocation_discovery"]
+                    inv = shadow["inventory"]
+                    print(f"  shadow: {len(shadow['new_roots'])} relocation roots, "
+                          f"{len(shadow['newly_reached_pcs'])} new words, "
+                          f"{inv['candidate_count']} candidates, "
+                          f"{inv['unvisited_aligned_words']} unvisited words, "
+                          f"{len(inv['shared_ordinary_pcs'])} shared PCs, "
+                          f"{len(inv['ordinary_delay_overlap'])} delay overlaps")
+            if not matches:
+                for candidate in sorted(unmatched_diagnostics[name],
+                                        key=lambda row: len(row["mismatches"]))[:2]:
+                    print(f"  nearest: {candidate['path']}: "
+                          f"{json.dumps(candidate['mismatches'], sort_keys=True)}")
         print(f"Receipt: {args.out} ({scanned} loose IRXs scanned)")
     except (OSError, ValueError, KeyError, TypeError, struct.error) as exc:
         parser.exit(1, f"IRX metadata audit: {exc}\n")

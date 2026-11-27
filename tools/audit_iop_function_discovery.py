@@ -104,7 +104,9 @@ def frame_candidates(base, data, excluded):
                 break
 
 
-def inventory(metadata, data, extended=False):
+def inventory(metadata, data, extended=False, relocated_call_entries=()):
+    if relocated_call_entries and not extended:
+        raise ValueError("relocation roots require extended discovery")
     base, size = metadata["base"], metadata["text_size"]
     digest = metadata["hash"]
     if (type(base) is not int or type(size) is not int or base & 3 or
@@ -145,6 +147,8 @@ def inventory(metadata, data, extended=False):
         for pc, save_pc in frame_candidates(base, data, excluded):
             seed(pc, "heuristic_stack_frame")
             frame_evidence.append({"entry": pc, "ra_save_pc": save_pc})
+    for pc in sorted(set(relocated_call_entries)):
+        seed(pc, "verified_relocated_jal")
     pending = collections.deque(sorted(seeds))
     graph = {}
     delay_by_branch = {}

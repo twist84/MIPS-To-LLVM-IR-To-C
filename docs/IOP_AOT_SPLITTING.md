@@ -285,3 +285,29 @@ Data pointers are not automatically promoted to function roots. The
 receipt reports missing matches, parse errors and coverage of loose files;
 embedded/archive IRXs are not searched. No build or runtime integration.
 Synthetic tests cover a relocated JAL, metadata mismatch and ELF bounds.
+
+## I7 acceptance / I8c measured evidence / I9a relocation shadow
+
+I7 archive SHA256 0cd89d570773c8f499333f58d6d1aab9603cbe3562d6c1b3332343399c9fdca8:
+40M dispatches, 3127 polls, 184700 identical trace samples, seven active
+libraries, exact report and PPM, unchanged inputs. Native retirement
+67,846,006 equals G8D.2; 11,767,550 entries. Interpreter 45.719s vs native
+43.453s, a single pair, not general performance acceptance.
+
+I8c archive SHA256 7824244f812623c5773a01482b31e92c3cf6ddfb3db7c606cc979c237bc3e0e7:
+seven loose IRXs parsed, six exact metadata matches, zero function
+symbols. 2,617 verified relocated JALs to 773 unique module-scoped
+in-text targets; 176 targets not reached by extended discovery. ARKD_DVD
+had no metadata match. I8 extended build: ARKD_DVD 9,348 discovered /
+1,860 residual PCs, 161 objects, 5.953s compile; CRI_ADXI 4,273 discovered /
+8,235 residual PCs, 251 objects, 201.968s compile. The dominant compile
+object is not measured in that receipt.
+
+I9a adds `--discover-relocations` to the original ELF audit. For a unique
+metadata match, verified relocated JAL targets not already reached and
+with both site and target in executable sections seed extended recursive
+discovery. No raw R_MIPS_32 pointer promotion. This remains shadow-only,
+reports full ownership/conflicts and capture identity, and discards
+shadow output for ambiguous original ELF matches. Unmatched metadata
+now reports actual differing fields, including ARKD_DVD. No build path,
+runner, or existing I7 artifact changes.

@@ -11,7 +11,8 @@ TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
 from build_iop_aot import prepare_split_pilot, cached_split_object, split_cache_key
-from audit_iop_irx_metadata import parse_irx, compare_capture
+from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
+                                    discover_relocation_roots)
 
 
 BASE = 0x10000
@@ -196,6 +197,34 @@ class DiscoveryTest(unittest.TestCase):
                                           inventory(meta, linked)))
         with self.assertRaises(ValueError):
             parse_irx(bytes(raw[:100]))
+
+    def test_relocation_shadow_discovers_unvisited_leaf(self):
+        meta, linked = capture([0x03e00008, 0, jump(3, BASE + 16), 0,
+                                0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = struct.pack("<6I", 0x03e00008, 0, jump(3, 16), 0,
+                               0x03e00008, 0)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [{"flags": 4, "address": 0, "size": len(linked)}],
+                  "relocations": [{"offset": 8, "type": 4}]}
+        baseline = inventory(meta, linked, extended=True)
+        match = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, match, baseline)
+        self.assertEqual(shadow["new_roots"], [{"entry": BASE + 16,
+                                               "call_sites": [BASE + 8]}])
+        self.assertEqual(shadow["newly_reached_pcs"], [BASE + 16, BASE + 20])
+        self.assertEqual(shadow["inventory"]["regions"][1]["origins"],
+                         ["verified_relocated_jal"])
+        self.assertEqual(shadow["inventory"]["unvisited_aligned_words"], 2)
+        self.assertEqual(inventory(meta, linked, extended=True), baseline)
+        self.assertEqual(capture_mismatches(dict(meta, gp=0), linked, parsed),
+                         {"gp": {"captured": 0, "elf": BASE + 0x80}})
+        parsed["sections"][0]["flags"] = 0
+        self.assertEqual(discover_relocation_roots(meta, linked, parsed, match,
+                                                   baseline)["new_roots"], [])
+        with self.assertRaises(ValueError):
+            inventory(meta, linked, relocated_call_entries=[BASE + 16])
 
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
