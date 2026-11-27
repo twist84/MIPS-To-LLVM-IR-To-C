@@ -25,9 +25,9 @@ enum class e_op
 };
 
 template<unsigned bits>
+    requires (bits > 0u && bits <= 64u)
 constexpr uint64_t low_mask()
 {
-    static_assert(bits > 0 && bits <= 64);
     if constexpr (bits == 64)
     {
         return UINT64_MAX;
@@ -39,6 +39,7 @@ constexpr uint64_t low_mask()
 }
 
 template<unsigned bits>
+    requires (bits > 0u && bits <= 64u)
 constexpr uint64_t sign_extend(uint64_t value)
 {
     constexpr uint64_t sign = uint64_t{1} << (bits - 1);
@@ -52,9 +53,10 @@ constexpr bool signed_less(uint64_t lhs, uint64_t rhs)
 }
 
 template<unsigned bits>
+    requires (bits == s_r5900_traits::k_word_bits ||
+              bits == s_r5900_traits::k_scalar_bits)
 constexpr uint64_t arithmetic_right(uint64_t value, uint64_t count)
 {
-    static_assert(bits == 32 || bits == 64);
     constexpr uint64_t mask = low_mask<bits>();
     constexpr uint64_t sign = uint64_t{1} << (bits - 1);
     const unsigned shift = static_cast<unsigned>(count & (bits - 1));
