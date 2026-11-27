@@ -1502,3 +1502,21 @@ existing isolated v0.6/v0.7 checkpoints unchanged; capture independent
 logs in each ROM0 workflow artifact. No guessed firmware stop or
 version-specific layout assumptions. Pending first real dual-domain
 CI evidence; use it to prioritize subsequent blockers.
+
+## M6E3H3E4: connect guest serial TX
+
+H3E3 passed both firmware versions at 977d65aa:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46061304170
+
+Actual synchronized stops (EE/IOP slots):
+- v0.6: 653362 / 81670
+- v0.7: 653554 / 81694
+
+Both refused SB opcode a0820000 at a0010540, data address b000f180,
+byte 5b. Zero IOP debt, no IOP fault. Reuse the existing bounded
+s_ee_reset_sio_tx transport in ordinary and resumable delay-slot
+execution. Expose immutable captured bytes; emit hex in diagnostic
+logs, not raw workflow commands. No synthetic UART state or events.
+Test byte writes, pending-slot retirement, zero budget and invalid
+word store. Require both pinned diagnostic runs to advance past
+their measured prior stop and emit the real initial byte. Pending CI.

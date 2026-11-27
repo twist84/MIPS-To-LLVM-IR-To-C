@@ -204,6 +204,10 @@ public:
     uint64_t sif1_delivered() const { return m_sif1 != nullptr ? m_sif1->delivered_bytes() : 0u; }
     uint32_t sif1_fifo_words() const { return m_sif1 != nullptr ? m_sif1->fifo_words() : 0u; }
 
+    std::span<const uint8_t> serial_output() const
+    {
+        return {m_sio_bytes.data(), m_sio.m_count};
+    }
     const s_ee_cpu_state& cpu() const { return m_cpu; }
     static constexpr size_t k_ram_size = 0x02000000u;
     std::span<const uint8_t> ram() const { return {m_memory.read_span(0u, k_ram_size), k_ram_size}; }
@@ -325,7 +329,7 @@ public:
         else
         {
             action = ee_execute_strict_rom_register_step(m_cpu, rom, budget, ram,
-                nullptr, &m_memory.tlb(), &mmio, &m_cold_cache, true);
+                &m_sio, &m_memory.tlb(), &mmio, &m_cold_cache, true);
         }
         m_branch_transaction = false;
         if (action.m_result != result::COMMITTED)
@@ -509,7 +513,7 @@ private:
             return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
         }
         const auto action = strict_reset_detail::execute_rom_word(m_cpu, rom, m_memory.tlb(),
-            pc, opcode, ram, nullptr, &m_memory.tlb(), &mmio, &m_cold_cache);
+            pc, opcode, ram, &m_sio, &m_memory.tlb(), &mmio, &m_cold_cache);
         if (action.m_result != result::COMMITTED)
         {
             return action;
@@ -945,6 +949,10 @@ private:
     const std::vector<uint8_t> m_rom;
     ee_memory m_memory;
     c_ee_reset_cold_cache m_cold_cache{};
+    // The bounded serial sink records only committed guest SB accesses.
+    // Capacity exhaustion is a refusal, never a silently discarded byte.
+    std::vector<uint8_t> m_sio_bytes = std::vector<uint8_t>(65536u, 0u);
+    s_ee_reset_sio_tx m_sio{m_sio_bytes.data(), m_sio_bytes.size(), 0u};
     s_ee_runtime m_runtime{};
     s_ee_vu0_state m_vu0{};
     c_ee_vif1 m_vif0{};

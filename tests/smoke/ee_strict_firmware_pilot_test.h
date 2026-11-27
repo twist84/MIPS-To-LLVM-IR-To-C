@@ -1022,4 +1022,44 @@ bool test_strict_firmware_split_slots()
     }
     return true;
 }
+
+bool test_strict_firmware_serial()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b000u, 0x3484f180u, 0x3402005bu,
+        0xa0820000u, 0x3402005du, 0x10000001u, 0xa0820000u,
+        0xac820000u}));
+    if (!pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    if (pilot.serial_output().size() != 1u || pilot.serial_output()[0] != 0x5bu ||
+        pilot.step(1u).m_boundary != boundary::RETIRED || !pilot.delay_slot_pending() ||
+        pilot.serial_output().size() != 1u || pilot.step(0u).m_boundary != boundary::BUDGET ||
+        pilot.step(1u).m_boundary != boundary::RETIRED)
+    {
+        return false;
+    }
+    if (pilot.serial_output().size() != 2u || pilot.serial_output()[1] != 0x5du ||
+        pilot.delay_slot_pending() || pilot.cycle() != 8u || pilot.iop_cycles() != 1u ||
+        pilot.cpu().m_pc != base + 32u)
+    {
+        return false;
+    }
+    // The byte-only port must refuse SW without changing time or output.
+    const auto refused = pilot.step(1u);
+    return refused.m_boundary == boundary::HOST_REFUSAL &&
+        refused.m_instruction.m_data_address == 0xb000f180u &&
+        pilot.serial_output().size() == 2u && pilot.cycle() == 8u &&
+        pilot.iop_cycles() == 1u;
+}
 } // namespace

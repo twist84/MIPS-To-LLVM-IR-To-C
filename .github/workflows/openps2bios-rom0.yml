@@ -76,6 +76,16 @@ jobs:
           ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 2000000 | tee dual-rom0-v06.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v06.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v06.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v06.log").read_text()
+          stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
+          serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert stop and int(stop[1]) > 653362, log
+          assert serial and int(serial[1]) > 0, log
+          assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
+          PY
 
       - name: Execute guest IOP reset vector and capture stop
         run: |
@@ -292,6 +302,16 @@ jobs:
           ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 2000000 | tee dual-rom0-v07.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v07.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v07.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v07.log").read_text()
+          stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
+          serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert stop and int(stop[1]) > 653554, log
+          assert serial and int(serial[1]) > 0, log
+          assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
+          PY
 
       - name: Explore authentic v0.7 EE reset execution
         run: |

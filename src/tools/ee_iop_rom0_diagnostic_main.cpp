@@ -149,6 +149,19 @@ int main(int argc, char** argv)
         pilot.sif_register_value(1u), pilot.sif_register_value(2u), pilot.sif_register_value(3u), pilot.sif_register_value(4u),
         static_cast<unsigned long long>(pilot.sif0_delivered()), static_cast<unsigned long long>(pilot.sif1_delivered()),
         pilot.sif1_fifo_words());
+    const auto serial = pilot.serial_output();
+    std::printf("Dual ROM0 serial: bytes=%zu\n", serial.size());
+    // Hex encoding preserves control bytes and avoids guest text being
+    // interpreted as workflow commands.
+    for (size_t offset = 0u; offset < serial.size(); offset += 32u)
+    {
+        std::printf("Dual ROM0 serial data: offset=%zu hex=", offset);
+        for (size_t i = offset; i < serial.size() && i - offset < 32u; ++i)
+        {
+            std::printf("%02x", static_cast<unsigned>(serial[i]));
+        }
+        std::printf("\n");
+    }
     std::printf("Dual ROM0 IOP: pc=%08x\n", iop->m_pc);
     if (const auto& run = pilot.iop_last_run(); run.has_value())
     {
