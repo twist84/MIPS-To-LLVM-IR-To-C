@@ -193,7 +193,8 @@ def relocation_receipt_roots(receipt, metadata, data, baseline):
     return sorted(roots)
 
 
-def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root):
+def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root,
+                           cross_block=False):
     """Reconstruct candidate edges from the original ELF and linked bytes.
 
     Tables are not assumed immutable or exhaustive. Only discovery ownership
@@ -202,7 +203,8 @@ def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root):
     from audit_iop_indirect_targets import constant_indirect_targets
     from audit_iop_irx_metadata import (parse_irx, capture_mismatches,
                                         compare_capture, discover_relocation_roots)
-    from audit_iop_jump_tables import table_candidates, discover_table_edges
+    from audit_iop_jump_tables import (table_candidates, cap_adjacent_tables,
+                                       discover_table_edges)
 
     record = relocation_receipt_match(receipt, metadata, data)
     disc = disc_root.resolve()
@@ -223,8 +225,15 @@ def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root):
     verified = discover_relocation_roots(metadata, data, parsed, comparison, initial)
     if sorted(row["entry"] for row in verified["new_roots"]) != roots:
         raise ValueError("original ELF relocation roots differ from receipt")
-    indirect = constant_indirect_targets(metadata, data, baseline, audit_producers=True)
+    indirect = constant_indirect_targets(metadata, data, baseline, audit_producers=True,
+                                         cross_block=cross_block)
     tables = table_candidates(metadata, data, parsed, original, baseline, indirect)
+    if cross_block:
+        tables = cap_adjacent_tables(tables)
+        for table in tables:
+            if "uncapped_entry_count" in table:
+                print(f"split table candidate cap: JR {table['site']:08x}, "
+                      f"{table['uncapped_entry_count']} -> {len(table['entries'])} slots")
     shadow = discover_table_edges(metadata, data, baseline, roots, tables)
     expanded = shadow["inventory"]
     print(f"split tables: {len(shadow['candidate_edges'])} candidate edges, "
@@ -234,7 +243,8 @@ def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root):
 
 
 def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
-                        relocation_receipt=None, table_disc_root=None):
+                        relocation_receipt=None, table_disc_root=None,
+                        cross_block_tables=False):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
@@ -247,6 +257,8 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
     if extended and not residual:
         raise ValueError("extended discovery requires residual dispatch coverage")
     report = inventory(metadata, data, extended=extended)
+    if cross_block_tables and table_disc_root is None:
+        raise ValueError("cross-block tables require original ELF table discovery")
     if table_disc_root is not None and relocation_receipt is None:
         raise ValueError("table discovery requires relocation evidence")
     if relocation_receipt is not None:
@@ -260,7 +272,8 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
                     or report["rejected_seeds"]):
                 raise ValueError("ambiguous baseline ownership")
             report = table_backed_inventory(metadata, data, report, relocation_receipt,
-                                            roots, table_disc_root)
+                                            roots, table_disc_root,
+                                            cross_block=cross_block_tables)
     if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"] or
             report["rejected_seeds"] or len(data) % 4):
         raise ValueError("split pilot refuses ambiguous or invalid ownership")
@@ -536,12 +549,16 @@ def main():
                         help="Experimental extended discovery; requires --split-residual")
     parser.add_argument("--split-relocation-receipt", type=Path,
                         help="Use unique relocation evidence from an original IRX audit")
+    parser.add_argument("--split-cross-block-tables", action="store_true",
+                        help="Experimental cross-block table ownership with adjacent candidate caps")
     parser.add_argument("--split-table-disc-root", type=Path,
                         help="Experimental: rederive non-exhaustive table edges from original IRXs")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
     split_mode = args.split_all or bool(args.split_module)
+    if args.split_cross_block_tables and args.split_table_disc_root is None:
+        parser.error("--split-cross-block-tables requires --split-table-disc-root")
     if args.split_table_disc_root is not None and args.split_relocation_receipt is None:
         parser.error("--split-table-disc-root requires --split-relocation-receipt")
     if args.split_relocation_receipt is not None and not (
@@ -637,7 +654,8 @@ def build(args, out):
                                            residual=args.split_residual,
                                            extended=args.split_extended,
                                            relocation_receipt=relocation_receipt,
-                                           table_disc_root=args.split_table_disc_root)
+                                           table_disc_root=args.split_table_disc_root,
+                                           cross_block_tables=args.split_cross_block_tables)
                 subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
                 provenance_by_stem[stem] = (
                     {**common_provenance,
