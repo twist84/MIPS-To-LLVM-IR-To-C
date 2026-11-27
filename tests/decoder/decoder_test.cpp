@@ -3,6 +3,8 @@
 #include "ee_decoder.h"
 #include "ee_decoder_detail.h"
 #include "instruction_lifter.h"
+#include "instruction_lifter_detail.h"
+#include <utility>
 #include "function_analyzer.h"
 #include "ee_recomp.h"
 #include <cstdio>
@@ -22,6 +24,67 @@ static consteval bool decoder_matches(uint32_t word, std::string_view mnemonic,
     return std::string_view(instruction.mnemonic) == mnemonic &&
         instruction.valid == validity;
 }
+
+// Test the same lift implementation used by the runtime entry point.
+static consteval bool test_lift_metadata()
+{
+    const auto instruction = decoder_detail::decode(0x00150000u, 0x5085ffffu);
+    const auto op = lifter_detail::lift(instruction);
+    return op.kind == LOP_BEQ && op.pc == instruction.pc &&
+        op.rs == 4u && op.rt == 5u && op.immediate == -1 &&
+        op.uimmediate == 0xffffu && op.branch_target == 0x00150000 &&
+        op.has_delay_slot && op.branch_likely;
+}
+static_assert(test_lift_metadata(), "branch-likely lift preserves metadata");
+
+static_assert(lifter_detail::lift(decoder_detail::decode(0x0018e154u,
+    0x70491ba9u)).kind == LOP_MMI_COPY_UPPER_D);
+static_assert(lifter_detail::lift(decoder_detail::decode(0u,
+    R(0x00u, 4u, 0u, 6u, 0u, 0x28u))).kind == LOP_UNSUPPORTED);
+static_assert(lifter_detail::lift(decoder_detail::decode(0u,
+    R(0x38u, 4u, 5u, 0u, 0u, 0u))).kind == LOP_UNSUPPORTED);
+
+// Partition the 4,096 encoding combinations into independent evaluation
+// budgets. Every invalid or unsupported encoding must also fail closed.
+template <uint32_t first>
+consteval bool test_mmi_lift_group()
+{
+    for (uint32_t funct = first; funct < first + 4u; ++funct)
+    {
+        for (uint32_t sa = 0u; sa < 32u; ++sa)
+        {
+            for (uint32_t rs : {0u, 4u})
+            {
+                const auto ins = decoder_detail::decode(
+                    0x0018e154u, R(0x1cu, rs, 5u, 6u, sa, funct));
+                const auto op = lifter_detail::lift(ins);
+                if ((ins.valid == e_ee_valid::VALID) !=
+                    (op.kind != LOP_UNSUPPORTED))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static_assert(test_mmi_lift_group<0u>(), "MMI decode/lift group 0");
+static_assert(test_mmi_lift_group<4u>(), "MMI decode/lift group 1");
+static_assert(test_mmi_lift_group<8u>(), "MMI decode/lift group 2");
+static_assert(test_mmi_lift_group<12u>(), "MMI decode/lift group 3");
+static_assert(test_mmi_lift_group<16u>(), "MMI decode/lift group 4");
+static_assert(test_mmi_lift_group<20u>(), "MMI decode/lift group 5");
+static_assert(test_mmi_lift_group<24u>(), "MMI decode/lift group 6");
+static_assert(test_mmi_lift_group<28u>(), "MMI decode/lift group 7");
+static_assert(test_mmi_lift_group<32u>(), "MMI decode/lift group 8");
+static_assert(test_mmi_lift_group<36u>(), "MMI decode/lift group 9");
+static_assert(test_mmi_lift_group<40u>(), "MMI decode/lift group 10");
+static_assert(test_mmi_lift_group<44u>(), "MMI decode/lift group 11");
+static_assert(test_mmi_lift_group<48u>(), "MMI decode/lift group 12");
+static_assert(test_mmi_lift_group<52u>(), "MMI decode/lift group 13");
+static_assert(test_mmi_lift_group<56u>(), "MMI decode/lift group 14");
+static_assert(test_mmi_lift_group<60u>(), "MMI decode/lift group 15");
 
 // Guest branch and jump targets must wrap at both signed and unsigned
 // boundaries, regardless of the host's signed integer representation.
@@ -176,33 +239,7 @@ int main()
             std::printf("FAIL SDBZ PCPYUD decode/lift/emitter classification\n");
         }
     }
-    // Every MMI encoding declared VALID must have a non-unsupported
-    // lifter kind; the LLVM emitter dispatches MMI using raw opcodes.
-    // Test both unary (rs=0) and binary (rs=4) forms exhaustively,
-    // including selector sub-opcodes that otherwise receive no unit test.
-    for (uint32_t funct = 0u; funct < 64u; ++funct)
-    {
-        for (uint32_t sa = 0u; sa < 32u; ++sa)
-        {
-            for (uint32_t rs : {0u, 4u})
-            {
-                const uint32_t word = R(0x1cu, rs, 5u, 6u, sa, funct);
-                const auto ins = decode(0x0018e154u, word);
-                if (ins.valid != V)
-                {
-                    continue;
-                }
-                const bool ok = lift(ins).kind != LOP_UNSUPPORTED;
-                ok ? ++g_pass : ++g_fail;
-                if (!ok)
-                {
-                    std::printf("FAIL VALID MMI unsupported by lifter: word=%08x "
-                                "funct=%02x sa=%02x rs=%u\n",
-                                word, funct, sa, rs);
-                }
-            }
-        }
-    }
+    // Full MMI selector matrix is enforced by the partitioned assertions above.
     static_assert(decoder_matches(R(0x1c,0,0,6,0,0x10), "mfhi1", V), "mfhi1");
     static_assert(decoder_matches(R(0x1c,4,0,0,0,0x13), "mtlo1", V), "mtlo1");
     // Real ops that are NOT lowered exactly must never be VALID (previously a
