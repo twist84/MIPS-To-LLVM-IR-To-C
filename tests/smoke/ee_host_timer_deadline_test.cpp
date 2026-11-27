@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <limits>
+#include <span>
 #include <vector>
 
 namespace
@@ -170,6 +171,79 @@ consteval bool test_bounded_alu_horizon()
 
 static_assert(test_bounded_alu_horizon(), "bounded ALU horizon regression");
 
+consteval bool test_horizon_rejection_reasons()
+{
+    using error = ee::e_ee_horizon_rejection;
+    const auto analyze = [](uint32_t base, std::span<const uint32_t> words)
+    {
+        return ee::ee_horizon_analyze_alu_exit(base,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (pc < base || (pc - base) / 4u >= words.size())
+                {
+                    return false;
+                }
+                *word = words[(pc - base) / 4u];
+                return true;
+            });
+    };
+    constexpr uint32_t valid[] = {0x03e00008u, 0u};
+    constexpr uint32_t missing[] = {0x03e00008u};
+    constexpr uint32_t unsafe[] = {0x8c020000u, 0x03e00008u, 0u};
+    constexpr uint32_t unsafe_delay[] = {0x03e00008u, 0x8c020000u};
+    constexpr uint32_t no_exit[32]{};
+
+    const auto accepted = analyze(0x1000u, valid);
+    const auto zero = analyze(0u, valid);
+    const auto unaligned = analyze(0x1001u, valid);
+    const auto unreadable = analyze(0x1000u, missing);
+    const auto bad = analyze(0x1000u, unsafe);
+    const auto delay = analyze(0x1000u, unsafe_delay);
+    const auto wrap = analyze(0xfffffffcu, valid);
+    const auto exhausted = analyze(0x1000u, no_exit);
+
+    return accepted && *accepted == 2u &&
+        !zero && zero.error() == error::invalid_entry &&
+        !unaligned && unaligned.error() == error::invalid_entry &&
+        !unreadable && unreadable.error() == error::instruction_unavailable &&
+        !bad && bad.error() == error::unsafe_instruction &&
+        !delay && delay.error() == error::unsafe_delay_slot &&
+        !wrap && wrap.error() == error::address_wrap &&
+        !exhausted && exhausted.error() == error::slot_limit;
+}
+
+static_assert(test_horizon_rejection_reasons(), "typed ALU horizon rejection reasons");
+
+
+consteval bool test_horizon_event_priority()
+{
+    using e_source = ee::e_ee_horizon_source;
+    constexpr uint64_t none = ee::k_ee_no_deadline;
+    const auto timer = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, false);
+    const auto scanout = ee::ee_execution_horizon(100u, none, 120u, 130u, 140u, false);
+    const auto cop0 = ee::ee_execution_horizon(100u, none, none, 130u, 140u, false);
+    const auto iop = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 101u, false);
+    const auto due = ee::ee_execution_horizon(100u, 99u, none, none, none, false);
+    const auto blocked = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, true);
+    const auto empty = ee::ee_execution_horizon(100u, none, none, none, none, false);
+    const auto tied = ee::ee_execution_horizon(100u, 110u, 110u, 110u, 110u, false);
+    if (!check(timer.m_cycle == 110u && timer.m_source == e_source::timer &&
+            scanout.m_cycle == 120u && scanout.m_source == e_source::scanout &&
+            cop0.m_cycle == 130u && cop0.m_source == e_source::cop0 &&
+            iop.m_cycle == 101u && iop.m_source == e_source::iop &&
+            due.m_cycle == 100u && due.m_source == e_source::timer &&
+            blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
+            empty.m_cycle == none && empty.m_source == e_source::none &&
+            tied.m_cycle == 110u && tied.m_source == e_source::timer,
+            "unified horizon chooses earliest known event or barrier"))
+    {
+        return false;
+    }
+    return true;
+}
+
+static_assert(test_horizon_event_priority(), "earliest deadline and tie priority");
+
 bool write_timer(ee::c_ee_host_timers& timers, uint32_t index,
     uint32_t offset, uint32_t value)
 {
@@ -290,26 +364,6 @@ int main()
             return 1;
         }
 
-        const auto timer = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, false);
-        const auto scanout = ee::ee_execution_horizon(100u, none, 120u, 130u, 140u, false);
-        const auto cop0 = ee::ee_execution_horizon(100u, none, none, 130u, 140u, false);
-        const auto iop = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 101u, false);
-        const auto due = ee::ee_execution_horizon(100u, 99u, none, none, none, false);
-        const auto blocked = ee::ee_execution_horizon(100u, 110u, 120u, 130u, 140u, true);
-        const auto empty = ee::ee_execution_horizon(100u, none, none, none, none, false);
-        const auto tied = ee::ee_execution_horizon(100u, 110u, 110u, 110u, 110u, false);
-        if (!check(timer.m_cycle == 110u && timer.m_source == e_source::timer &&
-                scanout.m_cycle == 120u && scanout.m_source == e_source::scanout &&
-                cop0.m_cycle == 130u && cop0.m_source == e_source::cop0 &&
-                iop.m_cycle == 101u && iop.m_source == e_source::iop &&
-                due.m_cycle == 100u && due.m_source == e_source::timer &&
-                blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
-                empty.m_cycle == none && empty.m_source == e_source::none &&
-                tied.m_cycle == 110u && tied.m_source == e_source::timer,
-                "unified horizon chooses earliest known event or barrier"))
-        {
-            return 1;
-        }
         runtime.m_cop0_clock_initialized = false;
         runtime.m_cop0_clock_last = 0u;
         runtime.m_cop0_clock_count = 0u;
