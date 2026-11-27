@@ -269,3 +269,19 @@ existing ownership-plan hash separates cache entries. The only change
 relative to I7 is region assignment, and unsupported opcodes still fall
 back through the same lifter. No runtime acceptance until a distinct
 retail experiment. I7 remains separately reproducible.
+
+## I8c: original IRX metadata audit
+
+`tools/audit_iop_irx_metadata.py --capture DIR --disc-root PS2_GAME --out FILE`
+scans loose .IRX files, validates ELF32 little-endian MIPS Sony IOP
+relocatable headers and table bounds, extracts executable STT_FUNC
+symbols and REL entries, and compares IOPMOD name, entry, GP and text
+size against each linked capture. Those are metadata matches, not a
+proof of original ELF identity; ambiguous matches are reported separately.
+For text relocations, R_MIPS_26 JAL and R_MIPS_32 values must agree with
+the linked word before becoming candidate evidence. Ordinary differing
+non-relocation words are recorded (including linked import stubs).
+Data pointers are not automatically promoted to function roots. The
+receipt reports missing matches, parse errors and coverage of loose files;
+embedded/archive IRXs are not searched. No build or runtime integration.
+Synthetic tests cover a relocated JAL, metadata mismatch and ELF bounds.

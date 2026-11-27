@@ -11,6 +11,7 @@ TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
 from build_iop_aot import prepare_split_pilot, cached_split_object, split_cache_key
+from audit_iop_irx_metadata import parse_irx, compare_capture
 
 
 BASE = 0x10000
@@ -164,6 +165,37 @@ class DiscoveryTest(unittest.TestCase):
             pcs = [int(pc) for line in lines[1:] for pc in line.split()[1:]]
             self.assertEqual(sorted(pcs), list(range(BASE, BASE + len(data), 4)))
             self.assertEqual(len(pcs), len(set(pcs)))
+
+    def test_original_irx_metadata_and_verified_relocated_call(self):
+        original_words = [jump(3, 8), 0, 0x03e00008, 0]
+        original = struct.pack("<4I", *original_words)
+        # ELF32 + two program headers + one REL section (loader offsets).
+        raw = bytearray(0x200)
+        raw[:6] = b"\x7fELF\x01\x01"
+        struct.pack_into("<HHIIIIIHHHHHH", raw, 16, 0xff80, 8, 1, 0,
+                         52, 0x140, 0, 52, 32, 2, 40, 2, 0)
+        struct.pack_into("<8I", raw, 52, 1, 0x100, 0, 0, 16, 16, 5, 4)
+        struct.pack_into("<8I", raw, 84, 0x70000080, 0xc0, 0, 0, 48, 48, 0, 4)
+        struct.pack_into("<6I", raw, 0xc0, 0, 0, 0x80, 16, 0, 0)
+        raw[0xda:0xda + 10] = b"synthetic\0"
+        raw[0x100:0x110] = original
+        struct.pack_into("<10I", raw, 0x168, 0, 9, 0, 0, 0x1c0, 8, 0, 0, 4, 8)
+        struct.pack_into("<II", raw, 0x1c0, 0, 4)
+        parsed, text = parse_irx(bytes(raw))
+        self.assertEqual(text, original)
+        self.assertEqual(parsed["relocations"], [{"offset": 0, "type": 4,
+                                                  "symbol_index": 0}])
+        meta, linked = capture([jump(3, BASE + 8), 0, 0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        match = compare_capture(meta, linked, parsed, text, inventory(meta, linked))
+        self.assertEqual(match["verified_relocated_calls"],
+                         [{"site": BASE, "target": BASE + 8, "site_reached": True}])
+        self.assertEqual(match["nonrelocation_changed_word_count"], 0)
+        self.assertTrue(match["metadata_match_only"])
+        self.assertIsNone(compare_capture(dict(meta, gp=0), linked, parsed, text,
+                                          inventory(meta, linked)))
+        with self.assertRaises(ValueError):
+            parse_irx(bytes(raw[:100]))
 
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
