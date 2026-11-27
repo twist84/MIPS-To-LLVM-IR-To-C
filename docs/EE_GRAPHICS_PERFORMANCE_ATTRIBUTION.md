@@ -786,3 +786,24 @@ outside either experiment directory. The new CTest checks paired
 receipt rejection and lexical counts, not an end-to-end retail object
 audit. Final CI and local audit pending. Use the output to decide
 whether lazy packed publication has a credible residual cost target.
+
+## G6B.0 accepted — identical O5 native objects
+
+All five CI workflows passed at 483d9e9c29541859288367f1e128d3797aa8d1b9.
+The user-supplied ee-packed-native-g6b-audit.zip SHA-256 is
+3ba99d277a5512b3744bef1724df433c7409ad7ea936f152d2a52e6fd3ba5142;
+JSON SHA-256 6c8c06a7e026fb0528709aba00c9ca70d4ca49b41cc9b4fd2b5a4e67cf20957f.
+Control receipt 775b471ebef0bdbe7276bd2c0f5eeacb9b854edf6295df148f7df3039d435438;
+candidate receipt f7b25e4d99d54a5dd7dc238ee9482d29b334584afe7a1774cac02f56dc21ad05
+matches the G6A replay receipt. All 16252 objects are reported
+byte-identical by the local digest-verified audit despite 42 changed
+IR modules and 6408 removed canonical vector insertions. Zero
+extractions removed; aggregate executable object sections unchanged
+at 95167472 bytes. Two sampled dumpbin outputs (0x425e10, 0x425758)
+differ only in input path; /NOBYTES was ignored by this dumpbin.
+Original/candidate object bytes are not included in the archive.
+Linked DLL digests differ, so do not claim byte-identical DLLs.
+G6A is an IR simplification, not a native optimization. Defer
+G6B lazy residency absent new evidence of residual publication
+cost. Keep G6A, preserve previous artifacts; move to G8 IOP
+attribution ahead of G7 (VIF1 UNPACK cost previously ~40ms).
