@@ -59,6 +59,37 @@ def main():
                     if not address or test(address, opcode) != expected:
                         raise RuntimeError(f"strict native transfer failed: {opcode:#x} O{opt}")
                     count += expected
+        sequence = helper.ee_test_strict_native_sequence
+        sequence.argtypes = [ctypes.c_void_p]
+        sequence.restype = ctypes.c_uint32
+        subprocess.run([str(fixture), str(path), "0x00400ff8",
+                        "0xac820000", "0x8cc50000", "0xac850004"], check=True)
+        source = path.read_text(encoding="utf-8")
+        for opt in (0, 2):
+            machine = target.create_target_machine(opt=opt)
+            module = llvm.parse_assembly(source)
+            module.triple = llvm.get_default_triple()
+            module.data_layout = str(machine.target_data)
+            module.verify()
+            if opt:
+                optimize_guest_ir(module, machine)
+            engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+            engine.add_module(module)
+            engine.finalize_object()
+            address = engine.get_function_address("guest_strict_word")
+            if not address or sequence(address) != 8:
+                raise RuntimeError(f"strict native sequence failed: O{opt}")
+            count += 8
+        # A branch, unsupported opcode, or wrapping sequence must not
+        # silently enter the straight-line lowering.
+        for pc, words in (
+            ("0x00400000", ["0xac820000", "0x10000000"]),
+            ("0x00400000", ["0xac820000", "0x0"]),
+            ("0xfffffffc", ["0xac820000", "0x8cc50000"]),
+        ):
+            rejected = subprocess.run([str(fixture), str(path), pc, *words])
+            if rejected.returncode != 3:
+                raise RuntimeError("strict sequence emitter accepted invalid CFG")
         # The separate emitter must not accept arbitrary instructions.
         rejected = subprocess.run([str(fixture), str(path), "0x00400000", "0x0"])
         if rejected.returncode != 3:

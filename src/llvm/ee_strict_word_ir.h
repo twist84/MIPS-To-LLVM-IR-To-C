@@ -5,6 +5,7 @@
 #include "ee_strict_native_word.h"
 #include <cstddef>
 #include <sstream>
+#include <vector>
 
 namespace llvm
 {
@@ -88,25 +89,32 @@ inline void emit_half(std::ostringstream& out, const std::string& prefix,
     }
     out << "  store i64 " << merged << ", ptr %" << prefix << "reg, align 8\n";
 }
-} // namespace strict_transfer_ir
 
-// Separate single-instruction lowering. Never selected by the retail
-// builder. All transfer blocks follow successful live preparation.
-inline bool emit_strict_word_entry(llvm_context& ctx, const ee::s_ee_instruction& ins)
+inline constexpr bool supported_instruction(const ee::s_ee_instruction& ins)
+{
+    return ins.valid == ee::e_ee_valid::VALID &&
+           ins.flow == ee::e_ee_flow::FLOW_NONE && !ins.has_delay_slot &&
+           (ins.pc & 3u) == 0u &&
+           ee::ee_decode_strict_transfer(ins.opcode_word).m_width != 0u;
+}
+
+inline void declare_prepare(std::ostringstream& out)
+{
+    out << "declare i32 @ee_strict_native_prepare_transfer(ptr, ptr, i32, i32, ptr, ptr)\n";
+}
+
+// Each instruction owns a complete commit boundary. The optional
+// internal linkage allows the normal LLVM pipeline to inline the
+// transfer into a sequence without weakening the checked helper edge.
+inline void emit_transfer_function(std::ostringstream& out,
+    const ee::s_ee_instruction& ins, const std::string& name, bool internal)
 {
     const auto transfer = ee::ee_decode_strict_transfer(ins.opcode_word);
-    if (ins.valid != ee::e_ee_valid::VALID ||
-        ins.flow != ee::e_ee_flow::FLOW_NONE || ins.has_delay_slot ||
-        (ins.pc & 3u) != 0u || transfer.m_width == 0u)
-    {
-        return false;
-    }
     const uint32_t rt = (ins.opcode_word >> 16u) & 31u;
     const size_t reg_offset = offsetof(ee::s_ee_cpu_state, m_gpr) +
         rt * sizeof(ee::s_ee_u128) + offsetof(ee::s_ee_u128, m_lo);
-    std::ostringstream out;
-    out << "declare i32 @ee_strict_native_prepare_transfer(ptr, ptr, i32, i32, ptr, ptr)\n"
-        << "define i32 @guest_strict_word(ptr %cpu, ptr %context) {\n"
+    out << "define " << (internal ? "internal " : "") << "i32 @" << name
+        << "(ptr %cpu, ptr %context) {\n"
         << "entry:\n"
         << "  %out = alloca ptr\n"
         << "  %lane = alloca i32\n"
@@ -153,6 +161,69 @@ inline bool emit_strict_word_entry(llvm_context& ctx, const ee::s_ee_instruction
     out << "committed:\n  %pc = getelementptr i8, ptr %cpu, i64 " << offsetof(ee::s_ee_cpu_state, m_pc) << "\n"
         << "  store i32 " << static_cast<uint32_t>(ins.pc + 4u) << ", ptr %pc, align 4\n"
         << "  ret i32 0\n}\n";
+}
+} // namespace strict_transfer_ir
+
+// Separate single-instruction lowering, never selected by retail.
+inline bool emit_strict_word_entry(llvm_context& ctx, const ee::s_ee_instruction& ins)
+{
+    if (!strict_transfer_ir::supported_instruction(ins))
+    {
+        return false;
+    }
+    std::ostringstream out;
+    strict_transfer_ir::declare_prepare(out);
+    strict_transfer_ir::emit_transfer_function(out, ins, "guest_strict_word", false);
+    ctx.ir(out.str());
+    return true;
+}
+
+// Bounded straight-line CFG. No branches, delay slots, or speculative
+// fetch. The caller retains isolated-boundary evidence throughout.
+// Each successful instruction publishes PC/GPR/RAM before the next
+// prepare call. Any nonzero result exits at that instruction, keeping
+// the completed prefix intact. A live opcode check at every boundary
+// also stops self-modifying sequences before stale native execution.
+inline bool emit_strict_memory_sequence(llvm_context& ctx,
+    const std::vector<ee::s_ee_instruction>& instructions)
+{
+    constexpr size_t max_instructions = 256u;
+    if (instructions.empty() || instructions.size() > max_instructions)
+    {
+        return false;
+    }
+    const uint64_t first = instructions.front().pc;
+    for (size_t i = 0u; i < instructions.size(); ++i)
+    {
+        if (!strict_transfer_ir::supported_instruction(instructions[i]) ||
+            static_cast<uint64_t>(instructions[i].pc) != first + i * 4u ||
+            instructions[i].pc == 0xfffffffcu)
+        {
+            return false;
+        }
+    }
+
+    std::ostringstream out;
+    strict_transfer_ir::declare_prepare(out);
+    for (size_t i = 0u; i < instructions.size(); ++i)
+    {
+        strict_transfer_ir::emit_transfer_function(out, instructions[i],
+            "strict_step_" + std::to_string(i), true);
+    }
+    out << "define i32 @guest_strict_word(ptr %cpu, ptr %context) {\n"
+        << "entry:\n  br label %step0\n";
+    for (size_t i = 0u; i < instructions.size(); ++i)
+    {
+        out << "step" << i << ":\n"
+            << "  %status" << i << " = call i32 @strict_step_" << i
+            << "(ptr %cpu, ptr %context)\n"
+            << "  %ok" << i << " = icmp eq i32 %status" << i << ", 0\n"
+            << "  br i1 %ok" << i << ", label %"
+            << (i + 1u == instructions.size() ? "complete" : "step" + std::to_string(i + 1u))
+            << ", label %stop" << i << "\n"
+            << "stop" << i << ":\n  ret i32 %status" << i << "\n";
+    }
+    out << "complete:\n  ret i32 0\n}\n";
     ctx.ir(out.str());
     return true;
 }

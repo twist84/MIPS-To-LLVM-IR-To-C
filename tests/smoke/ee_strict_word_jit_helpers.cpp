@@ -135,4 +135,141 @@ extern "C" uint32_t ee_test_strict_native_word(native_entry entry, uint32_t opco
     return scenarios;
 }
 
+
+extern "C" uint32_t ee_test_strict_native_sequence(native_entry entry)
+{
+    if (entry == nullptr)
+    {
+        return 0u;
+    }
+    constexpr uint32_t pc = 0x00400ff8u;
+    constexpr uint32_t data = 0x00600000u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t code_lo0 = (1u << 6u) | 0x16u;
+    constexpr uint32_t code_lo1 = (2u << 6u) | 0x16u;
+    constexpr uint32_t data_lo = (3u << 6u) | 0x16u;
+    constexpr uint32_t words[] =
+    {
+        0xac820000u, // sw r2,0(r4)
+        0x8cc50000u, // lw r5,0(r6)
+        0xac850004u  // sw r5,4(r4), next virtual page
+    };
+    constexpr uint32_t code_address[] = {0x1ff8u, 0x1ffcu, 0x2000u};
+    constexpr uint32_t original = 0x80ff8180u;
+    constexpr uint32_t marker = 0x55667788u;
+    constexpr uint64_t old_dest = 0x0123456789abcdefull;
+    constexpr uint64_t upper = 0xfedcba9876543210ull;
+    const s_ee_strict_ram_evidence evidence{true, true};
+    for (uint32_t scenario = 0u; scenario < 8u; ++scenario)
+    {
+        ee_memory native_ram(0x4000u);
+        ee_memory interpreted_ram(0x4000u);
+        for (ee_memory* memory : {&native_ram, &interpreted_ram})
+        {
+            if (!memory->tlb().write(0u, 0u, (pc & ~0x1fffu) | 0xabu,
+                    code_lo0, scenario == 3u ? code_lo1 & ~2u : code_lo1) ||
+                !memory->tlb().write(1u, 0u, data | 0xabu,
+                    scenario == 7u ? data_lo & ~4u : data_lo, 0x12u))
+            {
+                return 0u;
+            }
+            for (uint32_t i = 0u; i < 3u; ++i)
+            {
+                const bool stale = (scenario == 4u && i == 1u) ||
+                                   (scenario == 6u && i == 2u);
+                memory->write32(code_address[i], stale ? 0u : words[i]);
+            }
+            memory->write32(0x3000u, original);
+            memory->write32(0x3004u, original);
+        }
+        s_ee_cpu_state cpu{};
+        cpu.m_pc = pc;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[COP0_Status] = 0x10u;
+        cpu.m_cop0[COP0_EntryHi] = 0xabu;
+        cpu.m_gpr[2] = {marker, upper};
+        cpu.m_gpr[4].m_lo = scenario == 5u ? pc + 4u : data;
+        cpu.m_gpr[5] = {old_dest, upper};
+        cpu.m_gpr[6].m_lo = scenario == 1u ? 0x00800000u :
+            scenario == 2u ? data + 1u : data;
+        s_ee_cpu_state reference = cpu;
+        bool native_delay = true;
+        bool reference_delay = true;
+        s_ee_strict_native_word_context context{&native_ram, &native_delay, evidence};
+        const auto actual = static_cast<result>(entry(&cpu, &context));
+        result wanted = result::COMMITTED;
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            // A stale native word is a host refusal rather than guest
+            // interpretation of the changed opcode. Stop the reference
+            // at precisely that boundary to compare committed prefixes.
+            if (((scenario == 4u || scenario == 5u) && i == 1u) ||
+                (scenario == 6u && i == 2u))
+            {
+                wanted = result::UNSUPPORTED_INSTRUCTION;
+                break;
+            }
+            wanted = ee_execute_strict_ram_step(reference, interpreted_ram,
+                                                 reference_delay, evidence);
+            if (wanted != result::COMMITTED)
+            {
+                break;
+            }
+        }
+        if (actual != wanted || !equal_cpu(cpu, reference) ||
+            native_delay != reference_delay)
+        {
+            std::fprintf(stderr, "strict sequence state mismatch: scenario=%u\n", scenario);
+            return 0u;
+        }
+        for (uint32_t address = 0u; address < 0x4000u; address += 4u)
+        {
+            if (native_ram.read32(address) != interpreted_ram.read32(address))
+            {
+                return 0u;
+            }
+        }
+        const bool first_committed = scenario != 7u;
+        const bool second_committed = scenario == 0u || scenario == 3u || scenario == 6u;
+        const bool fault = scenario == 1u || scenario == 2u || scenario == 3u || scenario == 7u;
+        const uint32_t fault_index = scenario == 7u ? 0u : scenario == 3u ? 2u : 1u;
+        const uint32_t code = scenario == 7u ? EX_Mod :
+            scenario == 2u ? EX_AdEL : EX_TLBL;
+        if (native_ram.read32(0x3000u) !=
+                (first_committed && scenario != 5u ? marker : original) ||
+            native_ram.read32(0x3004u) != (scenario == 0u ? marker : original) ||
+            cpu.m_gpr[5].m_lo != (second_committed ? marker : old_dest) ||
+            cpu.m_gpr[5].m_hi != upper)
+        {
+            return 0u;
+        }
+        if (fault)
+        {
+            const uint32_t address = scenario == 1u ? 0x00800000u :
+                scenario == 2u ? data + 1u : scenario == 3u ? pc + 8u : data;
+            if (actual != result::FAULT_COMMITTED || cpu.m_exit_reason != exception ||
+                cpu.m_pc != (scenario == 1u ? VEC_TLB_REFILL_BEV0 : VEC_COMMON_BEV0) ||
+                cpu.m_cop0[COP0_EPC] != pc + fault_index * 4u ||
+                cpu.m_cop0[COP0_BadVAddr] != address ||
+                cpu.m_cop0[COP0_Cause] != (code << 2u) || native_delay)
+            {
+                return 0u;
+            }
+        }
+        else if (cpu.m_exit_reason != dispatch ||
+            cpu.m_pc != pc + (scenario == 0u ? 12u : scenario == 6u ? 8u : 4u) ||
+            actual != (scenario == 0u ? result::COMMITTED : result::UNSUPPORTED_INSTRUCTION) ||
+            !native_delay)
+        {
+            return 0u;
+        }
+        if (scenario == 5u && native_ram.read32(code_address[1]) != marker)
+        {
+            return 0u;
+        }
+    }
+    return 8u;
+}
+
 } // namespace ee

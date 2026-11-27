@@ -512,3 +512,32 @@ outcomes and complete quadword transfer. Existing M6A/B directed
 fixtures remain. Production CFG lowering, delay slots, BIOS/retail
 integration, cache/device state and native invalidation remain open.
 No change to default lowering or existing retail ABI. CI pending.
+
+## Strict memory follow-up M6D3A: precise native sequence boundaries
+
+Factor the existing transfer lowering into reusable internal LLVM
+functions. Add a bounded straight-line sequence emitter (1–256
+contiguous supported GPR memory instructions, no address wrap).
+Each instruction calls live preparation and commits its own PC,
+GPR and RAM effects before entering the next block. Any nonzero
+result exits immediately, preserving the completed prefix; no later
+guest instruction is fetched or executed. Internal linkage permits
+LLVM inlining without changing the checked helper ABI. Live opcode
+comparison is repeated at every boundary, including after stores
+to subsequent instruction bytes. The existing single-entry emitter
+and retail lowering remain unchanged.
+
+The MCJIT test adds eight three-instruction scenarios at O0/O2:
+normal dependency chain across a virtual page, second-instruction
+refill/alignment fault, third-instruction fetch invalid, stale second
+or third opcode, first store overwriting the next instruction, and
+first-instruction modified-page fault. Compare CPU/COP0 and the
+entire RAM fixture against sequential strict interpreter execution,
+with independent assertions for committed prefix, EPC, BadVAddr,
+vector and untouched suffix. Explicitly reject branches, unsupported
+opcodes and wrapping sequences.
+
+This is a straight-line native CFG pilot, not general function CFG
+integration. Branch/delay-slot precision, instruction/clock accounting,
+native handler dispatch, BIOS/retail caller integration, caches and
+devices remain open. No production change; CI pending.
