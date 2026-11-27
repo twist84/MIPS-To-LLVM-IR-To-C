@@ -13,6 +13,42 @@ namespace
 using namespace ee::scalar_constant;
 using op = e_op;
 
+template <unsigned bits>
+concept t_valid_scalar_width = requires
+{
+    low_mask<bits>();
+    sign_extend<bits>(0u);
+};
+
+template <unsigned bits>
+concept t_valid_shift_width = requires
+{
+    arithmetic_right<bits>(0u, 0u);
+};
+
+static_assert(t_valid_scalar_width<1u> && t_valid_scalar_width<64u>);
+static_assert(!t_valid_scalar_width<0u> && !t_valid_scalar_width<65u>);
+static_assert(t_valid_shift_width<32u> && t_valid_shift_width<64u>);
+static_assert(!t_valid_shift_width<16u> && !t_valid_shift_width<128u>);
+
+consteval bool test_scalar_bit_widths()
+{
+    for (unsigned shift = 0u; shift < 64u; ++shift)
+    {
+        const uint64_t high = uint64_t{1} << 63u;
+        const uint64_t negative = arithmetic_right<64>(high, shift);
+        const uint64_t expected = UINT64_MAX << (63u - shift);
+        if (negative != expected ||
+            arithmetic_right<64>(high >> 1u, shift) != ((high >> 1u) >> shift))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+static_assert(test_scalar_bit_widths(), "all 64 arithmetic shift counts");
+
 static_assert(*evaluate(op::addu, 0x7fffffffu, 1) == 0xffffffff80000000ull);
 static_assert(*evaluate(op::addu, 0x12345678ffffffffull, 1) == 0);
 static_assert(*evaluate(op::subu, 0, 1) == UINT64_MAX);
