@@ -479,3 +479,10 @@ remain beside native objects, and both original directory moves and receipt
 copies are rolled back on partition failure. The full link/reparse-point
 check and exact archive inventory verification remain mandatory. Timing
 reports distinguish whole-directory and individual-file moves.
+
+Recovery also seeds small existing dispatcher/runtime cache artifacts into
+the fresh selected profile, keeping the previous cache untouched. Existing
+compiler/source/flag/object validation decides reuse or compilation; no
+linked library or translation receipt is imported. Link reports distinguish
+host dispatch and runtime preparation. `--force-reconstruct` explicitly
+bypasses otherwise eligible IR copying for controlled recovery timing.

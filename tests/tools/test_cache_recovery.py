@@ -316,6 +316,29 @@ def test_cold_ir_benchmark_isolated():
         assert not list(base.glob("backup-*"))
 
 
+def test_host_cache_seed_copies_only_candidate_artifacts():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        source = root / "source"
+        target = root / "target"
+        source.mkdir()
+        target.mkdir()
+        library = "game-translated.dll"
+        for name in (library, library + ".dispatch.o", library + ".dispatch.o.json",
+                     "translation-cache.json"):
+            (source / name).write_bytes(name.encode())
+        runtime = source / (library + ".runtime-cache")
+        runtime.mkdir()
+        (runtime / "runtime-objects.json").write_bytes(b"receipt")
+        (runtime / "example.o").write_bytes(b"object")
+        assert recovery.seed_host_link_cache([source], target, library) == 4
+        assert not (target / library).exists()
+        assert not (target / "translation-cache.json").exists()
+        assert (target / runtime.name / "example.o").read_bytes() == b"object"
+        (target / runtime.name / "example.o").write_bytes(b"changed")
+        assert (runtime / "example.o").read_bytes() == b"object"
+
+
 def test_portable_validation_uses_one_fresh_ir_scan():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp).resolve()
@@ -1047,6 +1070,7 @@ def main():
     test_link_or_validation_failure_does_not_activate()
     test_verified_legacy_migration_preserves_ir_and_relocates()
     test_cold_ir_benchmark_isolated()
+    test_host_cache_seed_copies_only_candidate_artifacts()
     test_portable_validation_uses_one_fresh_ir_scan()
     test_selected_profile_promotion_without_o0()
     test_canonical_promotion_rolls_back_all_names()

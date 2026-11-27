@@ -443,9 +443,47 @@ def canonical_shared_profiles(base_work, work):
     return profiles
 
 
+def seed_host_link_cache(candidates, profile, library_name):
+    """Copy only known host cache artifacts; the linker verifies their identities."""
+    suffixes = (".dispatch.cpp", ".dispatch.o", ".dispatch.o.json",
+                ".dispatch-cache", ".runtime-cache")
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_dir() or candidate.is_symlink():
+            continue
+        selected = []
+        for suffix in suffixes:
+            source = candidate / (library_name + suffix)
+            if not source.exists() or source.is_symlink():
+                continue
+            target = profile / source.name
+            if target.exists():
+                continue
+            try:
+                if source.is_dir():
+                    if suffix not in (".dispatch-cache", ".runtime-cache"):
+                        continue
+                    files = cache_backup.backup_files(source)
+                    selected.extend((file, target / file.relative_to(source))
+                                    for file in files)
+                elif source.is_file() and not getattr(source.lstat(), "st_file_attributes", 0) & 0x400:
+                    selected.append((source, target))
+            except (OSError, ValueError):
+                continue
+        if not selected:
+            continue
+        for source, target in selected:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, target)
+        metrics.count("seeded_host_cache_files", len(selected))
+        # Every copied object is merely a candidate; stale or corrupt
+        # records are rejected by cached_dispatch/runtime_objects.
+        return len(selected)
+    return 0
+
+
 def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             *, full_native_backup=False, opt=0, ir_jobs=8,
-            allow_source_changes=False):
+            allow_source_changes=False, force_reconstruct=False):
     """Reconstruct, link only the selected profile, then validate and promote."""
     if opt not in range(6):
         raise ValueError("invalid recovery native profile")
@@ -490,7 +528,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                     if profile.exists():
                         locks.enter_context(shared_ir.ir_lock(profile))
         comparison = None
-        if same_sources and candidate.parent != history_dir(base_work):
+        if not force_reconstruct and same_sources and candidate.parent != history_dir(base_work):
             try:
                 comparison = stage_verified_ir(
                     elf, candidate.parent, work, manifest, ir_sources)
@@ -547,6 +585,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             seed_candidate_objects(
                 candidates, profile, metadata_path, hashes, opt,
                 llvm, native_target_identity, ir_pipeline_id)
+        with metrics.stage("host_cache_seeding"):
+            seed_host_link_cache(candidates, profile, library_name)
         run_game.build_linked_library(
             source_root, profile, metadata_path, profile / "objects",
             profile / library_name, opt, emit_jobs=jobs,
@@ -673,6 +713,8 @@ def main(argv=None):
                         help="also archive displaced native objects, libraries and reports")
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
+    parser.add_argument("--force-reconstruct", action="store_true",
+                        help="actual recovery: relift even if source IR can be copied")
     parser.add_argument("--allow-source-changes", action="store_true",
                         help="recovery: allow changed generator fingerprints, require exact IR hashes")
     args = parser.parse_args(argv)
@@ -682,6 +724,9 @@ def main(argv=None):
             parser.error("benchmark --ir-jobs requires --persistent-recomp for parallel emission")
     else:
         args.ir_jobs = 8 if args.ir_jobs is None else args.ir_jobs
+    if args.force_reconstruct and (args.benchmark_reconstruct or args.print_active or
+            args.check_active_source or args.migrate_source_fingerprints):
+        parser.error("--force-reconstruct is for actual recovery only")
     if args.allow_source_changes and (args.benchmark_reconstruct or args.print_active or
             args.check_active_source or args.migrate_source_fingerprints or args.allow_ir_changes):
         parser.error("--allow-source-changes is for strict actual recovery only")
@@ -739,11 +784,13 @@ def main(argv=None):
                                 allow_ir_changes=args.allow_ir_changes,
                                 allow_source_changes=args.allow_source_changes,
                                 ir_jobs=args.ir_jobs,
-                                full_native_backup=args.full_native_backup):
+                                full_native_backup=args.full_native_backup,
+                                force_reconstruct=args.force_reconstruct):
                 recover(elf, build, args.config, base_work, args.emit_jobs,
                         args.allow_ir_changes, full_native_backup=args.full_native_backup,
                         opt=args.emit_opt, ir_jobs=args.ir_jobs,
-                        allow_source_changes=args.allow_source_changes)
+                        allow_source_changes=args.allow_source_changes,
+                        force_reconstruct=args.force_reconstruct)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
                   else "EE source preflight refused" if args.check_active_source

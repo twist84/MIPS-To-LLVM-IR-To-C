@@ -859,6 +859,7 @@ def main():
         if args.pdb:
             runtime_flags += ["-g", "-gcodeview"]
 
+        dispatch_started = time.monotonic()
         if args.data_dispatch:
             # Plain C table + cached generic glue: no C++ headers to parse
             # per library, which dominated small overlay links (~1.1 s).
@@ -886,6 +887,7 @@ def main():
                 include_args, compile_flags
             )
 
+        dispatch_seconds = time.monotonic() - dispatch_started
         certificate_count = None
         if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
             from native_alu_certificate import verified_bounds, build_certificate_source
@@ -902,11 +904,13 @@ def main():
             print(f"link_native_objects: {certificate_count} verified ALU entry certificates",
                   flush=True)
 
+        runtime_started = time.monotonic()
         runtime_objects = cached_runtime_objects(
             cache_base, required_sources, source_root, args.cxx,
             include_args, runtime_flags
         )
 
+        runtime_seconds = time.monotonic() - runtime_started
         # Use a response file: the complete game emits thousands of per-function
         # objects and can exceed the operating system's command-line length.
         response_path = args.output.with_suffix(args.output.suffix + ".objects.rsp")
@@ -955,6 +959,8 @@ def main():
         link_seconds = time.monotonic() - link_started
         metrics.emit_child({"tool": "link_native_objects",
                             "stages": {"native_link": link_seconds,
+                                       "host_dispatch_preparation": dispatch_seconds,
+                                       "host_runtime_preparation": runtime_seconds,
                                        "link_input_and_host_preparation": link_started - validation_started}})
         print(
             f"link_native_objects: guest DLL linked "
