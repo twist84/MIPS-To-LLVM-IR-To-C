@@ -17,6 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
       - name: Download pinned native WebGPU SDK
         shell: bash
         run: |
@@ -74,6 +79,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
       # CMake configures the pinned SDK into build/_deps/wgpu-native.
       # Deliberately exercise the same automatic provisioning as users.
       - name: Activate installed MSVC toolchain
@@ -111,6 +121,11 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
       - name: Activate installed MSVC toolchain for Clang STL and dumpbin
         uses: ilammy/msvc-dev-cmd@v1
         with:
