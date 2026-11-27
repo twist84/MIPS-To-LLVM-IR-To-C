@@ -142,6 +142,61 @@ s_outcome run(iop::c_iop_aot* aot)
     cpu.dma_read(k_data, outcome.m_data.data(), 64);
     return outcome;
 }
+// Final-state comparison alone misses an overrun that is later
+// compensated by a shorter slice. Compare every scheduler boundary.
+bool compare_slices(iop::c_iop_aot& aot, uint32_t budget)
+{
+    iop::c_cpu reference;
+    iop::c_cpu translated;
+    const auto code = program();
+    for (auto* cpu : {&reference, &translated})
+    {
+        cpu->reset(k_base);
+        for (size_t i = 0u; i < code.size(); ++i)
+        {
+            if (!cpu->write32(k_base + static_cast<uint32_t>(i) * 4u, code[i]))
+            {
+                return false;
+            }
+        }
+        cpu->state().m_gpr[sp] = 0x00030000u;
+    }
+    aot.refresh(translated);
+    translated.set_aot(&aot);
+    const uint64_t native_before = aot.instructions();
+    for (uint32_t slice = 0u; slice < 10000u; ++slice)
+    {
+        const auto a = reference.run(budget);
+        const auto b = translated.run(budget);
+        const auto& x = reference.state();
+        const auto& y = translated.state();
+        uint8_t ram_a[64]{}, ram_b[64]{};
+        if (a.m_result != b.m_result || a.m_instructions != b.m_instructions ||
+            b.m_instructions > budget || a.m_pc != b.m_pc ||
+            a.m_opcode != b.m_opcode || reference.cycles() != translated.cycles() ||
+            x.m_pc != y.m_pc || x.m_next_pc != y.m_next_pc ||
+            x.m_in_delay_slot != y.m_in_delay_slot ||
+            (x.m_in_delay_slot && x.m_branch_pc != y.m_branch_pc) ||
+            x.m_hi != y.m_hi || x.m_lo != y.m_lo ||
+            std::memcmp(x.m_gpr, y.m_gpr, sizeof(x.m_gpr)) != 0 ||
+            !reference.dma_read(k_data, ram_a, sizeof(ram_a)) ||
+            !translated.dma_read(k_data, ram_b, sizeof(ram_b)) ||
+            std::memcmp(ram_a, ram_b, sizeof(ram_a)) != 0)
+        {
+            std::fprintf(stderr, "IOP slice mismatch: budget=%u slice=%u "
+                "interp=%u native=%u pc=%08x/%08x next=%08x/%08x\n",
+                budget, slice, a.m_instructions, b.m_instructions,
+                x.m_pc, y.m_pc, x.m_next_pc, y.m_next_pc);
+            return false;
+        }
+        if (a.m_result != iop::e_step_result::budget_exhausted)
+        {
+            return a.m_result == iop::e_step_result::overflow &&
+                aot.instructions() > native_before;
+        }
+    }
+    return false;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -220,6 +275,10 @@ int main(int argc, char** argv)
         check(translated.m_instructions == reference.m_instructions,
               "same retired instruction count");
         check(aot.instructions() > 0u, "translated code executed");
+        for (uint32_t budget = 1u; budget <= 17u; ++budget)
+        {
+            check(compare_slices(aot, budget), "exact per-slice native budget and state");
+        }
         for (int r = 0; r < 32; ++r)
         {
             if (translated.m_state.m_gpr[r] != reference.m_state.m_gpr[r])
