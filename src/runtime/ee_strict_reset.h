@@ -314,6 +314,10 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
                                      static_cast<uint32_t>(read_gpr(cpu, rt)));
             break;
+        case 0x23u: // SUBU: low 32-bit wrapping difference
+            value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) -
+                                     static_cast<uint32_t>(read_gpr(cpu, rt)));
+            break;
         case 0x24u: // AND: both low 64-bit operands
             value = read_gpr(cpu, rs) & read_gpr(cpu, rt);
             break;
@@ -433,6 +437,9 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         break;
     case 0x0du: // ORI
         value = read_gpr(cpu, rs) | imm;
+        break;
+    case 0x0eu: // XORI: zero-extended immediate
+        value = read_gpr(cpu, rs) ^ imm;
         break;
     case 0x0fu: // LUI
         if (rs != 0u)

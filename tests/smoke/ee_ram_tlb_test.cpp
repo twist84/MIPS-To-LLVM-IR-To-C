@@ -3287,6 +3287,128 @@ bool test_strict_reset_gs_csr()
         devices.gs_upper_count() == 1u && devices.intc_status() == 0u;
 }
 
+bool test_strict_reset_rom_bounds()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[32u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t opcode)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(opcode >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    struct s_arithmetic_case
+    {
+        uint32_t m_opcode;
+        uint64_t m_left;
+        uint64_t m_right;
+        uint64_t m_expected;
+    };
+    constexpr s_arithmetic_case arithmetic[] =
+    {
+        {0x3882ffffu, 0x123456789abcdef0ull, 0u, 0x123456789abc210full},
+        {0x38828000u, 0xffffffffffffffffull, 0u, 0xffffffffffff7fffull},
+        {0x00851023u, 0x1234567800000000ull, 1u, 0xffffffffffffffffull},
+        {0x00851023u, 0x80000000u, 1u, 0x7fffffffu},
+        {0x00851023u, 0x7fffffffu, 0xffffffffu, 0xffffffff80000000ull},
+        {0x00851023u, 0x100000000ull, 0x200000000ull, 0u}
+    };
+    for (const auto& item : arithmetic)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = item.m_left;
+        cpu.m_gpr[5].m_lo = item.m_right;
+        cpu.m_gpr[2] = {0xdeadbeefu, 0x1234u};
+        put(0u, item.m_opcode);
+        const auto action = step(1u);
+        if (action.m_result != result::COMMITTED || action.m_retired != 1u ||
+            cpu.m_pc != pc + 4u || cpu.m_gpr[2].m_lo != item.m_expected ||
+            cpu.m_gpr[2].m_hi != 0x1234u)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x00851063u); // SUBU with reserved shamt
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    cpu.m_gpr[0] = {~uint64_t{0}, ~uint64_t{0}};
+    put(0u, 0x38028000u); // XORI v0,zero,8000
+    if (step(1u).m_retired != 1u || cpu.m_gpr[2].m_lo != 0x8000u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x00850023u); // SUBU zero,a0,a1
+    if (step(1u).m_retired != 1u || cpu.m_gpr[0].m_lo != ~uint64_t{0} ||
+        cpu.m_gpr[0].m_hi != ~uint64_t{0})
+    {
+        return false;
+    }
+    // The actual seven-word ROM bounds helper. The unsigned
+    // comparison before subtraction must reject out-of-range offsets.
+    constexpr uint32_t words[] =
+    {
+        0x00c4082bu, 0x38210001u, 0x00c41023u, 0x0045102bu,
+        0x38420001u, 0x03e00008u, 0x00221024u
+    };
+    for (uint32_t i = 0u; i < sizeof(words) / sizeof(words[0]); ++i)
+    {
+        put(i * 4u, words[i]);
+    }
+    struct s_bounds_case
+    {
+        uint32_t m_offset;
+        uint32_t m_size;
+        uint64_t m_expected;
+    };
+    constexpr s_bounds_case bounds[] =
+    {
+        {0x1000u, 0x20u, 1u},
+        {0x3fffffu, 1u, 1u},
+        {0x3fffffu, 2u, 0u},
+        {0x400000u, 0u, 1u},
+        {0x400000u, 1u, 0u},
+        {0x400001u, 0u, 0u}
+    };
+    for (const auto& item : bounds)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = item.m_offset;
+        cpu.m_gpr[5].m_lo = item.m_size;
+        cpu.m_gpr[6].m_lo = 0x400000u;
+        cpu.m_gpr[31].m_lo = pc + 28u;
+        cpu.m_gpr[2].m_hi = 0x5678u;
+        for (uint32_t i = 0u; i < 5u; ++i)
+        {
+            if (step(1u).m_retired != 1u)
+            {
+                return false;
+            }
+        }
+        const uint64_t before = cpu.m_gpr[2].m_lo;
+        if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+            cpu.m_pc != pc + 20u || cpu.m_gpr[2].m_lo != before ||
+            step(2u).m_retired != 2u || cpu.m_pc != pc + 28u ||
+            cpu.m_gpr[2].m_lo != item.m_expected || cpu.m_gpr[2].m_hi != 0x5678u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3514,6 +3636,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_rom_bounds(), "strict reset XORI SUBU and ROM bounds regression"))
     {
         return 1;
     }

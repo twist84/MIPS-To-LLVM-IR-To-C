@@ -1184,3 +1184,18 @@ and timing-dependent state. Require exact retirement and next PC
 691014/a0016274 respectively. Directed rejection tests.
 Next guest JAL is to a0010234 with ROM0 and 4 MiB arguments;
 explore rather than fabricate its return. Pending CI.
+
+## M6E3F1: ROM directory bounds arithmetic
+
+M6E3E6 passed both versions on 1c06515d:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46054248071
+GS reset and upper-word writes matched. Both reached a001021c,
+opcode 38210001 (XORI), at 690906/691098 retirements.
+Implement XORI (64-bit XOR, zero-extended immediate) and canonical
+SUBU (32-bit wrapping subtraction, sign-extended result), preserve
+GPR high halves and architectural zero. Test actual seven-word
+bounds helper with valid and invalid offsets, end-of-ROM boundary,
+unsigned underflow rejection, reserved encodings and branch slot
+budget refusal. Require genuine helper return at a00102c4 with
+v0=1 after 690912/691104 retirements. No ROM parser HLE or synthetic
+return. New checkpoints require CI. No retail replay.
