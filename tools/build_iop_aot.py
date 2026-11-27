@@ -19,6 +19,7 @@ import argparse
 import concurrent.futures
 import collections
 import json
+import hashlib
 import re
 import struct
 import os
@@ -171,24 +172,94 @@ def prepare_split_pilot(staged, selected, pilot):
     return plan
 
 
-def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix):
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def split_cache_key(source, provenance):
+    payload = {"schema": 1, "ir_sha256": sha256_file(source),
+               "provenance": provenance}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True,
+                                    separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def cached_split_object(source, obj, cache, provenance, compile_object):
+    """Validate a complete immutable entry; publish only a successful object."""
+    if cache is None:
+        compile_object(source, obj)
+        return False
+    key = split_cache_key(source, provenance)
+    entry = cache / key
+
+    def valid_entry():
+        try:
+            meta = json.loads((entry / "receipt.json").read_text(encoding="utf-8"))
+            binary = entry / "object.o"
+            return (meta["key"] == key and binary.stat().st_size > 0 and
+                    meta["size"] == binary.stat().st_size and
+                    meta["sha256"] == sha256_file(binary))
+        except (OSError, ValueError, KeyError, TypeError):
+            return False
+
+    if entry.exists():
+        if not valid_entry():
+            raise ValueError(f"invalid split object cache entry: {entry}")
+        shutil.copyfile(entry / "object.o", obj)
+        return True
+
+    compile_object(source, obj)
+    if obj.stat().st_size == 0:
+        raise ValueError("empty split object")
+    # A temporary sibling directory makes the receipt and object visible
+    # together. A competing writer may win; never replace an existing key.
+    with tempfile.TemporaryDirectory(prefix=".pending-", dir=cache) as tmp:
+        pending = Path(tmp) / "entry"
+        pending.mkdir()
+        shutil.copyfile(obj, pending / "object.o")
+        (pending / "receipt.json").write_text(json.dumps({
+            "key": key, "size": obj.stat().st_size, "sha256": sha256_file(obj)
+        }) + "\n", encoding="utf-8")
+        try:
+            pending.rename(entry)
+        except OSError:
+            if not valid_entry():
+                raise
+    return False
+
+
+def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
+                        provenance=None):
     sources = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
     if not sources:
         raise ValueError("split pilot emitted no region IR")
     sources += [ir_dir / f"{stem}.ll", ir_dir / f"{stem}.table.ll"]
     started = time.monotonic()
 
+    def compile_object(source, obj):
+        command = [clang, f"-O{args.opt}", "-c", "-Wno-override-module"]
+        if args.region_cache is not None:
+            command += ["--no-default-config"]
+        subprocess.run([*command, str(source), "-o", str(obj)], check=True)
+
     def compile_one(source):
         obj = obj_dir / (source.stem + ".o")
-        subprocess.run([clang, f"-O{args.opt}", "-c", "-Wno-override-module",
-                        str(source), "-o", str(obj)], check=True)
-        return obj
+        hit = cached_split_object(source, obj, args.region_cache, provenance,
+                                  compile_object)
+        return obj, hit
 
     objects = []
+    hits = 0
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        for obj in pool.map(compile_one, sources):
+        for obj, hit in pool.map(compile_one, sources):
             objects.append(obj)
-            print(f"IOP objects [{len(objects)}/{len(sources)}]: {obj.name}")
+            hits += int(hit)
+            print(f"IOP objects [{len(objects)}/{len(sources)}]: {obj.name}"
+                  + (" (cached)" if hit else ""))
+    print(f"split cache: {hits} reused, {len(objects) - hits} compiled")
     compiled = time.monotonic()
     library = lib_dir / f"{stem}{suffix}"
     command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library),
@@ -214,7 +285,17 @@ def main():
                         help="Build missing libraries without clearing existing output files")
     parser.add_argument("--split-module",
                         help="Experimental: compile one exact staged IRX stem in regions")
+    parser.add_argument("--region-cache", type=Path,
+                        help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
+    if args.region_cache is not None:
+        if not args.split_module:
+            parser.error("--region-cache requires --split-module")
+        args.region_cache = args.region_cache.resolve()
+        for protected in (args.capture.resolve(), args.out.resolve()):
+            if (args.region_cache.is_relative_to(protected) or
+                    protected.is_relative_to(args.region_cache)):
+                parser.error("region cache must be separate from captures and output")
     if args.jobs < 1:
         parser.error("--jobs must be positive")
     if args.split_module and (args.bootstrap or args.out.exists()):
@@ -264,6 +345,7 @@ def build(args, out):
     started = time.monotonic()
     # The C++ lifter names its output from the capture stem and exports
     # the descriptor from metadata. Stage canonical names for both.
+    provenance = None
     with tempfile.TemporaryDirectory(prefix="iop-named-captures-") as temporary:
         staged = Path(temporary)
         prepare_captures(args.capture, staged)
@@ -271,6 +353,22 @@ def build(args, out):
             pilot = staged / "pilot"
             plan = prepare_split_pilot(staged, args.split_module, pilot)
             subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
+            if args.region_cache is not None:
+                args.region_cache.mkdir(parents=True, exist_ok=True)
+                provenance = {
+                    "plan_sha256": sha256_file(plan),
+                    "capture_sha256": sha256_file(next(pilot.glob("*.bin"))),
+                    "metadata_sha256": sha256_file(next(pilot.glob("*.json"))),
+                    "lifter_sha256": sha256_file(recomp),
+                    "compiler_sha256": sha256_file(clang),
+                    "compiler_version": subprocess.check_output(
+                        [clang, "--no-default-config", "--version"], text=True),
+                    "target": subprocess.check_output(
+                        [clang, "--no-default-config", "-dumpmachine"], text=True).strip(),
+                    "options": [f"-O{args.opt}", "-c", "-Wno-override-module",
+                                "--no-default-config"],
+                    "platform": os.name,
+                }
         else:
             subprocess.run([str(recomp), str(staged), str(ir_dir)], check=True)
     stems = sorted(p.name[:-len(".table.ll")] for p in ir_dir.glob("*.table.ll"))
@@ -282,7 +380,7 @@ def build(args, out):
         if len(stems) != 1:
             raise ValueError("split pilot emitted multiple module tables")
         library = compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir,
-                                      stems[0], suffix)
+                                      stems[0], suffix, provenance)
         print(f"build_iop_aot: {library} ({time.monotonic() - started:.1f}s total)")
         return 0
 

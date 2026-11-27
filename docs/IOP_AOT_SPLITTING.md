@@ -165,3 +165,31 @@ retail comparison should copy the six original non-pilot libraries to a
 fresh directory alongside the replacement SIO2MAN library and verify
 all seven identities. Use the unchanged G8D.2 runner, EE/VU1 images and
 recorded input, not the new EE timing shadow. No EE IR rebuild needed.
+
+## I4b: accepted SIO2MAN split replay
+
+User archive ee-iop-i4b.zip SHA-256
+f20352bc384436400021461978de4ed8dca0cbfce69b4fee653976a2a47c8669.
+Pinned G8D.2 runner SHA-256
+6cb539ba63b4790d1e034eb041d04ce5c42eec7a614e7346057389bec40b977f.
+40M dispatches, 3,127/3,127 input polls, 184,700 exact sampled transitions,
+7/7 active modules, 65,069,064 native IOP instructions. Report and PPM
+byte-identical, input receipts unchanged. Split SIO2MAN build at O3/jobs=8:
+67 regions, 69 objects, 0.516s compile, 0.109s link, 125,283 object bytes,
+55,808 DLL bytes. Matched interpreter 40.422s / mixed 39.875s. Prior
+monolithic 40.000s is a separate observation, not a paired speed claim.
+
+## I4c: opt-in content-addressed object reuse
+
+`--region-cache DIR` is available with a split module and fresh output.
+Cache keys bind individual emitted IR, full linked image/metadata and
+ownership plan, lifter and clang executable hashes, clang version/target,
+optimization flags and platform. Cached object bytes and size are verified;
+corrupt entries fail closed. New entries publish object and receipt together
+from a private sibling directory. All objects are linked again; default
+build behavior remains unchanged. Cache-enabled compilation disables clang
+default config files. This intentionally conservative key invalidates all
+regions when the linked image, plan or lifter changes; finer reuse across
+such changes is not yet claimed. Synthetic tests cover hits, input/option
+invalidation and corruption. MCMAN is the next retail split candidate;
+validate cold/warm reuse independently of runtime performance.

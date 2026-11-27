@@ -10,7 +10,7 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
-from build_iop_aot import prepare_split_pilot
+from build_iop_aot import prepare_split_pilot, cached_split_object, split_cache_key
 
 
 BASE = 0x10000
@@ -84,6 +84,37 @@ class DiscoveryTest(unittest.TestCase):
             (root / "SIO2MAN.json").write_text(json.dumps(meta))
             with self.assertRaises(ValueError):
                 prepare_split_pilot(root, "SIO2MAN", root / "ambiguous")
+
+    def test_region_cache_hits_invalidation_and_corruption(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            cache.mkdir()
+            source = root / "region.ll"
+            source.write_text("first IR")
+            obj = root / "region.o"
+            calls = []
+
+            def compile_object(src, dst):
+                calls.append(src.read_bytes())
+                dst.write_bytes(b"object:" + src.read_bytes())
+
+            context = {"target": "test", "options": ["-O3"], "plan": "a"}
+            self.assertFalse(cached_split_object(source, obj, cache, context, compile_object))
+            obj.unlink()
+            self.assertTrue(cached_split_object(source, obj, cache, context, compile_object))
+            self.assertEqual(obj.read_bytes(), b"object:first IR")
+            self.assertEqual(len(calls), 1)
+            changed = dict(context, options=["-O2"])
+            self.assertFalse(cached_split_object(source, obj, cache, changed, compile_object))
+            source.write_text("second IR")
+            self.assertFalse(cached_split_object(source, obj, cache, context, compile_object))
+            self.assertEqual(len(calls), 3)
+            entry = cache / split_cache_key(source, context)
+            (entry / "object.o").write_bytes(b"corrupt")
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, context, compile_object)
+            self.assertEqual(len(calls), 3)
 
     def test_capture_identity_and_exclusive_receipt(self):
         meta, data = capture([0x03e00008, 0])
