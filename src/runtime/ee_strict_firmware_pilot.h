@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_strict_reset.h"
+#include "ee_strict_gs_timing.h"
 #include "ee_vsync_flags.h"
 #include "../tools/ee_host_timers.h"
 #include "../tools/ee_iop_clock.h"
@@ -141,6 +142,8 @@ public:
     uint32_t gs_reset_count() const { return m_gs_reset_count; }
     uint32_t gs_upper_count() const { return m_gs_upper_count; }
     uint64_t gs_siglblid() const { return m_gs.siglblid(); }
+    uint32_t gs_crt_mode() const { return m_hardware.gs_crt_mode(); }
+    const s_ee_strict_gs_timing& gs_timing() const { return m_gs_timing; }
     const s_ee_gs_display_registers& gs_display_registers() const
     {
         return m_hardware.gs_display_registers();
@@ -320,7 +323,8 @@ public:
         // The reference executor commits branch+slot atomically. Refuse
         // an intervening deadline instead of processing it late or
         // committing a partial branch. An event exactly at end is legal.
-        if (deadline(end))
+        if (deadline(end) ||
+            (m_gs_timing.m_stage == 5u && next_scanout_event() <= end))
         {
             return {boundary::TIMER_DEADLINE};
         }
@@ -907,8 +911,36 @@ private:
             return false;
         }
         if (self.m_hardware.scanout().enabled() &&
+            s_ee_reset_mmio::gs_timing_write_address(address + 0xa0000000u, width))
+        {
+            // Stage the physical values, validating the entire mode tuple.
+            // Only the actual release-SINT write commits the clock change.
+            if (self.m_hardware.scanout().fields_started() != 0u ||
+                self.next_scanout_event() <= self.cycle() + 1u)
+            {
+                return false;
+            }
+            auto next = self.m_gs_timing;
+            if (!next.write(address, value->m_lo, self.gs_display_registers().m_smode2))
+            {
+                return false;
+            }
+            if (next.m_stage == 6u && !self.m_timers.reconfigure_cold_scanout(
+                next.m_smode2 & 1u, next.m_mode, (next.m_smode2 >> 1u) & 1u))
+            {
+                return false;
+            }
+            self.m_gs_timing = next;
+            return true;
+        }
+        if (self.m_hardware.scanout().enabled() &&
             s_ee_reset_mmio::gs_display_write_address(address + 0xa0000000u, width))
         {
+            if ((address & ~4u) == 0x12000020u &&
+                self.m_gs_timing.m_stage > 0u && self.m_gs_timing.m_stage < 6u)
+            {
+                return false;
+            }
             // Latch the exact guest value using the shared GS model.
             // No synthesized timing change, draw, field or IRQ.
             return c_ee_hw_bus::mmio_write(&self.m_hardware, address, width, value);
@@ -1069,6 +1101,7 @@ private:
     c_ee_vif1 m_vif0{};
     c_ee_vif1 m_vif1{};
     c_ee_gs_state m_gs{};
+    s_ee_strict_gs_timing m_gs_timing{};
     uint32_t m_gs_reset_count = 0u;
     uint32_t m_gs_upper_count = 0u;
     c_ee_hw_bus m_hardware{};

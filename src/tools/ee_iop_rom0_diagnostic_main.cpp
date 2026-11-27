@@ -207,6 +207,15 @@ int main(int argc, char** argv)
     std::printf("Dual ROM0 GS reset: count=%u upper=%u siglblid=%016llx\n",
         pilot.gs_reset_count(), pilot.gs_upper_count(),
         static_cast<unsigned long long>(pilot.gs_siglblid()));
+    const auto& timing = pilot.gs_timing();
+    std::printf("Dual ROM0 GS timing: stage=%u mode=%u active=%u smode1=%016llx srfsh=%016llx synch1=%016llx synch2=%016llx syncv=%016llx next=%llu\n",
+        timing.m_stage, timing.m_mode, pilot.gs_crt_mode(),
+        static_cast<unsigned long long>(timing.m_words[4]),
+        static_cast<unsigned long long>(timing.m_words[0]),
+        static_cast<unsigned long long>(timing.m_words[1]),
+        static_cast<unsigned long long>(timing.m_words[2]),
+        static_cast<unsigned long long>(timing.m_words[3]),
+        static_cast<unsigned long long>(pilot.next_scanout_event()));
     const auto& display = pilot.gs_display_registers();
     std::printf("Dual ROM0 GS display: smode2=%016llx pmode=%016llx dispfb1=%016llx display1=%016llx dispfb2=%016llx display2=%016llx\n",
         static_cast<unsigned long long>(display.m_smode2),

@@ -4397,6 +4397,7 @@ int main()
     if (!check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
         !check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
+        !check(test_strict_firmware_gs_timing(), "scheduler-owned GS timing transition") ||
         !check(test_strict_firmware_gs_display(), "scheduler-owned GS display writes") ||
         !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||

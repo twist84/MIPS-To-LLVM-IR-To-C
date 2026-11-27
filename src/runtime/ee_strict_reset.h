@@ -434,9 +434,17 @@ struct s_ee_reset_mmio
         }
     }
 
+    static constexpr bool gs_timing_write_address(uint32_t address, uint32_t width)
+    {
+        return width == 8u && (address == 0xb2000010u ||
+            address == 0xb2000030u || address == 0xb2000040u ||
+            address == 0xb2000050u || address == 0xb2000060u);
+    }
+
     constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address,
         const s_ee_u128& value) const
     {
+        const bool timing = m_scheduled_scanout && gs_timing_write_address(address, bus.m_width);
         const bool display = m_scheduled_scanout && gs_display_write_address(address, bus.m_width);
         const bool reset = bus.m_width == 4u && static_cast<uint32_t>(value.m_lo) == 1u &&
             (address == 0xb0003810u || address == 0xb0003c10u);
@@ -459,7 +467,7 @@ struct s_ee_reset_mmio
               (static_cast<uint32_t>(value.m_lo) & ~8u) == 0u));
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
-            (reset || fifo || intc || timer || dmac || sif || gs || display) &&
+            (reset || fifo || intc || timer || dmac || sif || gs || display || timing) &&
             bus.m_address == address - 0xa0000000u &&
             m_write(m_user, bus.m_address, bus.m_width, &value);
     }

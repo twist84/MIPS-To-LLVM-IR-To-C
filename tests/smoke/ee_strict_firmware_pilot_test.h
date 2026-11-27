@@ -1211,6 +1211,98 @@ bool test_strict_firmware_hblank_timer()
     return true;
 }
 
+bool test_strict_firmware_gs_timing()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    for (uint32_t mode : {2u, 3u})
+    {
+        for (bool bad_release : {false, true})
+        {
+            auto rom = make_firmware_pilot_rom({0x40806000u, 0x3c04b200u,
+                0x34020003u, 0xfc820020u});
+            // Let Timer3 accumulate one actual old-cadence tick before
+            // changing the source divider; all intervening words are NOP.
+            uint32_t slots = 19000u;
+            const auto emit = [&](uint32_t word)
+            {
+                for (uint32_t i = 0u; i < 4u; ++i)
+                {
+                    rom[slots * 4u + i] = static_cast<uint8_t>(word >> (i * 8u));
+                }
+                ++slots;
+            };
+            const auto store = [&](uint32_t offset, uint64_t value)
+            {
+                emit(0x34020000u | static_cast<uint32_t>(value >> 48u));
+                for (uint32_t shift : {32u, 16u, 0u})
+                {
+                    emit(0x00021438u); // DSLL v0,v0,16
+                    emit(0x34420000u | static_cast<uint32_t>((value >> shift) & 0xffffu));
+                }
+                emit(0xfc820000u | offset);
+            };
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                store(0x30u + 0x10u * i, ee::s_ee_strict_gs_timing::profile_word(mode, 3u, i));
+            }
+            const uint64_t held = ee::s_ee_strict_gs_timing::profile_word(mode, 3u, 4u);
+            store(0x10u, held);
+            emit(0x0000000fu);
+            store(0x10u, bad_release ? held : held & ~(1ull << 17u));
+            ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+            if (!pilot.configure_scanout(3u, 0u))
+            {
+                return false;
+            }
+            const uint64_t old_epoch = pilot.next_scanout_event();
+            for (uint32_t i = 0u; i < slots - 1u; ++i)
+            {
+                if (pilot.step(1u).m_boundary != boundary::RETIRED ||
+                    pilot.next_scanout_event() != old_epoch || pilot.gs_crt_mode() != 3u)
+                {
+                    return false;
+                }
+            }
+            if (pilot.gs_timing().m_stage != 5u || pilot.timer_count(3u) != 1u)
+            {
+                return false;
+            }
+            const auto action = pilot.step(1u);
+            if (bad_release)
+            {
+                if (action.m_boundary != boundary::HOST_REFUSAL ||
+                    action.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+                    pilot.cycle() != slots - 1u || pilot.gs_timing().m_stage != 5u ||
+                    pilot.next_scanout_event() != old_epoch)
+                {
+                    return false;
+                }
+                continue;
+            }
+            const uint64_t period = mode == 2u ? 4920115u : 5898240u;
+            const uint64_t divider = period * 2u / (mode == 2u ? 525u : 625u);
+            if (action.m_boundary != boundary::RETIRED || pilot.cycle() != slots ||
+                pilot.gs_timing().m_stage != 6u || pilot.gs_crt_mode() != mode ||
+                pilot.next_scanout_event() != slots - 1u + period ||
+                pilot.timer_count(3u) != 1u || pilot.fields_started() != 0u ||
+                pilot.fields_ended() != 0u || pilot.intc_status() != 0u)
+            {
+                return false;
+            }
+            for (uint64_t i = 1u; i < divider; ++i)
+            {
+                if (pilot.step(1u).m_boundary != boundary::RETIRED ||
+                    pilot.timer_count(3u) != (i + 1u == divider ? 2u : 1u))
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_gs_display()
 {
     using boundary = ee::e_ee_firmware_boundary;

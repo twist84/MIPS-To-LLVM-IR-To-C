@@ -1808,3 +1808,29 @@ PAL progressive, and SMODE2 latch changes alone do not establish
 NTSC timing or reschedule scanout. Next checkpoint must model the
 actual guest timing/PLL programming and safe epoch transition.
 No HLE, no retail replay. Pending CI.
+
+## M6E3H3E9B5B: bounded guest-driven CRT timing transition
+
+H3E9B5A passed all five workflows at 8fa8de2b, ROM0 run
+46067337236. Real SMODE2=3 on both releases; next SD fca70000
+at a001836c / a001838c targets SRFSH b2000030, after 798707 /
+798899 EE retirements. Both retain 104 serial bytes and zero IOP debt.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46067337236
+
+Recognize the actual NTSC/PAL register tuples in both pinned
+OpenPS2BIOS src/ee/kernel.c set_gs_crt routines. Address assignments
+and FIELD interlace behavior agree with PCSX2 Hw.h/GS.cpp/Counters.cpp.
+Only canonical SD timing writes, matching tuple and ordered hold /
+release SINT accepted; no syscall interception or PC matching.
+Commit the existing reference scanout epoch on the actual release
+write, before any delivered field and without pending DMA or timer
+edge. Re-anchor HBlank counters using their old-divider count,
+preserve flags and unaffected timers. No synthetic edges or IRQs.
+Reject incomplete/mixed tuples, unsupported modes and live field
+transitions. The bounded model uses a new compatibility line phase
+at release; no analog PLL lock, oscillator or cycle-calibrated
+settle interval is claimed. A hold crossing the old field deadline
+refuses rather than inventing scanout. Subsequent CRT reprogramming
+requires a broader live timing model. Existing HLE path unchanged.
+Add constexpr tuple tests, guest register execution tests and exact
+CRT diagnostic assertions for both ROMs. Pending CI; no retail replay.
