@@ -206,6 +206,19 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
             pc = prev
         return list(reversed(result)), list(reversed(crossed))
 
+    def context_instructions(pcs, crossed):
+        # Reinsert the non-writing control instruction before each slot
+        # for offline range-guard inspection. Do not execute it in the
+        # producer interpreter or infer that a branch bounds the index.
+        branch_by_slot = {edge["delay_pc"]: edge["pc"] for edge in crossed}
+        context = []
+        for pc in pcs:
+            if pc in branch_by_slot:
+                branch = branch_by_slot[pc]
+                context.append({"pc": branch, "word": f"{word_at(branch):08x}"})
+            context.append({"pc": pc, "word": f"{word_at(pc):08x}"})
+        return context
+
     def interpret_constants(pcs):
         values = {0: (0, ())}
         for pc in pcs:
@@ -253,6 +266,7 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
                 observation["producer"] = producer_slice(pcs, word_at, rs)
             if cross_block:
                 observation["crossed_edges"] = crossed
+                observation["context_instructions"] = context_instructions(pcs, crossed)
             unresolved.append(observation)
             continue
         target, evidence = value
@@ -265,6 +279,7 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
         })
         if cross_block:
             observations[-1]["crossed_edges"] = crossed
+            observations[-1]["context_instructions"] = context_instructions(pcs, crossed)
     return {"observations": observations, "unresolved": unresolved,
             "new_call_candidates": sorted({row["target"] for row in observations
                 if row["kind"] == "indirect_call" and row["in_text"] and
