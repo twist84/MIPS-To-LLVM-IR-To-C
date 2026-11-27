@@ -456,7 +456,7 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
         command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library),
                    *map(str, objects)]
         if os.name == "nt":
-            command += ["-nostdlib", "-Wl,/noentry"]
+            command += ["-nostdlib", "-Wl,/noentry", "-Wl,/timestamp:0"]
         link_started = time.monotonic()
         subprocess.run(command, check=True)
         linked = time.monotonic()
@@ -673,7 +673,7 @@ def build(args, out):
         library = lib_dir / f"{stem}{suffix}"
         command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library), *objects]
         if os.name == "nt":
-            command += ["-nostdlib", "-Wl,/noentry"]
+            command += ["-nostdlib", "-Wl,/noentry", "-Wl,/timestamp:0"]
         subprocess.run(command, check=True)
         return library
 
