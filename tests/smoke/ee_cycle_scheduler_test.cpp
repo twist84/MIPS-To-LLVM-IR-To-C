@@ -192,6 +192,33 @@ int main()
           boot_hardware.gs_crt_mode() == 2u,
           "HLE boot IRQ is real and guest NTSC mode supersedes boot timing");
 
+    // Preserve the established compatibility-clock accounting contract
+    // independently of the proposed opcode-weighted timing experiment.
+    runtime.m_guest_instruction_attempts = 91u;
+    runtime.m_reference_instruction_slots = 100u;
+    runtime.m_cop0_clock_idle = 17u;
+    runtime.m_hle_timing_boundaries = 3u;
+    uint64_t cycle = 0u;
+    check(ee::ee_reference_compatibility_cycle(runtime, cycle) &&
+          cycle == 1017u,
+          "reference clock charges slots, idle units and HLE boundaries once");
+    runtime.m_guest_instruction_attempts = 999u;
+    check(ee::ee_reference_compatibility_cycle(runtime, cycle) &&
+          cycle == 1017u,
+          "instruction attempts are diagnostic, not an independent clock charge");
+    runtime.m_reference_instruction_slots = UINT64_MAX - 17u;
+    runtime.m_hle_timing_boundaries = 0u;
+    check(ee::ee_reference_compatibility_cycle(runtime, cycle) &&
+          cycle == UINT64_MAX,
+          "reference clock permits exact maximum timestamp");
+    runtime.m_hle_timing_boundaries = 1u;
+    check(!ee::ee_reference_compatibility_cycle(runtime, cycle),
+          "reference clock rejects HLE budget overflow");
+    runtime.m_hle_timing_boundaries = 0u;
+    runtime.m_cop0_clock_idle = 18u;
+    check(!ee::ee_reference_compatibility_cycle(runtime, cycle),
+          "reference clock rejects idle budget overflow");
+
     std::printf("ee_cycle_scheduler_test: %d failure(s)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
