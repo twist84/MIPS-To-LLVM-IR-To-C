@@ -852,7 +852,7 @@ bool test_strict_firmware_iop_clock()
     }
 
     // Branch from cycle 7 to 9 crosses the IOP deadline at 8.
-    // Neither guest state nor clock may move on refusal.
+    // Retire branch, service IOP, then retire exactly one slot.
     auto branch_rom = make_firmware_pilot_rom({0x40806000u, 0u, 0u, 0u, 0u, 0u, 0u,
         0x1000ffffu, 0u});
     ee::c_ee_strict_firmware_pilot branch(std::move(branch_rom));
@@ -867,8 +867,17 @@ bool test_strict_firmware_iop_clock()
             return false;
         }
     }
-    if (branch.step(2u).m_boundary != boundary::TIMER_DEADLINE ||
-        branch.cycle() != 7u || branch.iop_cycles() != 0u || branch.iop_debt() != 0u ||
+    const auto split = branch.step(2u);
+    if (split.m_boundary != boundary::RETIRED || split.m_instruction.m_retired != 1u ||
+        split.m_iop_executed != 1u || !branch.delay_slot_pending() ||
+        branch.cycle() != 8u || branch.iop_cycles() != 1u || branch.iop_debt() != 0u ||
+        branch.cpu().m_pc != 0xbfc00020u)
+    {
+        return false;
+    }
+    if (branch.step(0u).m_boundary != boundary::BUDGET || branch.cycle() != 8u ||
+        !branch.delay_slot_pending() || branch.step(1u).m_boundary != boundary::RETIRED ||
+        branch.delay_slot_pending() || branch.cycle() != 9u || branch.iop_cycles() != 1u ||
         branch.cpu().m_pc != 0xbfc0001cu)
     {
         return false;
@@ -905,5 +914,100 @@ bool test_strict_firmware_iop_clock()
     }
     return scanout.fields_started() == 1u && scanout.fields_ended() == 1u &&
         scanout.intc_status() == 12u && !scanout.sif_faulted();
+}
+
+bool test_strict_firmware_split_slots()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t base = 0xbfc00000u;
+    const auto iop_rom = make_firmware_pilot_rom({0x1000ffffu, 0u});
+
+    // JAL link visible to slot, Compare IRQ at interior cycle 8.
+    // Device time advances immediately; EE IRQ is sampled after slot.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x34020008u, 0x40825800u, 0x3c020041u,
+            0x34428001u, 0x40826000u, 0u, 0x0ff00010u, 0x03e01821u}));
+        if (!pilot.attach_iop(iop_rom, true))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 7u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto first = pilot.step(2u);
+        if (first.m_boundary != boundary::RETIRED || first.m_instruction.m_retired != 1u ||
+            !first.m_cop0_compare_crossed || first.m_interrupt_vector != 0u ||
+            first.m_iop_executed != 1u || !pilot.delay_slot_pending() ||
+            pilot.cpu().m_gpr[31].m_lo != ee::ee_strict_link_address(base + 28u) ||
+            pilot.cycle() != 8u || pilot.cpu().m_pc != base + 32u)
+        {
+            return false;
+        }
+        const auto slot = pilot.step(1u);
+        if (slot.m_boundary != boundary::RETIRED || slot.m_interrupt_vector != base + 0x400u ||
+            pilot.delay_slot_pending() || pilot.cycle() != 9u ||
+            pilot.cpu().m_gpr[3].m_lo != ee::ee_strict_link_address(base + 28u) ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != base + 64u ||
+            (pilot.cpu().m_cop0[ee::COP0_Cause] & 0x80008000u) != 0x8000u)
+        {
+            return false;
+        }
+    }
+
+    // A refused slot preserves the committed JAL and sampled target.
+    // Retry cannot advance either clock or relink.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x0ff00010u, 0x42000018u}));
+        if (!pilot.attach_iop(iop_rom, true) ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            !pilot.delay_slot_pending())
+        {
+            return false;
+        }
+        for (uint32_t attempt = 0u; attempt < 2u; ++attempt)
+        {
+            const auto refused = pilot.step(1u);
+            if (refused.m_boundary != boundary::HOST_REFUSAL ||
+                refused.m_instruction.m_result != result::UNSUPPORTED_OPCODE ||
+                !pilot.delay_slot_pending() || pilot.cycle() != 2u ||
+                pilot.cpu().m_pc != base + 8u ||
+                pilot.cpu().m_gpr[31].m_lo != ee::ee_strict_link_address(base + 4u))
+            {
+                return false;
+            }
+        }
+    }
+
+    // JR samples the target before its delay slot overwrites the
+    // same register, even when a one-instruction budget splits it.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x3c04bfc0u, 0x34840040u, 0x00800008u, 0x34040001u}));
+        if (!pilot.attach_iop(iop_rom, true))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 5u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (pilot.cpu().m_pc != base + 64u || pilot.cpu().m_gpr[4].m_lo != 1u ||
+            pilot.delay_slot_pending() || pilot.cycle() != 5u)
+        {
+            return false;
+        }
+    }
+    return true;
 }
 } // namespace

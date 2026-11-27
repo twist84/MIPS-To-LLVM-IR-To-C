@@ -3760,7 +3760,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_iop_clock(), "scheduler-owned synchronized EE/IOP clock") ||
+    if (!check(test_strict_firmware_split_slots(), "scheduler-owned resumable branch slots") ||
+        !check(test_strict_firmware_iop_clock(), "scheduler-owned synchronized EE/IOP clock") ||
         !check(test_strict_firmware_scanout(), "scheduler-owned GS scanout and VBlank edges") ||
         !check(test_strict_firmware_sif_transport(), "scheduler-owned bidirectional SIF transport") ||
         !check(test_strict_firmware_sif_vif(), "scheduler-owned SIF mailbox and VIF DMA") ||

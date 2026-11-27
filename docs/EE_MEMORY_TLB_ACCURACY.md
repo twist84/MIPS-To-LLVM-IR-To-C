@@ -1462,3 +1462,26 @@ remain a blocker for unrestricted firmware execution; next
 checkpoint must address branch/slot scheduling and real-ROM
 dual-domain diagnostics before claiming authentic boot progress.
 No retail changes. Pending CI.
+
+## M6E3H3E2: resumable branch/slot deadlines
+
+H3E1 passed both firmware versions at 126876a9:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46060148640
+
+In the synchronized reset domain only, a one-slot budget or
+interior device deadline can retire a supported BEQ/BNE/J/JAL/JR
+branch independently. Preserve the sampled target and committed
+link across the explicit pending delay-slot boundary. Service the
+normal scheduler after each committed slot; no invented cycles.
+The next slot fetch is live, not a cached copy taken before IOP
+progress. Refusal preserves the retired branch and pending slot;
+do not roll back external device progress. Status/ERET and nested
+branches in slots remain refused. The compatibility interrupt
+policy samples asynchronous EE IRQs after the branch's slot,
+while device latches and IOP retirement occur at their actual
+scheduled timestamps. No calibrated interrupt/issue timing or
+synchronous slot fault entry is claimed. Atomic paths without an
+interior deadline and isolated probe behavior are retained.
+Directed tests cover IOP deadline crossing, budget zero, JAL link,
+interior Compare IRQ/slot completion, refusal/retry and sampled JR
+target. Pending CI.

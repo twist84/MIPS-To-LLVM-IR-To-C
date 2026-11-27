@@ -175,6 +175,7 @@ public:
         return run;
     }
 
+    bool delay_slot_pending() const { return m_delay_slot_pending; }
     uint64_t iop_cycles() const { return m_iop != nullptr ? m_iop->cycles() : 0u; }
     uint64_t iop_debt() const { return m_iop_clock.due(); }
     uint64_t next_iop_event() const { return m_iop_clock.next_cycle(); }
@@ -224,7 +225,7 @@ public:
         {
             return {boundary::DEVICE_FAULT};
         }
-        if (budget != 0u && m_retired != 0u && ee_interrupts_enabled(&m_cpu))
+        if (budget != 0u && m_retired != 0u && !m_delay_slot_pending && ee_interrupts_enabled(&m_cpu))
         {
             const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
             return {boundary::INTERRUPT_ENTRY, {}, false, vector};
@@ -236,7 +237,19 @@ public:
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
         const uint8_t* code = ee_fetch_strict_reset_word(fetch, rom, ram);
         const uint32_t opcode = code != nullptr ? ee_read_instruction_word(code) : 0u;
-        const uint32_t slots = ee_firmware_reference_slots(opcode);
+        const uint32_t natural_slots = m_delay_slot_pending ? 1u : ee_firmware_reference_slots(opcode);
+        const auto deadline = [this](uint64_t end)
+        {
+            return m_timers.next_event() < end || next_compare_event() < end ||
+                next_scanout_event() < end ||
+                (m_iop_synchronized && next_iop_event() < end);
+        };
+        // Split only in the synchronized domain when a real boundary or
+        // caller budget requires it. Unsplit and isolated behavior remains
+        // unchanged. The branch is retired before the interior event.
+        const bool split = m_iop_synchronized && natural_slots == 2u &&
+            (budget == 1u || deadline(cycle() + 2u));
+        const uint32_t slots = split ? 1u : natural_slots;
         if (budget < slots || slots > k_slot_limit - cycle())
         {
             return {boundary::BUDGET, {result::BUDGET_EXHAUSTED, opcode}};
@@ -246,9 +259,7 @@ public:
         // The reference executor commits branch+slot atomically. Refuse
         // an intervening deadline instead of processing it late or
         // committing a partial branch. An event exactly at end is legal.
-        if (m_timers.next_event() < end || next_compare_event() < end ||
-            next_scanout_event() < end ||
-            (m_iop_synchronized && next_iop_event() < end))
+        if (deadline(end))
         {
             return {boundary::TIMER_DEADLINE};
         }
@@ -287,6 +298,14 @@ public:
         if (m_retired == 0u)
         {
             action = ee_execute_strict_reset_prefix(m_cpu, rom);
+        }
+        else if (m_delay_slot_pending)
+        {
+            action = execute_pending_slot(rom, ram, code, opcode, mmio);
+        }
+        else if (split && code != nullptr)
+        {
+            action = execute_branch_only(opcode);
         }
         else if (code != nullptr && owned_control(opcode))
         {
@@ -409,14 +428,85 @@ public:
             (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
         // Compatibility policy: Status is effective at its retirement
         // boundary; no calibrated MTC0 pipeline hazard is claimed.
-        // An atomic branch has completed its slot, so EPC is its next PC
-        // and BD is clear. Intra-branch deadlines still refuse above.
-        const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
+        // Match the reference branch-boundary IRQ policy: hardware
+        // progresses at the interior timestamp, but asynchronous EE
+        // interrupts are sampled after the delay slot, not between the
+        // branch and slot. This is not a calibrated issue/IRQ model.
+        const uint32_t vector = m_delay_slot_pending ? 0u :
+            ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
         return {boundary::RETIRED, action, due, vector, compare_crossed, dma_completed,
             vblank_started, vblank_ended, iop_executed};
     }
 
 private:
+    // Only the scheduler-owned synchronized path can expose this
+    // intermediate state. Target and link are sampled once; retrying a
+    // refused delay-slot instruction never reexecutes the branch.
+    s_ee_reset_prefix_step execute_branch_only(uint32_t opcode)
+    {
+        using result = e_ee_reset_prefix_result;
+        const uint32_t pc = m_cpu.m_pc;
+        if (!strict_reset_detail::scheduled_status_supported(m_cpu.m_cop0[COP0_Status]))
+        {
+            return {result::UNSAFE_BOUNDARY, opcode, 0u, pc};
+        }
+        const uint32_t primary = opcode >> 26u;
+        const bool equal = strict_reset_detail::read_gpr(m_cpu, (opcode >> 21u) & 31u) ==
+            strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u);
+        const uint32_t imm = opcode & 0xffffu;
+        const uint32_t disp = (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) << 2u;
+        if (ee_strict_jr_supported(opcode))
+        {
+            m_delay_target = static_cast<uint32_t>(
+                strict_reset_detail::read_gpr(m_cpu, (opcode >> 21u) & 31u));
+        }
+        else if (primary == 2u || primary == 3u)
+        {
+            m_delay_target = ee_strict_direct_jump_target(pc, opcode);
+            if (primary == 3u)
+            {
+                m_cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
+            }
+        }
+        else if (primary == 4u || primary == 5u)
+        {
+            const bool taken = primary == 4u ? equal : !equal;
+            m_delay_target = taken ? pc + 4u + disp : pc + 8u;
+        }
+        else
+        {
+            return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+        }
+        m_delay_slot_pending = true;
+        m_cpu.m_pc = pc + 4u;
+        return {result::COMMITTED, opcode, 1u, pc};
+    }
+
+    s_ee_reset_prefix_step execute_pending_slot(const s_ee_strict_rom0_view& rom,
+        const s_ee_reset_ram_view& ram, const uint8_t* code, uint32_t opcode,
+        const s_ee_reset_mmio& mmio)
+    {
+        using result = e_ee_reset_prefix_result;
+        const uint32_t pc = m_cpu.m_pc;
+        if (code == nullptr)
+        {
+            return {result::FETCH_UNAVAILABLE, 0u, 0u, pc};
+        }
+        if (owned_control(opcode) || ee_firmware_reference_slots(opcode) != 1u)
+        {
+            return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+        }
+        const auto action = strict_reset_detail::execute_rom_word(m_cpu, rom, m_memory.tlb(),
+            pc, opcode, ram, nullptr, &m_memory.tlb(), &mmio, &m_cold_cache);
+        if (action.m_result != result::COMMITTED)
+        {
+            return action;
+        }
+        m_cpu.m_pc = m_delay_target;
+        m_delay_slot_pending = false;
+        return {result::COMMITTED, opcode, 1u, pc};
+    }
+
     static constexpr uint32_t k_eret = 0x42000018u;
 
     static constexpr bool status_write(uint32_t opcode)
@@ -856,6 +946,8 @@ private:
     uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
     bool m_iop_stopped = false;
+    bool m_delay_slot_pending = false;
+    uint32_t m_delay_target = 0u;
     bool m_iop_synchronized = false;
     c_ee_iop_clock m_iop_clock{};
     // Destruction order detaches FIFO callbacks before either endpoint.
