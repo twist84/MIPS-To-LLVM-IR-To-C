@@ -428,3 +428,34 @@ caller-owned dispatch/clock evidence. No delay slots, handler dispatch,
 cache contents, scratchpad or MMIO transactions, native lowering or
 default execution changes. CI pending; no retail replay needed.
 Next: bounded guest exception handler and ERET execution.
+
+## Strict memory follow-up M6C: bounded guest handler and ERET
+
+Extend the isolated executor with explicit guest-handler evidence.
+A pending Level 1 memory exception may enter its matching refill or
+common vector only with EXL set, ERL clear, ordinary-boundary and
+isolated-RAM evidence. Fetch still uses strict translation and physical
+backing checks (the test vector is uncached KSEG0 RAM). Rejected first
+instructions preserve the pending exception exit. No automatic HLE
+dispatch or host-side TLB repair is performed.
+
+Within the opt-in EXL handler, support restricted MFC0/MTC0, TLBWI,
+Level 1 ERET, NOP, LUI, ORI and ADDIU. COP0 writes are limited to
+validated Index, PageMask, EntryHi, ordinary EntryLo and EPC. No
+Status/Cause writes, TLBWR, ERL return, user COP0 success, or general
+privileged instruction emulation is implied. ERET uses the existing
+architectural Level 1 return helper. PC/EXL checks are not independent
+proof of caller ownership or absence of pending effects.
+
+Runtime tests execute actual guest handler instructions for refill,
+invalid and modified faults, reading BadVAddr/EntryHi, setting Index,
+PageMask and EntryLo through guest MTC0, committing TLBWI and ERET,
+and retrying the original LW/SW. The host never repairs the mapping
+after the fault. Verify destination/memory preservation before
+entry, handler opt-in, unsupported first instruction rollback,
+restored user Status, and rejection of user-mode ERET.
+
+Still a bounded isolated RAM pilot, not a general BIOS interpreter.
+ROM/BEV1 execution, branch/delay slots, TLB hazards, clocks/interrupts,
+cache and device state, production caller integration and native
+LLVM lowering remain open. CI pending; no retail replay required.

@@ -1198,6 +1198,134 @@ bool test_strict_ram_wide_execution()
            actual_delay_slot;
 }
 
+bool test_strict_ram_handler_execution()
+{
+    using result = ee::e_ee_strict_ram_step_result;
+    constexpr uint32_t pc = 0x00400000u;
+    constexpr uint32_t data = 0x00601000u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t code_lo = (1u << 6u) | 0x12u;
+    constexpr uint32_t data_lo = (2u << 6u) | 0x16u;
+    constexpr uint64_t marker = 0x1234567887654321ull;
+    constexpr uint32_t original = 0x80ff8180u;
+    const ee::s_ee_strict_ram_evidence plain{true, true};
+    const ee::s_ee_strict_ram_evidence handler{true, true, true};
+    const auto mfc = [](uint32_t rt, uint32_t rd)
+    {
+        return 0x40000000u | (rt << 16u) | (rd << 11u);
+    };
+    const auto mtc = [](uint32_t rt, uint32_t rd)
+    {
+        return 0x40800000u | (rt << 16u) | (rd << 11u);
+    };
+    for (uint32_t scenario = 0u; scenario < 3u; ++scenario)
+    {
+        ee::ee_memory memory(0x3000u);
+        if (!memory.tlb().write(0u, 0u, pc | 0xabu, code_lo, code_lo))
+        {
+            return false;
+        }
+        if (scenario != 0u &&
+            !memory.tlb().write(1u, 0u, (data & ~0x1fffu) | 0xabu,
+                0x12u, scenario == 1u ? data_lo & ~2u : data_lo & ~4u))
+        {
+            return false;
+        }
+        const bool write = scenario == 2u;
+        const uint32_t vector = scenario == 0u ? ee::VEC_TLB_REFILL_BEV0 : ee::VEC_COMMON_BEV0;
+        const uint32_t vector_physical = vector & 0x1fffffffu;
+        memory.write32(0x1000u, ((write ? 0x2bu : 0x23u) << 26u) |
+            (4u << 21u) | (2u << 16u));
+        memory.write32(0x2000u, original);
+        const uint32_t instructions[] =
+        {
+            mfc(26u, ee::COP0_BadVAddr),
+            mfc(27u, ee::COP0_EntryHi),
+            0x24080001u, // addiu t0,zero,1
+            mtc(8u, ee::COP0_Index),
+            0x34090012u, // ori t1,zero,0x12
+            mtc(9u, ee::COP0_EntryLo0),
+            0x340a0000u | data_lo, // ori t2,zero, repaired EntryLo1
+            mtc(10u, ee::COP0_EntryLo1),
+            mtc(0u, ee::COP0_PageMask),
+            0x42000002u, // TLBWI
+            0x42000018u  // ERET
+        };
+        for (uint32_t i = 0u; i < sizeof(instructions) / sizeof(instructions[0]); ++i)
+        {
+            memory.write32(vector_physical + i * 4u, instructions[i]);
+        }
+        ee::s_ee_cpu_state cpu{};
+        cpu.m_pc = pc;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[ee::COP0_Status] = 0x10u;
+        cpu.m_cop0[ee::COP0_Config] = 2u; // uncached KSEG0
+        cpu.m_cop0[ee::COP0_EntryHi] = 0xabu;
+        cpu.m_gpr[4].m_lo = data;
+        cpu.m_gpr[2] = {marker, marker};
+        bool actual_delay_slot = true;
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, plain) !=
+                result::FAULT_COMMITTED ||
+            cpu.m_pc != vector || cpu.m_exit_reason != exception ||
+            cpu.m_cop0[ee::COP0_EPC] != pc ||
+            cpu.m_cop0[ee::COP0_Cause] != ((write ? ee::EX_Mod : ee::EX_TLBL) << 2u) ||
+            cpu.m_cop0[ee::COP0_Status] != (0x10u | ee::STATUS_EXL) ||
+            cpu.m_gpr[2].m_lo != marker || memory.read32(0x2000u) != original ||
+            actual_delay_slot)
+        {
+            return false;
+        }
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, plain) !=
+                result::UNSAFE_BOUNDARY ||
+            cpu.m_pc != vector || cpu.m_exit_reason != exception)
+        {
+            return false;
+        }
+        // A rejected first instruction must preserve the pending exception.
+        memory.write32(vector_physical, 0x42000006u); // unsupported TLBWR
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, handler) !=
+                result::UNSUPPORTED_INSTRUCTION ||
+            cpu.m_pc != vector || cpu.m_exit_reason != exception ||
+            cpu.m_cop0[ee::COP0_EPC] != pc)
+        {
+            return false;
+        }
+        memory.write32(vector_physical, instructions[0]);
+        for (uint32_t i = 0u; i < sizeof(instructions) / sizeof(instructions[0]); ++i)
+        {
+            if (cpu.m_pc != vector + i * 4u ||
+                ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, handler) !=
+                    result::COMMITTED || cpu.m_exit_reason != dispatch)
+            {
+                return false;
+            }
+        }
+        if (cpu.m_pc != pc || cpu.m_cop0[ee::COP0_Status] != 0x10u ||
+            cpu.m_gpr[26].m_lo != data ||
+            cpu.m_gpr[27].m_lo != ((data & ~0x1fffu) | 0xabu) ||
+            memory.tlb().lookup(data, 0xabu, true).m_status != ee::e_ee_tlb_lookup_status::TRANSLATED ||
+            memory.read32(0x2000u) != original ||
+            ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, plain) !=
+                result::COMMITTED ||
+            cpu.m_pc != pc + 4u || cpu.m_gpr[2].m_hi != marker ||
+            cpu.m_gpr[2].m_lo != (write ? marker : 0xffffffff80ff8180ull) ||
+            memory.read32(0x2000u) != (write ? static_cast<uint32_t>(marker) : original))
+        {
+            return false;
+        }
+        // User-mode ERET is not silently executed by the strict pilot.
+        memory.write32(0x1004u, 0x42000018u);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, handler) !=
+                result::UNSUPPORTED_INSTRUCTION ||
+            cpu.m_pc != pc + 4u || cpu.m_cop0[ee::COP0_Status] != 0x10u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1401,6 +1529,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_ram_wide_execution(), "isolated strict RAM wide execution regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_ram_handler_execution(), "strict guest TLB handler and ERET regression"))
     {
         return 1;
     }

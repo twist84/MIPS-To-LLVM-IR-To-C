@@ -615,7 +615,117 @@ void strict_write_bytes(uint8_t* bytes, uint32_t count, uint64_t value)
 }
 } // namespace
 
-e_ee_strict_ram_step_result ee_execute_strict_ram_step(
+namespace
+{
+constexpr bool strict_handler_cop0_write_allowed(uint32_t reg, uint32_t value)
+{
+    switch (reg)
+    {
+    case COP0_Index:
+        return value < c_ee_tlb::k_entry_count;
+    case COP0_PageMask:
+        return c_ee_tlb::supported_page_mask(value);
+    case COP0_EntryHi:
+        return (value & 0x1f00u) == 0u;
+    case COP0_EntryLo0:
+    case COP0_EntryLo1:
+        // Isolated ordinary physical pages only, no S/reserved bits.
+        return (value & 0xfc000000u) == 0u;
+    case COP0_EPC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool strict_handler_cop0_read_allowed(uint32_t reg)
+{
+    switch (reg)
+    {
+    case COP0_Index:
+    case COP0_PageMask:
+    case COP0_EntryHi:
+    case COP0_EntryLo0:
+    case COP0_EntryLo1:
+    case COP0_BadVAddr:
+    case COP0_Context:
+    case COP0_Cause:
+    case COP0_Status:
+    case COP0_EPC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+e_ee_strict_ram_step_result strict_handler_cop0(
+    s_ee_cpu_state& cpu, c_ee_tlb& tlb, uint32_t instruction)
+{
+    using result = e_ee_strict_ram_step_result;
+    const uint32_t rs = (instruction >> 21u) & 31u;
+    const uint32_t rt = (instruction >> 16u) & 31u;
+    const uint32_t rd = (instruction >> 11u) & 31u;
+    if (instruction == 0x42000018u) // ERET, Level 1 only
+    {
+        ee_exception_return(&cpu);
+        return result::COMMITTED;
+    }
+    if (instruction == 0x42000002u) // TLBWI
+    {
+        const uint32_t regs[] =
+        {
+            COP0_Index, COP0_PageMask, COP0_EntryHi, COP0_EntryLo0, COP0_EntryLo1
+        };
+        for (const uint32_t reg : regs)
+        {
+            if (!strict_handler_cop0_write_allowed(reg, cpu.m_cop0[reg]))
+            {
+                return result::UNSUPPORTED_INSTRUCTION;
+            }
+        }
+        if (!tlb.write(cpu.m_cop0[COP0_Index], cpu.m_cop0[COP0_PageMask],
+                       cpu.m_cop0[COP0_EntryHi], cpu.m_cop0[COP0_EntryLo0],
+                       cpu.m_cop0[COP0_EntryLo1]))
+        {
+            return result::UNSUPPORTED_INSTRUCTION;
+        }
+    }
+    else if (rs == 0u && (instruction & 0x7ffu) == 0u &&
+             strict_handler_cop0_read_allowed(rd)) // MFC0
+    {
+        write_word(cpu, rt, cpu.m_cop0[rd]);
+    }
+    else if (rs == 4u && (instruction & 0x7ffu) == 0u &&
+             strict_handler_cop0_write_allowed(rd, static_cast<uint32_t>(read_reg(cpu, rt)))) // MTC0
+    {
+        ee_cop0_write(&cpu, rd, static_cast<uint32_t>(read_reg(cpu, rt)));
+    }
+    else
+    {
+        return result::UNSUPPORTED_INSTRUCTION;
+    }
+    cpu.m_pc += 4u;
+    return result::COMMITTED;
+}
+
+bool strict_memory_vector_entry(const s_ee_cpu_state& cpu)
+{
+    const uint32_t status = cpu.m_cop0[COP0_Status];
+    const uint32_t code = (cpu.m_cop0[COP0_Cause] >> 2u) & 31u;
+    if ((status & STATUS_EXL) == 0u || (status & STATUS_ERL) != 0u ||
+        (code != EX_Mod && code != EX_TLBL && code != EX_TLBS &&
+         code != EX_AdEL && code != EX_AdES))
+    {
+        return false;
+    }
+    const bool bev = (status & STATUS_BEV) != 0u;
+    const uint32_t common = bev ? VEC_COMMON_BEV1 : VEC_COMMON_BEV0;
+    const uint32_t refill = bev ? VEC_TLB_REFILL_BEV1 : VEC_TLB_REFILL_BEV0;
+    return cpu.m_pc == common ||
+        ((code == EX_TLBL || code == EX_TLBS) && cpu.m_pc == refill);
+}
+
+e_ee_strict_ram_step_result strict_ram_step_impl(
     s_ee_cpu_state& cpu, ee_memory& memory, bool& actual_delay_slot,
     const s_ee_strict_ram_evidence& evidence)
 {
@@ -684,6 +794,43 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     const uint32_t offset = static_cast<uint32_t>(
         static_cast<int32_t>(static_cast<int16_t>(instruction & 0xffffu)));
     const uint32_t address = static_cast<uint32_t>(read_reg(cpu, rs)) + offset;
+    // Privileged operations are deliberately restricted to opt-in
+    // Level 1 handler execution. No unsupported user-mode COP0 success.
+    if (primary == 0x10u)
+    {
+        if (!evidence.m_guest_handler_execution || (status & STATUS_EXL) == 0u)
+        {
+            return result::UNSUPPORTED_INSTRUCTION;
+        }
+        return strict_handler_cop0(cpu, tlb, instruction);
+    }
+    if (evidence.m_guest_handler_execution && (status & STATUS_EXL) != 0u)
+    {
+        // Minimal straight-line handler setup instructions only.
+        if (instruction == 0u)
+        {
+            cpu.m_pc += 4u;
+            return result::COMMITTED;
+        }
+        if (primary == 0x0fu && rs == 0u) // LUI
+        {
+            write_word(cpu, rt, (instruction & 0xffffu) << 16u);
+            cpu.m_pc += 4u;
+            return result::COMMITTED;
+        }
+        if (primary == 0x0du) // ORI
+        {
+            write_dword(cpu, rt, read_reg(cpu, rs) | (instruction & 0xffffu));
+            cpu.m_pc += 4u;
+            return result::COMMITTED;
+        }
+        if (primary == 0x09u) // ADDIU
+        {
+            write_word(cpu, rt, address);
+            cpu.m_pc += 4u;
+            return result::COMMITTED;
+        }
+    }
     bool store = false;
     bool sign_extend = false;
     data_kind kind = data_kind::BYTE;
@@ -849,6 +996,36 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     }
     cpu.m_pc = pc + 4u;
     return result::COMMITTED;
+}
+
+} // namespace
+
+e_ee_strict_ram_step_result ee_execute_strict_ram_step(
+    s_ee_cpu_state& cpu, ee_memory& memory, bool& actual_delay_slot,
+    const s_ee_strict_ram_evidence& evidence)
+{
+    using result = e_ee_strict_ram_step_result;
+    constexpr uint32_t exception = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t dispatch = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+    if (cpu.m_exit_reason != exception)
+    {
+        return strict_ram_step_impl(cpu, memory, actual_delay_slot, evidence);
+    }
+    if (!evidence.m_ordinary_boundary || !evidence.m_isolated_ram ||
+        !evidence.m_guest_handler_execution || !strict_memory_vector_entry(cpu))
+    {
+        return result::UNSAFE_BOUNDARY;
+    }
+    // Explicitly consume a committed Level 1 exit only at a known guest
+    // memory vector. Restore the exit if the first instruction rejects.
+    // No HLE exception bridge or host TLB repair is invoked.
+    cpu.m_exit_reason = dispatch;
+    const result action = strict_ram_step_impl(cpu, memory, actual_delay_slot, evidence);
+    if (action != result::COMMITTED && action != result::FAULT_COMMITTED)
+    {
+        cpu.m_exit_reason = exception;
+    }
+    return action;
 }
 
 const char* ee_ram_result_name(e_ee_ram_result result)
