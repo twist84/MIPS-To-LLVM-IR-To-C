@@ -53,7 +53,30 @@ public:
     }
     // Earliest possible voice/input fetch, mixer-ring or effect IRQ edge.
     // Zero means no pending playback IRQ opportunity.
-    uint32_t voice_irq_cycles_remaining() const;
+    uint32_t voice_irq_cycles_remaining() const
+    {
+        if (!m_irq_deadline_cache_enabled)
+        {
+            return compute_voice_irq_cycles_remaining();
+        }
+        // A valid zero result remains zero throughout the same sample.
+        // Every clock reset/wrap, sample crossing and relevant mutation
+        // invalidates the cache, so no phase calculation is needed here.
+        if (m_irq_deadline_valid && m_irq_deadline_remaining == 0u)
+        {
+            return 0u;
+        }
+        const uint32_t phase = sample_phase();
+        if (m_irq_deadline_valid && phase >= m_irq_deadline_phase)
+        {
+            const uint32_t elapsed = phase - m_irq_deadline_phase;
+            if (m_irq_deadline_remaining > elapsed)
+            {
+                return m_irq_deadline_remaining - elapsed;
+            }
+        }
+        return refresh_voice_irq_deadline(phase);
+    }
     // Host-only reference control for exact deadline-cache comparisons.
     void enable_irq_deadline_cache(bool enabled)
     {
@@ -277,6 +300,7 @@ private:
     int64_t effect_tap_offset(uint32_t core, uint32_t reg) const;
     uint32_t effect_irq_cycles_remaining() const;
     uint32_t compute_voice_irq_cycles_remaining() const;
+    uint32_t refresh_voice_irq_deadline(uint32_t phase) const;
     bool read_disabled_effect(uint32_t core, uint32_t channel, uint64_t step,
         int16_t* output);
     void advance_effect(uint32_t core, const int32_t (&input)[2], int16_t (&output)[2]);
