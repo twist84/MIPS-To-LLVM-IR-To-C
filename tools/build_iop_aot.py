@@ -349,8 +349,8 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def compact_split_router(router, plan):
-    """Replace the generated PC switch with a checked dense i16 region map.
+def compact_split_router(router, plan, narrow_ids=False):
+    """Replace the generated PC switch with a checked dense region map.
 
     Verify the old switch against the already validated ownership plan.
     Keep all region calls, context writes and budget/fallback paths intact.
@@ -387,11 +387,15 @@ def compact_split_router(router, plan):
         raise ValueError("generated router does not match validated ownership plan")
 
     width = len(ids)
-    table_type = f"[{width} x i16]"
+    # Reserve the all-ones sentinel for unowned PCs. 255 valid regions
+    # (IDs 0..254) fit in a byte; 256 require the original i16 map.
+    id_type = "i8" if narrow_ids and count <= 255 else "i16"
+    alignment = 1 if id_type == "i8" else 2
+    table_type = f"[{width} x {id_type}]"
     table = (f"@iop_region_ids = private unnamed_addr constant {table_type} [\n"
-             + ",\n".join("  " + ", ".join(f"i16 {value}" for value in ids[i:i + 16])
+             + ",\n".join("  " + ", ".join(f"{id_type} {value}" for value in ids[i:i + 16])
                             for i in range(0, width, 16))
-             + "\n], align 2\n\n")
+             + f"\n], align {alignment}\n\n")
     signed_base = base if base < 0x80000000 else base - 0x100000000
     replacement = (
         "dispatch:\n"
@@ -406,9 +410,9 @@ def compact_split_router(router, plan):
         "  %map_index = zext i32 %map_word to i64\n"
         f"  %map_ptr = getelementptr inbounds {table_type}, ptr @iop_region_ids, "
         "i64 0, i64 %map_index\n"
-        "  %map_id = load i16, ptr %map_ptr, align 2\n"
-        "  switch i16 %map_id, label %fallback [\n"
-        + "".join(f"    i16 {region}, label %region_{region}\n"
+        f"  %map_id = load {id_type}, ptr %map_ptr, align {alignment}\n"
+        f"  switch {id_type} %map_id, label %fallback [\n"
+        + "".join(f"    {id_type} {region}, label %region_{region}\n"
                   for region in range(count))
         + "  ]\n")
     return table + router.replace(old, replacement, 1)
@@ -591,7 +595,9 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
                   + (" (cached)" if row["cached"] else ""))
         receipt = {
             "schema": 1, "module": stem, "opt": args.opt, "jobs": args.jobs,
-            "router": "compact" if getattr(args, "split_compact_router", False) else "switch",
+            "router": ("compact-narrow" if getattr(args, "split_narrow_router", False)
+                       else "compact" if getattr(args, "split_compact_router", False)
+                       else "switch"),
             "compile_seconds": compile_seconds, "link_seconds": linked - link_started,
             "cache_hits": hits, "object_bytes": object_bytes,
             "library_bytes": library_bytes, "objects": observations,
@@ -647,6 +653,8 @@ def main():
                            help="Compile an exact staged IRX stem in regions (repeatable)")
     selection.add_argument("--split-all", action="store_true",
                            help="Compile all staged IRXs in regions")
+    parser.add_argument("--split-narrow-router", action="store_true",
+                        help="Use i8 region IDs when compact dispatch has at most 255 regions")
     parser.add_argument("--split-compact-router", action="store_true",
                         help="Experimental: checked dense region-ID map for split dispatch")
     parser.add_argument("--split-residual-max-pcs", type=int,
@@ -667,6 +675,8 @@ def main():
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
     split_mode = args.split_all or bool(args.split_module)
+    if args.split_narrow_router and not args.split_compact_router:
+        parser.error("--split-narrow-router requires --split-compact-router")
     if args.split_compact_router and not split_mode:
         parser.error("--split-compact-router requires --split-module or --split-all")
     if args.split_cross_block_tables and args.split_table_disc_root is None:
@@ -778,7 +788,8 @@ def build(args, out):
                 if args.split_compact_router:
                     router_path = ir_dir / f"{stem}.ll"
                     router = router_path.read_text(encoding="utf-8")
-                    compact = compact_split_router(router, plan.read_text(encoding="ascii"))
+                    compact = compact_split_router(router, plan.read_text(encoding="ascii"),
+                                                   narrow_ids=args.split_narrow_router)
                     router_path.write_text(compact, encoding="utf-8")
                     print(f"{stem}: compact router {len(router.encode('utf-8'))} -> "
                           f"{len(compact.encode('utf-8'))} IR bytes")
