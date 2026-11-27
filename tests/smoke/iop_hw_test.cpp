@@ -3857,6 +3857,20 @@ int main()
     {
         return fail("CDVD no-media type access or unsupported width safety");
     }
+    if (!hardware.set_cdvd_disc_type(0x14u) ||
+        hardware.cdvd_disc_type() != 0x14u ||
+        !hardware.read(iop::c_hw::k_cdvd_disc_type, 1u, &actual) ||
+        actual != 0x14u || hardware.set_cdvd_disc_type(0x15u))
+    {
+        return fail("CDVD mounted PS2 DVD type configuration");
+    }
+    hardware.reset();
+    if (hardware.cdvd_disc_type() != iop::c_hw::k_cdvd_no_disc ||
+        !hardware.read(iop::c_hw::k_cdvd_disc_type, 1u, &actual) ||
+        actual != iop::c_hw::k_cdvd_no_disc)
+    {
+        return fail("CDVD media state survived device reset");
+    }
     if (!hardware.read(iop::c_hw::k_cdvd_drive_status, 1u, &actual) ||
         actual != iop::c_hw::k_cdvd_stopped ||
         hardware.read(iop::c_hw::k_cdvd_drive_status, 2u, &actual) ||
