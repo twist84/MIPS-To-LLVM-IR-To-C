@@ -323,12 +323,42 @@ def cached_split_object(source, obj, cache, provenance, compile_object):
     return False
 
 
-def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
-                        provenance=None):
-    sources = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
-    if not sources:
-        raise ValueError("split pilot emitted no region IR")
-    sources += [ir_dir / f"{stem}.ll", ir_dir / f"{stem}.table.ll"]
+def select_split_stems(staged, selected, all_modules=False):
+    available = {path.stem.casefold(): path.stem
+                 for path in staged.glob("*.json")}
+    if all_modules:
+        if not available:
+            raise ValueError("no staged IRX captures")
+        return sorted(available.values())
+    stems = []
+    for name in selected:
+        stem = available.get(name.casefold())
+        if stem is None:
+            raise ValueError(f"split pilot must select one exact staged IRX stem: {name}")
+        if stem in stems:
+            raise ValueError(f"duplicate split module: {name}")
+        stems.append(stem)
+    return sorted(stems)
+
+
+def split_compile_schedule(sources_by_stem):
+    """Prioritize large IR as a cost proxy, independent of linker order."""
+    return sorted(((stem, source) for stem, sources in sources_by_stem.items()
+                   for source in sources),
+                  key=lambda job: (-job[1].stat().st_size, job[0], job[1].name))
+
+
+def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
+                          provenance_by_stem):
+    sources_by_stem = {}
+    for stem in stems:
+        sources = sorted(ir_dir.glob(f"{stem}.region.*.ll"))
+        if not sources:
+            raise ValueError(f"split pilot emitted no region IR: {stem}")
+        sources += [ir_dir / f"{stem}.ll", ir_dir / f"{stem}.table.ll"]
+        sources_by_stem[stem] = sources
+
+    jobs = split_compile_schedule(sources_by_stem)
     started = time.monotonic()
 
     def compile_object(source, obj):
@@ -337,60 +367,104 @@ def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
             command += ["--no-default-config"]
         subprocess.run([*command, str(source), "-o", str(obj)], check=True)
 
-    def compile_one(source):
+    def compile_one(stem, source):
         obj = obj_dir / (source.stem + ".o")
         start = time.monotonic()
-        hit = cached_split_object(source, obj, args.region_cache, provenance,
-                                  compile_object)
-        return obj, {
+        hit = cached_split_object(source, obj, args.region_cache,
+                                  provenance_by_stem[stem], compile_object)
+        finish = time.monotonic()
+        return stem, obj, start, finish, {
             "source": source.name, "object": obj.name, "cached": hit,
-            "seconds": time.monotonic() - start,
+            "seconds": finish - start,
             "ir_bytes": source.stat().st_size, "object_bytes": obj.stat().st_size,
         }
 
-    completed = {}
-    hits = 0
+    completed = {stem: {} for stem in stems}
+    count = 0
     with concurrent.futures.ThreadPoolExecutor(args.jobs) as pool:
-        futures = [pool.submit(compile_one, source) for source in sources]
+        futures = [pool.submit(compile_one, stem, source) for stem, source in jobs]
         for future in concurrent.futures.as_completed(futures):
-            obj, observation = future.result()
-            completed[observation["source"]] = (obj, observation)
-            hits += int(observation["cached"])
-            print(f"IOP objects [{len(completed)}/{len(sources)}]: {obj.name}"
+            stem, obj, start, finish, observation = future.result()
+            completed[stem][observation["source"]] = (obj, observation, start, finish)
+            count += 1
+            print(f"IOP objects [{count}/{len(jobs)}]: {obj.name}"
                   + (" (cached)" if observation["cached"] else ""))
-    # Completion order is deliberately not the linker input order.
-    objects = [completed[source.name][0] for source in sources]
-    observations = [completed[source.name][1] for source in sources]
-    print(f"split cache: {hits} reused, {len(objects) - hits} compiled")
+
     compiled = time.monotonic()
-    library = lib_dir / f"{stem}{suffix}"
-    command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library),
-               *map(str, objects)]
-    if os.name == "nt":
-        command += ["-nostdlib", "-Wl,/noentry"]
-    subprocess.run(command, check=True)
-    linked = time.monotonic()
-    object_bytes = sum(obj.stat().st_size for obj in objects)
-    library_bytes = library.stat().st_size
-    print(f"split compile {compiled - started:.3f}s, "
-          f"link {linked - compiled:.3f}s, "
-          f"{object_bytes} object bytes, {library_bytes} library bytes")
-    slowest = sorted(observations, key=lambda row: (-row["seconds"], row["source"]))
-    for row in slowest[:5]:
-        print(f"split slow object: {row['source']} {row['seconds']:.3f}s, "
-              f"{row['ir_bytes']} IR bytes, {row['object_bytes']} object bytes"
-              + (" (cached)" if row["cached"] else ""))
-    receipt = lib_dir.parent / "split-build-receipt.json"
-    with receipt.open("x", encoding="utf-8") as stream:
-        json.dump({
+    libraries = []
+    receipts = []
+    multi = len(stems) > 1
+    if multi:
+        receipt_dir = lib_dir.parent / "split-receipts"
+        receipt_dir.mkdir()
+    for stem in stems:
+        # Preserve the original per-module linker ordering, not queue order.
+        rows = [completed[stem][source.name] for source in sources_by_stem[stem]]
+        objects = [row[0] for row in rows]
+        observations = [row[1] for row in rows]
+        hits = sum(int(row["cached"]) for row in observations)
+        library = lib_dir / f"{stem}{suffix}"
+        command = [clang, "-shared", "-fuse-ld=lld", "-o", str(library),
+                   *map(str, objects)]
+        if os.name == "nt":
+            command += ["-nostdlib", "-Wl,/noentry"]
+        link_started = time.monotonic()
+        subprocess.run(command, check=True)
+        linked = time.monotonic()
+        object_bytes = sum(obj.stat().st_size for obj in objects)
+        library_bytes = library.stat().st_size
+        compile_seconds = (max(row[3] for row in rows) - min(row[2] for row in rows)
+                           if multi else compiled - started)
+        print(f"{stem}: split cache: {hits} reused, {len(objects) - hits} compiled")
+        print(f"split compile {compile_seconds:.3f}s, "
+              f"link {linked - link_started:.3f}s, "
+              f"{object_bytes} object bytes, {library_bytes} library bytes")
+        slowest = sorted(observations, key=lambda row: (-row["seconds"], row["source"]))
+        for row in slowest[:5]:
+            print(f"split slow object: {row['source']} {row['seconds']:.3f}s, "
+                  f"{row['ir_bytes']} IR bytes, {row['object_bytes']} object bytes"
+                  + (" (cached)" if row["cached"] else ""))
+        receipt = {
             "schema": 1, "module": stem, "opt": args.opt, "jobs": args.jobs,
-            "compile_seconds": compiled - started, "link_seconds": linked - compiled,
+            "compile_seconds": compile_seconds, "link_seconds": linked - link_started,
             "cache_hits": hits, "object_bytes": object_bytes,
             "library_bytes": library_bytes, "objects": observations,
             "library_sha256": sha256_file(library),
-        }, stream, indent=2)
-        stream.write("\n")
-    return library
+        }
+        receipt_path = (receipt_dir / f"{stem}.json" if multi else
+                        lib_dir.parent / "split-build-receipt.json")
+        with receipt_path.open("x", encoding="utf-8") as stream:
+            json.dump(receipt, stream, indent=2)
+            stream.write("\n")
+        receipts.append(receipt)
+        libraries.append(library)
+    if multi:
+        aggregate = {
+            "schema": 1, "kind": "iop_split_multi_build",
+            "opt": args.opt, "jobs": args.jobs,
+            "compile_seconds": compiled - started,
+            "link_seconds": sum(row["link_seconds"] for row in receipts),
+            "cache_hits": sum(row["cache_hits"] for row in receipts),
+            "object_count": len(jobs),
+            "object_bytes": sum(row["object_bytes"] for row in receipts),
+            "library_bytes": sum(row["library_bytes"] for row in receipts),
+            "modules": [{**{key: row[key] for key in
+                            ("module", "cache_hits", "object_bytes", "library_bytes",
+                             "library_sha256")},
+                         "object_count": len(row["objects"]),
+                         "receipt": f"split-receipts/{row['module']}.json"}
+                        for row in receipts],
+        }
+        with (lib_dir.parent / "split-build-receipt.json").open("x", encoding="utf-8") as stream:
+            json.dump(aggregate, stream, indent=2)
+            stream.write("\n")
+    return libraries
+
+
+def compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir, stem, suffix,
+                        provenance=None):
+    return compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir,
+                                 [stem], suffix, {stem: provenance})[0]
 
 
 def main():
@@ -402,8 +476,11 @@ def main():
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--bootstrap", action="store_true",
                         help="Build missing libraries without clearing existing output files")
-    parser.add_argument("--split-module",
-                        help="Experimental: compile one exact staged IRX stem in regions")
+    selection = parser.add_mutually_exclusive_group()
+    selection.add_argument("--split-module", action="append",
+                           help="Compile an exact staged IRX stem in regions (repeatable)")
+    selection.add_argument("--split-all", action="store_true",
+                           help="Compile all staged IRXs in regions")
     parser.add_argument("--split-residual", action="store_true",
                         help="Add one residual region covering every remaining aligned PC")
     parser.add_argument("--split-extended", action="store_true",
@@ -413,16 +490,17 @@ def main():
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
+    split_mode = args.split_all or bool(args.split_module)
     if args.split_relocation_receipt is not None and not (
-            args.split_module and args.split_extended and args.split_residual):
+            split_mode and args.split_extended and args.split_residual):
         parser.error("--split-relocation-receipt requires extended residual splitting")
-    if args.split_extended and not (args.split_module and args.split_residual):
-        parser.error("--split-extended requires --split-module and --split-residual")
-    if args.split_residual and not args.split_module:
-        parser.error("--split-residual requires --split-module")
+    if args.split_extended and not (split_mode and args.split_residual):
+        parser.error("--split-extended requires --split-module or --split-all and --split-residual")
+    if args.split_residual and not split_mode:
+        parser.error("--split-residual requires --split-module or --split-all")
     if args.region_cache is not None:
-        if not args.split_module:
-            parser.error("--region-cache requires --split-module")
+        if not split_mode:
+            parser.error("--region-cache requires --split-module or --split-all")
         args.region_cache = args.region_cache.resolve()
         for protected in (args.capture.resolve(), args.out.resolve()):
             if (args.region_cache.is_relative_to(protected) or
@@ -430,7 +508,7 @@ def main():
                 parser.error("region cache must be separate from captures and output")
     if args.jobs < 1:
         parser.error("--jobs must be positive")
-    if args.split_module and (args.bootstrap or args.out.exists()):
+    if split_mode and (args.bootstrap or args.out.exists()):
         parser.error("split pilot requires a fresh output directory, without --bootstrap")
 
     if args.bootstrap:
@@ -477,25 +555,19 @@ def build(args, out):
     started = time.monotonic()
     # The C++ lifter names its output from the capture stem and exports
     # the descriptor from metadata. Stage canonical names for both.
-    provenance = None
+    provenance_by_stem = {}
+    split_mode = args.split_all or bool(args.split_module)
     with tempfile.TemporaryDirectory(prefix="iop-named-captures-") as temporary:
-        staged = Path(temporary)
+        staged = Path(temporary) / "staged"
         prepare_captures(args.capture, staged)
-        if args.split_module:
-            pilot = staged / "pilot"
-            plan = prepare_split_pilot(staged, args.split_module, pilot,
-                                       residual=args.split_residual,
-                                       extended=args.split_extended,
-                                       relocation_receipt=json.loads(
-                                           args.split_relocation_receipt.read_text(encoding="utf-8"))
-                                       if args.split_relocation_receipt is not None else None)
-            subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
+        if split_mode:
+            selected = select_split_stems(staged, args.split_module, args.split_all)
+            relocation_receipt = (json.loads(args.split_relocation_receipt.read_text(encoding="utf-8"))
+                                  if args.split_relocation_receipt is not None else None)
+            common_provenance = None
             if args.region_cache is not None:
                 args.region_cache.mkdir(parents=True, exist_ok=True)
-                provenance = {
-                    "plan_sha256": sha256_file(plan),
-                    "capture_sha256": sha256_file(next(pilot.glob("*.bin"))),
-                    "metadata_sha256": sha256_file(next(pilot.glob("*.json"))),
+                common_provenance = {
                     "lifter_sha256": sha256_file(recomp),
                     "compiler_sha256": sha256_file(clang),
                     "compiler_version": subprocess.check_output(
@@ -506,6 +578,19 @@ def build(args, out):
                                 "--no-default-config"],
                     "platform": os.name,
                 }
+            for index, stem in enumerate(selected):
+                pilot = Path(temporary) / f"pilot-{index}"
+                plan = prepare_split_pilot(staged, stem, pilot,
+                                           residual=args.split_residual,
+                                           extended=args.split_extended,
+                                           relocation_receipt=relocation_receipt)
+                subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
+                provenance_by_stem[stem] = (
+                    {**common_provenance,
+                     "plan_sha256": sha256_file(plan),
+                     "capture_sha256": sha256_file(next(pilot.glob("*.bin"))),
+                     "metadata_sha256": sha256_file(next(pilot.glob("*.json")))}
+                    if common_provenance is not None else None)
         else:
             subprocess.run([str(recomp), str(staged), str(ir_dir)], check=True)
     stems = sorted(p.name[:-len(".table.ll")] for p in ir_dir.glob("*.table.ll"))
@@ -513,12 +598,15 @@ def build(args, out):
         sys.exit("build_iop_aot: no translated IRX modules")
     suffix = ".dll" if os.name == "nt" else ".so"
 
-    if args.split_module:
-        if len(stems) != 1:
-            raise ValueError("split pilot emitted multiple module tables")
-        library = compile_split_pilot(args, clang, ir_dir, obj_dir, lib_dir,
-                                      stems[0], suffix, provenance)
-        print(f"build_iop_aot: {library} ({time.monotonic() - started:.1f}s total)")
+    if split_mode:
+        if stems != selected:
+            raise ValueError("split pilot emitted unexpected module tables")
+        libraries = compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir,
+                                          stems, suffix, provenance_by_stem)
+        for library in libraries:
+            print(f"build_iop_aot: {library}")
+        print(f"build_iop_aot: {len(libraries)} split module libraries "
+              f"({time.monotonic() - started:.1f}s total)")
         return 0
 
     def build_one(stem):
