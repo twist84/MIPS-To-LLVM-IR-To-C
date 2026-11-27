@@ -191,7 +191,7 @@ def main():
     parser.add_argument("--candidate-runner", type=Path,
                         help="matched alternative runner; same EE and VU1 images")
     parser.add_argument("--control-runner-sha256",
-                        help="required pinned control runner hash for runner comparison")
+                        help="pinned control runner hash; required for runner and IOP comparisons")
     parser.add_argument("--candidate-vu1", type=Path,
                         help="matched alternative VU1 inventory; compare with same runner and EE")
     parser.add_argument("--candidate-source", type=Path,
@@ -218,11 +218,12 @@ def main():
                                   args.candidate_runner, args.candidate_iop_aot,
                                   args.capture_iop)) > 1:
             raise ValueError("compare one changed component at a time")
-        if bool(args.candidate_runner) != bool(args.control_runner_sha256):
-            raise ValueError("runner comparison requires pinned control runner hash")
-        if args.candidate_runner and (sha(args.runner) != args.control_runner_sha256 or
-                                      sha(args.candidate_runner) == sha(args.runner)):
-            raise ValueError("runner identities differ from comparison requirements")
+        if (args.candidate_runner or args.capture_iop or args.candidate_iop_aot) and not args.control_runner_sha256:
+            raise ValueError("comparison or IOP capture requires pinned control runner hash")
+        if args.control_runner_sha256 and sha(args.runner) != args.control_runner_sha256:
+            raise ValueError("control runner hash differs from pinned runner")
+        if args.candidate_runner and sha(args.candidate_runner) == sha(args.runner):
+            raise ValueError("candidate runner must differ from control")
         protected = (args.profile, args.source, args.vu1, args.disc, args.reference)
         if args.candidate_iop_aot is not None:
             protected += (args.candidate_iop_aot,)
@@ -340,15 +341,15 @@ def main():
                     receipt["runs"][name].append(run)
                     run["directory"] = directory.name
                     run["profile_enabled"] = enabled
+                    if args.capture_iop or iop_inventory is not None:
+                        run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
+                            len(iop_inventory) if iop_inventory and name == "candidate" else 0)
                     run.update(validate_run(args, directory, args.reference, args.recording, polls, run))
                     report = read_json(directory / "report.json")
                     require_match(report, reference)
                     if report["vu1_worker"]["enabled"]:
                         raise ValueError("asynchronous VU1 not permitted in G1A")
                     run["attribution"] = extract_profile(report, directory / "stderr.log", enabled)
-                    if args.capture_iop or iop_inventory is not None:
-                        run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
-                            len(iop_inventory) if iop_inventory and name == "candidate" else 0)
             if args.capture_iop:
                 receipt["captures"] = iop_capture_identity(args.capture_iop)
             receipt["median_wall_seconds"] = {
