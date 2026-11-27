@@ -174,8 +174,27 @@ enum class e_ee_exit_reason : uint32_t
     EE_EXIT_LOOP_BUDGET = 5,
     // Host-cooperative yield at a fully committed guest loop-header PC.
     // This does not advance guest time or imply a device event.
-    EE_EXIT_HOST_YIELD = 6
+    EE_EXIT_HOST_YIELD = 6,
+    // A committed Level 2 architectural exception, not a Level 1
+    // ExcCode/EPC event. Do not route through the Level 1 HLE bridge.
+    EE_EXIT_LEVEL2_EXCEPTION = 7
 };
+
+static_assert(static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_RETURN) == 0u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION) == 1u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXTERNAL_CALL) == 2u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) == 3u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_UNSUPPORTED) == 4u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_LOOP_BUDGET) == 5u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_HOST_YIELD) == 6u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION) == 7u);
+
+inline constexpr bool ee_is_level2_exception_exit(uint32_t reason)
+{
+    return reason == static_cast<uint32_t>(
+        e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION);
+}
+
 
 // Forward declaration; the runtime owns the memory/peripheral subsystems.
 struct s_ee_runtime;

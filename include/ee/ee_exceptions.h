@@ -69,6 +69,32 @@ struct s_ee_exception_info
 const s_ee_exception_info* ee_exception_table();
 const s_ee_exception_info* ee_exception_info(uint32_t excode);
 
+// Host-only read-only preflight for a validated typed-event producer.
+// Never commits a counter, enters an exception or advances a clock.
+s_ee_perf_crossing_entry_plan ee_cop0_perf_preflight_crossing(
+    const s_ee_cpu_state& cpu, const s_ee_runtime& rt,
+    const s_ee_perf_crossing_request& request);
+
+// The caller must own the EE execution thread, account preceding device
+// and clock work, and restore all architectural side effects to the
+// actual restart PC (branch PC for an ordinary delay-slot cancellation).
+// Matching PC/exit reason is necessary, not proof of this restoration.
+inline constexpr bool ee_perf_crossing_commit_boundary_matches(
+    uint32_t pc, uint32_t exit_reason, const s_ee_perf_crossing_entry_plan& plan)
+{
+    return plan.m_result == e_ee_perf_crossing_entry_result::READY &&
+           exit_reason == static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) &&
+           pc == plan.m_entry.m_entry.m_error_epc;
+}
+
+// Host-only transaction for an independently established precise boundary.
+// Recompute against live state, never accept a cached plan. COMMITTED means
+// both PCRs and Level 2 entry state changed; every other result is read-only.
+// No production caller is installed. Do not call from compatibility timing.
+e_ee_perf_crossing_entry_result ee_cop0_perf_commit_crossing(
+    s_ee_cpu_state& cpu, s_ee_runtime& rt,
+    const s_ee_perf_crossing_request& request);
+
 // Status bits (R5900 subset).
 constexpr uint32_t STATUS_IE   = 1u << 0;
 constexpr uint32_t STATUS_EXL  = 1u << 1;
