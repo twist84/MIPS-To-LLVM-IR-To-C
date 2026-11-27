@@ -8,8 +8,6 @@ function(ee_configure_raylib_window source binary)
     set(disabled_features
         SUPPORT_MODULE_RAUDIO
         SUPPORT_MODULE_RSHAPES
-        SUPPORT_MODULE_RTEXTURES
-        SUPPORT_MODULE_RTEXT
         SUPPORT_MODULE_RMODELS
         SUPPORT_CAMERA_SYSTEM
         SUPPORT_GESTURES_SYSTEM
@@ -43,7 +41,6 @@ function(ee_configure_raylib_window source binary)
         SUPPORT_FILEFORMAT_TTF
         SUPPORT_FILEFORMAT_FNT
         SUPPORT_FILEFORMAT_BDF
-        SUPPORT_TEXT_MANIPULATION
         SUPPORT_FONT_ATLAS_WHITE_REC
         SUPPORT_FILEFORMAT_OBJ
         SUPPORT_FILEFORMAT_MTL
@@ -64,12 +61,21 @@ function(ee_configure_raylib_window source binary)
         set(${feature} OFF CACHE BOOL "Unused by the native WebGPU window" FORCE)
     endforeach()
 
+    # rcore's ScanDirectoryFiles calls TextFindIndex unconditionally in
+    # this pinned version. rtext itself has unguarded texture dependencies.
+    # Keep the supporting modules without fonts, codecs or default assets.
+    foreach(feature IN ITEMS SUPPORT_MODULE_RTEXT SUPPORT_MODULE_RTEXTURES
+                             SUPPORT_TEXT_MANIPULATION)
+        set(${feature} ON CACHE BOOL "Required by pinned raylib core" FORCE)
+    endforeach()
+
     # Keep input, the existing host timer behaviour, diagnostics, standard
     # file IO and the rlgl context needed by InitWindow(). Do not suppress
     # compiler diagnostics globally or change the pinned dependency.
-    # raylib's old cmake_minimum_required emits a deprecation warning with
-    # CMake 4.5. Scope the exception to this dependency only.
-    set(CMAKE_WARN_DEPRECATED OFF)
+    # Raise only this dependency's effective minimum policy version.
+    # CMake 4.5 still warns on a 3.5 declaration with WARN_DEPRECATED OFF.
+    # Do not edit fetched sources or silence unrelated diagnostics.
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.10)
     add_subdirectory("${source}" "${binary}" SYSTEM)
 
     # The pinned raylib ParseConfigHeader.cmake is not a C preprocessor.
@@ -92,5 +98,5 @@ function(ee_configure_raylib_window source binary)
             message(FATAL_ERROR "Unused raylib feature is enabled: ${definition}")
         endif()
     endforeach()
-    message(STATUS "Native raylib window: core/GLFW input and timing; rendering via WebGPU")
+    message(STATUS "Native raylib window: core/GLFW with required text/texture support; rendering via WebGPU")
 endfunction()
