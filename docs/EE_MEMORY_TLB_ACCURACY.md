@@ -1718,3 +1718,14 @@ variants retain identical no-retirement, PC, RAM and clock checks.
 Use the same unsupported sentinel in the Count wrap fixture.
 No executor changes, no reduced real-ROM thresholds. Pending CI.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46065262316
+
+H3E9B2 workflow 46065615191 at 513705b2 passed the previous
+scheduler pilot check but stopped at the processor-selection
+regression. Its delay-slot fc820000 SD was also a stale unsupported
+opcode fixture. Preserve both an unsupported SPECIAL word and the
+original SD as an explicit data refusal, with no branch/slot
+retirement, unchanged PC and both halves of the branch operand.
+Reviewed remaining unsupported-opcode checks in both strict pilot
+and RAM/TLB test files for collisions with the new opcode families.
+No executor or firmware threshold changes. Pending CI.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46065615191

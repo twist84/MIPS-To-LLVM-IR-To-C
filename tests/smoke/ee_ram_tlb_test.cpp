@@ -1487,11 +1487,21 @@ bool test_strict_reset_register_execution()
     {
         return false;
     }
-    put(0x104u, 0xfc820000u); // unsupported SD in slot
-    if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_result != result::UNSUPPORTED_OPCODE ||
-        cpu.m_pc != 0xbfc00100u || cpu.m_gpr[2].m_lo != 1u)
+    // Check both decode refusal and a recognized SD with unavailable
+    // backing in the delay slot. Neither may commit the branch.
+    for (const uint32_t word : {0x00000001u, 0xfc820000u})
     {
-        return false;
+        put(0x104u, word);
+        const auto refused = ee::ee_execute_strict_rom_register_step(cpu, view, 2u);
+        const auto expected = word == 0xfc820000u ? result::DATA_UNAVAILABLE :
+            result::UNSUPPORTED_OPCODE;
+        if (refused.m_result != expected || refused.m_retired != 0u ||
+            refused.m_detail_pc != 0xbfc00104u ||
+            cpu.m_pc != 0xbfc00100u || cpu.m_gpr[2].m_lo != 1u ||
+            cpu.m_gpr[2].m_hi != 0x1234u || cpu.m_gpr[3].m_lo != 1u)
+        {
+            return false;
+        }
     }
     put(0x104u, 0x24420001u);
     if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_retired != 2u ||
