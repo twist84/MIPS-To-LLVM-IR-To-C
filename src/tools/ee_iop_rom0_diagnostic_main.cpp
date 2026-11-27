@@ -35,6 +35,18 @@ const char* boundary_name(ee::e_ee_firmware_boundary boundary)
     }
     return "UNKNOWN";
 }
+
+uint32_t read_iop_ram_word(std::span<const uint8_t> ram, uint32_t offset)
+{
+    if (offset > ram.size() || ram.size() - offset < 4u)
+    {
+        return 0u;
+    }
+    return static_cast<uint32_t>(ram[offset]) |
+        (static_cast<uint32_t>(ram[offset + 1u]) << 8u) |
+        (static_cast<uint32_t>(ram[offset + 2u]) << 16u) |
+        (static_cast<uint32_t>(ram[offset + 3u]) << 24u);
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -278,6 +290,15 @@ int main(int argc, char** argv)
         std::printf("\n");
     }
     std::printf("Dual ROM0 IOP: pc=%08x\n", iop->m_pc);
+    const auto iop_ram = pilot.iop_ram_span();
+    std::printf("Dual ROM0 IOP RAM mailbox: backing=%zu offset=00042f00 words=",
+        iop_ram.size());
+    for (uint32_t word = 0u; word < 5u; ++word)
+    {
+        std::printf("%s%08x", word == 0u ? "" : ",",
+            read_iop_ram_word(iop_ram, 0x00042f00u + word * 4u));
+    }
+    std::putchar('\n');
     if (const auto& run = pilot.iop_last_run(); run.has_value())
     {
         std::printf("Dual ROM0 last IOP step: stop=%u executed=%llu pc=%08x opcode=%08x\n",

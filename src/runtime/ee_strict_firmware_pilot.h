@@ -200,6 +200,10 @@ public:
     {
         return m_iop != nullptr ? &m_iop->cpu().state() : nullptr;
     }
+    std::span<const uint8_t> iop_ram_span() const
+    {
+        return m_iop != nullptr ? m_iop->cpu().ram_span() : std::span<const uint8_t>{};
+    }
     const std::optional<iop::s_kernel_run_result>& iop_last_run() const { return m_iop_last_run; }
     uint32_t sif_register_value(uint32_t id)
     {
