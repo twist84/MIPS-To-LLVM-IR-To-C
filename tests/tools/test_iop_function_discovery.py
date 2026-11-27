@@ -140,6 +140,31 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_split_pilot(root, "MCMAN", root / "ambiguous", residual=True)
 
+    def test_extended_plan_retains_full_dispatch_domain(self):
+        meta, data = capture([
+            0x88820000, 0x03e00008, 0,
+            0x27bdfff0, 0xafbf000c, 0x03e00008, 0x27bd0010,
+            0,
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(data)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "MCMAN", root / "invalid", extended=True)
+            plan = prepare_split_pilot(root, "MCMAN", root / "pilot",
+                                       residual=True, extended=True)
+            lines = plan.read_text().splitlines()
+            self.assertEqual(lines[0], f"IOPREG1 {BASE} 32 {fnv1a(data)} 3")
+            self.assertEqual(lines[1:], [
+                f"1 {BASE + 4}",
+                f"3 {BASE + 12} {BASE + 16} {BASE + 20}",
+                f"4 {BASE} {BASE + 8} {BASE + 24} {BASE + 28}",
+            ])
+            pcs = [int(pc) for line in lines[1:] for pc in line.split()[1:]]
+            self.assertEqual(sorted(pcs), list(range(BASE, BASE + len(data), 4)))
+            self.assertEqual(len(pcs), len(set(pcs)))
+
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

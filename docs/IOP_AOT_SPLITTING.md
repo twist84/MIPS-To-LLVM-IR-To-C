@@ -245,3 +245,27 @@ symbols and relocations, preserve linked import stubs and code/data
 metadata, and resolve indirect targets from bounded register value
 analysis and observed guest PCs. Retain residual compatibility; if large
 regions remain, test bounded partitions separately from discovery.
+
+## I8b: measured extended discovery / opt-in build pilot
+
+Receipt iop-i8-discovery.zip SHA256
+6ba67e3814302da9a679cb2a1bb2f0bbd0512f3584ffbf839963ae0f571310a6.
+413 -> 895 candidate roots; 21,567 -> 39,395 reached aligned words
+(38.1% -> 69.5%); 189 heuristic stack-frame roots, 60 interpreter-linear
+PCs; no shared ordinary PCs, ordinary/delay overlap or rejected seeds.
+Remaining unvisited words: 17,273. ARKD_DVD 356 -> 10,671 reached words
+out of 11,208, CRI_ADXI 435 -> 5,488 out of 12,508, PADMAN 2,163 ->
+2,810 out of 8,008. Largest extended candidate in ARKD_DVD: 1,610
+ordinary PCs; CRI_ADXI: 184. These are candidate ownership measurements,
+not dynamic execution coverage or proof of ELF function symbols.
+
+`--split-extended` enables this audit's regions for an explicitly opt-in
+build and requires `--split-residual`. All aligned PCs remain in the exact
+disjoint dispatch partition; interpreter-only PCs and unsupported
+boundaries are excluded from candidate function regions and routed
+through the residual compatibility region. The C++ emitter, ABI,
+exception/MMIO handling and default builder remain unchanged. The
+existing ownership-plan hash separates cache entries. The only change
+relative to I7 is region assignment, and unsupported opcodes still fall
+back through the same lifter. No runtime acceptance until a distinct
+retail experiment. I7 remains separately reproducible.

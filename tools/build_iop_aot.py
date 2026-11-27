@@ -136,7 +136,7 @@ def prepare_captures(capture, destination):
     return len(records)
 
 
-def prepare_split_pilot(staged, selected, pilot, residual=False):
+def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
@@ -146,7 +146,9 @@ def prepare_split_pilot(staged, selected, pilot, residual=False):
     binary = meta.with_suffix(".bin")
     metadata = json.loads(meta.read_text(encoding="utf-8"))
     data = binary.read_bytes()
-    report = inventory(metadata, data)
+    if extended and not residual:
+        raise ValueError("extended discovery requires residual dispatch coverage")
+    report = inventory(metadata, data, extended=extended)
     if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"] or
             report["rejected_seeds"] or len(data) % 4):
         raise ValueError("split pilot refuses ambiguous or invalid ownership")
@@ -154,12 +156,20 @@ def prepare_split_pilot(staged, selected, pilot, residual=False):
     # encoding natively. Keep unsupported boundaries on the interpreter.
     rejected = {item["pc"] for item in report["unresolved"]
                 if item["kind"] in ("unsupported", "unsupported_delay", "missing_delay")}
+    if extended:
+        # The audit can follow interpreter-only operations to discover
+        # subsequent code. Do not assign those operations to functions.
+        rejected.update(report["extended"]["interpreter_linear_pcs"])
     regions = [[pc for pc in region["ordinary_pcs"] if pc not in rejected]
                for region in report["regions"]]
     regions = [region for region in regions if region]
     if not regions:
         raise ValueError("split pilot has no eligible regions")
     discovered_count = sum(map(len, regions))
+    if extended:
+        print(f"split extended: {report['candidate_count']} candidates, "
+              f"{len(regions)} eligible function regions, "
+              f"{discovered_count} eligible ordinary PCs")
     residual_count = 0
     if residual:
         # Preserve the legacy lifter's dispatch domain, not a claim that
@@ -306,9 +316,13 @@ def main():
                         help="Experimental: compile one exact staged IRX stem in regions")
     parser.add_argument("--split-residual", action="store_true",
                         help="Add one residual region covering every remaining aligned PC")
+    parser.add_argument("--split-extended", action="store_true",
+                        help="Experimental extended discovery; requires --split-residual")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
+    if args.split_extended and not (args.split_module and args.split_residual):
+        parser.error("--split-extended requires --split-module and --split-residual")
     if args.split_residual and not args.split_module:
         parser.error("--split-residual requires --split-module")
     if args.region_cache is not None:
@@ -375,7 +389,8 @@ def build(args, out):
         if args.split_module:
             pilot = staged / "pilot"
             plan = prepare_split_pilot(staged, args.split_module, pilot,
-                                       residual=args.split_residual)
+                                       residual=args.split_residual,
+                                       extended=args.split_extended)
             subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
             if args.region_cache is not None:
                 args.region_cache.mkdir(parents=True, exist_ok=True)
