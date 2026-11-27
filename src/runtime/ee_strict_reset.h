@@ -296,6 +296,17 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             cpu.m_cop0[COP0_Status] = status;
             return true;
         }
+        if ((opcode & 0xffe0ffffu) == 0x40803000u) // MTC0 rt,Wired
+        {
+            const uint32_t wired = static_cast<uint32_t>(read_gpr(cpu, rt));
+            if (wired >= c_ee_tlb::k_entry_count)
+            {
+                return false;
+            }
+            cpu.m_cop0[COP0_Wired] = wired;
+            cpu.m_cop0[COP0_Random] = c_ee_tlb::k_entry_count - 1u;
+            return true;
+        }
         if ((opcode & 0xffe0ffffu) == 0x40808000u) // MTC0 rt,Config
         {
             const uint32_t config = static_cast<uint32_t>(read_gpr(cpu, rt));
@@ -310,6 +321,11 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         {
             value = sign_extend_word(cpu.m_cop0[COP0_Config]);
         }
+        else if ((opcode & 0xffe0ffffu) == 0x40003000u) // MFC0 rt,Wired
+        {
+            value = sign_extend_word(cpu.m_cop0[COP0_Wired]);
+        }
+        // Random reads remain unsupported: no elapsed-cycle model.
         else if ((opcode & 0xffe0ffffu) == 0x40007800u)
         {
             value = sign_extend_word(cpu.m_cop0[COP0_PRId]);

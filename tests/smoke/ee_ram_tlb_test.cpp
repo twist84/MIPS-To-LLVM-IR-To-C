@@ -2470,6 +2470,86 @@ bool test_strict_reset_word_shifts()
     return true;
 }
 
+bool test_strict_reset_wired()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[16u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    put(0u, 0x40843000u); // mtc0 a0,Wired
+    put(4u, 0x40023000u); // mfc0 v0,Wired
+    put(8u, 0x40030800u); // mfc0 v1,Random (unsupported)
+    put(12u, 0x42000006u); // tlbwr (unsupported)
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    for (uint32_t wired = 0u; wired < ee::c_ee_tlb::k_entry_count; ++wired)
+    {
+        cpu.m_pc = pc;
+        cpu.m_cop0[ee::COP0_Random] = 12u;
+        cpu.m_gpr[4] = {0x1234567800000000ull | wired, 0x5678u};
+        cpu.m_gpr[2].m_hi = 0xabcdefu;
+        if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_Wired] != wired ||
+            cpu.m_cop0[ee::COP0_Random] != 47u || step(1u).m_retired != 1u ||
+            cpu.m_gpr[2].m_lo != wired || cpu.m_gpr[2].m_hi != 0xabcdefu ||
+            cpu.m_gpr[4].m_lo != (0x1234567800000000ull | wired) ||
+            cpu.m_gpr[4].m_hi != 0x5678u)
+        {
+            return false;
+        }
+    }
+    for (const uint32_t invalid : {48u, 63u, 0xffffffffu})
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = invalid;
+        cpu.m_cop0[ee::COP0_Random] = 17u;
+        const auto refused = step(1u);
+        if (refused.m_result != result::UNSUPPORTED_OPCODE || refused.m_retired != 0u ||
+            cpu.m_pc != pc || cpu.m_cop0[ee::COP0_Wired] != 47u ||
+            cpu.m_cop0[ee::COP0_Random] != 17u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[4].m_lo = 0u;
+    put(0u, 0x40843001u); // reserved encoding
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc ||
+        cpu.m_cop0[ee::COP0_Wired] != 47u || cpu.m_cop0[ee::COP0_Random] != 17u)
+    {
+        return false;
+    }
+    cpu.m_gpr[0] = {0xffffffffffffffffull, 0x9876u};
+    put(0u, 0x40803000u); // mtc0 zero,Wired
+    if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_Wired] != 0u ||
+        cpu.m_cop0[ee::COP0_Random] != 47u)
+    {
+        return false;
+    }
+    put(4u, 0x40003000u); // mfc0 zero,Wired
+    if (step(1u).m_retired != 1u || cpu.m_gpr[0].m_lo != 0xffffffffffffffffull ||
+        cpu.m_gpr[0].m_hi != 0x9876u)
+    {
+        return false;
+    }
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 8u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc + 12u;
+    return step(1u).m_result == result::UNSUPPORTED_OPCODE &&
+        cpu.m_pc == pc + 12u && cpu.m_cop0[ee::COP0_Random] == 47u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2697,6 +2777,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_wired(), "strict reset Wired and Random boundary regression"))
     {
         return 1;
     }

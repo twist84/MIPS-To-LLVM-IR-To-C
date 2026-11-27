@@ -724,7 +724,137 @@ int main(int argc, char** argv)
     std::printf("EELOAD first vector word: retired=%u pc=%08x physical=%08x word=%08x next_word=%08x\n",
         retired, cpu.m_pc, vector_offset, first_vector_word, second_vector_word);
 
-    const uint32_t exploration_limit = vector_checkpoint + 4096u;
+    // The authentic routine returned after writing four complete
+    // LUI/ORI/JR/NOP stubs. Validate each destination using the ROM
+    // table, including every untouched byte of low RAM.
+    constexpr uint32_t vector_count = 4u;
+    constexpr uint32_t vector_words[] = {0x3c1aa001u, 0x375a9160u, 0x03400008u, 0u};
+    constexpr uint32_t vector_bytes = sizeof(vector_words);
+    static_assert(vector_table_offset + vector_count * 4u <= image_size);
+    uint32_t vector_offsets[vector_count]{};
+    for (uint32_t i = 0u; i < vector_count; ++i)
+    {
+        vector_offsets[i] = ee::ee_read_instruction_word(
+            bytes.data() + source_offset + vector_table_offset + i * 4u);
+        if ((vector_offsets[i] & 3u) != 0u || vector_offsets[i] > destination - vector_bytes)
+        {
+            std::fprintf(stderr, "EELOAD invalid vector offset: index=%u offset=%08x\n", i, vector_offsets[i]);
+            return 48;
+        }
+        for (uint32_t j = 0u; j < i; ++j)
+        {
+            if (vector_offsets[i] < vector_offsets[j] + vector_bytes &&
+                vector_offsets[j] < vector_offsets[i] + vector_bytes)
+            {
+                std::fprintf(stderr, "EELOAD overlapping vector offsets\n");
+                return 49;
+            }
+        }
+    }
+    const uint32_t vectors_done = vector_checkpoint + 44u;
+    for (; retired < vectors_done;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            vectors_done - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > vectors_done - retired)
+        {
+            std::fprintf(stderr, "EELOAD vectors refused: retired=%u pc=%08x opcode=%08x result=%u\n",
+                retired, cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result));
+            return 50;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0016220u || cpu.m_gpr[31].m_lo != 0x00000000a0016220ull ||
+        cpu.m_cop0[ee::COP0_Config] != expected_config || sio.m_count != message_size)
+    {
+        std::fprintf(stderr, "EELOAD vector return mismatch: retired=%u pc=%08x\n", retired, cpu.m_pc);
+        return 51;
+    }
+    for (uint32_t i = 0u; i < destination; ++i)
+    {
+        uint8_t expected = 0xa5u;
+        for (uint32_t j = 0u; j < vector_count; ++j)
+        {
+            if (i >= vector_offsets[j] && i < vector_offsets[j] + vector_bytes)
+            {
+                const uint32_t offset = i - vector_offsets[j];
+                expected = static_cast<uint8_t>(vector_words[offset / 4u] >> ((offset % 4u) * 8u));
+                break;
+            }
+        }
+        if (ram_bytes[i] != expected)
+        {
+            std::fprintf(stderr, "EELOAD vector byte mismatch: physical=%08x expected=%02x actual=%02x\n",
+                i, static_cast<unsigned>(expected), static_cast<unsigned>(ram_bytes[i]));
+            return 52;
+        }
+    }
+    for (uint32_t i = 0u; i < vector_count; ++i)
+    {
+        std::printf("EELOAD vector installed: physical=%08x words=%08x,%08x,%08x,%08x\n",
+            vector_offsets[i], vector_words[0], vector_words[1], vector_words[2], vector_words[3]);
+    }
+    std::printf("EELOAD vectors complete: retired=%u pc=%08x count=%u\n",
+        retired, cpu.m_pc, vector_count);
+
+    // The next call sequence writes Wired=0, serializes and returns.
+    // Verify the guest write and return; do not manufacture Random
+    // progression or clear entries from a host shortcut.
+    const uint32_t wired_entry = vectors_done + 15u;
+    const uint32_t wired_done = wired_entry + 4u;
+    for (; retired < wired_entry;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            wired_entry - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > wired_entry - retired)
+        {
+            std::fprintf(stderr, "EELOAD Wired call refused: retired=%u pc=%08x opcode=%08x result=%u\n",
+                retired, cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result));
+            return 53;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa00197acu || cpu.m_gpr[4].m_lo != 0u ||
+        cpu.m_gpr[31].m_lo != 0x00000000a001635cull)
+    {
+        std::fprintf(stderr, "EELOAD Wired call entry mismatch\n");
+        return 54;
+    }
+    const auto wired = ee::ee_execute_strict_rom_register_step(cpu, rom, 1u, ram, &sio);
+    if (wired.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+        wired.m_opcode != 0x40843000u || wired.m_retired != 1u ||
+        cpu.m_cop0[ee::COP0_Wired] != 0u || cpu.m_cop0[ee::COP0_Random] != 47u ||
+        cpu.m_pc != 0xa00197b0u)
+    {
+        std::fprintf(stderr, "EELOAD Wired write mismatch\n");
+        return 55;
+    }
+    retired += wired.m_retired;
+    for (; retired < wired_done;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            wired_done - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > wired_done - retired)
+        {
+            std::fprintf(stderr, "EELOAD Wired return refused: pc=%08x opcode=%08x\n",
+                cpu.m_pc, action.m_opcode);
+            return 56;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa001635cu || cpu.m_cop0[ee::COP0_Wired] != 0u ||
+        cpu.m_cop0[ee::COP0_Random] != 47u || cpu.m_gpr[29].m_lo != 0xffffffffa007ff60ull)
+    {
+        std::fprintf(stderr, "EELOAD Wired return mismatch\n");
+        return 57;
+    }
+    std::printf("EELOAD Wired: retired=%u pc=%08x wired=%u random=%u\n",
+        retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
+
+    const uint32_t exploration_limit = wired_done + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {

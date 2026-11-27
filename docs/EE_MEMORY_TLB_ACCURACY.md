@@ -969,3 +969,28 @@ low-RAM sentinel bytes, and derive the destination independently
 from the original ROM. Continue bounded execution to identify
 the next dependency. This is not instruction cache coherence
 or actual exception dispatch yet. Pending authentic CI.
+
+## Strict memory follow-up M6E3C2: complete vectors and Wired initialization
+
+M6E3C1 passed CI run 46048827089/job 140674754490, first vector
+word at physical zero, 653575 retirements. The guest returned
+from its vector installation routine at 653619 / a0016220 and
+stopped at 653634 / a00197ac (40843000 MTC0 a0,Wired), a0=0.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46048827089/job/140674754490
+
+Require four non-overlapping 16-byte stubs at the offsets in the
+pinned ROM table: 3c1aa001,375a9160,03400008,00000000.
+Compare all other low RAM bytes with the original sentinel.
+This validates installation, not exception entry or cache coherence.
+
+Support canonical MFC0/MTC0 Wired using low-word semantics.
+As established in Batch 8, defined Wired values 0–47 reset
+Random to 47; refuse undefined values. Test all defined values,
+reserved encodings, architectural zero and unchanged state on
+refusal. Random reads and TLBWR remain unsupported, as no
+cycle-based Random evolution is modeled. No production changes.
+
+Require the actual Wired write, SYNC.P and JR/NOP return at
+653638 retirements, pc a001635c, Wired=0, Random=47 and
+SP ffffffffa007ff60. Continue bounded exploration from there.
+These new acceptance criteria are pending CI; no retail replay.
