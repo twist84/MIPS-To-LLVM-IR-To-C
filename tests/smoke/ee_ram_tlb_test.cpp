@@ -2393,7 +2393,7 @@ bool test_strict_reset_data_cache()
     using cache = ee::c_ee_reset_data_cache;
     constexpr uint32_t pc = 0xa0000000u;
     constexpr uint32_t va = 0x82000u;
-    uint8_t bytes[0x4080u]{};
+    uint8_t bytes[0x6080u]{};
     bytes[0x1000u] = 0x11u;
     bytes[0x1004u] = 0x22u;
     cache lines;
@@ -2460,8 +2460,42 @@ bool test_strict_reset_data_cache()
         return false;
     }
     cpu.m_gpr[4].m_lo = 0x80003000u;
-    if (step(0xac820000u).m_result != result::DATA_UNAVAILABLE ||
-        cpu.m_pc != pc || lines.dirty_count() != 1u || bytes[0x3000u] != 0u)
+    const auto uncommitted_conflict = step(0xac820000u, false);
+    if (uncommitted_conflict.m_retired != 1u ||
+        lines.resident_count() != 2u || lines.dirty_count() != 1u ||
+        bytes[0x1000u] != 0x11u || bytes[0x3000u] != 0u ||
+        step(0xac820000u).m_result != result::COMMITTED ||
+        lines.resident_count() != 2u || lines.dirty_count() != 1u ||
+        bytes[0x1000u] != 0xefu || bytes[0x1001u] != 0xcdu ||
+        bytes[0x1002u] != 0xabu || bytes[0x1003u] != 0x89u ||
+        bytes[0x3000u] != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80003000u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        cpu.m_gpr[3].m_lo != 0xffffffff89abcdefull)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xa0001000u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        cpu.m_gpr[3].m_lo != 0xffffffff89abcdefull)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80004000u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        lines.resident_count() != 2u || lines.dirty_count() != 1u ||
+        bytes[0x3000u] != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80005000u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        lines.resident_count() != 2u || lines.dirty_count() != 0u ||
+        bytes[0x3000u] != 0xefu || bytes[0x3001u] != 0xcdu ||
+        bytes[0x3002u] != 0xabu || bytes[0x3003u] != 0x89u)
     {
         return false;
     }
@@ -2499,9 +2533,18 @@ bool test_strict_reset_data_cache()
         return false;
     }
     tx.commit();
-    return lines.resident_count() == 3u && lines.dirty_count() == 2u &&
-        bytes[0x1040u] == 0u && step(0x8c830000u).m_retired == 1u &&
-        cpu.m_gpr[3].m_lo == 0xffffffffa0000008ull;
+    const bool final_step = step(0x8c830000u).m_retired == 1u;
+    if (!final_step || lines.resident_count() != 3u || lines.dirty_count() != 1u ||
+        bytes[0x1040u] != 0u || cpu.m_gpr[3].m_lo != 0xffffffffa0000008ull)
+    {
+        std::fprintf(stderr, "D-cache final check failed step=%u resident=%u dirty=%u data=%02x gpr=%016llx\n", final_step, lines.resident_count(), lines.dirty_count(), bytes[0x1040u], static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
+        return false;
+    }
+    cpu.m_gpr[8].m_lo = 0x40u;
+    return step(0xbd140000u).m_result == result::COMMITTED &&
+        lines.resident_count() == 2u && lines.dirty_count() == 0u &&
+        bytes[0x1040u] == 0x08u && bytes[0x1041u] == 0u &&
+        bytes[0x1042u] == 0u && bytes[0x1043u] == 0xa0u;
 }
 
 bool test_strict_reset_instruction_cache()

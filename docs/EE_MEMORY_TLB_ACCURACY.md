@@ -1903,15 +1903,18 @@ Add a bounded physically tagged 8 KiB, 64-byte, two-way D-cache
 the guest cold data sweep and synchronized ownership. Only translated
 cache-3 writeback-allocate RAM spans; no direct RAM writes on cached
 stores. Stage one full data line per instruction or branch-slot,
-commit fills/dirty data only on retirement. Refuse a third same-set
-line; no eviction, writeback, replacement policy, locking, live CACHE,
-Config changes with resident data, or calibrated cache latency.
-Uncached accesses observe physical backing, not coherent dirty lines.
-Apply to ordinary and partial scalar, quadword and raw COP1 data.
-Add nonidentity TLB, hit/dirty, uncached alias, refusal, conflict,
-and branch-slot tests. Require dirty D-cache, actual OSDSYS entry
-retirement, and advancement past the stack SW in CI. No HLE or
-production LLVM changes, no retail replay. Pending CI.
+commit fills/dirty data only on retirement. Replace a full set using
+the documented LRF way selection and write back dirty victims before
+replacement. Model indexed `CACHE DXWBIN` (`0x14`) as a staged dirty
+writeback and invalidation; other live cache operations, locking,
+Config changes with resident data, and calibrated cache latency remain
+unsupported. Uncached accesses observe physical backing, not coherent
+dirty lines. Apply to ordinary and partial scalar, quadword and raw
+COP1 data. Add nonidentity TLB, hit/dirty, uncached alias, refusal,
+conflict, writeback, invalidation and branch-slot tests. Require actual
+OSDSYS entry retirement and advance beyond the stack SW in CI. No HLE
+or production LLVM changes, no retail replay. This cache model has
+passed local focused regressions and real firmware runs; see M6E3H3E9B8C.
 
 ## M6E3H3E9B7B: repeated pre-field CRT programming
 
@@ -1992,11 +1995,37 @@ read-only CDVD drive-status byte at `0xBF40200A`, reporting stopped/no-media
 as zero. No command completion, IRQ, or disc data is synthesized. With this
 byte available, both releases advance beyond the earlier IOP CDVD read fault.
 
-The next synchronized stop is now an EE cached store at virtual address
-`0x00107A88` (`SW`, opcode `0xAC230008`), refused by the bounded strict D-cache
-path. The mailbox remains guest-owned; both final snapshots show
-`4F424344, 00000000, 00000000, 00000000, 00000000`. The diagnostic prints the
-actual IOP RAM words and any IOP memory-fault address. CI runs the synchronized
-diagnostic with a 16,000,000 EE-slot budget and asserts the live mailbox,
-absence of the old CDVD memory fault, and this next fail-closed EE boundary
+The earlier cached store at virtual address `0x00107A88` (`SW`, opcode
+`0xAC230008`) is now admitted. Both ROM0 images reach a real GIF DMA and
+then poll GS CSR.VSINT in OSDSYS. At 16 million slots this is before the
+polling loop observes the next field; local replays through 67 million
+slots remain in the firmware wait loop without a host refusal or IOP
+memory fault. The mailbox remains guest-owned and reads
+`4F424344, 00000000, 00000000, 00000000, 00000000`. Indexed D-cache
+writeback/invalidate and ordinary GIF channel transfer are now modeled
+with retirement/transaction checks. The next checkpoint is to capture
+whether the guest observes the scheduled VSINT and continue beyond the
+current wait loop. CI asserts the 16-million-slot OSDSYS wait boundary,
+completed GIF DMA status, live mailbox and absence of IOP memory faults
 for both pinned releases.
+
+## M6E3H3E9B8C: indexed D-cache writeback and BIOS GIF transfer
+
+Use the documented LRF replacement selection for full D-cache sets and
+write dirty victims to RAM only when the replacing instruction retires.
+Implement indexed `CACHE DXWBIN` (`0x14`) as a staged writeback and
+invalidation of the selected index/way. Keep dirty lines invisible to
+uncached aliases until writeback. Extend the synchronized firmware pilot
+to admit bounded GIF channel registers and direct-mode transfers through
+the existing GIF PATH3 parser and GS sink; validate guest RAM span and
+the entire QWC before starting, and reject transfers beyond 4096 QWC.
+The test checks deferred conflict side effects, replacement/writeback,
+LRF selection, cache-op writeback/invalidation, and branch-slot staging.
+
+Local Release focused tests `ee_ram_tlb` and `iop_hw` pass. Both pinned
+OpenPS2BIOS ROM0 images pass the dual EE/IOP replay through 67,000,000
+slots with the real GIF transfer completed, no EE host refusal, and no
+IOP memory fault; both then remain in the OSDSYS GS CSR.VSINT wait loop.
+The GitHub ROM0 acceptance now checks the fast 16,000,000-slot checkpoint,
+the completed GIF D_STAT bit, live IOP mailbox and wait-loop PC. This is
+not yet a rendered boot screen or proof that the guest observes a field.

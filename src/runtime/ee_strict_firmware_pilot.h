@@ -88,7 +88,7 @@ public:
     // deadline (65536 ticks at the reference NTSC line cadence).
     // Permit several fields. Guest HBlank programming is admitted only
     // with an explicit reference scanout configuration.
-    static constexpr uint64_t k_slot_limit = 1u << 24u;
+    static constexpr uint64_t k_slot_limit = 1u << 26u;
     static_assert(k_slot_limit <
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
 
@@ -714,7 +714,7 @@ private:
     }
 
     static constexpr uint32_t k_d_ctrl = 0x1000e000u;
-    static constexpr uint32_t k_dma_channel_mask = 3u | (1u << 8u) | (1u << 9u);
+    static constexpr uint32_t k_dma_channel_mask = 7u | (1u << 8u) | (1u << 9u);
 
     static constexpr bool spr_register(uint32_t address)
     {
@@ -732,6 +732,14 @@ private:
             (offset == 0u || offset == 0x10u || offset == 0x20u);
     }
 
+    static constexpr bool gif_dma_register(uint32_t address)
+    {
+        const uint32_t base = address & ~0xffu;
+        const uint32_t offset = address & 0xffu;
+        return base == c_ee_dmac::k_gif_base &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
+    }
+
     static constexpr bool sif_dma_register(uint32_t address)
     {
         const uint32_t base = address & ~0xffu;
@@ -746,6 +754,7 @@ private:
         {
         case c_ee_dmac::k_vif0_base: return 1u << 0u;
         case c_ee_dmac::k_vif1_base: return 1u << 1u;
+        case c_ee_dmac::k_gif_base: return 1u << 2u;
         case c_ee_dmac::k_sif0_base: return 1u << 5u;
         case c_ee_dmac::k_sif1_base: return 1u << 6u;
         case c_ee_dmac::k_from_spr_base: return 1u << 8u;
@@ -784,6 +793,10 @@ private:
     static bool vif_dma(void* user, uint32_t channel, const uint8_t* data, uint32_t qwc)
     {
         auto& self = *static_cast<c_ee_strict_firmware_pilot*>(user);
+        if (channel == 2u)
+        {
+            return self.m_gif_path3.consume(data, qwc);
+        }
         if (channel > 1u || !vif_packet_supported(data, qwc))
         {
             return false;
@@ -860,7 +873,7 @@ private:
         // Limit the pilot to nonzero bounded transfers with no alias or
         // physical span overflow. The production engine validates again.
         const uint64_t bytes = qwc.m_lo * 16u;
-        if (qwc.m_lo == 0u || qwc.m_lo > 1024u || (madr.m_lo & 15u) != 0u ||
+        if (qwc.m_lo == 0u || qwc.m_lo > 4096u || (madr.m_lo & 15u) != 0u ||
             madr.m_lo >= k_ram_size || bytes > k_ram_size - madr.m_lo ||
             !m_memory.contains(static_cast<uint32_t>(madr.m_lo), static_cast<size_t>(bytes)))
         {
@@ -911,7 +924,7 @@ private:
             *value = {self.m_dmac_control, 0u};
             return true;
         }
-        if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address) ||
+        if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address) || gif_dma_register(address) ||
             (self.m_iop != nullptr && sif_dma_register(address)))
         {
             return c_ee_dmac::mmio_read(&self.m_hardware.dmac(), address, width, value);
@@ -1074,7 +1087,7 @@ private:
             }
             return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
         }
-        if (spr_register(address) || vif_dma_register(address) ||
+        if (spr_register(address) || vif_dma_register(address) || gif_dma_register(address) ||
             (self.m_iop != nullptr && sif_dma_register(address)))
         {
             if ((self.m_hardware.dmac().started_channels() & dma_channel_bit(address)) != 0u)

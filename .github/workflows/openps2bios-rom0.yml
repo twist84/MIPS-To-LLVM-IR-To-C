@@ -84,7 +84,7 @@ jobs:
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
           assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000000,00000000,00000000,00000000" in log, log
-          assert re.search(r"^Dual ROM0 stop: boundary=HOST_REFUSAL result=5 .*opcode=ac230008 data_address=00107a88", log, re.M), log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ee_pc=001006c0 .*slot_pending=0$", log, re.M), log
           assert "Dual ROM0 IOP memory fault:" not in log, log
           assert stop and int(stop[1]) > 819184, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818763 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
@@ -104,7 +104,8 @@ jobs:
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
           assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
           assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
-          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=[1-9][0-9]*$", log, re.M), log
+          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
+          assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
           assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
           PY
 
@@ -331,7 +332,7 @@ jobs:
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
           assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000000,00000000,00000000,00000000" in log, log
-          assert re.search(r"^Dual ROM0 stop: boundary=HOST_REFUSAL result=5 .*opcode=ac230008 data_address=00107a88", log, re.M), log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ee_pc=001006c0 .*slot_pending=0$", log, re.M), log
           assert "Dual ROM0 IOP memory fault:" not in log, log
           assert stop and int(stop[1]) > 819376, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818955 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
@@ -351,7 +352,8 @@ jobs:
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
           assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
           assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
-          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=[1-9][0-9]*$", log, re.M), log
+          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
+          assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
           assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
           PY
 

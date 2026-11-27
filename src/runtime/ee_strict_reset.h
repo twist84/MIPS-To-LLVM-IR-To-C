@@ -238,8 +238,9 @@ private:
     uint32_t m_count = 0u;
 };
 
-// Bounded cold D-cache. One staged line per instruction or branch
-// slot; no replacement, writeback, locking or live maintenance.
+// Bounded cold D-cache. One staged line per instruction or branch slot;
+// validated two-way least-recently-filled replacement and dirty writeback.
+// Locking, live CACHE operations and cache latency remain unsupported.
 class c_ee_reset_data_cache
 {
 public:
@@ -253,6 +254,7 @@ public:
         uint32_t m_tag = 0u;
         bool m_valid = false;
         bool m_dirty = false;
+        bool m_lrf = false;
         uint8_t m_bytes[k_line_size]{};
     };
 
@@ -270,7 +272,7 @@ public:
         }
 
         constexpr uint8_t* access(uint32_t address, const s_ee_bus_span_plan& bus,
-            const uint8_t* ram, size_t size, bool store)
+            uint8_t* ram, size_t size, bool store)
         {
             const uint32_t physical = bus.m_address;
             const uint32_t width = bus.m_width;
@@ -296,6 +298,7 @@ public:
                     m_line = line;
                     m_set = set;
                     m_way = way;
+                    m_writeback_invalidate = false;
                     m_pending = true;
                     m_line.m_dirty = m_line.m_dirty || store;
                     return m_line.m_bytes + offset;
@@ -305,9 +308,24 @@ public:
                     free_way = way;
                 }
             }
-            if (free_way == k_ways)
+            m_replacing = free_way == k_ways;
+            m_writeback_invalidate = false;
+            if (m_replacing)
             {
-                return nullptr;
+                const auto& way0 = m_cache->m_lines[set][0u];
+                const auto& way1 = m_cache->m_lines[set][1u];
+                free_way = static_cast<uint32_t>(way0.m_lrf ^ way1.m_lrf);
+                const auto& victim = m_cache->m_lines[set][free_way];
+                if (!victim.m_valid || (victim.m_dirty &&
+                    (ee_classify_physical_span(victim.m_tag, 16u, size) !=
+                        e_ee_bus_region::RAM ||
+                     ee_classify_physical_span(victim.m_tag + 48u, 16u, size) !=
+                        e_ee_bus_region::RAM)))
+                {
+                    return nullptr;
+                }
+                m_victim = victim;
+                m_line.m_lrf = !victim.m_lrf;
             }
             m_line.m_tag = base;
             m_line.m_valid = true;
@@ -318,8 +336,40 @@ public:
             }
             m_set = set;
             m_way = free_way;
+            m_backing = ram;
             m_pending = true;
             return m_line.m_bytes + offset;
+        }
+
+        constexpr bool index_writeback_invalidate(uint32_t address,
+            uint8_t* ram, size_t size)
+        {
+            if (m_cache == nullptr || ram == nullptr || m_pending ||
+                (address & 0x3eu) != 0u || address >= 0x1000u)
+            {
+                return false;
+            }
+            const uint32_t set = (address >> 6u) & (k_sets - 1u);
+            const uint32_t way = address & 1u;
+            m_victim = m_cache->m_lines[set][way];
+            if (m_victim.m_valid && m_victim.m_dirty &&
+                (ee_classify_physical_span(m_victim.m_tag, 16u, size) !=
+                    e_ee_bus_region::RAM ||
+                 ee_classify_physical_span(m_victim.m_tag + 48u, 16u, size) !=
+                    e_ee_bus_region::RAM))
+            {
+                return false;
+            }
+            m_line = m_victim;
+            m_line.m_valid = false;
+            m_line.m_dirty = false;
+            m_backing = ram;
+            m_set = set;
+            m_way = way;
+            m_replacing = false;
+            m_writeback_invalidate = true;
+            m_pending = true;
+            return true;
         }
 
         constexpr void commit()
@@ -327,24 +377,45 @@ public:
             if (m_pending)
             {
                 auto& old = m_cache->m_lines[m_set][m_way];
-                if (!old.m_valid)
+                if ((m_replacing || m_writeback_invalidate) && m_victim.m_dirty)
+                {
+                    for (uint32_t i = 0u; i < k_line_size; ++i)
+                    {
+                        m_backing[m_victim.m_tag + i] = m_victim.m_bytes[i];
+                    }
+                }
+                if (!old.m_valid && m_line.m_valid)
                 {
                     ++m_cache->m_count;
                 }
-                if (!old.m_dirty && m_line.m_dirty)
+                else if (old.m_valid && !m_line.m_valid)
+                {
+                    --m_cache->m_count;
+                }
+                if (old.m_dirty && !m_line.m_dirty)
+                {
+                    --m_cache->m_dirty_count;
+                }
+                else if (!old.m_dirty && m_line.m_dirty)
                 {
                     ++m_cache->m_dirty_count;
                 }
                 old = m_line;
                 m_pending = false;
+                m_replacing = false;
+                m_writeback_invalidate = false;
             }
         }
 
     private:
         c_ee_reset_data_cache* m_cache = nullptr;
         s_line m_line{};
+        s_line m_victim{};
+        uint8_t* m_backing = nullptr;
         uint32_t m_set = 0u;
         uint32_t m_way = 0u;
+        bool m_replacing = false;
+        bool m_writeback_invalidate = false;
         bool m_pending = false;
     };
 
@@ -532,6 +603,10 @@ struct s_ee_reset_mmio
         if (m_scheduled_sif_vif && (base == 0xb0008000u || base == 0xb0009000u))
         {
             return offset == 0u || offset == 0x10u || offset == 0x20u;
+        }
+        if (base == 0xb000a000u)
+        {
+            return offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u;
         }
         return (base == 0xb000d000u || base == 0xb000d400u) &&
             (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
@@ -1244,6 +1319,16 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, (opcode >> 21u) & 31u)) +
             (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
         const uint32_t op = (opcode >> 16u) & 31u;
+        if (op == 0x14u && ram.m_data_cache != nullptr &&
+            ram.m_data_cache->has_resident())
+        {
+            if (!ram.m_data_cache->index_writeback_invalidate(address,
+                    ram.m_bytes, ram.m_size))
+            {
+                return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc, address};
+            }
+            return {result::COMMITTED, opcode, 0u, pc};
+        }
         if ((ram.m_instruction_cache != nullptr && ram.m_instruction_cache->has_resident()) ||
             (ram.m_data_cache != nullptr && ram.m_data_cache->has_resident()) ||
             cold_cache == nullptr || !cold_cache->invalidate(op, address))
