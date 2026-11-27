@@ -1,6 +1,8 @@
 #include "iop_folder_sector_source.h"
 
 #include <algorithm>
+#include <bit>
+#include <iterator>
 #include <cstring>
 #include <fstream>
 #include <limits>
@@ -62,31 +64,56 @@ bool valid_name(const std::string& name)
     return true;
 }
 
-void put16(uint8_t* p, uint16_t value, bool big = false)
+// Serialize the numeric value explicitly in ISO9660 byte order,
+// independently of host endianness and alignment.
+constexpr void put16(uint8_t* p, uint16_t value, bool big = false)
 {
-    p[big ? 1u : 0u] = static_cast<uint8_t>(value);
-    p[big ? 0u : 1u] = static_cast<uint8_t>(value >> 8u);
+    if (big)
+    {
+        value = std::byteswap(value);
+    }
+    p[0] = static_cast<uint8_t>(value);
+    p[1] = static_cast<uint8_t>(value >> 8u);
 }
 
-void put32(uint8_t* p, uint32_t value, bool big = false)
+constexpr void put32(uint8_t* p, uint32_t value, bool big = false)
 {
+    if (big)
+    {
+        value = std::byteswap(value);
+    }
     for (uint32_t i = 0u; i < 4u; ++i)
     {
-        p[big ? 3u - i : i] = static_cast<uint8_t>(value >> (i * 8u));
+        p[i] = static_cast<uint8_t>(value >> (i * 8u));
     }
 }
 
-void both16(uint8_t* p, uint16_t value)
+constexpr void both16(uint8_t* p, uint16_t value)
 {
     put16(p, value);
     put16(p + 2u, value, true);
 }
 
-void both32(uint8_t* p, uint32_t value)
+constexpr void both32(uint8_t* p, uint32_t value)
 {
     put32(p, value);
     put32(p + 4u, value, true);
 }
+
+consteval bool test_iso_byte_order()
+{
+    uint8_t bytes[12]{};
+    both16(bytes, 0x80ffu);
+    both32(bytes + 4u, 0x1234abffu);
+    constexpr uint8_t expected[] = {
+        0xffu, 0x80u, 0x80u, 0xffu,
+        0xffu, 0xabu, 0x34u, 0x12u,
+        0x12u, 0x34u, 0xabu, 0xffu
+    };
+    return std::equal(std::begin(bytes), std::end(bytes), std::begin(expected));
+}
+
+static_assert(test_iso_byte_order(), "ISO9660 dual-endian byte order");
 } // namespace
 
 c_folder_sector_source::c_folder_sector_source(const std::filesystem::path& root,

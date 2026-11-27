@@ -15,21 +15,21 @@ namespace ee
 
 namespace
 {
-static inline uint8_t  mmi_get8 (const s_ee_u128& v, int i){ return (uint8_t)((i<8?v.m_lo:v.m_hi)>>((i&7)*8)); }
-static inline uint16_t mmi_get16(const s_ee_u128& v, int i){ return (uint16_t)((i<4?v.m_lo:v.m_hi)>>((i&3)*16)); }
-static inline uint32_t mmi_get32(const s_ee_u128& v, int i){ return (uint32_t)((i<2?v.m_lo:v.m_hi)>>((i&1)*32)); }
-static inline uint64_t mmi_get64(const s_ee_u128& v, int i){ return i==0?v.m_lo:v.m_hi; }
+static inline constexpr uint8_t  mmi_get8 (const s_ee_u128& v, int i){ return (uint8_t)((i<8?v.m_lo:v.m_hi)>>((i&7)*8)); }
+static inline constexpr uint16_t mmi_get16(const s_ee_u128& v, int i){ return (uint16_t)((i<4?v.m_lo:v.m_hi)>>((i&3)*16)); }
+static inline constexpr uint32_t mmi_get32(const s_ee_u128& v, int i){ return (uint32_t)((i<2?v.m_lo:v.m_hi)>>((i&1)*32)); }
+static inline constexpr uint64_t mmi_get64(const s_ee_u128& v, int i){ return i==0?v.m_lo:v.m_hi; }
 
-static inline s_ee_u128 mmi_put8 (s_ee_u128 v, int i, uint8_t  x){ uint64_t& w = i<8?v.m_lo:v.m_hi; int s=(i&7)*8; w=(w&~(0xffULL<<s))|((uint64_t)x<<s); return v; }
-static inline s_ee_u128 mmi_put16(s_ee_u128 v, int i, uint16_t x){ uint64_t& w = i<4?v.m_lo:v.m_hi; int s=(i&3)*16; w=(w&~(0xffffULL<<s))|((uint64_t)x<<s); return v; }
-static inline s_ee_u128 mmi_put32(s_ee_u128 v, int i, uint32_t x){ uint64_t& w = i<2?v.m_lo:v.m_hi; int s=(i&1)*32; w=(w&~(0xffffffffULL<<s))|((uint64_t)x<<s); return v; }
-static inline s_ee_u128 mmi_put64(s_ee_u128 v, int i, uint64_t x){ if(i==0)v.m_lo=x;else v.m_hi=x; return v; }
+static inline constexpr s_ee_u128 mmi_put8 (s_ee_u128 v, int i, uint8_t  x){ uint64_t& w = i<8?v.m_lo:v.m_hi; int s=(i&7)*8; w=(w&~(0xffULL<<s))|((uint64_t)x<<s); return v; }
+static inline constexpr s_ee_u128 mmi_put16(s_ee_u128 v, int i, uint16_t x){ uint64_t& w = i<4?v.m_lo:v.m_hi; int s=(i&3)*16; w=(w&~(0xffffULL<<s))|((uint64_t)x<<s); return v; }
+static inline constexpr s_ee_u128 mmi_put32(s_ee_u128 v, int i, uint32_t x){ uint64_t& w = i<2?v.m_lo:v.m_hi; int s=(i&1)*32; w=(w&~(0xffffffffULL<<s))|((uint64_t)x<<s); return v; }
+static inline constexpr s_ee_u128 mmi_put64(s_ee_u128 v, int i, uint64_t x){ if(i==0)v.m_lo=x;else v.m_hi=x; return v; }
 
-static inline uint8_t  mmi_sat8u (uint32_t v){ return v>0xff?0xff:(uint8_t)v; }
-static inline uint16_t mmi_sat16u(uint32_t v){ return v>0xffff?0xffff:(uint16_t)v; }
-static inline uint32_t mmi_sat32u(uint64_t v){ return v>0xffffffffULL?0xffffffffu:(uint32_t)v; }
+static inline constexpr uint8_t  mmi_sat8u (uint32_t v){ return v>0xff?0xff:(uint8_t)v; }
+static inline constexpr uint16_t mmi_sat16u(uint32_t v){ return v>0xffff?0xffff:(uint16_t)v; }
+static inline constexpr uint32_t mmi_sat32u(uint64_t v){ return v>0xffffffffULL?0xffffffffu:(uint32_t)v; }
 
-static inline s_ee_u128 mmi_shr128(const s_ee_u128& v, int n)
+static inline constexpr s_ee_u128 mmi_shr128(const s_ee_u128& v, int n)
 {
     n &= 127;
     if (n == 0)
@@ -39,7 +39,7 @@ static inline s_ee_u128 mmi_shr128(const s_ee_u128& v, int n)
     else { int m = n - 64; r.m_hi = 0; r.m_lo = (m < 64) ? (v.m_hi >> m) : 0; }
     return r;
 }
-static inline s_ee_u128 mmi_shl128(const s_ee_u128& v, int n)
+static inline constexpr s_ee_u128 mmi_shl128(const s_ee_u128& v, int n)
 {
     n &= 127;
     if (n == 0)
@@ -49,7 +49,7 @@ static inline s_ee_u128 mmi_shl128(const s_ee_u128& v, int n)
     else { int m = n - 64; r.m_lo = 0; r.m_hi = (m < 64) ? (v.m_lo << m) : 0; }
     return r;
 }
-static inline s_ee_u128 mmi_sar128(const s_ee_u128& v, int n)
+static inline constexpr s_ee_u128 mmi_sar128(const s_ee_u128& v, int n)
 {
     n &= 127;
     if (n == 0)
@@ -63,7 +63,7 @@ static inline s_ee_u128 mmi_sar128(const s_ee_u128& v, int n)
 } // namespace
 
 // Apply one MMI packed op. a = rs operand, b = rt operand, sa = shift amount.
-inline s_ee_u128 mmi_apply(e_lift_op_kind kind, const s_ee_u128& a, const s_ee_u128& b, uint8_t sa)
+inline constexpr s_ee_u128 mmi_apply(e_lift_op_kind kind, const s_ee_u128& a, const s_ee_u128& b, uint8_t sa)
 {
     s_ee_u128 r{};
     switch (kind)

@@ -70,6 +70,34 @@ See [current retail validation and limitations](docs/SDBZ_RUNTIME_VALIDATION_202
 [native boot plan](docs/SDBZ_NATIVE_BOOT_PLAN.md) and
 [native WebGPU documentation](docs/NATIVE_WEBGPU.md).
 
+## EE translation cache recovery
+
+The 2026-11-27 Windows validation reconstructed all 16,252 known SDBZ
+EE IR modules with exact original SHA-256 hashes and identical reconstructed
+metadata. Isolated reconstruction improved from 191.000 s to 105.640 s
+(44.69% lower wall time). The persistent eight-worker recovery path can
+target the selected O5 profile directly and reuse authenticated native
+objects without an intermediate O0 build.
+
+Full forced O5 recovery completed in 273.625 s, versus 407.922 s in an
+earlier recovery from a different starting cache state; all 16,252 native
+objects were reused, with zero compilation and one link. A subsequent
+warm explicit overwrite took 131.735 s with no native emission or linking.
+The default verified IR-only level-1 backup took 6.000 s for compression
+and archive testing in the isolated compression benchmark; that figure
+does not include the remaining recovery stages.
+
+Two post-recovery P40 runs reached training gameplay, each completing
+40 million dispatches, retaining all 16,252 cached modules, with no
+observed IR expansion, native compilation wait, IOP guest faults or
+VU1 interpreter fallbacks. Both had byte-identical CPU/GPU display
+captures and successful window presentations. Host audio was disabled;
+controller inputs differed, so the runs are functional validation rather
+than a controlled runtime performance comparison.
+
+See [known-IR replay and recovery](docs/SDBZ_KNOWN_IR_REPLAY.md) for
+the full measurements, provenance requirements and limitations.
+
 ## Repository layout
 
 | Path | Contents |

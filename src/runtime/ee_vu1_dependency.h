@@ -9,6 +9,36 @@
 
 namespace ee
 {
+namespace vu1_dependency_detail
+{
+struct s_lane_list
+{
+    std::array<uint8_t, 4> m_lanes{};
+    uint8_t m_count = 0u;
+};
+
+// VU destination masks use bits 3..0 for X..W. Expand the 16
+// possible masks once at compilation, retaining ascending lane order.
+consteval std::array<s_lane_list, 16> make_lane_lists()
+{
+    std::array<s_lane_list, 16> lists{};
+    for (uint32_t mask = 0u; mask < lists.size(); ++mask)
+    {
+        auto& list = lists[mask];
+        for (uint8_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                list.m_lanes[list.m_count++] = lane;
+            }
+        }
+    }
+    return lists;
+}
+
+inline constexpr auto k_lane_lists = make_lane_lists();
+} // namespace vu1_dependency_detail
+
 struct s_ee_vu1_use
 {
     std::array<uint8_t, 4> m_reg{};
@@ -29,7 +59,7 @@ struct s_ee_vu1_use
     uint8_t m_write_lane_count = 0u;
     uint8_t m_vi_index_count = 0u;
 
-    void read_vi(uint32_t register_index)
+    constexpr void read_vi(uint32_t register_index)
     {
         register_index &= 15u;
         if (register_index != 0u)
@@ -44,36 +74,32 @@ struct s_ee_vu1_use
         }
     }
 
-    void read(uint32_t register_index, uint32_t mask)
+    constexpr void read(uint32_t register_index, uint32_t mask)
     {
         if (register_index != 0u && mask != 0u && m_n < m_reg.size())
         {
             m_reg[m_n] = static_cast<uint8_t>(register_index);
             m_mask[m_n++] = static_cast<uint8_t>(mask);
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            const auto& lanes = vu1_dependency_detail::k_lane_lists[mask & 15u];
+            for (uint32_t index = 0u; index < lanes.m_count; ++index)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    m_read_lanes[m_read_lane_count++] =
-                        static_cast<uint8_t>(register_index * 4u + lane);
-                }
+                m_read_lanes[m_read_lane_count++] =
+                    static_cast<uint8_t>(register_index * 4u + lanes.m_lanes[index]);
             }
         }
     }
 
-    void write(uint32_t register_index, uint32_t mask)
+    constexpr void write(uint32_t register_index, uint32_t mask)
     {
         if (register_index != 0u && mask != 0u && m_wn < m_wreg.size())
         {
             m_wreg[m_wn] = static_cast<uint8_t>(register_index);
             m_wmask[m_wn++] = static_cast<uint8_t>(mask);
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            const auto& lanes = vu1_dependency_detail::k_lane_lists[mask & 15u];
+            for (uint32_t index = 0u; index < lanes.m_count; ++index)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    m_write_lanes[m_write_lane_count++] =
-                        static_cast<uint8_t>(register_index * 4u + lane);
-                }
+                m_write_lanes[m_write_lane_count++] =
+                    static_cast<uint8_t>(register_index * 4u + lanes.m_lanes[index]);
             }
         }
     }
@@ -84,7 +110,7 @@ struct s_ee_vu1_dependency
     std::array<std::array<uint32_t, 4>, 32> m_vf_ready{};
     std::array<uint32_t, 16> m_vi_ready{};
 
-    static s_ee_vu1_use decode(uint32_t lo, uint32_t hi)
+    static constexpr s_ee_vu1_use decode(uint32_t lo, uint32_t hi)
     {
         s_ee_vu1_use result{};
         const uint32_t dest = (hi >> 21u) & 15u;
@@ -282,7 +308,7 @@ struct s_ee_vu1_dependency
         return result;
     }
 
-    uint32_t issue(const s_ee_vu1_use& use, uint32_t next_cycle) const
+    constexpr uint32_t issue(const s_ee_vu1_use& use, uint32_t next_cycle) const
     {
         uint32_t cycle = next_cycle;
         for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
@@ -297,7 +323,7 @@ struct s_ee_vu1_dependency
         return cycle;
     }
 
-    void retire(const s_ee_vu1_use& use, uint32_t cycle)
+    constexpr void retire(const s_ee_vu1_use& use, uint32_t cycle)
     {
         for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
         {

@@ -512,13 +512,8 @@ if(EE_ENABLE_WEBGPU)
     target_compile_definitions(ee_game_runner PRIVATE EE_ENABLE_WEBGPU=1)
     target_link_libraries(ee_game_runner PRIVATE ee_webgpu_native)
     if(EE_ENABLE_RAYLIB_WINDOW)
-        # The separately compiled raudio from this same checkout is
-        # the sole audio implementation; only configure graphics here.
-        set(BUILD_EXAMPLES OFF CACHE BOOL "Build raylib examples" FORCE)
-        set(CUSTOMIZE_BUILD ON CACHE BOOL "Customize raylib modules" FORCE)
-        set(USE_AUDIO OFF CACHE BOOL "Disable duplicate raylib audio" FORCE)
-        set(SUPPORT_MODULE_RAUDIO OFF CACHE BOOL "Disable duplicate raudio" FORCE)
-        add_subdirectory("${raylib_SOURCE_DIR}" "${raylib_BINARY_DIR}")
+        include(cmake/configure_raylib_window.cmake)
+        ee_configure_raylib_window("${raylib_SOURCE_DIR}" "${raylib_BINARY_DIR}")
         target_sources(ee_game_runner PRIVATE
             src/runtime/ee_raylib_window.cpp
             src/runtime/ee_raylib_win32.cpp)

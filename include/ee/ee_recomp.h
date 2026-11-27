@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include <memory>
 
 namespace ee {
 
@@ -80,6 +81,8 @@ struct s_recomp_options
     std::vector<uint32_t> only_functions;
     // LLVM optimisation level hint (0-3); currently logged only.
     int opt_level = 0;
+    // Bounded parallel emission for explicit batches only; ownership is serial.
+    uint32_t ir_jobs = 1;
     // Reuse a verified full-ELF discovery snapshot when emitting one function.
     // The snapshot is tied to the exact source ELF and discovery format.
     std::string discovery_cache_path;
@@ -96,5 +99,19 @@ bool ee_recomp(const char* elf_path,
                s_recompiled_elf* result,
                std::string* error = nullptr,
                const s_recomp_options& opts = {});
+
+struct s_ee_recomp_session_state;
+class c_ee_recomp_session
+{
+public:
+    c_ee_recomp_session();
+    ~c_ee_recomp_session();
+    bool recompile(const char* elf_path, const char* output_dir,
+                   s_recompiled_elf* result, std::string* error,
+                   const s_recomp_options& opts);
+
+private:
+    std::unique_ptr<s_ee_recomp_session_state> m_state;
+};
 
 } // namespace ee

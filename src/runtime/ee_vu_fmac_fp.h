@@ -1,4 +1,5 @@
 #pragma once
+#include <bit>
 #include <cstdint>
 
 // Integer VU FMAC reference for the generated LLVM arithmetic.
@@ -15,7 +16,7 @@ struct s_fmac_result
 // The VU0 adder retains one alignment guard bit and, on cancellation
 // underflow, the normalized fraction in an exponent-zero result word.
 // See the physical SCPH-900xx observations in PCSX2 PR #12001.
-inline s_fmac_result add(uint32_t a, uint32_t b, bool subtract)
+inline constexpr s_fmac_result add(uint32_t a, uint32_t b, bool subtract)
 {
     if (subtract)
     {
@@ -48,11 +49,11 @@ inline s_fmac_result add(uint32_t a, uint32_t b, bool subtract)
     }
     else
     {
-        while (magnitude < 0x1000000u)
-        {
-            magnitude <<= 1u;
-            --exponent;
-        }
+        // sum is nonzero and magnitude is below 2^25. Normalise
+        // directly to bit 24 instead of shifting one bit per iteration.
+        const int shift = std::countl_zero(magnitude) - 7;
+        magnitude <<= shift;
+        exponent -= shift;
     }
     const uint32_t fraction = (magnitude >> 1u) & 0x7fffffu;
     if (exponent > 255)
@@ -76,7 +77,7 @@ struct s_product_row
     uint32_t m_carry;
 };
 
-inline s_product_row booth_row(uint32_t a, uint32_t code, uint32_t shift)
+inline constexpr s_product_row booth_row(uint32_t a, uint32_t code, uint32_t shift)
 {
     if (code == 0u || code == 7u)
     {
@@ -95,12 +96,12 @@ inline s_product_row booth_row(uint32_t a, uint32_t code, uint32_t shift)
     return {magnitude, 0u};
 }
 
-inline s_product_row product_csa(uint32_t a, uint32_t b, uint32_t c)
+inline constexpr s_product_row product_csa(uint32_t a, uint32_t b, uint32_t c)
 {
     return {a ^ b ^ c, ((a & b) | ((a ^ b) & c)) << 1u};
 }
 
-inline s_fmac_result mul(uint32_t a, uint32_t b)
+inline constexpr s_fmac_result mul(uint32_t a, uint32_t b)
 {
     const int ea = static_cast<int>((a >> 23u) & 255u);
     const int eb = static_cast<int>((b >> 23u) & 255u);
@@ -151,7 +152,7 @@ struct s_mac_result
     uint32_t m_sticky;
 };
 
-inline s_mac_result mac(uint32_t acc, uint32_t a, uint32_t b,
+inline constexpr s_mac_result mac(uint32_t acc, uint32_t a, uint32_t b,
                         bool subtract, bool acc_overflow)
 {
     const auto product = mul(a, b);

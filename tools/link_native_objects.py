@@ -21,6 +21,12 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+_tools_path = str(Path(__file__).resolve().parent)
+if _tools_path not in sys.path:
+    sys.path.insert(0, _tools_path)
+import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
+
 
 def select_native_link_compiler(requested=None, platform=None, environment=None):
     """Choose a driver compatible with this linker's Clang/GNU-style options.
@@ -68,6 +74,57 @@ def select_native_link_compiler(requested=None, platform=None, environment=None)
         "install LLVM, add clang++ to PATH, or set CXX/--cxx to "
         "the absolute path of clang++.exe"
     )
+
+
+def link_toolchain_identity(cxx=None, *, pdb=False, data_dispatch=False, dispatcher_opt=0):
+    """Identity for an optional no-link reuse, not a guest object cache key.
+
+    Conservative: inability to identify the driver or a linker disables the
+    optimization. The actual link remains available.
+    """
+    driver = select_native_link_compiler(cxx)
+    compiler = Path(shutil.which(driver) or driver).resolve(strict=True)
+
+    def executable_identity(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return {"path": str(path), "sha256": digest.hexdigest()}
+
+    linker_names = ("link.exe", "lld-link.exe") if sys.platform == "win32" else (
+        "ld", "ld.lld", "ld64", "ld.gold")
+    candidates = set()
+    for name in linker_names:
+        found = shutil.which(name)
+        if found:
+            candidates.add(Path(found).resolve(strict=True))
+        sibling = compiler.parent / name
+        if sibling.is_file():
+            candidates.add(sibling.resolve(strict=True))
+    if sys.platform != "win32":
+        result = subprocess.run([str(compiler), "-print-prog-name=ld"],
+                                capture_output=True, text=True, check=True)
+        name = result.stdout.strip()
+        found = shutil.which(name) or name
+        if found and Path(found).is_file():
+            candidates.add(Path(found).resolve(strict=True))
+    if not candidates:
+        raise ValueError("native linker identity unavailable")
+    return {
+        "schema": "ee-link-toolchain-v1",
+        "compiler": executable_identity(compiler),
+        "linkers": [executable_identity(path) for path in sorted(candidates)],
+        "platform": sys.platform,
+        "pdb": pdb,
+        "data_dispatch": data_dispatch,
+        "dispatcher_opt": dispatcher_opt,
+        "environment": {name: os.environ.get(name, "") for name in (
+            "PATH", "INCLUDE", "LIB", "LIBPATH", "CPATH", "CPLUS_INCLUDE_PATH",
+            "CXXFLAGS", "SDKROOT", "LIBRARY_PATH", "COMPILER_PATH",
+            "GCC_EXEC_PREFIX", "VCToolsInstallDir", "WindowsSdkDir",
+            "WindowsSDKVersion")},
+    }
 
 
 def cpp_string(value):
@@ -416,16 +473,21 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
         flags = wrapper_flags if unit_index == 0 else compile_flags
         unit_key = wrapper_key if unit_index == 0 else dependency_key
         encoded = generated.encode('utf-8')
-        key = hashlib.sha256(
-            unit_key.encode('ascii') + b'\0' + encoded
-        ).hexdigest()
+        def dispatch_key(dependency):
+            return hashlib.sha256(
+                dependency.encode('ascii') + b'\0' + encoded
+            ).hexdigest()
+
+        key = dispatch_key(unit_key)
+        accepted_keys = {key, *(dispatch_key(old)
+                                for old in getattr(unit_key, "legacy", ()))}
         record_path = obj.with_suffix(obj.suffix + '.json')
         try:
             record = json.loads(record_path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             record = {}
         valid = (
-            obj.is_file() and record.get('key') == key and
+            obj.is_file() and record.get('key') in accepted_keys and
             record.get('object_sha256') == hashlib.sha256(obj.read_bytes()).hexdigest()
         )
         if not valid:
@@ -445,6 +507,10 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
                 if temporary.exists():
                     temporary.unlink()
         else:
+            if record.get('key') != key:
+                # Only promote the proven identity after checking the exact
+                # native object bytes; a failed promotion keeps the old receipt.
+                shared_ir.write_json(record_path, dict(record, key=key))
             reused += 1
         object_paths.append(obj)
     print(
@@ -554,6 +620,15 @@ def load_inputs(metadata_path, object_dir):
     return metadata, object_manifest, validated_functions, linked_objects
 
 
+class RuntimeCacheKey(str):
+    """Versioned runtime identity plus reproducible legacy aggregate keys."""
+
+    def __new__(cls, canonical, legacy):
+        value = super().__new__(cls, canonical)
+        value.legacy = frozenset(legacy)
+        return value
+
+
 def runtime_cache_key(sources, source_root, compiler, flags):
     """Fingerprint the compilation ABI and all in-tree C++ include inputs.
 
@@ -572,7 +647,10 @@ def runtime_cache_key(sources, source_root, compiler, flags):
                          "CXXFLAGS", "SDKROOT")
         },
     }
-    hasher = hashlib.sha256(json.dumps(info, sort_keys=True).encode("utf-8"))
+    legacy_info = json.dumps(info, sort_keys=True).encode("utf-8")
+    info["schema"] = "ee-runtime-objects-v2-text-lf"
+    canonical = hashlib.sha256(json.dumps(info, sort_keys=True).encode("utf-8"))
+    legacy = [hashlib.sha256(legacy_info) for _ in range(3)]
     paths = list(sources)
     for directory in ("include", "src/runtime", "src/ee"):
         paths.extend(
@@ -581,10 +659,24 @@ def runtime_cache_key(sources, source_root, compiler, flags):
         )
     for path in sorted(set(paths)):
         relative = path.relative_to(source_root).as_posix()
-        hasher.update(relative.encode("utf-8"))
-        hasher.update(b"\\0")
-        hasher.update(hashlib.sha256(path.read_bytes()).digest())
-    return hasher.hexdigest()
+        raw = path.read_bytes()
+        normalized = raw
+        if path.suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".inl"):
+            normalized = shared_ir.normalized_source_bytes(raw)
+        crlf = (normalized.replace(b"\n", b"\r\n")
+                if b"\r" not in normalized and b"\0" not in normalized
+                and path.suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".inl")
+                else raw)
+        # The old aggregate key did not retain per-file hashes. Prove only
+        # the actual checkout, all-LF or all-CRLF variant; an unreproducible
+        # historical mixture is a cache miss, never a guessed identity.
+        for hasher, data in zip((canonical, *legacy),
+                                (normalized, raw, normalized, crlf)):
+            hasher.update(relative.encode("utf-8"))
+            hasher.update(b"\\0")
+            hasher.update(hashlib.sha256(data).digest())
+    return RuntimeCacheKey(canonical.hexdigest(),
+                           (hasher.hexdigest() for hasher in legacy))
 
 
 def cached_runtime_objects(output, sources, source_root, cxx,
@@ -621,7 +713,7 @@ def cached_runtime_objects(output, sources, source_root, cxx,
         manifest = {}
     recorded = manifest.get("objects", [])
     reuse = (
-        manifest.get("key") == key and
+        manifest.get("key") in {key, *getattr(key, "legacy", ())} and
         len(recorded) == len(object_paths) and
         all(
             item.get("path") == path.name and path.is_file() and
@@ -630,6 +722,8 @@ def cached_runtime_objects(output, sources, source_root, cxx,
         )
     )
     if reuse:
+        if manifest.get("key") != key:
+            shared_ir.write_json(manifest_path, dict(manifest, key=key))
         print(
             "link_native_objects: reused "
             f"{len(object_paths)} cached runtime objects "
@@ -704,6 +798,8 @@ def main():
         default=0,
         help="metadata chunk optimisation level (default: 0); entry wrapper at least O2",
     )
+    parser.add_argument("--record-link-identity", action="store_true",
+                        help="record driver/linker identity for future unchanged-cache reuse")
     args = parser.parse_args()
 
     source_root = args.source_root.resolve()
@@ -722,6 +818,7 @@ def main():
             )
             if "clang" not in (compiler_info.stdout + compiler_info.stderr).lower():
                 raise ValueError("--pdb requires clang++ (with lld), not GCC")
+        validation_started = time.monotonic()
         metadata, object_manifest, functions, objects = load_inputs(
             args.functions_json.resolve(), args.object_dir.resolve()
         )
@@ -762,6 +859,7 @@ def main():
         if args.pdb:
             runtime_flags += ["-g", "-gcodeview"]
 
+        dispatch_started = time.monotonic()
         if args.data_dispatch:
             # Plain C table + cached generic glue: no C++ headers to parse
             # per library, which dominated small overlay links (~1.1 s).
@@ -789,6 +887,7 @@ def main():
                 include_args, compile_flags
             )
 
+        dispatch_seconds = time.monotonic() - dispatch_started
         certificate_count = None
         if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1":
             from native_alu_certificate import verified_bounds, build_certificate_source
@@ -805,11 +904,13 @@ def main():
             print(f"link_native_objects: {certificate_count} verified ALU entry certificates",
                   flush=True)
 
+        runtime_started = time.monotonic()
         runtime_objects = cached_runtime_objects(
             cache_base, required_sources, source_root, args.cxx,
             include_args, runtime_flags
         )
 
+        runtime_seconds = time.monotonic() - runtime_started
         # Use a response file: the complete game emits thousands of per-function
         # objects and can exceed the operating system's command-line length.
         response_path = args.output.with_suffix(args.output.suffix + ".objects.rsp")
@@ -855,6 +956,12 @@ def main():
         )
         link_started = time.monotonic()
         subprocess.run(command, check=True)
+        link_seconds = time.monotonic() - link_started
+        metrics.emit_child({"tool": "link_native_objects",
+                            "stages": {"native_link": link_seconds,
+                                       "host_dispatch_preparation": dispatch_seconds,
+                                       "host_runtime_preparation": runtime_seconds,
+                                       "link_input_and_host_preparation": link_started - validation_started}})
         print(
             f"link_native_objects: guest DLL linked "
             f"({time.monotonic() - link_started:.2f}s)",
@@ -886,6 +993,14 @@ def main():
             "pdb_sha256": hashlib.sha256(pdb_path.read_bytes()).hexdigest()
                           if pdb_path is not None else None,
         }
+        if args.record_link_identity:
+            try:
+                link_manifest["toolchain_identity"] = link_toolchain_identity(
+                    args.cxx, pdb=args.pdb, data_dispatch=args.data_dispatch,
+                    dispatcher_opt=args.dispatcher_opt)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f"link_native_objects: no-link reuse unavailable: {error}",
+                      file=sys.stderr, flush=True)
         manifest_path = args.output.with_suffix(args.output.suffix + ".link.json")
         manifest_path.write_text(json.dumps(link_manifest, indent=2) + "\n", encoding="utf-8")
         print(

@@ -2,6 +2,8 @@
 
 #include "ee_instruction.h"
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -10,7 +12,9 @@ namespace ee
 // A PCSX2-style heuristic in eighths of an EE cycle, not measured R5900
 // latency. Only apply to an instruction accepted by the exact EE decoder.
 // Zero means that no reference cost is established.
-constexpr uint32_t pcsx2_opcode_weight(uint32_t word, e_ee_valid validity)
+namespace pcsx2_timing_detail
+{
+constexpr uint32_t reference_opcode_weight(uint32_t word, e_ee_valid validity)
 {
     if (validity != e_ee_valid::VALID)
     {
@@ -153,6 +157,64 @@ constexpr uint32_t pcsx2_opcode_weight(uint32_t word, e_ee_valid validity)
         }
     default: return 0u;
     }
+}
+
+// Only the four packed sub-op groups need selector lookup. The
+// existing reference classifier is the single source of their costs.
+inline constexpr std::array<uint32_t, 4> k_mmi_groups{0x08u, 0x28u, 0x09u, 0x29u};
+
+consteval auto make_mmi_weights()
+{
+    std::array<std::array<uint8_t, 32>, k_mmi_groups.size()> weights{};
+    for (std::size_t group = 0u; group < k_mmi_groups.size(); ++group)
+    {
+        for (uint32_t sa = 0u; sa < 32u; ++sa)
+        {
+            const uint32_t word = (0x1cu << 26u) | (sa << 6u) | k_mmi_groups[group];
+            const auto weight = reference_opcode_weight(word, e_ee_valid::VALID);
+            weights[group][sa] = static_cast<uint8_t>(weight);
+        }
+    }
+    return weights;
+}
+
+inline constexpr auto k_mmi_weights = make_mmi_weights();
+static_assert([]() consteval
+{
+    for (std::size_t group = 0u; group < k_mmi_groups.size(); ++group)
+    {
+        for (uint32_t sa = 0u; sa < 32u; ++sa)
+        {
+            const uint32_t word = (0x1cu << 26u) | (sa << 6u) | k_mmi_groups[group];
+            if (k_mmi_weights[group][sa] != reference_opcode_weight(word, e_ee_valid::VALID))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}(), "MMI timing weights must fit the generated table");
+} // namespace pcsx2_timing_detail
+
+constexpr uint32_t pcsx2_opcode_weight(uint32_t word, e_ee_valid validity)
+{
+    if (validity != e_ee_valid::VALID)
+    {
+        return 0u;
+    }
+    if ((word >> 26u) == 0x1cu)
+    {
+        const uint32_t sa = (word >> 6u) & 31u;
+        switch (word & 63u)
+        {
+        case 0x08u: return pcsx2_timing_detail::k_mmi_weights[0][sa];
+        case 0x28u: return pcsx2_timing_detail::k_mmi_weights[1][sa];
+        case 0x09u: return pcsx2_timing_detail::k_mmi_weights[2][sa];
+        case 0x29u: return pcsx2_timing_detail::k_mmi_weights[3][sa];
+        default: break;
+        }
+    }
+    return pcsx2_timing_detail::reference_opcode_weight(word, validity);
 }
 
 constexpr uint32_t pcsx2_opcode_weight(const s_ee_instruction& insn)

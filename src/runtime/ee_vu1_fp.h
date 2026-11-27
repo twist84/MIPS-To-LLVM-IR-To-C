@@ -5,63 +5,61 @@
 #include "ee_vu_scalar_fp.h"
 #include "ee_vu_fmac_fp.h"
 
-#include <cstring>
+#include <bit>
+#include <limits>
+#include <type_traits>
 #include <cmath>
 #include <cstdint>
 #include <utility>
 
 namespace ee::vu1_fp {
 
+static_assert(sizeof(double) == sizeof(std::uint64_t) &&
+              std::numeric_limits<double>::is_iec559);
+
 inline constexpr std::uint32_t kSign = 0x80000000u;
 inline constexpr std::uint32_t kAbs = 0x7FFFFFFFu;
 inline constexpr std::uint32_t kOne = 0x3F800000u;
 
-inline std::uint32_t exponent(std::uint32_t x) { return (x >> 23) & 0xFFu; }
-inline std::uint32_t flush(std::uint32_t x) { return exponent(x) ? x : (x & kSign); }
-inline std::uint32_t mantissa(std::uint32_t x) { return (x & 0x7FFFFFu) | 0x800000u; }
+inline constexpr std::uint32_t exponent(std::uint32_t x) { return (x >> 23) & 0xFFu; }
+inline constexpr std::uint32_t flush(std::uint32_t x) { return exponent(x) ? x : (x & kSign); }
+inline constexpr std::uint32_t mantissa(std::uint32_t x) { return (x & 0x7FFFFFu) | 0x800000u; }
 
-inline int leading_zeroes(std::uint32_t value)
+inline constexpr int leading_zeroes(std::uint32_t value)
 {
-    int count = 0;
-    while ((value & 0x80000000u) == 0u && count < 32)
-    {
-        value <<= 1u;
-        ++count;
-    }
-    return count;
+    return std::countl_zero(value);
 }
 
 template <typename T, typename U>
-inline T bit_copy(const U& source)
+    requires (sizeof(T) == sizeof(U) &&
+              std::is_trivially_copyable_v<T> && std::is_trivially_copyable_v<U>)
+inline constexpr T bit_copy(const U& source)
 {
-    static_assert(sizeof(T) == sizeof(U), "bit_copy needs equal width");
-    T result{};
-    std::memcpy(&result, &source, sizeof(result));
-    return result;
+    return std::bit_cast<T>(source);
 }
 
-inline std::uint32_t pack(std::uint32_t sign, int e, std::uint32_t m) {
+inline constexpr std::uint32_t pack(std::uint32_t sign, int e, std::uint32_t m) {
     if (e > 255) return sign | kAbs;
     if (e <= 0) return sign;
     return sign | (static_cast<std::uint32_t>(e) << 23) | (m & 0x7FFFFFu);
 }
 
-inline std::uint32_t add(std::uint32_t a, std::uint32_t b)
+inline constexpr std::uint32_t add(std::uint32_t a, std::uint32_t b)
 {
     return vu_fmac_fp::add(a, b, false).m_bits;
 }
 
-inline std::uint32_t sub(std::uint32_t a, std::uint32_t b)
+inline constexpr std::uint32_t sub(std::uint32_t a, std::uint32_t b)
 {
     return vu_fmac_fp::add(a, b, true).m_bits;
 }
 
-inline std::uint32_t mul(std::uint32_t a, std::uint32_t b)
+inline constexpr std::uint32_t mul(std::uint32_t a, std::uint32_t b)
 {
     return vu_fmac_fp::mul(a, b).m_bits;
 }
 
-inline double to_double(std::uint32_t x) {
+inline constexpr double to_double(std::uint32_t x) {
     if (!exponent(x)) return (x & kSign) ? -0.0 : 0.0;
     const std::uint64_t bits = (static_cast<std::uint64_t>(x & kSign) << 32) |
                                (static_cast<std::uint64_t>(exponent(x) + 1023 - 127) << 52) |
@@ -69,7 +67,7 @@ inline double to_double(std::uint32_t x) {
     return bit_copy<double>(bits);
 }
 
-inline std::uint32_t from_double(double d) {
+inline constexpr std::uint32_t from_double(double d) {
     const std::uint64_t bits = bit_copy<std::uint64_t>(d);
     const std::uint32_t sign = static_cast<std::uint32_t>(bits >> 32) & kSign;
     const int e = static_cast<int>((bits >> 52) & 0x7FFu);
@@ -82,24 +80,24 @@ struct s_result {
     std::uint32_t current_flags;
 };
 
-inline s_result div(std::uint32_t a, std::uint32_t b)
+inline constexpr s_result div(std::uint32_t a, std::uint32_t b)
 {
     return {vu_scalar_fp::quotient(a, b),
             vu_scalar_fp::current_flags(a, b, false, false)};
 }
 
-inline std::uint32_t sqrt(std::uint32_t a)
+inline constexpr std::uint32_t sqrt(std::uint32_t a)
 {
     return vu_scalar_fp::root(a);
 }
 
-inline s_result rsqrt(std::uint32_t a, std::uint32_t b)
+inline constexpr s_result rsqrt(std::uint32_t a, std::uint32_t b)
 {
     return {vu_scalar_fp::quotient(a, vu_scalar_fp::root(b)),
             vu_scalar_fp::current_flags(a, b, false, true)};
 }
 
-inline std::int32_t key(std::uint32_t x) {
+inline constexpr std::int32_t key(std::uint32_t x) {
     x = flush(x);
     const auto magnitude = static_cast<std::int32_t>(x & kAbs);
     return (x & kSign) ? -magnitude : magnitude;
@@ -107,15 +105,15 @@ inline std::int32_t key(std::uint32_t x) {
 
 // MAX/MINI select raw words. Unlike CLIP's numerical key, do not
 // flush denormals or collapse signed zero (PCSX2 VUops.cpp fp_max/min).
-inline std::uint32_t raw_order_key(std::uint32_t x)
+inline constexpr std::uint32_t raw_order_key(std::uint32_t x)
 {
     return (x & kSign) ? ~x : (x ^ kSign);
 }
 
-inline std::uint32_t max(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) >= raw_order_key(b) ? a : b; }
-inline std::uint32_t min(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) <= raw_order_key(b) ? a : b; }
+inline constexpr std::uint32_t max(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) >= raw_order_key(b) ? a : b; }
+inline constexpr std::uint32_t min(std::uint32_t a, std::uint32_t b) { return raw_order_key(a) <= raw_order_key(b) ? a : b; }
 
-inline std::uint32_t to_fixed(std::uint32_t x, int fraction) {
+inline constexpr std::uint32_t to_fixed(std::uint32_t x, int fraction) {
     const int e = static_cast<int>(exponent(x)) + fraction;
     if (e <= 126 || !exponent(x)) return 0;
     const bool negative = x & kSign;
@@ -126,11 +124,11 @@ inline std::uint32_t to_fixed(std::uint32_t x, int fraction) {
     return negative ? 0u - v : v;
 }
 
-inline std::uint32_t from_fixed(std::int32_t v, int fraction) {
+inline constexpr std::uint32_t from_fixed(std::int32_t v, int fraction) {
     return from_double(static_cast<double>(v) / static_cast<double>(1u << fraction));
 }
 
-inline std::uint32_t cvt_w_s(std::uint32_t x) { return to_fixed(x, 0); }
-inline std::uint32_t cvt_s_w(std::uint32_t v) { return from_fixed(static_cast<std::int32_t>(v), 0); }
+inline constexpr std::uint32_t cvt_w_s(std::uint32_t x) { return to_fixed(x, 0); }
+inline constexpr std::uint32_t cvt_s_w(std::uint32_t v) { return from_fixed(static_cast<std::int32_t>(v), 0); }
 
 }

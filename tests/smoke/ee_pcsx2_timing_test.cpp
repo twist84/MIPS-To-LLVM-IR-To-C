@@ -38,6 +38,35 @@ static_assert(cost(0xd4000000u) == 0u);
 static_assert(ee::pcsx2_opcode_weight(0u, e_ee_valid::INVALID) == 0u);
 static_assert(ee::pcsx2_opcode_weight(0u, e_ee_valid::UNSUPPORTED) == 0u);
 
+template <uint32_t first>
+consteval bool check_mmi_weights()
+{
+    for (uint32_t funct = first; funct < first + 8u; ++funct)
+    {
+        for (uint32_t sa = 0u; sa < 32u; ++sa)
+        {
+            // Other operand fields must not influence a selector weight.
+            const uint32_t word = mmi(funct, sa) | 0x01253000u;
+            if (cost(word) != ee::pcsx2_timing_detail::reference_opcode_weight(
+                    word, e_ee_valid::VALID) ||
+                ee::pcsx2_opcode_weight(word, e_ee_valid::INVALID) != 0u ||
+                ee::pcsx2_opcode_weight(word, e_ee_valid::UNSUPPORTED) != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static_assert(check_mmi_weights<0u>(), "MMI timing selector group 0");
+static_assert(check_mmi_weights<8u>(), "MMI timing selector group 1");
+static_assert(check_mmi_weights<16u>(), "MMI timing selector group 2");
+static_assert(check_mmi_weights<24u>(), "MMI timing selector group 3");
+static_assert(check_mmi_weights<32u>(), "MMI timing selector group 4");
+static_assert(check_mmi_weights<40u>(), "MMI timing selector group 5");
+static_assert(check_mmi_weights<48u>(), "MMI timing selector group 6");
+static_assert(check_mmi_weights<56u>(), "MMI timing selector group 7");
+
 constexpr bool check_accumulator()
 {
     ee::s_pcsx2_cycle_accumulator a;

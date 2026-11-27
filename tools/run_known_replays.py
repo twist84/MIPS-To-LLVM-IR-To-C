@@ -17,6 +17,7 @@ The archived SHA-256 list authenticates IR identities, not their contents.
 """
 import argparse
 import csv
+from contextlib import nullcontext
 from datetime import datetime
 import hashlib
 import json
@@ -28,6 +29,7 @@ import sys
 import zipfile
 
 import run_game
+import recovery_metrics as metrics
 
 
 IR_NAME = re.compile(r"sub_0x([0-9a-fA-F]{1,8})_0x([0-9a-fA-F]{1,8})\.ll")
@@ -36,6 +38,7 @@ CROSS_PC = "0x00109d50"
 DEFAULT_WORK = Path("build/ps2-game-hle")
 
 
+@metrics.measure("manifest_read_validation")
 def read_manifest(path):
     """Accept a translation-cache.json or one diagnostic ZIP containing it."""
     path = Path(path)
@@ -83,11 +86,16 @@ def read_manifest(path):
     return data, entries
 
 
+@metrics.measure("ir_hash_verification")
 def compare_ir(work_dir, hashes):
     """Compare the precise named module set and contents, not just a count."""
     ir_dir = Path(work_dir) / "ir"
     observed = {path.name: run_game.sha256_path(path)
                 for path in ir_dir.glob("*.ll")}
+    return compare_hashes(hashes, observed)
+
+
+def compare_hashes(hashes, observed):
     missing = sorted(set(hashes) - set(observed))
     extra = sorted(set(observed) - set(hashes))
     changed = sorted(name for name in set(observed) & set(hashes)
@@ -102,16 +110,17 @@ def compare_ir(work_dir, hashes):
     }
 
 
+@metrics.measure("explicit_entry_restoration")
 def restore_missing_entries(recomp, elf, work, metadata_path, entries,
-                            allow_mismatches):
-    """Re-lift missing explicit entries without stealing existing block PCs.
+                            *, staged_metadata=None, run_recompiler=None):
+    """Restore explicit entries in an unpublished reconstruction.
 
-    Different reconstruction batch boundaries can give a later entry's PC
-    to an earlier function. Changed lowering is already an explicit opt-in;
-    in that mode reserve missing entries and translate each independently.
-    Never accept a smaller module set or invent a dispatch target.
+    Different batch boundaries may assign an explicit entry to another
+    function. Restoration is an attempt, not acceptance of changed IR;
+    reconstruct() still enforces the complete original hash inventory.
     """
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata = (staged_metadata if staged_metadata is not None else
+                run_game.shared_ir.read_json(metadata_path))
     generated = [int(fn["vaddr"], 0) for fn in metadata["functions"]]
     expected = set(entries)
     generated_set = set(generated)
@@ -126,11 +135,7 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
     print(f"Reconstruction missing {len(missing)} explicit entries; "
           f"{len(covered)} already owned as block PCs: " +
           ", ".join(f"0x{pc:08x}" for pc in missing), flush=True)
-    if not allow_mismatches:
-        raise ValueError(f"reconstructed entries differ: expected={len(entries)} "
-                         f"generated={len(generated)}; missing=" +
-                         ", ".join(f"0x{pc:08x}" for pc in missing))
-    if run_game.shared_ir.active(metadata_path):
+    if run_game.shared_ir.active(metadata_path) or (work / "translation-cache.json").exists():
         raise ValueError("cannot change ownership in a published shared IR store")
 
     reserved = set(missing)
@@ -143,12 +148,12 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
         fn["block_pcs"] = [pc for pc in blocks if int(pc, 0) not in reserved]
         if int(fn["vaddr"], 0) not in {int(pc, 0) for pc in fn["block_pcs"]}:
             raise ValueError("existing entry lost its dispatch block")
-    run_game.shared_ir.write_json(metadata_path, metadata)
     for pc in missing:
         print(f"Restoring explicit known entry 0x{pc:08x}", flush=True)
+        extra = {"run_recompiler": run_recompiler} if run_recompiler is not None else {}
         run_game.batch_append_functions(recomp, elf, work, metadata_path, [pc],
-                                        reserved_entries=reserved)
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                                        reserved_entries=reserved,
+                                        staged_metadata=metadata, **extra)
     by_entry = {int(fn["vaddr"], 0): fn for fn in metadata["functions"]}
     if (len(by_entry) != len(metadata["functions"]) or
             set(by_entry) != expected):
@@ -162,13 +167,24 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
     if not prior_coverage.issubset(owners):
         raise ValueError("restoration lost previously reconstructed block coverage")
     metadata["functions"] = [by_entry[pc] for pc in entries]
-    run_game.shared_ir.write_json(metadata_path, metadata)
+    if staged_metadata is None:
+        run_game.shared_ir.write_json(metadata_path, metadata)
+    metrics.count("restored_explicit_entries", len(missing))
     print(f"Restored {len(missing)} explicit entries; all {len(entries)} "
           "known function entries retained", flush=True)
 
 
+def recovery_recompiler_options(ir_jobs):
+    """0 retains the independent-process fallback; 1 is persistent serial."""
+    if not 0 <= ir_jobs <= 32:
+        raise ValueError("recovery IR worker count must be in 0..32")
+    return {"persistent": ir_jobs != 0, "ir_jobs": max(1, ir_jobs)}
+
+
+@metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
-                allow_mismatches, *, ir_only=False):
+                allow_mismatches, *, ir_only=False, verified_hashes=None,
+                persistent=False, ir_jobs=1):
     """Build known guest entries without any intermediate game execution."""
     ir_dir = work / "ir"
     for candidate in (ir_dir, work / "objects", work / "translation-cache.json",
@@ -180,7 +196,8 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 "Choose a new --work-dir; existing IR is never replaced."
             )
     expected_elf = manifest["inputs"]["ELF"]
-    actual_elf = run_game.sha256_path(elf)
+    with metrics.stage("elf_hashing"):
+        actual_elf = run_game.sha256_path(elf)
     if expected_elf != actual_elf:
         raise ValueError("ELF SHA-256 differs from archived translation manifest")
     recomp = run_game.native_executable(build, "ee_recomp", config)
@@ -191,16 +208,35 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
     # Subsequent batches reuse the discovery cache and exact ownership logic
     # used by production auto-expansion, WITHOUT replaying the game.
     print(f"Known-function reconstruction: {len(entries)} entries", flush=True)
-    run_game.run([recomp, elf, ir_dir, f"--function=0x{entries[0]:08x}"])
-    for first in range(1, len(entries), 128):
-        batch = entries[first:first + 128]
-        print(f"Known IR entries {first + 1}..{first + len(batch)} "
-              f"of {len(entries)}", flush=True)
-        run_game.batch_append_functions(recomp, elf, work, metadata_path, batch)
-
-    restore_missing_entries(recomp, elf, work, metadata_path, entries,
-                            allow_mismatches)
-    comparison = compare_ir(work, manifest["ir_hashes"])
+    if not 1 <= ir_jobs <= 32 or (ir_jobs != 1 and not persistent):
+        raise ValueError("parallel IR emission requires persistent reconstruction")
+    with (run_game.c_recomp_session(recomp, elf, ir_jobs) if persistent else
+          nullcontext(run_game.run)) as recompiler:
+        recompiler([recomp, elf, ir_dir, f"--function=0x{entries[0]:08x}"])
+        with metrics.stage("metadata_read_parse"):
+            staged_metadata = run_game.shared_ir.read_json(metadata_path)
+        extra = {"run_recompiler": recompiler} if persistent else {}
+        for first in range(1, len(entries), 128):
+            batch = entries[first:first + 128]
+            print(f"Known IR entries {first + 1}..{first + len(batch)} "
+                  f"of {len(entries)}", flush=True)
+            run_game.batch_append_functions(recomp, elf, work, metadata_path, batch,
+                                            staged_metadata=staged_metadata, **extra)
+        restore_missing_entries(recomp, elf, work, metadata_path, entries,
+                                staged_metadata=staged_metadata, **extra)
+    if persistent:
+        with metrics.stage("elf_hashing"):
+            if run_game.sha256_path(elf) != expected_elf:
+                raise ValueError("ELF changed during persistent reconstruction")
+    # Authenticate the exact owned module set in metadata order, once.
+    # The caller can carry these hashes into the next staging operation;
+    # no on-disk receipt is accepted as proof of this scan.
+    observed = run_game.hash_ir_modules(
+        ir_dir, staged_metadata["functions"], require_owned_directory=True)
+    if list(observed) != manifest.get("known_entries", list(manifest["ir_hashes"])):
+        raise ValueError("reconstructed ordered IR inventory changed")
+    comparison = compare_hashes(manifest["ir_hashes"], observed)
+    metrics.details("ir_comparison", comparison)
     print("Known IR SHA-256 verification: "
           f"{comparison['matching']}/{comparison['expected']} identical; "
           f"mismatches={len(comparison['mismatched_sha256'])}; "
@@ -215,7 +251,18 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
             "\nUse --allow-ir-mismatches in an ISOLATED work directory only "
             "after inspecting the differences; parity is not established."
         )
-    run_game.shared_ir.normalize_metadata(metadata_path, elf)
+    # Do not publish the complete function map before final IR parity.
+    # The staging directory is not an executable cache on failure.
+    # hash_ir_modules has already resolved every owned path in order.
+    # Normalize in memory instead of reopening each path and writing JSON twice.
+    for function, name in zip(staged_metadata["functions"], observed):
+        function["ir_path"] = name
+    staged_metadata["elf"] = run_game.shared_ir.relative_path(elf, ir_dir)
+    staged_metadata["path_format"] = "manifest-relative-v1"
+    run_game.shared_ir.write_json(metadata_path, staged_metadata)
+    if verified_hashes is not None:
+        verified_hashes.clear()
+        verified_hashes.update(observed)
     if ir_only:
         return comparison
     # Emit all guest objects once, then link one library. Never run a guest

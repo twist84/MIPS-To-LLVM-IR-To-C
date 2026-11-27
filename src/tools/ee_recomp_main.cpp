@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <utility>
 
 static void print_usage(const char* argv0)
 {
@@ -21,6 +22,7 @@ static void print_usage(const char* argv0)
         "                        0/1 safe baseline, 2 +CSE, 3 +dead-temp\n"
 
         "  --discovery-cache=FILE   Reuse matching full-ELF discovery for explicit entries\n"
+        "  --serve-reconstruction  Persistent isolated batch session (ELF only)\n"
         "  -h, --help          Show this help\n",
         argv0);
 }
@@ -74,11 +76,100 @@ static bool parse_function_addresses(const std::string& text,
     return true;
 }
 
+// Line protocol used only by isolated reconstruction: seed/batch, output,
+// comma-separated PCs. A failed request terminates the session.
+static int serve_reconstruction(const char* elf_path, uint32_t ir_jobs)
+{
+    ee::c_ee_recomp_session session;
+    std::string cache_path;
+    std::string line;
+    for (; std::getline(std::cin, line);)
+    {
+        if (line == "quit")
+        {
+            return cache_path.empty() ? 2 : 0;
+        }
+        const size_t first = line.find('\t');
+        const size_t second = first == std::string::npos
+            ? std::string::npos : line.find('\t', first + 1);
+        if (second == std::string::npos || line.find('\t', second + 1) != std::string::npos)
+        {
+            return 2;
+        }
+        const std::string mode = line.substr(0, first);
+        const std::string output = line.substr(first + 1, second - first - 1);
+        std::vector<uint32_t> addresses;
+        if (output.empty() ||
+            !parse_function_addresses(line.substr(second + 1), addresses))
+        {
+            return 2;
+        }
+        ee::s_recomp_options opts;
+        opts.ir_jobs = ir_jobs;
+        if (mode == "seed" && cache_path.empty() && addresses.size() == 1)
+        {
+            opts.only_function = addresses.front();
+        }
+        else if (mode == "batch" && !cache_path.empty())
+        {
+            opts.only_functions = std::move(addresses);
+            opts.discovery_cache_path = cache_path;
+        }
+        else
+        {
+            return 2;
+        }
+        ee::s_recompiled_elf result;
+        std::string error;
+        if (!session.recompile(elf_path, output.c_str(), &result, &error, opts))
+        {
+            std::fprintf(stderr, "ee_recomp session: %s\n", error.c_str());
+            return 1;
+        }
+        if (cache_path.empty())
+        {
+            cache_path = output + "/ee_discovery_cache.bin";
+        }
+        std::printf("ee_recomp session result: ok\n");
+        std::fflush(stdout);
+    }
+    return 2;
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) {
         print_usage(argv[0]);
         return 2;
+    }
+
+    if (argc >= 3 && std::strcmp(argv[2], "--serve-reconstruction") == 0)
+    {
+        uint32_t ir_jobs = 1;
+        if (argc == 4)
+        {
+            const std::string arg = argv[3];
+            if (!arg.starts_with("--ir-jobs="))
+            {
+                return 2;
+            }
+            const std::string value = arg.substr(10);
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos ||
+                value.size() > 2)
+            {
+                return 2;
+            }
+            ir_jobs = parse_u32(value);
+            if (ir_jobs == 0 || ir_jobs > 32)
+            {
+                return 2;
+            }
+        }
+        else if (argc != 3)
+        {
+            return 2;
+        }
+        return serve_reconstruction(argv[1], ir_jobs);
     }
 
     const char* elf_path = nullptr;

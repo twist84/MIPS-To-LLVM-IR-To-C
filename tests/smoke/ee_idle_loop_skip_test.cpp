@@ -4,7 +4,7 @@
 #include "ee_idle_loop_skip.h"
 
 #include <cstdio>
-#include <cstring>
+#include <string_view>
 #include <map>
 #include <vector>
 
@@ -24,7 +24,7 @@ struct s_code
     uint32_t base = 0u;
     std::vector<uint32_t> words;
 
-    bool operator()(uint32_t pc, uint32_t* word) const
+    constexpr bool operator()(uint32_t pc, uint32_t* word) const
     {
         if (pc < base || pc >= base + 4u * words.size() || (pc & 3u) != 0u)
         {
@@ -60,6 +60,135 @@ struct s_memory
         return true;
     }
 };
+// Keep vector-owning fixtures non-const during constant evaluation:
+// GCC 15 rejects construction of some const aggregate vector subobjects.
+// The analyzer still receives the same read-only instruction words.
+consteval bool test_rejected_loops()
+{
+    struct s_rejected
+    {
+        const char* name;
+        s_code code;
+        const char* reason;
+    };
+    s_rejected rejected[] = {
+        {"store inside the loop", {0x00300000u, {
+            0xac400000u,   // sw   zero,0(v0)
+            0x1000fffeu,   // b    0x00300000
+            0x00000000u}}, "unsupported instruction"},
+        {"loop-carried counter", {0x00300000u, {
+            0x25080001u,   // addiu t0,t0,1
+            0x1509fffeu,   // bne   t0,t1,0x00300000
+            0x00000000u}}, "loop-carried register"},
+        {"branch-likely backedge", {0x00300000u, {
+            0x8c820000u,   // lw   v0,0(a0)
+            0x5040fffeu,   // beql v0,zero,0x00300000
+            0x00000000u}}, "unsupported instruction"},
+        {"call inside the loop", {0x00300000u, {
+            0x0c0c0000u,   // jal  0x00300000
+            0x00000000u,
+            0x1000fffdu,   // b    0x00300000
+            0x00000000u}}, "unsupported instruction"},
+        {"branch into the loop body", {0x00300000u, {
+            0x8c820000u,   // lw   v0,0(a0)
+            0x10400001u,   // beq  v0,zero,0x0030000c (inside)
+            0x00000000u,
+            0x8c830004u,   // lw   v1,4(a0)
+            0x1000fffbu,   // b    0x00300000
+            0x00000000u}}, "branch into the loop body"},
+        {"syscall inside the loop", {0x00300000u, {
+            0x0000000cu,   // syscall
+            0x1000fffeu,
+            0x00000000u}}, "unsupported instruction"},
+    };
+    for (const s_rejected& item : rejected)
+    {
+        ee::s_idle_loop_shape shape = ee::analyze_idle_loop(item.code.base, item.code);
+        const bool ok = !shape.eligible && std::string_view(shape.reason) == item.reason;
+        if (!ok)
+        {
+            return false;
+        }
+    }
+
+    s_code no_backedge = {0x00300000u, std::vector<uint32_t>(40u, 0u)};
+    return !ee::analyze_idle_loop(0x00300000u, no_backedge).eligible;
+}
+
+static_assert(test_rejected_loops(), "unsafe idle-loop shape accepted");
+
+consteval bool test_idle_prediction()
+{
+    s_code code{0x00200000u, {0x80820000u, 0x0441fffeu, 0u}};
+    auto shape = ee::analyze_idle_loop(code.base, code);
+    uint64_t gpr[32]{};
+    gpr[4] = 0x00400000u;
+    gpr[2] = 0x12345678u;
+
+    uint64_t value = 0x7fu;
+    bool refuse = false;
+    const auto load = [&](uint32_t address, uint32_t width, uint64_t* raw)
+    {
+        if (refuse || address != 0x00400000u || width != 1u)
+        {
+            return false;
+        }
+        *raw = value;
+        return true;
+    };
+
+    uint32_t executed = 0u;
+    if (!shape.eligible || ee::predict_idle_iteration(shape, gpr, load, &executed)
+            != ee::e_idle_iteration::loops || executed != 3u)
+    {
+        return false;
+    }
+    value = 0x80u;
+    if (ee::predict_idle_iteration(shape, gpr, load, &executed)
+            != ee::e_idle_iteration::exits || executed != 0u)
+    {
+        return false;
+    }
+    refuse = true;
+    return ee::predict_idle_iteration(shape, gpr, load, &executed)
+            == ee::e_idle_iteration::unsupported &&
+        executed == 0u && gpr[2] == 0x12345678u;
+}
+
+static_assert(test_idle_prediction(), "idle-loop prediction semantics");
+
+// Compare the actual polling ALU against independently expressed guest
+// operations, including ignored upper bits and negative shift operands.
+consteval bool test_idle_scalar_operations()
+{
+    using namespace ee::idle_loop_detail;
+    uint64_t gpr[32]{};
+    gpr[4] = 0x8000000080000000ull;
+    gpr[5] = 0x0123456780000000ull;
+    for (uint32_t shift = 0u; shift < 32u; ++shift)
+    {
+        const uint32_t word = (5u << 16u) | (6u << 11u) | (shift << 6u);
+        const uint64_t expected_word = UINT64_MAX << (31u - shift);
+        const uint64_t expected_double = UINT64_MAX << (63u - shift);
+        if (alu(word | 3u, gpr) != expected_word ||
+            alu((word ^ ((5u ^ 4u) << 16u)) | 0x3bu, gpr) !=
+                (expected_double | (uint64_t{1} << (31u - shift))) ||
+            alu((word ^ ((5u ^ 4u) << 16u)) | 0x3fu, gpr) !=
+                (UINT64_MAX << (31u - shift)))
+        {
+            return false;
+        }
+    }
+    return alu(0x0085302au, gpr) == 1u &&
+        alu(0x2886ffffu, gpr) == 1u &&
+        extend_load(0x80000000u, 0x80u) == 0xffffffffffffff80ull &&
+        extend_load(0x84000000u, 0x8000u) == 0xffffffffffff8000ull &&
+        extend_load(0x8c000000u, 0x80000000u) == 0xffffffff80000000ull;
+}
+
+static_assert(test_idle_scalar_operations(), "shared scalar arithmetic in idle-loop prediction");
+
+
 } // namespace
 
 int main()
@@ -143,7 +272,7 @@ int main()
     carried.words[2] = 0u; // v1 now has no reaching write on the taken path.
     const auto carried_shape = ee::analyze_idle_loop(carried.base, carried, true);
     check(!carried_shape.eligible &&
-        std::strcmp(carried_shape.reason, "loop-carried register") == 0 &&
+        std::string_view(carried_shape.reason) == "loop-carried register" &&
         carried_shape.carried_read_pc == carried.base + 16u &&
         carried_shape.carried_read_register == 3u,
         "merge identifies the register and PC lacking an incoming write");
@@ -158,58 +287,6 @@ int main()
     secondary_loop.words.push_back(0u);
     check(!ee::analyze_idle_loop(secondary_loop.base, secondary_loop, true).eligible,
         "secondary backward edge is rejected");
-
-    struct s_rejected
-    {
-        const char* name;
-        s_code code;
-        const char* reason;
-    };
-    const s_rejected rejected[] = {
-        {"store inside the loop", {0x00300000u, {
-            0xac400000u,   // sw   zero,0(v0)
-            0x1000fffeu,   // b    0x00300000
-            0x00000000u}}, "unsupported instruction"},
-        {"loop-carried counter", {0x00300000u, {
-            0x25080001u,   // addiu t0,t0,1
-            0x1509fffeu,   // bne   t0,t1,0x00300000
-            0x00000000u}}, "loop-carried register"},
-        {"branch-likely backedge", {0x00300000u, {
-            0x8c820000u,   // lw   v0,0(a0)
-            0x5040fffeu,   // beql v0,zero,0x00300000
-            0x00000000u}}, "unsupported instruction"},
-        {"call inside the loop", {0x00300000u, {
-            0x0c0c0000u,   // jal  0x00300000
-            0x00000000u,
-            0x1000fffdu,   // b    0x00300000
-            0x00000000u}}, "unsupported instruction"},
-        {"branch into the loop body", {0x00300000u, {
-            0x8c820000u,   // lw   v0,0(a0)
-            0x10400001u,   // beq  v0,zero,0x0030000c (inside)
-            0x00000000u,
-            0x8c830004u,   // lw   v1,4(a0)
-            0x1000fffbu,   // b    0x00300000
-            0x00000000u}}, "branch into the loop body"},
-        {"syscall inside the loop", {0x00300000u, {
-            0x0000000cu,   // syscall
-            0x1000fffeu,
-            0x00000000u}}, "unsupported instruction"},
-    };
-    for (const s_rejected& item : rejected)
-    {
-        const ee::s_idle_loop_shape shape = ee::analyze_idle_loop(item.code.base, item.code);
-        const bool ok = !shape.eligible && std::strcmp(shape.reason, item.reason) == 0;
-        if (!ok)
-        {
-            std::printf("  %s: eligible=%d reason=%s\n",
-                        item.name, shape.eligible ? 1 : 0, shape.reason);
-        }
-        check(ok, item.name);
-    }
-
-    const s_code no_backedge = {0x00300000u, std::vector<uint32_t>(40u, 0u)};
-    check(!ee::analyze_idle_loop(0x00300000u, no_backedge).eligible,
-          "straight-line code without a backedge is not a loop");
 
     std::printf("ee_idle_loop_skip_test: %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

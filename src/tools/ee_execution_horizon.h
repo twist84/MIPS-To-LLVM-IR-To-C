@@ -7,6 +7,7 @@
 
 #include <array>
 #include <cstdint>
+#include <expected>
 #include <limits>
 
 namespace ee
@@ -82,48 +83,84 @@ inline bool ee_horizon_checkpoint_ready(const s_ee_runtime& runtime,
 // COP0/COP2, traps, conditional control flow, and any unknown encoding.
 // The result is advisory until native ownership and code provenance are
 // established; source bytes alone cannot certify a loaded native entry.
-template<typename t_read>
-uint32_t ee_horizon_alu_exit_slots(uint32_t pc, const t_read& read)
+enum class e_ee_horizon_rejection : uint8_t
 {
+    invalid_entry,
+    instruction_unavailable,
+    unsafe_instruction,
+    address_wrap,
+    slot_limit,
+    unsafe_delay_slot
+};
+
+// Keep failure reasons distinct for diagnostic callers. No rejected path
+// may authorize native execution, even when an instruction reader succeeds.
+template<typename t_read>
+    requires t_ee_instruction_reader<const t_read>
+constexpr std::expected<uint32_t, e_ee_horizon_rejection>
+ee_horizon_analyze_alu_exit(uint32_t pc, const t_read& read)
+{
+    using error = e_ee_horizon_rejection;
     constexpr uint32_t max_slots = 32u;
-    uint32_t slots = 0u;
-    if (pc != 0u && (pc & 3u) == 0u)
+    if (pc == 0u || (pc & 3u) != 0u)
     {
-        for (uint32_t i = 0u; i < max_slots; ++i)
-        {
-            uint32_t word = 0u;
-            if (!read(pc, &word))
-            {
-                break;
-            }
-            const uint32_t op = word >> 26u;
-            const uint32_t funct = word & 63u;
-            const bool indirect = op == 0u &&
-                ((funct == 8u && (word & 0x001fffc0u) == 0u) ||
-                 (funct == 9u && (word & 0x001f07c0u) == 0u));
-            if (op == 3u || indirect)
-            {
-                uint32_t delay = 0u;
-                if (i + 2u <= max_slots && pc <= UINT32_MAX - 4u &&
-                    read(pc + 4u, &delay) &&
-                    idle_loop_detail::decode(delay).kind == idle_loop_detail::e_kind::alu)
-                {
-                    slots = i + 2u;
-                }
-                break;
-            }
-            if (idle_loop_detail::decode(word).kind != idle_loop_detail::e_kind::alu ||
-                pc > UINT32_MAX - 4u)
-            {
-                break;
-            }
-            pc += 4u;
-        }
+        return std::unexpected(error::invalid_entry);
     }
-    return slots;
+    for (uint32_t i = 0u; i < max_slots; ++i)
+    {
+        uint32_t word = 0u;
+        if (!read(pc, &word))
+        {
+            return std::unexpected(error::instruction_unavailable);
+        }
+        const uint32_t op = word >> 26u;
+        const uint32_t funct = word & 63u;
+        const bool indirect = op == 0u &&
+            ((funct == 8u && (word & 0x001fffc0u) == 0u) ||
+             (funct == 9u && (word & 0x001f07c0u) == 0u));
+        if (op == 3u || indirect)
+        {
+            if (i + 2u > max_slots)
+            {
+                return std::unexpected(error::slot_limit);
+            }
+            if (pc > UINT32_MAX - 4u)
+            {
+                return std::unexpected(error::address_wrap);
+            }
+            uint32_t delay = 0u;
+            if (!read(pc + 4u, &delay))
+            {
+                return std::unexpected(error::instruction_unavailable);
+            }
+            if (idle_loop_detail::decode(delay).kind != idle_loop_detail::e_kind::alu)
+            {
+                return std::unexpected(error::unsafe_delay_slot);
+            }
+            return i + 2u;
+        }
+        if (idle_loop_detail::decode(word).kind != idle_loop_detail::e_kind::alu)
+        {
+            return std::unexpected(error::unsafe_instruction);
+        }
+        if (pc > UINT32_MAX - 4u)
+        {
+            return std::unexpected(error::address_wrap);
+        }
+        pc += 4u;
+    }
+    return std::unexpected(error::slot_limit);
 }
 
-inline bool ee_horizon_bound_fits(uint64_t now, uint64_t deadline, uint32_t slots)
+// Preserve the established zero-on-rejection contract for native dispatch.
+template<typename t_read>
+    requires t_ee_instruction_reader<const t_read>
+constexpr uint32_t ee_horizon_alu_exit_slots(uint32_t pc, const t_read& read)
+{
+    return ee_horizon_analyze_alu_exit(pc, read).value_or(0u);
+}
+
+inline constexpr bool ee_horizon_bound_fits(uint64_t now, uint64_t deadline, uint32_t slots)
 {
     return slots != 0u && deadline != k_ee_no_deadline &&
         deadline > now && slots < deadline - now;
@@ -160,7 +197,7 @@ inline uint64_t ee_cop0_compare_deadline(const s_ee_runtime& runtime,
 // This is a bound on known scheduled events, not proof that arbitrary
 // translated code cannot perform MMIO, take a trap, or change a deadline.
 // A caller must independently establish that execution is safe to chain.
-inline s_ee_execution_horizon ee_execution_horizon(
+inline constexpr s_ee_execution_horizon ee_execution_horizon(
     uint64_t now, uint64_t timer, uint64_t scanout, uint64_t cop0,
     uint64_t iop, bool barrier)
 {
