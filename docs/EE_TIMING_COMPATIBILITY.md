@@ -10,8 +10,8 @@ synchronization when a cheaper conservative boundary suffices. Keep the
 current reference-compat clock and its caches available as the control.
 Never label a PCSX2-derived heuristic as validated physical R5900 timing.
 
-IOP AOT accuracy work G8D.2 accepted; optimization/function splitting is
-paused. Keep it optional and use interpreter for initial EE timing
+IOP AOT accuracy work G8D.2 accepted; execution micro-optimization is
+paused, but function splitting and parallel compilation remain active in #174. Keep it optional and use interpreter for initial EE timing
 comparisons so only one component changes. No further retail replay until
 a timing candidate requires one.
 
@@ -114,3 +114,27 @@ time domains today, so swapping a single formula is insufficient.
 T1.0 is audit and baseline regression only; no new timing producer
 or changed game timing yet. New source changes must be reviewed
 before generating any new EE image; no cache invalidation for T1.0.
+
+## T1.1: standalone cost primitive
+
+`include/ee/ee_pcsx2_timing.h` implements numerical timing categories
+independently using raw architectural selector fields, gated by the local
+decoder's VALID classification. A zero result means no established cost;
+it is not a zero-cycle instruction. Decoder validity is required even for
+COP2, where the pinned reference charges the major opcode only. The
+reference also weights integer traps at 11, MADD/MADDU and their 1
+variants at 16, and MFHI1/MTHI1/MFLO1/MTLO1 at 9.
+The checked accumulator preserves fractional eighth-cycles and rejects
+overflow transactionally. Its explicit DIE epoch is a primitive, not
+a claim about exact PCSX2 Config-write or publication semantics.
+No runtime or generated-IR consumer has been connected.
+
+Provenance: numerical heuristic observations from the pinned PCSX2
+opcode table and interpreter above. PCSX2 is GPL-licensed; no PCSX2
+implementation routines or original table layout are imported. This
+is independently expressed architectural selector/category logic; no
+license change or legal determination is implied. The regression target
+`ee_pcsx2_timing` checks constexpr arithmetic, selector distinctions and
+the existing runtime decoder gate. T1.2 must separately audit actual
+publication/exception paths and ps2-web-recomp timing. No retail replay
+or EE IR refresh is required for this standalone checkpoint.
