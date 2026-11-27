@@ -24,6 +24,28 @@ enum class e_thread_status
     faulted
 };
 
+// Optional host-only attribution of a sampled HLE kernel invocation.
+// Phases are disjoint but not exhaustive; CPU time includes retirement
+// and attached device work. Never use timings for guest scheduling.
+enum class e_kernel_phase : uint32_t
+{
+    wake_irq,
+    ready,
+    idle_deadline,
+    idle_advance,
+    guest_context,
+    guest_cpu,
+    count
+};
+
+struct s_kernel_phase_sample
+{
+    static constexpr uint32_t k_count =
+        static_cast<uint32_t>(e_kernel_phase::count);
+    uint64_t m_calls[k_count]{};
+    uint64_t m_ns[k_count]{};
+};
+
 enum class e_kernel_stop
 {
     budget_exhausted,
@@ -318,7 +340,8 @@ public:
     // Explicit IOP cycle budget. The EE must eventually provide this from
     // guest execution timing, never by counting native dispatches.
     s_kernel_run_result run(
-        uint64_t cycle_budget, uint32_t quantum = 128u
+        uint64_t cycle_budget, uint32_t quantum = 128u,
+        s_kernel_phase_sample* sample = nullptr
     );
 
 private:
