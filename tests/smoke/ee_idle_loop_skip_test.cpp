@@ -60,6 +60,9 @@ struct s_memory
         return true;
     }
 };
+// Keep vector-owning fixtures non-const during constant evaluation:
+// GCC 15 rejects construction of some const aggregate vector subobjects.
+// The analyzer still receives the same read-only instruction words.
 consteval bool test_rejected_loops()
 {
     struct s_rejected
@@ -68,7 +71,7 @@ consteval bool test_rejected_loops()
         s_code code;
         const char* reason;
     };
-    const s_rejected rejected[] = {
+    s_rejected rejected[] = {
         {"store inside the loop", {0x00300000u, {
             0xac400000u,   // sw   zero,0(v0)
             0x1000fffeu,   // b    0x00300000
@@ -100,7 +103,7 @@ consteval bool test_rejected_loops()
     };
     for (const s_rejected& item : rejected)
     {
-        const ee::s_idle_loop_shape shape = ee::analyze_idle_loop(item.code.base, item.code);
+        ee::s_idle_loop_shape shape = ee::analyze_idle_loop(item.code.base, item.code);
         const bool ok = !shape.eligible && std::string_view(shape.reason) == item.reason;
         if (!ok)
         {
@@ -108,7 +111,7 @@ consteval bool test_rejected_loops()
         }
     }
 
-    const s_code no_backedge = {0x00300000u, std::vector<uint32_t>(40u, 0u)};
+    s_code no_backedge = {0x00300000u, std::vector<uint32_t>(40u, 0u)};
     return !ee::analyze_idle_loop(0x00300000u, no_backedge).eligible;
 }
 
@@ -116,8 +119,8 @@ static_assert(test_rejected_loops(), "unsafe idle-loop shape accepted");
 
 consteval bool test_idle_prediction()
 {
-    const s_code code{0x00200000u, {0x80820000u, 0x0441fffeu, 0u}};
-    const auto shape = ee::analyze_idle_loop(code.base, code);
+    s_code code{0x00200000u, {0x80820000u, 0x0441fffeu, 0u}};
+    auto shape = ee::analyze_idle_loop(code.base, code);
     uint64_t gpr[32]{};
     gpr[4] = 0x00400000u;
     gpr[2] = 0x12345678u;
