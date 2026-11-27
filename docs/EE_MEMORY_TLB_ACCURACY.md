@@ -1520,3 +1520,24 @@ logs, not raw workflow commands. No synthetic UART state or events.
 Test byte writes, pending-slot retirement, zero budget and invalid
 word store. Require both pinned diagnostic runs to advance past
 their measured prior stop and emit the real initial byte. Pending CI.
+
+## M6E3H3E5: enable configured reference HBlank timers
+
+H3E4 passed both firmware versions at a7d07440:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46061705946
+
+Both emitted their 36-byte EE ready line and advanced 19191 slots.
+v0.6 stopped at 672553 EE / 84069 IOP, v0.7 at 672745 / 84093.
+Both stopped at a0014ce8, opcode ac430000, writing MODE=83 to
+Timer3 (b0001810). Zero IOP debt.
+
+Admit HBlank timer MODE, COUNT and COMP MMIO only when an explicit
+fixed CRT mode is configured. Reuse the existing production
+integer line cadence and timer scheduler. No gating or reserved
+bits, no dynamic CRT mode changes, no new scanline phase model.
+Test NTSC and PAL divisors, exact first/second ticks, real compare
+INTC12 and the unchanged refusal without scanout. This is the
+existing reference approximation (counter-relative integer line
+periods), not a hardware-calibrated HBlank edge producer. No
+production timer changes. Raise the pinned real-ROM minimum progress
+assertions past the observed Timer3 stop. Pending CI.

@@ -1062,4 +1062,77 @@ bool test_strict_firmware_serial()
         pilot.serial_output().size() == 2u && pilot.cycle() == 8u &&
         pilot.iop_cycles() == 1u;
 }
+
+bool test_strict_firmware_hblank_timer()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint64_t ntsc_div = (4920115ull * 2u) / 525u;
+    constexpr uint64_t pal_div = (5898240ull * 2u) / 625u;
+    static_assert(ntsc_div == 18743u);
+    static_assert(pal_div == 18874u);
+    // Stop reset Timer3, zero COUNT, set COMP=2, enable compare and
+    // HBlank source. The MODE write is anchored at cycle 8.
+    const auto program = []()
+    {
+        return make_firmware_pilot_rom({
+            0x40806000u, 0x3c04b000u, 0x34841800u, 0xac800010u,
+            0xac800000u, 0x34020002u, 0xac820020u, 0x34020183u,
+            0xac820010u, 0x8c830010u});
+    };
+    for (uint32_t mode : {0u, 2u, 3u})
+    {
+        ee::c_ee_strict_firmware_pilot pilot(program());
+        if (mode != 0u && !pilot.configure_scanout(mode, 0u))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 8u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto enable = pilot.step(1u);
+        if (mode == 0u)
+        {
+            if (enable.m_boundary != boundary::HOST_REFUSAL ||
+                pilot.cycle() != 8u || pilot.timer_mode(3u) != 0u)
+            {
+                return false;
+            }
+            continue;
+        }
+        const uint64_t div = mode == 2u ? ntsc_div : pal_div;
+        const uint64_t compare = 8u + 2u * div;
+        if (enable.m_boundary != boundary::RETIRED ||
+            pilot.next_timer_event() != compare || pilot.timer_mode(3u) != 0x183u ||
+            pilot.timer_count(3u) != 0u || pilot.intc_status() != 0u)
+        {
+            return false;
+        }
+        if (pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_gpr[3].m_lo != 0x183u)
+        {
+            return false;
+        }
+        for (uint64_t now = 11u; now <= compare; ++now)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED ||
+                pilot.cycle() != now || pilot.timer_count(3u) != (now - 8u) / div ||
+                step.m_timer_serviced != (now == compare) ||
+                pilot.intc_status() != (now == compare ? 0x1000u : 0u))
+            {
+                return false;
+            }
+        }
+        if (pilot.timer_mode(3u) != 0x583u || pilot.fields_started() != 0u ||
+            pilot.gs_csr() != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace

@@ -78,7 +78,8 @@ class c_ee_strict_firmware_pilot
 public:
     // Keep the pilot below the unconfigured reset Timer3 HBlank compare
     // deadline (65536 ticks at the reference NTSC line cadence).
-    // Permit several fields, but no guest HBlank programming yet.
+    // Permit several fields. Guest HBlank programming is admitted only
+    // with an explicit reference scanout configuration.
     static constexpr uint64_t k_slot_limit = 1u << 24u;
     static_assert(k_slot_limit <
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
@@ -818,7 +819,8 @@ private:
         uint32_t index = 0u;
         uint32_t offset = 0u;
         if (!timer_register(address, index, offset) ||
-            (self.m_timers.current_mode(index) & 3u) == 3u)
+            ((self.m_timers.current_mode(index) & 3u) == 3u &&
+             !self.m_hardware.scanout().enabled()))
         {
             return false;
         }
@@ -929,14 +931,17 @@ private:
         }
         if (offset == 0x10u)
         {
-            // No gating, HBlank, or reserved bits in this pilot.
+            // No gating or reserved bits. HBlank uses the production
+            // reference integer line divider only with a fixed CRT mode.
             const uint32_t word = static_cast<uint32_t>(value->m_lo);
-            if ((word & ~0xfc3u) != 0u || (word & 3u) == 3u)
+            if ((word & ~0xfc3u) != 0u ||
+                ((word & 3u) == 3u && !self.m_hardware.scanout().enabled()))
             {
                 return false;
             }
         }
-        else if ((self.m_timers.current_mode(index) & 3u) == 3u)
+        else if ((self.m_timers.current_mode(index) & 3u) == 3u &&
+                 !self.m_hardware.scanout().enabled())
         {
             return false;
         }
