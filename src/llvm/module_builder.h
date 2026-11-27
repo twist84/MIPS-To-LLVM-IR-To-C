@@ -34,11 +34,14 @@ public:
                            const char* func_name);
 
     void set_opt_level(int level);
+    // Explicit fixture opt-in; production recompilation remains unchanged.
+    void set_pcsx2_shadow(bool enabled) { m_pcsx2_shadow = enabled; }
     int  opt_level() const { return m_opt_level; }
 
     std::string str() const { return m_ctx.ir(); }
 
 private:
+    bool m_pcsx2_shadow = false;
     llvm_context& m_ctx;
     std::string m_out;
     std::map<uint32_t, std::string> m_block_labels;   // pc -> LLVM label
@@ -138,6 +141,7 @@ private:
                     bool guarded_loop_header = false,
                     const std::map<uint32_t, ee::s_ee_instruction>* insn_map = nullptr);
     bool try_specialize_scalar(const ee::s_ee_instruction& ins);
+    void emit_guest_instruction_count(const ee::s_ee_instruction& ins);
     void emit_insn(const ee::s_ee_instruction& ins, bool is_last_in_block,
                    uint32_t fallthrough_pc, bool in_delay_slot = false,
                    bool count_instruction = true);

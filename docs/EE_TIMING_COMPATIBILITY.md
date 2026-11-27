@@ -138,3 +138,22 @@ license change or legal determination is implied. The regression target
 the existing runtime decoder gate. T1.2 must separately audit actual
 publication/exception paths and ps2-web-recomp timing. No retail replay
 or EE IR refresh is required for this standalone checkpoint.
+
+## T1.2a: fixture-only native attempt shadow
+
+The module builder has an explicit default-off shadow option used only by
+synthetic fixtures. Every existing native attempt-count site receives a
+compile-time cost when enabled; safe scalar ALU runs aggregate their cost
+in the existing count helper. Annulled slots remain reference slots only.
+No additional host calls, device clock publication or runner selection
+are introduced. The runtime fields are appended after the existing prefix.
+The shadow samples Config.DIE before the attempted operation, accumulates
+unrounded eighth-cycles and latches unknown cost or overflow without
+wrapping the counters. This is diagnostic attempt accounting, not exact
+PCSX2 retirement/publication semantics. In particular HLE, interpreter
+fallback, exception semantics, idle skipping and Config transitions need
+separate end-to-end validation before enabling a retail timing model.
+Existing generated IR is not shadow-enabled and must not be treated as
+such. Do not mix shadow and non-shadow modules in a timing comparison.
+The timing observer IR fixture tests ordinary and batched paths, both DIE
+states, taken/annulled branch-likely, overflow and null-runtime behavior.

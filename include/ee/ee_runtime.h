@@ -397,6 +397,11 @@ struct s_ee_runtime
     // Independent aligned 128-bit physical RAM experiment.
     uint8_t* m_fastmem_quad_base = nullptr;
     uint32_t m_fastmem_quad_size = 0u;
+
+    // Opt-in EE native-attempt timing shadow; never a scheduler timebase.
+    uint64_t m_pcsx2_shadow_eighth_cycles = 0u;
+    uint64_t m_pcsx2_shadow_attempts = 0u;
+    uint32_t m_pcsx2_shadow_failed = 0u;
 };
 
 // ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,

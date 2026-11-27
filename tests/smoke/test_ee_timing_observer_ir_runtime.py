@@ -136,6 +136,77 @@ def check_alu_count_run(fixture, root, target):
     assert all(result == results[0] for result in results)
 
 
+def check_pcsx2_shadow(fixture, root, target):
+    for mode, symbol in (("alu_count_run", "guest_alu_count_run"),
+                         ("bltzall", "guest_bltzall_delay_test")):
+        path = root / ("shadow_" + mode + ".ll")
+        emitted = subprocess.run([str(fixture), "shadow_" + mode, str(path)],
+                                 text=True, capture_output=True, check=True)
+        layout = next(line.split() for line in emitted.stdout.splitlines()
+                      if line.startswith("SHADOW_LAYOUT "))
+        size, cycles, charged, failed, attempts, slots, callback = map(int, layout[1:])
+        ir = path.read_text(encoding="utf-8")
+        if mode == "alu_count_run":
+            assert "@ee_try_count_alu_run(ptr %rt, i64 4, ptr %cpu, i64 36)" in ir
+        machine = target.create_target_machine(opt=0)
+        module = llvm.parse_assembly(ir)
+        module.verify()
+        module.triple = llvm.get_default_triple()
+        module.data_layout = str(machine.target_data)
+        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+        engine.add_module(module)
+        engine.finalize_object()
+        address = engine.get_function_address(symbol)
+        assert address
+        guest = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.POINTER(EEState),
+                                 ctypes.c_void_p)(address)
+
+        def run(die, observed=False, taken=False, overflow=False, null=False):
+            state_backing, ptr = aligned_buffer(ctypes.sizeof(EEState))
+            state = ctypes.cast(ptr, ctypes.POINTER(EEState)).contents
+            state.pc = 0x100000
+            state.cop0[16] = (1 << 18) if die else 0
+            state.gpr[31].lo = 0x120000
+            state.gpr[8].lo = 7
+            state.gpr[2].lo = 0xffffffffffffffff if taken else 1
+            runtime_backing, rt = aligned_buffer(size)
+            start = (1 << 64) - 2 if overflow else 0
+            ctypes.c_uint64.from_address(rt + cycles).value = start
+
+            @OBSERVER
+            def observe(user, pc, opcode, kind, service, attempt, slot):
+                return True
+
+            if observed:
+                ctypes.c_void_p.from_address(rt + callback).value = ctypes.cast(
+                    observe, ctypes.c_void_p).value
+            result = guest(ctypes.pointer(state), None if null else rt)
+            if mode == "alu_count_run":
+                assert result == 0 and state.pc == 0x120000
+                assert state.gpr[2].lo == 78
+                count, slot_count, weight = 7, 7, 63
+            else:
+                assert result == 3
+                assert state.pc == (0x100014 if taken else 0x100008)
+                assert state.gpr[8].lo == (0x100008 if taken else 7)
+                count, slot_count, weight = (2, 2, 20) if taken else (1, 2, 11)
+            u64 = lambda offset: ctypes.c_uint64.from_address(rt + offset).value
+            assert u64(attempts) == (0 if null else count)
+            assert u64(slots) == (0 if null else slot_count)
+            assert u64(cycles) == (start if overflow or null else weight * (1 if die else 2))
+            assert u64(charged) == (0 if overflow or null else count)
+            assert ctypes.c_uint32.from_address(rt + failed).value == int(overflow)
+            return bytes(state)
+
+        for die in (False, True):
+            for taken in ((False, True) if mode == "bltzall" else (False,)):
+                baseline = run(die, taken=taken)
+                assert run(die, observed=True, taken=taken) == baseline
+                assert run(die, taken=taken, overflow=True) == baseline
+                assert run(die, observed=True, taken=taken, overflow=True) == baseline
+                assert run(die, taken=taken, null=True) == baseline
+
+
 def main():
     if len(sys.argv) != 2:
         raise SystemExit("usage: test_ee_timing_observer_ir_runtime.py fixture")
@@ -223,6 +294,7 @@ def main():
         ], (observed, failed)
 
         check_alu_count_run(fixture, pathlib.Path(tmp), target)
+        check_pcsx2_shadow(fixture, pathlib.Path(tmp), target)
 
     print("ee_timing_observer_ir_runtime: PASS")
 

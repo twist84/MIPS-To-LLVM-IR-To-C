@@ -40,7 +40,20 @@ int main(int argc, char** argv)
     }
 
     constexpr uint32_t entry_pc = 0x00100000u;
-    const std::string mode = argv[1];
+    std::string mode = argv[1];
+    const bool shadow = mode.compare(0, 7, "shadow_") == 0;
+    if (shadow)
+    {
+        mode.erase(0, 7);
+        std::printf("SHADOW_LAYOUT %zu %zu %zu %zu %zu %zu %zu\n",
+            sizeof(ee::s_ee_runtime),
+            offsetof(ee::s_ee_runtime, m_pcsx2_shadow_eighth_cycles),
+            offsetof(ee::s_ee_runtime, m_pcsx2_shadow_attempts),
+            offsetof(ee::s_ee_runtime, m_pcsx2_shadow_failed),
+            offsetof(ee::s_ee_runtime, m_guest_instruction_attempts),
+            offsetof(ee::s_ee_runtime, m_reference_instruction_slots),
+            offsetof(ee::s_ee_runtime, m_timing_observer));
+    }
     if (mode == "alu_count_run")
     {
         // GPR dependencies, repeated destinations, preserved upper halves,
@@ -74,6 +87,7 @@ int main(int argc, char** argv)
         }
         llvm::llvm_context context("alu_count_run");
         llvm::module_builder builder(context);
+        builder.set_pcsx2_shadow(shadow);
         builder.emit_function_cfg(functions[0], instructions, "guest_alu_count_run");
         std::printf("ALU_COUNT_LAYOUT %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu %zu\n",
             sizeof(ee::s_ee_runtime),
@@ -512,6 +526,7 @@ int main(int argc, char** argv)
 
     llvm::llvm_context context(mode + "_delay_slot_test");
     llvm::module_builder builder(context);
+    builder.set_pcsx2_shadow(shadow);
     builder.emit_function_cfg(functions[0], insn_map, function_name);
 
     if (mode == "bltzall")

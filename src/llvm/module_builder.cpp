@@ -7,6 +7,7 @@
 #include "../runtime/ee_vu_fmac4_ir.h"
 #include "ee_vu0_macro_ir.h"
 #include "ee_runtime.h"
+#include "ee_pcsx2_timing.h"
 #include <cstddef>
 #include <cassert>
 #include "ee_opcode.h"
@@ -293,10 +294,60 @@ void module_builder::declare_memory_helpers()
         m_out += "  br label %done\n";
     };
 
+    // Test-only shadow accounting. No new host callback or device clock.
+    // The pre-instruction Config value selects the explicit DIE epoch.
+    const auto emit_shadow_account = [&](const char* count)
+    {
+        if (!m_pcsx2_shadow)
+        {
+            return;
+        }
+        m_out += "  %shadow_config_ptr = getelementptr i8, ptr %cpu, i64 " +
+                 std::to_string(offsetof(ee::s_ee_cpu_state, m_cop0) + 16u * sizeof(uint32_t)) + "\n";
+        m_out += "  %shadow_config = load i32, ptr %shadow_config_ptr\n";
+        m_out += "  %shadow_die_bit = and i32 %shadow_config, 262144\n";
+        m_out += "  %shadow_die = icmp ne i32 %shadow_die_bit, 0\n";
+        m_out += "  %shadow_doubled = shl i64 %weight, 1\n";
+        m_out += "  %shadow_delta = select i1 %shadow_die, i64 %weight, i64 %shadow_doubled\n";
+        m_out += "  %shadow_scale_overflow = icmp ugt i64 %weight, 9223372036854775807\n";
+        m_out += "  %shadow_double = xor i1 %shadow_die, true\n";
+        m_out += "  %shadow_scale_bad = and i1 %shadow_double, %shadow_scale_overflow\n";
+        m_out += "  %shadow_cost_bad = icmp eq i64 %weight, 0\n";
+        m_out += "  %shadow_cycles_ptr = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_pcsx2_shadow_eighth_cycles)) + "\n";
+        m_out += "  %shadow_attempts_ptr = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_pcsx2_shadow_attempts)) + "\n";
+        m_out += "  %shadow_failed_ptr = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime, m_pcsx2_shadow_failed)) + "\n";
+        m_out += "  %shadow_cycles = load i64, ptr %shadow_cycles_ptr\n";
+        m_out += "  %shadow_attempts = load i64, ptr %shadow_attempts_ptr\n";
+        m_out += "  %shadow_failed = load i32, ptr %shadow_failed_ptr\n";
+        m_out += "  %shadow_new_cycles = add i64 %shadow_cycles, %shadow_delta\n";
+        m_out += "  %shadow_new_attempts = add i64 %shadow_attempts, " + std::string(count) + "\n";
+        m_out += "  %shadow_cycle_overflow = icmp ult i64 %shadow_new_cycles, %shadow_cycles\n";
+        m_out += "  %shadow_attempt_overflow = icmp ult i64 %shadow_new_attempts, %shadow_attempts\n";
+        m_out += "  %shadow_prior_failure = icmp ne i32 %shadow_failed, 0\n";
+        m_out += "  %shadow_bad_weight = or i1 %shadow_cost_bad, %shadow_scale_bad\n";
+        m_out += "  %shadow_bad_add = or i1 %shadow_cycle_overflow, %shadow_attempt_overflow\n";
+        m_out += "  %shadow_bad = or i1 %shadow_bad_weight, %shadow_bad_add\n";
+        m_out += "  %shadow_rejected = or i1 %shadow_bad, %shadow_prior_failure\n";
+        m_out += "  %shadow_cycles_out = select i1 %shadow_rejected, i64 %shadow_cycles, i64 %shadow_new_cycles\n";
+        m_out += "  %shadow_attempts_out = select i1 %shadow_rejected, i64 %shadow_attempts, i64 %shadow_new_attempts\n";
+        m_out += "  %shadow_failed_out = zext i1 %shadow_rejected to i32\n";
+        m_out += "  store i64 %shadow_cycles_out, ptr %shadow_cycles_ptr\n";
+        m_out += "  store i64 %shadow_attempts_out, ptr %shadow_attempts_ptr\n";
+        m_out += "  store i32 %shadow_failed_out, ptr %shadow_failed_ptr\n";
+    };
+
     // Private helper avoids unresolved external symbols in MCJIT fixtures.
     // Count executed VALID guest instructions, not host dispatches/loops.
     // This is NOT an EE cycle counter and must not drive GS scanout.
-    m_out += "define internal void @ee_count_guest_instruction(ptr %rt, i32 %pc, i32 %opcode) {\n";
+    m_out += "define internal void @ee_count_guest_instruction(ptr %rt, i32 %pc, i32 %opcode";
+    if (m_pcsx2_shadow)
+    {
+        m_out += ", ptr %cpu, i64 %weight";
+    }
+    m_out += ") {\n";
     m_out += "entry:\n";
     m_out += "  %valid_rt = icmp ne ptr %rt, null\n";
     m_out += "  br i1 %valid_rt, label %count, label %done\n";
@@ -316,6 +367,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  %ref_old = load i64, ptr %ref_counter_ptr\n";
     m_out += "  %ref_new = add i64 %ref_old, 1\n";
     m_out += "  store i64 %ref_new, ptr %ref_counter_ptr\n";
+    emit_shadow_account("1");
     emit_observation_gate(0u, "%counter_ptr", "%ref_counter_ptr");
     m_out += "done:\n";
     m_out += "  ret void\n";
@@ -323,7 +375,12 @@ void module_builder::declare_memory_helpers()
 
     // Pure scalar GPR runs contain no event producers or exception
     // edges. Observed runs retain the original per-instruction path.
-    m_out += "define internal i1 @ee_try_count_alu_run(ptr %rt, i64 %count) alwaysinline {\n";
+    m_out += "define internal i1 @ee_try_count_alu_run(ptr %rt, i64 %count";
+    if (m_pcsx2_shadow)
+    {
+        m_out += ", ptr %cpu, i64 %weight";
+    }
+    m_out += ") alwaysinline {\n";
     m_out += "entry:\n";
     m_out += "  %null = icmp eq ptr %rt, null\n";
     m_out += "  br i1 %null, label %accepted, label %check\n";
@@ -349,6 +406,7 @@ void module_builder::declare_memory_helpers()
     m_out += "  %new_slot = add i64 %slot, %count\n";
     m_out += "  store i64 %new_attempt, ptr %attempt_ptr\n";
     m_out += "  store i64 %new_slot, ptr %slot_ptr\n";
+    emit_shadow_account("%count");
     m_out += "  br label %accepted\n";
     m_out += "accepted:\n";
     m_out += "  ret i1 true\n";
@@ -1856,6 +1914,17 @@ bool module_builder::try_specialize_scalar(const ee::s_ee_instruction& ins)
     return false;
 }
 
+void module_builder::emit_guest_instruction_count(const ee::s_ee_instruction& ins)
+{
+    m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
+             std::to_string(ins.pc) + ", i32 " + std::to_string(ins.opcode_word);
+    if (m_pcsx2_shadow)
+    {
+        m_out += ", ptr %cpu, i64 " + std::to_string(ee::pcsx2_opcode_weight(ins));
+    }
+    m_out += ")\n";
+}
+
 void module_builder::emit_insn(const ee::s_ee_instruction& ins,
                                bool is_last_in_block,
                                uint32_t fallthrough_pc,
@@ -1926,9 +1995,7 @@ void module_builder::emit_insn(const ee::s_ee_instruction& ins,
     // The call is internal to each IR module, so it has no host ABI cost.
     if (count_instruction)
     {
-        m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                 std::to_string(ins.pc) + ", i32 " +
-                 std::to_string(ins.opcode_word) + ")\n";
+        emit_guest_instruction_count(ins);
     }
 
     if (try_specialize_scalar(ins))
@@ -3869,7 +3936,23 @@ void module_builder::emit_counted_alu_run(
     const std::string merge = "alu_count_merge_" + suffix;
     const std::string counted = newtemp();
     m_out += "  " + counted + " = call i1 @ee_try_count_alu_run(ptr %rt, i64 " +
-             std::to_string(end - first) + ")\n";
+             std::to_string(end - first);
+    if (m_pcsx2_shadow)
+    {
+        uint64_t total_weight = 0u;
+        for (size_t i = first; i < end; ++i)
+        {
+            const uint64_t weight = ee::pcsx2_opcode_weight(block[i]);
+            if (weight == 0u || total_weight > UINT64_MAX - weight)
+            {
+                total_weight = 0u;
+                break;
+            }
+            total_weight += weight;
+        }
+        m_out += ", ptr %cpu, i64 " + std::to_string(total_weight);
+    }
+    m_out += ")\n";
     m_out += "  br i1 " + counted + ", label %" + fast + ", label %" + slow + "\n";
 
     const auto incoming_lo = m_cur_lo;
@@ -4257,9 +4340,7 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             }
             const auto count = [&](const ee::s_ee_instruction& ins)
             {
-                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                    std::to_string(ins.pc) + ", i32 " +
-                    std::to_string(ins.opcode_word) + ")\n";
+                emit_guest_instruction_count(ins);
             };
             const auto annul = [&](const ee::s_ee_instruction& ins)
             {
@@ -4496,9 +4577,7 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             // Split into taken (delay + target) and not-taken (skip delay, ft).
             // ---------------------------------------------------------------
             // The branch condition reads the PRE-delay-slot register values.
-            m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                         std::to_string(ctrl.pc) + ", i32 " +
-                         std::to_string(ctrl.opcode_word) + ")\n";
+            emit_guest_instruction_count(ctrl);
             std::string cmp = make_cond(ctrl);
 
             // BLTZALL/BGEZALL write the link unconditionally, including when
@@ -4584,9 +4663,7 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                   ctrl.rs == static_cast<uint8_t>(e_ee_opcode::COP2_BC2)));
             if (supported_conditional)
             {
-                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                         std::to_string(ctrl.pc) + ", i32 " +
-                         std::to_string(ctrl.opcode_word) + ")\n";
+                emit_guest_instruction_count(ctrl);
                 const std::string cmp = make_cond(ctrl);
 
                 // BLTZAL/BGEZAL always set $ra to PC+8 before the ordinary
@@ -4607,9 +4684,7 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
             }
             else if (ctrl.opcode == e_ee_opcode::OP_JAL)
             {
-                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                         std::to_string(ctrl.pc) + ", i32 " +
-                         std::to_string(ctrl.opcode_word) + ")\n";
+                emit_guest_instruction_count(ctrl);
                 // JAL writes $ra before the delay slot executes.
                 std::string link = newtemp();
                 char link_pc[32];
@@ -4632,9 +4707,7 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
                      (ctrl.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_JR) ||
                       ctrl.funct == static_cast<uint8_t>(e_ee_opcode::FUNCT_JALR)))
             {
-                m_out += "  call void @ee_count_guest_instruction(ptr %rt, i32 " +
-                         std::to_string(ctrl.pc) + ", i32 " +
-                         std::to_string(ctrl.opcode_word) + ")\n";
+                emit_guest_instruction_count(ctrl);
                 // Register-indirect targets are sampled before the delay slot:
                 // the slot may overwrite rs, or rd may alias rs in JALR.
                 const std::string jump_target = src_lo(ctrl.rs);
