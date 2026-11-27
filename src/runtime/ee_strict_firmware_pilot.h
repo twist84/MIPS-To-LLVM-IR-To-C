@@ -2,9 +2,15 @@
 
 #include "ee_strict_reset.h"
 #include "../tools/ee_host_timers.h"
+#include "../iop/iop_kernel.h"
+#include "../iop/iop_sif_mmio_link.h"
+#include "../iop/iop_sif0_dma_transport.h"
+#include "../iop/iop_sif1_dma_transport.h"
 
 #include <cstdlib>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <span>
 #include <utility>
 #include <vector>
@@ -19,7 +25,9 @@ enum class e_ee_firmware_boundary : uint8_t
     RETIRED,
     HOST_REFUSAL,
     BUDGET,
-    TIMER_DEADLINE
+    TIMER_DEADLINE,
+    INTERRUPT_ENTRY,
+    DEVICE_FAULT
 };
 
 struct s_ee_firmware_step
@@ -93,6 +101,55 @@ public:
     c_ee_strict_firmware_pilot(const c_ee_strict_firmware_pilot&) = delete;
     c_ee_strict_firmware_pilot& operator=(const c_ee_strict_firmware_pilot&) = delete;
 
+    // Install a second reset domain before either processor executes.
+    // Only immutable ROM input is supplied; no guest RAM/register
+    // prepopulation or HLE service bootstrap.
+    bool attach_iop(const std::vector<uint8_t>& rom)
+    {
+        if (m_retired != 0u || m_iop != nullptr)
+        {
+            return false;
+        }
+        auto iop = std::make_unique<iop::c_kernel>();
+        if (!iop->start_rom0_boot(rom))
+        {
+            return false;
+        }
+        m_iop = std::move(iop);
+        iop::c_sif_mmio_link::bind(m_iop->hardware(), m_hardware.sif());
+        m_sif0 = std::make_unique<iop::c_sif0_dma_transport>(
+            m_memory, m_hardware.dmac(), m_iop->cpu(), m_iop->hardware());
+        m_sif1 = std::make_unique<iop::c_sif1_dma_transport>(
+            m_memory, m_hardware.dmac(), m_iop->cpu(), m_iop->hardware());
+        return true;
+    }
+
+    // Explicit independent IOP slice, not an EE-to-IOP clock mapping.
+    // Calls are serialized between EE transactions. The next EE step
+    // samples resulting interrupt levels before fetching any opcode.
+    std::optional<iop::s_kernel_run_result> advance_iop(uint32_t budget)
+    {
+        if (m_iop == nullptr || budget == 0u || budget > k_slot_limit || sif_faulted())
+        {
+            return std::nullopt;
+        }
+        const auto run = m_iop->run(budget, budget);
+        if (run.m_stop != iop::e_kernel_stop::budget_exhausted)
+        {
+            m_iop_stopped = true;
+        }
+        return run;
+    }
+
+    bool sif_faulted() const
+    {
+        return m_iop_stopped || (m_sif0 != nullptr && m_sif0->faulted()) ||
+            (m_sif1 != nullptr && m_sif1->faulted());
+    }
+    uint64_t sif0_delivered() const { return m_sif0 != nullptr ? m_sif0->delivered_bytes() : 0u; }
+    uint64_t sif1_delivered() const { return m_sif1 != nullptr ? m_sif1->delivered_bytes() : 0u; }
+    uint32_t sif1_fifo_words() const { return m_sif1 != nullptr ? m_sif1->fifo_words() : 0u; }
+
     const s_ee_cpu_state& cpu() const { return m_cpu; }
     static constexpr size_t k_ram_size = 0x02000000u;
     std::span<const uint8_t> ram() const { return {m_memory.read_span(0u, k_ram_size), k_ram_size}; }
@@ -121,6 +178,15 @@ public:
     {
         using boundary = e_ee_firmware_boundary;
         using result = e_ee_reset_prefix_result;
+        if (sif_faulted())
+        {
+            return {boundary::DEVICE_FAULT};
+        }
+        if (budget != 0u && m_retired != 0u && ee_interrupts_enabled(&m_cpu))
+        {
+            const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
+            return {boundary::INTERRUPT_ENTRY, {}, false, vector};
+        }
         const s_ee_strict_rom0_view rom{m_rom.data(), m_rom.size()};
         const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size), k_ram_size};
         const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
@@ -171,7 +237,7 @@ public:
             m_cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
         }
         m_branch_transaction = slots == 2u;
-        const s_ee_reset_mmio mmio{this, &write, &read, true, true, true};
+        const s_ee_reset_mmio mmio{this, &write, &read, true, true, true, m_iop != nullptr};
         s_ee_reset_prefix_step action{};
         if (m_retired == 0u)
         {
@@ -215,12 +281,18 @@ public:
         // A prevalidated normal SPR/VIF DMA start is a synchronous reference
         // transaction at the retired store boundary, before IRQ sampling.
         // No asynchronous latency/arbitration or fake completion is used.
-        const bool dma_completed = m_dma_start_address != 0u;
-        if (dma_completed)
+        bool dma_completed = false;
+        if (m_dma_start_address != 0u)
         {
+            const uint32_t channel = dma_channel_bit(m_dma_start_address);
+            const bool sif = sif_dma_register(m_dma_start_address);
             const s_ee_u128 value{m_dma_start_value, 0u};
-            if (!c_ee_dmac::mmio_write(&m_hardware.dmac(), m_dma_start_address, 4u, &value) ||
-                m_hardware.dmac().started_channels() != 0u)
+            if (!c_ee_dmac::mmio_write(&m_hardware.dmac(), m_dma_start_address, 4u, &value))
+            {
+                std::abort();
+            }
+            dma_completed = (m_hardware.dmac().started_channels() & channel) == 0u;
+            if (!sif && !dma_completed)
             {
                 std::abort(); // prevalidated synchronous transfer contract
             }
@@ -339,6 +411,28 @@ private:
             (offset == 0u || offset == 0x10u || offset == 0x20u);
     }
 
+    static constexpr bool sif_dma_register(uint32_t address)
+    {
+        const uint32_t base = address & ~0xffu;
+        const uint32_t offset = address & 0xffu;
+        return (base == c_ee_dmac::k_sif0_base || base == c_ee_dmac::k_sif1_base) &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u);
+    }
+
+    static constexpr uint32_t dma_channel_bit(uint32_t address)
+    {
+        switch (address & ~0xffu)
+        {
+        case c_ee_dmac::k_vif0_base: return 1u << 0u;
+        case c_ee_dmac::k_vif1_base: return 1u << 1u;
+        case c_ee_dmac::k_sif0_base: return 1u << 5u;
+        case c_ee_dmac::k_sif1_base: return 1u << 6u;
+        case c_ee_dmac::k_from_spr_base: return 1u << 8u;
+        case c_ee_dmac::k_to_spr_base: return 1u << 9u;
+        default: return 0u;
+        }
+    }
+
     static constexpr bool vif_command_supported(uint32_t word)
     {
         // Only complete, single-word commands, no VU starts, path
@@ -411,9 +505,11 @@ private:
         // chain/interleave/tag behavior. Reject disabled DMAE instead of
         // pretending to model queued starts while the controller is off.
         const bool vif = vif_dma_register(address);
-        if (m_dmac_control != 1u || (word & ~0x101u) != 0u ||
-            (vif && word != 0x101u) ||
-            m_hardware.dmac().started_channels() != 0u)
+        const bool sif = sif_dma_register(address);
+        if (m_dmac_control != 1u ||
+            (m_hardware.dmac().started_channels() & dma_channel_bit(address)) != 0u ||
+            (sif && m_iop == nullptr) ||
+            (!sif && ((word & ~0x101u) != 0u || (vif && word != 0x101u))))
         {
             return false;
         }
@@ -423,6 +519,22 @@ private:
             !c_ee_dmac::mmio_read(&dmac, address + 0x20u, 4u, &qwc))
         {
             return false;
+        }
+        if (sif && address == c_ee_dmac::k_sif0_base)
+        {
+            // Destination chain comes from genuine IOP DMA9, not EE
+            // TADR or host memory. Do not complete an unpaired receiver.
+            if ((word != 0x184u && word != 0x104u) || qwc.m_lo != 0u)
+            {
+                return false;
+            }
+            m_dma_start_address = address;
+            m_dma_start_value = word;
+            return true;
+        }
+        if (sif && word != 0x101u)
+        {
+            return false; // only normal forward SIF1 source in this batch
         }
         // Limit the pilot to nonzero bounded transfers with no alias or
         // physical span overflow. The production engine validates again.
@@ -473,7 +585,8 @@ private:
             *value = {self.m_dmac_control, 0u};
             return true;
         }
-        if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address))
+        if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address) ||
+            (self.m_iop != nullptr && sif_dma_register(address)))
         {
             return c_ee_dmac::mmio_read(&self.m_hardware.dmac(), address, width, value);
         }
@@ -531,7 +644,8 @@ private:
         const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
         if (address == k_d_ctrl)
         {
-            if ((dmac_word & ~1u) != 0u)
+            if ((dmac_word & ~1u) != 0u ||
+                (dmac_word == 0u && self.m_hardware.dmac().started_channels() != 0u))
             {
                 return false;
             }
@@ -540,7 +654,8 @@ private:
         }
         if (address == c_ee_dmac::k_stat_address)
         {
-            constexpr uint32_t supported = k_dma_channel_mask | (k_dma_channel_mask << 16u);
+            const uint32_t channels = k_dma_channel_mask | (self.m_iop != nullptr ? 0x60u : 0u);
+            const uint32_t supported = channels | (channels << 16u);
             // Other channel sources and bus error state are not connected.
             if ((dmac_word & ~supported) != 0u)
             {
@@ -548,8 +663,13 @@ private:
             }
             return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
         }
-        if (spr_register(address) || vif_dma_register(address))
+        if (spr_register(address) || vif_dma_register(address) ||
+            (self.m_iop != nullptr && sif_dma_register(address)))
         {
+            if ((self.m_hardware.dmac().started_channels() & dma_channel_bit(address)) != 0u)
+            {
+                return false; // no cancellation or active register overwrite
+            }
             if ((address & 0xffu) == 0u)
             {
                 if ((dmac_word & c_ee_dmac::k_chcr_str) != 0u)
@@ -619,5 +739,10 @@ private:
     uint32_t m_dma_start_address = 0u;
     uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
+    bool m_iop_stopped = false;
+    // Destruction order detaches FIFO callbacks before either endpoint.
+    std::unique_ptr<iop::c_kernel> m_iop;
+    std::unique_ptr<iop::c_sif0_dma_transport> m_sif0;
+    std::unique_ptr<iop::c_sif1_dma_transport> m_sif1;
 };
 } // namespace ee

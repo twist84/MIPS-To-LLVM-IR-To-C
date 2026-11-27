@@ -203,6 +203,7 @@ struct s_ee_reset_mmio
     bool m_scheduled_timers = false;
     bool m_scheduled_dmac = false;
     bool m_scheduled_sif_vif = false;
+    bool m_scheduled_sif_dma = false;
 
     constexpr bool scheduled_timer_address(uint32_t address) const
     {
@@ -224,6 +225,10 @@ struct s_ee_reset_mmio
         }
         const uint32_t base = address & ~0xffu;
         const uint32_t offset = address & 0xffu;
+        if (m_scheduled_sif_dma && (base == 0xb000c000u || base == 0xb000c400u))
+        {
+            return offset == 0u || offset == 0x10u || offset == 0x20u;
+        }
         if (m_scheduled_sif_vif && (base == 0xb0008000u || base == 0xb0009000u))
         {
             return offset == 0u || offset == 0x10u || offset == 0x20u;

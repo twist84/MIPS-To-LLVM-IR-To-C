@@ -94,6 +94,7 @@ add_library(iop_cpu STATIC
     src/iop/iop_sif_rpc_bridge.cpp
 )
 target_include_directories(iop_cpu PUBLIC ${CMAKE_SOURCE_DIR}/src/iop)
+target_link_libraries(ee_ram_tlb_test PRIVATE iop_cpu ee_core)
 add_executable(iop_cpu_test tests/smoke/iop_cpu_test.cpp)
 target_link_libraries(iop_cpu_test PRIVATE iop_cpu)
 add_executable(iop_guest_fault_probe_test

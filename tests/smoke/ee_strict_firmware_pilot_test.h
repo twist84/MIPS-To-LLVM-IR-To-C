@@ -631,4 +631,81 @@ bool test_strict_firmware_sif_vif()
     }
     return true;
 }
+
+bool test_strict_firmware_sif_transport()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    // EE guest constructs a SIF1 destination tag and payload in RAM,
+    // enables DMA, arms SIF0 then starts SIF1 with no IOP receiver yet.
+    ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+        0x40806000u, 0x3c04a000u, 0x3c024000u, 0x34420100u,
+        0xac820000u, 0x34020010u, 0xac820004u,
+        0x34021234u, 0xac820010u, 0x3c05b000u, 0x34a6e000u,
+        0x34020001u, 0xacc20000u, 0x3c020060u, 0xacc20010u,
+        0x34a7c000u, 0xace00020u, 0x34020184u, 0xace20000u,
+        0x34a7c400u, 0xace00010u, 0x34020002u, 0xace20020u,
+        0x34020101u, 0xace20000u,
+        0x34020040u, 0xacc20010u, // ack EE sender only
+        0x3c020041u, 0x34420801u, 0x40826000u, 0u}));
+    // All tags, payload transformation and DMA starts on the IOP
+    // are guest instructions. No host writes to either RAM.
+    const auto iop_rom = make_firmware_pilot_rom({
+        0x3c08bf80u, 0x35081538u, 0x3c090100u, 0x35290700u,
+        0xad090000u, 0x3c0f0100u,
+        0x8d0e0000u, 0u, 0x01cf7024u, 0x15c0fffcu, 0u,
+        0x24080100u, 0x8d090000u, 0u, 0x39295aa5u, 0xad090100u,
+        0x24080300u, 0x3c098000u, 0x35290200u, 0xad090000u,
+        0x24090004u, 0xad090004u, 0x3c099000u, 0x35290001u, 0xad090008u,
+        0x24090040u, 0xad09000cu, 0xad000010u, 0xad000014u,
+        0x3c08bf80u, 0x3508152cu, 0x24090300u, 0xad090000u,
+        0x2508fffcu, 0x3c090100u, 0x35290701u, 0xad090000u,
+        0x1000ffffu, 0u});
+    if (!pilot.attach_iop(iop_rom) || pilot.attach_iop(iop_rom) ||
+        pilot.advance_iop(0u).has_value())
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 25u; ++i)
+    {
+        const auto step = pilot.step(1u);
+        if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u)
+        {
+            return false;
+        }
+    }
+    // DMA6 can finish into the real FIFO without DMA10. DMA5
+    // stays armed, no payload delivered and no invented reply.
+    if (pilot.sif1_delivered() != 0u || pilot.sif0_delivered() != 0u ||
+        pilot.sif1_fifo_words() != 8u || pilot.dmac_started() != 0x20u ||
+        pilot.dmac_status() != 0x00600040u || pilot.sif_faulted())
+    {
+        return false;
+    }
+    for (uint32_t i = 25u; i < 30u; ++i)
+    {
+        const auto step = pilot.step(1u);
+        if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u)
+        {
+            return false;
+        }
+    }
+    const auto run = pilot.advance_iop(128u);
+    if (!run.has_value() || run->m_stop != iop::e_kernel_stop::budget_exhausted ||
+        run->m_executed == 0u || pilot.sif_faulted() || pilot.cycle() != 30u ||
+        pilot.sif0_delivered() != 16u || pilot.sif1_delivered() != 16u ||
+        pilot.sif1_fifo_words() != 0u || pilot.dmac_started() != 0u ||
+        pilot.dmac_status() != 0x00600020u ||
+        ee::ee_read_instruction_word(pilot.ram().data() + 0x40u) != (0x1234u ^ 0x5aa5u))
+    {
+        return false;
+    }
+    // External guest progress asserted IP3 at the committed EE boundary.
+    // Take it before executing the next EE word; no invented EE slots.
+    const auto irq = pilot.step(1u);
+    return irq.m_boundary == boundary::INTERRUPT_ENTRY &&
+        irq.m_interrupt_vector == 0xbfc00400u && pilot.retired() == 30u &&
+        pilot.cycle() == 30u && pilot.cpu().m_cop0[ee::COP0_EPC] == base + 120u &&
+        pilot.cpu().m_cop0[ee::COP0_Cause] == 0x800u;
+}
 } // namespace

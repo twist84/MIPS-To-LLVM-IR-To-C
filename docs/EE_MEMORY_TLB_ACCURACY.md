@@ -1388,3 +1388,28 @@ guest MARK interrupt and D_STAT source, reset and refusal,
 plus direct FIFO NOP. No SIF FIFO endpoint yet; genuine paired
 SIF DMA is H3C2, with IOP ownership and progress explicit.
 No production retail path changes. Pending CI.
+
+## M6E3H3C2: paired SIF FIFO transport
+
+H3C1 passed both firmware releases at 9aa0c3bd:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46058677582
+
+The strict pilot can now own a second ROM0 reset domain (existing
+IOP kernel raw firmware path), bind the genuine SIF mailbox link
+and both existing 128-word SIF DMA engines to the same physical
+EE RAM and DMAC. No HLE service or host guest-RAM prepopulation.
+Admit EE DMA5 destination-chain receive with QWC zero and DMA6
+bounded normal source, with real STR/FIFO/completion states;
+an unpaired receiver is not a synchronous completed transfer.
+Reject active register overwrite and DMAE disable with active DMA.
+SIF producer/consumer faults are terminal pilot boundaries.
+An explicit independent IOP instruction slice runs between EE
+transactions. Sample its pending interrupt before the next EE
+fetch; no EE time advances for the IOP slice or IRQ entry.
+This is not synchronized clock mapping, concurrency, arbitration
+or calibrated DMA latency. H3E must establish those ownership and
+deadline contracts. Test ROMs build both tags and payloads in
+guest instructions, verify pending FIFO without a receiver,
+IOP-transformed response bytes, actual D_STAT/IP3 and zero-slot
+interrupt entry. SIF1 source chains remain out of this subset.
+No production retail path changes. Pending CI.
