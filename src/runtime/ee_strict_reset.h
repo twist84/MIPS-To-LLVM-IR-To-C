@@ -201,6 +201,7 @@ struct s_ee_reset_mmio
     // Explicit scheduler-owned transport only. The isolated firmware
     // diagnostic keeps its existing narrow register whitelist.
     bool m_scheduled_timers = false;
+    bool m_scheduled_dmac = false;
 
     constexpr bool scheduled_timer_address(uint32_t address) const
     {
@@ -210,6 +211,22 @@ struct s_ee_reset_mmio
             (offset == 0u || offset == 0x10u || offset == 0x20u);
     }
 
+    constexpr bool scheduled_dmac_address(uint32_t address) const
+    {
+        if (!m_scheduled_dmac)
+        {
+            return false;
+        }
+        if (address == 0xb000e010u)
+        {
+            return true;
+        }
+        const uint32_t base = address & ~0xffu;
+        const uint32_t offset = address & 0xffu;
+        return (base == 0xb000d000u || base == 0xb000d400u) &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
+    }
+
     constexpr bool read(const s_ee_bus_span_plan& bus, uint32_t address,
         s_ee_u128& value) const
     {
@@ -217,7 +234,8 @@ struct s_ee_reset_mmio
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
             bus.m_width == 4u &&
             (address == 0xb000f010u || address == 0xb000e000u || address == 0xb000f220u ||
-             scheduled_timer_address(address) || (m_scheduled_timers && address == 0xb000f000u)) &&
+             scheduled_timer_address(address) || scheduled_dmac_address(address) ||
+             (m_scheduled_timers && address == 0xb000f000u)) &&
             bus.m_address == address - 0xa0000000u &&
             m_read(m_user, bus.m_address, bus.m_width, &value);
     }
@@ -234,8 +252,9 @@ struct s_ee_reset_mmio
         const bool timer = bus.m_width == 4u &&
             (address == 0xb0001800u || address == 0xb0001810u || address == 0xb0001820u ||
              scheduled_timer_address(address));
-        const bool dmac = bus.m_width == 4u && address == 0xb000e000u &&
-            (static_cast<uint32_t>(value.m_lo) & ~1u) == 0u;
+        const bool dmac = bus.m_width == 4u &&
+            ((address == 0xb000e000u && (static_cast<uint32_t>(value.m_lo) & ~1u) == 0u) ||
+             scheduled_dmac_address(address));
         const bool sif = bus.m_width == 4u && address == 0xb000f220u;
         const bool gs = bus.m_width == 4u &&
             ((address == 0xb2001000u && static_cast<uint32_t>(value.m_lo) == 0x200u) ||

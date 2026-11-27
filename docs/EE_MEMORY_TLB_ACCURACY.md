@@ -1338,3 +1338,30 @@ guest acknowledgement of each independently, ERET, wrap, sign
 extension, zero register, and deadline refusal/commit. All new
 clock transfers refuse in delay slots until finer scheduling exists.
 No Random, DMA, IOP or physical issue timing added. Pending CI.
+
+## M6E3H3B: live DMAC scratchpad transfer pilot
+
+M6E3H3A passed both firmware releases on ca7a4c09:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46057843002
+The new Count/Compare tests and previous isolated stops passed.
+
+Replace pilot-only RAM vector/TLB with owned production ee_memory
+and its persistent TLB. CPU strict RAM access and the actual DMAC
+share the same physical backing; the DMA scratchpad is owned by
+the same memory object. No mirrored copies or fabricated payload.
+Connect real c_ee_dmac normal channels 8/9, D_STAT and IP3.
+D_CTRL remains an explicitly limited local DMAE gate because the
+production synchronous DMAC does not implement global arbitration.
+Refuse disabled starts, unsupported modes and invalid spans before
+touching CHCR or time. Limit to 1..1024 QWC, no chains/interleave,
+no other channel masks, no MMIO in branch slots.
+Stage the validated CHCR start during the store, perform the real
+synchronous copy at retirement before device timers/Count and IRQ
+sampling, and check that STR cleared. This is a reference-style
+transaction, NOT a modeled asynchronous bus transfer or DMA latency.
+Directed guest ROM tests round-trip actual RAM bytes through
+scratchpad wrap, observe MADR/QWC/SADR, independent D_STAT status
+and masks, IP3, BEV1 entry, acknowledgement and ERET. Negative
+tests verify disabled/misaligned/unsupported starts are read-only.
+SIF/VIF DMA and dual processor coordination remain future work;
+isolated firmware and retail execution remain unchanged. Pending CI.

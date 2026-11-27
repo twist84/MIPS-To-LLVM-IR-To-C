@@ -5,14 +5,15 @@
 
 #include <cstdlib>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
 namespace ee
 {
-// The pilot owns a reset domain, not a resumed snapshot. Only the bus-clock
-// timer/INTC subset is connected; guest exception entry is bounded to
-// Level 1 interrupts. Other devices remain disconnected.
+// The pilot owns a reset domain, not a resumed snapshot. Bus-clock timers,
+// INTC and bounded synchronous SPR DMA are connected; guest exception
+// entry is bounded to Level 1 interrupts.
 enum class e_ee_firmware_boundary : uint8_t
 {
     RETIRED,
@@ -28,6 +29,7 @@ struct s_ee_firmware_step
     bool m_timer_serviced = false;
     uint32_t m_interrupt_vector = 0u;
     bool m_cop0_compare_crossed = false;
+    bool m_dma_completed = false;
 };
 
 // Reference policy reserves two slots for supported branches and their delay
@@ -69,20 +71,29 @@ public:
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
 
     explicit c_ee_strict_firmware_pilot(std::vector<uint8_t> rom)
-        : m_rom(std::move(rom)), m_ram(0x02000000u, 0u)
+        : m_rom(std::move(rom)), m_memory(k_ram_size)
     {
         if (!m_runtime.m_ee_cycle_scheduler.install_reference_compatibility_source())
         {
             std::abort();
         }
+        if (m_memory.physical_ram_span(0u, k_ram_size) == nullptr)
+        {
+            std::abort();
+        }
         m_hardware.bind_cpu(&m_cpu);
+        m_hardware.bind_memory(&m_memory);
     }
 
     c_ee_strict_firmware_pilot(const c_ee_strict_firmware_pilot&) = delete;
     c_ee_strict_firmware_pilot& operator=(const c_ee_strict_firmware_pilot&) = delete;
 
     const s_ee_cpu_state& cpu() const { return m_cpu; }
-    const std::vector<uint8_t>& ram() const { return m_ram; }
+    static constexpr size_t k_ram_size = 0x02000000u;
+    std::span<const uint8_t> ram() const { return {m_memory.read_span(0u, k_ram_size), k_ram_size}; }
+    uint32_t dmac_control() const { return m_dmac_control; }
+    uint32_t dmac_status() { return m_hardware.dmac().status(); }
+    uint32_t dmac_started() { return m_hardware.dmac().started_channels(); }
     uint64_t retired() const { return m_retired; }
     uint64_t cycle() const { return m_runtime.m_ee_cycle_scheduler.current_cycle(); }
     e_ee_cycle_source source() const { return m_runtime.m_ee_cycle_scheduler.source(); }
@@ -106,8 +117,8 @@ public:
         using boundary = e_ee_firmware_boundary;
         using result = e_ee_reset_prefix_result;
         const s_ee_strict_rom0_view rom{m_rom.data(), m_rom.size()};
-        const s_ee_reset_ram_view ram{m_ram.data(), m_ram.size()};
-        const auto fetch = ee_plan_instruction_fetch(m_tlb, m_cpu.m_pc,
+        const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size), k_ram_size};
+        const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
             m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
         const uint8_t* code = ee_fetch_strict_reset_word(fetch, rom, ram);
@@ -132,7 +143,7 @@ public:
         if (slots == 2u)
         {
             const uint32_t slot_pc = m_cpu.m_pc + 4u;
-            const auto slot_fetch = ee_plan_instruction_fetch(m_tlb, slot_pc,
+            const auto slot_fetch = ee_plan_instruction_fetch(m_memory.tlb(), slot_pc,
                 m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
                 m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
             const uint8_t* slot = ee_fetch_strict_reset_word(slot_fetch, rom, ram);
@@ -155,7 +166,7 @@ public:
             m_cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
         }
         m_branch_transaction = slots == 2u;
-        const s_ee_reset_mmio mmio{this, &write, &read, true};
+        const s_ee_reset_mmio mmio{this, &write, &read, true, true};
         s_ee_reset_prefix_step action{};
         if (m_retired == 0u)
         {
@@ -168,12 +179,13 @@ public:
         else
         {
             action = ee_execute_strict_rom_register_step(m_cpu, rom, budget, ram,
-                nullptr, &m_tlb, &mmio, &m_cold_cache, true);
+                nullptr, &m_memory.tlb(), &mmio, &m_cold_cache, true);
         }
         m_branch_transaction = false;
         if (action.m_result != result::COMMITTED)
         {
             m_cpu.m_exit_reason = previous_exit;
+            m_dma_start_address = 0u;
             // No time or device service on a host refusal.
             return {boundary::HOST_REFUSAL, action};
         }
@@ -195,6 +207,20 @@ public:
 
         // Effects of the instruction/slot are committed first; then service
         // due timers (production timer model uses ascending channel order).
+        // A prevalidated normal SPR DMA start is a synchronous reference
+        // transaction at the retired store boundary, before IRQ sampling.
+        // No asynchronous latency/arbitration or fake completion is used.
+        const bool dma_completed = m_dma_start_address != 0u;
+        if (dma_completed)
+        {
+            const s_ee_u128 value{m_dma_start_value, 0u};
+            if (!c_ee_dmac::mmio_write(&m_hardware.dmac(), m_dma_start_address, 4u, &value) ||
+                m_hardware.dmac().started_channels() != 0u)
+            {
+                std::abort(); // prevalidated synchronous transfer contract
+            }
+            m_dma_start_address = 0u;
+        }
         const bool due = m_timers.next_event() <= timestamp;
         m_timers.service();
         const bool ip7_before = (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
@@ -206,7 +232,7 @@ public:
         // An atomic branch has completed its slot, so EPC is its next PC
         // and BD is clear. Intra-branch deadlines still refuse above.
         const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
-        return {boundary::RETIRED, action, due, vector, compare_crossed};
+        return {boundary::RETIRED, action, due, vector, compare_crossed, dma_completed};
     }
 
 private:
@@ -289,6 +315,49 @@ private:
         return {result::COMMITTED, opcode, 1u, pc};
     }
 
+    static constexpr uint32_t k_d_ctrl = 0x1000e000u;
+    static constexpr uint32_t k_spr_channel_mask = (1u << 8u) | (1u << 9u);
+
+    static constexpr bool spr_register(uint32_t address)
+    {
+        const uint32_t base = address & ~0xffu;
+        const uint32_t offset = address & 0xffu;
+        return (base == c_ee_dmac::k_from_spr_base || base == c_ee_dmac::k_to_spr_base) &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
+    }
+
+    bool prepare_spr_start(uint32_t address, uint32_t word)
+    {
+        // Normal-mode STR only. Dedicated scratchpad channels have
+        // fixed direction; accept the reference DIR bit without inventing
+        // chain/interleave/tag behavior. Reject disabled DMAE instead of
+        // pretending to model queued starts while the controller is off.
+        if (m_dmac_control != 1u || (word & ~0x101u) != 0u ||
+            m_hardware.dmac().started_channels() != 0u)
+        {
+            return false;
+        }
+        s_ee_u128 madr{}, qwc{};
+        auto& dmac = m_hardware.dmac();
+        if (!c_ee_dmac::mmio_read(&dmac, address + 0x10u, 4u, &madr) ||
+            !c_ee_dmac::mmio_read(&dmac, address + 0x20u, 4u, &qwc))
+        {
+            return false;
+        }
+        // Limit the pilot to nonzero bounded transfers with no alias or
+        // physical span overflow. The production engine validates again.
+        const uint64_t bytes = qwc.m_lo * 16u;
+        if (qwc.m_lo == 0u || qwc.m_lo > 1024u || (madr.m_lo & 15u) != 0u ||
+            madr.m_lo >= k_ram_size || bytes > k_ram_size - madr.m_lo ||
+            !m_memory.contains(static_cast<uint32_t>(madr.m_lo), static_cast<size_t>(bytes)))
+        {
+            return false;
+        }
+        m_dma_start_address = address;
+        m_dma_start_value = word;
+        return true;
+    }
+
     static bool timer_register(uint32_t address, uint32_t& index, uint32_t& offset)
     {
         if (address < 0x10000000u || address >= 0x10002000u)
@@ -313,6 +382,15 @@ private:
         {
             return c_ee_intc::mmio_read(&self.m_hardware.intc(), address, width, value);
         }
+        if (address == k_d_ctrl)
+        {
+            *value = {self.m_dmac_control, 0u};
+            return true;
+        }
+        if (address == c_ee_dmac::k_stat_address || spr_register(address))
+        {
+            return c_ee_dmac::mmio_read(&self.m_hardware.dmac(), address, width, value);
+        }
         uint32_t index = 0u;
         uint32_t offset = 0u;
         if (!timer_register(address, index, offset) ||
@@ -333,6 +411,41 @@ private:
         if (address == c_ee_intc::k_mask_address || address == c_ee_intc::k_stat_address)
         {
             return c_ee_intc::mmio_write(&self.m_hardware.intc(), address, width, value);
+        }
+        const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
+        if (address == k_d_ctrl)
+        {
+            if ((dmac_word & ~1u) != 0u)
+            {
+                return false;
+            }
+            self.m_dmac_control = dmac_word;
+            return true;
+        }
+        if (address == c_ee_dmac::k_stat_address)
+        {
+            constexpr uint32_t supported = k_spr_channel_mask | (k_spr_channel_mask << 16u);
+            // Other channel sources and bus error state are not connected.
+            if ((dmac_word & ~supported) != 0u)
+            {
+                return false;
+            }
+            return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
+        }
+        if (spr_register(address))
+        {
+            if ((address & 0xffu) == 0u)
+            {
+                if ((dmac_word & c_ee_dmac::k_chcr_str) != 0u)
+                {
+                    return self.prepare_spr_start(address, dmac_word);
+                }
+                if ((dmac_word & ~1u) != 0u)
+                {
+                    return false;
+                }
+            }
+            return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
         }
         uint32_t index = 0u;
         uint32_t offset = 0u;
@@ -360,13 +473,15 @@ private:
 
     s_ee_cpu_state m_cpu = ee_make_strict_reset_prefix_state();
     const std::vector<uint8_t> m_rom;
-    std::vector<uint8_t> m_ram;
-    c_ee_tlb m_tlb{};
+    ee_memory m_memory;
     c_ee_reset_cold_cache m_cold_cache{};
     s_ee_runtime m_runtime{};
     c_ee_hw_bus m_hardware{};
     c_ee_host_timers m_timers{&m_runtime, &m_hardware};
     uint64_t m_retired = 0u;
+    uint32_t m_dmac_control = 0u;
+    uint32_t m_dma_start_address = 0u;
+    uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
 };
 } // namespace ee

@@ -418,4 +418,107 @@ bool test_strict_firmware_cop0_clock()
     }
     return true;
 }
+
+bool test_strict_firmware_spr_dma()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t base = 0xbfc00000u;
+    constexpr uint32_t vector = 0xbfc00400u;
+    // Fill source RAM, set DMAE and mask both SPR channels, program
+    // toSPR then fromSPR using real guest writes. Both use SADR=3ff0
+    // and two QWC, so the production engine wraps through SPR zero.
+    const auto program = [](uint32_t enable, uint32_t source, uint32_t start)
+    {
+        return make_firmware_pilot_rom({
+            0x40806000u, 0x3c04a000u, 0x34021234u, 0xac820000u,
+            0x34025678u, 0xac820010u, 0x3c05b000u, 0x34a6e000u,
+            0x34020000u | enable, 0xacc20000u,
+            0x3c020300u, 0xacc20010u, 0x34a7d400u,
+            0x34020000u | source, 0xace20010u, 0x34020002u, 0xace20020u,
+            0x34023ff0u, 0xace20080u, 0x34020000u | start, 0xace20000u,
+            0x8ce80020u, 0x8ce90010u, 0x8cea0080u, 0x8ccb0010u,
+            0x34a7d000u, 0x34020020u, 0xace20010u, 0x34020002u, 0xace20020u,
+            0x34023ff0u, 0xace20080u, 0x34020100u, 0xace20000u,
+            0x8c8c0020u, 0x8c8d0030u, 0x3c020041u, 0x34420801u, 0x40826000u, 0u});
+    };
+    {
+        auto rom = program(1u, 0u, 0x101u);
+        const uint32_t handler[] = {
+            0x34020300u, 0xacc20010u, 0x42000018u};
+        size_t offset = 0x400u;
+        for (const uint32_t word : handler)
+        {
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                rom[offset++] = static_cast<uint8_t>(word >> (i * 8u));
+            }
+        }
+        ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+        for (uint32_t i = 0u; i < 39u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED ||
+                step.m_dma_completed != (i == 20u || i == 33u) ||
+                step.m_interrupt_vector != (i == 38u ? vector : 0u))
+            {
+                return false;
+            }
+            if (i == 20u && (pilot.dmac_status() != 0x03000200u ||
+                pilot.dmac_started() != 0u || (pilot.cpu().m_cop0[ee::COP0_Cause] & 0x800u) == 0u))
+            {
+                return false;
+            }
+        }
+        if (pilot.dmac_control() != 1u || pilot.dmac_status() != 0x03000300u ||
+            pilot.cpu().m_gpr[8].m_lo != 0u || pilot.cpu().m_gpr[9].m_lo != 32u ||
+            pilot.cpu().m_gpr[10].m_lo != 16u || pilot.cpu().m_gpr[11].m_lo != 0x03000200u ||
+            pilot.cpu().m_gpr[12].m_lo != 0x1234u || pilot.cpu().m_gpr[13].m_lo != 0x5678u ||
+            ee::ee_read_instruction_word(pilot.ram().data() + 0x20u) != 0x1234u ||
+            ee::ee_read_instruction_word(pilot.ram().data() + 0x30u) != 0x5678u ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != base + 39u * 4u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0x800u)
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u)
+            {
+                return false;
+            }
+        }
+        if (pilot.cpu().m_pc != base + 39u * 4u || pilot.dmac_status() != 0x03000000u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0u || pilot.cycle() != 42u)
+        {
+            return false;
+        }
+    }
+
+    // Disabled DMAE, misaligned physical MADR, and chain mode must all
+    // refuse the guest start without latching STR, completion or time.
+    for (uint32_t variant = 0u; variant < 3u; ++variant)
+    {
+        ee::c_ee_strict_firmware_pilot pilot(program(variant == 0u ? 0u : 1u,
+            variant == 1u ? 1u : 0u, variant == 2u ? 0x105u : 0x101u));
+        for (uint32_t i = 0u; i < 20u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto refused = pilot.step(1u);
+        if (refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+            refused.m_dma_completed || pilot.cycle() != 20u || pilot.retired() != 20u ||
+            pilot.cpu().m_pc != base + 80u || pilot.dmac_started() != 0u ||
+            pilot.dmac_status() != 0x03000000u || pilot.cpu().m_cop0[ee::COP0_Cause] != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace
