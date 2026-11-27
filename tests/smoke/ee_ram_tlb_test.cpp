@@ -2392,6 +2392,84 @@ bool test_strict_reset_config()
         cpu.m_pc == pc + 16u && cpu.m_cop0[ee::COP0_Config] == 0x73443u;
 }
 
+bool test_strict_reset_word_shifts()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[8u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    struct s_case
+    {
+        uint32_t m_function;
+        uint32_t m_shift;
+        uint64_t m_input;
+        uint64_t m_expected;
+    };
+    constexpr s_case cases[] =
+    {
+        {2u, 16u, 0xffffffffa0019160ull, 0xa001u},
+        {2u, 0u, 0x1234567880000001ull, 0xffffffff80000001ull},
+        {2u, 31u, 0x1234567880000001ull, 1u},
+        {0u, 31u, 0x1234567800000001ull, 0xffffffff80000000ull},
+        {0u, 1u, 0x1234567880000001ull, 2u},
+        {3u, 31u, 0x1234567880000000ull, 0xffffffffffffffffull},
+        {3u, 16u, 0x1234567880000000ull, 0xffffffffffff8000ull},
+        {3u, 16u, 0xffffffff7fff0000ull, 0x7fffu},
+        {3u, 0u, 0x1234567880000001ull, 0xffffffff80000001ull}
+    };
+    for (const auto& item : cases)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[1] = {item.m_input, 0xabcdefu};
+        // In-place shift: the original low word must be read first.
+        put((1u << 16u) | (1u << 11u) | (item.m_shift << 6u) | item.m_function);
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+        if (step.m_result != result::COMMITTED || step.m_retired != 1u ||
+            cpu.m_pc != pc + 4u || cpu.m_gpr[1].m_lo != item.m_expected ||
+            cpu.m_gpr[1].m_hi != 0xabcdefu)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[0] = {0xffffffffffffffffull, 0x1234u};
+    cpu.m_pc = pc;
+    put(0x00000842u); // srl r1,zero,1
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_retired != 1u ||
+        cpu.m_gpr[1].m_lo != 0u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[1].m_lo = 0xffffffff80000000ull;
+    put(0x00010043u); // sra zero,r1,1
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_retired != 1u ||
+        cpu.m_gpr[0].m_lo != 0xffffffffffffffffull || cpu.m_gpr[0].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    for (const uint32_t function : {0u, 2u, 3u})
+    {
+        cpu.m_pc = pc;
+        put((1u << 21u) | (1u << 16u) | (1u << 11u) | function);
+        const auto refused = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+        if (refused.m_result != result::UNSUPPORTED_OPCODE || refused.m_retired != 0u ||
+            cpu.m_pc != pc || cpu.m_gpr[1].m_lo != 0xffffffff80000000ull)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2619,6 +2697,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_word_shifts(), "strict reset immediate word shifts regression"))
     {
         return 1;
     }

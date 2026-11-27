@@ -660,7 +660,71 @@ int main(int argc, char** argv)
         retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Config],
         static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
 
-    const uint32_t exploration_limit = config_checkpoint + 4096u;
+    // The next routine constructs handler instruction words, then
+    // writes through a firmware table of low-RAM offsets. Derive the
+    // first destination from the pinned ROM, not from the executor.
+    constexpr uint32_t vector_table_physical = 0x0001a1a4u;
+    constexpr uint32_t vector_table_offset = vector_table_physical - destination;
+    static_assert(vector_table_offset + 4u <= image_size);
+    const uint32_t vector_offset = ee::ee_read_instruction_word(
+        bytes.data() + source_offset + vector_table_offset);
+    constexpr uint32_t first_vector_word = 0x3c1aa001u;
+    constexpr uint32_t second_vector_word = 0x375a9160u;
+    if ((vector_offset & 3u) != 0u || vector_offset > destination - 4u)
+    {
+        std::fprintf(stderr, "EELOAD unexpected first vector table offset: %08x\n", vector_offset);
+        return 43;
+    }
+    for (uint32_t i = 0u; i < destination; ++i)
+    {
+        if (ram_bytes[i] != 0xa5u)
+        {
+            std::fprintf(stderr, "EELOAD low RAM initial sentinel mismatch: physical=%08x\n", i);
+            return 44;
+        }
+    }
+    // Seven retirements through a0016704, then fifteen instructions
+    // through the first SW at a0016740 (inclusive).
+    const uint32_t vector_checkpoint = config_checkpoint + 22u;
+    for (; retired < vector_checkpoint;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            vector_checkpoint - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > vector_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD vector generation refused: retired=%u pc=%08x opcode=%08x result=%u detail_pc=%08x address=%08x\n",
+                retired, cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result),
+                action.m_detail_pc, action.m_data_address);
+            return 45;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0016744u || cpu.m_gpr[2].m_lo != second_vector_word ||
+        cpu.m_gpr[3].m_lo != first_vector_word ||
+        cpu.m_gpr[11].m_lo != (0xffffffffa0000000ull + vector_offset) ||
+        ee::ee_read_instruction_word(ram_bytes.data() + vector_offset) != first_vector_word ||
+        cpu.m_cop0[ee::COP0_Config] != expected_config || sio.m_count != message_size)
+    {
+        std::fprintf(stderr, "EELOAD first vector word mismatch: retired=%u pc=%08x offset=%08x word=%08x v0=%016llx v1=%016llx t3=%016llx\n",
+            retired, cpu.m_pc, vector_offset, ee::ee_read_instruction_word(ram_bytes.data() + vector_offset),
+            static_cast<unsigned long long>(cpu.m_gpr[2].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[3].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[11].m_lo));
+        return 46;
+    }
+    for (uint32_t i = 0u; i < destination; ++i)
+    {
+        if ((i < vector_offset || i >= vector_offset + 4u) && ram_bytes[i] != 0xa5u)
+        {
+            std::fprintf(stderr, "EELOAD first vector unexpected write: physical=%08x\n", i);
+            return 47;
+        }
+    }
+    std::printf("EELOAD first vector word: retired=%u pc=%08x physical=%08x word=%08x next_word=%08x\n",
+        retired, cpu.m_pc, vector_offset, first_vector_word, second_vector_word);
+
+    const uint32_t exploration_limit = vector_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {

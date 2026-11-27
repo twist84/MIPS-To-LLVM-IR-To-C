@@ -225,6 +225,7 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     switch (primary)
     {
     case 0u:
+    {
         if (opcode == 0u || opcode == 0x0000040fu || opcode == 0x0000000fu)
         {
             // NOP / canonical SYNC.P / SYNC.L. All transfers in this
@@ -234,6 +235,33 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return true;
         }
         dest = (opcode >> 11u) & 31u;
+        const uint32_t function = opcode & 0x3fu;
+        if (function == 0u || function == 2u || function == 3u)
+        {
+            // SLL/SRL/SRA consume only the low word, sign-extend the
+            // result to 64 bits, and require the reserved rs field zero.
+            if (rs != 0u)
+            {
+                return false;
+            }
+            const uint32_t shift = (opcode >> 6u) & 31u;
+            const uint32_t source = static_cast<uint32_t>(read_gpr(cpu, rt));
+            uint32_t shifted = 0u;
+            if (function == 0u)
+            {
+                shifted = source << shift;
+            }
+            else
+            {
+                shifted = source >> shift;
+                if (function == 3u && shift != 0u && (source & 0x80000000u) != 0u)
+                {
+                    shifted |= 0xffffffffu << (32u - shift);
+                }
+            }
+            value = sign_extend_word(shifted);
+            break;
+        }
         switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
         case 0x21u: // ADDU: low 32-bit wrapping sum
@@ -256,6 +284,7 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return false;
         }
         break;
+    }
     case 0x10u:
         if ((opcode & 0xffe0ffffu) == 0x40806000u) // canonical MTC0 rt,Status
         {

@@ -946,3 +946,26 @@ Require guest Config read/modify/write and SYNC.P at 653553
 retirements, pc a0016218, Config/v0=73443, v1=440; preserve
 Status and console byte count. Pending CI. No retail replay.
 Reference: https://docs.alexrp.com/mips/ee.pdf (p.78).
+
+## Strict memory follow-up M6E3C1: guest-generated vector instructions
+
+M6E3B passed CI run 46048372002/job 140673213324: Config changed
+from 440 to 73443 at 653553 retirements, pc a0016218. After
+a call to a00166f4 the next stop was 653560 / a0016708, word
+00010c02 (SRL at,at,16), source ffffffffa0019160.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46048372002/job/140673213324
+
+Support canonical SLL/SRL/SRA word-immediate operations, low
+32-bit input, sign-extended result, preserved upper GPR half,
+architectural zero and reserved rs rejection. Explicit unsigned
+arithmetic avoids signed-shift or shift-by-width assumptions.
+
+The observed code constructs 3c1aa001 and 375a9160 (LUI/ORI
+k0 with handler address a0019160), reads a destination offset
+from the copied image at a001a1a4 and stores the first generated
+instruction to canonical uncached low RAM. Require 653575
+retirements at a0016744, verify the first word and all other
+low-RAM sentinel bytes, and derive the destination independently
+from the original ROM. Continue bounded execution to identify
+the next dependency. This is not instruction cache coherence
+or actual exception dispatch yet. Pending authentic CI.
