@@ -197,6 +197,38 @@ def canonical_portable(base_work, work):
                     for fn in metadata["functions"]))
 
 
+def migrate_source_fingerprints(elf, base_work, source_root):
+    """Migrate a verified canonical shared source store without any build."""
+    with shared_ir.ir_lock(base_work):
+        work = active_work(base_work)
+        if not canonical_portable(base_work, work):
+            raise ValueError("fingerprint migration requires canonical relative-path metadata")
+        metadata_path = shared_ir.ir_directory(work) / "ee_functions.json"
+        if not shared_ir.active(metadata_path):
+            raise ValueError("fingerprint migration requires existing shared IR provenance")
+        if metadata_path.parent.is_symlink() or metadata_path.is_symlink():
+            raise ValueError("fingerprint migration requires owned IR metadata")
+        sources = run_game.ir_generation_inputs(elf, source_root)
+        state = shared_ir.current_state(metadata_path, sources)
+        metadata = shared_ir.read_json(metadata_path)
+        if shared_ir.elf_path(metadata, metadata_path.parent) != elf:
+            raise ValueError("shared IR source ELF location differs")
+        hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
+                                         require_owned_directory=True)
+        if not hashes or state["ir_hashes"] != hashes:
+            raise ValueError("shared IR module hashes changed")
+        if run_game.ir_generation_inputs(elf, source_root) != sources:
+            raise ValueError("lowering inputs changed during fingerprint migration")
+        shared_ir.current_state(metadata_path, sources, hashes)
+        changed = sum(state["ir_sources"][name] != value
+                      for name, value in sources.items())
+        shared_ir.publish(metadata_path, sources, hashes)
+        print(f"EE fingerprint migration: {len(hashes)} verified modules; "
+              f"{changed} source fingerprints migrated; "
+              "no IR regeneration or native compilation/linking", flush=True)
+        return changed
+
+
 def stage_verified_ir(elf, source, work, manifest, ir_sources):
     """Copy a verified map and byte-identical modules, never re-lift them."""
     metadata_path = shared_ir.ir_directory(source) / "ee_functions.json"
@@ -453,6 +485,8 @@ def main(argv=None):
                         help="print only the selected active work directory")
     parser.add_argument("--check-active-source", action="store_true",
                         help="read-only current lowering and metadata preflight")
+    parser.add_argument("--migrate-source-fingerprints", action="store_true",
+                        help="authenticate canonical IR and migrate equivalent source fingerprints only")
     parser.add_argument("--require-portable", action="store_true",
                         help="also require canonical relative-path metadata")
     parser.add_argument("--build-dir", type=Path, default=Path("build"))
@@ -464,6 +498,9 @@ def main(argv=None):
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
     args = parser.parse_args(argv)
+    if args.migrate_source_fingerprints and (
+            args.print_active or args.check_active_source or args.allow_ir_changes):
+        parser.error("--migrate-source-fingerprints cannot be combined with other modes or --allow-ir-changes")
     if args.print_active:
         print(active_work(args.base_work_dir.resolve()))
         return 0
@@ -475,7 +512,9 @@ def main(argv=None):
         elf = args.elf.resolve(strict=True)
         build = args.build_dir.resolve()
         base_work = args.base_work_dir.resolve()
-        if args.check_active_source:
+        if args.migrate_source_fingerprints:
+            migrate_source_fingerprints(elf, base_work, Path(__file__).resolve().parents[1])
+        elif args.check_active_source:
             work = active_work(base_work)
             print(f"Active EE source: {work}", flush=True)
             source_root = Path(__file__).resolve().parents[1]
@@ -489,8 +528,9 @@ def main(argv=None):
             recover(elf, build, args.config, base_work, args.emit_jobs,
                     args.allow_ir_changes)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        prefix = ("EE source preflight refused" if args.check_active_source else
-                  "Cache recovery stopped without changing the active cache")
+        prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
+                  else "EE source preflight refused" if args.check_active_source
+                  else "Cache recovery stopped without changing the active cache")
         print(f"{prefix}: {error}", file=sys.stderr)
         return 1
     return 0

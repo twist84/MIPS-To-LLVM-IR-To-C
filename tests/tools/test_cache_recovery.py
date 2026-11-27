@@ -321,6 +321,61 @@ def test_active_source_preflight_rejects_stale_shared_provenance():
         assert provenance.read_bytes() == original
 
 
+def test_source_fingerprint_migration_does_not_build_or_replace_ir():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        source = root / "test.cpp"
+        source.write_bytes(b"int f();\r\n")
+        legacy = {"ELF": run_game.sha256_path(elf),
+                  "test.cpp": run_game.sha256_path(source)}
+        source.write_bytes(b"int f();\n")
+        sources = shared_ir.fingerprint_sources(
+            [("ELF", elf), ("test.cpp", source)], binary_keys={"ELF"})
+        work = root / "ps2-game-hle"
+        ir = work / "ir"
+        ir.mkdir(parents=True)
+        module = ir / "sub_0x100008_0x100008.ll"
+        module.write_bytes(b"; exact IR\r\n")
+        meta = ir / "ee_functions.json"
+        shared_ir.write_json(meta, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": module.name}],
+        })
+        hashes = {module.name: run_game.sha256_path(module)}
+        shared_ir.publish(meta, legacy, hashes)
+        provenance = ir / shared_ir.PROVENANCE
+        original = provenance.read_bytes()
+        metadata_bytes = meta.read_bytes()
+        native = work / "O2-native"
+        native.mkdir()
+        receipt = native / "translation-cache.json"
+        receipt.write_bytes(b"native receipt unchanged")
+        with patch.object(run_game, "ir_generation_inputs", return_value=sources), \
+             patch.object(run_game, "build_linked_library",
+                          side_effect=AssertionError("must not build")), \
+             patch.object(recovery.run_known_replays, "reconstruct",
+                          side_effect=AssertionError("must not reconstruct")):
+            module.write_bytes(b"corrupted")
+            try:
+                recovery.migrate_source_fingerprints(elf, work, root)
+            except ValueError as error:
+                assert "module hashes changed" in str(error)
+            else:
+                raise AssertionError("corrupt IR migrated")
+            assert provenance.read_bytes() == original
+            module.write_bytes(b"; exact IR\r\n")
+            assert recovery.migrate_source_fingerprints(elf, work, root) == 1
+            assert recovery.migrate_source_fingerprints(elf, work, root) == 0
+        assert meta.read_bytes() == metadata_bytes
+        assert module.read_bytes() == b"; exact IR\r\n"
+        assert receipt.read_bytes() == b"native receipt unchanged"
+        assert shared_ir.read_json(provenance)["source_fingerprint_migrations"] == [legacy]
+
+
 def test_launcher_recovers_before_automatic_rebuild():
     batch = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--recover-cache" (' in batch
@@ -543,6 +598,7 @@ def main():
     test_verified_legacy_migration_preserves_ir_and_relocates()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()
+    test_source_fingerprint_migration_does_not_build_or_replace_ir()
     test_launcher_recovers_before_automatic_rebuild()
     print("safe known-function cache recovery: PASS")
 

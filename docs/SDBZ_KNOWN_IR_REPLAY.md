@@ -34,6 +34,36 @@ observer proxy: these are instructions executed by the native guest.
 If the existing cache cannot be validated or safely relinked, this
 mode stops without regenerating any guest code.
 
+## Migrate source fingerprints without rebuilding (PR #178)
+
+LF and CRLF source checkouts now share versioned text fingerprints. ELF,
+generated IR, object, library and authenticated manifest hashes remain
+byte-exact. Legacy source fingerprints are accepted only if each recorded
+hash can be reproduced from the corresponding current file (its actual
+bytes, LF form or CRLF form). Files with bare CR or NUL are kept byte-exact.
+Added, removed, renamed or genuinely changed source inputs fail closed.
+
+For an existing canonical shared cache, authenticate all modules and
+migrate only its source provenance:
+
+    python tools\recover_translation_cache.py --elf PS2_GAME\SLUS_214.42 --base-work-dir build\ps2-game-hle --migrate-source-fingerprints
+
+This is not recovery: it takes the shared IR lock, checks metadata and all
+module hashes, and atomically publishes the normalized source map while
+retaining the previous fingerprints and append history. It never invokes
+the recompiler, compiles native objects, relinks, runs the game or deletes
+a backup. Repeating the command should report zero fingerprints migrated.
+Native profile receipts are migrated on their next verified link/publication;
+changing the cache/link scripts themselves can still require a host relink.
+Guest objects remain eligible for the existing authenticated reuse path.
+
+Legacy runtime/dispatcher aggregate keys are reused only when an exact
+legacy checkout, all-LF or all-CRLF key can be reproduced and the native
+object bytes still match. If a historical mixed aggregate cannot be proven,
+the host runtime/dispatcher objects must be recompiled; this never requires
+re-lifting guest IR. Existing batch CRLF attributes are retained; no
+repository-wide source checkout renormalization is required.
+
 ## Reconstruct known IR from the archived manifest
 
 The diagnostic ZIP contains **function entry names and SHA-256 values**,
