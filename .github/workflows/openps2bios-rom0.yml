@@ -76,6 +76,7 @@ jobs:
           ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 2000000 | tee dual-rom0-v06.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v06.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v06.log
+          grep -q '^Dual ROM0 fetch:' dual-rom0-v06.log
           python3 - <<'PY'
           import re
           from pathlib import Path
@@ -303,6 +304,7 @@ jobs:
           ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 2000000 | tee dual-rom0-v07.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v07.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v07.log
+          grep -q '^Dual ROM0 fetch:' dual-rom0-v07.log
           python3 - <<'PY'
           import re
           from pathlib import Path

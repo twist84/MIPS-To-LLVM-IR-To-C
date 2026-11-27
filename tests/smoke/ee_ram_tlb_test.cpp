@@ -2177,6 +2177,75 @@ bool test_strict_reset_jalr()
     return true;
 }
 
+
+bool test_strict_reset_mapped_fetch()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0x00082000u;
+    uint8_t bytes[8192u]{};
+    bytes[0] = 0x07u; // ORI v0,zero,7
+    bytes[2] = 0x02u;
+    bytes[3] = 0x34u;
+    const ee::s_ee_reset_ram_view mapped{bytes, sizeof(bytes), true};
+    const ee::s_ee_reset_ram_view isolated{bytes, sizeof(bytes)};
+    for (uint32_t cache : {2u, 3u, 7u})
+    {
+        for (uint32_t ice : {0u, 1u << 17u})
+        {
+            ee::c_ee_tlb tlb;
+            const uint32_t flags = (cache << 3u) | 3u;
+            // Clean, valid, global TLB page, nonidentity RAM mapping.
+            if (!tlb.write(0u, 0u, pc, flags, 0x40u | flags))
+            {
+                return false;
+            }
+            auto cpu = ee::ee_make_strict_reset_prefix_state();
+            cpu.m_pc = pc;
+            cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+            cpu.m_cop0[ee::COP0_Config] = 0x440u | ice;
+            const auto fetch = ee::ee_plan_instruction_fetch(tlb, pc,
+                cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config], 0u, 0u);
+            if (isolated.fetch_span(fetch) != nullptr)
+            {
+                return false;
+            }
+            const bool allowed = cache == 2u || (cache == 3u && ice == 0u);
+            const auto step = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, mapped,
+                nullptr, &tlb);
+            if (allowed)
+            {
+                if (step.m_result != result::COMMITTED || cpu.m_pc != pc + 4u ||
+                    cpu.m_gpr[2].m_lo != 7u)
+                {
+                    return false;
+                }
+            }
+            else if (step.m_result != result::FETCH_UNAVAILABLE ||
+                cpu.m_pc != pc || cpu.m_gpr[2].m_lo != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    // No translation, invalid page and out-of-backing mappings must
+    // not read the virtual address or fall back to a ROM image.
+    ee::c_ee_tlb tlb;
+    for (uint32_t variant = 0u; variant < 3u; ++variant)
+    {
+        if (variant != 0u &&
+            !tlb.write(0u, 0u, pc, variant == 1u ? 0x11u : 0x93u, 0x13u))
+        {
+            return false;
+        }
+        const auto fetch = ee::ee_plan_instruction_fetch(tlb, pc, 0x70000000u, 0x440u, 0u, 0u);
+        if (mapped.fetch_span(fetch) != nullptr)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_reset_ram_scalar()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4088,7 +4157,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
+    if (!check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
+        !check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
         !check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
     {
         return 1;

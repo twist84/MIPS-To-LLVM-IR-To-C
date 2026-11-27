@@ -1581,3 +1581,26 @@ refusals roll back the link; split slots retain the committed link.
 No change to mapped/cached instruction fetch: diagnose the actual
 target boundary before enabling a new fetch domain. Require real
 dual-domain execution beyond the observed JALR stops. Pending CI.
+
+## M6E3H3E8A: mapped fetch admission and actual cache-route evidence
+
+H3E7 passed both ROM0 jobs at 9c71c209:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46062958498
+
+v0.6: 696407 EE / 87050 IOP; v0.7: 696599 / 87074.
+Both retired JALR and its slot, then refused the live fetch at 00082000.
+Prior isolated evidence reports Config=00073443 (ICE and DCE enabled).
+The current synchronized diagnostic did not report the actual TLB
+translation/cache route at this PC, so do not assume a cache hit or miss.
+
+Opt into low mapped-address RAM fetch only in the synchronized
+owner, only if the existing planner proves physical cache bypass,
+cache attribute 2 or cache attribute 3 with ICE disabled, aligned
+valid backing. No identity assumption, no raw access on TLB fault,
+no accelerated or active I-cache route. Preserve isolated default
+and all data access restrictions. Tests exercise actual guest TLB
+mapping, clean pages, ICE toggles, invalid/missing/backing refusals.
+Add passive stop diagnostics for Config, EntryHi, TLB index/status,
+cache route and physical backing instruction (not an executed word).
+Do not require progress beyond 00082000 until actual fetch evidence
+supports the next cache or fault model. Pending CI.

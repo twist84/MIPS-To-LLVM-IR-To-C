@@ -215,6 +215,16 @@ public:
     {
         return {m_sio_bytes.data(), m_sio.m_count};
     }
+    s_ee_fetch_plan current_fetch_plan() const
+    {
+        return ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
+            m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
+            m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
+    }
+    s_ee_tlb_lookup current_tlb_lookup() const
+    {
+        return m_memory.tlb().lookup(m_cpu.m_pc, m_cpu.m_cop0[COP0_EntryHi] & 0xffu, false);
+    }
     const s_ee_cpu_state& cpu() const { return m_cpu; }
     static constexpr size_t k_ram_size = 0x02000000u;
     std::span<const uint8_t> ram() const { return {m_memory.read_span(0u, k_ram_size), k_ram_size}; }
@@ -253,7 +263,8 @@ public:
             return {boundary::INTERRUPT_ENTRY, {}, false, vector};
         }
         const s_ee_strict_rom0_view rom{m_rom.data(), m_rom.size()};
-        const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size), k_ram_size};
+        const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size),
+            k_ram_size, m_iop_synchronized};
         const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
             m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);

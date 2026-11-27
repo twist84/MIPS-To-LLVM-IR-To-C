@@ -114,21 +114,30 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
 
 // Explicit caller-owned, isolated main RAM backing for the reset copy.
 // The physical bus planner excludes aliases, ROM and device windows;
-// only canonical uncached main RAM instruction fetch is permitted.
+// The isolated default permits only canonical uncached RAM fetch.
+// The synchronized owner can opt into proven mapped cache bypass.
 struct s_ee_reset_ram_view
 {
     uint8_t* m_bytes = nullptr;
     size_t m_size = 0u;
+    bool m_mapped_fetch = false;
 
     constexpr const uint8_t* fetch_span(const s_ee_fetch_plan& fetch) const
     {
         const uint32_t address = fetch.m_access.m_physical_address;
-        if (m_bytes == nullptr ||
+        const uint32_t cache = fetch.m_access.m_cache_mode;
+        const bool canonical = cache == 2u && fetch.m_pc >= 0xa0000000u &&
+            fetch.m_pc < 0xa2000000u && address == fetch.m_pc - 0xa0000000u;
+        // A mapped cache-3 fetch bypasses ICE only when the planner
+        // explicitly classifies it as such. Never admit accelerated
+        // cache-7 or an active instruction-cache route here.
+        const bool mapped = m_mapped_fetch && fetch.m_pc < 0x80000000u &&
+            (cache == 2u || cache == 3u);
+        if (m_bytes == nullptr || fetch.m_fault.m_valid ||
             fetch.m_route != e_ee_fetch_route::CACHE_BYPASS_PHYSICAL ||
             fetch.m_access.m_status != e_ee_access_status::PHYSICAL ||
-            fetch.m_access.m_cache_mode != 2u || (fetch.m_pc & 3u) != 0u ||
-            fetch.m_pc < 0xa0000000u || fetch.m_pc >= 0xa2000000u ||
-            address != fetch.m_pc - 0xa0000000u ||
+            (fetch.m_pc & 3u) != 0u || (address & 3u) != 0u ||
+            !(canonical || mapped) ||
             ee_classify_physical_span(address, 4u, m_size) != e_ee_bus_region::RAM)
         {
             return nullptr;

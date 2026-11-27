@@ -135,6 +135,24 @@ int main(int argc, char** argv)
         boundary_name(stop.m_boundary), static_cast<unsigned>(instruction.m_result),
         static_cast<unsigned long long>(pilot.retired()), cpu.m_pc, instruction.m_detail_pc,
         instruction.m_opcode, instruction.m_data_address, pilot.delay_slot_pending() ? 1u : 0u);
+    const auto fetch = pilot.current_fetch_plan();
+    const auto lookup = pilot.current_tlb_lookup();
+    std::printf("Dual ROM0 fetch: config=%08x entryhi=%08x route=%u access=%u cache=%u physical=%08x fault=%u tlb_status=%u tlb_index=%u page_size=%u\n",
+        cpu.m_cop0[ee::COP0_Config], cpu.m_cop0[ee::COP0_EntryHi],
+        static_cast<unsigned>(fetch.m_route), static_cast<unsigned>(fetch.m_access.m_status),
+        fetch.m_access.m_cache_mode, fetch.m_access.m_physical_address, fetch.m_fault.m_valid ? 1u : 0u,
+        static_cast<unsigned>(lookup.m_status), lookup.m_entry_index, lookup.m_page_size);
+    // Passive physical backing evidence, NOT the instruction visible
+    // through an active I-cache, and never executed by this diagnostic.
+    const auto ram = pilot.ram();
+    if (fetch.m_access.m_status == ee::e_ee_access_status::PHYSICAL &&
+        ee::ee_classify_physical_span(fetch.m_access.m_physical_address, 4u, ram.size()) ==
+            ee::e_ee_bus_region::RAM)
+    {
+        const uint32_t word = ee::ee_read_instruction_word(ram.data() + fetch.m_access.m_physical_address);
+        std::printf("Dual ROM0 physical backing: address=%08x word=%08x decoded=%s\n",
+            fetch.m_access.m_physical_address, word, ee::decode(cpu.m_pc, word).mnemonic);
+    }
     std::printf("Dual ROM0 clocks: ee=%llu iop=%llu debt=%llu next_iop=%llu interrupts=%llu\n",
         static_cast<unsigned long long>(pilot.cycle()), static_cast<unsigned long long>(pilot.iop_cycles()),
         static_cast<unsigned long long>(pilot.iop_debt()), static_cast<unsigned long long>(pilot.next_iop_event()),
