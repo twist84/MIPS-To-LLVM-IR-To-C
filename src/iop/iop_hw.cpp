@@ -761,7 +761,7 @@ void c_hw::start_spu2_dma(uint32_t core)
         m_spu2_dma_remaining[core]);
 }
 
-uint32_t c_hw::spu2_dma_cycles_remaining() const
+uint32_t c_hw::spu2_dma_refill_cycles_remaining() const
 {
     // Ordinary DMA uses only two countdowns. The refill query is
     // needed solely for an active AutoDMA transfer with bytes left.
