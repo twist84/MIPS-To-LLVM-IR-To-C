@@ -305,6 +305,11 @@ int main(int argc, char** argv)
             static_cast<unsigned>(run->m_stop), static_cast<unsigned long long>(run->m_executed),
             run->m_guest_pc, run->m_opcode);
     }
+    if (const auto* fault = pilot.iop_memory_fault(); fault != nullptr && fault->m_valid)
+    {
+        std::printf("Dual ROM0 IOP memory fault: address=%08x width=%u write=%u\n",
+            fault->m_address, fault->m_width, fault->m_write ? 1u : 0u);
+    }
     for (uint32_t reg = 0u; reg < 32u; ++reg)
     {
         std::printf("Dual ROM0 GPR: r%02u ee=%016llx iop=%08x\n", reg,

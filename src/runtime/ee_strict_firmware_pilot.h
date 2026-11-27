@@ -204,6 +204,10 @@ public:
     {
         return m_iop != nullptr ? m_iop->cpu().ram_span() : std::span<const uint8_t>{};
     }
+    const iop::s_memory_fault* iop_memory_fault() const
+    {
+        return m_iop != nullptr ? &m_iop->cpu().last_memory_fault() : nullptr;
+    }
     const std::optional<iop::s_kernel_run_result>& iop_last_run() const { return m_iop_last_run; }
     uint32_t sif_register_value(uint32_t id)
     {
