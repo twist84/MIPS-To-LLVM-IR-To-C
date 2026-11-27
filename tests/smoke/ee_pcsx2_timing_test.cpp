@@ -38,6 +38,27 @@ static_assert(cost(0xd4000000u) == 0u);
 static_assert(ee::pcsx2_opcode_weight(0u, e_ee_valid::INVALID) == 0u);
 static_assert(ee::pcsx2_opcode_weight(0u, e_ee_valid::UNSUPPORTED) == 0u);
 
+consteval bool check_mmi_weights()
+{
+    for (uint32_t funct = 0u; funct < 64u; ++funct)
+    {
+        for (uint32_t sa = 0u; sa < 32u; ++sa)
+        {
+            // Other operand fields must not influence a selector weight.
+            const uint32_t word = mmi(funct, sa) | 0x01253000u;
+            if (cost(word) != ee::pcsx2_timing_detail::reference_opcode_weight(
+                    word, e_ee_valid::VALID) ||
+                ee::pcsx2_opcode_weight(word, e_ee_valid::INVALID) != 0u ||
+                ee::pcsx2_opcode_weight(word, e_ee_valid::UNSUPPORTED) != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+static_assert(check_mmi_weights(), "MMI timing table preserves selector costs and validity gating");
+
 constexpr bool check_accumulator()
 {
     ee::s_pcsx2_cycle_accumulator a;
