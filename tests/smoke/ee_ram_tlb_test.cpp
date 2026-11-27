@@ -1,4 +1,5 @@
 #include "ee_strict_reset_vif.h"
+#include "ee_strict_firmware_pilot_test.h"
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
 #include "ee_address_route.h"
@@ -3759,6 +3760,11 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
+    if (!check(test_strict_firmware_pilot(), "scheduler-owned strict firmware pilot"))
+    {
+        return 1;
+    }
+
     ee::ee_memory memory(8u * 1024u * 1024u);
     memory.set_kseg_ram_aliases(true);
     write_set_entry(memory);

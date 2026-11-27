@@ -1258,3 +1258,31 @@ INTC/DMAC/SIF sources, implement precise Status commit and interrupt
 entry, and verify against real firmware traces. Do not just relax
 status_supported. Native LLVM execution and real cache coherence
 remain separate required milestones. Pending CI; no retail replay.
+
+## M6E3H1: bounded reset-owned scheduler pilot
+
+M6E3G2 passed both firmware releases on 1a95082c:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46056154163
+Both job logs confirm the exact interrupt refusal at a0014a4c.
+
+Introduce c_ee_strict_firmware_pilot as a separate opt-in owner of
+reset CPU, immutable ROM, zeroed live RAM, TLB, cold-cache state,
+runtime scheduler, hardware bus and production host timers. The
+production reference compatibility clock reserves one slot for an
+ordinary instruction and two for supported branch+delay-slot
+transactions; only committed instructions publish time. This is
+not measured R5900 timing. Refused instructions and insufficient
+budget do not advance time or service devices. Timers/INTC use
+real register programming, not fabricated pending sources.
+Service a deadline at the committed boundary in production timer
+channel order; refuse a deadline strictly inside an atomic branch.
+Also refuse branch-slot MMIO until issue-time ordering is modeled.
+The pilot only connects bus-clock timers and INTC, rejects HBlank
+and gating configuration, and is limited to 1048576 reference
+slots (below the default unconfigured Timer3 HBlank deadline).
+No IOP, DMA, GS scanout or guest exception entry is implied.
+Status enablement remains refused; the isolated ROM0 checkpoints
+and production retail path are unchanged. Directed synthetic ROM
+tests cover reset ownership, RAM effects, retirement/budget,
+branch refusal and rollback, real compare IRQ/Cause pending state,
+and deadline ordering. Pending CI on both firmware jobs.
