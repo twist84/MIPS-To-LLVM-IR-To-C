@@ -272,4 +272,187 @@ extern "C" uint32_t ee_test_strict_native_sequence(native_entry entry)
     return 8u;
 }
 
+
+extern "C" uint32_t ee_test_strict_native_branch(native_entry entry,
+    uint32_t branch_opcode, uint32_t slot_opcode)
+{
+    if (entry == nullptr || !ee_strict_branch_supported(branch_opcode) ||
+        (slot_opcode != 0x8c850000u && slot_opcode != 0xac850000u))
+    {
+        return 0u;
+    }
+    constexpr uint32_t pc = 0x00400ffcu;
+    constexpr uint32_t data = 0x00600000u;
+    constexpr uint32_t target = 0x0040100cu;
+    constexpr uint32_t fallthrough = 0x00401004u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t code_lo0 = (1u << 6u) | 0x16u;
+    constexpr uint32_t code_lo1 = (2u << 6u) | 0x16u;
+    constexpr uint32_t data_lo = (3u << 6u) | 0x16u;
+    constexpr uint32_t original = 0x80ff8180u;
+    constexpr uint64_t upper = 0xfedcba9876543210ull;
+    constexpr uint32_t pending = 0x40028400u;
+    constexpr uint32_t old_epc = 0x01234000u;
+    const bool likely = ((branch_opcode >> 26u) & 0x10u) != 0u;
+    const bool unequal_branch = ((branch_opcode >> 26u) & 1u) != 0u;
+    const bool zero_rhs = ((branch_opcode >> 16u) & 31u) == 0u;
+    const bool store = (slot_opcode >> 26u) == 0x2bu;
+    for (uint32_t scenario = 0u; scenario < 17u; ++scenario)
+    {
+        const bool taken = scenario != 1u && scenario != 3u &&
+            scenario != 5u && scenario != 8u;
+        const bool equal = taken != unequal_branch;
+        const bool annulled = likely && !taken;
+        const bool nested = scenario == 12u || scenario == 13u;
+        const bool bev = nested;
+        const bool slot_invalid = scenario == 2u || scenario == 3u || scenario == 12u;
+        const bool misaligned = scenario == 4u || scenario == 5u || scenario == 13u;
+        const bool stale_slot = scenario == 7u || scenario == 8u;
+        const bool branch_fault = scenario == 10u || scenario == 11u;
+        const uint32_t old_status = 0x10u |
+            (nested ? STATUS_EXL : 0u) | (bev ? STATUS_BEV : 0u);
+        const uint32_t old_cause = pending | (scenario == 13u ? CAUSE_BD : 0u);
+        ee_memory memory(0x4000u);
+        if (!memory.tlb().write(0u, 0u, (pc & ~0x1fffu) | 0xabu,
+                scenario == 10u ? code_lo0 & ~2u : code_lo0,
+                slot_invalid ? code_lo1 & ~2u : code_lo1) ||
+            !memory.tlb().write(1u, 0u, data | 0xabu,
+                scenario == 14u ? data_lo & ~4u :
+                scenario == 15u ? (4u << 6u) | 0x16u : data_lo, 0x12u))
+        {
+            return 0u;
+        }
+        memory.write32(0x1ffcu, scenario == 9u ? 0u : branch_opcode);
+        memory.write32(0x2000u, stale_slot ? 0u : slot_opcode);
+        memory.write32(0x3000u, original);
+        memory.write32(0x3004u, original);
+        s_ee_cpu_state cpu{};
+        cpu.m_pc = pc;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[COP0_Status] = old_status;
+        cpu.m_cop0[COP0_Cause] = old_cause;
+        cpu.m_cop0[COP0_EPC] = old_epc;
+        cpu.m_cop0[COP0_EntryHi] = scenario == 11u ? 0xacu : 0xabu;
+        cpu.m_cop0[COP0_BadVAddr] = 0x12345678u;
+        cpu.m_gpr[0] = {0xdeadbeefu, upper};
+        cpu.m_gpr[3] = {0x100000000ull, upper};
+        cpu.m_gpr[4].m_lo = scenario == 6u ? 0x00800000u : data + (misaligned ? 1u : 0u);
+        // Compare 64-bit low halves, not low words or upper GPR halves.
+        const uint64_t lhs = zero_rhs ? (equal ? 0u : 0x100000000ull)
+                                      : (equal ? 0x100000000ull : 0u);
+        cpu.m_gpr[5] = {lhs, upper ^ 1u};
+        const auto before = cpu;
+        bool actual_delay = true;
+        s_ee_strict_native_word_context context{&memory, &actual_delay,
+            {scenario != 16u, true}};
+        const auto actual = static_cast<result>(entry(&cpu, &context));
+        result expected = result::COMMITTED;
+        uint32_t code = 0u;
+        uint32_t bad = 0u;
+        bool bd = false;
+        bool refill = false;
+        if (scenario == 16u)
+        {
+            expected = result::UNSAFE_BOUNDARY;
+        }
+        else if (branch_fault)
+        {
+            expected = result::FAULT_COMMITTED;
+            code = EX_TLBL;
+            bad = pc;
+            refill = scenario == 11u;
+        }
+        else if (scenario == 9u)
+        {
+            expected = result::UNSUPPORTED_INSTRUCTION;
+        }
+        else if (!annulled)
+        {
+            bd = true;
+            if (slot_invalid)
+            {
+                expected = result::FAULT_COMMITTED;
+                code = EX_TLBL;
+                bad = pc + 4u;
+            }
+            else if (stale_slot)
+            {
+                expected = result::UNSUPPORTED_INSTRUCTION;
+            }
+            else if (misaligned)
+            {
+                expected = result::FAULT_COMMITTED;
+                code = store ? EX_AdES : EX_AdEL;
+                bad = data + 1u;
+            }
+            else if (scenario == 6u)
+            {
+                expected = result::FAULT_COMMITTED;
+                code = store ? EX_TLBS : EX_TLBL;
+                bad = 0x00800000u;
+                refill = true;
+            }
+            else if (scenario == 14u && store)
+            {
+                expected = result::FAULT_COMMITTED;
+                code = EX_Mod;
+                bad = data;
+            }
+            else if (scenario == 15u)
+            {
+                expected = result::UNMODELED_ACCESS;
+            }
+        }
+        if (actual != expected)
+        {
+            std::fprintf(stderr, "strict branch result mismatch: branch=%08x slot=%08x scenario=%u actual=%u expected=%u\n",
+                branch_opcode, slot_opcode, scenario, static_cast<unsigned>(actual),
+                static_cast<unsigned>(expected));
+            return 0u;
+        }
+        const bool executed = expected == result::COMMITTED && !annulled;
+        if (memory.read32(0x3000u) != (executed && store ? static_cast<uint32_t>(lhs) : original) ||
+            memory.read32(0x3004u) != original ||
+            cpu.m_gpr[5].m_lo != (executed && !store ? 0xffffffff80ff8180ull : lhs) ||
+            cpu.m_gpr[5].m_hi != (upper ^ 1u) ||
+            cpu.m_gpr[0].m_lo != before.m_gpr[0].m_lo ||
+            cpu.m_gpr[3].m_lo != before.m_gpr[3].m_lo)
+        {
+            return 0u;
+        }
+        if (expected == result::COMMITTED)
+        {
+            if (cpu.m_pc != (taken ? target : fallthrough) || cpu.m_exit_reason != dispatch ||
+                cpu.m_cop0[COP0_Status] != old_status || cpu.m_cop0[COP0_Cause] != old_cause ||
+                cpu.m_cop0[COP0_EPC] != old_epc || !actual_delay)
+            {
+                return 0u;
+            }
+        }
+        else if (expected == result::FAULT_COMMITTED)
+        {
+            const uint32_t vector = refill && !nested
+                ? (bev ? VEC_TLB_REFILL_BEV1 : VEC_TLB_REFILL_BEV0)
+                : (bev ? VEC_COMMON_BEV1 : VEC_COMMON_BEV0);
+            const uint32_t cause = pending | (code << 2u) |
+                ((nested ? scenario == 13u : bd) ? CAUSE_BD : 0u);
+            if (cpu.m_pc != vector || cpu.m_exit_reason != exception ||
+                cpu.m_pad != pc + (bd ? 4u : 0u) ||
+                cpu.m_cop0[COP0_Status] != (old_status | STATUS_EXL) ||
+                cpu.m_cop0[COP0_Cause] != cause ||
+                cpu.m_cop0[COP0_EPC] != (nested ? old_epc : pc) ||
+                cpu.m_cop0[COP0_BadVAddr] != bad || actual_delay != bd)
+            {
+                return 0u;
+            }
+        }
+        else if (!equal_cpu(cpu, before) || !actual_delay)
+        {
+            return 0u;
+        }
+    }
+    return 17u;
+}
+
 } // namespace ee

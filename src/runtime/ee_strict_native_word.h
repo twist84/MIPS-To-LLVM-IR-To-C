@@ -64,6 +64,31 @@ static_assert(ee_decode_strict_transfer(0x2du << 26u).m_store &&
               ee_decode_strict_transfer(0x2du << 26u).m_partial);
 static_assert(ee_decode_strict_transfer(0u).m_width == 0u);
 
+// The branch pilot admits only non-linking integer equality branches.
+// Their condition is evaluated before the slot, with no GPR mutation.
+inline constexpr bool ee_strict_branch_supported(uint32_t opcode)
+{
+    const uint32_t primary = opcode >> 26u;
+    return primary == 4u || primary == 5u || primary == 0x14u || primary == 0x15u;
+}
+
+static_assert(ee_strict_branch_supported(0x10000000u));
+static_assert(ee_strict_branch_supported(0x54000000u));
+static_assert(!ee_strict_branch_supported(0x0c000000u));
+
+// Check the live branch fetch without executing it. A generated branch
+// pair must call this first, evaluate the condition, and call the delay
+// helper only if the slot is executed. The non-linking branch leaves
+// cpu.m_pc at its own PC until the pair succeeds or commits a fault.
+// These are internal experimental entry contracts, not guest callbacks.
+extern "C" uint32_t ee_strict_native_check_branch(
+    s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
+    uint32_t expected_pc, uint32_t expected_opcode);
+extern "C" uint32_t ee_strict_native_prepare_delay_transfer(
+    s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
+    uint32_t expected_pc, uint32_t expected_opcode, uint8_t** out,
+    uint32_t* lane_offset);
+
 // General transfer preparation. For partial operations the returned
 // pointer addresses the first enabled byte, and lane_offset is the
 // original effective address modulo container width. Both outputs

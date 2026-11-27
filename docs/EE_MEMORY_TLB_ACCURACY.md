@@ -541,3 +541,33 @@ This is a straight-line native CFG pilot, not general function CFG
 integration. Branch/delay-slot precision, instruction/clock accounting,
 native handler dispatch, BIOS/retail caller integration, caches and
 devices remain open. No production change; CI pending.
+
+## Strict memory follow-up M6D3B: non-linking branch/delay pairs
+
+Add a separate native branch terminator emitter for BEQ/BNE/BEQL/BNEL
+with one supported integer GPR memory slot. The branch fetch is checked
+against the live translation/opcode before LLVM samples its two 64-bit
+low-half operands. The selected target/fallthrough is captured before
+the slot writes any GPR. Ordinary branches execute their slot even
+when not taken; not-taken likely branches never call the slot fetch or
+data helper. No target instruction is fetched here.
+
+The delay helper recomputes the live slot fetch and data access while
+the CPU remains at the side-effect-free branch restart PC. M5 receives
+the actual slot PC and branch PC, selecting EPC/BD correctly, preserving
+nested saved EPC/BD, and retaining actual-slot diagnostics. A rejected
+slot leaves the branch restart state intact; a successful slot commits
+the transfer before the parent publishes its selected next PC. The
+existing ordinary single-step and sequence ABI remains available.
+
+Directed MCJIT tests cover all four branch opcodes, a register or zero
+comparison operand, LW/SW slots, 17 scenarios each, O0/O2 (544 cases).
+Include low-64-bit comparison, slot overwriting a branch operand,
+invalid or stale slot fetch, alignment/refill/modified faults, branch
+fetch failure, nested BEV/BD, annulment, stale branch and host refusal.
+Reject branch-in-slot, linking branches and unsupported sequence shapes.
+
+This is not general CFG lowering: linking/indirect branches, arbitrary
+slot instructions, integrated prefix/branch blocks, timing accounting,
+actual BIOS/retail dispatch, cache/device state remain open. No default
+path or production runtime ABI change. CI pending.

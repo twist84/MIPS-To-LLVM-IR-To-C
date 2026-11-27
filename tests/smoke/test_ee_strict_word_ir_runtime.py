@@ -20,6 +20,8 @@ def main():
         "ee_strict_native_prepare_transfer",
         ctypes.cast(helper.ee_strict_native_prepare_transfer, ctypes.c_void_p).value,
     )
+    for name in ("ee_strict_native_check_branch", "ee_strict_native_prepare_delay_transfer"):
+        llvm.add_symbol(name, ctypes.cast(getattr(helper, name), ctypes.c_void_p).value)
     test = helper.ee_test_strict_native_word
     test.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     test.restype = ctypes.c_uint32
@@ -80,10 +82,37 @@ def main():
             if not address or sequence(address) != 8:
                 raise RuntimeError(f"strict native sequence failed: O{opt}")
             count += 8
-        # A branch, unsupported opcode, or wrapping sequence must not
+        branch_test = helper.ee_test_strict_native_branch
+        branch_test.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32]
+        branch_test.restype = ctypes.c_uint32
+        for primary in (4, 5, 0x14, 0x15):
+            for rt in (0, 3):
+                branch = (primary << 26) | (5 << 21) | (rt << 16) | 3
+                for slot in (0x8c850000, 0xac850000):
+                    subprocess.run([str(fixture), str(path), "0x00400ffc",
+                                    hex(branch), hex(slot)], check=True)
+                    source = path.read_text(encoding="utf-8")
+                    for opt in (0, 2):
+                        machine = target.create_target_machine(opt=opt)
+                        module = llvm.parse_assembly(source)
+                        module.triple = llvm.get_default_triple()
+                        module.data_layout = str(machine.target_data)
+                        module.verify()
+                        if opt:
+                            optimize_guest_ir(module, machine)
+                        engine = llvm.create_mcjit_compiler(llvm.parse_assembly(""), machine)
+                        engine.add_module(module)
+                        engine.finalize_object()
+                        address = engine.get_function_address("guest_strict_word")
+                        if not address or branch_test(address, branch, slot) != 17:
+                            raise RuntimeError(f"strict native branch failed: {branch:#x}/{slot:#x} O{opt}")
+                        count += 17
+        # A branch in a memory sequence, unsupported opcode, or wrapping sequence must not
         # silently enter the straight-line lowering.
         for pc, words in (
             ("0x00400000", ["0xac820000", "0x10000000"]),
+            ("0x00400000", ["0x10000000", "0x10000000"]),
+            ("0x00400000", ["0x0c100000", "0xac820000"]),
             ("0x00400000", ["0xac820000", "0x0"]),
             ("0xfffffffc", ["0xac820000", "0x8cc50000"]),
         ):

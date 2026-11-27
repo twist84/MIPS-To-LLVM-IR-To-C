@@ -107,7 +107,8 @@ inline void declare_prepare(std::ostringstream& out)
 // internal linkage allows the normal LLVM pipeline to inline the
 // transfer into a sequence without weakening the checked helper edge.
 inline void emit_transfer_function(std::ostringstream& out,
-    const ee::s_ee_instruction& ins, const std::string& name, bool internal)
+    const ee::s_ee_instruction& ins, const std::string& name, bool internal,
+    bool delay = false)
 {
     const auto transfer = ee::ee_decode_strict_transfer(ins.opcode_word);
     const uint32_t rt = (ins.opcode_word >> 16u) & 31u;
@@ -118,8 +119,9 @@ inline void emit_transfer_function(std::ostringstream& out,
         << "entry:\n"
         << "  %out = alloca ptr\n"
         << "  %lane = alloca i32\n"
-        << "  %status = call i32 @ee_strict_native_prepare_transfer(ptr %cpu, ptr %context, i32 "
-        << ins.pc << ", i32 " << ins.opcode_word << ", ptr %out, ptr %lane)\n"
+        << "  %status = call i32 @" << (delay ? "ee_strict_native_prepare_delay_transfer"
+                                               : "ee_strict_native_prepare_transfer")
+        << "(ptr %cpu, ptr %context, i32 " << ins.pc << ", i32 " << ins.opcode_word << ", ptr %out, ptr %lane)\n"
         << "  %ready = icmp eq i32 %status, 0\n"
         << "  br i1 %ready, label %transfer, label %rejected\n"
         << "rejected:\n  ret i32 %status\n"
@@ -158,9 +160,13 @@ inline void emit_transfer_function(std::ostringstream& out,
         }
         out << "  br label %committed\n";
     }
-    out << "committed:\n  %pc = getelementptr i8, ptr %cpu, i64 " << offsetof(ee::s_ee_cpu_state, m_pc) << "\n"
-        << "  store i32 " << static_cast<uint32_t>(ins.pc + 4u) << ", ptr %pc, align 4\n"
-        << "  ret i32 0\n}\n";
+    out << "committed:\n";
+    if (!delay)
+    {
+        out << "  %pc = getelementptr i8, ptr %cpu, i64 " << offsetof(ee::s_ee_cpu_state, m_pc) << "\n"
+            << "  store i32 " << static_cast<uint32_t>(ins.pc + 4u) << ", ptr %pc, align 4\n";
+    }
+    out << "  ret i32 0\n}\n";
 }
 } // namespace strict_transfer_ir
 
@@ -224,6 +230,78 @@ inline bool emit_strict_memory_sequence(llvm_context& ctx,
             << "stop" << i << ":\n  ret i32 %status" << i << "\n";
     }
     out << "complete:\n  ret i32 0\n}\n";
+    ctx.ir(out.str());
+    return true;
+}
+
+// A bounded branch terminator and exactly one integer memory delay
+// instruction. No link/branch-in-slot, no speculative target fetch.
+// Both branch operands are sampled before the delay instruction. An
+// ordinary not-taken branch still executes its slot; a not-taken likely
+// branch skips the slot helper entirely, including its fetch checks.
+inline bool emit_strict_memory_branch(llvm_context& ctx,
+    const ee::s_ee_instruction& branch, const ee::s_ee_instruction& slot)
+{
+    if (branch.valid != ee::e_ee_valid::VALID || !branch.has_delay_slot ||
+        (branch.pc & 3u) != 0u || branch.pc > 0xfffffff4u ||
+        !ee::ee_strict_branch_supported(branch.opcode_word) ||
+        !strict_transfer_ir::supported_instruction(slot) || slot.pc != branch.pc + 4u)
+    {
+        return false;
+    }
+    const uint32_t primary = branch.opcode_word >> 26u;
+    const bool likely = (primary & 0x10u) != 0u;
+    if (branch.flow != (likely ? ee::e_ee_flow::FLOW_BRANCH_LIKELY : ee::e_ee_flow::FLOW_BRANCH))
+    {
+        return false;
+    }
+    const uint32_t displacement = static_cast<uint32_t>(
+        static_cast<int32_t>(static_cast<int16_t>(branch.opcode_word & 0xffffu))) << 2u;
+    const uint32_t target = branch.pc + 4u + displacement;
+    const uint32_t fallthrough = branch.pc + 8u;
+    std::ostringstream out;
+    out << "declare i32 @ee_strict_native_check_branch(ptr, ptr, i32, i32)\n"
+        << "declare i32 @ee_strict_native_prepare_delay_transfer(ptr, ptr, i32, i32, ptr, ptr)\n";
+    strict_transfer_ir::emit_transfer_function(out, slot, "strict_delay", true, true);
+    out << "define i32 @guest_strict_word(ptr %cpu, ptr %context) {\n"
+        << "entry:\n"
+        << "  %branch_status = call i32 @ee_strict_native_check_branch(ptr %cpu, ptr %context, i32 "
+        << branch.pc << ", i32 " << branch.opcode_word << ")\n"
+        << "  %branch_ready = icmp eq i32 %branch_status, 0\n"
+        << "  br i1 %branch_ready, label %condition, label %branch_stop\n"
+        << "branch_stop:\n  ret i32 %branch_status\ncondition:\n";
+    const auto operand = [&](uint32_t reg, const std::string& name) -> std::string
+    {
+        if (reg == 0u)
+        {
+            return "0";
+        }
+        const size_t offset = offsetof(ee::s_ee_cpu_state, m_gpr) +
+            reg * sizeof(ee::s_ee_u128) + offsetof(ee::s_ee_u128, m_lo);
+        out << "  %" << name << "_ptr = getelementptr i8, ptr %cpu, i64 " << offset << "\n"
+            << "  %" << name << " = load i64, ptr %" << name << "_ptr, align 8\n";
+        return "%" + name;
+    };
+    const auto left = operand((branch.opcode_word >> 21u) & 31u, "lhs");
+    const auto right = operand((branch.opcode_word >> 16u) & 31u, "rhs");
+    out << "  %taken = icmp " << ((primary & 1u) == 0u ? "eq" : "ne")
+        << " i64 " << left << ", " << right << "\n"
+        << "  %next = select i1 %taken, i32 " << target << ", i32 " << fallthrough << "\n";
+    if (likely)
+    {
+        out << "  br i1 %taken, label %delay, label %complete\n";
+    }
+    else
+    {
+        out << "  br label %delay\n";
+    }
+    out << "delay:\n  %slot_status = call i32 @strict_delay(ptr %cpu, ptr %context)\n"
+        << "  %slot_ready = icmp eq i32 %slot_status, 0\n"
+        << "  br i1 %slot_ready, label %complete, label %slot_stop\n"
+        << "slot_stop:\n  ret i32 %slot_status\n"
+        << "complete:\n  %pc = getelementptr i8, ptr %cpu, i64 "
+        << offsetof(ee::s_ee_cpu_state, m_pc) << "\n"
+        << "  store i32 %next, ptr %pc, align 4\n  ret i32 0\n}\n";
     ctx.ir(out.str());
     return true;
 }

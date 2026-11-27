@@ -5,10 +5,19 @@
 
 namespace ee
 {
-extern "C" uint32_t ee_strict_native_prepare_transfer(
+namespace
+{
+enum class e_prepare_kind : uint8_t
+{
+    ORDINARY,
+    BRANCH_FETCH,
+    DELAY_TRANSFER
+};
+
+uint32_t strict_native_prepare(
     s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
     uint32_t expected_pc, uint32_t expected_opcode, uint8_t** out,
-    uint32_t* lane_offset)
+    uint32_t* lane_offset, e_prepare_kind kind)
 {
     using result = e_ee_strict_ram_step_result;
     constexpr auto committed = static_cast<uint32_t>(result::COMMITTED);
@@ -25,17 +34,20 @@ extern "C" uint32_t ee_strict_native_prepare_transfer(
     {
         return static_cast<uint32_t>(result::UNSAFE_BOUNDARY);
     }
+    const bool delay = kind == e_prepare_kind::DELAY_TRANSFER;
+    const bool branch_fetch = kind == e_prepare_kind::BRANCH_FETCH;
+    const uint32_t restart_pc = delay ? expected_pc - 4u : expected_pc;
     if (cpu == nullptr || context == nullptr || context->m_memory == nullptr ||
         context->m_actual_delay_slot == nullptr ||
         !context->m_evidence.m_ordinary_boundary || !context->m_evidence.m_isolated_ram ||
-        cpu->m_pc != expected_pc ||
+        cpu->m_pc != restart_pc || (delay && (expected_pc < 4u || (expected_pc & 3u) != 0u)) ||
         cpu->m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
         (cpu->m_cop0[COP0_Status] & STATUS_ERL) != 0u)
     {
         return static_cast<uint32_t>(result::UNSAFE_BOUNDARY);
     }
     const auto transfer = ee_decode_strict_transfer(expected_opcode);
-    if (transfer.m_width == 0u)
+    if (branch_fetch ? !ee_strict_branch_supported(expected_opcode) : transfer.m_width == 0u)
     {
         return static_cast<uint32_t>(result::UNSUPPORTED_INSTRUCTION);
     }
@@ -49,6 +61,8 @@ extern "C" uint32_t ee_strict_native_prepare_transfer(
     request.m_kind = e_ee_memory_request_kind::FETCH;
     request.m_address = expected_pc;
     request.m_faulting_pc = expected_pc;
+    request.m_in_delay_slot = delay;
+    request.m_branch_pc = delay ? restart_pc : 0u;
     request.m_architectural_state_restored = true;
     const auto fault = [&]()
     {
@@ -92,6 +106,10 @@ extern "C" uint32_t ee_strict_native_prepare_transfer(
     if (live != expected_opcode)
     {
         return static_cast<uint32_t>(result::UNSUPPORTED_INSTRUCTION);
+    }
+    if (branch_fetch)
+    {
+        return committed;
     }
     const uint32_t rs = (live >> 21u) & 31u;
     const uint32_t base = rs == 0u ? 0u : static_cast<uint32_t>(cpu->m_gpr[rs].m_lo);
@@ -140,6 +158,36 @@ extern "C" uint32_t ee_strict_native_prepare_transfer(
         *out = backing(ee_plan_data_bus_span(data.m_access, data.m_width, config, retail_ram_end));
     }
     return *out != nullptr ? committed : static_cast<uint32_t>(result::UNMODELED_ACCESS);
+}
+
+} // namespace
+
+extern "C" uint32_t ee_strict_native_prepare_transfer(
+    s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
+    uint32_t expected_pc, uint32_t expected_opcode, uint8_t** out,
+    uint32_t* lane_offset)
+{
+    return strict_native_prepare(cpu, context, expected_pc, expected_opcode,
+        out, lane_offset, e_prepare_kind::ORDINARY);
+}
+
+extern "C" uint32_t ee_strict_native_check_branch(
+    s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
+    uint32_t expected_pc, uint32_t expected_opcode)
+{
+    uint8_t* unused = nullptr;
+    uint32_t lane = 0u;
+    return strict_native_prepare(cpu, context, expected_pc, expected_opcode,
+        &unused, &lane, e_prepare_kind::BRANCH_FETCH);
+}
+
+extern "C" uint32_t ee_strict_native_prepare_delay_transfer(
+    s_ee_cpu_state* cpu, s_ee_strict_native_word_context* context,
+    uint32_t expected_pc, uint32_t expected_opcode, uint8_t** out,
+    uint32_t* lane_offset)
+{
+    return strict_native_prepare(cpu, context, expected_pc, expected_opcode,
+        out, lane_offset, e_prepare_kind::DELAY_TRANSFER);
 }
 
 // Preserve the original experimental LW/SW entry contract.
