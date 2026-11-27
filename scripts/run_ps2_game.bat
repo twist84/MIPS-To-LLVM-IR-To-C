@@ -392,7 +392,7 @@ if defined OVERWRITE_IR (
 )
 rem Optimized full replay validates the shared source IR in the profile
 rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
-if not defined CACHE_FLAG if /I not "%REQUESTED_SESSION_MODE%"=="recover" if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\ir\ee_functions.json" (
+if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="recover" if exist "%WORK_DIR%\ir\ee_functions.json" (
     echo === Validating shared EE IR for selected optimization profile ===
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
         --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable

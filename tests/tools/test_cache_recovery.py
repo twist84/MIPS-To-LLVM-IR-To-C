@@ -258,6 +258,55 @@ def test_verified_legacy_migration_preserves_ir_and_relocates():
         assert (backup / "ir" / "ee_functions.json").is_file()
 
 
+def test_cold_ir_benchmark_isolated():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        base = root / "cache"
+        base.mkdir()
+        marker = base / "sentinel"
+        marker.write_bytes(b"untouched")
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        sources = {"ELF": digest(b"ELF")}
+        entries = [0x100008, 0x100010]
+        manifest = manifest_for(elf, entries, sources)
+        run_game.archive_known_function_manifest(base / "translation-cache.json", manifest)
+        output = root / "ir-baseline"
+
+        def fake_reconstruct(saved, requested, elf_arg, build, config, work, jobs,
+                             allow_mismatches, *, ir_only=False):
+            assert requested == entries and ir_only and not allow_mismatches
+            assert marker.read_bytes() == b"untouched"
+            ir = work / "ir"
+            ir.mkdir()
+            functions = []
+            for pc, name in zip(entries, saved["known_entries"]):
+                (ir / name).write_bytes(str(pc).encode())
+                functions.append({"ir_path": name, "vaddr": hex(pc), "block_pcs": [hex(pc)]})
+            shared_ir.write_json(ir / "ee_functions.json", {
+                "elf": shared_ir.relative_path(elf, ir),
+                "path_format": "manifest-relative-v1",
+                "function_count": len(functions), "functions": functions})
+            return {"missing": [], "extra": [], "mismatched_sha256": []}
+
+        with patch.object(run_game, "ir_generation_inputs", return_value=sources), \
+             patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
+             patch.object(run_game, "build_linked_library",
+                          side_effect=AssertionError("must not emit/link")):
+            recovery.benchmark_reconstruction(elf, root, "Release", base, output, 2)
+            for unsafe in (base, base / "inside", output):
+                try:
+                    recovery.benchmark_reconstruction(elf, root, "Release", base, unsafe, 2)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("benchmark accepted existing/unsafe output")
+        assert marker.read_bytes() == b"untouched"
+        assert shared_ir.read_json(output / "benchmark-output.json")["ir_hashes"] == manifest["ir_hashes"]
+        assert not (output / "objects").exists()
+        assert not list(base.glob("backup-*"))
+
+
 def test_selected_profile_promotion_without_o0():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp).resolve()
@@ -903,6 +952,7 @@ def main():
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
     test_verified_legacy_migration_preserves_ir_and_relocates()
+    test_cold_ir_benchmark_isolated()
     test_selected_profile_promotion_without_o0()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()

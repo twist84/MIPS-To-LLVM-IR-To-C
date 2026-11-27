@@ -586,9 +586,53 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
     return base_work
 
 
+def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
+                             allow_ir_changes=False):
+    """Cold IR-only reconstruction in a fresh directory outside active cache."""
+    base_work = base_work.resolve()
+    output = output.resolve()
+    if (output.exists() or output.is_relative_to(base_work) or
+            base_work.is_relative_to(output) or
+            output.parent != base_work.parent or
+            output.name.startswith((base_work.name + "-", "recovery-", "backup-", "retained-"))):
+        raise ValueError("benchmark requires a fresh separate sibling work directory")
+    source_root = Path(__file__).resolve().parents[1]
+    with shared_ir.ir_lock(base_work):
+        sources = run_game.ir_generation_inputs(elf, source_root)
+        candidate, manifest, entries, same_sources = select_manifest(
+            base_work, elf, sources, allow_ir_changes)
+        metrics.details("selected_manifest", str(candidate))
+        metrics.details("known_modules", len(entries))
+        metrics.details("lowering_sources_match", same_sources)
+        metrics.details("source_fingerprints", dict(sources))
+        metrics.details("known_manifest_metadata_sha256", manifest.get("metadata_sha256"))
+        # Retain the exact ordered input inventory for controlled repetitions.
+        output.mkdir(parents=True, exist_ok=False)
+        shared_ir.write_json(output / "benchmark-input.json", manifest)
+    comparison = run_known_replays.reconstruct(
+        manifest, entries, elf, build, config, output, jobs,
+        allow_ir_changes, ir_only=True)
+    metadata_path = output / "ir" / "ee_functions.json"
+    metadata = shared_ir.read_json(metadata_path)
+    hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
+                                      require_owned_directory=True)
+    if (list(hashes) != manifest.get("known_entries", list(manifest["ir_hashes"])) or
+            comparison["missing"] or comparison["extra"] or
+            (not allow_ir_changes and hashes != manifest["ir_hashes"])):
+        raise ValueError("benchmark reconstructed inventory differs")
+    shared_ir.write_json(output / "benchmark-output.json", {
+        "ir_hashes": hashes, "comparison": comparison,
+        "metadata_sha256": run_game.sha256_path(metadata_path)})
+    metrics.details("ir_comparison", comparison)
+    print(f"Cold IR-only reconstruction complete: {len(hashes)} modules; "
+          "no native emission, linking, promotion or guest execution", flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--elf", type=Path)
+    parser.add_argument("--benchmark-reconstruct", type=Path, metavar="FRESH_WORK_DIR",
+                        help="cold IR-only reconstruction; never activate output")
     parser.add_argument("--print-active", action="store_true",
                         help="print only the selected active work directory")
     parser.add_argument("--check-active-source", action="store_true",
@@ -612,6 +656,10 @@ def main(argv=None):
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
     args = parser.parse_args(argv)
+    if args.benchmark_reconstruct and (
+            args.print_active or args.check_active_source or
+            args.migrate_source_fingerprints or args.full_native_backup):
+        parser.error("--benchmark-reconstruct cannot be combined with other modes")
     if args.migrate_source_fingerprints and (
             args.print_active or args.check_active_source or args.allow_ir_changes):
         parser.error("--migrate-source-fingerprints cannot be combined with other modes or --allow-ir-changes")
@@ -626,7 +674,16 @@ def main(argv=None):
         elf = args.elf.resolve(strict=True)
         build = args.build_dir.resolve()
         base_work = args.base_work_dir.resolve()
-        if args.migrate_source_fingerprints:
+        if args.benchmark_reconstruct:
+            report = args.timings_report or metrics.default_report(base_work, "ir-benchmark")
+            with metrics.report("ir-benchmark", report, cache=str(base_work),
+                                elf=str(elf), jobs=args.emit_jobs,
+                                work=str(args.benchmark_reconstruct.resolve()),
+                                allow_ir_changes=args.allow_ir_changes):
+                benchmark_reconstruction(
+                    elf, build, args.config, base_work, args.benchmark_reconstruct,
+                    args.emit_jobs, args.allow_ir_changes)
+        elif args.migrate_source_fingerprints:
             migrate_source_fingerprints(elf, base_work, Path(__file__).resolve().parents[1])
         elif args.check_active_source:
             work = active_work(base_work)

@@ -323,3 +323,18 @@ also recognizes a valid shared source without a root O0 translation receipt
 when preparing a subsequent optimized full replay. No intermediate O0 build
 or retail replay is required. The explicit recovery mode may rebuild a
 selected profile even when its current native cache is already valid.
+
+## Cold IR reconstruction baseline (before R6)
+
+Use a fresh sibling directory for a reconstruction-only timing baseline:
+
+    python tools\recover_translation_cache.py --elf PS2_GAME\SLUS_214.42 --benchmark-reconstruct build\ee-r6-baseline --timings-report ee-r6-baseline.json
+
+The benchmark selects the known inventory using the ordinary recovery policy,
+then releases the source lock before reconstruction in the isolated output.
+It records the exact input manifest and output IR hashes, and does not
+compile native objects, link, promote, back up or execute the game. Existing
+output directories are refused. Strict byte comparison is the default;
+if reconstruction differs, a separately named isolated benchmark with
+`--allow-ir-changes` can measure it without authorizing activation. Preserve
+both benchmark inventories for parity comparisons during R6/R7.
