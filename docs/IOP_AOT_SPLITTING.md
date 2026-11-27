@@ -695,3 +695,62 @@ unchanged function IR. Do not compare warm and cold times as if
 equivalent. Regression fixtures cover limits of 1, 3, 4 and 8, invalid
 limits, unchanged function IDs, exact coverage and default behavior.
 Latest CI and real candidate validation pending.
+
+## I16c acceptance
+
+Archive `ee-iop-i16c.zip`, SHA-256
+`114ae5d4408962cf92b7a0ffe38a64cf6386a2e2ae9b842776dd743b3d0af715`.
+Accept `build/iop-native-split-i16c-candidate/modules` as the retail
+correctness baseline; I14c remains the rollback baseline.
+All pinned inputs and VU1 inventory match I14c. All three replacement
+DLL hashes match their build and replay receipts; four unaffected
+library hashes match I14c. All three replacement timestamps are zero.
+40M EE dispatches, 184,700 matching traces, zero divergent/unpaired,
+3,127/3,127 polls, 7/7 active native IRXs, 67,846,006 retired native IOP
+instructions, 12,611,093 entry attempts (three more than I14c).
+Report and framebuffer independently match byte-for-byte.
+Control 40.578 s, candidate 39.938 s, translated execution 575.7 ms,
+refresh 1.7 ms. Performance acceptance remains false (one pair).
+
+Three-module cold compile: 703 objects, 0 cache hits, 12.781 s compile,
+0.470 s link. MCMAN's slowest residual object fell from 17.906 s to
+2.672 s (different queue workloads, not matched whole-build timing).
+The largest remaining compile object is CRI_ADXI.region.83.ll, a
+discovered function (1,233,831 IR bytes, 8.250 s), not a residual region.
+DLL sizes: CRI_ADXI 1,324,032 B; MCMAN 1,743,872 B; PADMAN 821,248 B.
+Combined size 3,889,152 B, 188,416 B below I14c (4.62% reduction).
+Retain 1,024-PC residual partitioning for these three tested modules;
+other IRXs remain unchanged.
+
+I16c CI had a single discovery fixture assertion failure in
+CTest fast-2: the test expected "requires" while the actual
+error used "require". Corrected in a separate commit; no runtime
+or builder semantics changed by that fix.
+
+## I16d — Exact-IR object cache reuse across ownership plans
+
+Opt-in `--region-cache-ir-key` requires `--region-cache`. The schema-2
+cache key includes exact IR SHA-256, source filename, capture and
+staged metadata identity, lifter and compiler identity, compiler
+options/target/platform, and all other existing provenance except
+the ownership-plan SHA. The plan remains independently validated
+before lifting. Identical object inputs can therefore survive a
+changed partition plan; changed IR or compiler/capture inputs still
+invalidate entries.
+
+On a schema-2 miss, the builder checks only the current plan's exact
+legacy schema-1 key, validates size and SHA-256, and atomically
+promotes a hit into the new namespace without modifying the old
+entry. Corrupt entries are rejected. No scanning or trust of other
+plans' legacy receipts. Default cache behavior remains unchanged.
+Synthetic tests cover legacy promotion, cross-plan reuse, unchanged
+legacy keys, provenance/source-name invalidation and corruption.
+
+Local acceptance: first rebuild the three I16c modules with the
+same 1,024-PC plan and existing cache, with the new flag and fresh
+output. Require 703/703 hits and all three raw DLL SHA-256 values
+identical to I16c. Then build MCMAN alone with a fresh 2,048-PC plan
+and the same schema-2 cache; unchanged function IR should hit
+without having to compile it again. The 2,048-PC build is a cache
+experiment only, not a new accepted retail library. No retail replay
+is needed for raw-identical I16c artifacts.
