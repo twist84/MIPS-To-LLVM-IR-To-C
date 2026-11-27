@@ -18,7 +18,7 @@ from audit_iop_function_discovery import fnv1a, inventory
 from build_iop_aot import (prepare_split_pilot, cached_split_object, split_cache_key,
                            relocation_receipt_roots, select_split_stems,
                            split_compile_schedule, compile_split_modules,
-                           compact_split_router)
+                           compact_split_router, shared_split_memory_helpers)
 from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
                                     discover_relocation_roots)
 
@@ -752,6 +752,106 @@ fallback:
                                 11 if pc in (base, base + 12) else
                                 12 if pc == base + 4 else 1)
                     self.assertEqual(outcomes[1][0], expected)
+
+    @staticmethod
+    def shared_memory_fixture():
+        source = (TOOLS.parent / "src/iop/iop_ir_lifter.cpp").read_text(encoding="utf-8")
+        prefix = source.split('const char* k_helpers = R"IR(', 1)[1].split(')IR";', 1)[0]
+        regions = []
+        for index, width in enumerate((1, 2, 4)):
+            regions.append(prefix + f"""define dso_local i32 @iop_aot_fn_region_{index}(ptr %c, i32 %start) {{
+entry:
+  %ldv = alloca i32
+  %t0 = add i32 %start, 0
+  %t1 = call i1 @iop_ld(ptr %c, i32 %t0, i32 {width}, ptr %ldv)
+  br i1 %t1, label %store, label %fail
+store:
+  %t2 = load i32, ptr %ldv
+  %t3 = add i32 %t2, 1
+  %t4 = call i1 @iop_st(ptr %c, i32 %t0, i32 {width}, i32 %t3)
+  br i1 %t4, label %done, label %fail
+done:
+  ret i32 %t2
+fail:
+  ret i32 -1
+}}
+""")
+        regions.append(prefix + """define dso_local i32 @iop_aot_fn_region_3(ptr %c, i32 %start) {
+entry:
+  ret i32 0
+}
+""")
+        return regions
+
+    def test_shared_memory_helper_outlining(self):
+        regions = self.shared_memory_fixture()
+        rewritten, helper = shared_split_memory_helpers(regions)
+        self.assertEqual(rewritten[-1], regions[-1])
+        for index, width in enumerate((1, 2, 4)):
+            self.assertIn(f"declare hidden i1 @iop_shared_ld_{width}(ptr, i32, ptr)", rewritten[index])
+            self.assertIn(f"call i1 @iop_shared_st_{width}(ptr %c, i32 %t0, i32 %t3)", rewritten[index])
+            self.assertIn(f"define hidden i1 @iop_shared_ld_{width}", helper)
+            self.assertIn(f"define hidden i1 @iop_shared_st_{width}", helper)
+        self.assertEqual(shared_split_memory_helpers(regions[-1:]), (regions[-1:], None))
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers(rewritten)
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers([regions[0], "; different\n" + regions[1]])
+        with self.assertRaises(ValueError):
+            shared_split_memory_helpers([regions[0].replace("i32 1, ptr %ldv)", "i32 3, ptr %ldv)")])
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("clang"),
+                         "requires Linux host Clang for native helper comparison")
+    def test_shared_memory_helpers_native_ram_and_callbacks(self):
+        regions = self.shared_memory_fixture()
+        rewritten, helper = shared_split_memory_helpers(regions)
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            libs = []
+            for label, units in (("inline", regions), ("shared", rewritten + [helper])):
+                paths = []
+                for index, ir in enumerate(units):
+                    path = root / f"{label}-{index}.ll"
+                    path.write_text(ir)
+                    paths.append(str(path))
+                lib = root / f"{label}.so"
+                subprocess.run(["clang", "-O3", "-shared", "-fPIC",
+                                "-Wno-override-module", *paths, "-o", str(lib)], check=True)
+                libs.append(ctypes.CDLL(str(lib)))
+
+            read_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p,
+                                        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p)
+            write_type = ctypes.CFUNCTYPE(ctypes.c_uint32, ctypes.c_void_p,
+                                         ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32)
+            for index, width in enumerate((1, 2, 4)):
+                for address in (0, 0x80000000, 0xa0200000, 1, 0x1f801000):
+                    for permit in (False, True):
+                        outcomes = []
+                        for lib in libs:
+                            events = []
+
+                            @read_type
+                            def read(cpu, addr, size, out):
+                                events.append(("read", addr, size))
+                                if permit:
+                                    ctypes.cast(out, ctypes.POINTER(ctypes.c_uint32))[0] = 0x12
+                                return int(permit)
+
+                            @write_type
+                            def write(cpu, addr, size, value):
+                                events.append(("write", addr, size, value))
+                                return int(permit)
+
+                            ram = ctypes.create_string_buffer(b"Z" * 16, 16)
+                            ctx = ctypes.create_string_buffer(80)
+                            struct.pack_into("P", ctx, 24, ctypes.addressof(ram))
+                            struct.pack_into("P", ctx, 40, ctypes.cast(read, ctypes.c_void_p).value)
+                            struct.pack_into("P", ctx, 48, ctypes.cast(write, ctypes.c_void_p).value)
+                            fn = getattr(lib, f"iop_aot_fn_region_{index}")
+                            fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                            fn.restype = ctypes.c_uint32
+                            outcomes.append((fn(ctx, address), ram.raw, events))
+                        self.assertEqual(outcomes[0], outcomes[1], (width, address, permit))
 
     def test_exact_ir_cache_reuses_across_plans_and_validates_legacy(self):
         with tempfile.TemporaryDirectory() as tmp:
