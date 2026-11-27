@@ -29,7 +29,7 @@ struct s_ee_vu1_use
     uint8_t m_write_lane_count = 0u;
     uint8_t m_vi_index_count = 0u;
 
-    void read_vi(uint32_t register_index)
+    constexpr void read_vi(uint32_t register_index)
     {
         register_index &= 15u;
         if (register_index != 0u)
@@ -44,7 +44,7 @@ struct s_ee_vu1_use
         }
     }
 
-    void read(uint32_t register_index, uint32_t mask)
+    constexpr void read(uint32_t register_index, uint32_t mask)
     {
         if (register_index != 0u && mask != 0u && m_n < m_reg.size())
         {
@@ -61,7 +61,7 @@ struct s_ee_vu1_use
         }
     }
 
-    void write(uint32_t register_index, uint32_t mask)
+    constexpr void write(uint32_t register_index, uint32_t mask)
     {
         if (register_index != 0u && mask != 0u && m_wn < m_wreg.size())
         {
@@ -84,7 +84,7 @@ struct s_ee_vu1_dependency
     std::array<std::array<uint32_t, 4>, 32> m_vf_ready{};
     std::array<uint32_t, 16> m_vi_ready{};
 
-    static s_ee_vu1_use decode(uint32_t lo, uint32_t hi)
+    static constexpr s_ee_vu1_use decode(uint32_t lo, uint32_t hi)
     {
         s_ee_vu1_use result{};
         const uint32_t dest = (hi >> 21u) & 15u;
@@ -282,7 +282,7 @@ struct s_ee_vu1_dependency
         return result;
     }
 
-    uint32_t issue(const s_ee_vu1_use& use, uint32_t next_cycle) const
+    constexpr uint32_t issue(const s_ee_vu1_use& use, uint32_t next_cycle) const
     {
         uint32_t cycle = next_cycle;
         for (uint32_t index = 0u; index < use.m_read_lane_count; ++index)
@@ -297,7 +297,7 @@ struct s_ee_vu1_dependency
         return cycle;
     }
 
-    void retire(const s_ee_vu1_use& use, uint32_t cycle)
+    constexpr void retire(const s_ee_vu1_use& use, uint32_t cycle)
     {
         for (uint32_t index = 0u; index < use.m_write_lane_count; ++index)
         {
