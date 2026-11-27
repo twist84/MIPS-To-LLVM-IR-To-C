@@ -149,6 +149,9 @@ int main(int argc, char** argv)
         pilot.sif_register_value(1u), pilot.sif_register_value(2u), pilot.sif_register_value(3u), pilot.sif_register_value(4u),
         static_cast<unsigned long long>(pilot.sif0_delivered()), static_cast<unsigned long long>(pilot.sif1_delivered()),
         pilot.sif1_fifo_words());
+    std::printf("Dual ROM0 GS reset: count=%u upper=%u siglblid=%016llx\n",
+        pilot.gs_reset_count(), pilot.gs_upper_count(),
+        static_cast<unsigned long long>(pilot.gs_siglblid()));
     const auto serial = pilot.serial_output();
     std::printf("Dual ROM0 serial: bytes=%zu\n", serial.size());
     // Hex encoding preserves control bytes and avoids guest text being

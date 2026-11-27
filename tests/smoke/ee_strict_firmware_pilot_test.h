@@ -1135,4 +1135,47 @@ bool test_strict_firmware_hblank_timer()
     }
     return true;
 }
+
+bool test_strict_firmware_gs_reset()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    // Enable DMAE, unmask INTC1, publish an EE SIF flag, then issue
+    // the firmware's cold GS reset and reserved upper-word write.
+    ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b000u, 0x3485e000u, 0x34020001u,
+        0xaca20000u, 0x3485f010u, 0x34020002u, 0xaca20000u,
+        0x3485f220u, 0x3c020001u, 0xaca20000u, 0x3c04b200u,
+        0x34841000u, 0x34020200u, 0xac820000u, 0xac800004u,
+        0xac820000u}));
+    if (!pilot.configure_scanout(3u, 0u) ||
+        !pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+    {
+        return false;
+    }
+    const uint64_t first_field = pilot.next_scanout_event();
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        const auto step = pilot.step(1u);
+        if (step.m_boundary != boundary::RETIRED || pilot.cycle() != i + 1u ||
+            pilot.iop_cycles() != (i + 1u) / 8u ||
+            pilot.next_scanout_event() != first_field ||
+            step.m_vblank_started || step.m_vblank_ended ||
+            pilot.gs_reset_count() != (i >= 14u ? 1u : 0u) ||
+            pilot.gs_upper_count() != (i >= 15u ? 1u : 0u))
+        {
+            return false;
+        }
+    }
+    if (pilot.gs_siglblid() != 0u || pilot.gs_csr() != 0u ||
+        pilot.dmac_control() != 1u || pilot.intc_mask() != 2u ||
+        pilot.intc_status() != 0u || pilot.sif_register_value(3u) != 0x10000u)
+    {
+        return false;
+    }
+    const auto refused = pilot.step(1u);
+    return refused.m_boundary == boundary::HOST_REFUSAL &&
+        pilot.cycle() == 16u && pilot.iop_cycles() == 2u &&
+        pilot.gs_reset_count() == 1u && pilot.gs_upper_count() == 1u &&
+        pilot.next_scanout_event() == first_field;
+}
 } // namespace

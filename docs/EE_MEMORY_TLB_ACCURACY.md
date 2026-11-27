@@ -1541,3 +1541,21 @@ existing reference approximation (counter-relative integer line
 periods), not a hardware-calibrated HBlank edge producer. No
 production timer changes. Raise the pinned real-ROM minimum progress
 assertions past the observed Timer3 stop. Pending CI.
+
+## M6E3H3E6: cold GS reset in synchronized ROM0
+
+H3E5 passed both firmware releases at d88fa6a2:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46062073575
+
+Both progressed 18267 EE slots, reached DMAE=1/MSFLAG=10000,
+then refused CSR.RESET at b2001000 (opcode ac230000, value 200).
+v0.6: 690820 EE / 86352 IOP; v0.7: 691012 / 86376.
+Connect a real owned c_ee_gs_state to the pilot bus. Admit the
+same one-shot cold GS reset and reserved-zero upper word as the
+isolated probe, only before any field and with no active DMA.
+Do not reset the configured scanout epoch, INTC, timers, SIF or
+either processor's clock. No GIF input/GPU is connected; live GS
+reset after scanout is outside this scope. Test exact reset counts,
+preserved unrelated state and deadline, and duplicate refusal.
+Require both pinned dual-domain diagnostics to advance beyond the
+measured reset stop and execute the upper-word store. Pending CI.

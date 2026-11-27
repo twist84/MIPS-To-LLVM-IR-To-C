@@ -101,6 +101,7 @@ public:
         m_vif0.bind_vu0(&m_vu0);
         m_hardware.bind_vif0(&m_vif0);
         m_hardware.bind_vif1(&m_vif1);
+        m_hardware.bind_gs(&m_gs);
         m_hardware.bind_device_transfer(this, &vif_dma);
     }
 
@@ -130,6 +131,9 @@ public:
     uint64_t fields_started() { return m_hardware.scanout().fields_started(); }
     uint64_t fields_ended() { return m_hardware.scanout().fields_ended(); }
     uint64_t gs_csr() { return m_hardware.scanout().csr(); }
+    uint32_t gs_reset_count() const { return m_gs_reset_count; }
+    uint32_t gs_upper_count() const { return m_gs_upper_count; }
+    uint64_t gs_siglblid() const { return m_gs.siglblid(); }
 
     // Install a second reset domain before either processor executes.
     // Only immutable ROM input is supplied; no guest RAM/register
@@ -858,11 +862,37 @@ private:
         {
             return c_ee_intc::mmio_write(&self.m_hardware.intc(), address, width, value);
         }
-        if (self.m_hardware.scanout().enabled() && address == c_ee_hw_bus::k_gs_csr)
+        if (address == c_ee_hw_bus::k_gs_csr)
         {
-            // Only CSR.VSINT W1C, never fake GS reset or other latches.
-            return (value->m_lo & ~8ull) == 0u &&
+            if (static_cast<uint32_t>(value->m_lo) == 0x200u)
+            {
+                // Same bounded cold-GS reset as the isolated ROM0
+                // probe. No GIF/VRAM work is connected to this pilot.
+                // Do not reset the bus, scanout epoch, INTC or clocks.
+                if (self.m_gs_reset_count != 0u ||
+                    self.m_hardware.scanout().fields_started() != 0u ||
+                    self.m_hardware.dmac().started_channels() != 0u)
+                {
+                    return false;
+                }
+                self.m_gs.reset();
+                ++self.m_gs_reset_count;
+                return true;
+            }
+            // Only CSR.VSINT W1C outside the cold reset command.
+            return self.m_hardware.scanout().enabled() &&
+                (static_cast<uint32_t>(value->m_lo) & ~8u) == 0u &&
                 c_ee_hw_bus::mmio_write(&self.m_hardware, address, width, value);
+        }
+        if (address == c_ee_hw_bus::k_gs_csr + 4u)
+        {
+            if (static_cast<uint32_t>(value->m_lo) != 0u ||
+                self.m_gs_reset_count != 1u || self.m_gs_upper_count != 0u)
+            {
+                return false;
+            }
+            ++self.m_gs_upper_count;
+            return true; // reserved upper word, no control bits
         }
         const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
         if (address == k_d_ctrl)
@@ -962,6 +992,9 @@ private:
     s_ee_vu0_state m_vu0{};
     c_ee_vif1 m_vif0{};
     c_ee_vif1 m_vif1{};
+    c_ee_gs_state m_gs{};
+    uint32_t m_gs_reset_count = 0u;
+    uint32_t m_gs_upper_count = 0u;
     c_ee_hw_bus m_hardware{};
     c_ee_vsync_flags m_vsync_flags{};
     c_ee_host_timers m_timers{&m_runtime, &m_hardware};
