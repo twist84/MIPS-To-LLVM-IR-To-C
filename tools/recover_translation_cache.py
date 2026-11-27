@@ -404,9 +404,13 @@ def validate_portable_cache(directory, elf, inputs, ir_sources, library_name, op
     if (not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
             snapshot.get("ir_hashes") != hashes):
         raise ValueError("recovered guest IR differs from verified provenance")
+    # This exact owned-directory scan is already authenticated against
+    # the receipt. Share it within this validation call only; promotion
+    # still performs a new independent scan after moving the files.
     run_game.validate_translation_cache(cache_path, inputs, opt,
                                         metadata_path, profile / library_name,
-                                        ir_sources=ir_sources)
+                                        ir_sources=ir_sources,
+                                        verified_ir_hashes=hashes if shared_ir.active(metadata_path) else None)
     _, objects, _, _ = load_inputs(metadata_path, profile / "objects")
     from verify_ir import append_cached_objects, llvm
     append_cached_objects(profile / "objects", opt, llvm.get_default_triple(), [])

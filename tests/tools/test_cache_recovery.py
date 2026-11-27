@@ -316,6 +316,54 @@ def test_cold_ir_benchmark_isolated():
         assert not list(base.glob("backup-*"))
 
 
+def test_portable_validation_uses_one_fresh_ir_scan():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        stage = root / "cache"
+        ir = stage / "ir"
+        ir.mkdir(parents=True)
+        module = ir / "sub_0x100008_0x100008.ll"
+        module.write_bytes(b"guest")
+        metadata = ir / "ee_functions.json"
+        shared_ir.write_json(metadata, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": module.name, "vaddr": "0x100008",
+                           "block_pcs": ["0x100008"]}],
+        })
+        hashes = {module.name: digest(b"guest")}
+        sources = {"ELF": digest(b"ELF")}
+        shared_ir.publish(metadata, sources, hashes)
+        profile = recovery.native_profile(stage, 5)
+        (profile / "objects").mkdir(parents=True)
+        shared_ir.attach(profile, ir)
+        shared_ir.write_json(profile / "translation-cache.json",
+                             {"ir_sources": sources, "ir_hashes": hashes})
+        manifest = {"path_format": "manifest-relative-v1", "objects": [{
+            "input": shared_ir.relative_path(module, profile / "objects"),
+            "ir_sha256": hashes[module.name]}]}
+        with patch.object(run_game, "hash_ir_modules",
+                          wraps=run_game.hash_ir_modules) as scan, \
+             patch.object(run_game, "validate_translation_cache") as validate, \
+             patch("link_native_objects.load_inputs", return_value=({}, manifest, [], [])), \
+             patch("verify_ir.append_cached_objects"):
+            recovery.validate_portable_cache(stage, elf, {}, sources, "game-translated.dll", 5)
+            scan.assert_called_once()
+            assert validate.call_args.kwargs["verified_ir_hashes"] == hashes
+            module.write_bytes(b"changed")
+            try:
+                recovery.validate_portable_cache(stage, elf, {}, sources, "game-translated.dll", 5)
+            except ValueError as error:
+                assert "IR differs" in str(error)
+            else:
+                raise AssertionError("changed IR accepted on second validation")
+            assert scan.call_count == 2
+            validate.assert_called_once()
+
+
 def test_selected_profile_promotion_without_o0():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp).resolve()
@@ -983,6 +1031,7 @@ def main():
     test_link_or_validation_failure_does_not_activate()
     test_verified_legacy_migration_preserves_ir_and_relocates()
     test_cold_ir_benchmark_isolated()
+    test_portable_validation_uses_one_fresh_ir_scan()
     test_selected_profile_promotion_without_o0()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()

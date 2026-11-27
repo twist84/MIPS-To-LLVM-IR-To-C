@@ -454,3 +454,20 @@ Guest incremental/append manifests also reject a contradictory recorded
 backend optimization level; legacy manifests without that field retain
 the established profile-to-backend mapping. Malformed seed candidates are
 skipped rather than preventing reuse from other inventories.
+
+### R8 direct O5 recovery acceptance
+
+Windows canonical recovery succeeded in 407.922 s, with source-only consent
+and strict 16,252/16,252 original IR hashes. All 16,252 O5 guest objects
+were seeded/reused, zero compiled, exactly one link and no O0 build.
+The previous cache was retained; L1 archive 98,818,105 bytes from
+1,024,142,763 input bytes, compression 4.375 s, verification 0.656 s.
+This is the first measured end-to-end recovery, not an old/new full-recovery
+speedup measurement. Remaining large stages: reconstruction 97.906 s,
+native build 88.328 s, backup preparation 78.157 s, validation 77.031 s.
+Six full IR hash scans took 67.655 s in aggregate; stages overlap.
+
+Each portable-cache validation now passes its own freshly computed owned IR
+hashes to the nested translation receipt validator. Independent scans before
+and after canonical promotion remain; no persisted or stale hash inventory
+substitutes for fresh authentication.
