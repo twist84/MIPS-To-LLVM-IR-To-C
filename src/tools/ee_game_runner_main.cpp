@@ -4058,6 +4058,15 @@ int main(int argc, char** argv)
     const bool attribute_iop = ee::g_runtime_profile.m_enabled &&
         iop_attribution_value != nullptr &&
         std::strcmp(iop_attribution_value, "1") == 0;
+    std::string iop_kernel_profile_environment;
+    const char* iop_kernel_profile_value = read_host_environment(
+        "SDBZ_PROFILE_IOP_KERNEL", &iop_kernel_profile_environment);
+    const bool attribute_iop_kernel = attribute_iop &&
+        iop_kernel_profile_value != nullptr &&
+        std::strcmp(iop_kernel_profile_value, "1") == 0;
+    iop::s_kernel_phase_sample iop_phase_sample{};
+    iop::s_kernel_phase_sample iop_phase_totals[2]{};
+    uint64_t iop_phase_samples[2]{};
     if (ee::g_runtime_profile.m_enabled)
     {
         runtime.m_vu0_sync = runner_vu0_profiled_sync;
@@ -4889,10 +4898,26 @@ int main(int argc, char** argv)
                 }
                 // Both idle and budget_exhausted are accepted scheduled
                 // service outcomes. The fast path has no guest execution.
+                iop::s_kernel_phase_sample* phase_sample = nullptr;
+                if (sample_iop && attribute_iop_kernel && !quiet_advanced)
+                {
+                    iop_phase_sample = {};
+                    phase_sample = &iop_phase_sample;
+                }
                 const iop::s_kernel_run_result progressed = quiet_advanced
-                    ? iop::s_kernel_run_result{} : iop_kernel->run(cycles, 128u);
+                    ? iop::s_kernel_run_result{} : iop_kernel->run(cycles, 128u, phase_sample);
                 const auto kernel_end = sample_iop ? t_iop_clock::now() :
                     t_iop_clock::time_point{};
+                if (phase_sample != nullptr)
+                {
+                    const uint32_t kind = progressed.m_executed != 0u ? 1u : 0u;
+                    ++iop_phase_samples[kind];
+                    for (uint32_t i = 0u; i < iop::s_kernel_phase_sample::k_count; ++i)
+                    {
+                        iop_phase_totals[kind].m_calls[i] += phase_sample->m_calls[i];
+                        iop_phase_totals[kind].m_ns[i] += phase_sample->m_ns[i];
+                    }
+                }
                 if (pad_poll.failed())
                 {
                     pad_poll.summary(stderr);
@@ -9683,6 +9708,26 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(b.m_rpc_calls),
                 static_cast<unsigned long long>(b.m_rpc_samples),
                 static_cast<unsigned long long>(b.m_sampled_rpc_ns));
+        }
+    }
+    if (attribute_iop_kernel)
+    {
+        const char* kinds[] = {"no_guest", "guest"};
+        const char* phases[] = {"wake_irq", "ready", "idle_deadline",
+            "idle_advance", "guest_context", "guest_cpu"};
+        static_assert(sizeof(phases) / sizeof(phases[0]) ==
+            iop::s_kernel_phase_sample::k_count);
+        for (uint32_t kind = 0u; kind < 2u; ++kind)
+        {
+            for (uint32_t phase = 0u; phase < iop::s_kernel_phase_sample::k_count; ++phase)
+            {
+                std::fprintf(stderr, "IOP kernel profile: kind=%s phase=%s "
+                    "sampled_batches=%llu calls=%llu ns=%llu\n",
+                    kinds[kind], phases[phase],
+                    static_cast<unsigned long long>(iop_phase_samples[kind]),
+                    static_cast<unsigned long long>(iop_phase_totals[kind].m_calls[phase]),
+                    static_cast<unsigned long long>(iop_phase_totals[kind].m_ns[phase]));
+            }
         }
     }
     if (iop_fast_quiet)
