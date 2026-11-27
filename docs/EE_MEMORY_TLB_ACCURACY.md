@@ -622,3 +622,33 @@ It retires zero instructions: fetch validation, not firmware boot.
 Next: examine observed reset words and introduce bounded reset
 execution with verified COP0 initialization. No retail replay
 required. CI pending.
+
+## Strict memory follow-up M6E2A: authentic reset-entry retirement
+
+M6E1 CI run 46040114327, job 140645391124, observed the pinned
+OpenPS2BIOS v0.6 reset word 0x40806000 (MTC0 zero,Status) at
+0xbfc00000, and zero words at the sampled BEV1 refill/common vectors.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46040114327/job/140645391124
+
+EE Core User's Manual v6.0 section 4.2.1 (p.95) defines reset
+PC, Status.ERL/BEV, Random=47, Wired=0 and disabled Config controls.
+https://docs.alexrp.com/mips/ee.pdf
+The isolated reset-prefix state initializes these relevant fields;
+other zero-initialized values are deterministic fixture choices,
+not claims of defined hardware reset contents. No full CPU/device,
+cache, debug or timer reset is claimed.
+
+A narrowly scoped reset-entry executor fetches real ROM bytes and
+retires only the observed MTC0 zero,Status. No other ERL instruction,
+unknown reset state, missing ROM or unexpected opcode is accepted.
+It clears Status and advances PC, preserving unrelated GPRs. The
+existing general strict interpreter/native paths still refuse ERL.
+No pipeline hazards, elapsed cycles or IRQs are synthesized.
+
+The pinned ROM0 CI probe now requires this single retirement and
+records the next PC/opcode plus fifteen further decoded words
+without executing them. The one-instruction budget is an explicit
+host stop, not a guest fault or successful boot. Synthetic tests
+cover missing backing, wrong opcode, unsafe boundary, zero source
+and repeat refusal. Next: use the actual lookahead to establish
+the next bounded execution prefix. No retail replay required.

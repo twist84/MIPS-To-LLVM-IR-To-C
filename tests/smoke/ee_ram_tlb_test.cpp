@@ -7,6 +7,7 @@
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 #include "ee_strict_native_word.h"
+#include "ee_strict_reset.h"
 #include <vector>
 
 #include <cstdint>
@@ -1389,6 +1390,44 @@ bool test_strict_rom0_native_fetch()
            view.fetch_span(user) == nullptr && view.fetch_span(cached) == nullptr;
 }
 
+bool test_strict_reset_prefix()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    constexpr uint32_t reset_status = ee::STATUS_ERL | ee::STATUS_BEV;
+    if (cpu.m_cop0[ee::COP0_Status] != reset_status ||
+        cpu.m_cop0[ee::COP0_Random] != 47u ||
+        cpu.m_cop0[ee::COP0_Wired] != 0u ||
+        ee::ee_execute_strict_reset_prefix(cpu, {}).m_result != result::FETCH_UNAVAILABLE ||
+        ee::ee_execute_strict_reset_prefix(cpu, view).m_result != result::UNSUPPORTED_OPCODE ||
+        cpu.m_pc != 0xbfc00000u || cpu.m_cop0[ee::COP0_Status] != reset_status)
+    {
+        return false;
+    }
+    rom[1] = 0x60u;
+    rom[2] = 0x80u;
+    rom[3] = 0x40u;
+    cpu.m_gpr[0] = {0xdeadbeefull, 0x12345678ull};
+    cpu.m_gpr[3] = {0x76543210ull, 0x11223344ull};
+    auto bad = cpu;
+    bad.m_cop0[ee::COP0_Status] = 0u;
+    if (ee::ee_execute_strict_reset_prefix(bad, view).m_result != result::UNSAFE_BOUNDARY ||
+        bad.m_pc != 0xbfc00000u || bad.m_cop0[ee::COP0_Status] != 0u)
+    {
+        return false;
+    }
+    const auto step = ee::ee_execute_strict_reset_prefix(cpu, view);
+    return step.m_result == result::COMMITTED && step.m_opcode == 0x40806000u &&
+           cpu.m_pc == 0xbfc00004u && cpu.m_cop0[ee::COP0_Status] == 0u &&
+           cpu.m_cop0[ee::COP0_Random] == 47u &&
+           cpu.m_gpr[0].m_lo == 0xdeadbeefull &&
+           cpu.m_gpr[3].m_lo == 0x76543210ull && cpu.m_gpr[3].m_hi == 0x11223344ull &&
+           ee::ee_execute_strict_reset_prefix(cpu, view).m_result == result::UNSAFE_BOUNDARY &&
+           cpu.m_pc == 0xbfc00004u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1600,6 +1639,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_rom0_native_fetch(), "strict ROM0 native fetch regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_prefix(), "strict reset prefix regression"))
     {
         return 1;
     }
