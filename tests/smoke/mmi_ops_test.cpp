@@ -6,29 +6,23 @@
 
 namespace
 {
-int g_fail = 0;
-
-void expect_u128(const char* name, const ee::s_ee_u128& actual,
-                 const ee::s_ee_u128& expected)
+constexpr void expect_u128(const char* name, const ee::s_ee_u128& actual,
+                           const ee::s_ee_u128& expected)
 {
-    if (actual.m_lo == expected.m_lo && actual.m_hi == expected.m_hi)
-        return;
-    ++g_fail;
-    std::printf("FAIL %s got=%016llx:%016llx expected=%016llx:%016llx\n",
-                name,
-                (unsigned long long)actual.m_hi,
-                (unsigned long long)actual.m_lo,
-                (unsigned long long)expected.m_hi,
-                (unsigned long long)expected.m_lo);
+    if (actual.m_lo != expected.m_lo || actual.m_hi != expected.m_hi)
+    {
+        // A failing constant expression reports the offending call site.
+        throw name;
+    }
 }
-uint64_t get_lane(const ee::s_ee_u128& value, unsigned width, unsigned index)
+constexpr uint64_t get_lane(const ee::s_ee_u128& value, unsigned width, unsigned index)
 {
     const unsigned bit = width * index;
     const uint64_t word = bit < 64 ? value.m_lo : value.m_hi;
     const unsigned shift = bit & 63u;
     return (word >> shift) & ((1ull << width) - 1ull);
 }
-void put_lane(ee::s_ee_u128& value, unsigned width, unsigned index, uint64_t lane)
+constexpr void put_lane(ee::s_ee_u128& value, unsigned width, unsigned index, uint64_t lane)
 {
     const unsigned bit = width * index;
     uint64_t& word = bit < 64 ? value.m_lo : value.m_hi;
@@ -36,13 +30,13 @@ void put_lane(ee::s_ee_u128& value, unsigned width, unsigned index, uint64_t lan
     const uint64_t mask = ((1ull << width) - 1ull) << shift;
     word = (word & ~mask) | ((lane << shift) & mask);
 }
-int64_t signed_lane(uint64_t raw, unsigned width)
+constexpr int64_t signed_lane(uint64_t raw, unsigned width)
 {
     const uint64_t sign = 1ull << (width - 1);
     return (raw & sign) ? (int64_t)raw - (1ll << width) : (int64_t)raw;
 }
 enum class e_lane_op { abs_sat, equal, min_signed, add_unsigned_sat, sub_unsigned_sat };
-ee::s_ee_u128 expected_lanes(const ee::s_ee_u128& a,
+constexpr ee::s_ee_u128 expected_lanes(const ee::s_ee_u128& a,
                              const ee::s_ee_u128& b,
                              unsigned width,
                              e_lane_op operation)
@@ -78,7 +72,7 @@ ee::s_ee_u128 expected_lanes(const ee::s_ee_u128& a,
     }
     return result;
 }
-ee::s_ee_u128 expected_padsbh(const ee::s_ee_u128& a, const ee::s_ee_u128& b)
+constexpr ee::s_ee_u128 expected_padsbh(const ee::s_ee_u128& a, const ee::s_ee_u128& b)
 {
     ee::s_ee_u128 result{0, 0};
     for (unsigned i = 0; i < 8; ++i)
@@ -89,7 +83,7 @@ ee::s_ee_u128 expected_padsbh(const ee::s_ee_u128& a, const ee::s_ee_u128& b)
     }
     return result;
 }
-ee::s_ee_u128 expected_pext(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsigned width)
+constexpr ee::s_ee_u128 expected_pext(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsigned width)
 {
     ee::s_ee_u128 result{0, 0};
     const unsigned half = (128 / width) / 2;
@@ -100,7 +94,7 @@ ee::s_ee_u128 expected_pext(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsign
     }
     return result;
 }
-ee::s_ee_u128 expected_qfsrv(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsigned shift)
+constexpr ee::s_ee_u128 expected_qfsrv(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsigned shift)
 {
     shift &= 0x7fu;
     if (shift == 0) return b;
@@ -117,9 +111,8 @@ ee::s_ee_u128 expected_qfsrv(const ee::s_ee_u128& a,const ee::s_ee_u128& b,unsig
     result.m_hi = (a.m_lo >> upper_shift) | (a.m_hi << (64 - upper_shift));
     return result;
 }
-}
 
-int main()
+consteval bool test_mmi_ops()
 {
     const ee::s_ee_u128 a{0x800000007fffffffull, 0x12345678ffffffffull};
     const ee::s_ee_u128 b{0x800000007fffffffull, 0x8765432100000002ull};
@@ -171,6 +164,40 @@ int main()
     );
     expect_u128("SLL shift 0", ee::mmi_apply(ee::LOP_MMI_SLL,a,b,0), b);
     expect_u128("SRL shift 0", ee::mmi_apply(ee::LOP_MMI_SRL,a,b,0), b);
-    std::printf("mmi_ops_test: %s (%d failures)\n", g_fail == 0 ? "PASS" : "FAIL", g_fail);
-    return g_fail == 0 ? 0 : 1;
+    return true;
+}
+
+static_assert(test_mmi_ops(), "packed MMI semantic regression");
+
+// Cross-check every legal QFSRV shift, including the 64-bit boundary,
+// against a per-bit reference rather than duplicating the implementation.
+consteval bool test_qfsrv_all_shifts()
+{
+    constexpr ee::s_ee_u128 a{0x1122334455667788ull, 0x99aabbccddeeff01ull};
+    constexpr ee::s_ee_u128 b{0xfedcba9876543210ull, 0x0123456789abcdefull};
+    constexpr uint64_t words[] = {b.m_lo, b.m_hi, a.m_lo, a.m_hi};
+    for (unsigned shift = 0u; shift < 128u; ++shift)
+    {
+        ee::s_ee_u128 expected{};
+        for (unsigned bit = 0u; bit < 128u; ++bit)
+        {
+            const unsigned source = bit + shift;
+            const uint64_t value = (words[source / 64u] >> (source % 64u)) & 1u;
+            uint64_t& half = bit < 64u ? expected.m_lo : expected.m_hi;
+            half |= value << (bit % 64u);
+        }
+        expect_u128("QFSRV bit reference",
+            ee::mmi_apply(ee::LOP_MMI_QFSRV, a, b, static_cast<uint8_t>(shift)),
+            expected);
+    }
+    return true;
+}
+
+static_assert(test_qfsrv_all_shifts(), "QFSRV full shift range regression");
+}
+
+int main()
+{
+    std::puts("mmi_ops_test: compile-time fixtures passed");
+    return 0;
 }
