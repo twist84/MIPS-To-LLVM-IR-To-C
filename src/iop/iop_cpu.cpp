@@ -858,7 +858,7 @@ s_run_result c_cpu::run(uint32_t instruction_budget)
                 t_iop_aot_entry entry = module->m_entry;
                 if (chain_enabled && chain_safe && !verify && context.m_budget > 1u)
                 {
-                    const auto chain = m_aot->chain_entry(module);
+                    const auto chain = m_aot->chain_entry(module, m_state.m_pc);
                     if (chain != nullptr)
                     {
                         entry = chain;
