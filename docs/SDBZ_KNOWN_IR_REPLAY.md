@@ -214,6 +214,23 @@ removed. If partitioning fails, the full displaced tree is retained
 uncompressed. Legacy full backups remain readable by the existing
 object-seeding path.
 
+To compare compression without changing the active cache or triggering
+recovery, run:
+
+    python tools\cache_backup.py --benchmark-compression build\ps2-game-hle --output ee-backup-benchmark.json
+
+The isolated benchmark creates and tests temporary archives for the full
+current payload at level 9 and the IR-only payload at levels 9, 3 and 1.
+Historical backups and retained data are excluded. The benchmark holds
+the shared cache lock and reports the payload sizes and elapsed times;
+it does not measure promotion or inventory SHA-256 generation. Temporary
+archives are discarded; the JSON report is retained outside the cache.
+
+After extracting a new IR-only archive into an isolated directory,
+verify its complete SHA-256 inventory before using its contents:
+
+    python tools\cache_backup.py --verify-ir-backup PATH_TO_EXTRACTED_DIRECTORY
+
 Both the normal launcher's strict fallback and explicit recovery path reuse
 the same batched emitter/linker in `run_known_replays.reconstruct` but **do
 not execute the neutral/Cross replay pair**. Once a recovered cache is

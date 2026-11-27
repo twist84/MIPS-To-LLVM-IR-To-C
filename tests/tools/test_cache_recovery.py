@@ -472,6 +472,51 @@ def test_ir_only_backup_partition_preserves_native_and_authenticates():
             raise AssertionError("modified backup accepted")
 
 
+def test_backup_benchmark_payload_selection_and_timings():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        cache = root / "cache"
+        ir = cache / "ir"
+        ir.mkdir(parents=True)
+        (ir / "test.ll").write_bytes(b"IR")
+        (ir / "ee_functions.json").write_bytes(b"metadata")
+        (cache / "game-translated.dll").write_bytes(b"native")
+        prior = cache / "backup-prior"
+        prior.mkdir()
+        (prior / "test").write_bytes(b"not a benchmark input")
+        retained = cache / "retained-old"
+        retained.mkdir()
+        (retained / "test").write_bytes(b"not a benchmark input")
+        full, subset = cache_backup.benchmark_payloads(cache)
+        assert len(full) == 3 and len(subset) == 2
+        assert (cache / "game-translated.dll") in full
+        assert (cache / "game-translated.dll") not in subset
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "a":
+                listing = Path(command[-1][1:])
+                names = listing.read_text(encoding="utf-8").splitlines()
+                assert "backup-prior/test" not in names
+                assert "retained-old/test" not in names
+                Path(command[-2]).write_bytes(b"archive")
+
+        report = root / "benchmark.json"
+        with patch.object(cache_backup, "seven_zip", return_value="7z"), \
+             patch.object(cache_backup.subprocess, "run", side_effect=fake_run):
+            cache_backup.benchmark_compression(cache, report)
+        results = json.loads(report.read_text(encoding="utf-8"))["results"]
+        assert [(row["scope"], row["level"]) for row in results] == [
+            ("full", 9), ("ir", 9), ("ir", 3), ("ir", 1)]
+        assert [row["files"] for row in results] == [3, 2, 2, 2]
+        assert all(row["archive_bytes"] == 7 for row in results)
+        assert [call[1] for call in calls] == ["a", "t"] * 4
+        assert (ir / "test.ll").read_bytes() == b"IR"
+        assert (cache / "game-translated.dll").read_bytes() == b"native"
+        assert not list(root.glob(".ee-backup-benchmark-*"))
+
+
 def test_verified_maximum_compression_backup():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -653,6 +698,7 @@ def main():
     test_overwrite_ir_uses_active_inventory_and_selected_profile()
     test_overwrite_launcher_routes_before_preflight()
     test_ir_only_backup_partition_preserves_native_and_authenticates()
+    test_backup_benchmark_payload_selection_and_timings()
     test_verified_maximum_compression_backup()
     test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()

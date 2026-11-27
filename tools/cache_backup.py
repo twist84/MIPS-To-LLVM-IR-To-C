@@ -241,3 +241,107 @@ def backup_object_candidates(source_work, profile):
             candidates.extend((backup / profile, backup / ("legacy-" + profile)))
             candidates.extend(backup.glob("legacy-recovery-*-" + profile))
         yield candidates
+
+
+
+def benchmark_payloads(root):
+    """Select current canonical payloads; never include historical backups."""
+    full = []
+    for child in sorted(root.iterdir()):
+        if (child.name.startswith(("backup-", "retained-", "recovery-", ".overwrite-ir-"))
+                or child.name.endswith(".ee-ir.lock")):
+            continue
+        stat = child.lstat()
+        if child.is_symlink() or getattr(stat, "st_file_attributes", 0) & 0x400:
+            raise ValueError(f"linked benchmark input: {child}")
+        if child.is_dir():
+            full.extend(backup_files(child))
+        elif child.is_file():
+            full.append(child)
+        else:
+            raise ValueError(f"unsupported benchmark input: {child}")
+    full = sorted(full)
+    ir = [path for path in full if recovery_file(path.relative_to(root))]
+    if not any(path.suffix == ".ll" for path in ir):
+        raise ValueError("no canonical IR modules to benchmark")
+    return full, ir
+
+
+def benchmark_compression(root, output):
+    """Read-only comparison of the old and new payloads and compression levels."""
+    from shared_ee_ir import ir_lock
+
+    root = root.resolve(strict=True)
+    output = output.resolve()
+    if output.exists() or output.is_relative_to(root):
+        raise ValueError("benchmark report must be a new file outside the cache")
+    executable = seven_zip()
+    if not executable:
+        raise ValueError("7-Zip is required for a compression benchmark")
+    results = []
+    with ir_lock(root), tempfile.TemporaryDirectory(
+            prefix=".ee-backup-benchmark-", dir=root.parent) as temporary:
+        temp = Path(temporary)
+        full, ir = benchmark_payloads(root)
+        for scope, level, paths in (("full", 9, full), ("ir", 9, ir),
+                                    ("ir", 3, ir), ("ir", 1, ir)):
+            archive = temp / f"{scope}-{level}.7z"
+            listing = temp / f"{scope}-{level}.txt"
+            relative = [path.relative_to(root).as_posix() for path in paths]
+            if any("\n" in name or "\r" in name for name in relative):
+                raise ValueError("unsupported newline in benchmark input filename")
+            listing.write_bytes(("\n".join(relative) + "\n").encode("utf-8"))
+            input_bytes = sum(path.stat().st_size for path in paths)
+            print(f"Benchmarking {scope} level {level}: {len(paths)} files, "
+                  f"{input_bytes} bytes", flush=True)
+            started = time.monotonic()
+            subprocess.run([executable, "a", "-t7z", f"-mx={level}",
+                            "-m0=LZMA2", "-ms=on", "-scsUTF-8", "-spd",
+                            "-y", str(archive), "@" + str(listing)],
+                           cwd=root, check=True)
+            compression = time.monotonic() - started
+            started = time.monotonic()
+            subprocess.run([executable, "t", str(archive)], check=True)
+            verification = time.monotonic() - started
+            result = {"scope": scope, "level": level, "files": len(paths),
+                      "input_bytes": input_bytes, "archive_bytes": archive.stat().st_size,
+                      "compression_seconds": compression,
+                      "verification_seconds": verification}
+            results.append(result)
+            print(json.dumps(result), flush=True)
+            archive.unlink()
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump({"schema": "ee-backup-compression-benchmark-v1",
+                   "root": str(root), "seven_zip": executable,
+                   "results": results}, stream, indent=2)
+        stream.write("\n")
+    print(f"Backup benchmark report: {output}", flush=True)
+
+
+def main(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(description=__doc__)
+    modes = parser.add_mutually_exclusive_group(required=True)
+    modes.add_argument("--benchmark-compression", type=Path, metavar="CACHE")
+    modes.add_argument("--verify-ir-backup", type=Path, metavar="DIRECTORY")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        if args.benchmark_compression:
+            if args.output is None:
+                parser.error("--benchmark-compression requires --output")
+            benchmark_compression(args.benchmark_compression, args.output)
+        else:
+            if args.output is not None:
+                parser.error("--output is only for the benchmark")
+            inventory = verify_ir_backup(args.verify_ir_backup)
+            print(f"Verified {len(inventory['files'])} backup files", flush=True)
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(f"Backup operation refused: {error}", flush=True)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
