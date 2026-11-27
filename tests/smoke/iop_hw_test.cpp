@@ -2286,7 +2286,20 @@ bool test_spu2_playback_irq()
                     }
                 }
             }
-            if (reference.voice_irq_cycles_remaining() != cached.voice_irq_cycles_remaining() ||
+            // Repeated queries must preserve both zero and positive cache
+            // hits; toggling the cache must not alter the underlying horizon.
+            const uint32_t expected = reference.voice_irq_cycles_remaining();
+            if (i % 97u == 0u)
+            {
+                cached.enable_irq_deadline_cache(false);
+                if (cached.voice_irq_cycles_remaining() != expected)
+                {
+                    return false;
+                }
+                cached.enable_irq_deadline_cache(true);
+            }
+            if (cached.voice_irq_cycles_remaining() != expected ||
+                cached.voice_irq_cycles_remaining() != expected ||
                 reference.advance_cycles(1u) != cached.advance_cycles(1u) ||
                 reference.irq_latches() != cached.irq_latches())
             {
