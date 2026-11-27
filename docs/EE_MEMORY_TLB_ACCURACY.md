@@ -459,3 +459,30 @@ Still a bounded isolated RAM pilot, not a general BIOS interpreter.
 ROM/BEV1 execution, branch/delay slots, TLB hazards, clocks/interrupts,
 cache and device state, production caller integration and native
 LLVM lowering remain open. CI pending; no retail replay required.
+
+## Strict memory follow-up M6D1: opt-in native LW/SW pilot
+
+Add a separate single-instruction LLVM emitter for decoded LW/SW, not
+a mode of the production module builder. Its distinct context ABI
+requires isolated RAM and an ordinary dispatch boundary. The checked
+preparation helper translates live instruction fetch, checks the
+compiled PC/opcode against current memory, translates the data access
+and validates the actual physical backing. M5 delivers faults before
+any guest transfer. Stale instructions and unresolved backing reject
+without changing CPU/RAM. The helper returns a short-lived validated
+span only on success. No interpreter call performs the native transfer:
+LLVM emits explicit little-endian byte loads/stores, signed LW result
+and PC advance on the success edge. GPR zero still translates and
+faults; a successful isolated RAM read to zero can be optimized away.
+
+The MCJIT fixture executes real LLVM at O0 and the normal O2 pipeline,
+with actual C++ memory/fault helpers, comparing CPU/COP0/RAM against
+the independent strict interpreter. Four opcodes (LW/SW to/from r2 or
+zero), twelve scenarios each, two optimization paths: 96 executions.
+Cases include clean/invalid/missing mappings, misalignment, modified
+stores, cached and missing backing, fetch ASID miss, evidence refusal,
+stale opcode and mismatched PC. Unsupported instructions reject at
+emission. This is a pilot: native multi-instruction CFG, delay-slot
+precision, native handler dispatch, cache/device ordering, invalidation
+and integration with the actual BIOS/retail runner are still open.
+No production lowering selection or runtime ABI change. CI pending.

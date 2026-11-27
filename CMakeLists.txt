@@ -44,6 +44,7 @@ add_library(ee_core STATIC
     src/lift/native_codegen.cpp
     src/runtime/ee_memory.cpp
     src/runtime/ee_ram_interpreter.cpp
+    src/runtime/ee_strict_native_word.cpp
     src/runtime/ee_unaligned.cpp
     src/runtime/ee_intc.cpp
     src/runtime/ee_dmac.cpp
@@ -276,6 +277,19 @@ target_link_libraries(ee_vu0_transfer_ir_fixture PRIVATE ee_core)
 add_executable(ee_checked_ir_fixture
     tests/smoke/ee_checked_ir_fixture.cpp)
 target_link_libraries(ee_checked_ir_fixture PRIVATE ee_core)
+
+# Separate experimental strict native word ABI. Build a real helper
+# library for MCJIT, without changing ee_core PIC or retail native ABI.
+add_library(ee_strict_word_jit_helpers SHARED
+    src/runtime/ee_strict_native_word.cpp
+    src/runtime/ee_memory.cpp
+    src/runtime/ee_ram_interpreter.cpp
+    src/runtime/ee_exceptions.cpp
+    tests/smoke/ee_strict_word_jit_helpers.cpp)
+set_target_properties(ee_strict_word_jit_helpers PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_link_libraries(ee_strict_word_jit_helpers PRIVATE Threads::Threads)
+add_executable(ee_strict_word_ir_fixture tests/smoke/ee_strict_word_ir_fixture.cpp)
+target_link_libraries(ee_strict_word_ir_fixture PRIVATE ee_core)
 
 add_executable(ee_min_test
     tests/smoke/min_test.cpp
@@ -1055,6 +1069,11 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_alignment_ir_runtime.py
                 $<TARGET_FILE:ee_vu0_transfer_ir_fixture>
                 $<TARGET_FILE:ee_cop0_jit_helpers>)
+    add_test(NAME ee_strict_word_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_strict_word_ir_runtime.py
+                $<TARGET_FILE:ee_strict_word_ir_fixture>
+                $<TARGET_FILE:ee_strict_word_jit_helpers>)
     add_test(NAME ee_checked_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_checked_ir_runtime.py
