@@ -5,6 +5,8 @@
 #include "iop_aot_abi.h"
 
 #include <cstdint>
+#include <map>
+#include <tuple>
 #include <string>
 #include <vector>
 
@@ -61,6 +63,10 @@ public:
     void add_time(double milliseconds) { m_milliseconds += milliseconds; }
     double milliseconds() const { return m_milliseconds; }
     double refresh_milliseconds() const { return m_refresh_milliseconds; }
+    // Diagnostic-only exit observations, recorded outside translated timing.
+    void record_exit(const s_iop_aot_module& module, uint32_t entry,
+                     const s_iop_aot_context& context, uint32_t reason,
+                     uint32_t requested_budget);
     void record(uint32_t executed)
     {
         ++m_entries;
@@ -68,6 +74,18 @@ public:
     }
 
 private:
+    struct s_exit_counts
+    {
+        uint64_t m_entries = 0u;
+        uint64_t m_retired = 0u;
+        uint64_t m_budget_exhausted = 0u;
+        uint64_t m_horizon_limited = 0u;
+        uint64_t m_zero_progress = 0u;
+    };
+    // Module identity, raw entry/resume PC, reason, delay state.
+    using t_exit_key = std::tuple<uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t>;
+    std::map<t_exit_key, s_exit_counts> m_exit_counts;
+    uint64_t m_exit_dropped = 0u;
     std::vector<void*> m_libraries;
     std::vector<const s_iop_aot_module*> m_modules;
     std::vector<const s_iop_aot_module*> m_active;
