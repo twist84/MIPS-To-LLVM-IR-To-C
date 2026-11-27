@@ -580,7 +580,7 @@ class DiscoveryTest(unittest.TestCase):
                 self.assertNotIn(BASE + 36, cross_rows[-1])
                 self.assertEqual(sorted(pc for row in cross_rows for pc in row),
                                  list(range(BASE, BASE + len(linked), 4)))
-            with self.assertRaisesRegex(ValueError, "requires original ELF table discovery"):
+            with self.assertRaisesRegex(ValueError, "require original ELF table discovery"):
                 prepare_split_pilot(root, "CANONICAL", root / "missing",
                                     residual=True, extended=True, cross_block_tables=True)
 
