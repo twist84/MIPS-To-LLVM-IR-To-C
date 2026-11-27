@@ -750,3 +750,39 @@ implement speculative lazy residency solely because emitted IR
 is smaller. If no substantive residual cost is established,
 prioritize G8 IOP attribution (15.90% of profiled runner wall).
 G7 remains lower priority absent new VIF1 evidence.
+
+### G6B.0 — paired native object audit (read-only)
+
+tools/audit_ee_packed_native.py compares existing G5A/G6A linked
+O5 receipts and verifies both actual IR inventories, object hashes,
+manifests, metadata and linked image hashes. Count changed IR,
+changed objects, byte-identical objects after IR changes, and
+canonical 2xi64 insert/extract operations in changed modules.
+Report executable bytes independently of total object bytes.
+Select representative modules with packing reduction in both
+native-object identity classes, preferring small functions; optional
+MSVC dumpbin output supplies actual static assembly for review.
+No claims about executed instruction counts from lexical counts.
+No compilation, cache mutation, runner execution or promotion.
+
+From a Visual Studio developer command prompt:
+
+```bat
+git pull --ff-only
+python tests\tools\test_audit_ee_packed_native.py
+python tools\audit_ee_packed_native.py ^
+    --control-receipt ee-graphics-g5a-comparison.json ^
+    --candidate-receipt ee-graphics-g6a-comparison.json ^
+    --control-dir build\ee-graphics-g5a ^
+    --candidate-dir build\ee-graphics-g6a ^
+    --output ee-packed-native-g6b-audit.json ^
+    --samples 2 ^
+    --dumpbin dumpbin.exe
+```
+
+The optional --dumpbin argument may be omitted if unavailable; retain
+the digest and executable-size audit. The output must be new and
+outside either experiment directory. The new CTest checks paired
+receipt rejection and lexical counts, not an end-to-end retail object
+audit. Final CI and local audit pending. Use the output to decide
+whether lazy packed publication has a credible residual cost target.
