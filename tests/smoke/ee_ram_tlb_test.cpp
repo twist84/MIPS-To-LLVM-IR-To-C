@@ -1658,7 +1658,36 @@ bool test_strict_reset_rom_data()
     {
         return false;
     }
+    rom[0x1001u] = 0x80u;
+    cpu.m_pc = pc + 4u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfc01000ull;
+    put(4u, 0x84820000u); // lh r2,0(r4)
+    const auto lh_step = ee::ee_execute_strict_rom_register_step(cpu, view, 1u);
+    if (lh_step.m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xffffffffffff80e5ull ||
+        cpu.m_gpr[2].m_hi != 0x55667788u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc + 4u;
+    put(4u, 0x94820000u); // lhu r2,0(r4)
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0x80e5u || cpu.m_gpr[2].m_hi != 0x55667788u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc + 4u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfc01001ull;
+    put(4u, 0x84820000u); // misaligned LH must refuse without changing GPRs
+    const auto misaligned = ee::ee_execute_strict_rom_register_step(cpu, view, 1u);
+    if (misaligned.m_result != result::DATA_UNAVAILABLE ||
+        misaligned.m_data_address != 0xbfc01001u || cpu.m_pc != pc + 4u ||
+        cpu.m_gpr[2].m_lo != 0x80e5u)
+    {
+        return false;
+    }
     // ADDU wraps a low 32-bit sum, sign-extends and preserves upper half.
+    cpu.m_pc = pc + 4u;
     cpu.m_gpr[3].m_lo = 0x123456787fffffffull;
     cpu.m_gpr[5].m_lo = 0xabcdef0000000001ull;
     put(4u, 0x00651021u); // addu r2,r3,r5
@@ -2554,6 +2583,8 @@ bool test_strict_reset_instruction_cache()
     uint8_t bytes[0x4080u]{};
     bytes[0] = 0x11u;
     bytes[64] = 0x22u;
+    bytes[0x2000u] = 0x33u;
+    bytes[0x4000u] = 0x44u;
     cache lines;
     {
         cache::c_transaction refused(&lines);
@@ -2590,14 +2621,43 @@ bool test_strict_reset_instruction_cache()
     }
     {
         cache::c_transaction conflict(&lines);
-        if (conflict.fetch(pc + 0x4000u, 0x4000u, bytes, sizeof(bytes)) != nullptr ||
+        const auto* replacement = conflict.fetch(pc + 0x4000u, 0x4000u,
+            bytes, sizeof(bytes));
+        if (replacement == nullptr || *replacement != 0x44u ||
             conflict.fetch(pc + 64u, 0u, bytes, sizeof(bytes)) != nullptr ||
             conflict.fetch(pc + 0x4040u, 0x4040u, bytes, 0x4060u) != nullptr)
         {
             return false;
         }
+        conflict.commit();
     }
-    return lines.resident_count() == 3u;
+    if (lines.resident_count() != 3u)
+    {
+        return false;
+    }
+    {
+        cache::c_transaction lrf(&lines);
+        const auto* refilled = lrf.fetch(pc, 0u, bytes, sizeof(bytes));
+        if (refilled == nullptr || *refilled != 0x33u ||
+            lrf.fetch(pc + 0x4000u, 0x4000u, bytes, sizeof(bytes)) == nullptr)
+        {
+            return false;
+        }
+        lrf.commit();
+    }
+    if (lines.resident_count() != 3u)
+    {
+        return false;
+    }
+    {
+        cache::c_transaction invalidate(&lines);
+        if (!invalidate.index_invalidate(pc + 0x4000u))
+        {
+            return false;
+        }
+        invalidate.commit();
+    }
+    return lines.resident_count() == 2u;
 }
 
 bool test_strict_reset_cached_kernel_fetch()

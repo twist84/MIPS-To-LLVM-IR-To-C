@@ -6,6 +6,7 @@
 #include "../tools/ee_host_timers.h"
 #include "../tools/ee_iop_clock.h"
 #include "../iop/iop_kernel.h"
+#include "../iop/iop_cdvd.h"
 #include "../iop/iop_sif_mmio_link.h"
 #include "../iop/iop_sif0_dma_transport.h"
 #include "../iop/iop_sif1_dma_transport.h"
@@ -182,6 +183,21 @@ public:
         return true;
     }
 
+    // Attach real sector-backed media before guest execution. The IOP CDVD
+    // transport owns the N-command/DMA3 handshake; the source owns sectors.
+    bool attach_disc(iop::c_sector_source& source, uint8_t disc_type = 0x13u)
+    {
+        if (m_retired != 0u || m_iop == nullptr || m_cdvd_transport != nullptr ||
+            source.sector_count() == 0u || source.sector_count() > 0xffffffffull ||
+            !m_iop->hardware().set_cdvd_disc_type(disc_type))
+        {
+            return false;
+        }
+        m_cdvd_transport = std::make_unique<iop::c_cdvd_dma_transport>(
+            m_iop->cpu(), m_iop->hardware(), source);
+        return true;
+    }
+
     // Explicit independent IOP slice, not an EE-to-IOP clock mapping.
     // Calls are serialized between EE transactions. The next EE step
     // samples resulting interrupt levels before fetching any opcode.
@@ -225,6 +241,18 @@ public:
     uint32_t iop_irq_status() const
     {
         return m_iop != nullptr ? m_iop->hardware().scheduler_checkpoint().m_irq_stat : 0u;
+    }
+    uint8_t cdvd_disc_type() const
+    {
+        return m_iop != nullptr ? m_iop->hardware().cdvd_disc_type() : iop::c_hw::k_cdvd_no_disc;
+    }
+    uint32_t cdvd_bytes_transferred() const
+    {
+        return m_cdvd_transport != nullptr ? m_cdvd_transport->bytes_transferred() : 0u;
+    }
+    iop::s_cdvd_read_request cdvd_last_request() const
+    {
+        return m_cdvd_transport != nullptr ? m_cdvd_transport->last_request() : iop::s_cdvd_read_request{};
     }
 
     bool sif_faulted() const
@@ -977,8 +1005,7 @@ private:
         {
             // Stage the physical values, validating the entire mode tuple.
             // Only the actual release-SINT write commits the clock change.
-            if (self.m_hardware.scanout().fields_started() != 0u ||
-                self.next_scanout_event() <= self.cycle() + 1u)
+            if (self.next_scanout_event() <= self.cycle() + 1u)
             {
                 return false;
             }
@@ -987,7 +1014,7 @@ private:
             {
                 return false;
             }
-            if (next.m_stage == 6u && !self.m_timers.reconfigure_cold_scanout(
+            if (next.m_stage == 6u && !self.m_timers.reconfigure_scanout(
                 next.m_smode2 & 1u, next.m_mode, (next.m_smode2 >> 1u) & 1u))
             {
                 return false;
@@ -1066,20 +1093,31 @@ private:
         const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
         if (address == 0x10003000u)
         {
-            // Cold GIF reset only. Reset the actual parser, not GS
-            // VRAM, scanout, or DMA. No queued or live path is admitted.
-            if (!self.m_hardware.scanout().enabled() || dmac_word != 1u ||
-                self.m_gif_reset_count != 0u ||
+            // Reset the actual GIF parser, not GS VRAM, scanout, or DMA.
+            // Accept reset assertion/release only while PATH3 and DMA idle.
+            if (!self.m_hardware.scanout().enabled() ||
                 self.m_hardware.dmac().started_channels() != 0u ||
                 self.m_hardware.dmac().gif_path3_masked() ||
-                self.m_gif_path3.state().m_active ||
-                self.m_gif_path3.counters().m_accepted_batches != 0u)
+                self.m_gif_path3.state().m_active)
             {
                 return false;
             }
-            self.m_gif_path3.reset();
-            ++self.m_gif_reset_count;
-            return true;
+            if (dmac_word == 1u)
+            {
+                if (!self.m_gif_reset_asserted)
+                {
+                    self.m_gif_path3.reset();
+                    ++self.m_gif_reset_count;
+                    self.m_gif_reset_asserted = true;
+                }
+                return true;
+            }
+            if (dmac_word == 0u)
+            {
+                self.m_gif_reset_asserted = false;
+                return true;
+            }
+            return false;
         }
         if (address == k_d_ctrl)
         {
@@ -1185,6 +1223,7 @@ private:
     uint64_t m_vsint_csr_reads = 0u;
     uint64_t m_vsint_csr_set_reads = 0u;
     uint32_t m_gif_reset_count = 0u;
+    bool m_gif_reset_asserted = false;
     s_ee_strict_gs_timing m_gs_timing{};
     uint32_t m_gs_reset_count = 0u;
     uint32_t m_gs_upper_count = 0u;
@@ -1206,5 +1245,6 @@ private:
     std::unique_ptr<iop::c_kernel> m_iop;
     std::unique_ptr<iop::c_sif0_dma_transport> m_sif0;
     std::unique_ptr<iop::c_sif1_dma_transport> m_sif1;
+    std::unique_ptr<iop::c_cdvd_dma_transport> m_cdvd_transport;
 };
 } // namespace ee

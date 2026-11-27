@@ -114,8 +114,8 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
 }
 
 // Bounded cold I-cache subset. The owner supplies an explicit completed
-// IXIN sweep before admitting fills. No replacement, speculative fetch,
-// timing penalties or live CACHE maintenance are modeled here.
+// IXIN sweep before admitting fills. Replacement follows the EE LRF bit;
+// speculative fetch, timing penalties and live CACHE maintenance remain out.
 class c_ee_reset_instruction_cache
 {
 public:
@@ -128,6 +128,7 @@ public:
     {
         uint32_t m_tag = 0u;
         bool m_valid = false;
+        bool m_lrf = false;
         uint8_t m_bytes[k_line_size]{};
     };
 
@@ -142,6 +143,11 @@ public:
         constexpr bool has_resident() const
         {
             return m_cache != nullptr && (m_cache->m_count != 0u || m_pending_count != 0u);
+        }
+
+        constexpr bool active() const
+        {
+            return m_cache != nullptr;
         }
 
         constexpr const uint8_t* fetch(uint32_t pc, uint32_t physical,
@@ -178,34 +184,80 @@ public:
                     return m_pending[i].m_line.m_bytes + offset;
                 }
             }
-            // At most two requested instructions per transaction. Never
-            // evict a resident line using an unvalidated replacement rule.
+            // A transaction may stage the branch and its delay-slot line.
             if (m_pending_count == 2u)
             {
                 return nullptr;
             }
+            s_line ways[k_ways]{};
             for (uint32_t way = 0u; way < k_ways; ++way)
             {
-                bool occupied = m_cache->m_lines[set][way].m_valid;
-                for (uint32_t i = 0u; i < m_pending_count; ++i)
+                ways[way] = m_cache->m_lines[set][way];
+            }
+            for (uint32_t i = 0u; i < m_pending_count; ++i)
+            {
+                if (m_pending[i].m_set == set)
                 {
-                    occupied = occupied || (m_pending[i].m_set == set && m_pending[i].m_way == way);
-                }
-                if (!occupied)
-                {
-                    auto& entry = m_pending[m_pending_count++];
-                    entry.m_set = set;
-                    entry.m_way = way;
-                    entry.m_line.m_tag = base;
-                    entry.m_line.m_valid = true;
-                    for (uint32_t i = 0u; i < k_line_size; ++i)
-                    {
-                        entry.m_line.m_bytes[i] = ram[base + i];
-                    }
-                    return entry.m_line.m_bytes + offset;
+                    ways[m_pending[i].m_way] = m_pending[i].m_line;
                 }
             }
-            return nullptr;
+            uint32_t fill_way = k_ways;
+            for (uint32_t way = 0u; way < k_ways; ++way)
+            {
+                if (!ways[way].m_valid)
+                {
+                    fill_way = way;
+                    break;
+                }
+            }
+            if (fill_way == k_ways)
+            {
+                // EE Core User's Manual 6.0, 6.3.1: XOR of the two
+                // least-recently-filled bits selects the refill way.
+                fill_way = static_cast<uint32_t>(ways[0u].m_lrf ^ ways[1u].m_lrf);
+            }
+            auto& entry = m_pending[m_pending_count++];
+            entry.m_set = set;
+            entry.m_way = fill_way;
+            entry.m_line.m_tag = base;
+            entry.m_line.m_valid = true;
+            entry.m_line.m_lrf = !ways[fill_way].m_lrf;
+            for (uint32_t i = 0u; i < k_line_size; ++i)
+            {
+                entry.m_line.m_bytes[i] = ram[base + i];
+            }
+            return entry.m_line.m_bytes + offset;
+        }
+
+        constexpr bool index_invalidate(uint32_t address)
+        {
+            if (m_cache == nullptr || m_pending_count == 2u)
+            {
+                return false;
+            }
+            const uint32_t set = (address >> 6u) & (k_sets - 1u);
+            const uint32_t way = address & 1u;
+            s_line line = m_cache->m_lines[set][way];
+            for (uint32_t i = 0u; i < m_pending_count; ++i)
+            {
+                if (m_pending[i].m_set == set && m_pending[i].m_way == way)
+                {
+                    line = m_pending[i].m_line;
+                    line.m_valid = false;
+                    m_pending[i].m_line = line;
+                    return true;
+                }
+            }
+            if (!line.m_valid)
+            {
+                return true;
+            }
+            line.m_valid = false;
+            auto& entry = m_pending[m_pending_count++];
+            entry.m_set = set;
+            entry.m_way = way;
+            entry.m_line = line;
+            return true;
         }
 
         constexpr void commit()
@@ -213,8 +265,16 @@ public:
             for (uint32_t i = 0u; i < m_pending_count; ++i)
             {
                 const auto& entry = m_pending[i];
-                m_cache->m_lines[entry.m_set][entry.m_way] = entry.m_line;
-                ++m_cache->m_count;
+                auto& resident = m_cache->m_lines[entry.m_set][entry.m_way];
+                if (!resident.m_valid && entry.m_line.m_valid)
+                {
+                    ++m_cache->m_count;
+                }
+                else if (resident.m_valid && !entry.m_line.m_valid)
+                {
+                    --m_cache->m_count;
+                }
+                resident = entry.m_line;
             }
             m_pending_count = 0u;
         }
@@ -675,7 +735,7 @@ struct s_ee_reset_mmio
         const s_ee_u128& value) const
     {
         const bool gif_reset = m_scheduled_scanout && bus.m_width == 4u &&
-            address == 0xb0003000u && static_cast<uint32_t>(value.m_lo) == 1u;
+            address == 0xb0003000u;
         const bool timing = m_scheduled_scanout && gs_timing_write_address(address, bus.m_width);
         const bool display = m_scheduled_scanout && gs_display_write_address(address, bus.m_width);
         const bool reset = bus.m_width == 4u && static_cast<uint32_t>(value.m_lo) == 1u &&
@@ -1329,6 +1389,15 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
             }
             return {result::COMMITTED, opcode, 0u, pc};
         }
+        if (op == 0x07u && ram.m_instruction_cache != nullptr &&
+            ram.m_instruction_cache->active())
+        {
+            if (!ram.m_instruction_cache->index_invalidate(address))
+            {
+                return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc, address};
+            }
+            return {result::COMMITTED, opcode, 0u, pc};
+        }
         if ((ram.m_instruction_cache != nullptr && ram.m_instruction_cache->has_resident()) ||
             (ram.m_data_cache != nullptr && ram.m_data_cache->has_resident()) ||
             cold_cache == nullptr || !cold_cache->invalidate(op, address))
@@ -1346,12 +1415,13 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     }
     const bool quad = primary == 0x1eu || primary == 0x1fu;
     const bool doubleword = primary == 0x37u || primary == 0x3fu;
-    const bool half = primary == 0x29u; // SH
+    const bool half = primary == 0x21u || primary == 0x25u || primary == 0x29u;
     const bool partial = primary == 0x22u || primary == 0x26u ||
         primary == 0x2au || primary == 0x2eu;
-    const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu ||
+    const bool store = primary == 0x28u || primary == 0x29u || primary == 0x2bu || primary == 0x1fu ||
         primary == 0x2au || primary == 0x2eu || primary == 0x3fu || primary == 0x39u;
-    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu &&
+    if (primary != 0x20u && primary != 0x21u && primary != 0x24u && primary != 0x25u &&
+        primary != 0x23u && primary != 0x1eu &&
         !doubleword && !partial && !store && !fp)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
@@ -1524,9 +1594,28 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         }
         else
         {
-            cpu.m_gpr[rt].m_lo = primary == 0x23u
-                ? sign_extend_word(ee_read_instruction_word(bytes))
-                : static_cast<uint64_t>(*bytes);
+            if (primary == 0x23u)
+            {
+                cpu.m_gpr[rt].m_lo = sign_extend_word(ee_read_instruction_word(bytes));
+            }
+            else if (primary == 0x21u || primary == 0x25u)
+            {
+                const uint32_t halfword = static_cast<uint32_t>(bytes[0u]) |
+                    (static_cast<uint32_t>(bytes[1u]) << 8u);
+                cpu.m_gpr[rt].m_lo = primary == 0x21u
+                    ? sign_extend_word(halfword | ((halfword & 0x8000u) != 0u ? 0xffff0000u : 0u))
+                    : halfword;
+            }
+            else if (primary == 0x20u)
+            {
+                const uint32_t byte = *bytes;
+                cpu.m_gpr[rt].m_lo = sign_extend_word(byte |
+                    ((byte & 0x80u) != 0u ? 0xffffff00u : 0u));
+            }
+            else
+            {
+                cpu.m_gpr[rt].m_lo = static_cast<uint64_t>(*bytes);
+            }
         }
     }
     return {result::COMMITTED, opcode, 0u, pc};

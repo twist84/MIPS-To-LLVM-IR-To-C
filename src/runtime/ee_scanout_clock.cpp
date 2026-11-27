@@ -116,6 +116,38 @@ bool c_ee_scanout_clock::configure(
     return true;
 }
 
+bool c_ee_scanout_clock::reconfigure(
+    uint32_t interlace, uint32_t mode, uint32_t ffmd,
+    uint64_t current_ee_cycle
+)
+{
+    if (!m_enabled || interlace > 1u || ffmd > 1u ||
+        (mode != 0x02u && mode != 0x03u) ||
+        current_ee_cycle < m_last_ee_cycle ||
+        current_ee_cycle > std::numeric_limits<uint64_t>::max() -
+            2u * k_ee_clock_hz)
+    {
+        return false;
+    }
+
+    const auto& timing = mode == 0x02u ? k_ntsc : k_pal;
+    m_interlaced = interlace != 0u;
+    m_last_ee_cycle = current_ee_cycle;
+    m_field_whole = timing.m_whole;
+    m_field_remainder = timing.m_remainder;
+    m_field_denominator = timing.m_denominator;
+    m_fraction = 0u;
+    m_next_field_cycle = current_ee_cycle;
+    queue_next_field();
+    m_vblank_duration = timing.m_vblank_duration;
+    if (m_next_end_cycle <= current_ee_cycle)
+    {
+        m_next_end_cycle = 0u;
+    }
+    m_delivered_edges.clear();
+    return true;
+}
+
 bool c_ee_scanout_clock::deliver_due_edges(
     uint64_t ee_cycle, c_ee_intc* intc,
     c_ee_vsync_flags* flags, ee_memory* memory

@@ -1,10 +1,13 @@
 #include "ee_strict_firmware_pilot.h"
 #include "ee_decoder.h"
+#include "../iop/iop_cdvd.h"
 
 #include <array>
 #include <charconv>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string_view>
 #include <vector>
 
@@ -53,14 +56,34 @@ int main(int argc, char** argv)
 {
     constexpr uint32_t default_budget = 2000000u;
     uint32_t budget = default_budget;
-    if (argc < 2 || argc > 3)
+    std::filesystem::path iso_path;
+    bool iso_requested = false;
+    bool budget_supplied = false;
+    if (argc < 2 || argc > 5)
     {
-        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget]\n");
+        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget] [--iso IMAGE]\n");
         return 1;
     }
-    if (argc == 3)
+    for (int argument = 2; argument < argc; ++argument)
     {
-        const std::string_view arg(argv[2]);
+        const std::string_view arg(argv[argument]);
+        if (arg == "--iso")
+        {
+            if (iso_requested || argument + 1 >= argc)
+            {
+                std::fprintf(stderr, "invalid --iso argument\n");
+                return 1;
+            }
+            iso_path = argv[++argument];
+            iso_requested = true;
+            continue;
+        }
+        if (budget_supplied)
+        {
+            std::fprintf(stderr, "unexpected argument: %.*s\n",
+                static_cast<int>(arg.size()), arg.data());
+            return 1;
+        }
         const auto parsed = std::from_chars(arg.data(), arg.data() + arg.size(), budget);
         if (parsed.ec != std::errc{} || parsed.ptr != arg.data() + arg.size() ||
             budget == 0u || budget > ee::c_ee_strict_firmware_pilot::k_slot_limit)
@@ -68,6 +91,7 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "invalid EE slot budget\n");
             return 1;
         }
+        budget_supplied = true;
     }
     std::ifstream file(argv[1], std::ios::binary | std::ios::ate);
     if (!file || file.tellg() != static_cast<std::streamoff>(ee::s_ee_strict_rom0_view::k_size))
@@ -82,6 +106,17 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    std::unique_ptr<iop::c_iso_sector_source> media;
+    if (iso_requested)
+    {
+        media = std::make_unique<iop::c_iso_sector_source>(iso_path);
+        if (!media->valid())
+        {
+            std::fprintf(stderr, "invalid ISO sector source: %s\n", iso_path.string().c_str());
+            return 1;
+        }
+    }
+
     ee::c_ee_strict_firmware_pilot pilot(rom);
     // Explicit PAL reference-machine policy, no guest CRT syscall.
     if (!pilot.attach_iop(rom, true) || !pilot.configure_scanout(3u, 0u))
@@ -89,8 +124,14 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "dual reset setup refused\n");
         return 1;
     }
-    std::printf("Dual ROM0 reset: bytes=%zu ee=%08x iop=%08x ratio=8:1 video=PAL budget=%u\n",
-        rom.size(), pilot.cpu().m_pc, pilot.iop_state()->m_pc, budget);
+    if (media != nullptr && !pilot.attach_disc(*media))
+    {
+        std::fprintf(stderr, "failed to attach ISO media to IOP CDVD\n");
+        return 1;
+    }
+    std::printf("Dual ROM0 reset: bytes=%zu ee=%08x iop=%08x ratio=8:1 video=PAL budget=%u media=%s\n",
+        rom.size(), pilot.cpu().m_pc, pilot.iop_state()->m_pc, budget,
+        media != nullptr ? iso_path.string().c_str() : "none");
 
     using boundary = ee::e_ee_firmware_boundary;
     ee::s_ee_firmware_step stop{};
@@ -203,6 +244,9 @@ int main(int argc, char** argv)
         boundary_name(stop.m_boundary), static_cast<unsigned>(instruction.m_result),
         static_cast<unsigned long long>(pilot.retired()), cpu.m_pc, instruction.m_detail_pc,
         instruction.m_opcode, instruction.m_data_address, pilot.delay_slot_pending() ? 1u : 0u);
+    std::printf("Dual ROM0 refusal operands: rs=%016llx rt=%016llx\n",
+        static_cast<unsigned long long>(cpu.m_gpr[(instruction.m_opcode >> 21u) & 31u].m_lo),
+        static_cast<unsigned long long>(cpu.m_gpr[(instruction.m_opcode >> 16u) & 31u].m_lo));
     const auto fetch = pilot.current_fetch_plan();
     const auto lookup = pilot.current_tlb_lookup();
     std::printf("Dual ROM0 fetch: config=%08x entryhi=%08x route=%u access=%u cache=%u physical=%08x fault=%u tlb_status=%u tlb_index=%u page_size=%u\n",
@@ -257,6 +301,10 @@ int main(int argc, char** argv)
         static_cast<unsigned long long>(pilot.fields_ended()),
         static_cast<unsigned long long>(pilot.vsint_csr_reads()),
         static_cast<unsigned long long>(pilot.vsint_csr_set_reads()));
+    const auto cdvd_request = pilot.cdvd_last_request();
+    std::printf("Dual ROM0 CDVD: type=%02x bytes=%u last_lba=%u last_sectors=%u\n",
+        pilot.cdvd_disc_type(), pilot.cdvd_bytes_transferred(),
+        cdvd_request.m_lba, cdvd_request.m_sector_count);
     std::printf("Dual ROM0 SIF: mscom=%08x smcom=%08x msflag=%08x smflag=%08x sif0_bytes=%llu sif1_bytes=%llu fifo1_words=%u\n",
         pilot.sif_register_value(1u), pilot.sif_register_value(2u), pilot.sif_register_value(3u), pilot.sif_register_value(4u),
         static_cast<unsigned long long>(pilot.sif0_delivered()), static_cast<unsigned long long>(pilot.sif1_delivered()),

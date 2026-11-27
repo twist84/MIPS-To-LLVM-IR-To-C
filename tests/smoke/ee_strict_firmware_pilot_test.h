@@ -1435,7 +1435,8 @@ bool test_strict_firmware_gs_background_gif_reset()
         0x3c04b000u, 0x3484e000u, 0x34020001u, 0xac820000u,
         0x8c830000u, // D_CTRL read
         0x3c04b000u, 0x34843000u, 0xac820000u, // GIF_CTRL.RST
-        0xac820000u}); // repeated reset refused
+        0xac800000u, 0x34020001u, 0xac820000u,
+        0x34020002u, 0xac820000u}); // unsupported GIF control value
     for (bool configured : {false, true})
     {
         ee::c_ee_strict_firmware_pilot pilot(rom);
@@ -1445,7 +1446,7 @@ bool test_strict_firmware_gs_background_gif_reset()
             return false;
         }
         const uint64_t epoch = pilot.next_scanout_event();
-        const uint32_t count = configured ? 14u : 3u;
+        const uint32_t count = configured ? 17u : 3u;
         for (uint32_t i = 0u; i < count; ++i)
         {
             const auto step = pilot.step(1u);
@@ -1453,7 +1454,7 @@ bool test_strict_firmware_gs_background_gif_reset()
                 pilot.cycle() != i + 1u ||
                 pilot.next_scanout_event() != epoch ||
                 pilot.fields_started() != 0u || pilot.intc_status() != 0u ||
-                pilot.gif_reset_count() != (i == 13u ? 1u : 0u) ||
+                pilot.gif_reset_count() != (i >= 16u ? 2u : i >= 13u ? 1u : 0u) ||
                 pilot.gs_reset_count() != 0u)
             {
                 return false;
@@ -1463,14 +1464,21 @@ bool test_strict_firmware_gs_background_gif_reset()
             (pilot.gs_display_registers().m_bgcolor != 0x0000567800001234ull ||
              pilot.cpu().m_gpr[3].m_lo != 1u || pilot.dmac_control() != 1u ||
              pilot.dmac_status() != 0u || pilot.dmac_started() != 0u ||
-             pilot.iop_cycles() != 1u))
+             pilot.iop_cycles() != 2u))
         {
             return false;
         }
-        const auto refused = pilot.step(1u);
+        const auto next = pilot.step(1u);
+        if (configured && (next.m_boundary != boundary::RETIRED ||
+                           pilot.gif_reset_count() != 2u || pilot.cycle() != count + 1u))
+        {
+            return false;
+        }
+        const auto refused = configured ? pilot.step(1u) : next;
         if (refused.m_boundary != boundary::HOST_REFUSAL ||
             refused.m_instruction.m_result != result::DATA_UNAVAILABLE ||
-            pilot.cycle() != count || pilot.gif_reset_count() != (configured ? 1u : 0u) ||
+            pilot.cycle() != count + (configured ? 1u : 0u) ||
+            pilot.gif_reset_count() != (configured ? 2u : 0u) ||
             pilot.gs_display_registers().m_bgcolor !=
                 (configured ? 0x0000567800001234ull : 0u) ||
             pilot.next_scanout_event() != epoch)

@@ -247,6 +247,28 @@ public:
         return true;
     }
 
+    bool reconfigure_gs_crt(uint32_t interlace, uint32_t mode, uint32_t ffmd,
+                            uint64_t current_ee_cycle)
+    {
+        if (interlace > 1u || ffmd > 1u || mode > 0xffu ||
+            m_dmac.deferred_vif1_pending())
+        {
+            return false;
+        }
+        if (mode != 2u && mode != 3u)
+        {
+            return false;
+        }
+        if (!m_scanout.reconfigure(interlace, mode, ffmd, current_ee_cycle))
+        {
+            return false;
+        }
+        m_gs_crt_interlace = interlace;
+        m_gs_crt_mode = mode;
+        m_gs_crt_ffmd = ffmd;
+        return true;
+    }
+
     // Host-only observation of IPU registers, IPU FIFOs and DMA channels
     // 3/4 (fromIPU/toIPU). Observation never claims the access.
     struct s_ipu_observation

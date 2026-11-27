@@ -28,6 +28,11 @@ public:
     bool configure(uint32_t interlace, uint32_t mode, uint32_t ffmd,
                    uint64_t current_ee_cycle);
 
+    // Change a calibrated CRT profile at a guest register boundary without
+    // discarding field counters, CSR state, or an already scheduled VBlank end.
+    bool reconfigure(uint32_t interlace, uint32_t mode, uint32_t ffmd,
+                     uint64_t current_ee_cycle);
+
     // Runs due GS field-start transitions in timestamp order. This must
     // NEVER be fed a count of host/native dispatches or loop guards.
     // The INTC cause is asserted regardless of INTC_MASK; the controller

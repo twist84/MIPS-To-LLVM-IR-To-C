@@ -159,6 +159,30 @@ int main()
           clock.advance_to(5898240ull, &intc, &flags, &memory) &&
           clock.fields_started() == 1u,
           "PAL CRT mode 3 schedules a real 50 Hz field boundary");
+
+    ee::c_ee_scanout_clock live_clock{};
+    ee::c_ee_intc live_intc{};
+    ee::ee_memory live_memory(0x1000u);
+    ee::c_ee_vsync_flags live_flags{};
+    const uint64_t live_start = 2000u;
+    check(live_clock.configure(1u, 2u, 0u, live_start) &&
+          live_clock.advance_to(live_start + 4920115ull,
+                                &live_intc, &live_flags, &live_memory) &&
+          live_clock.fields_started() == 1u,
+          "live reconfiguration test starts with one real NTSC field");
+    const uint64_t live_end = live_clock.next_event_cycle();
+    const uint64_t live_csr = live_clock.csr();
+    const uint64_t live_commit = live_start + 4920115ull + 100u;
+    check(live_clock.reconfigure(1u, 3u, 1u, live_commit) &&
+          live_clock.fields_started() == 1u &&
+          live_clock.csr() == live_csr &&
+          live_clock.next_event_cycle() == live_end &&
+          live_clock.next_field_cycle() == live_commit + 5898240ull,
+          "guest CRT transition preserves field history, CSR and pending VBlank end");
+    check(!live_clock.reconfigure(1u, 0x1au, 0u, live_commit) &&
+          live_clock.fields_started() == 1u &&
+          live_clock.next_event_cycle() == live_end,
+          "unsupported live CRT transition preserves scheduled events");
     // The HLE EE bus now exposes privileged GS_CSR/GS_IMR through
     // the same scanout state used for real VBlank callbacks. No manual
     // CSR store can generate VBlank or set an interrupt.

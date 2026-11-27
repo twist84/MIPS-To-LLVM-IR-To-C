@@ -111,16 +111,13 @@ public:
         return true;
     }
 
-    // Bounded pre-first-field CRT transition. Preserve the old HBlank
-    // counter value and sticky mode bits; the compatibility line phase
-    // restarts at the actual register-write timestamp. Never reinterpret
-    // elapsed PAL cycles using the NTSC divider (or vice versa).
-    bool reconfigure_cold_scanout(uint32_t interlace, uint32_t mode, uint32_t ffmd)
+    // Apply a guest-completed CRT timing sequence at its register boundary.
+    // Preserve HBlank counters and keep the already scheduled VBlank end;
+    // the next field uses the newly selected calibrated profile.
+    bool reconfigure_scanout(uint32_t interlace, uint32_t mode, uint32_t ffmd)
     {
         const uint64_t cycle = now();
         if (m_hardware == nullptr || !m_hardware->scanout().enabled() ||
-            m_hardware->scanout().fields_started() != 0u ||
-            m_hardware->scanout().fields_ended() != 0u ||
             m_hardware->scanout().next_event_cycle() <= cycle ||
             m_next_event <= cycle || m_hardware->dmac().started_channels() != 0u ||
             m_hardware->dmac().deferred_vif1_pending() ||
@@ -133,7 +130,7 @@ public:
         {
             counts[i] = count(i, cycle);
         }
-        if (!m_hardware->set_gs_crt(interlace, mode, ffmd, cycle))
+        if (!m_hardware->reconfigure_gs_crt(interlace, mode, ffmd, cycle))
         {
             return false;
         }
