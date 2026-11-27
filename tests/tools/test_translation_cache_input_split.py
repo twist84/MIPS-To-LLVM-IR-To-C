@@ -67,7 +67,7 @@ def verify_preservation_when_host_only_inputs_change():
             "src/ee/recompiled_functions.cpp": b"dispatch map",
             "src/ee/decoder.cpp": b"decoder",
             "src/tools/ee_recomp_main.cpp": b"recomp front-end",
-            "include/ee/guest_lifter_input.h": b"guest header",
+            "include/ee/guest_lifter_input.h": b"guest header\r\n",
             "src/architecture/ee_scalar_constant.h": b"scalar evaluator",
             "src/runtime/ee_sdbz_pad_return_probe.h": b"first host probe",
             "src/runtime/ee_vu_fmac4_ir.h": b"shared FMAC lowering",
@@ -79,6 +79,17 @@ def verify_preservation_when_host_only_inputs_change():
 
         initial_host = run_game.translation_inputs(elf, recomp, source_root)
         initial_guest = run_game.ir_generation_inputs(elf, source_root)
+        guest_header = source_root / "include/ee/guest_lifter_input.h"
+        legacy_guest = {
+            name: (run_game.sha256_path(elf) if name == "ELF"
+                   else run_game.sha256_path(source_root / name))
+            for name in initial_guest
+        }
+        guest_header.write_bytes(b"guest header\n")
+        assert run_game.ir_generation_inputs(elf, source_root) == initial_guest
+        assert run_game.translation_inputs(elf, recomp, source_root) == initial_host
+        assert run_game.shared_ir.matching_sources(
+            legacy_guest, run_game.ir_generation_inputs(elf, source_root))
         from unittest.mock import patch
         import os
         with patch.dict(os.environ, {"SDBZ_NATIVE_ALU_CERTIFICATES": "0"}):

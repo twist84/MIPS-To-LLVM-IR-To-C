@@ -2,6 +2,7 @@
 """Native dispatcher chunks preserve ownership order and stable cache inputs."""
 import importlib.util
 import hashlib
+import json
 from pathlib import Path
 import unittest
 import tempfile
@@ -116,6 +117,67 @@ class ChunkDispatcherTests(unittest.TestCase):
                 linker.cached_dispatch_objects(
                     output, metadata, functions, str(compiler), root, [], ["-O0"])
                 self.assertEqual(calls, [])
+
+    def test_runtime_source_line_endings_and_legacy_key(self):
+        with tempfile.TemporaryDirectory(prefix="ee-runtime-fingerprint-") as tmp:
+            root = Path(tmp)
+            source = root / "src/runtime/test.cpp"
+            header = root / "include/test.h"
+            source.parent.mkdir(parents=True)
+            header.parent.mkdir()
+            source.write_bytes(b"int f();\r\n")
+            header.write_bytes(b"#pragma once\r\n")
+            compiler = root / "clang++"
+            compiler.write_bytes(b"synthetic compiler")
+            output = root / "game.dll"
+            calls = []
+
+            def compile_unit(command, **kwargs):
+                calls.append(command)
+                Path(command[command.index("-o") + 1]).write_bytes(b"object")
+
+            flags = ["-O2"]
+            identity = {"compiler": "synthetic"}
+            old = linker.runtime_cache_key([source], root, identity, flags)
+            source.write_bytes(b"int f();\n")
+            header.write_bytes(b"#pragma once\n")
+            new = linker.runtime_cache_key([source], root, identity, flags)
+            self.assertEqual(old, new)
+            self.assertEqual(old.legacy, new.legacy)
+            self.assertNotEqual(new, linker.runtime_cache_key(
+                [source], root, identity, ["-O3"]))
+            header.write_bytes(b"#pragma once\n// changed\n")
+            self.assertNotEqual(new, linker.runtime_cache_key(
+                [source], root, identity, flags))
+            header.write_bytes(b"#pragma once\n")
+
+            # Verify migration using the actual compiler identity/flags and
+            # existing exact object digest, not merely key equality.
+            stat = compiler.stat()
+            compiler_info = {"path": str(compiler.resolve()), "size": stat.st_size,
+                             "mtime_ns": stat.st_mtime_ns}
+            key = linker.runtime_cache_key([source], root, compiler_info, flags)
+            with mock.patch.object(linker.subprocess, "run", side_effect=compile_unit):
+                objects = linker.cached_runtime_objects(
+                    output, [source], root, str(compiler), [], flags)
+                self.assertEqual(len(calls), 1)
+                receipt = output.parent / (output.name + ".runtime-cache") / "runtime-objects.json"
+                manifest = json.loads(receipt.read_text(encoding="utf-8"))
+                self.assertEqual(manifest["key"], key)
+                legacy_key = sorted(key.legacy)[0]
+                manifest["key"] = legacy_key
+                receipt.write_text(json.dumps(manifest), encoding="utf-8")
+                source.write_bytes(b"int f();\r\n")
+                header.write_bytes(b"#pragma once\r\n")
+                calls.clear()
+                self.assertEqual(objects, linker.cached_runtime_objects(
+                    output, [source], root, str(compiler), [], flags))
+                self.assertEqual(calls, [])
+                self.assertEqual(json.loads(receipt.read_text(encoding="utf-8"))["key"], key)
+                objects[0].write_bytes(b"corrupt")
+                linker.cached_runtime_objects(
+                    output, [source], root, str(compiler), [], flags)
+                self.assertEqual(len(calls), 1)
 
     def test_chunk_ownership_uses_original_metadata_order(self):
         inputs = [make_function(i) for i in range(3)]

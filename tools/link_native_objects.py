@@ -21,6 +21,11 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+_tools_path = str(Path(__file__).resolve().parent)
+if _tools_path not in sys.path:
+    sys.path.insert(0, _tools_path)
+import shared_ee_ir as shared_ir
+
 
 def select_native_link_compiler(requested=None, platform=None, environment=None):
     """Choose a driver compatible with this linker's Clang/GNU-style options.
@@ -416,16 +421,21 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
         flags = wrapper_flags if unit_index == 0 else compile_flags
         unit_key = wrapper_key if unit_index == 0 else dependency_key
         encoded = generated.encode('utf-8')
-        key = hashlib.sha256(
-            unit_key.encode('ascii') + b'\0' + encoded
-        ).hexdigest()
+        def dispatch_key(dependency):
+            return hashlib.sha256(
+                dependency.encode('ascii') + b'\0' + encoded
+            ).hexdigest()
+
+        key = dispatch_key(unit_key)
+        accepted_keys = {key, *(dispatch_key(old)
+                                for old in getattr(unit_key, "legacy", ()))}
         record_path = obj.with_suffix(obj.suffix + '.json')
         try:
             record = json.loads(record_path.read_text(encoding='utf-8'))
         except (OSError, ValueError):
             record = {}
         valid = (
-            obj.is_file() and record.get('key') == key and
+            obj.is_file() and record.get('key') in accepted_keys and
             record.get('object_sha256') == hashlib.sha256(obj.read_bytes()).hexdigest()
         )
         if not valid:
@@ -445,6 +455,10 @@ def cached_dispatch_objects(output, metadata, functions, cxx,
                 if temporary.exists():
                     temporary.unlink()
         else:
+            if record.get('key') != key:
+                # Only promote the proven identity after checking the exact
+                # native object bytes; a failed promotion keeps the old receipt.
+                shared_ir.write_json(record_path, dict(record, key=key))
             reused += 1
         object_paths.append(obj)
     print(
@@ -554,6 +568,15 @@ def load_inputs(metadata_path, object_dir):
     return metadata, object_manifest, validated_functions, linked_objects
 
 
+class RuntimeCacheKey(str):
+    """Versioned runtime identity plus reproducible legacy aggregate keys."""
+
+    def __new__(cls, canonical, legacy):
+        value = super().__new__(cls, canonical)
+        value.legacy = frozenset(legacy)
+        return value
+
+
 def runtime_cache_key(sources, source_root, compiler, flags):
     """Fingerprint the compilation ABI and all in-tree C++ include inputs.
 
@@ -572,7 +595,10 @@ def runtime_cache_key(sources, source_root, compiler, flags):
                          "CXXFLAGS", "SDKROOT")
         },
     }
-    hasher = hashlib.sha256(json.dumps(info, sort_keys=True).encode("utf-8"))
+    legacy_info = json.dumps(info, sort_keys=True).encode("utf-8")
+    info["schema"] = "ee-runtime-objects-v2-text-lf"
+    canonical = hashlib.sha256(json.dumps(info, sort_keys=True).encode("utf-8"))
+    legacy = [hashlib.sha256(legacy_info) for _ in range(3)]
     paths = list(sources)
     for directory in ("include", "src/runtime", "src/ee"):
         paths.extend(
@@ -581,10 +607,24 @@ def runtime_cache_key(sources, source_root, compiler, flags):
         )
     for path in sorted(set(paths)):
         relative = path.relative_to(source_root).as_posix()
-        hasher.update(relative.encode("utf-8"))
-        hasher.update(b"\\0")
-        hasher.update(hashlib.sha256(path.read_bytes()).digest())
-    return hasher.hexdigest()
+        raw = path.read_bytes()
+        normalized = raw
+        if path.suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".inl"):
+            normalized = shared_ir.normalized_source_bytes(raw)
+        crlf = (normalized.replace(b"\n", b"\r\n")
+                if b"\r" not in normalized and b"\0" not in normalized
+                and path.suffix in (".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".inl")
+                else raw)
+        # The old aggregate key did not retain per-file hashes. Prove only
+        # the actual checkout, all-LF or all-CRLF variant; an unreproducible
+        # historical mixture is a cache miss, never a guessed identity.
+        for hasher, data in zip((canonical, *legacy),
+                                (normalized, raw, normalized, crlf)):
+            hasher.update(relative.encode("utf-8"))
+            hasher.update(b"\\0")
+            hasher.update(hashlib.sha256(data).digest())
+    return RuntimeCacheKey(canonical.hexdigest(),
+                           (hasher.hexdigest() for hasher in legacy))
 
 
 def cached_runtime_objects(output, sources, source_root, cxx,
@@ -621,7 +661,7 @@ def cached_runtime_objects(output, sources, source_root, cxx,
         manifest = {}
     recorded = manifest.get("objects", [])
     reuse = (
-        manifest.get("key") == key and
+        manifest.get("key") in {key, *getattr(key, "legacy", ())} and
         len(recorded) == len(object_paths) and
         all(
             item.get("path") == path.name and path.is_file() and
@@ -630,6 +670,8 @@ def cached_runtime_objects(output, sources, source_root, cxx,
         )
     )
     if reuse:
+        if manifest.get("key") != key:
+            shared_ir.write_json(manifest_path, dict(manifest, key=key))
         print(
             "link_native_objects: reused "
             f"{len(object_paths)} cached runtime objects "
