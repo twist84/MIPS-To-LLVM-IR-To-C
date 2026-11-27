@@ -695,3 +695,58 @@ receipts, every replay and median/spread before making a performance
 claim. G6B (lazy extraction/direct vector publication) requires
 evidence of residual host-side packing/state traffic and an independent
 correctness checkpoint; do not infer native savings from raw IR counts.
+
+## G6A — correctness accepted; native throughput neutral
+
+All five workflows passed at c8d1c956d6430728a9df8bd72b8527d7a39e858b
+(same production code as be57b33; its build/test run was cancelled).
+The supplied ee-graphics-g6a.zip and ee-graphics-g6a-comparison.zip
+were independently inspected. Archive SHA-256 respectively:
+1e94e006523af50d62e7d13d65b8f75bd8be53ee458f3e2cd223b81a5d36995d
+and 4ee3086e45f902df3326a8c2bc723b6ca3ddee2690b9a7f7d64dde2a775616ce.
+Candidate comparison JSON SHA-256 matches the replay receipt:
+f7b25e4d99d54a5dd7dc238ee9482d29b334584afe7a1774cac02f56dc21ad05.
+Candidate DLL SHA-256:
+669e6ddca5c64bc9489b4a0646f6de8127d2f6b217299ef3962904cb770c8330.
+
+All eight terminal reports and PPMs independently match the fixed
+reference SHA-256. All archived dispatch maps agree (184719 trace
+lines, 184700 unique dispatch keys each); PAD footers 3127/3127
+valid. Each completed 40M dispatches, 21910026110 guest attempts,
+22115080673 EE cycles, 4494 fields, 3221 presentations, 394881 VU1
+native executions, 445669423 native pairs; 84 native libraries,
+zero interpreter fallbacks, IOP guest faults or timing observer
+failures. Receipt reports unchanged input hashes. Original inputs
+and binaries themselves are not included in these archives.
+
+| Pair | G5A s | G6A s |
+|---|---:|---:|
+| 1 | 40.328 | 40.062 |
+| 2 | 39.812 | 39.797 |
+| 3 | 39.672 | 39.750 |
+| 4 | 39.593 | 39.640 |
+
+Median 39.742 -> 39.7735s, nominal throughput -0.0792%.
+Two faster and two slower; median difference 31.5ms is far below
+the within-arm spreads 735ms and 422ms. Retain G6A as a
+correctness-validated experimental baseline, not a speedup.
+No production-cache promotion or asynchronous performance claim.
+
+16252 functions and 845746 function-scoped guest PCs retained;
+zero ownership or coverage changes. Relative to original O5,
+12702 IR modules changed. Compared to G5A, IR bytes 983470709 ->
+983105758 (-364951); total native object bytes 152435481, DLL
+111410176 and executable sections 101747712 all unchanged.
+Generation/scan/compile/link 166.625/52.375/208.156/46.657s;
+these single-build times do not establish compiler speedup.
+Identical aggregate native footprint does not establish identical
+machine code. G5A/G6A DLL digests differ, but the previous per-module
+G5A object hashes and actual object bytes are not in the G6A archive.
+
+Before G6B, compare the two existing receipts and representative
+native objects to distinguish optimized-away packing from residual
+SIMD/scalar transfers and architectural state traffic. Do not
+implement speculative lazy residency solely because emitted IR
+is smaller. If no substantive residual cost is established,
+prioritize G8 IOP attribution (15.90% of profiled runner wall).
+G7 remains lower priority absent new VIF1 evidence.
