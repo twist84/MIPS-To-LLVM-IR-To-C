@@ -90,7 +90,7 @@ public:
     // Permit long firmware diagnostics while keeping the budget bounded.
     // Guest HBlank programming is admitted only with an explicit
     // reference scanout configuration.
-    static constexpr uint64_t k_slot_limit = 1u << 28u;
+    static constexpr uint64_t k_slot_limit = 1u << 30u;
     static_assert(k_slot_limit <
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
 
