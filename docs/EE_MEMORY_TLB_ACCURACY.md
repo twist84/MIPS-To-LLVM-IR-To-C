@@ -1865,3 +1865,25 @@ before rather than inside the initial if expression. Correct the
 registration and preserve all test predicates and CI thresholds.
 No runtime changes. Real-ROM execution remains pending CI.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46069794804
+
+## M6E3H3E9B6B: raw COP1 context restoration
+
+H3E9B6A passed both pinned ROMs at 5204c1eb, workflow 46070057699.
+Both advanced 21 EE retirements, to 818524 / 818716; EPC=00100000.
+Actual stop is CTC1 k1,FCR31 44dbf800 at a0019310 / a0019330.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46070057699
+
+Admit canonical MFC1/MTC1, CFC1/CTC1 and LWC1/SWC1 with CU1 set.
+Use existing module_builder.cpp raw FPR storage and console-verified
+FCR read aliases, FCR0 read-only behavior, FCR31 mask 0083c078 and
+fixed bits 01000001. All 32 FPRs (including FPR0) are writable.
+Preserve upper GPR halves, zero suppression, ACC/overflow state;
+no host floating-point conversion. Memory transfers use the existing
+strict word plan and canonical uncached backing; never route to MMIO
+or serial callbacks. Disabled CU1, reserved selectors, bad alignment
+and unbacked/cached/device data refuse with no retirement; this does
+not yet implement coprocessor-unusable exception entry. Add constexpr
+and full register round-trip tests and real synthetic guest exception
+save/restore/ERET regression with synchronized IOP. Require 33 further
+retirements (CTC1 + 32 LWC1) in both actual ROMs. No arithmetic or
+production LLVM changes, no retail replay. Pending CI.

@@ -1511,6 +1511,58 @@ bool test_strict_firmware_syscall()
     return true;
 }
 
+bool test_strict_firmware_cop1_context()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c022040u, 0x40826000u, // CU1+BEV
+        0x3c04a000u, 0x34840100u, 0x2402ffffu,
+        0x44820000u, 0x44c2f800u, 0x0000000cu, 0x2407002au});
+    // A real exception handler saves FPR0 and FCR31, changes both,
+    // reloads them, restores EPC and returns to the interrupted caller.
+    constexpr uint32_t handler[] = {
+        0xe4800000u, 0x4443f800u, 0xac830004u,
+        0x44800000u, 0x44c0f800u,
+        0xc4800000u, 0x8c830004u, 0x44c3f800u,
+        0x40057000u, 0x24a50004u, 0x40857000u, 0x42000018u};
+    for (uint32_t i = 0u; i < sizeof(handler) / sizeof(handler[0]); ++i)
+    {
+        for (uint32_t j = 0u; j < 4u; ++j)
+        {
+            rom[0x380u + i * 4u + j] = static_cast<uint8_t>(handler[i] >> (j * 8u));
+        }
+    }
+    ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+    if (!pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    if (pilot.step(1u).m_boundary != boundary::SYSCALL_ENTRY)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < sizeof(handler) / sizeof(handler[0]); ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    return pilot.cpu().m_pc == base + 36u &&
+        pilot.cpu().m_fpr[0] == 0xffffffffu && pilot.cpu().m_fcsr == 0x0183c079u &&
+        pilot.step(1u).m_boundary == boundary::RETIRED &&
+        pilot.cpu().m_gpr[7].m_lo == 42u && pilot.cycle() == 21u &&
+        pilot.iop_cycles() == 2u;
+}
+
 bool test_strict_firmware_epc_restore()
 {
     using boundary = ee::e_ee_firmware_boundary;

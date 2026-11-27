@@ -581,6 +581,20 @@ static_assert(!status_requires_interrupt_scheduler(0x70000001u));
 static_assert(!status_requires_interrupt_scheduler(0x70030c03u));
 
 // No memory, branches, clocks or general COP0 side effects.
+inline constexpr bool cop1_enabled(const s_ee_cpu_state& cpu)
+{
+    return (cpu.m_cop0[COP0_Status] & (1u << 29u)) != 0u;
+}
+
+// Match the console-verified FCR contract in LLVM module_builder.cpp.
+inline constexpr uint32_t cop1_control_value(uint32_t value)
+{
+    return (value & 0x0083c078u) | 0x01000001u;
+}
+
+static_assert(cop1_control_value(0u) == 0x01000001u);
+static_assert(cop1_control_value(0xffffffffu) == 0x0183c079u);
+
 inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode,
     c_ee_tlb* persistent_tlb)
 {
@@ -733,6 +747,39 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         case 0x2bu: // SLTU: unsigned comparison of both low 64-bit halves
             value = read_gpr(cpu, rs) < read_gpr(cpu, rt) ? 1u : 0u;
             break;
+        default:
+            return false;
+        }
+        break;
+    }
+    case 0x11u: // COP1 raw register/control transfers only
+    {
+        if (!cop1_enabled(cpu) || (opcode & 0x7ffu) != 0u)
+        {
+            return false;
+        }
+        const uint32_t fs = (opcode >> 11u) & 31u;
+        switch (rs)
+        {
+        case 0u: // MFC1
+            value = sign_extend_word(static_cast<uint32_t>(cpu.m_fpr[fs]));
+            break;
+        case 2u: // CFC1: console-observed read aliases
+            value = fs < 16u ? 0x2e30u : cop1_control_value(cpu.m_fcsr);
+            break;
+        case 4u: // MTC1: zero-extended storage of raw 32-bit FPR
+            cpu.m_fpr[fs] = static_cast<uint32_t>(read_gpr(cpu, rt));
+            return true;
+        case 6u: // CTC1: FCR0 is read-only; only FCR31 is writable
+            if (fs == 31u)
+            {
+                cpu.m_fcsr = cop1_control_value(static_cast<uint32_t>(read_gpr(cpu, rt)));
+            }
+            else if (fs != 0u)
+            {
+                return false;
+            }
+            return true;
         default:
             return false;
         }
@@ -954,6 +1001,27 @@ static_assert([]()
         cpu.m_gpr[2].m_hi == 0x1234u;
 }());
 
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[2] = {0xffffffffffffffffull, 0x1234u};
+    if (execute_register_word(cpu, 0x44c2f800u, nullptr))
+    {
+        return false;
+    }
+    cpu.m_cop0[COP0_Status] = 1u << 29u;
+    return execute_register_word(cpu, 0x44820000u, nullptr) &&
+        cpu.m_fpr[0] == 0xffffffffu &&
+        execute_register_word(cpu, 0x44020000u, nullptr) &&
+        cpu.m_gpr[2].m_lo == ~0ull && cpu.m_gpr[2].m_hi == 0x1234u &&
+        execute_register_word(cpu, 0x44c2f800u, nullptr) &&
+        cpu.m_fcsr == 0x0183c079u &&
+        execute_register_word(cpu, 0x44c20000u, nullptr) &&
+        !execute_register_word(cpu, 0x44c20800u, nullptr) &&
+        execute_register_word(cpu, 0x4442f800u, nullptr) &&
+        cpu.m_gpr[2].m_lo == 0x0183c079u;
+}());
+
 // LBU/LW/LD/LQ read ROM or explicitly backed uncached RAM; SB/SW/SD/SQ write RAM.
 // SB to the exact SIO TX register additionally requires an explicit sink.
 // Validate even with register zero. A refusal is diagnostic only;
@@ -988,15 +1056,20 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         // uncached domain. IXIN likewise has no live cached code.
         return {result::COMMITTED, opcode, 0u, pc};
     }
+    const bool fp = primary == 0x31u || primary == 0x39u;
+    if (fp && !cop1_enabled(cpu))
+    {
+        return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+    }
     const bool quad = primary == 0x1eu || primary == 0x1fu;
     const bool doubleword = primary == 0x37u || primary == 0x3fu;
     const bool half = primary == 0x29u; // SH
     const bool partial = primary == 0x22u || primary == 0x26u ||
         primary == 0x2au || primary == 0x2eu;
     const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu ||
-        primary == 0x2au || primary == 0x2eu || primary == 0x3fu;
+        primary == 0x2au || primary == 0x2eu || primary == 0x3fu || primary == 0x39u;
     if (primary != 0x24u && primary != 0x23u && primary != 0x1eu &&
-        !doubleword && !partial && !store)
+        !doubleword && !partial && !store && !fp)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -1058,7 +1131,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         }
         return {result::COMMITTED, opcode, 0u, pc};
     }
-    const bool word = primary == 0x23u || primary == 0x2bu;
+    const bool word = primary == 0x23u || primary == 0x2bu || fp;
     const auto kind = quad ? e_ee_data_access_kind::GPR_QUADWORD :
         doubleword ? e_ee_data_access_kind::DOUBLEWORD :
         word ? e_ee_data_access_kind::WORD :
@@ -1075,13 +1148,14 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         bus.m_address == access_address - 0xa0000000u;
     if (store)
     {
-        if (!plan.m_fault.m_valid && sio != nullptr &&
+        if (!fp && !plan.m_fault.m_valid && sio != nullptr &&
             sio->write(bus, address, static_cast<uint8_t>(read_gpr(cpu, rt))))
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
-        const s_ee_u128 value{read_gpr(cpu, rt), rt == 0u ? 0u : cpu.m_gpr[rt].m_hi};
-        if (!plan.m_fault.m_valid && mmio != nullptr &&
+        const s_ee_u128 value{fp ? static_cast<uint32_t>(cpu.m_fpr[rt]) : read_gpr(cpu, rt),
+            fp || rt == 0u ? 0u : cpu.m_gpr[rt].m_hi};
+        if (!fp && !plan.m_fault.m_valid && mmio != nullptr &&
             mmio->write(bus, access_address, value))
         {
             return {result::COMMITTED, opcode, 0u, pc};
@@ -1099,7 +1173,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         return {result::COMMITTED, opcode, 0u, pc};
     }
     s_ee_u128 device_value{};
-    if (!plan.m_fault.m_valid && mmio != nullptr &&
+    if (!fp && !plan.m_fault.m_valid && mmio != nullptr &&
         mmio->read(bus, access_address, device_value))
     {
         if (rt != 0u)
@@ -1124,7 +1198,13 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     {
         return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
     }
-    if (rt != 0u)
+    if (fp)
+    {
+        // FPR0 is writable, unlike GPR0; preserve raw bits, including
+        // NaN and denormal encodings, without host float conversion.
+        cpu.m_fpr[rt] = ee_read_instruction_word(bytes);
+    }
+    else if (rt != 0u)
     {
         if (quad)
         {

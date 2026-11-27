@@ -83,7 +83,7 @@ jobs:
           log = Path("dual-rom0-v06.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 818513, log
+          assert stop and int(stop[1]) >= 818557, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696458 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
           assert serial and int(serial[1]) >= 104, log
           serial_bytes = b"".join(bytes.fromhex(x) for x in re.findall(r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))
@@ -319,7 +319,7 @@ jobs:
           log = Path("dual-rom0-v07.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 818705, log
+          assert stop and int(stop[1]) >= 818749, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696650 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
           assert serial and int(serial[1]) >= 104, log
           serial_bytes = b"".join(bytes.fromhex(x) for x in re.findall(r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))

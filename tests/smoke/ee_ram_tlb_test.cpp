@@ -2526,6 +2526,97 @@ bool test_strict_reset_scalar_completion()
         step(0x6480ffffu).m_retired == 1u && cpu.m_gpr[0].m_lo == 0x66u;
 }
 
+bool test_strict_reset_cop1_context()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[256u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_gpr[4].m_lo = pc + 128u;
+    cpu.m_gpr[2] = {0x12345678ff812345ull, 0xabcdefu};
+    cpu.m_fpu_acc = 0x12345678u;
+    cpu.m_fpu_acc_overflow = 1u;
+    const auto step = [&](uint32_t word)
+    {
+        cpu.m_pc = pc;
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+    };
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    for (uint32_t word : {0x44820000u, 0x44c2f800u, 0xc4800000u, 0xe4800000u})
+    {
+        if (step(word).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc)
+        {
+            return false;
+        }
+    }
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[0] = {0x55u, 0x66u};
+    for (uint32_t reg = 0u; reg < 32u; ++reg)
+    {
+        cpu.m_gpr[2].m_lo = 0x12345678ff812345ull + reg;
+        const uint32_t raw = static_cast<uint32_t>(cpu.m_gpr[2].m_lo);
+        if (step(0x44820000u | (reg << 11u)).m_retired != 1u ||
+            cpu.m_fpr[reg] != raw ||
+            step(0xe4800000u | (reg << 16u) | (reg * 4u)).m_retired != 1u ||
+            ee::ee_read_instruction_word(bytes + 128u + reg * 4u) != raw)
+        {
+            return false;
+        }
+        cpu.m_fpr[reg] = ~0ull;
+        if (step(0xc4800000u | (reg << 16u) | (reg * 4u)).m_retired != 1u ||
+            cpu.m_fpr[reg] != raw ||
+            step(0x44020000u | (reg << 11u)).m_retired != 1u ||
+            cpu.m_gpr[2].m_lo != (0xffffffff00000000ull | raw) ||
+            cpu.m_gpr[2].m_hi != 0xabcdefu ||
+            step(0x44000000u | (reg << 11u)).m_retired != 1u ||
+            cpu.m_gpr[0].m_lo != 0x55u || cpu.m_gpr[0].m_hi != 0x66u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[2].m_lo = ~0ull;
+    if (step(0x44c2f800u).m_retired != 1u || cpu.m_fcsr != 0x0183c079u ||
+        step(0x44c00000u).m_retired != 1u || cpu.m_fcsr != 0x0183c079u ||
+        step(0x44c0f800u).m_retired != 1u || cpu.m_fcsr != 0x01000001u)
+    {
+        return false;
+    }
+    for (uint32_t reg = 0u; reg < 32u; ++reg)
+    {
+        if (step(0x44420000u | (reg << 11u)).m_retired != 1u ||
+            cpu.m_gpr[2].m_lo != (reg < 16u ? 0x2e30u : 0x01000001u))
+        {
+            return false;
+        }
+    }
+    for (uint32_t word : {0x44c20800u, 0x44c2f801u, 0x44820001u, 0x44020040u})
+    {
+        if (step(word).m_result != result::UNSUPPORTED_OPCODE ||
+            cpu.m_pc != pc || cpu.m_fcsr != 0x01000001u)
+        {
+            return false;
+        }
+    }
+    const uint64_t fpr0 = cpu.m_fpr[0];
+    for (uint32_t address : {pc + 129u, pc + 256u, 0x80000080u, 0xb2000020u})
+    {
+        cpu.m_gpr[4].m_lo = address;
+        if (step(0xc4800000u).m_result != result::DATA_UNAVAILABLE ||
+            step(0xe4800000u).m_result != result::DATA_UNAVAILABLE ||
+            cpu.m_pc != pc || cpu.m_fpr[0] != fpr0)
+        {
+            return false;
+        }
+    }
+    return cpu.m_fpu_acc == 0x12345678u && cpu.m_fpu_acc_overflow == 1u &&
+        cpu.m_fcsr == 0x01000001u;
+}
+
 bool test_strict_reset_exception_context()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4416,7 +4507,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_epc_restore(), "scheduler-owned EPC restore and ERET") ||
+    if (!check(test_strict_firmware_cop1_context(), "scheduler-owned COP1 context restore") ||
+        !check(test_strict_firmware_epc_restore(), "scheduler-owned EPC restore and ERET") ||
         !check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
         !check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
@@ -4691,6 +4783,7 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_scalar_completion(), "strict reset remaining nontrapping scalar operations") ||
+        !check(test_strict_reset_cop1_context(), "strict reset raw COP1 context transfers") ||
         !check(test_strict_reset_exception_context(), "strict reset exception context transfers") ||
         !check(test_strict_reset_ram_scalar(), "strict reset RAM scalar transfer regression"))
     {
