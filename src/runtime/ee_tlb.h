@@ -49,7 +49,7 @@ class c_ee_tlb
 public:
     static constexpr uint32_t k_entry_count = 48u;
 
-    static bool supported_page_mask(uint32_t mask)
+    static constexpr bool supported_page_mask(uint32_t mask)
     {
         switch (mask)
         {
@@ -66,7 +66,7 @@ public:
         }
     }
 
-    bool write(uint32_t index, uint32_t page_mask, uint32_t entry_hi,
+    constexpr bool write(uint32_t index, uint32_t page_mask, uint32_t entry_hi,
                uint32_t entry_lo0, uint32_t entry_lo1)
     {
         if (index >= k_entry_count || !supported_page_mask(page_mask))
@@ -82,7 +82,7 @@ public:
         return true;
     }
 
-    bool read(uint32_t index, s_ee_tlb_entry* output) const
+    constexpr bool read(uint32_t index, s_ee_tlb_entry* output) const
     {
         if (output == nullptr || index >= k_entry_count ||
             !m_entries[index].m_written)
@@ -93,7 +93,7 @@ public:
         return true;
     }
 
-    bool probe(uint32_t entry_hi, uint32_t* index) const
+    constexpr bool probe(uint32_t entry_hi, uint32_t* index) const
     {
         if (index == nullptr)
         {
@@ -124,7 +124,7 @@ public:
     // Architectural classification for a caller that can deliver precise
     // faults. Existing HLE direct aliases and legacy translate() are not
     // changed; cache modes are reported, not emulated.
-    s_ee_tlb_lookup lookup(uint32_t virtual_address, uint32_t asid,
+    constexpr s_ee_tlb_lookup lookup(uint32_t virtual_address, uint32_t asid,
                            bool write_access) const
     {
         s_ee_tlb_lookup result{};
@@ -206,7 +206,7 @@ public:
     // Explicit translation of a matched user/mapped address. A matching
     // invalid/clean page is an access failure, never an identity fallback.
     // Do not use this API without also raising architectural TLB exceptions.
-    bool translate(uint32_t virtual_address, uint32_t asid, bool write_access,
+    constexpr bool translate(uint32_t virtual_address, uint32_t asid, bool write_access,
                    uint32_t* physical_address) const
     {
         if (physical_address == nullptr)
