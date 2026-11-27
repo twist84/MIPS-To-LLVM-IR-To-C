@@ -252,6 +252,11 @@ int main(int argc, char** argv)
     std::printf("Dual ROM0 hardware: intc_stat=%08x intc_mask=%08x dctrl=%08x dstat=%08x str=%08x iop_istat=%08x gs_csr=%016llx\n",
         pilot.intc_status(), pilot.intc_mask(), pilot.dmac_control(), pilot.dmac_status(),
         pilot.dmac_started(), pilot.iop_irq_status(), static_cast<unsigned long long>(pilot.gs_csr()));
+    std::printf("Dual ROM0 GS scanout: started=%llu ended=%llu vsint_reads=%llu vsint_set_reads=%llu\n",
+        static_cast<unsigned long long>(pilot.fields_started()),
+        static_cast<unsigned long long>(pilot.fields_ended()),
+        static_cast<unsigned long long>(pilot.vsint_csr_reads()),
+        static_cast<unsigned long long>(pilot.vsint_csr_set_reads()));
     std::printf("Dual ROM0 SIF: mscom=%08x smcom=%08x msflag=%08x smflag=%08x sif0_bytes=%llu sif1_bytes=%llu fifo1_words=%u\n",
         pilot.sif_register_value(1u), pilot.sif_register_value(2u), pilot.sif_register_value(3u), pilot.sif_register_value(4u),
         static_cast<unsigned long long>(pilot.sif0_delivered()), static_cast<unsigned long long>(pilot.sif1_delivered()),

@@ -106,6 +106,9 @@ jobs:
           assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
           assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
           assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
+          scanout = re.search(r"^Dual ROM0 GS scanout: started=(\d+) ended=(\d+) vsint_reads=(\d+) vsint_set_reads=(\d+)$", log, re.M)
+          assert scanout and int(scanout[1]) >= 2 and scanout[1] == scanout[2], log
+          assert int(scanout[3]) > 0 and int(scanout[4]) > 0, log
           assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
           PY
 
@@ -354,6 +357,9 @@ jobs:
           assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
           assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
           assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
+          scanout = re.search(r"^Dual ROM0 GS scanout: started=(\d+) ended=(\d+) vsint_reads=(\d+) vsint_set_reads=(\d+)$", log, re.M)
+          assert scanout and int(scanout[1]) >= 2 and scanout[1] == scanout[2], log
+          assert int(scanout[3]) > 0 and int(scanout[4]) > 0, log
           assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
           PY
 

@@ -1997,17 +1997,18 @@ byte available, both releases advance beyond the earlier IOP CDVD read fault.
 
 The earlier cached store at virtual address `0x00107A88` (`SW`, opcode
 `0xAC230008`) is now admitted. Both ROM0 images reach a real GIF DMA and
-then poll GS CSR.VSINT in OSDSYS. At 16 million slots this is before the
-polling loop observes the next field; local replays through 67 million
-slots remain in the firmware wait loop without a host refusal or IOP
-memory fault. The mailbox remains guest-owned and reads
+then poll GS CSR.VSINT in OSDSYS. At 16 million slots each image has started
+and ended three scanout fields, and the guest has read VSINT while set. A
+150-million-slot replay continues to advance fields and read VSINT without
+a host refusal or IOP memory fault. This is the expected OSDSYS no-disc
+refresh loop (`wait_frames(15)`); it is not a stalled boot path. The mailbox remains guest-owned and reads
 `4F424344, 00000000, 00000000, 00000000, 00000000`. Indexed D-cache
 writeback/invalidate and ordinary GIF channel transfer are now modeled
 with retirement/transaction checks. The next checkpoint is to capture
-whether the guest observes the scheduled VSINT and continue beyond the
-current wait loop. CI asserts the 16-million-slot OSDSYS wait boundary,
-completed GIF DMA status, live mailbox and absence of IOP memory faults
-for both pinned releases.
+the next actual state transition after media is modeled. CI asserts the
+16-million-slot OSDSYS boundary, completed GIF DMA status, live mailbox,
+completed scanout fields, guest VSINT reads, and absence of IOP memory
+faults for both pinned releases.
 
 ## M6E3H3E9B8C: indexed D-cache writeback and BIOS GIF transfer
 
@@ -2023,9 +2024,10 @@ The test checks deferred conflict side effects, replacement/writeback,
 LRF selection, cache-op writeback/invalidation, and branch-slot staging.
 
 Local Release focused tests `ee_ram_tlb` and `iop_hw` pass. Both pinned
-OpenPS2BIOS ROM0 images pass the dual EE/IOP replay through 67,000,000
+OpenPS2BIOS ROM0 images pass the dual EE/IOP replay through 150,000,000
 slots with the real GIF transfer completed, no EE host refusal, and no
-IOP memory fault; both then remain in the OSDSYS GS CSR.VSINT wait loop.
+IOP memory fault; periodic VSINT reads confirm that OSDSYS's no-disc
+refresh loop is making progress.
 The GitHub ROM0 acceptance now checks the fast 16,000,000-slot checkpoint,
-the completed GIF D_STAT bit, live IOP mailbox and wait-loop PC. This is
-not yet a rendered boot screen or proof that the guest observes a field.
+the completed GIF D_STAT bit, live IOP mailbox, and guest observation of
+scanout VSINT. These execution checks do not assert rendered pixels.

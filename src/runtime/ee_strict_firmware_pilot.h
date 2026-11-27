@@ -86,9 +86,10 @@ class c_ee_strict_firmware_pilot
 public:
     // Keep the pilot below the unconfigured reset Timer3 HBlank compare
     // deadline (65536 ticks at the reference NTSC line cadence).
-    // Permit several fields. Guest HBlank programming is admitted only
-    // with an explicit reference scanout configuration.
-    static constexpr uint64_t k_slot_limit = 1u << 26u;
+    // Permit long firmware diagnostics while keeping the budget bounded.
+    // Guest HBlank programming is admitted only with an explicit
+    // reference scanout configuration.
+    static constexpr uint64_t k_slot_limit = 1u << 28u;
     static_assert(k_slot_limit <
         65536ull * ((c_ee_scanout_clock::k_ee_clock_hz * 1001ull / 60000ull) * 2ull / 525ull));
 
@@ -139,6 +140,8 @@ public:
     uint64_t next_scanout_event() { return m_hardware.scanout().next_event_cycle(); }
     uint64_t fields_started() { return m_hardware.scanout().fields_started(); }
     uint64_t fields_ended() { return m_hardware.scanout().fields_ended(); }
+    uint64_t vsint_csr_reads() const { return m_vsint_csr_reads; }
+    uint64_t vsint_csr_set_reads() const { return m_vsint_csr_set_reads; }
     uint64_t gs_csr() { return m_hardware.scanout().csr(); }
     uint32_t gs_reset_count() const { return m_gs_reset_count; }
     uint32_t gif_reset_count() const { return m_gif_reset_count; }
@@ -917,7 +920,19 @@ private:
         if (self.m_hardware.scanout().enabled() &&
             (address == c_ee_hw_bus::k_gs_csr || address == c_ee_hw_bus::k_gs_csr + 4u))
         {
-            return c_ee_hw_bus::mmio_read(&self.m_hardware, address, width, value);
+            if (!c_ee_hw_bus::mmio_read(&self.m_hardware, address, width, value))
+            {
+                return false;
+            }
+            if (address == c_ee_hw_bus::k_gs_csr)
+            {
+                ++self.m_vsint_csr_reads;
+                if ((value->m_lo & c_ee_scanout_clock::k_csr_vsint) != 0u)
+                {
+                    ++self.m_vsint_csr_set_reads;
+                }
+            }
+            return true;
         }
         if (address == k_d_ctrl)
         {
@@ -1167,6 +1182,8 @@ private:
     c_ee_vif1 m_vif1{};
     c_ee_gs_state m_gs{};
     c_ee_gif_path3 m_gif_path3{};
+    uint64_t m_vsint_csr_reads = 0u;
+    uint64_t m_vsint_csr_set_reads = 0u;
     uint32_t m_gif_reset_count = 0u;
     s_ee_strict_gs_timing m_gs_timing{};
     uint32_t m_gs_reset_count = 0u;
