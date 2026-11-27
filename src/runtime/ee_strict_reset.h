@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_strict_rom0.h"
+#include "ee_strict_partial_merge.h"
 #include "ee_strict_branch.h"
 
 namespace ee
@@ -476,8 +477,11 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t primary = opcode >> 26u;
     const bool quad = primary == 0x1eu || primary == 0x1fu;
     const bool half = primary == 0x29u; // SH
-    const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu;
-    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu && !store)
+    const bool partial = primary == 0x22u || primary == 0x26u ||
+        primary == 0x2au || primary == 0x2eu;
+    const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu ||
+        primary == 0x2au || primary == 0x2eu;
+    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu && !partial && !store)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -487,6 +491,58 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t imm = opcode & 0xffffu;
     const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
+    if (partial)
+    {
+        const auto kind = primary == 0x22u || primary == 0x2au
+            ? e_ee_partial_access_kind::WORD_LEFT : e_ee_partial_access_kind::WORD_RIGHT;
+        const auto plan = ee_plan_partial_access(tlb, kind, store, address,
+            cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
+            cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
+        const auto bus = ee_plan_partial_bus_span(plan, cpu.m_cop0[COP0_Config],
+            ram.m_bytes != nullptr ? ram.m_size : 0u);
+        const uint32_t first = plan.m_aligned_virtual_address + plan.m_memory_first_lane;
+        const bool canonical_ram = first >= 0xa0000000u && first < 0xa2000000u &&
+            bus.m_address == first - 0xa0000000u;
+        if (plan.m_fault.m_valid)
+        {
+            return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+        }
+        // Never route a partial transfer to an MMIO callback.
+        if (store)
+        {
+            uint8_t* target = canonical_ram ? ram.write_span(bus) : nullptr;
+            if (target == nullptr)
+            {
+                return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+            }
+            const uint64_t value = read_gpr(cpu, rt) >> (plan.m_register_first_lane * 8u);
+            for (uint32_t i = 0u; i < plan.m_lane_count; ++i)
+            {
+                target[i] = static_cast<uint8_t>(value >> (i * 8u));
+            }
+        }
+        else
+        {
+            const uint8_t* bytes = canonical_ram ? ram.read_span(bus) :
+                (first >= 0xbfc00000u && first < 0xc0000000u &&
+                 bus.m_address == first - 0xa0000000u ? rom.read_span(bus) : nullptr);
+            if (bytes == nullptr)
+            {
+                return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+            }
+            if (rt != 0u)
+            {
+                uint64_t incoming = 0u;
+                for (uint32_t i = 0u; i < plan.m_lane_count; ++i)
+                {
+                    incoming |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+                }
+                cpu.m_gpr[rt].m_lo = ee_strict_merge_load(read_gpr(cpu, rt), incoming,
+                    plan.m_register_first_lane, plan.m_lane_count, plan.m_sign_extend_word_load);
+            }
+        }
+        return {result::COMMITTED, opcode, 0u, pc};
+    }
     const bool word = primary == 0x23u || primary == 0x2bu;
     const auto kind = quad ? e_ee_data_access_kind::GPR_QUADWORD :
         word ? e_ee_data_access_kind::WORD :

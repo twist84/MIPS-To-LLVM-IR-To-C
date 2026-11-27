@@ -47,6 +47,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     bool gs_logged = false;
     bool gs_upper_logged = false;
     bool rom_bounds_logged = false;
+    bool rom_word_logged = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
@@ -67,6 +68,21 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!rom_word_logged && pc == 0xa001008cu && cpu.m_pc == 0xa00102f0u)
+        {
+            rom_word_logged = true;
+            const uint32_t expected = ee::ee_read_instruction_word(rom.m_bytes + 0x100cu);
+            const uint64_t word = cpu.m_gpr[2].m_lo;
+            const uint64_t extended = (expected & 0x80000000u) != 0u
+                ? 0xffffffff00000000ull | expected : expected;
+            if (word != extended)
+            {
+                std::fprintf(stderr, "EE exploration ROM word mismatch\n");
+                return 8;
+            }
+            std::printf("EE exploration ROM word: retired=%u pc=%08x value=%08x matched=1\n",
+                retired, cpu.m_pc, expected);
+        }
         if (!rom_bounds_logged && pc == 0xa001022cu && cpu.m_pc == 0xa00102c4u)
         {
             rom_bounds_logged = true;
@@ -1253,6 +1269,8 @@ int main(int argc, char** argv)
     uint32_t gs_upper_pc = 0u;
     uint32_t rom_bounds_retired = 0u;
     uint64_t rom_bounds_result = 0u;
+    uint32_t rom_word_retired = 0u;
+    uint64_t rom_word_result = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -1269,6 +1287,13 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (rom_word_retired == 0u && pc == 0xa001008cu && cpu.m_pc == 0xa00102f0u)
+        {
+            rom_word_retired = retired;
+            rom_word_result = cpu.m_gpr[2].m_lo;
+            std::printf("EELOAD ROM word: retired=%u pc=%08x value=%016llx\n",
+                retired, cpu.m_pc, static_cast<unsigned long long>(rom_word_result));
+        }
         if (rom_bounds_retired == 0u && pc == 0xa001022cu && cpu.m_pc == 0xa00102c4u)
         {
             rom_bounds_retired = retired;
@@ -1437,6 +1462,15 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "EELOAD GS reset checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
             retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
         return 80;
+    }
+    const uint32_t expected_rom_word = ee::ee_read_instruction_word(bytes.data() + 0x100cu);
+    const uint64_t extended_rom_word = (expected_rom_word & 0x80000000u) != 0u
+        ? 0xffffffff00000000ull | expected_rom_word : expected_rom_word;
+    if (rom_word_retired != 690980u || rom_word_result != extended_rom_word)
+    {
+        std::fprintf(stderr, "EELOAD ROM word checkpoint mismatch: retired=%u pc=%08x opcode=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode);
+        return 82;
     }
     if (rom_bounds_retired != 690912u || rom_bounds_result != 1u)
     {

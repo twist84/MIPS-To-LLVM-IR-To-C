@@ -1199,3 +1199,20 @@ unsigned underflow rejection, reserved encodings and branch slot
 budget refusal. Require genuine helper return at a00102c4 with
 v0=1 after 690912/691104 retirements. No ROM parser HLE or synthetic
 return. New checkpoints require CI. No retail replay.
+
+## M6E3F2: partial word ROM/RAM operations
+
+M6E3F1 passed both releases on 56636bdb:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46054621684
+Both reach a0010080 at 690975/691167, opcode 88820003
+(LWL v0,3(a0)), followed by LWR v0,0(a0), SLL v0,v0,0,
+JR ra and NOP. Source bfc0100c.
+Reuse partial access/bus planners and extract the existing strict
+RAM interpreter's constexpr merge into a common header without
+changing its arithmetic. Admit LWL/LWR from immutable ROM and
+canonical uncached RAM; SWL/SWR only to RAM, selected lanes only.
+No partial MMIO, cached aliases or writes to ROM. Tests exercise
+all four lanes independently in ROM/RAM, store lane preservation,
+cross-word pairs and delay-slot refusal. Require original ROM
+word at a00102f0 at 690980/691172, compared against actual image.
+No host parser substitution or retail replay. Pending CI.

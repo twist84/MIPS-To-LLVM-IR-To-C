@@ -3409,6 +3409,134 @@ bool test_strict_reset_rom_bounds()
     return true;
 }
 
+bool test_strict_reset_partial_word()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[64u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    std::vector<uint8_t> image(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view rom{image.data(), image.size()};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t opcode)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(opcode >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, rom, budget, ram);
+    };
+    constexpr uint64_t left[] = {0x0000000011667788ull, 0x0000000022117788ull,
+        0x0000000033221188ull, 0xffffffff84332211ull};
+    constexpr uint64_t right[] = {0xffffffff84332211ull, 0x1122334455843322ull,
+        0x1122334455668433ull, 0x1122334455667784ull};
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        code[32u + i] = image[32u + i] = i == 3u ? 0x84u : static_cast<uint8_t>((i + 1u) * 0x11u);
+    }
+    for (const uint32_t base : {pc, 0xbfc00000u})
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            cpu.m_gpr[4].m_lo = base + 32u + lane;
+            cpu.m_pc = pc;
+            cpu.m_gpr[2] = {0x1122334455667788ull, 0xabcdefu};
+            put(0u, 0x88820000u);
+            if (step(1u).m_retired != 1u || cpu.m_gpr[2].m_lo != left[lane] ||
+                cpu.m_gpr[2].m_hi != 0xabcdefu)
+            {
+                return false;
+            }
+            cpu.m_pc = pc;
+            cpu.m_gpr[2].m_lo = 0x1122334455667788ull;
+            put(0u, 0x98820000u);
+            if (step(1u).m_retired != 1u || cpu.m_gpr[2].m_lo != right[lane] ||
+                cpu.m_gpr[2].m_hi != 0xabcdefu)
+            {
+                return false;
+            }
+        }
+    }
+    // Independently check each selected store lane and untouched bytes.
+    for (const bool left_store : {false, true})
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            for (uint32_t i = 32u; i < 36u; ++i)
+            {
+                code[i] = 0xa5u;
+            }
+            cpu.m_pc = pc;
+            cpu.m_gpr[4].m_lo = pc + 32u + lane;
+            cpu.m_gpr[2].m_lo = 0x44332211u;
+            put(0u, left_store ? 0xa8820000u : 0xb8820000u);
+            if (step(1u).m_retired != 1u)
+            {
+                return false;
+            }
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                const bool enabled = left_store ? i <= lane : i >= lane;
+                const uint32_t register_lane = left_store ? 3u - lane + i : i - lane;
+                const uint8_t expected = enabled ?
+                    static_cast<uint8_t>(0x11u * (register_lane + 1u)) : 0xa5u;
+                if (code[32u + i] != expected)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    // Actual cross-word pair; preserve the upper 64 bits.
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        code[32u + i] = static_cast<uint8_t>(0x80u + i);
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[4].m_lo = pc + 33u;
+    put(0u, 0x88820003u);
+    put(4u, 0x98820000u);
+    if (step(1u).m_retired != 1u || step(1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xffffffff84838281ull || cpu.m_gpr[2].m_hi != 0xabcdefu)
+    {
+        return false;
+    }
+    // Missing backing, cached alias, device and ROM stores refuse.
+    for (const uint32_t address : {pc + 64u, 0x80000020u, 0xb000f010u})
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = address;
+        const uint64_t old = cpu.m_gpr[2].m_lo;
+        if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+            cpu.m_gpr[2].m_lo != old)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[4].m_lo = 0xbfc00020u;
+    put(0u, 0xa8820000u);
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    // A delay slot with insufficient budget must not merge any lanes.
+    cpu.m_gpr[4].m_lo = 0xbfc00023u;
+    put(0u, 0x10000001u);
+    put(4u, 0x88820000u);
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED || cpu.m_pc != pc ||
+        cpu.m_gpr[2].m_lo != 0xffffffff84838281ull)
+    {
+        return false;
+    }
+    return step(2u).m_retired == 2u && cpu.m_pc == pc + 8u &&
+        cpu.m_gpr[2].m_lo == 0xffffffff84332211ull;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3636,6 +3764,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_partial_word(), "strict reset partial word ROM and RAM regression"))
     {
         return 1;
     }

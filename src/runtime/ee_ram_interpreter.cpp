@@ -1,6 +1,7 @@
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
 #include "ee_memory_bus_plan.h"
+#include "ee_strict_partial_merge.h"
 #include "ee_memory_fault_commit.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
@@ -565,37 +566,6 @@ s_ee_ram_execution ee_execute_ram_callback(
 
 namespace
 {
-// All callers supply a validated lane range within one 64-bit half.
-constexpr uint64_t strict_low_byte_mask(uint32_t count)
-{
-    return count == 8u ? ~uint64_t{0} : (uint64_t{1} << (count * 8u)) - 1u;
-}
-
-constexpr uint64_t strict_merge_load(uint64_t original, uint64_t incoming,
-    uint32_t first_lane, uint32_t count, bool sign_extend_word)
-{
-    const uint32_t shift = first_lane * 8u;
-    const uint64_t mask = strict_low_byte_mask(count);
-    uint64_t value = (original & ~(mask << shift)) | ((incoming & mask) << shift);
-    if (sign_extend_word)
-    {
-        value &= 0xffffffffull;
-        if ((value & 0x80000000ull) != 0u)
-        {
-            value |= 0xffffffff00000000ull;
-        }
-    }
-    return value;
-}
-
-static_assert(strict_low_byte_mask(8u) == 0xffffffffffffffffull);
-static_assert(strict_merge_load(0x1122334455667788ull, 0x80u, 3u, 1u, true) ==
-              0xffffffff80667788ull);
-static_assert(strict_merge_load(0x1122334455667788ull, 0xffu, 0u, 1u, false) ==
-              0x11223344556677ffull);
-static_assert(strict_merge_load(0u, 0x8877665544332211ull, 0u, 8u, false) ==
-              0x8877665544332211ull);
-
 uint64_t strict_read_bytes(const uint8_t* bytes, uint32_t count)
 {
     uint64_t value = 0u;
@@ -937,7 +907,7 @@ e_ee_strict_ram_step_result strict_ram_step_impl(
         else
         {
             const uint64_t incoming = strict_read_bytes(bytes, plan.m_lane_count);
-            write_dword(cpu, rt, strict_merge_load(read_reg(cpu, rt), incoming,
+            write_dword(cpu, rt, ee_strict_merge_load(read_reg(cpu, rt), incoming,
                 plan.m_register_first_lane, plan.m_lane_count,
                 plan.m_sign_extend_word_load));
         }
