@@ -545,7 +545,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                 llvm, native_target_identity, ir_pipeline_id)
         run_game.build_linked_library(
             source_root, profile, metadata_path, profile / "objects",
-            profile / library_name, opt, emit_jobs=jobs)
+            profile / library_name, opt, emit_jobs=jobs,
+            record_link_identity=True)
         run_game.write_translation_cache(
             profile / "translation-cache.json", inputs, opt, metadata_path,
             profile / library_name, ir_sources)

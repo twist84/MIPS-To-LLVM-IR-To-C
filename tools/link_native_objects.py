@@ -76,6 +76,57 @@ def select_native_link_compiler(requested=None, platform=None, environment=None)
     )
 
 
+def link_toolchain_identity(cxx=None, *, pdb=False, data_dispatch=False, dispatcher_opt=0):
+    """Identity for an optional no-link reuse, not a guest object cache key.
+
+    Conservative: inability to identify the driver or a linker disables the
+    optimization. The actual link remains available.
+    """
+    driver = select_native_link_compiler(cxx)
+    compiler = Path(shutil.which(driver) or driver).resolve(strict=True)
+
+    def executable_identity(path):
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        return {"path": str(path), "sha256": digest.hexdigest()}
+
+    linker_names = ("link.exe", "lld-link.exe") if sys.platform == "win32" else (
+        "ld", "ld.lld", "ld64", "ld.gold")
+    candidates = set()
+    for name in linker_names:
+        found = shutil.which(name)
+        if found:
+            candidates.add(Path(found).resolve(strict=True))
+        sibling = compiler.parent / name
+        if sibling.is_file():
+            candidates.add(sibling.resolve(strict=True))
+    if sys.platform != "win32":
+        result = subprocess.run([str(compiler), "-print-prog-name=ld"],
+                                capture_output=True, text=True, check=True)
+        name = result.stdout.strip()
+        found = shutil.which(name) or name
+        if found and Path(found).is_file():
+            candidates.add(Path(found).resolve(strict=True))
+    if not candidates:
+        raise ValueError("native linker identity unavailable")
+    return {
+        "schema": "ee-link-toolchain-v1",
+        "compiler": executable_identity(compiler),
+        "linkers": [executable_identity(path) for path in sorted(candidates)],
+        "platform": sys.platform,
+        "pdb": pdb,
+        "data_dispatch": data_dispatch,
+        "dispatcher_opt": dispatcher_opt,
+        "environment": {name: os.environ.get(name, "") for name in (
+            "PATH", "INCLUDE", "LIB", "LIBPATH", "CPATH", "CPLUS_INCLUDE_PATH",
+            "CXXFLAGS", "SDKROOT", "LIBRARY_PATH", "COMPILER_PATH",
+            "GCC_EXEC_PREFIX", "VCToolsInstallDir", "WindowsSdkDir",
+            "WindowsSDKVersion")},
+    }
+
+
 def cpp_string(value):
     return (
         '"'
@@ -747,6 +798,8 @@ def main():
         default=0,
         help="metadata chunk optimisation level (default: 0); entry wrapper at least O2",
     )
+    parser.add_argument("--record-link-identity", action="store_true",
+                        help="record driver/linker identity for future unchanged-cache reuse")
     args = parser.parse_args()
 
     source_root = args.source_root.resolve()
@@ -934,6 +987,14 @@ def main():
             "pdb_sha256": hashlib.sha256(pdb_path.read_bytes()).hexdigest()
                           if pdb_path is not None else None,
         }
+        if args.record_link_identity:
+            try:
+                link_manifest["toolchain_identity"] = link_toolchain_identity(
+                    args.cxx, pdb=args.pdb, data_dispatch=args.data_dispatch,
+                    dispatcher_opt=args.dispatcher_opt)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                print(f"link_native_objects: no-link reuse unavailable: {error}",
+                      file=sys.stderr, flush=True)
         manifest_path = args.output.with_suffix(args.output.suffix + ".link.json")
         manifest_path.write_text(json.dumps(link_manifest, indent=2) + "\n", encoding="utf-8")
         print(

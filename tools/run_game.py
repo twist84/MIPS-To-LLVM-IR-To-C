@@ -1292,7 +1292,8 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
 @metrics.measure("native_build_total")
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
-                         appended_ir=None, cache_base=None, emit_only=False):
+                         appended_ir=None, cache_base=None, emit_only=False,
+                         record_link_identity=False):
     if not reuse_objects:
         # Full verification is mandatory on the initial build. An append
         # pass has already validated the existing provenance and only new
@@ -1322,6 +1323,8 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
     ]
     if pdb:
         command.append("--pdb")
+    if record_link_identity:
+        command.append("--record-link-identity")
     if cache_base is not None:
         command.append(f"--cache-base={cache_base}")
     run(command)

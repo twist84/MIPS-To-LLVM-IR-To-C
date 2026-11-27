@@ -232,6 +232,7 @@ def cached_objects(emit_dir, emit_opt, target_triple, filenames):
         if (
             not manifest.get("complete")
             or manifest.get("optimization_level") != emit_opt
+            or manifest.get("backend_optimization_level", backend_opt(emit_opt)) != backend_opt(emit_opt)
             or manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt)
             or manifest.get("native_target") != native_target_identity(emit_opt)
             or manifest.get("target_triple") != target_triple
@@ -286,6 +287,7 @@ def append_cached_objects(emit_dir, emit_opt, target_triple, new_files):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if (manifest.get("complete") is not True or
         manifest.get("optimization_level") != emit_opt or
+        manifest.get("backend_optimization_level", backend_opt(emit_opt)) != backend_opt(emit_opt) or
         manifest.get("ir_pipeline") != ir_pipeline_id(emit_opt) or
         manifest.get("native_target") != native_target_identity(emit_opt) or
         manifest.get("target_triple") != target_triple or

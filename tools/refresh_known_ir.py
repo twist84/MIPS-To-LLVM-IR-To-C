@@ -57,13 +57,19 @@ def reuse_identical_native_cache(cache, inputs, sources, opt, metadata, library,
     if not cache.is_file() or not library.is_file():
         return False
     try:
-        from link_native_objects import load_inputs
+        from link_native_objects import load_inputs, link_toolchain_identity
         from verify_ir import append_cached_objects, llvm
         objects = library.parent / "objects"
         snapshot = run_game.validate_cached_library_identity(
             cache, inputs, opt, metadata, library)
         if (not shared_ir.matching_sources(snapshot.get("ir_sources"), sources) or
                 snapshot.get("ir_hashes") != hashes):
+            return False
+        link_receipt = shared_ir.read_json(library.with_suffix(library.suffix + ".link.json"))
+        if (link_receipt.get("complete") is not True or
+                link_receipt.get("library_sha256") != snapshot.get("library_sha256") or
+                not link_receipt.get("toolchain_identity") or
+                link_receipt["toolchain_identity"] != link_toolchain_identity()):
             return False
         shared_ir.current_state(metadata, sources, hashes)
         records = append_cached_objects(objects, opt, llvm.get_default_triple(), [])
@@ -74,7 +80,7 @@ def reuse_identical_native_cache(cache, inputs, sources, opt, metadata, library,
             return False
         load_inputs(metadata, objects)
         return True
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return False
 
 
@@ -157,7 +163,8 @@ def refresh(elf, build, config, base, opt, jobs, *, ir_jobs=8):
                       "compilation and linking skipped", flush=True)
             else:
                 run_game.build_linked_library(root, work, metadata_path, work / "objects",
-                                              library, opt, emit_jobs=jobs)
+                                              library, opt, emit_jobs=jobs,
+                                              record_link_identity=True)
                 run_game.write_translation_cache(cache, inputs, opt, metadata_path,
                                                  library, sources)
             with metrics.stage("cache_validation"):

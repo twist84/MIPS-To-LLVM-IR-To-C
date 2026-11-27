@@ -839,13 +839,23 @@ def test_identical_native_reuse_requires_verified_objects():
         hashes = {"a.ll": digest(b"IR")}
         sources = {"ELF": "same"}
         records = {str(metadata.parent / "a.ll"): {"ir_sha256": hashes["a.ll"]}}
+        identity = {"schema": "fixture"}
+        receipt = library.with_suffix(library.suffix + ".link.json")
+        shared_ir.write_json(receipt, {"complete": True, "library_sha256": digest(b"library"),
+                                       "toolchain_identity": identity})
         with patch.object(run_game, "validate_cached_library_identity",
-                          return_value={"ir_sources": sources, "ir_hashes": hashes}), \
+                          return_value={"ir_sources": sources, "ir_hashes": hashes,
+                                        "library_sha256": digest(b"library")}), \
              patch.object(shared_ir, "current_state"), \
              patch("verify_ir.append_cached_objects", return_value=records), \
+             patch("link_native_objects.link_toolchain_identity", return_value=identity) as toolchain, \
              patch("link_native_objects.load_inputs") as load:
             assert refresh.reuse_identical_native_cache(
                 cache, {}, sources, 0, metadata, library, hashes)
+            toolchain.return_value = {"schema": "changed"}
+            assert not refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
+            toolchain.return_value = identity
             load.side_effect = ValueError("corrupt object")
             assert not refresh.reuse_identical_native_cache(
                 cache, {}, sources, 0, metadata, library, hashes)

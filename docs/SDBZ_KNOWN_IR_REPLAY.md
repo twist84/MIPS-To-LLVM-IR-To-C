@@ -442,3 +442,15 @@ source fingerprints via `--allow-source-changes`, but still requires the
 exact original ordered IR hashes; `--allow-ir-changes` remains a separate
 and broader consent. Independent native and promotion checks are unchanged.
 The isolated benchmark defaults remain unchanged for repeatable comparisons.
+
+The optional unchanged-library shortcut now requires a matching recorded
+native driver/linker identity, in addition to existing source, target,
+object and library verification. Recovery/overwrite links record driver
+and discoverable linker executable SHA-256 hashes, link options and relevant
+environment; old receipts or unavailable identity cause a normal relink,
+not a guest recompilation. Normal live links avoid this extra hashing.
+System SDK and external library contents are not exhaustively fingerprinted.
+Guest incremental/append manifests also reject a contradictory recorded
+backend optimization level; legacy manifests without that field retain
+the established profile-to-backend mapping. Malformed seed candidates are
+skipped rather than preventing reuse from other inventories.

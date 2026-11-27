@@ -304,10 +304,12 @@ def seed_candidate_objects(candidates, work, metadata_path, hashes, opt,
         directory = source / "objects"
         try:
             manifest = shared_ir.read_json(directory / "objects.json")
-            if (manifest.get("complete") is not True or
+            if (not isinstance(manifest, dict) or manifest.get("complete") is not True or
                     any(manifest.get(key) != value for key, value in identity.items())):
                 continue
             entries = manifest["objects"]
+            if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+                continue
             names = [Path(item["input"]).name for item in entries]
             if len(names) != len(set(names)):
                 continue
