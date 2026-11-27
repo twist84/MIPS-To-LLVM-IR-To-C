@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_ram_interpreter.h"
+#include "ee_strict_branch.h"
 
 namespace ee
 {
@@ -80,7 +81,7 @@ inline constexpr bool ee_strict_branch_supported(uint32_t opcode)
         const uint32_t function = opcode & 63u;
         const uint32_t rs = (opcode >> 21u) & 31u;
         const uint32_t rd = (opcode >> 11u) & 31u;
-        return (function == 8u && (opcode & 0x001fffc0u) == 0u) ||
+        return ee_strict_jr_supported(opcode) ||
             (function == 9u && (opcode & 0x001f07c0u) == 0u && rs != rd);
     }
     return false;

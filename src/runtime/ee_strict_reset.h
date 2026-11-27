@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_strict_rom0.h"
+#include "ee_strict_branch.h"
 
 namespace ee
 {
@@ -84,11 +85,27 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
 
 // Explicit caller-owned, isolated main RAM backing for the reset copy.
 // The physical bus planner excludes aliases, ROM and device windows;
-// no guest fetch from this mutable view is supported yet.
+// only canonical uncached main RAM instruction fetch is permitted.
 struct s_ee_reset_ram_view
 {
     uint8_t* m_bytes = nullptr;
     size_t m_size = 0u;
+
+    constexpr const uint8_t* fetch_span(const s_ee_fetch_plan& fetch) const
+    {
+        const uint32_t address = fetch.m_access.m_physical_address;
+        if (m_bytes == nullptr ||
+            fetch.m_route != e_ee_fetch_route::CACHE_BYPASS_PHYSICAL ||
+            fetch.m_access.m_status != e_ee_access_status::PHYSICAL ||
+            fetch.m_access.m_cache_mode != 2u || (fetch.m_pc & 3u) != 0u ||
+            fetch.m_pc < 0xa0000000u || fetch.m_pc >= 0xa2000000u ||
+            address != fetch.m_pc - 0xa0000000u ||
+            ee_classify_physical_span(address, 4u, m_size) != e_ee_bus_region::RAM)
+        {
+            return nullptr;
+        }
+        return m_bytes + address;
+    }
 
     constexpr uint8_t* write_span(const s_ee_bus_span_plan& bus) const
     {
@@ -102,6 +119,18 @@ struct s_ee_reset_ram_view
         return m_bytes + bus.m_address;
     }
 };
+
+// Fetch from the supplied live backing, never from a ROM image's
+// source bytes as a substitute for missing RAM.
+inline constexpr const uint8_t* ee_fetch_strict_reset_word(
+    const s_ee_fetch_plan& fetch, const s_ee_strict_rom0_view& rom,
+    const s_ee_reset_ram_view& ram = {})
+{
+    return fetch.m_pc >= 0xbfc00000u && fetch.m_pc < 0xc0000000u
+        ? rom.fetch_span(fetch) : ram.fetch_span(fetch);
+}
+
+static_assert(s_ee_reset_ram_view{}.fetch_span({}) == nullptr);
 
 namespace strict_reset_detail
 {
@@ -239,9 +268,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 }
 } // namespace strict_reset_detail
 
-// Isolated post-Status-clear ROM instruction execution. The caller
+// Isolated post-Status-clear ROM and uncached RAM execution. The caller
 // owns all backing/state and excludes pending clock/device effects.
-// BEQ/BNE and their supported register/ROM-read/RAM-store slots are
+// BEQ/BNE/JR and their supported register/ROM-read/RAM-store slots are
 // a single bounded transaction. A refused slot changes no state.
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
@@ -250,8 +279,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
-        cpu.m_cop0[COP0_Status] != 0u || cpu.m_pc < 0xbfc00000u ||
-        cpu.m_pc >= 0xc0000000u)
+        cpu.m_cop0[COP0_Status] != 0u)
     {
         return {result::UNSAFE_BOUNDARY};
     }
@@ -262,9 +290,9 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     const c_ee_tlb tlb{};
     const auto fetch = [&](uint32_t pc)
     {
-        return rom.fetch_span(ee_plan_instruction_fetch(tlb, pc,
+        return ee_fetch_strict_reset_word(ee_plan_instruction_fetch(tlb, pc,
             cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
-            cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]));
+            cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]), rom, ram);
     };
     const uint8_t* code = fetch(cpu.m_pc);
     if (code == nullptr)
@@ -273,7 +301,8 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     }
     const uint32_t opcode = ee_read_instruction_word(code);
     const uint32_t primary = opcode >> 26u;
-    if (primary == 4u || primary == 5u)
+    const bool jr = ee_strict_jr_supported(opcode);
+    if (primary == 4u || primary == 5u || jr)
     {
         if (budget < 2u)
         {
@@ -285,6 +314,11 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         const bool taken = primary == 4u ? equal : !equal;
         const uint32_t imm = opcode & 0xffffu;
         const uint32_t disp = (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) << 2u;
+        // Sample the indirect target before the delay slot. Its
+        // alignment and backing are checked only on the next fetch.
+        const uint32_t next = jr
+            ? static_cast<uint32_t>(strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u))
+            : taken ? pc + 4u + disp : pc + 8u;
         const uint8_t* slot = fetch(pc + 4u);
         if (slot == nullptr)
         {
@@ -296,7 +330,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         {
             return action;
         }
-        cpu.m_pc = taken ? pc + 4u + disp : pc + 8u;
+        cpu.m_pc = next;
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,

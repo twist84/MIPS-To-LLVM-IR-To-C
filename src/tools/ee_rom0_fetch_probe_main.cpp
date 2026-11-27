@@ -217,9 +217,9 @@ int main(int argc, char** argv)
     std::vector<uint8_t> ram_bytes(0x02000000u, 0xa5u);
     const ee::s_ee_reset_ram_view ram{ram_bytes.data(), ram_bytes.size()};
 
-    // Explore the actual supported prefix, not an invented device
-    // response. Preserve a small committed tail for diagnosis.
-    constexpr uint32_t exploration_budget = 1000000u;
+    // Stop exactly at the authentic JR handoff before exploring RAM.
+    // The pinned image must retain all previously observed copy results.
+    constexpr uint32_t handoff_checkpoint = 251576u;
     struct s_trace
     {
         uint32_t m_pc;
@@ -232,17 +232,17 @@ int main(int argc, char** argv)
     s_trace tail[tail_capacity]{};
     uint32_t trace_count = 0u;
     ee::s_ee_reset_prefix_step stop{ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
-    for (; retired < exploration_budget;)
+    for (; retired < handoff_checkpoint;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_budget - retired, ram);
+            handoff_checkpoint - retired, ram);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
             break;
         }
-        if (action.m_retired == 0u || action.m_retired > exploration_budget - retired)
+        if (action.m_retired == 0u || action.m_retired > handoff_checkpoint - retired)
         {
             return 12;
         }
@@ -257,7 +257,7 @@ int main(int argc, char** argv)
         std::printf("EE reset trace: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
             item.m_pc, item.m_opcode, item.m_count, item.m_next, item.m_total);
     }
-    std::printf("EE reset exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
+    std::printf("EE reset copy checkpoint: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);
     for (uint32_t i = 0u; i < 32u; ++i)
@@ -285,26 +285,46 @@ int main(int argc, char** argv)
         matching, image_size, matching_prefix,
         static_cast<unsigned>(ram_bytes[destination - 1u]),
         static_cast<unsigned>(ram_bytes[destination + image_size]));
+    if (retired != handoff_checkpoint || cpu.m_pc != 0xa0010000u ||
+        matching != image_size || matching_prefix != image_size ||
+        ram_bytes[destination - 1u] != 0xa5u ||
+        ram_bytes[destination + image_size] != 0xa5u || trace_count == 0u)
+    {
+        std::fprintf(stderr, "EELOAD handoff or image regression\n");
+        return 19;
+    }
+    const auto& handoff = tail[(trace_count - 1u) % tail_capacity];
+    if (handoff.m_pc != 0xbfc00124u || handoff.m_opcode != 0x03000008u ||
+        handoff.m_count != 2u || handoff.m_next != cpu.m_pc ||
+        handoff.m_total != handoff_checkpoint)
+    {
+        std::fprintf(stderr, "EELOAD JR retirement regression\n");
+        return 20;
+    }
     const auto next = ee::ee_plan_instruction_fetch(tlb, cpu.m_pc,
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
-    const uint8_t* code = rom.fetch_span(next);
-    if (code == nullptr)
+    const uint8_t* code = ee::ee_fetch_strict_reset_word(next, rom, ram);
+    if (code != ram_bytes.data() + destination ||
+        next.m_access.m_physical_address != destination)
     {
-        std::puts("EE reset lookahead unavailable at committed stop");
-        return 0;
+        std::fprintf(stderr, "EELOAD live RAM fetch regression\n");
+        return 21;
     }
     const uint32_t word = ee::ee_read_instruction_word(code);
     const auto ins = ee::decode(cpu.m_pc, word);
-    std::printf("EE reset prefix stop: pc=%08x opcode=%08x decoded=%s valid=%u (diagnostic host stop)\n",
-        cpu.m_pc, word, ins.mnemonic, static_cast<unsigned>(ins.valid));
+    std::printf("EELOAD handoff: retired=%u pc=%08x physical=%08x opcode=%08x decoded=%s valid=%u (RAM-backed fetch, not retirement)\n",
+        retired, cpu.m_pc, next.m_access.m_physical_address, word, ins.mnemonic,
+        static_cast<unsigned>(ins.valid));
     // Capture a bounded lookahead for the next implementation batch;
-    // these words are fetched and decoded only, never executed.
+    // this lookahead fetches and decodes without executing any word.
     for (uint32_t i = 1u; i < 16u; ++i)
     {
         const uint32_t pc = cpu.m_pc + i * 4u;
-        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc, 0u, 0u, 0u, 0u);
-        const uint8_t* look = rom.fetch_span(plan);
+        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+            cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+        const uint8_t* look = ee::ee_fetch_strict_reset_word(plan, rom, ram);
         if (look == nullptr)
         {
             break;
@@ -313,6 +333,36 @@ int main(int argc, char** argv)
         const auto decoded = ee::decode(pc, opcode);
         std::printf("EE reset lookahead: pc=%08x opcode=%08x decoded=%s\n",
             pc, opcode, decoded.mnemonic);
+    }
+    // The handoff above is an enforced milestone. A further bounded
+    // run is diagnostic: report the first genuine unsupported action.
+    constexpr uint32_t exploration_limit = handoff_checkpoint + 4096u;
+    stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
+    for (; retired < exploration_limit;)
+    {
+        const uint32_t pc = cpu.m_pc;
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            exploration_limit - retired, ram);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
+        {
+            stop = action;
+            break;
+        }
+        if (action.m_retired == 0u || action.m_retired > exploration_limit - retired)
+        {
+            return 22;
+        }
+        retired += action.m_retired;
+        std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
+            pc, action.m_opcode, action.m_retired, cpu.m_pc, retired);
+    }
+    std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
+        retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
+        stop.m_opcode, stop.m_data_address);
+    for (uint32_t i = 0u; i < 32u; ++i)
+    {
+        std::printf("EELOAD stop GPR: r%02u=%016llx\n", i,
+            static_cast<unsigned long long>(i == 0u ? 0u : cpu.m_gpr[i].m_lo));
     }
     return 0;
 }

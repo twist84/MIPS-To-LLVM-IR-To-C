@@ -775,3 +775,33 @@ Directed tests cover full-width unsigned comparisons, byte copying,
 negative displacement, zero-register stores, missing backing,
 wrong regions, physical bounds, and successful/refused/budgeted
 delay-slot stores. CI pending; no retail replay.
+
+## Strict memory follow-up M6E2F: authentic EELOAD handoff
+
+M6E2E CI run 46044834525/job 140661376485 verified 251574 retired
+instructions, stopping at bfc00124 / 03000008 (JR t8), with all
+41896 EELOAD bytes matching the ROM source and both guards a5.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46044834525/job/140661376485
+
+Share the canonical JR encoding predicate with native branch lowering.
+Capture its low 32-bit target before the actual slot; retire the pair
+only after a successful slot. A refused slot retains the branch PC.
+Check alignment and backing at the next fetch, not speculatively.
+
+The isolated reset executor now permits live instruction fetch from
+explicitly supplied canonical uncached KSEG1 RAM via the architectural
+fetch planner and physical span classifier. No cached or accelerated
+aliases, devices, missing RAM backing, or ROM-source substitution.
+Existing ROM data reads and isolated SB stores are unchanged.
+
+The pinned probe requires exactly 251576 retirements at a0010000,
+physical 00010000, a final two-instruction JR transaction, full image
+comparison and unchanged guards. Decode live RAM entry and bounded
+lookahead before a separate diagnostic exploration of up to 4096
+additional retirements. This is not native firmware execution or
+boot completion. The expected handoff remains pending CI validation.
+
+Directed tests cover target capture before slot mutation, zero GPR,
+reserved encodings, budget and refused slots, live guest-written
+instruction bytes, missing/short backing, cached/unmapped/device
+targets and deferred misalignment. No retail replay required.

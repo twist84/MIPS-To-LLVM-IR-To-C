@@ -1807,6 +1807,135 @@ bool test_strict_reset_range_checks_and_byte_store()
            ram[ram.size() - 2u] == 0xa5u && cpu.m_gpr[0].m_lo == 0xdeadbeefu;
 }
 
+bool test_strict_reset_jr_and_ram_fetch()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xbfc00000u;
+    constexpr uint32_t target = 0xa0001000u;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    std::vector<uint8_t> ram(0x1004u, 0xa5u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    const ee::s_ee_reset_ram_view backing{ram.data(), ram.size()};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    // Guest stores generate ADDIU r3,zero,7 in live RAM. A differing
+    // ROM word at the same offset must not become the fetched code.
+    put(0u, 0xa0820000u); // sb r2,0(r4)
+    put(0x1000u, 0x24030009u);
+    cpu.m_gpr[4].m_lo = target;
+    constexpr uint32_t instruction = 0x24030007u;
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[2].m_lo = instruction >> (i * 8u);
+        cpu.m_gpr[4].m_lo = target + i;
+        if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u, backing).m_retired != 1u)
+        {
+            return false;
+        }
+    }
+
+    constexpr uint32_t branch_pc = pc + 4u;
+    put(4u, 0x03000008u); // jr t8
+    put(8u, 0x27180004u); // addiu t8,t8,4
+    cpu.m_pc = branch_pc;
+    cpu.m_gpr[24] = {0x12345678a0001000ull, 0x5678u};
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, view, budget, backing);
+    };
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+        cpu.m_pc != branch_pc || cpu.m_gpr[24].m_lo != 0x12345678a0001000ull)
+    {
+        return false;
+    }
+    put(8u, 0x03000008u); // unsupported branch in slot
+    const auto refused = step(2u);
+    if (refused.m_result != result::UNSUPPORTED_OPCODE || refused.m_retired != 0u ||
+        refused.m_detail_pc != branch_pc + 4u || cpu.m_pc != branch_pc ||
+        cpu.m_gpr[24].m_lo != 0x12345678a0001000ull)
+    {
+        return false;
+    }
+    put(8u, 0xa0800000u); // sb zero,0(r4), outside backing
+    cpu.m_gpr[4].m_lo = target + 4u;
+    const auto data_refused = step(2u);
+    if (data_refused.m_result != result::DATA_UNAVAILABLE ||
+        data_refused.m_detail_pc != branch_pc + 4u ||
+        cpu.m_pc != branch_pc || ram.back() != 0x24u)
+    {
+        return false;
+    }
+    put(8u, 0x27180004u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != target ||
+        cpu.m_gpr[24].m_lo != 0xffffffffa0001004ull || cpu.m_gpr[24].m_hi != 0x5678u ||
+        ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_result != result::FETCH_UNAVAILABLE ||
+        cpu.m_pc != target ||
+        step(1u).m_retired != 1u || cpu.m_gpr[3].m_lo != 7u || cpu.m_pc != target + 4u ||
+        step(1u).m_result != result::FETCH_UNAVAILABLE)
+    {
+        return false;
+    }
+
+    // JR's reserved fields must not be accepted or execute its slot.
+    for (const uint32_t invalid : {0x03010008u, 0x03000808u, 0x03000048u})
+    {
+        put(4u, invalid);
+        cpu.m_pc = branch_pc;
+        if (step(2u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != branch_pc ||
+            cpu.m_gpr[24].m_lo != 0xffffffffa0001004ull)
+        {
+            return false;
+        }
+    }
+    put(4u, 0x03000008u);
+    put(8u, 0u);
+    for (const uint32_t unavailable : {target + 1u, target + 4u, 0x80001000u,
+                                      0x00401000u, 0xa2000000u, 0xb0000000u})
+    {
+        cpu.m_pc = branch_pc;
+        cpu.m_gpr[24].m_lo = unavailable;
+        // No speculative target fetch, including misaligned targets.
+        if (step(2u).m_retired != 2u || cpu.m_pc != unavailable)
+        {
+            return false;
+        }
+        const auto fetch = step(1u);
+        if (fetch.m_result != result::FETCH_UNAVAILABLE ||
+            fetch.m_detail_pc != unavailable || fetch.m_retired != 0u ||
+            cpu.m_pc != unavailable)
+        {
+            return false;
+        }
+    }
+    put(4u, 0x00000008u); // jr zero
+    cpu.m_pc = branch_pc;
+    cpu.m_gpr[0] = {target, 0x1234u};
+    if (step(2u).m_retired != 2u || cpu.m_pc != 0u ||
+        cpu.m_gpr[0].m_lo != target || step(1u).m_result != result::FETCH_UNAVAILABLE)
+    {
+        return false;
+    }
+
+    // A JR at the very last backed RAM word cannot fetch its slot.
+    cpu.m_pc = target;
+    ram[0x1000u] = 8u;
+    ram[0x1001u] = 0u;
+    ram[0x1002u] = 0u;
+    ram[0x1003u] = 3u;
+    const auto slot = step(2u);
+    return slot.m_result == result::FETCH_UNAVAILABLE && slot.m_retired == 0u &&
+        slot.m_detail_pc == target + 4u && cpu.m_pc == target &&
+        ram[0xfffu] == 0xa5u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2034,6 +2163,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_jr_and_ram_fetch(), "strict reset JR and live RAM fetch regression"))
     {
         return 1;
     }
