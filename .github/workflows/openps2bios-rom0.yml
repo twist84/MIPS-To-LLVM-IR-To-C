@@ -363,6 +363,25 @@ jobs:
           assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
           PY
 
+      - name: Verify mounted ISO boot path (v0.7)
+        run: |
+          set -euo pipefail
+          python3 tools/make_openps2bios_test_iso.py openps2bios-test.iso
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 16000000 \
+            --iso openps2bios-test.iso > dual-rom0-v07-iso.log 2>&1
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v07-iso.log").read_text()
+          serial = b"".join(bytes.fromhex(x) for x in re.findall(
+              r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))
+          assert "CDVD READ DMA3 complete: lba=16 sectors=8" in log, log
+          assert "Dual ROM0 CDVD: type=13 bytes=16384 last_lba=16 last_sectors=8" in log, log
+          assert b"starting cdrom0:\\TEST.ELF;1\n" in serial, log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ", log, re.M), log
+          assert "HOST_REFUSAL" not in log, log
+          PY
+
       - name: Explore authentic v0.7 EE reset execution
         run: |
           set -euo pipefail
