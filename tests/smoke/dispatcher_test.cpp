@@ -109,6 +109,28 @@ uint32_t host_yield_entry(ee::s_ee_cpu_state* cpu, ee::s_ee_runtime*)
     return static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD);
 }
 
+// Synthetic committed Level 2 boundary; no timing producer is installed.
+uint32_t level2_exit_entry(ee::s_ee_cpu_state* cpu, ee::s_ee_runtime*)
+{
+    cpu->m_cop0[ee::COP0_Status] |= ee::STATUS_ERL;
+    cpu->m_cop0[ee::COP0_Cause] = 0x40020020u; // BD2, EXC2=2, saved Sys.
+    cpu->m_cop0[ee::COP0_ErrorEPC] = 0x00320000u;
+    cpu->m_pc = 0x80000080u;
+    return static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION);
+}
+
+uint32_t level2_vector_entry(ee::s_ee_cpu_state* cpu, ee::s_ee_runtime*)
+{
+    // A mapped vector must not execute within the same dispatcher call.
+    cpu->m_gpr[8].m_lo = 99u;
+    return static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+}
+
+static_assert(ee::ee_is_level2_exception_exit(7u));
+static_assert(!ee::ee_is_level2_exception_exit(1u));
+static_assert(!ee::ee_is_level2_exception_exit(3u));
+static_assert(!ee::ee_is_level2_exception_exit(6u));
+
 uint32_t dispatch_loop_entry(ee::s_ee_cpu_state* cpu, ee::s_ee_runtime*)
 {
     // Deliberately return to this same translated block forever.
@@ -351,6 +373,39 @@ int main()
               cpu.m_gpr[8].m_hi == 0x0123456789abcdefull &&
               cpu.m_cop0[13] == 0u,
               "propagate exact host yield and resume same guest entry");
+    }
+
+    // The Level 2 exit must propagate even when its vector has translated
+    // code. The saved Level 1 syscall fields are not a new syscall.
+    {
+        ee::s_recompiled_elf compiled{};
+        compiled.functions.push_back(
+            make_function("level2_exit", 0x00320000u, {0x00320000u}));
+        compiled.functions.push_back(
+            make_function("level2_vector", 0x80000080u, {0x80000080u}));
+        const ee::t_ee_translated_entry entries[] =
+        {
+            level2_exit_entry, level2_vector_entry
+        };
+        const ee::s_ee_dispatch_table table{&compiled, entries, 2u};
+        ee::s_ee_cpu_state cpu{};
+        cpu.m_pc = 0x00320000u;
+        cpu.m_cop0[ee::COP0_EPC] = 0x00123400u;
+        cpu.m_cop0[ee::COP0_Status] = ee::STATUS_EXL;
+        cpu.m_gpr[8].m_lo = 41u;
+        const auto result = ee::ee_dispatch_run(&cpu, nullptr, table, 50u);
+        check(is_exited(result, static_cast<uint32_t>(
+                  e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION)) &&
+              result.dispatch_count == 1u &&
+              result.guest_pc == 0x80000080u &&
+              cpu.m_pc == 0x80000080u &&
+              cpu.m_cop0[ee::COP0_EPC] == 0x00123400u &&
+              cpu.m_cop0[ee::COP0_ErrorEPC] == 0x00320000u &&
+              cpu.m_cop0[ee::COP0_Cause] == 0x40020020u &&
+              cpu.m_cop0[ee::COP0_Status] ==
+                  (ee::STATUS_EXL | ee::STATUS_ERL) &&
+              cpu.m_gpr[8].m_lo == 41u,
+              "propagate Level 2 exit without executing mapped vector or losing saved Level 1 state");
     }
 
     // Metadata and native entry arrays must remain index-aligned.

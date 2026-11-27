@@ -271,17 +271,30 @@ namespace
 constexpr uint32_t k_perf_control_mask = 0x800ffbfeu;
 constexpr uint32_t k_perf_cte = 0x80000000u;
 
-bool perf_event_supported(uint32_t control, unsigned index, bool has_clock)
+bool perf_event_supported(uint32_t control, unsigned index, bool has_clock,
+                          uint32_t capabilities = 0u)
 {
     const uint32_t modes = (control >> (1u + index * 10u)) & 15u;
     const uint32_t event = (control >> (5u + index * 10u)) & 31u;
     // EE Core User's Manual 7.2.2, table 7-1: event zero is
     // reserved only for PCR0; PCR1 selects low-order branch issue.
     // Never silently report zero for an active, unmodeled branch event.
-    if ((control & k_perf_cte) == 0u || modes == 0u ||
-        (event == 0u && index == 0u) || event >= 16u)
+    if ((control & k_perf_cte) == 0u || modes == 0u || event == 16u)
     {
         return true;
+    }
+    // Preserve legacy reserved-selector behavior only for the cycle-only
+    // compatibility path. A typed producer must never invent an event.
+    if (capabilities == 0u && ((event == 0u && index == 0u) || event > 16u))
+    {
+        return true;
+    }
+    if (capabilities != 0u)
+    {
+        const auto identity = ee_perf_event_for_selector(index, event);
+        const uint32_t bit = static_cast<uint32_t>(identity);
+        return has_clock && bit < k_ee_perf_event_count &&
+               (capabilities & (uint32_t{1} << bit)) != 0u;
     }
     return event == 1u && has_clock;
 }
@@ -355,10 +368,19 @@ extern "C" uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu,
     else if (selector == 0u)
     {
         const uint32_t control = value & k_perf_control_mask;
+        // A revoked typed source must be explicitly reconfigured with
+        // CTE clear. Disabling the counters remains legal.
+        if ((control & k_perf_cte) != 0u &&
+            rt->m_ee_cycle_scheduler.perf_event_authorization_revoked())
+        {
+            return 4u;
+        }
         const bool has_clock = rt->m_ee_cycle_scheduler.source() !=
             e_ee_cycle_source::UNAVAILABLE;
-        if (!perf_event_supported(control, 0u, has_clock) ||
-            !perf_event_supported(control, 1u, has_clock))
+        const uint32_t capabilities = rt->m_ee_cycle_scheduler.source() ==
+            e_ee_cycle_source::VALIDATED_R5900 ? rt->m_ee_cycle_scheduler.perf_event_capabilities() : 0u;
+        if (!perf_event_supported(control, 0u, has_clock, capabilities) ||
+            !perf_event_supported(control, 1u, has_clock, capabilities))
         {
             return 4u;
         }
@@ -417,7 +439,99 @@ extern "C" bool ee_cop0_perf_advance(s_ee_runtime* rt,
     // The compatibility path is restricted to its real existing budget.
     return rt != nullptr && rt->m_ee_cycle_scheduler.source() ==
         e_ee_cycle_source::VALIDATED_R5900 &&
+        rt->m_ee_cycle_scheduler.perf_event_capabilities() == 0u &&
+        !rt->m_ee_cycle_scheduler.perf_event_authorization_revoked() &&
         perf_advance_interval(rt, status, cycles);
+}
+
+extern "C" bool ee_cop0_perf_configure_events(s_ee_runtime* rt, uint32_t capabilities)
+{
+    if (rt == nullptr || rt->m_ee_cycle_scheduler.source() !=
+        e_ee_cycle_source::VALIDATED_R5900 ||
+        (rt->m_perf_control & k_perf_cte) != 0u ||
+        (capabilities & ~k_ee_perf_event_mask) != 0u)
+    {
+        return false;
+    }
+    return rt->m_ee_cycle_scheduler.configure_perf_event_capabilities(capabilities);
+}
+
+extern "C" e_ee_perf_interval_result ee_cop0_perf_advance_events(
+    s_ee_runtime* rt, uint32_t status, const s_ee_perf_event_interval* interval)
+{
+    using result = e_ee_perf_interval_result;
+    if (rt == nullptr || interval == nullptr ||
+        rt->m_ee_cycle_scheduler.source() != e_ee_cycle_source::VALIDATED_R5900 ||
+        rt->m_ee_cycle_scheduler.perf_event_capabilities() == 0u ||
+        (interval->m_available & ~rt->m_ee_cycle_scheduler.perf_event_capabilities()) != 0u)
+    {
+        return result::UNAVAILABLE_SOURCE;
+    }
+    return ee_perf_apply_interval(rt->m_perf_control, status, *interval,
+                                  rt->m_perf_counter);
+}
+
+s_ee_perf_crossing_entry_plan ee_cop0_perf_preflight_crossing(
+    const s_ee_cpu_state& cpu, const s_ee_runtime& rt,
+    const s_ee_perf_crossing_request& request)
+{
+    using result = e_ee_perf_crossing_entry_result;
+    s_ee_perf_crossing_entry_plan plan{};
+    const auto& scheduler = rt.m_ee_cycle_scheduler;
+    const uint32_t capabilities = scheduler.perf_event_capabilities();
+    if (scheduler.source() == e_ee_cycle_source::VALIDATED_R5900 &&
+        capabilities != 0u && !scheduler.perf_event_authorization_revoked())
+    {
+        if ((request.m_prefix.m_available & ~capabilities) != 0u ||
+            !perf_event_supported(rt.m_perf_control, 0u, true, capabilities) ||
+            !perf_event_supported(rt.m_perf_control, 1u, true, capabilities))
+        {
+            plan.m_result = result::UNAUTHORIZED_EVENTS;
+        }
+        else
+        {
+            plan = ee_perf_plan_crossing_entry(
+                request, rt.m_perf_control, cpu.m_cop0[COP0_Status],
+                cpu.m_cop0[COP0_Cause], cpu.m_cop0[COP0_ErrorEPC],
+                rt.m_perf_counter);
+        }
+    }
+    return plan;
+}
+
+e_ee_perf_crossing_entry_result ee_cop0_perf_commit_crossing(
+    s_ee_cpu_state& cpu, s_ee_runtime& rt,
+    const s_ee_perf_crossing_request& request)
+{
+    using result = e_ee_perf_crossing_entry_result;
+    const auto plan = ee_cop0_perf_preflight_crossing(cpu, rt, request);
+    result value = plan.m_result;
+    if (value == result::READY)
+    {
+        if (!ee_perf_crossing_commit_boundary_matches(
+                cpu.m_pc, cpu.m_exit_reason, plan))
+        {
+            value = result::UNSAFE_LIVE_STATE;
+        }
+        else
+        {
+            // No fallible operation or callback after the first write.
+            // The caller owns the execution thread and has already
+            // accounted time/side effects through the restored boundary.
+            // Preserve Level 1 EPC, trap diagnostics and pending IRQ bits.
+            rt.m_perf_counter[0] = plan.m_crossing.m_next[0];
+            rt.m_perf_counter[1] = plan.m_crossing.m_next[1];
+            const auto& entry = plan.m_entry.m_entry;
+            cpu.m_cop0[COP0_Status] = entry.m_status;
+            cpu.m_cop0[COP0_Cause] = entry.m_cause;
+            cpu.m_cop0[COP0_ErrorEPC] = entry.m_error_epc;
+            cpu.m_pc = entry.m_vector;
+            cpu.m_exit_reason = static_cast<uint32_t>(
+                e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION);
+            value = result::COMMITTED;
+        }
+    }
+    return value;
 }
 
 // ---- Interrupts ----------------------------------------------------------

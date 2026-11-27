@@ -1154,6 +1154,7 @@ const char* exit_name(uint32_t reason)
     case ee::e_ee_exit_reason::EE_EXIT_UNSUPPORTED: return "UNSUPPORTED";
     case ee::e_ee_exit_reason::EE_EXIT_LOOP_BUDGET: return "LOOP_BUDGET";
     case ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD: return "HOST_YIELD";
+    case ee::e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION: return "LEVEL2_EXCEPTION";
     default: return "UNKNOWN";
     }
 }
@@ -6271,6 +6272,13 @@ int main(int argc, char** argv)
             }
         }
         remaining -= count;
+        // Level 2 delivery is not supported by this runner. Stop before
+        // device service, callback resumption or Level 1 HLE dispatch;
+        // preserved ExcCode/EPC may describe a completely different event.
+        if (ee::ee_is_level2_exception_exit(reason))
+        {
+            break;
+        }
         const auto device_result = service_devices();
         if (device_result == e_device_service::failed)
         {
@@ -10714,6 +10722,18 @@ int main(int argc, char** argv)
                     static_cast<unsigned long long>(
                         reached_inventory.totals().m_total),
                     isa_path.c_str());
+    }
+    if (ee::ee_is_level2_exception_exit(reason))
+    {
+        const uint32_t cause = cpu.m_cop0[ee::COP0_Cause];
+        std::fprintf(stderr,
+            "EE Level 2 exception: EXC2=%u BD2=%u ErrorEPC=0x%08x "
+            "Cause=0x%08x Status=0x%08x vector=0x%08x "
+            "(runner delivery unsupported)\n",
+            (cause >> 16u) & 7u, (cause >> 30u) & 1u,
+            cpu.m_cop0[ee::COP0_ErrorEPC], cause,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_pc);
+        return 3;
     }
     if (status == 1u && remaining == 0)
     {

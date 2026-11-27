@@ -1,6 +1,7 @@
 #pragma once
 #include "ee_state.h"
 #include "ee_cycle_scheduler.h"
+#include "ee_perf_events.h"
 #include <cstdint>
 #include <cstddef>
 
@@ -379,6 +380,7 @@ struct s_ee_runtime
     uint64_t m_perf_compat_last = 0u;
     bool m_perf_compat_fault = false;
 
+
     // Host-only diagnostic for the latest taken exception. Cause.BD may
     // refer to an earlier exception while EXL is set. HLE callbacks need
     // the actual nested trap's delay-slot status, alongside cpu.m_pad.
@@ -676,6 +678,15 @@ uint32_t ee_cop0_perf_transfer(s_ee_cpu_state* cpu, s_ee_runtime* rt,
 // accounted separately at COP0 accesses and architectural safepoints.
 // False means unsupported event/overflow or unavailable timing; no mutation.
 bool ee_cop0_perf_advance(s_ee_runtime* rt, uint32_t status, uint64_t cycles);
+
+// Opt-in typed event delivery requires an independently validated source,
+// disabled counters at configuration, and explicit capability declaration.
+// A producer must split intervals at every PCCR/status transition. Do not
+// mix this with the legacy cycle-only advance API. Scheduler reset revokes
+// typed capabilities; counters must be disabled before authorizing a new source.
+bool ee_cop0_perf_configure_events(s_ee_runtime* rt, uint32_t capabilities);
+e_ee_perf_interval_result ee_cop0_perf_advance_events(
+    s_ee_runtime* rt, uint32_t status, const s_ee_perf_event_interval* interval);
 
 // Exception entry / return and interrupt helpers (ee_exceptions.cpp).
 uint32_t ee_raise_exception(s_ee_cpu_state* cpu, s_ee_runtime* rt,

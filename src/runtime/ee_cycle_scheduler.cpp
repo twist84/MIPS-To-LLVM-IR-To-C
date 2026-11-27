@@ -12,6 +12,8 @@ void c_ee_cycle_scheduler::reset()
     m_current_cycle = 0u;
     m_scheduler_yields = 0u;
     m_source = e_ee_cycle_source::UNAVAILABLE;
+    m_perf_event_revoked = m_perf_event_revoked || m_perf_event_capabilities != 0u;
+    m_perf_event_capabilities = 0u;
 }
 
 bool c_ee_cycle_scheduler::install_validated_source()
@@ -30,8 +32,9 @@ bool c_ee_cycle_scheduler::install_validated_source()
 
 bool c_ee_cycle_scheduler::install_reference_compatibility_source()
 {
+    // Do not silently substitute compatibility cycles for revoked typed events.
     if (m_source != e_ee_cycle_source::UNAVAILABLE ||
-        m_current_cycle != 0u)
+        m_current_cycle != 0u || m_perf_event_revoked)
     {
         return false;
     }
