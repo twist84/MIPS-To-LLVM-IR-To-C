@@ -1974,3 +1974,25 @@ unsupported repeat/no scanout, D_CTRL and synchronized IOP. CI requires
 real reset retirement and exact display state. No retail replay; pending
 CI. Shared BGCOLOR latch expands existing hardware-bus register coverage;
 production presentation composition remains unchanged.
+
+## M6E3H3E9B8B: genuine EE-to-IOP RAM aperture
+
+Classify EE physical `0x1C000000–0x1C7FFFFF` as the IOP's mirrored 8 MiB
+aperture over its real 2 MiB RAM backing. Synchronized EE strict loads and
+stores use the live `iop::c_cpu` RAM vector; cached, unavailable-backing and
+boundary-crossing accesses remain refused. Direct and synchronized guest
+tests verify little-endian visibility, mirror aliases, uncached TLB aliases,
+and that refused accesses have no side effects. The synchronized test has
+the IOP guest publish an ordinary marker; it does not seed mailbox state.
+
+Local Release run with the pinned OpenPS2BIOS v0.6 and v0.7 images passed
+`ee_ram_tlb` and reached the same real firmware mailbox at EE physical
+`0x1C042F00`: words `4F424344, 00000005, 00000000, FFFFFFF9, 00000000`.
+The EE loop was reading the mailbox state at `0xBC042F04`. Both runs then
+stopped at the unmodeled IOP CDVD byte read `0xBF40200A` (IOP PC
+`0x0001DAF8`, opcode `0x92220000`); that stop is reported as the next hardware
+boundary, not treated as successful disc service. The diagnostic prints the
+actual IOP RAM words and memory-fault address. CI now runs the synchronized
+diagnostic with a 16,000,000 EE-slot budget and asserts the same firmware-
+produced mailbox and CDVD stop for both pinned releases. No request
+completion or CDVD response is synthesized.

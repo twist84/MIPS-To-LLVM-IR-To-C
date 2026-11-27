@@ -73,7 +73,7 @@ jobs:
       - name: Diagnose synchronized EE and IOP reset (v0.6)
         run: |
           set -euo pipefail
-          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 2000000 | tee dual-rom0-v06.log
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 16000000 | tee dual-rom0-v06.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v06.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v06.log
           grep -q '^Dual ROM0 fetch:' dual-rom0-v06.log
@@ -83,6 +83,8 @@ jobs:
           log = Path("dual-rom0-v06.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000005,00000000,fffffff9,00000000" in log, log
+          assert "Dual ROM0 IOP memory fault: address=bf40200a width=1 write=0" in log, log
           assert stop and int(stop[1]) > 819184, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818763 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696458 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
@@ -317,7 +319,7 @@ jobs:
       - name: Diagnose synchronized EE and IOP reset (v0.7)
         run: |
           set -euo pipefail
-          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 2000000 | tee dual-rom0-v07.log
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 16000000 | tee dual-rom0-v07.log
           grep -q '^Dual ROM0 stop:' dual-rom0-v07.log
           grep -q '^Dual ROM0 clocks:' dual-rom0-v07.log
           grep -q '^Dual ROM0 fetch:' dual-rom0-v07.log
@@ -327,6 +329,8 @@ jobs:
           log = Path("dual-rom0-v07.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000005,00000000,fffffff9,00000000" in log, log
+          assert "Dual ROM0 IOP memory fault: address=bf40200a width=1 write=0" in log, log
           assert stop and int(stop[1]) > 819376, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818955 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696650 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
