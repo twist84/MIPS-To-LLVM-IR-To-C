@@ -261,8 +261,8 @@ validation after changing the recompiler's semantics.
 `ee_known_cache_recovery` CTest exercises snapshot selection, content
 integrity, exact-ELF scoping, changed-source opt-in, safe active pointers,
 failure preservation, and activation only after validation. Its fixtures
-are synthetic; testing against a real user-owned 1,296-function cache
-remains an end-to-end acceptance step.
+are synthetic; the real user-owned 16,252-module recovery and overwrite
+acceptance is recorded below.
 
 
 ## Recovery and known-IR refresh timings (R3)
@@ -354,7 +354,7 @@ publishes it only after final module inventory/hash checks. Live expansion
 continues to publish each batch normally. Strict reconstruction attempts
 explicit entry restoration before evaluating byte parity; changed IR still
 requires explicit acceptance. The original 128-entry batch boundaries are
-retained. No speedup claimed before measured comparison.
+retained. The measured comparison follows.
 
 R6.1 Windows acceptance: 160.672 s vs 191.000 s (30.328 s saved,
 15.88% lower wall time), strict 16,252/16,252 identical IR hashes and
@@ -386,8 +386,9 @@ discovery snapshot in a child process. Each batch starts with a separate
 copy of the original discovery map and boundaries; dynamic discoveries do
 not accumulate across requests. Python still chooses the original ordered
 128-entry batches and restores missing entries independently. The child
-fails closed on incomplete requests. Normal recovery and live expansion
-continue using the independent-process path until parity is established.
+fails closed on incomplete requests. At this experimental checkpoint, normal recovery and live expansion
+continued using the independent-process path. The accepted recovery default
+is described under R7.
 
     cmake --build build --config Release --target ee_recomp
     python tools/recover_translation_cache.py --elf PS2_GAME/SLUS_214.42 --benchmark-reconstruct build/ee-r6-persistent --persistent-recomp --benchmark-allow-source-changes --timings-report ee-r6-persistent.json
@@ -396,8 +397,7 @@ The generator fingerprints changed because the recompiler source changed.
 The benchmark-only source override still requires exact original IR hashes;
 it does not authorize activation or accept changed IR. The report counts
 actual child launches separately from logical session requests. Compare
-metadata bytes against the accepted relaxed baseline. No measured speedup
-for the persistent experiment yet.
+metadata bytes against the accepted relaxed baseline. The measured result follows.
 
 R6.4 Windows acceptance: 120.031 s wall time, 16,252 exact IR hashes and
 byte-identical reconstructed metadata. One process, 137 requests; discovery
@@ -425,8 +425,7 @@ bounded session-owned worker pool. Batch-local data is borrowed only until
 all active workers finish. The standalone path retains its joined worker
 group; serial emission is unchanged. Timing reports now distinguish actual
 thread launches from per-batch worker assignments. Test identical bytes
-and metadata before selecting a default worker count. No R7.2 speedup
-claimed until measured.
+and metadata before selecting a default worker count. The measured result follows.
 
 R7.2 Windows acceptance: 105.640 s wall time, strict 16,252/16,252 IR
 hashes, byte-identical reconstructed metadata, 8 actual thread launches
@@ -486,3 +485,76 @@ compiler/source/flag/object validation decides reuse or compilation; no
 linked library or translation receipt is imported. Link reports distinguish
 host dispatch and runtime preparation. `--force-reconstruct` explicitly
 bypasses otherwise eligible IR copying for controlled recovery timing.
+
+### R8.2/R8.3 Windows recovery and overwrite acceptance (2026-11-27)
+
+At `07e6c31`, forced reconstruction of the canonical O5 cache completed
+in 273.625 s with strict 16,252/16,252 matching IR SHA-256 hashes, all
+16,252 native O5 objects reused, zero native compilations, one native link,
+and successful canonical promotion. No changed-source or changed-IR
+consent was needed. The previous cache was retained and the archive verified.
+Compared with R8.1 (407.922 s), this saves 134.297 s (32.92%); both runs
+reconstructed the full inventory but started from different cache states.
+This is not a controlled cold-cache benchmark.
+
+| Stage | R8.1 (s) | R8.2 (s) |
+| --- | ---: | ---: |
+| Reconstruction | 97.906 | 100.187 |
+| Native build | 88.328 | 31.078 |
+| Link preparation | 61.000 | 3.531 |
+| Backup creation | 78.157 | 28.578 |
+| IR hash verification | 67.655 | 46.078 |
+| Cache validation | 77.031 | 55.015 |
+| Native object seeding | 32.031 | 24.281 |
+| End-to-end wall | 407.922 | 273.625 |
+
+Stage timings are inclusive and must not be summed. The recovery seeded
+202 host compilation cache files and moved four backup directories and
+twelve individual files.
+
+The subsequent warm explicit overwrite (`refresh_known_ir.py --emit-opt=5
+--ir-jobs=8 --emit-jobs=8`) completed in 131.735 s, including reconstruction
+97.907 s, native reuse preflight 17.204 s, final validation 11.484 s and
+promotion 0.016 s. All 16,252 IR hashes matched, with no missing, extra or
+changed modules. `native_link_skipped=1`; no native emission or link
+subprocess ran. One persistent recompiler process and eight worker threads
+were used. This measures overwrite, not full recovery or archive compression.
+
+### R9 retail execution after recovery and overwrite
+
+Two warm P40 runs at clean tracked HEAD `07e6c318832d7e39ac2a57dff4e0205f2d5ca9d7`
+used the existing O5 cache, native WebGPU, host audio disabled, and a
+40-million-dispatch limit. Neither used a recorded controller replay.
+Archives: `sdbz-graphics-pr148-neutral-20261127-133331856.zip` and
+`sdbz-graphics-pr148-neutral-20261127-133558673.zip`.
+
+| Metric | Pre-PR reference | R9.1 | R9.2 |
+| --- | ---: | ---: | ---: |
+| Dispatches | 40,000,000 | 40,000,000 | 40,000,000 |
+| Native process wall (s) | 45.672 | 48.375 | 50.937 |
+| Profiled runtime (s) | not recorded here | 43.201 | 46.085 |
+| Guest fields/s | 107.04 | 98.17 | 104.59 |
+| Successful / attempted presents | 3179/3179 | 3039/3039 | 3456/3456 |
+| Native VU1 runs | 392,469 | 418,560 | 384,543 |
+| VU1 interpreter fallbacks | 0 | 0 | 0 |
+| IOP guest faults | 0 | 0 | 0 |
+| Cross candidates | 162 | 96 | 125 |
+| Analog samples outside deadzone | 230 | 382 | 44 |
+
+Both completed the dispatch budget, reached training gameplay, retained
+16,252 IR modules with no observed expansion or native recompilation,
+and had zero compile wait. Their translation-cache manifests were
+byte-identical, including the recorded native library and metadata
+SHA-256 hashes. CPU and GPU display PPM captures matched byte-for-byte
+within each run; these are GPU-authoritative display comparisons, not
+independent rasterizer validation.
+
+Functional/cache acceptance passed. The last replay's field throughput
+was 2.29% below the pre-PR reference, while its process wall time was
+11.53% higher. Input and guest workload differ across all three runs,
+so these numbers neither establish a runtime regression attributable to
+this PR nor prove controlled performance parity. No guest runtime source
+was changed by the PR; host audio playback was not tested in R9.
+A matched-input before/after benchmark is needed for a causal performance
+comparison. This does not invalidate the measured reconstruction, recovery
+or warm-overwrite results above.
