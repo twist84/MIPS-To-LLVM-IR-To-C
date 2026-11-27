@@ -133,4 +133,142 @@ bool test_strict_firmware_pilot()
         pilot.cpu().m_pc == 0xbfc00014u && pilot.cpu().m_gpr[3].m_lo == 0x1234u &&
         ee::ee_read_instruction_word(pilot.ram().data()) == 0x1234u;
 }
+
+bool test_strict_firmware_interrupts()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t base = 0xbfc00000u;
+    constexpr uint32_t bev_vector = 0xbfc00400u;
+    constexpr uint32_t normal_vector = 0x80000200u;
+    constexpr uint32_t enabled = ee::STATUS_BEV | ee::STATUS_IE | ee::STATUS_EIE | 0x400u;
+    for (uint32_t variant = 0u; variant < 7u; ++variant)
+    {
+        // Timer0 reaches compare at 14 (or 16 in the branch test).
+        // Variants: same-boundary Status, already pending, masked source,
+        // BEV0, branch completion, unacknowledged ERET, masked CPU IM.
+        auto rom = make_firmware_pilot_rom({
+            0x40806000u, 0x3c04b000u, variant == 4u ? 0x34020004u : 0x34020003u,
+            0xac820020u, variant == 2u ? 0x34020000u : 0x34020200u,
+            0x3485f010u, 0xaca20000u, 0x34020180u, 0xac820010u,
+            variant == 3u ? 0x3c020001u : 0x3c020041u,
+            variant == 6u ? 0x34420001u : 0x34420401u,
+            0u, 0u, variant == 1u ? 0u : 0x40826000u,
+            variant == 4u ? 0x10000001u : variant == 1u ? 0x40826000u : 0u,
+            0x34030007u, 0u});
+        const auto put = [&](uint32_t offset, uint32_t word)
+        {
+            for (uint32_t i = 0u; i < 4u; ++i)
+            {
+                rom[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+            }
+        };
+        put(0x400u, 0x3485f000u); // ORI a1,a0,INTC_STAT
+        put(0x404u, 0x34030200u); // ORI v1,zero,Timer0 source
+        put(0x408u, variant == 5u ? 0u : 0xaca30000u); // acknowledge (or deliberately not)
+        put(0x40cu, 0x42000018u); // ERET
+        ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+        for (uint32_t i = 0u; i < 13u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u)
+            {
+                return false;
+            }
+        }
+        if (pilot.cycle() != 13u || pilot.cpu().m_cop0[ee::COP0_Count] != 13u)
+        {
+            return false;
+        }
+        auto step = pilot.step(1u);
+        if (step.m_boundary != boundary::RETIRED || pilot.retired() != 14u ||
+            step.m_timer_serviced != (variant != 4u))
+        {
+            return false;
+        }
+        if (variant == 1u || variant == 4u)
+        {
+            if (step.m_interrupt_vector != 0u ||
+                (variant == 1u && pilot.intc_status() != 0x200u))
+            {
+                return false;
+            }
+            step = pilot.step(variant == 4u ? 2u : 1u);
+        }
+        const uint32_t resume = base + (variant == 4u ? 64u : variant == 1u ? 60u : 56u);
+        if (variant == 2u || variant == 6u)
+        {
+            if (step.m_interrupt_vector != 0u || pilot.cpu().m_pc != resume ||
+                (pilot.cpu().m_cop0[ee::COP0_Status] & ee::STATUS_EXL) != 0u ||
+                pilot.intc_status() != 0x200u ||
+                ((pilot.cpu().m_cop0[ee::COP0_Cause] & 0x400u) != 0u) != (variant == 6u))
+            {
+                return false;
+            }
+            continue;
+        }
+        const uint32_t vector = variant == 3u ? normal_vector : bev_vector;
+        const uint32_t expected_status = (variant == 3u ? enabled & ~ee::STATUS_BEV : enabled) | ee::STATUS_EXL;
+        if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != vector ||
+            pilot.cpu().m_pc != vector || pilot.cpu().m_cop0[ee::COP0_EPC] != resume ||
+            pilot.cpu().m_cop0[ee::COP0_Status] != expected_status ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0x400u ||
+            pilot.cpu().m_exit_reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_EXCEPTION) ||
+            pilot.retired() != (resume - base) / 4u ||
+            (variant == 4u && pilot.cpu().m_gpr[3].m_lo != 7u))
+        {
+            return false;
+        }
+        if (variant == 3u)
+        {
+            // BEV0 is correctly selected, but cached handler execution
+            // remains unsupported. Refusal preserves architectural entry.
+            if (pilot.step(1u).m_boundary != boundary::HOST_REFUSAL ||
+                pilot.cpu().m_pc != vector ||
+                pilot.cpu().m_exit_reason != static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_EXCEPTION))
+            {
+                return false;
+            }
+            continue;
+        }
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            const auto handler = pilot.step(1u);
+            if (handler.m_boundary != boundary::RETIRED || handler.m_interrupt_vector != 0u)
+            {
+                return false;
+            }
+        }
+        const auto eret = pilot.step(1u);
+        if (eret.m_boundary != boundary::RETIRED ||
+            eret.m_interrupt_vector != (variant == 5u ? bev_vector : 0u) ||
+            pilot.cpu().m_pc != (variant == 5u ? bev_vector : resume) ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != resume ||
+            pilot.cpu().m_cop0[ee::COP0_Status] != (variant == 5u ? expected_status : enabled) ||
+            pilot.intc_status() != (variant == 5u ? 0x200u : 0u))
+        {
+            return false;
+        }
+    }
+    // Refuse Status/ERET in a JAL slot without leaking link or time.
+    for (const uint32_t word : {0x40806000u, 0x42000018u})
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x0ff00003u, word, 0u}));
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+        const auto refused = pilot.step(2u);
+        if (refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != result::UNSUPPORTED_OPCODE ||
+            refused.m_instruction.m_detail_pc != base + 8u ||
+            pilot.cpu().m_pc != base + 4u || pilot.cpu().m_gpr[31].m_lo != 0u ||
+            pilot.cycle() != 1u || pilot.retired() != 1u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace

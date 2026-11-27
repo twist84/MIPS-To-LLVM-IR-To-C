@@ -321,6 +321,20 @@ static_assert(!status_supported(0x80000000u));
 // A canonical kernel-mode Status write enabling interrupt delivery
 // cannot retire in this executor: it has neither an authoritative
 // clock nor the real pending-source/exception scheduling contract.
+// Bounded scheduler-owned kernel-mode Status subset. BEV and EXL are
+// needed for architectural Level 1 handler execution. No ERL, KSU,
+// cache configuration, level 2 or reserved interrupt mask bits.
+inline constexpr bool scheduled_status_supported(uint32_t status)
+{
+    constexpr uint32_t mask = 0x70000000u | STATUS_IE | STATUS_EIE |
+        STATUS_EXL | STATUS_BEV | (1u << 17u) | 0x8c00u;
+    return (status & ~mask) == 0u;
+}
+static_assert(scheduled_status_supported(0x70030c01u));
+static_assert(scheduled_status_supported(STATUS_BEV | STATUS_EXL));
+static_assert(!scheduled_status_supported(STATUS_ERL));
+static_assert(!scheduled_status_supported(0x10u));
+
 inline constexpr bool status_requires_interrupt_scheduler(uint32_t status)
 {
     constexpr uint32_t enable = STATUS_IE | STATUS_EIE;
@@ -740,11 +754,12 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
     const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr,
     c_ee_tlb* persistent_tlb = nullptr, const s_ee_reset_mmio* mmio = nullptr,
-    c_ee_reset_cold_cache* cold_cache = nullptr)
+    c_ee_reset_cold_cache* cold_cache = nullptr, bool scheduled_status = false)
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
-        !strict_reset_detail::status_supported(cpu.m_cop0[COP0_Status]))
+        !(scheduled_status ? strict_reset_detail::scheduled_status_supported(cpu.m_cop0[COP0_Status]) :
+          strict_reset_detail::status_supported(cpu.m_cop0[COP0_Status])))
     {
         return {result::UNSAFE_BOUNDARY};
     }

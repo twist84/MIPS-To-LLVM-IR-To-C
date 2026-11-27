@@ -3760,7 +3760,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_pilot(), "scheduler-owned strict firmware pilot"))
+    if (!check(test_strict_firmware_interrupts(), "scheduler-owned firmware interrupt entry and ERET") ||
+        !check(test_strict_firmware_pilot(), "scheduler-owned strict firmware pilot"))
     {
         return 1;
     }

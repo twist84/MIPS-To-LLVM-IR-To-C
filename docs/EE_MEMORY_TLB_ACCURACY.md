@@ -1286,3 +1286,32 @@ and production retail path are unchanged. Directed synthetic ROM
 tests cover reset ownership, RAM effects, retirement/budget,
 branch refusal and rollback, real compare IRQ/Cause pending state,
 and deadline ordering. Pending CI on both firmware jobs.
+
+## M6E3H2: bounded Level 1 interrupt entry and ERET
+
+M6E3H1 passed both v0.6/v0.7 jobs on 53b292df:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46057014681
+The new directed scheduler pilot and unchanged isolated stop passed.
+
+Admit canonical kernel MTC0 Status only in the owned scheduler path,
+with a bounded CU0/1/2, IE/EIE/EDI, EXL, BEV and hardware IM subset.
+Reject ERL, KSU, cache-related and reserved fields. Retain the
+isolated reference's original Status restrictions. Synchronize the
+existing compatibility COP0 clock at committed boundaries from reset;
+Count/Compare transfers and scheduling their deadlines remain H3.
+Use the common COP0 write, Level 1 exception entry and ERET helpers.
+Service actual due timers before interrupt eligibility at the
+retirement boundary; EPC is the next PC, BD clear after a completed
+branch+slot. Refuse Status/ERET in slots and deadlines strictly inside
+a branch. No physical Status pipeline hazard timing is claimed; the
+reference compatibility policy uses the retirement boundary.
+Distinguish retirement with/without accepted interrupt via vector.
+The pilot preserves exception exit state on refusal and dispatches
+BEV1 handlers through the same live ROM. BEV0 entry selects the real
+cached vector but execution of that backing still refuses.
+ERET from EXL returns to EPC; uncleared pending sources reenter
+without executing the resumed instruction. Directed tests cover
+same-boundary and prior pending timers, masks, BEV selection,
+branch completion, real guest INTC acknowledgement and ERET.
+No dual-processor coordination, full firmware boot or native lift
+asserted. Pending CI. No production retail path changes.

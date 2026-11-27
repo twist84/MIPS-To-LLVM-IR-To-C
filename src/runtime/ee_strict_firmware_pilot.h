@@ -10,8 +10,8 @@
 namespace ee
 {
 // The pilot owns a reset domain, not a resumed snapshot. Only the bus-clock
-// timer/INTC subset is connected; other devices and guest exception entry
-// remain deliberately outside this checkpoint.
+// timer/INTC subset is connected; guest exception entry is bounded to
+// Level 1 interrupts. Other devices remain disconnected.
 enum class e_ee_firmware_boundary : uint8_t
 {
     RETIRED,
@@ -25,6 +25,7 @@ struct s_ee_firmware_step
     e_ee_firmware_boundary m_boundary = e_ee_firmware_boundary::HOST_REFUSAL;
     s_ee_reset_prefix_step m_instruction{};
     bool m_timer_serviced = false;
+    uint32_t m_interrupt_vector = 0u;
 };
 
 // Reference policy reserves two slots for supported branches and their delay
@@ -102,17 +103,54 @@ public:
             return {boundary::TIMER_DEADLINE};
         }
 
+        // Status/ERET in a delay slot is outside this atomic timing
+        // contract. Preflight before the reference executor can link.
+        if (slots == 2u)
+        {
+            const uint32_t slot_pc = m_cpu.m_pc + 4u;
+            const auto slot_fetch = ee_plan_instruction_fetch(m_tlb, slot_pc,
+                m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
+                m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
+            const uint8_t* slot = ee_fetch_strict_reset_word(slot_fetch, rom, ram);
+            if (slot != nullptr)
+            {
+                const uint32_t word = ee_read_instruction_word(slot);
+                if (status_write(word) || word == k_eret)
+                {
+                    return {boundary::HOST_REFUSAL,
+                        {result::UNSUPPORTED_OPCODE, word, 0u, slot_pc}};
+                }
+            }
+        }
+
+        const uint32_t previous_exit = m_cpu.m_exit_reason;
+        // A previously accepted interrupt is an owned dispatcher handoff,
+        // not an HLE callback. Preserve its exit marker on a host refusal.
+        if (previous_exit == static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EXCEPTION))
+        {
+            m_cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
+        }
         m_branch_transaction = slots == 2u;
         const s_ee_reset_mmio mmio{this, &write, &read, true};
-        const auto action = m_retired == 0u
-            ? ee_execute_strict_reset_prefix(m_cpu, rom)
-            : ee_execute_strict_rom_register_step(m_cpu, rom, budget, ram,
-                nullptr, &m_tlb, &mmio, &m_cold_cache);
+        s_ee_reset_prefix_step action{};
+        if (m_retired == 0u)
+        {
+            action = ee_execute_strict_reset_prefix(m_cpu, rom);
+        }
+        else if (code != nullptr && (status_write(opcode) || opcode == k_eret))
+        {
+            action = execute_control(opcode);
+        }
+        else
+        {
+            action = ee_execute_strict_rom_register_step(m_cpu, rom, budget, ram,
+                nullptr, &m_tlb, &mmio, &m_cold_cache, true);
+        }
         m_branch_transaction = false;
         if (action.m_result != result::COMMITTED)
         {
-            // The strict executor has host refusals, not guest exception
-            // delivery. Do not advance time or service a device on refusal.
+            m_cpu.m_exit_reason = previous_exit;
+            // No time or device service on a host refusal.
             return {boundary::HOST_REFUSAL, action};
         }
 
@@ -133,13 +171,58 @@ public:
 
         // Effects of the instruction/slot are committed first; then service
         // due timers (production timer model uses ascending channel order).
-        // INTC can assert Cause.IP2, but no interrupt entry occurs in H1.
         const bool due = m_timers.next_event() <= timestamp;
         m_timers.service();
-        return {boundary::RETIRED, action, due};
+        ee_cop0_clock_sync(&m_cpu, &m_runtime);
+        // Compatibility policy: Status is effective at its retirement
+        // boundary; no calibrated MTC0 pipeline hazard is claimed.
+        // An atomic branch has completed its slot, so EPC is its next PC
+        // and BD is clear. Intra-branch deadlines still refuse above.
+        const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
+        return {boundary::RETIRED, action, due, vector};
     }
 
 private:
+    static constexpr uint32_t k_eret = 0x42000018u;
+
+    static constexpr bool status_write(uint32_t opcode)
+    {
+        return (opcode & 0xffe0ffffu) == 0x40806000u;
+    }
+
+    s_ee_reset_prefix_step execute_control(uint32_t opcode)
+    {
+        using result = e_ee_reset_prefix_result;
+        const uint32_t pc = m_cpu.m_pc;
+        const uint32_t status = m_cpu.m_cop0[COP0_Status];
+        if (!strict_reset_detail::scheduled_status_supported(status))
+        {
+            return {result::UNSAFE_BOUNDARY, opcode, 0u, pc};
+        }
+        if (opcode == k_eret)
+        {
+            if ((status & STATUS_EXL) == 0u)
+            {
+                return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+            }
+            (void)ee_exception_return(&m_cpu);
+        }
+        else
+        {
+            const uint32_t requested = static_cast<uint32_t>(
+                strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u));
+            if (!strict_reset_detail::scheduled_status_supported(requested))
+            {
+                return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+            }
+            // All preceding committed time was synchronized at the previous
+            // boundary. The common COP0 write owns the register update.
+            ee_cop0_write(&m_cpu, COP0_Status, requested);
+            m_cpu.m_pc += 4u;
+        }
+        return {result::COMMITTED, opcode, 1u, pc};
+    }
+
     static bool timer_register(uint32_t address, uint32_t& index, uint32_t& offset)
     {
         if (address < 0x10000000u || address >= 0x10002000u)
