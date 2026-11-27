@@ -16,6 +16,11 @@ def append_chain_entry(router, table, entry, resume):
     # router stay unchanged. The host must authorize the device-safe budget.
     export = "dllexport " if "define dllexport i32 @iop_aot_module_count" in table else ""
     return router + f"""
+define {export}i32 @iop_aot_chain_entry_pc_v1() {{
+entry:
+  ret i32 {entry}
+}}
+
 define {export}i32 @iop_aot_chain_entry_v1(ptr %c, i32 %start) {{
 entry:
   %budgetp = getelementptr i8, ptr %c, i64 56
