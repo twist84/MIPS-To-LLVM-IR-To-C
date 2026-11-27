@@ -3,6 +3,7 @@
 #include "ee_strict_reset.h"
 #include "ee_vif1.h"
 #include "ee_intc.h"
+#include "ee_sif.h"
 #include "../tools/ee_host_timers.h"
 
 namespace ee
@@ -36,6 +37,20 @@ public:
         return index < 4u ? m_timer_writes[index] : s_timer_write{};
     }
 
+    uint32_t dmac_control() const { return m_dmac_control; }
+    uint32_t dmac_read_count() const { return m_dmac_read_count; }
+    uint32_t dmac_write_count() const { return m_dmac_write_count; }
+    uint32_t first_dmac_read() const { return m_first_dmac_read; }
+    uint32_t first_dmac_write() const { return m_first_dmac_write; }
+    uint32_t sif_write_count() const { return m_sif_write_count; }
+    uint32_t first_sif_write() const { return m_first_sif_write; }
+    uint32_t sif_msflag() const
+    {
+        uint32_t value = 0u;
+        (void)m_sif.get_reg(3u, &value);
+        return value;
+    }
+
     uint32_t intc_mask() const { return m_intc.mask(); }
     uint32_t intc_status() const { return m_intc.status(); }
     uint32_t intc_read_count() const { return m_intc_read_count; }
@@ -67,12 +82,28 @@ public:
 private:
     static bool read(void* user, uint32_t address, uint32_t width, s_ee_u128* value)
     {
-        if (user == nullptr || value == nullptr || address != c_ee_intc::k_mask_address ||
-            width != 4u)
+        if (user == nullptr || value == nullptr || width != 4u)
         {
             return false;
         }
         auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
+        if (address == 0x1000e000u)
+        {
+            *value = {self.m_dmac_control, 0u};
+            if (self.m_dmac_read_count++ == 0u)
+            {
+                self.m_first_dmac_read = self.m_dmac_control;
+            }
+            return true;
+        }
+        if (address == c_ee_sif::k_msflag_address)
+        {
+            return c_ee_sif::mmio_read(&self.m_sif, address, width, value);
+        }
+        if (address != c_ee_intc::k_mask_address)
+        {
+            return false;
+        }
         if (!c_ee_intc::mmio_read(&self.m_intc, address, width, value))
         {
             return false;
@@ -91,6 +122,34 @@ private:
             return false;
         }
         auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
+        if (width == 4u && address == 0x1000e000u)
+        {
+            const uint32_t word = static_cast<uint32_t>(value->m_lo);
+            // Only DMAE is modeled here. No channel starts, arbitration,
+            // MFIFO, completion or interrupt side effects are admitted.
+            if ((word & ~1u) != 0u)
+            {
+                return false;
+            }
+            self.m_dmac_control = word;
+            if (self.m_dmac_write_count++ == 0u)
+            {
+                self.m_first_dmac_write = word;
+            }
+            return true;
+        }
+        if (width == 4u && address == c_ee_sif::k_msflag_address)
+        {
+            if (!c_ee_sif::mmio_write(&self.m_sif, address, width, value))
+            {
+                return false;
+            }
+            if (self.m_sif_write_count++ == 0u)
+            {
+                self.m_first_sif_write = static_cast<uint32_t>(value->m_lo);
+            }
+            return true;
+        }
         if (width == 4u &&
             (address == 0x10001800u || address == 0x10001810u || address == 0x10001820u))
         {
@@ -153,6 +212,15 @@ private:
     uint32_t m_fifo_count[2]{};
     s_ee_u128 m_last_fifo[2]{};
     c_ee_intc m_intc{};
+    // Cold isolated D_CTRL.DMAE, not the live DMA scheduler.
+    uint32_t m_dmac_control = 0u;
+    uint32_t m_dmac_read_count = 0u;
+    uint32_t m_dmac_write_count = 0u;
+    uint32_t m_first_dmac_read = 0u;
+    uint32_t m_first_dmac_write = 0u;
+    c_ee_sif m_sif{};
+    uint32_t m_sif_write_count = 0u;
+    uint32_t m_first_sif_write = 0u;
     c_ee_host_timers m_timers{nullptr, nullptr};
     uint32_t m_timer_write_count = 0u;
     s_timer_write m_timer_writes[4]{};

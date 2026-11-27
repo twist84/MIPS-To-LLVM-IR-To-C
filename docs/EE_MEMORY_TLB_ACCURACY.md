@@ -1145,3 +1145,23 @@ Require original guest sequence MODE=0c00, COUNT=0, COMP=ffff,
 MODE=83; validate post-write MODE/COUNT and exact fourth-write
 retirement 672554 / 672746 at a0014cec. v0.6 checks physical
 23824 halfword zero. No runtime clock or retail changes. Pending CI.
+
+## M6E3E5: isolated DMAE and genuine SIF MSFLAG programming
+
+M6E3E4 passed both releases on 020f1a2a:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46053200211
+Timer3 sequence verified, INTC_MASK=1002; v0.6 exhausted
+its 32768-instruction window at 686711, v0.7 reached D_CTRL
+read at 690993 / a001419c, b000e000. Following instructions
+OR DMAE and write 10000 to b000f220 (SIF MSFLAG, not D_STAT).
+Reference: https://github.com/twist84/ps2-web-recomp/blob/SDBZ/runtime/src/dmac.cpp
+D_CTRL reset is zero. The live native DMAC does not yet model
+D_CTRL global enable; add isolated DMAE register storage only,
+reject other bits, channel starts and completion. Reuse c_ee_sif
+for MSFLAG's OR-on-write behavior. No IOP-ready state is injected.
+Require exact first D_CTRL and MSFLAG guest writes and state at
+690805/690806 (v0.6 predicted) and 690997/690998 (v0.7).
+Extend v0.6 bound to 65536 instructions and reduce per-step
+printing before the new boundary. Tests verify readback,
+enable/disable, rejected unsupported mode/width/address and
+MSFLAG accumulation. No production scheduler change. Pending CI.

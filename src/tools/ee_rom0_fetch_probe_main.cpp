@@ -42,6 +42,8 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     bool entered_ram = false;
     bool first_intc_write = false;
     uint32_t timer_logged = 0u;
+    bool dmac_logged = false;
+    bool sif_logged = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
@@ -62,6 +64,19 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!dmac_logged && vif_devices.dmac_write_count() != 0u)
+        {
+            dmac_logged = true;
+            std::printf("EE exploration D_CTRL: retired=%u pc=%08x read=%08x write=%08x control=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_dmac_read(), vif_devices.first_dmac_write(),
+                vif_devices.dmac_control());
+        }
+        if (!sif_logged && vif_devices.sif_write_count() != 0u)
+        {
+            sif_logged = true;
+            std::printf("EE exploration MSFLAG: retired=%u pc=%08x write=%08x flags=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_sif_write(), vif_devices.sif_msflag());
+        }
         if (timer_logged < 4u && timer_logged < vif_devices.timer_write_count())
         {
             const auto event = vif_devices.timer_write(timer_logged++);
@@ -1198,12 +1213,18 @@ int main(int argc, char** argv)
     // only the tail and explicitly counting real device reset writes.
     ee::c_ee_reset_vif_devices vif_devices;
     const auto vif = vif_devices.transport();
-    const uint32_t exploration_limit = compare_done + 32768u;
+    const uint32_t exploration_limit = compare_done + 65536u;
     uint32_t first_intc_retired = 0u;
     uint32_t first_intc_pc = 0u;
     uint32_t timer_logged = 0u;
     uint32_t timer_fourth_retired = 0u;
     uint32_t timer_fourth_pc = 0u;
+    uint32_t dmac_retired = 0u;
+    uint32_t dmac_pc = 0u;
+    uint32_t sif_retired = 0u;
+    uint32_t sif_pc = 0u;
+    uint32_t dmac_value = 0u;
+    uint32_t sif_flags = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -1220,6 +1241,22 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (dmac_retired == 0u && vif_devices.dmac_write_count() != 0u)
+        {
+            dmac_retired = retired;
+            dmac_pc = cpu.m_pc;
+            dmac_value = vif_devices.dmac_control();
+            std::printf("EELOAD D_CTRL: retired=%u pc=%08x read=%08x write=%08x control=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_dmac_read(), vif_devices.first_dmac_write(), dmac_value);
+        }
+        if (sif_retired == 0u && vif_devices.sif_write_count() != 0u)
+        {
+            sif_retired = retired;
+            sif_pc = cpu.m_pc;
+            sif_flags = vif_devices.sif_msflag();
+            std::printf("EELOAD MSFLAG: retired=%u pc=%08x write=%08x flags=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_sif_write(), sif_flags);
+        }
         if (timer_logged < 4u && timer_logged < vif_devices.timer_write_count())
         {
             const auto event = vif_devices.timer_write(timer_logged++);
@@ -1239,7 +1276,7 @@ int main(int argc, char** argv)
                 retired, cpu.m_pc, vif_devices.first_intc_read(), vif_devices.first_intc_write(),
                 vif_devices.first_intc_mask(), vif_devices.intc_status());
         }
-        if (retired >= compare_done + 17000u)
+        if (retired >= 690750u)
         {
             std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
                 pc, action.m_opcode, action.m_retired, cpu.m_pc, retired);
@@ -1332,6 +1369,16 @@ int main(int argc, char** argv)
         return 78;
     }
     std::printf("EELOAD Timer3 initialization: four writes verified, clock unavailable\n");
+    if (dmac_retired != 690805u || dmac_pc != 0xa00141acu ||
+        vif_devices.dmac_read_count() == 0u || vif_devices.first_dmac_read() != 0u ||
+        vif_devices.first_dmac_write() != 1u || dmac_value != 1u ||
+        sif_retired != 690806u || sif_pc != 0xa00141b0u ||
+        vif_devices.first_sif_write() != 0x10000u || sif_flags != 0x10000u)
+    {
+        std::fprintf(stderr, "EELOAD DMAE/MSFLAG checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 79;
+    }
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);

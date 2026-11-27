@@ -296,6 +296,8 @@ jobs:
           grep -Fx 'EE exploration Timer3 write: retired=672739 pc=a0014cd0 address=10001800 value=00000000 mode=00000000 count=00000000' ee-rom0-v07.log
           grep -Fx 'EE exploration Timer3 write: retired=672744 pc=a0014ce4 address=10001820 value=0000ffff mode=00000000 count=00000000' ee-rom0-v07.log
           grep -Fx 'EE exploration Timer3 write: retired=672746 pc=a0014cec address=10001810 value=00000083 mode=00000083 count=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration D_CTRL: retired=690997 pc=a00141ac read=00000000 write=00000001 control=00000001' ee-rom0-v07.log
+          grep -Fx 'EE exploration MSFLAG: retired=690998 pc=a00141b0 write=00010000 flags=00010000' ee-rom0-v07.log
           echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
 
       - name: Explore authentic v0.7 IOP reset execution
