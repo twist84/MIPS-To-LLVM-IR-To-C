@@ -1834,3 +1834,27 @@ refuses rather than inventing scanout. Subsequent CRT reprogramming
 requires a broader live timing model. Existing HLE path unchanged.
 Add constexpr tuple tests, guest register execution tests and exact
 CRT diagnostic assertions for both ROMs. Pending CI; no retail replay.
+
+## M6E3H3E9B6A: guest exception context restoration
+
+H3E9B5B passed both pinned ROMs at 3473c071, workflow 46069373283.
+Both advanced 19796 EE retirements, to 818503 / 818695 with
+102312 / 102336 IOP retirements and no debt. Genuine NTSC mode
+programming completed, and serial includes exec entry=00100000
+argc=00000001. This identifies the selected guest entry, not
+execution of OSDSYS. Actual stop is MTC0 k1,EPC 409b7000 at
+ a00192bc / a00192dc in ob_ee_exception_return.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46069373283
+
+Admit canonical scheduler-owned MTC0 EPC via common ee_cop0_write.
+No Cause/Status/clock mutation or target fetch at EPC write. Keep
+existing control delay-slot restrictions. Add MTHI/MTLO/MTHI1/MTLO1
+and MTSA, canonical rs-only encodings, architectural zero reads,
+full scalar HI/LO values and shared bit-unit SA representation
+(native_codegen.cpp; PCSX2 R5900OpcodeImpl.cpp). Add compile-time
+and directed round-trip tests plus guest SYSCALL/EPC/ERET test with
+synchronized IOP variant and reserved refusal. Require authentic
+exec-entry serial and progress through the ten context restore
+instructions beyond the EPC stop. The upcoming FPU restore and
+actual OSDSYS execution are separate checkpoints. No fabricated
+frame, HLE interception, retail changes or replay. Pending CI.

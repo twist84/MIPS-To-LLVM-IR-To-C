@@ -1511,6 +1511,79 @@ bool test_strict_firmware_syscall()
     return true;
 }
 
+bool test_strict_firmware_epc_restore()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t base = 0xbfc00000u;
+    for (uint32_t variant = 0u; variant < 3u; ++variant)
+    {
+        auto rom = make_firmware_pilot_rom({
+            0x40806000u, 0x3c020040u, 0x40826000u, 0x0000000cu,
+            0x2407002au});
+        // Read the actual trap EPC, advance it, restore it with MTC0,
+        // then return to the guest instruction after SYSCALL.
+        const uint32_t handler[] = {0x40047000u, 0x24840004u,
+            variant == 1u ? 0x40847001u : 0x40847000u,
+            0x40057000u, 0x42000018u};
+        for (uint32_t i = 0u; i < 5u; ++i)
+        {
+            for (uint32_t j = 0u; j < 4u; ++j)
+            {
+                rom[0x380u + i * 4u + j] = static_cast<uint8_t>(handler[i] >> (j * 8u));
+            }
+        }
+        ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+        if (variant == 2u &&
+            !pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (pilot.step(1u).m_boundary != boundary::SYSCALL_ENTRY ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != base + 12u)
+        {
+            return false;
+        }
+        const auto action = pilot.step(1u);
+        if (variant == 1u)
+        {
+            if (action.m_boundary != boundary::HOST_REFUSAL ||
+                action.m_instruction.m_result != result::UNSUPPORTED_OPCODE ||
+                pilot.cycle() != 5u || pilot.cpu().m_pc != base + 0x388u ||
+                pilot.cpu().m_cop0[ee::COP0_EPC] != base + 12u)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (action.m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != base + 16u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != (ee::EX_Sys << 2u) ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_gpr[5].m_lo != 0xffffffffbfc00010ull ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_pc != base + 16u ||
+            (pilot.cpu().m_cop0[ee::COP0_Status] & ee::STATUS_EXL) != 0u ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.cpu().m_gpr[7].m_lo != 42u ||
+            pilot.retired() != 9u || pilot.cycle() != 9u ||
+            pilot.iop_cycles() != (variant == 2u ? 1u : 0u))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_exception_registers()
 {
     using boundary = ee::e_ee_firmware_boundary;

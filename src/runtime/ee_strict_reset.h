@@ -664,6 +664,29 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             value = *scalar_constant::evaluate(op, read_gpr(cpu, rt), (opcode >> 6u) & 31u);
             break;
         }
+        // MTHI/MTLO/MTSA consume only rs. Reject reserved fields
+        // before publishing any special-register state.
+        if (function == 0x11u || function == 0x13u || function == 0x29u)
+        {
+            if ((opcode & 0x001fffc0u) != 0u)
+            {
+                return false;
+            }
+            const uint64_t source = read_gpr(cpu, rs);
+            if (function == 0x11u)
+            {
+                cpu.m_hi = source;
+            }
+            else if (function == 0x13u)
+            {
+                cpu.m_lo = source;
+            }
+            else
+            {
+                cpu.m_sa = (static_cast<uint32_t>(source) & 15u) << 3u;
+            }
+            return true;
+        }
         // SPECIAL register transfers require all unused fields zero.
         if (function == 0x10u || function == 0x12u || function == 0x28u)
         {
@@ -715,7 +738,17 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         break;
     }
-    case 0x1cu: // MMI: MFHI1/MFLO1 only
+    case 0x1cu: // MMI: HI1/LO1 transfers
+        if ((opcode & 0x001fffffu) == 0x11u)
+        {
+            cpu.m_hi1 = read_gpr(cpu, rs);
+            return true;
+        }
+        if ((opcode & 0x001fffffu) == 0x13u)
+        {
+            cpu.m_lo1 = read_gpr(cpu, rs);
+            return true;
+        }
         if ((opcode & 0x03ff07ffu) != 0x10u &&
             (opcode & 0x03ff07ffu) != 0x12u)
         {
@@ -889,6 +922,21 @@ static_assert([]()
         execute_register_word(cpu, 0x0000d828u, nullptr) &&
         cpu.m_gpr[27].m_lo == 15u && cpu.m_gpr[27].m_hi == 0xabcdefu &&
         !execute_register_word(cpu, 0x0020d810u, nullptr);
+}());
+
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[27] = {0xfedcba987654321bull, 0x1234u};
+    return execute_register_word(cpu, 0x03600011u, nullptr) &&
+        execute_register_word(cpu, 0x73600013u, nullptr) &&
+        execute_register_word(cpu, 0x03600029u, nullptr) &&
+        cpu.m_hi == 0xfedcba987654321bull &&
+        cpu.m_lo1 == cpu.m_hi && cpu.m_sa == (11u << 3u) &&
+        !execute_register_word(cpu, 0x03600811u, nullptr) &&
+        !execute_register_word(cpu, 0x73600813u, nullptr) &&
+        execute_register_word(cpu, 0x00000011u, nullptr) &&
+        cpu.m_hi == 0u && cpu.m_gpr[27].m_hi == 0x1234u;
 }());
 
 static_assert([]()

@@ -2576,6 +2576,28 @@ bool test_strict_reset_exception_context()
             return false;
         }
     }
+    const uint32_t restores[] = {0x03600011u, 0x03600013u, 0x73600011u,
+        0x73600013u, 0x03600029u};
+    for (uint32_t i = 0u; i < 5u; ++i)
+    {
+        const uint64_t source = 0x8123456789abcde0ull + i;
+        cpu.m_gpr[27].m_lo = source;
+        if (step(restores[i]).m_retired != 1u ||
+            step(words[i]).m_retired != 1u ||
+            cpu.m_gpr[27].m_lo != (i == 4u ? source & 15u : source) ||
+            cpu.m_gpr[27].m_hi != 0x12345678u ||
+            step(restores[i] | (1u << 11u)).m_result != result::UNSUPPORTED_OPCODE ||
+            step(words[i]).m_retired != 1u ||
+            cpu.m_gpr[27].m_lo != (i == 4u ? source & 15u : source) ||
+            step(restores[i] & ~(31u << 21u)).m_retired != 1u ||
+            step(words[i]).m_retired != 1u || cpu.m_gpr[27].m_lo != 0u ||
+            cpu.m_gpr[0].m_lo != 0x55u || cpu.m_gpr[0].m_hi != 0x66u)
+        {
+            return false;
+        }
+    }
+    // Restore the nonzero data marker for the existing SD/LD checks.
+    cpu.m_lo = expected[1];
     cpu.m_gpr[27].m_lo = cpu.m_lo;
     if (step(0xff5b0000u).m_retired != 1u) // SD k1,0(k0)
     {
@@ -4394,6 +4416,7 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
+        !check(test_strict_firmware_epc_restore(), "scheduler-owned EPC restore and ERET") ||
     if (!check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
         !check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
