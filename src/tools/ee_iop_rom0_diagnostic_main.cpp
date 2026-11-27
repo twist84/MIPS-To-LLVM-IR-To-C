@@ -31,6 +31,7 @@ const char* boundary_name(ee::e_ee_firmware_boundary boundary)
     case type::TIMER_DEADLINE: return "TIMER_DEADLINE";
     case type::INTERRUPT_ENTRY: return "INTERRUPT_ENTRY";
     case type::DEVICE_FAULT: return "DEVICE_FAULT";
+    case type::SYSCALL_ENTRY: return "SYSCALL_ENTRY";
     }
     return "UNKNOWN";
 }
@@ -85,12 +86,29 @@ int main(int argc, char** argv)
     std::array<s_trace, 64u> tail{};
     uint64_t count = 0u;
     uint64_t interrupts = 0u;
+    uint64_t syscalls = 0u;
     for (; pilot.retired() < budget;)
     {
         const uint32_t pc = pilot.cpu().m_pc;
         const uint64_t before = pilot.retired();
         const uint64_t iop_before = pilot.iop_cycles();
         const auto step = pilot.step(static_cast<uint32_t>(budget - before));
+        if (step.m_boundary == boundary::SYSCALL_ENTRY)
+        {
+            const auto& cpu = pilot.cpu();
+            if (pilot.retired() != before || pilot.cycle() != before ||
+                pilot.iop_cycles() != iop_before || step.m_instruction.m_retired != 0u ||
+                step.m_interrupt_vector == 0u || ++syscalls > budget)
+            {
+                std::fprintf(stderr, "invalid zero-slot syscall progress\n");
+                return 2;
+            }
+            std::printf("Dual ROM0 syscall: pc=%08x vector=%08x retired=%llu status=%08x cause=%08x epc=%08x v1=%016llx\n",
+                pc, step.m_interrupt_vector, static_cast<unsigned long long>(before),
+                cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Cause],
+                cpu.m_cop0[ee::COP0_EPC], static_cast<unsigned long long>(cpu.m_gpr[3].m_lo));
+            continue;
+        }
         if (step.m_boundary == boundary::INTERRUPT_ENTRY)
         {
             if (pilot.retired() != before || pilot.iop_cycles() != iop_before ||

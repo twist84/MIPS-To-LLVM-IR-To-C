@@ -21,7 +21,7 @@ namespace ee
 {
 // The pilot owns a reset domain, not a resumed snapshot. Bus-clock timers,
 // INTC and bounded synchronous SPR DMA are connected; guest exception
-// entry is bounded to Level 1 interrupts.
+// entry is bounded to Level 1 interrupts and synchronous SYSCALL.
 enum class e_ee_firmware_boundary : uint8_t
 {
     RETIRED,
@@ -29,7 +29,8 @@ enum class e_ee_firmware_boundary : uint8_t
     BUDGET,
     TIMER_DEADLINE,
     INTERRUPT_ENTRY,
-    DEVICE_FAULT
+    DEVICE_FAULT,
+    SYSCALL_ENTRY
 };
 
 struct s_ee_firmware_step
@@ -264,10 +265,10 @@ public:
             return {boundary::INTERRUPT_ENTRY, {}, false, vector};
         }
         const s_ee_strict_rom0_view rom{m_rom.data(), m_rom.size()};
-        c_ee_reset_instruction_cache::c_transaction cache_transaction(
-            m_iop_synchronized &&
+        auto* active_cache = m_iop_synchronized &&
             m_cold_cache.instruction_count() == c_ee_reset_cold_cache::k_instruction_lines
-                ? &m_instruction_cache : nullptr);
+                ? &m_instruction_cache : nullptr;
+        c_ee_reset_instruction_cache::c_transaction cache_transaction(active_cache);
         const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size),
             k_ram_size, m_iop_synchronized, &cache_transaction};
         const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
@@ -285,8 +286,22 @@ public:
         // Split only in the synchronized domain when a real boundary or
         // caller budget requires it. Unsplit and isolated behavior remains
         // unchanged. The branch is retired before the interior event.
-        const bool split = m_iop_synchronized && natural_slots == 2u &&
+        bool split = m_iop_synchronized && natural_slots == 2u &&
             (budget == 1u || deadline(cycle() + 2u));
+        // A synchronous trap in a slot needs a committed branch and its
+        // saved restart PC. Probe with a separate, discarded transaction
+        // so a slot line cannot become resident on branch retirement.
+        if (m_iop_synchronized && natural_slots == 2u && !split && budget >= 2u)
+        {
+            c_ee_reset_instruction_cache::c_transaction probe(active_cache);
+            const s_ee_reset_ram_view probe_ram{m_memory.physical_ram_span(0u, k_ram_size),
+                k_ram_size, true, &probe};
+            const auto slot_fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc + 4u,
+                m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
+                m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
+            const auto* slot = ee_fetch_strict_reset_word(slot_fetch, rom, probe_ram);
+            split = slot != nullptr && syscall_word(ee_read_instruction_word(slot));
+        }
         const uint32_t slots = split ? 1u : natural_slots;
         if (budget < slots || slots > k_slot_limit - cycle())
         {
@@ -320,6 +335,23 @@ public:
                         {result::UNSUPPORTED_OPCODE, word, 0u, slot_pc}};
                 }
             }
+        }
+
+        // SYSCALL is a precise, non-retiring synchronous exception,
+        // not a successful instruction or an HLE request. The reference
+        // clock counts committed retirements only; exception latency is
+        // not calibrated. A successfully fetched trapping word is real
+        // cache activity, unlike an unsupported host refusal.
+        if (m_retired != 0u && code != nullptr && syscall_word(opcode) &&
+            strict_reset_detail::scheduled_status_supported(m_cpu.m_cop0[COP0_Status]))
+        {
+            const uint32_t pc = m_cpu.m_pc;
+            const uint32_t vector = ee_raise_exception(&m_cpu, &m_runtime, EX_Sys,
+                pc, m_delay_slot_pending ? 1u : 0u, 0u);
+            m_delay_slot_pending = false;
+            m_delay_target = 0u;
+            cache_transaction.commit();
+            return {boundary::SYSCALL_ENTRY, {result::COMMITTED, opcode, 0u, pc}, false, vector};
         }
 
         const uint32_t previous_exit = m_cpu.m_exit_reason;
@@ -572,10 +604,17 @@ private:
             canonical == 0x40006800u || canonical == 0x40007000u;
     }
 
+    static constexpr bool syscall_word(uint32_t opcode)
+    {
+        // SPECIAL function 0x0c; the optional 20-bit code is ignored
+        // by architectural exception entry.
+        return (opcode & 0xfc00003fu) == 0x0000000cu;
+    }
+
     static constexpr bool owned_control(uint32_t opcode)
     {
         return status_write(opcode) || clock_write(opcode) ||
-            clock_read(opcode) || opcode == k_eret;
+            clock_read(opcode) || opcode == k_eret || syscall_word(opcode);
     }
 
     s_ee_reset_prefix_step execute_control(uint32_t opcode)

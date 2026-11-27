@@ -1179,6 +1179,77 @@ bool test_strict_firmware_gs_reset()
         pilot.next_scanout_event() == first_field;
 }
 
+bool test_strict_firmware_syscall()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    for (uint32_t variant = 0u; variant < 4u; ++variant)
+    {
+        const bool delay = variant >= 2u;
+        const bool bev = variant != 0u;
+        auto rom = make_firmware_pilot_rom({
+            0x40806000u, 0x3c020040u, bev ? 0x40826000u : 0u,
+            0x34030006u, delay ? 0x10000002u : 0x0001230cu,
+            0x0000000cu, 0u, 0u});
+        // A second genuine syscall at the BEV1 vector tests nested
+        // entry, including preservation of the outer EPC/BD pair.
+        rom[0x380u] = 0x0cu;
+        ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+        if (!pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (delay)
+        {
+            // Both a forced split and an explicit one-slot budget
+            // must retire only the branch before entering the trap.
+            if (pilot.step(variant == 2u ? 2u : 1u).m_boundary != boundary::RETIRED ||
+                !pilot.delay_slot_pending() || pilot.retired() != 5u)
+            {
+                return false;
+            }
+        }
+        const uint32_t pc = base + (delay ? 20u : 16u);
+        const uint64_t before = pilot.retired();
+        const uint32_t vector = bev ? ee::VEC_COMMON_BEV1 : ee::VEC_COMMON_BEV0;
+        const uint32_t cause = (ee::EX_Sys << 2u) | (delay ? ee::CAUSE_BD : 0u);
+        if (pilot.step(0u).m_boundary != boundary::BUDGET || pilot.cpu().m_pc != pc)
+        {
+            return false;
+        }
+        const auto trap = pilot.step(1u);
+        if (trap.m_boundary != boundary::SYSCALL_ENTRY || trap.m_instruction.m_retired != 0u ||
+            trap.m_instruction.m_detail_pc != pc || trap.m_interrupt_vector != vector ||
+            pilot.retired() != before || pilot.cycle() != before ||
+            pilot.iop_cycles() != before / 8u || pilot.delay_slot_pending() ||
+            pilot.cpu().m_pc != vector || pilot.cpu().m_cop0[ee::COP0_EPC] != base + 16u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != cause ||
+            pilot.cpu().m_cop0[ee::COP0_Status] != ((bev ? ee::STATUS_BEV : 0u) | ee::STATUS_EXL) ||
+            pilot.cpu().m_gpr[3].m_lo != 6u)
+        {
+            return false;
+        }
+        if (bev)
+        {
+            const auto nested = pilot.step(1u);
+            if (nested.m_boundary != boundary::SYSCALL_ENTRY ||
+                pilot.cpu().m_pc != vector || pilot.cpu().m_cop0[ee::COP0_EPC] != base + 16u ||
+                pilot.cpu().m_cop0[ee::COP0_Cause] != cause || pilot.retired() != before)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_jalr()
 {
     using boundary = ee::e_ee_firmware_boundary;

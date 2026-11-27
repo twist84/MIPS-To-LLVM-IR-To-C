@@ -1653,3 +1653,33 @@ bounded data contract; do not bypass cached data access or syscall entry.
 Require real-ROM progress beyond 696448 / 696640, retaining the original
 isolated regressions and all backing assertions. Pending firmware CI.
 No retail replay required; do not claim syscall execution or full boot.
+
+## M6E3H3E9B1: genuine Level 1 SYSCALL and cached KSEG0 vector
+
+H3E9A passed both releases at a8816a8e, workflow 46064486569.
+Both reached actual SYSCALL 000822c0 with five resident lines and
+696458 / 696650 EE retirements, zero IOP debt and 66 serial bytes.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46064486569
+
+Use the existing ee_raise_exception EX_Sys path for all SPECIAL
+SYSCALL code fields, preserving pending interrupt bits, EPC/BD on
+nested entry, and the actual BEV-selected vector. A trapping word
+is not a successful retirement. Under this pilot's existing
+retirement-based compatibility clock, synchronous entry advances
+zero slots (no measured exception latency is implied); commit
+its successful instruction fetch, and leave the branch target
+cancelled. Synchronized branch/slot execution splits before a
+trapping slot using a discarded cache probe; non-synchronized
+atomic slots remain refused. Test ordinary, nested, BEV0/1,
+explicit and forced split entries and zero budget.
+
+Allow cache-3 canonical KSEG0 RAM fetch through the existing cold
+transactional I-cache, with identical backing/color/way checks.
+No cache bypass, replacement or D-cache model is added. Both
+upstream kernel.c versions install the vector via guest uncached
+stores (LUI/ORI/JR/NOP), then branch to ob_ee_exception_entry.
+The upstream exception.S starts with depth bookkeeping and SQ
+register saves before MFHI/MFLO/SD and COP0 frame reads. Further
+coverage follows actual stop evidence, not a host syscall shim.
+Require actual guest syscall 6 entry with correct Cause/EPC/EXL
+and subsequent guest retirement. Pending real-ROM CI; no retail replay.

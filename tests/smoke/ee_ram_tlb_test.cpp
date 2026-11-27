@@ -2232,6 +2232,51 @@ bool test_strict_reset_instruction_cache()
     return lines.resident_count() == 3u;
 }
 
+bool test_strict_reset_cached_kernel_fetch()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    using cache = ee::c_ee_reset_instruction_cache;
+    uint8_t bytes[0x200u]{};
+    constexpr uint32_t pc = 0x80000180u;
+    bytes[0x180u] = 7u; // ORI v0,zero,7
+    bytes[0x182u] = 2u;
+    bytes[0x183u] = 0x34u;
+    cache lines;
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_cop0[ee::COP0_Config] = 0x20443u;
+    {
+        const ee::s_ee_reset_ram_view isolated{bytes, sizeof(bytes)};
+        if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, isolated).m_result !=
+            result::FETCH_UNAVAILABLE)
+        {
+            return false;
+        }
+    }
+    {
+        cache::c_transaction transaction(&lines);
+        const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, &transaction};
+        if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::COMMITTED ||
+            cpu.m_gpr[2].m_lo != 7u || lines.resident_count() != 0u)
+        {
+            return false;
+        }
+        transaction.commit();
+    }
+    bytes[0x180u] = 9u;
+    cpu.m_pc = pc;
+    cache::c_transaction transaction(&lines);
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, &transaction};
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::COMMITTED ||
+        cpu.m_gpr[2].m_lo != 7u)
+    {
+        return false;
+    }
+    transaction.commit();
+    return lines.resident_count() == 1u;
+}
+
 bool test_strict_reset_mapped_fetch()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4080,7 +4125,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
+    if (!check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
+        !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
         !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||
         !check(test_strict_firmware_serial(), "scheduler-owned serial byte transport") ||
@@ -4352,7 +4398,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_instruction_cache(), "strict reset transactional I-cache fills") ||
+    if (!check(test_strict_reset_cached_kernel_fetch(), "strict reset cached KSEG0 fetch") ||
+        !check(test_strict_reset_instruction_cache(), "strict reset transactional I-cache fills") ||
         !check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
         !check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
         !check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))

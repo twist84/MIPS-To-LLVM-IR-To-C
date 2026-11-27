@@ -253,8 +253,10 @@ struct s_ee_reset_ram_view
     {
         const uint32_t address = fetch.m_access.m_physical_address;
         const uint32_t cache = fetch.m_access.m_cache_mode;
+        const bool cached_kernel = fetch.m_pc >= 0x80000000u &&
+            fetch.m_pc < 0x82000000u && address == fetch.m_pc - 0x80000000u;
         if (m_mapped_fetch && m_instruction_cache != nullptr &&
-            fetch.m_pc < 0x80000000u && !fetch.m_fault.m_valid &&
+            (fetch.m_pc < 0x80000000u || cached_kernel) && !fetch.m_fault.m_valid &&
             fetch.m_route == e_ee_fetch_route::CACHED_PHYSICAL &&
             fetch.m_access.m_status == e_ee_access_status::PHYSICAL && cache == 3u)
         {
