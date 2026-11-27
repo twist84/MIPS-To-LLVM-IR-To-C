@@ -152,6 +152,37 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_split_pilot(root, "MCMAN", root / "ambiguous", residual=True)
 
+    def test_bounded_residual_partitions_keep_function_ids_and_all_pcs(self):
+        meta, data = capture([0, 0x0000000c, 0x03e00008, 0, 0, 0],
+                             exports=(BASE + 8,))
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(data)
+            old = prepare_split_pilot(root, "MCMAN", root / "old", residual=True)
+            for limit, expected in ((1, [1, 1, 1, 1]), (3, [3, 1]),
+                                    (4, [4]), (8, [4])):
+                plan = prepare_split_pilot(root, "MCMAN", root / f"cap-{limit}",
+                                           residual=True, residual_max_pcs=limit)
+                rows = [list(map(int, line.split()))[1:]
+                        for line in plan.read_text().splitlines()[1:]]
+                old_rows = [list(map(int, line.split()))[1:]
+                            for line in old.read_text().splitlines()[1:]]
+                self.assertEqual(rows[:2], old_rows[:2])
+                self.assertEqual([len(row) for row in rows[2:]], expected)
+                self.assertEqual([pc for row in rows[2:] for pc in row], old_rows[-1])
+                self.assertEqual(sorted(pc for row in rows for pc in row),
+                                 list(range(BASE, BASE + len(data), 4)))
+                self.assertEqual(int(plan.read_text().splitlines()[0].split()[-1]),
+                                 len(rows))
+            for limit in (0, -1, True, 1.5):
+                with self.assertRaises(ValueError):
+                    prepare_split_pilot(root, "MCMAN", root / "invalid",
+                                        residual=True, residual_max_pcs=limit)
+            with self.assertRaises(ValueError):
+                prepare_split_pilot(root, "MCMAN", root / "invalid",
+                                    residual_max_pcs=2)
+
     def test_extended_plan_retains_full_dispatch_domain(self):
         meta, data = capture([
             0x88820000, 0x03e00008, 0,
