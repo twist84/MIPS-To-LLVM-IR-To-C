@@ -65,3 +65,13 @@ model subsequent pipeline backpressure or prove a hardware issue timeline.
 The comparator can evaluate both policies without activating guest timing.
 
 https://docs.alexrp.com/mips/ee.pdf
+
+## Build artifact
+
+The separate R5900 console timing ELF workflow compiles the optional program
+using the immutable PS2DEV v2.0.0 image index digest documented at
+https://github.com/ps2dev/ps2dev/pkgs/container/ps2dev/ . It verifies each
+linked executable body's alignment, length and exact instruction bytes
+against the generator before uploading the ELF, traces and provenance.
+No SDK is required for ordinary host builds. Successful cross-compilation
+and opcode verification still do not constitute hardware execution.

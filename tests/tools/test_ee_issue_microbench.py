@@ -22,7 +22,7 @@ def main():
         assembly = (out / "bench.S").read_text()
         for row in rows:
             body = assembly.split(row["symbol"] + "_body:\n", 1)[1].split(
-                "    sync.p", 1)[0]
+                ".globl " + row["symbol"] + "_body_end", 1)[0]
             words = [int(line.split()[1], 16) for line in body.splitlines()]
             assert words == list(CASES[row["case"]]) * row["repeat"]
             with (out / row["trace"]).open(newline="") as stream:

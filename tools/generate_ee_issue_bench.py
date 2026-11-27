@@ -44,9 +44,10 @@ def generate(out: Path) -> list[dict]:
                          "    mtc1 $11,$f1", "    mtc1 $11,$f2",
                          ".balign 16", "    .word 0", "    .word 0",
                          "    sync.p", "    mfpc $2,0",
-                         f"{symbol}_body:"]
+                         f".globl {symbol}_body", f"{symbol}_body:"]
             assembly += [f"    .word 0x{word:08x}" for word in words]
-            assembly += ["    sync.p", "    mfpc $3,0",
+            assembly += [f".globl {symbol}_body_end", f"{symbol}_body_end:",
+                         "    sync.p", "    mfpc $3,0",
                          "    subu $2,$3,$2", "    jr $31", "    nop"]
             header.append(f"extern uint32_t {symbol}(const uint32_t *);")
             trace = f"{symbol}.csv"
