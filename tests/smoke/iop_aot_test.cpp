@@ -356,6 +356,100 @@ int main(int argc, char** argv)
             check(compare_slices(aot, budget), "exact per-slice native budget and state");
             check(compare_hardware_slices(aot, budget), "exact MMIO and timer retirement");
         }
+        // Split the existing synthetic program at the direct-call target
+        // and inside the attached-hardware sequence. Deliberately leave
+        // one ordinary PC unowned to exercise interpreter fallback.
+        std::vector<std::vector<uint32_t>> regions(4);
+        const uint32_t callee = ((code[10] & 0x03ffffffu) << 2);
+        for (uint32_t pc = k_base; pc < k_base + module.m_text.size(); pc += 4u)
+        {
+            if (pc == k_base + 4u || (pc >= callee + 12u && pc < k_mmio_pc))
+            {
+                continue;
+            }
+            const size_t region = pc < callee ? 0u : pc < k_mmio_pc ? 1u :
+                pc < k_mmio_pc + 12u ? 2u : 3u;
+            regions[region].push_back(pc);
+        }
+        std::vector<std::string> split_code;
+        std::string router;
+        const bool split_ok = iop::iop_lift_regions_ir(module, regions,
+            "iop_split_entry", &split_code, &router);
+        check(split_ok && split_code.size() == regions.size(), "split IR generation");
+        if (!split_ok)
+        {
+            return 1;
+        }
+        auto invalid = regions;
+        invalid[1].insert(invalid[1].begin(), k_base);
+        std::vector<std::string> untouched{"sentinel"};
+        std::string untouched_router = "sentinel";
+        check(!iop::iop_lift_regions_ir(module, invalid, "invalid", &untouched,
+            &untouched_router) && untouched == std::vector<std::string>{"sentinel"} &&
+            untouched_router == "sentinel", "reject overlapping region ownership");
+#if defined(_WIN32)
+        const std::string split_library = (work / "iop-aot-split.dll").string();
+#else
+        const std::string split_library = (work / "iop-aot-split.so").string();
+#endif
+        std::ofstream(work / "split-router.ll") << router;
+        std::ofstream(work / "split-table.ll") << iop::iop_table_module_ir(
+            {{module.m_name, k_base, static_cast<uint32_t>(module.m_text.size()),
+              hash, "iop_split_entry"}}, windows);
+        std::string split_command = "clang -O2 -shared -fuse-ld=lld -Wno-override-module -o \"" +
+            split_library + "\" \"" + (work / "split-router.ll").string() +
+            "\" \"" + (work / "split-table.ll").string() + "\"";
+        for (size_t i = 0u; i < split_code.size(); ++i)
+        {
+            const auto path = work / ("split-" + std::to_string(i) + ".ll");
+            std::ofstream(path) << split_code[i];
+            split_command += " \"" + path.string() + "\"";
+        }
+#if defined(_WIN32)
+        split_command += " -nostdlib -Wl,/noentry";
+#else
+        split_command += " -fPIC";
+#endif
+        if (std::system(split_command.c_str()) != 0)
+        {
+            std::printf("FAIL: split library failed to compile\n");
+            return 1;
+        }
+        iop::c_iop_aot split;
+        if (!split.open(split_library, &error))
+        {
+            std::printf("FAIL: %s\n", error.c_str());
+            return 1;
+        }
+        iop::c_cpu activation;
+        activation.reset(k_base);
+        for (size_t i = 0u; i < code.size(); ++i)
+        {
+            activation.write32(k_base + static_cast<uint32_t>(i) * 4u, code[i]);
+        }
+        split.refresh(activation);
+        const auto* descriptor = split.find(k_base);
+        check(descriptor != nullptr && split.module_count() == 1u,
+            "single split descriptor activates original linked image");
+        if (descriptor == nullptr)
+        {
+            return 1;
+        }
+        s_iop_aot_context ctx{};
+        check(descriptor->m_entry(&ctx, k_base) == IOP_AOT_EXIT &&
+            ctx.m_executed == 0u && ctx.m_pc == k_base &&
+            ctx.m_next_pc == k_base + 4u && ctx.m_in_delay == 0u,
+            "zero budget exits without native retirement");
+        ctx.m_budget = 1u;
+        check(descriptor->m_entry(&ctx, k_base + 4u) == IOP_AOT_INTERPRET &&
+            ctx.m_executed == 0u && ctx.m_pc == k_base + 4u &&
+            ctx.m_next_pc == k_base + 8u && ctx.m_in_delay == 0u,
+            "unowned PC falls back without retirement");
+        for (uint32_t budget = 1u; budget <= 17u; ++budget)
+        {
+            check(compare_slices(split, budget), "split exact per-slice budget and state");
+            check(compare_hardware_slices(split, budget), "split exact MMIO and timer retirement");
+        }
         for (int r = 0; r < 32; ++r)
         {
             if (translated.m_state.m_gpr[r] != reference.m_state.m_gpr[r])

@@ -119,3 +119,28 @@ python tools\\audit_iop_function_discovery.py --capture build\\iop-g8d-capture -
 ```
 
 No new retail run or AOT rebuild is needed for this inventory.
+
+## I2b: received retail inventory / I3a: synthetic split lowering
+
+Archive SHA-256 744b097e9875c5e2ef1c0a7bd2f9d2d5e46732b9c076da71b203fb65cb59a303.
+Seven captures, 413 candidate regions, 17,812 ordinary and 3,755 delay PCs,
+35,101 unvisited aligned words (56,668 total); no reported shared ordinary
+PCs, ordinary/delay overlap, or rejected seeds. The 574 unresolved records
+include returns and external jumps; they are not 574 decoding failures.
+The receipt is not raw capture data or a dynamic coverage trace.
+SIO2MAN (67 candidates, 438 ordinary / 143 delay PCs, 976 words, four
+indirect calls) is the first prospective retail split pilot. MCMAN
+(161 candidates, 14,263 discovered words out of 18,148) is the later
+compile scalability pilot. Unvisited code must retain interpreter or
+legacy native fallback; do not assert it is data.
+
+I3a adds an explicit, validated disjoint-region emitter and one dispatcher
+under the existing descriptor ABI. Native direct edges outside a region
+exit with the ordinary resume PC; indirect targets stay in the region or
+exit to the CPU. Delay slots still read full original linked text and
+retain G8D.2 budget/fallback semantics. The dispatcher checks zero budget
+and unowned PCs before calling a region. Production iop_recomp is not
+connected yet; the synthetic AOT differential compiles four regions plus
+router/table into one library and checks budgets 1–17, cross-region calls
+and returns, missing ownership, overlapping regions and Timer5/MMIO.
+No retail build/replay until CI validates the synthetic split path.
