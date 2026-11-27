@@ -28,7 +28,8 @@ enum class e_ee_reset_prefix_result : uint8_t
     UNSAFE_BOUNDARY,
     FETCH_UNAVAILABLE,
     UNSUPPORTED_OPCODE,
-    BUDGET_EXHAUSTED
+    BUDGET_EXHAUSTED,
+    DATA_UNAVAILABLE
 };
 
 struct s_ee_reset_prefix_step
@@ -36,6 +37,11 @@ struct s_ee_reset_prefix_step
     e_ee_reset_prefix_result m_result = e_ee_reset_prefix_result::UNSAFE_BOUNDARY;
     uint32_t m_opcode = 0u;
     uint32_t m_retired = 0u;
+    // On refusal, identify the actual unsupported instruction or slot,
+    // not just the branch restart PC. Data address is meaningful only
+    // for DATA_UNAVAILABLE.
+    uint32_t m_detail_pc = 0u;
+    uint32_t m_data_address = 0u;
 };
 
 // Only the reset-entry MTC0 zero,Status is supported. Its source is
@@ -95,12 +101,24 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     const uint32_t primary = opcode >> 26u;
     const uint32_t rs = (opcode >> 21u) & 31u;
     const uint32_t rt = (opcode >> 16u) & 31u;
+    uint32_t dest = rt;
     const uint32_t imm = opcode & 0xffffu;
     uint64_t value = 0u;
     switch (primary)
     {
     case 0u:
-        return opcode == 0u; // NOP only
+        if (opcode == 0u)
+        {
+            return true;
+        }
+        if ((opcode & 0x7ffu) != 0x21u) // canonical ADDU, shamt=0
+        {
+            return false;
+        }
+        dest = (opcode >> 11u) & 31u;
+        value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
+                                 static_cast<uint32_t>(read_gpr(cpu, rt)));
+        break;
     case 0x10u:
         if ((opcode & 0xffe0ffffu) != 0x40007800u)
         {
@@ -128,17 +146,51 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     default:
         return false;
     }
-    if (rt != 0u)
+    if (dest != 0u)
     {
-        cpu.m_gpr[rt].m_lo = value;
+        cpu.m_gpr[dest].m_lo = value;
     }
     return true;
+}
+
+// LBU must validate even when the destination is zero. A refusal
+// is diagnostic only: this ROM probe does not deliver guest faults.
+inline constexpr s_ee_reset_prefix_step execute_rom_word(
+    s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
+    const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode)
+{
+    using result = e_ee_reset_prefix_result;
+    if ((opcode >> 26u) != 0x24u)
+    {
+        return {execute_register_word(cpu, opcode) ? result::COMMITTED :
+            result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+    }
+    const uint32_t rs = (opcode >> 21u) & 31u;
+    const uint32_t rt = (opcode >> 16u) & 31u;
+    const uint32_t imm = opcode & 0xffffu;
+    const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
+        (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
+    const auto plan = ee_plan_data_access(tlb, e_ee_data_access_kind::BYTE,
+        false, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
+        cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
+    const auto bus = ee_plan_data_bus_span(plan.m_access, plan.m_width,
+        cpu.m_cop0[COP0_Config], 0u);
+    const uint8_t* bytes = plan.m_fault.m_valid ? nullptr : rom.read_span(bus);
+    if (bytes == nullptr)
+    {
+        return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+    }
+    if (rt != 0u)
+    {
+        cpu.m_gpr[rt].m_lo = *bytes;
+    }
+    return {result::COMMITTED, opcode, 0u, pc};
 }
 } // namespace strict_reset_detail
 
 // Isolated post-Status-clear ROM-only execution. The caller owns all
 // state and establishes the absence of pending clock/device effects.
-// BEQ/BNE and their non-branching register-only slots are a single
+// BEQ/BNE and their supported register/ROM-read slots are a single
 // bounded transaction: an unavailable/unsupported slot leaves the
 // branch PC and GPRs unchanged. No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
@@ -165,7 +217,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     const uint8_t* code = fetch(cpu.m_pc);
     if (code == nullptr)
     {
-        return {result::FETCH_UNAVAILABLE};
+        return {result::FETCH_UNAVAILABLE, 0u, 0u, cpu.m_pc};
     }
     const uint32_t opcode = ee_read_instruction_word(code);
     const uint32_t primary = opcode >> 26u;
@@ -184,18 +236,22 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         const uint8_t* slot = fetch(pc + 4u);
         if (slot == nullptr)
         {
-            return {result::FETCH_UNAVAILABLE, opcode};
+            return {result::FETCH_UNAVAILABLE, 0u, 0u, pc + 4u};
         }
-        if (!strict_reset_detail::execute_register_word(cpu, ee_read_instruction_word(slot)))
+        const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
+            pc + 4u, ee_read_instruction_word(slot));
+        if (action.m_result != result::COMMITTED)
         {
-            return {result::UNSUPPORTED_OPCODE, opcode};
+            return action;
         }
         cpu.m_pc = taken ? pc + 4u + disp : pc + 8u;
         return {result::COMMITTED, opcode, 2u};
     }
-    if (!strict_reset_detail::execute_register_word(cpu, opcode))
+    const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
+        cpu.m_pc, opcode);
+    if (action.m_result != result::COMMITTED)
     {
-        return {result::UNSUPPORTED_OPCODE, opcode};
+        return action;
     }
     cpu.m_pc += 4u;
     return {result::COMMITTED, opcode, 1u};

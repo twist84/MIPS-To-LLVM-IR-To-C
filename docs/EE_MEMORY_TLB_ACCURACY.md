@@ -681,3 +681,37 @@ not a firmware fault or boot completion. A synthetic regression
 covers this observed prefix, taken/not-taken delay slots, a slot
 changing the compared register, budget refusal and unsupported slot.
 Production runtime unchanged. CI pending; no retail replay.
+
+## Strict memory follow-up M6E2C: authentic ROM data reads
+
+CI at 1fcb692 confirmed all five workflows and the 12-retirement
+processor selection checkpoint (PC bfc00044, PRId 2e20, t8
+ffffffffa0010000, t7 ffffffffbfc0012c).
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46042781159/job/140654445133
+
+The next actual firmware words set up pointers and issue LBU at
+bfc00054, followed by BEQ and an ADDU-based byte comparison
+sequence. Add a const ROM0 data-span accessor using the existing
+translated bus/cache plan, canonical ADDU and LBU to the isolated
+reset executor. Validate uncached physical ROM backing before the
+read, including loads to zero. Preserve upper GPR halves. Reject
+non-ROM/cached/unavailable data without inventing guest faults.
+Non-linking delay-slot refusal preserves the branch restart state;
+the diagnostic now identifies the actual slot opcode/PC and EA.
+
+Keep the exact twelve-retirement checkpoint. Independently require
+twenty actual retirements and a first LBU value matching the
+unmodified image byte at offset 0x1000; the following BEQ must
+select bfc000bc (zero byte) or bfc00064 (nonzero byte). Then explore
+until the first host refusal or a 65,536-instruction total budget,
+logging the last 32 committed steps, actual stop and GPRs, and
+bounded decode lookahead. Reaching a diagnostic stop is not a
+successful boot. The probe does not synthesize an MMIO response,
+write ROM, or execute RAM instructions. Existing native/HLE
+execution remains unchanged.
+
+Directed synthetic tests cover LBU negative displacement, zero
+extension, zero destination, ADDU wrapping/sign extension, upper
+GPR preservation, cached/RAM/unmapped data refusal, final ROM byte
+and successful/refused delay-slot reads. CI pending. No retail
+replay required; use actual firmware stop for the next checkpoint.

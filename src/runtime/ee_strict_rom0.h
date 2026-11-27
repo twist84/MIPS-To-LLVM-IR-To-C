@@ -13,6 +13,23 @@ struct s_ee_strict_rom0_view
     const uint8_t* m_bytes = nullptr;
     size_t m_size = 0u;
 
+    // Read-only data access for a previously translated, validated span.
+    // Only the isolated reset executor opts into this path. Neither
+    // cached/accelerated reads nor any mutable ROM backing are exposed.
+    constexpr const uint8_t* read_span(const s_ee_bus_span_plan& bus) const
+    {
+        if (m_bytes == nullptr || m_size != k_size ||
+            bus.m_region != e_ee_bus_region::ROM0 ||
+            bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED ||
+            bus.m_width > 16u ||
+            !ee_bus_span_inside(bus.m_address, bus.m_width,
+                                k_base, uint64_t{k_base} + k_size))
+        {
+            return nullptr;
+        }
+        return m_bytes + (bus.m_address - k_base);
+    }
+
     constexpr const uint8_t* fetch_span(const s_ee_fetch_plan& fetch) const
     {
         if (m_bytes == nullptr || m_size != k_size ||

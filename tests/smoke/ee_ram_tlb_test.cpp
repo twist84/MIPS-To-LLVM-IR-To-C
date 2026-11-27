@@ -1509,6 +1509,85 @@ bool test_strict_reset_register_execution()
         cpu.m_pc == 0xbfc00100u && cpu.m_gpr[2].m_lo == 3u;
 }
 
+bool test_strict_reset_rom_data()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xbfc00000u;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset + i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfc01001ull;
+    cpu.m_gpr[2] = {0x11223344u, 0x55667788u};
+    rom[0x1000u] = 0xe5u;
+    put(0u, 0x9082ffffu); // lbu r2,-1(r4)
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_pc != pc + 4u || cpu.m_gpr[2].m_lo != 0xe5u ||
+        cpu.m_gpr[2].m_hi != 0x55667788u)
+    {
+        return false;
+    }
+    // ADDU wraps a low 32-bit sum, sign-extends and preserves upper half.
+    cpu.m_gpr[3].m_lo = 0x123456787fffffffull;
+    cpu.m_gpr[5].m_lo = 0xabcdef0000000001ull;
+    put(4u, 0x00651021u); // addu r2,r3,r5
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xffffffff80000000ull || cpu.m_gpr[2].m_hi != 0x55667788u)
+    {
+        return false;
+    }
+    put(8u, 0x9080ffffu); // lbu zero,-1(r4)
+    cpu.m_gpr[0] = {0x9999u, 0x7777u};
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[0].m_lo != 0x9999u || cpu.m_gpr[0].m_hi != 0x7777u)
+    {
+        return false;
+    }
+    for (const uint32_t address : {0x9fc01001u, 0xa0001001u, 0xbfc00000u, 0xc0000001u, 0x00401001u})
+    {
+        cpu.m_pc = pc + 8u;
+        cpu.m_gpr[4].m_lo = address;
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, view, 1u);
+        if (step.m_result != result::DATA_UNAVAILABLE || step.m_detail_pc != pc + 8u ||
+            step.m_data_address != address - 1u || step.m_retired != 0u ||
+            cpu.m_pc != pc + 8u || cpu.m_gpr[0].m_lo != 0x9999u)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc + 12u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfffffffull;
+    rom.back() = 0xffu;
+    put(12u, 0x90820000u);
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xffu)
+    {
+        return false;
+    }
+    // A failed delay-slot read refuses the entire non-linking branch.
+    put(16u, 0x10000003u);
+    put(20u, 0x90820000u);
+    cpu.m_gpr[4].m_lo = 0xa0001000u;
+    const auto rejected = ee::ee_execute_strict_rom_register_step(cpu, view, 2u);
+    if (rejected.m_result != result::DATA_UNAVAILABLE || rejected.m_detail_pc != pc + 20u ||
+        rejected.m_opcode != 0x90820000u || rejected.m_data_address != 0xa0001000u ||
+        cpu.m_pc != pc + 16u || cpu.m_gpr[2].m_lo != 0xffu)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xbfc01000u;
+    return ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_retired == 2u &&
+           cpu.m_pc == pc + 32u && cpu.m_gpr[2].m_lo == 0xe5u &&
+           cpu.m_gpr[2].m_hi == 0x55667788u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1728,6 +1807,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_register_execution(), "strict reset processor selection regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_rom_data(), "strict reset ROM data and ADDU regression"))
     {
         return 1;
     }
