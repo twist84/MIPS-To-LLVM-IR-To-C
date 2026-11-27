@@ -200,6 +200,49 @@ def test_graphics_ee_comparison(root):
     assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
     assert not receipt["performance_accepted"] and receipt["relative_throughput"] == 2.0
 
+    (root / "new-runner").write_text("new executable")
+    calls.clear()
+
+    def replay_runner(args, image, directory, env):
+        assert image == root / "control.dll"
+        calls.append((directory.name, args.runner.name,
+                      env["SDBZ_VU1_AOT"], env["SDBZ_RUNTIME_PROFILE"]))
+        directory.mkdir()
+        return {"wall_seconds": 2.0 if args.runner.name == "runner" else 1.0}
+
+    runner_args = args[:args.index("--candidate-source")]
+    runner_args[runner_args.index("--output") + 1] = str(root / "runner-replay")
+    runner_args += ["--candidate-runner", str(root / "new-runner"),
+                    "--control-runner-sha256", sha(root / "runner")]
+    with patch.multiple(
+            harness, validate_source_libraries=validate,
+            aot_identity=lambda path: inventory,
+            terminal_budget=lambda path, budget: True,
+            read_json=lambda path: report, record_count=lambda path: 1,
+            replay_environment=lambda path: {}, run_one=replay_runner,
+            validate_run=lambda *args: {}, require_match=lambda *args: None,
+            extract_profile=lambda *args: None):
+        with patch.object(sys, "argv", runner_args[:-1] + ["wrong"]):
+            assert harness.main() == 1 and not calls
+        with patch.object(sys, "argv", runner_args + [
+                "--candidate-source", str(root / "candidate-source"),
+                "--candidate-source-receipt", str(root / "candidate.json")]):
+            assert harness.main() == 1 and not calls
+        with patch.object(sys, "argv", runner_args):
+            assert harness.main() == 0
+    assert calls == [
+        (directory, runner, str(root / "vu1"), "0")
+        for directory, runner in (("control-1", "runner"),
+                                  ("candidate-1", "new-runner"),
+                                  ("candidate-2", "new-runner"),
+                                  ("control-2", "runner"))]
+    receipt = json.loads((root / "runner-replay" / "profiling-receipt.json").read_text())
+    assert receipt["schema"] == "ee-graphics-runner-comparison-v1"
+    assert receipt["inputs"]["runner"] == sha(root / "runner")
+    assert receipt["inputs"]["candidate_runner"] == sha(root / "new-runner")
+    assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
+    assert not receipt["performance_accepted"] and receipt["relative_throughput"] == 2.0
+
 
 def run():
     with TemporaryDirectory() as tmp:
