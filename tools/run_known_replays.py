@@ -174,6 +174,13 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
           "known function entries retained", flush=True)
 
 
+def recovery_recompiler_options(ir_jobs):
+    """0 retains the independent-process fallback; 1 is persistent serial."""
+    if not 0 <= ir_jobs <= 32:
+        raise ValueError("recovery IR worker count must be in 0..32")
+    return {"persistent": ir_jobs != 0, "ir_jobs": max(1, ir_jobs)}
+
+
 @metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 allow_mismatches, *, ir_only=False, verified_hashes=None,

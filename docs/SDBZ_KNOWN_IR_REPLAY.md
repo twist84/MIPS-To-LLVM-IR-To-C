@@ -427,3 +427,18 @@ group; serial emission is unchanged. Timing reports now distinguish actual
 thread launches from per-batch worker assignments. Test identical bytes
 and metadata before selecting a default worker count. No R7.2 speedup
 claimed until measured.
+
+R7.2 Windows acceptance: 105.640 s wall time, strict 16,252/16,252 IR
+hashes, byte-identical reconstructed metadata, 8 actual thread launches
+and 1,025 worker assignments. Emission 7.152 s. Cumulative reconstruction
+reduction: 44.69% (191.000 -> 105.640 s).
+
+Actual recovery and explicit overwrite now default to the accepted
+persistent 8-worker path. Use `--ir-jobs=1` for persistent serial or
+`--ir-jobs=0` for the original independent-process path. This option is
+separate from native object emission jobs. Verified IR copying still avoids
+all recompilation. Actual strict recovery may explicitly accept changed
+source fingerprints via `--allow-source-changes`, but still requires the
+exact original ordered IR hashes; `--allow-ir-changes` remains a separate
+and broader consent. Independent native and promotion checks are unchanged.
+The isolated benchmark defaults remain unchanged for repeatable comparisons.

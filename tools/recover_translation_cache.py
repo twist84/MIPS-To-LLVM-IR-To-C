@@ -440,15 +440,17 @@ def canonical_shared_profiles(base_work, work):
 
 
 def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
-            *, full_native_backup=False, opt=0):
+            *, full_native_backup=False, opt=0, ir_jobs=8,
+            allow_source_changes=False):
     """Reconstruct, link only the selected profile, then validate and promote."""
     if opt not in range(6):
         raise ValueError("invalid recovery native profile")
+    options = run_known_replays.recovery_recompiler_options(ir_jobs)
     source_root = Path(__file__).resolve().parents[1]
     recomp = run_game.native_executable(build, "ee_recomp", config)
     ir_sources = run_game.ir_generation_inputs(elf, source_root)
     candidate, manifest, entries, same_sources = select_manifest(
-        base_work, elf, ir_sources, allow_ir_changes
+        base_work, elf, ir_sources, allow_ir_changes or allow_source_changes
     )
     metrics.details("selected_manifest", str(candidate))
     metrics.details("known_modules", len(entries))
@@ -498,7 +500,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
         if comparison is None:
             comparison = run_known_replays.reconstruct(
                 manifest, entries, elf, build, config, work, jobs, allow_ir_changes,
-                ir_only=True, verified_hashes=hashes)
+                ir_only=True, verified_hashes=hashes, **options)
         else:
             # stage_verified_ir authenticated the copied bytes in order.
             hashes = {name: manifest["ir_hashes"][name] for name in
@@ -511,6 +513,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             raise ValueError("recovered ordered IR inventory changed")
         if not allow_ir_changes and hashes != manifest["ir_hashes"]:
             raise ValueError("recovered IR hash mismatch")
+        if run_game.ir_generation_inputs(elf, source_root) != ir_sources:
+            raise ValueError("lowering inputs changed during recovery")
         # Both copied and reconstructed IR use the same native seeding path.
         # Use current hashes rather than the historical manifest: changed
         # lowering can still leave a large fraction of modules byte-identical.
@@ -635,8 +639,9 @@ def main(argv=None):
     parser.add_argument("--elf", type=Path)
     parser.add_argument("--benchmark-reconstruct", type=Path, metavar="FRESH_WORK_DIR",
                         help="cold IR-only reconstruction; never activate output")
-    parser.add_argument("--ir-jobs", type=int, choices=range(1, 33), default=1,
-                        help="parallel IR emission workers in persistent benchmark")
+    parser.add_argument("--ir-jobs", type=int, choices=range(33),
+                        help="recovery IR workers (default 8; 0 independent processes, "
+                             "1 persistent serial); benchmark default 1")
     parser.add_argument("--persistent-recomp", action="store_true",
                         help="benchmark one persistent recompiler process")
     parser.add_argument("--benchmark-allow-source-changes", action="store_true",
@@ -663,9 +668,18 @@ def main(argv=None):
                         help="also archive displaced native objects, libraries and reports")
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
+    parser.add_argument("--allow-source-changes", action="store_true",
+                        help="recovery: allow changed generator fingerprints, require exact IR hashes")
     args = parser.parse_args(argv)
-    if args.ir_jobs != 1 and not (args.persistent_recomp and args.benchmark_reconstruct):
-        parser.error("--ir-jobs requires --persistent-recomp and --benchmark-reconstruct")
+    if args.benchmark_reconstruct:
+        args.ir_jobs = 1 if args.ir_jobs is None else args.ir_jobs
+        if args.ir_jobs == 0 or (args.ir_jobs != 1 and not args.persistent_recomp):
+            parser.error("benchmark --ir-jobs requires --persistent-recomp for parallel emission")
+    else:
+        args.ir_jobs = 8 if args.ir_jobs is None else args.ir_jobs
+    if args.allow_source_changes and (args.benchmark_reconstruct or args.print_active or
+            args.check_active_source or args.migrate_source_fingerprints or args.allow_ir_changes):
+        parser.error("--allow-source-changes is for strict actual recovery only")
     if (args.persistent_recomp or args.benchmark_allow_source_changes) and not args.benchmark_reconstruct:
         parser.error("persistent recompiler/source-change experiment requires --benchmark-reconstruct")
     if args.benchmark_reconstruct and (
@@ -718,10 +732,13 @@ def main(argv=None):
             with metrics.report("recovery", report, cache=str(base_work),
                                 elf=str(elf), jobs=args.emit_jobs, profile=args.emit_opt,
                                 allow_ir_changes=args.allow_ir_changes,
+                                allow_source_changes=args.allow_source_changes,
+                                ir_jobs=args.ir_jobs,
                                 full_native_backup=args.full_native_backup):
                 recover(elf, build, args.config, base_work, args.emit_jobs,
                         args.allow_ir_changes, full_native_backup=args.full_native_backup,
-                        opt=args.emit_opt)
+                        opt=args.emit_opt, ir_jobs=args.ir_jobs,
+                        allow_source_changes=args.allow_source_changes)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
                   else "EE source preflight refused" if args.check_active_source

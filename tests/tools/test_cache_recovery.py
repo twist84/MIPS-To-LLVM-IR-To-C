@@ -160,7 +160,9 @@ def test_link_or_validation_failure_does_not_activate():
         builds = []
 
         def fake_reconstruct(manifest, entries, elf_path, build_dir, config,
-                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None,
+                             persistent=False, ir_jobs=1):
+            assert persistent and ir_jobs == 8
             assert ir_only
             assert entries == [0x100008, 0x100010]
             assert not allow_mismatches
@@ -888,7 +890,9 @@ def test_overwrite_ir_uses_active_inventory_and_selected_profile():
         calls = []
 
         def fake_reconstruct(manifest, known_entries, elf_arg, build, config,
-                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None,
+                             persistent=False, ir_jobs=1):
+            assert persistent and ir_jobs == 8
             assert known_entries == entries
             assert manifest["ir_hashes"] == old_hashes
             assert allow_mismatches and ir_only and elf_arg == elf

@@ -78,7 +78,8 @@ def reuse_identical_native_cache(cache, inputs, sources, opt, metadata, library,
         return False
 
 
-def refresh(elf, build, config, base, opt, jobs):
+def refresh(elf, build, config, base, opt, jobs, *, ir_jobs=8):
+    options = known.recovery_recompiler_options(ir_jobs)
     elf = elf.resolve(strict=True)
     base = base.resolve(strict=True)
     work = base / PROFILE_DIRS[opt]
@@ -113,7 +114,7 @@ def refresh(elf, build, config, base, opt, jobs):
             hashes = {}
             comparison = known.reconstruct(
                 manifest, entries, elf, build, config, stage, jobs, True,
-                ir_only=True, verified_hashes=hashes)
+                ir_only=True, verified_hashes=hashes, **options)
             metrics.details("known_modules", len(entries))
             metrics.details("ir_comparison", comparison)
             if comparison["missing"] or comparison["extra"]:
@@ -122,6 +123,8 @@ def refresh(elf, build, config, base, opt, jobs):
             metadata = shared_ir.read_json(staged_meta)
             if list(hashes) != manifest["known_entries"]:
                 raise ValueError("re-emitted ordered EE inventory changed")
+            if run_game.ir_generation_inputs(elf, root) != sources:
+                raise ValueError("lowering inputs changed during overwrite")
             # Rebase the external ELF reference BEFORE publishing the new
             # provenance record and moving the directory into its final path.
             metadata["elf"] = shared_ir.relative_path(elf, ir)
@@ -187,6 +190,8 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", required=True, type=Path)
     parser.add_argument("--emit-opt", type=int, choices=range(6), required=True)
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--ir-jobs", type=int, choices=range(33), default=8,
+                        help="IR workers; 0 independent processes, 1 persistent serial")
     parser.add_argument("--timings-report", type=Path,
                         help="new JSON report path; default is beside the cache")
     args = parser.parse_args(argv)
@@ -196,9 +201,9 @@ def main(argv=None):
         output = args.timings_report or metrics.default_report(args.base_work_dir, "refresh")
         with metrics.report("refresh", output, cache=str(args.base_work_dir.resolve()),
                             elf=str(args.elf.resolve()), jobs=args.emit_jobs,
-                            profile=args.emit_opt):
+                            profile=args.emit_opt, ir_jobs=args.ir_jobs):
             refresh(args.elf, args.build_dir, args.config, args.base_work_dir,
-                    args.emit_opt, args.emit_jobs)
+                    args.emit_opt, args.emit_jobs, ir_jobs=args.ir_jobs)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             subprocess.SubprocessError) as error:
         print(f"EE IR overwrite failed; replay not started: {error}", file=sys.stderr)
