@@ -564,6 +564,8 @@ add_executable(ee_rom0_fetch_probe src/tools/ee_rom0_fetch_probe_main.cpp)
 target_link_libraries(ee_rom0_fetch_probe PRIVATE ee_core)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
 target_link_libraries(ee_ram_tlb_test PRIVATE iop_cpu ee_core)
+add_executable(ee_iop_rom0_diagnostic src/tools/ee_iop_rom0_diagnostic_main.cpp)
+target_link_libraries(ee_iop_rom0_diagnostic PRIVATE iop_cpu ee_core)
 
 add_executable(ee_memory_alias_test tests/smoke/ee_memory_alias_test.cpp)
 target_link_libraries(ee_memory_alias_test PRIVATE ee_core)

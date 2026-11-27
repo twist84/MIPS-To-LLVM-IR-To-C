@@ -38,7 +38,7 @@ jobs:
             -R '^(iop_cpu|iop_rom0_boot|iop_rom0_runner|iop_hw|iop_timer5_exception|iop_dma_icr|iop_dma_global_enable|iop_dma_sif_channels|iop_sif_handoff)$'
 
       - name: Build native EE runner for authentic firmware rendezvous
-        run: cmake --build build-rom0 --parallel 2 --target ee_recomp ee_game_runner ee_rom0_fetch_probe ee_ram_tlb_test
+        run: cmake --build build-rom0 --parallel 2 --target ee_recomp ee_game_runner ee_rom0_fetch_probe ee_ram_tlb_test ee_iop_rom0_diagnostic
 
       - name: Install LLVM Python binding for synthetic EE translation
         run: |
@@ -69,6 +69,13 @@ jobs:
           set -euo pipefail
           ./build-rom0/ee_rom0_fetch_probe OpenPS2BIOS-0.6.bin | tee ee-rom0-fetch.log
           ctest --test-dir build-rom0 --output-on-failure -R '^ee_ram_tlb$'
+
+      - name: Diagnose synchronized EE and IOP reset (v0.6)
+        run: |
+          set -euo pipefail
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 2000000 | tee dual-rom0-v06.log
+          grep -q '^Dual ROM0 stop:' dual-rom0-v06.log
+          grep -q '^Dual ROM0 clocks:' dual-rom0-v06.log
 
       - name: Execute guest IOP reset vector and capture stop
         run: |
@@ -225,6 +232,7 @@ jobs:
           name: openps2bios-v06-rom0-execution
           path: |
             ee-rom0-fetch.log
+            dual-rom0-v06.log
             rom0-report.json
             rom0-ee-smflag.json
             rom0-ee-smflag.log
@@ -253,7 +261,7 @@ jobs:
       - name: Build strict EE and IOP firmware diagnostics
         run: |
           cmake -S . -B build-rom0 -G Ninja -DCMAKE_BUILD_TYPE=Release
-          cmake --build build-rom0 --parallel 2 --target ee_rom0_fetch_probe ee_ram_tlb_test iop_rom0_runner
+          cmake --build build-rom0 --parallel 2 --target ee_rom0_fetch_probe ee_ram_tlb_test iop_rom0_runner ee_iop_rom0_diagnostic
           ctest --test-dir build-rom0 --output-on-failure -R '^ee_ram_tlb$'
 
       - name: Download and verify official OpenPS2BIOS v0.7 ROM0
@@ -277,6 +285,13 @@ jobs:
           print("Verified OpenPS2BIOS v0.7 SHA-256:", actual)
           Path("rom0-v07-verified.sha256").write_text(f"{actual}  {image.name}\n")
           PY
+
+      - name: Diagnose synchronized EE and IOP reset (v0.7)
+        run: |
+          set -euo pipefail
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 2000000 | tee dual-rom0-v07.log
+          grep -q '^Dual ROM0 stop:' dual-rom0-v07.log
+          grep -q '^Dual ROM0 clocks:' dual-rom0-v07.log
 
       - name: Explore authentic v0.7 EE reset execution
         run: |
@@ -343,6 +358,7 @@ jobs:
           path: |
             rom0-v07-verified.sha256
             ee-rom0-v07.log
+            dual-rom0-v07.log
             rom0-v07-report.json
             rom0-v07-trace.log
           if-no-files-found: warn

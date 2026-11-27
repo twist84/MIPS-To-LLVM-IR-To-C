@@ -1485,3 +1485,20 @@ interior deadline and isolated probe behavior are retained.
 Directed tests cover IOP deadline crossing, budget zero, JAL link,
 interior Compare IRQ/slot completion, refusal/retry and sampled JR
 target. Pending CI.
+
+## M6E3H3E3: real-ROM dual-domain diagnostic
+
+H3E2 passed both pinned firmware releases at e853f3b1:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46060890164
+
+The separate ee_iop_rom0_diagnostic executable starts both processors
+from the same unmodified, verified 4 MiB ROM0, no RAM seeding and
+no HLE service. Select explicit PAL reset cadence and a 2 million
+EE compatibility-slot diagnostic bound. Record actual first refusal,
+EE/IOP clocks and debt, register state, SIF/DMAC/INTC/CSR state, and
+last 64 EE retirement transactions. Check retirement accounting and
+actual progress on both CPUs, not successful firmware boot. Keep the
+existing isolated v0.6/v0.7 checkpoints unchanged; capture independent
+logs in each ROM0 workflow artifact. No guessed firmware stop or
+version-specific layout assumptions. Pending first real dual-domain
+CI evidence; use it to prioritize subsequent blockers.

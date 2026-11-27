@@ -175,6 +175,17 @@ public:
         return run;
     }
 
+    const iop::s_cpu_state* iop_state() const
+    {
+        return m_iop != nullptr ? &m_iop->cpu().state() : nullptr;
+    }
+    const std::optional<iop::s_kernel_run_result>& iop_last_run() const { return m_iop_last_run; }
+    uint32_t sif_register_value(uint32_t id)
+    {
+        uint32_t value = 0u;
+        (void)m_hardware.sif().get_reg(id, &value);
+        return value;
+    }
     bool delay_slot_pending() const { return m_delay_slot_pending; }
     uint64_t iop_cycles() const { return m_iop != nullptr ? m_iop->cycles() : 0u; }
     uint64_t iop_debt() const { return m_iop_clock.due(); }
@@ -411,6 +422,7 @@ public:
             if (m_iop_clock.due() != 0u && !sif_faulted())
             {
                 const auto run = m_iop->run(1u, 1u);
+                m_iop_last_run = run;
                 if (run.m_executed > 1u || !m_iop_clock.consume(run.m_executed))
                 {
                     std::abort();
@@ -945,6 +957,7 @@ private:
     uint32_t m_dma_start_address = 0u;
     uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
+    std::optional<iop::s_kernel_run_result> m_iop_last_run;
     bool m_iop_stopped = false;
     bool m_delay_slot_pending = false;
     uint32_t m_delay_target = 0u;
