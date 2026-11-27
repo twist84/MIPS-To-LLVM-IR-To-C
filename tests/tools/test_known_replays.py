@@ -125,10 +125,12 @@ def test_reconstruction_is_batched_and_linked_once():
             }
             (work / "ir" / "ee_functions.json").write_text(json.dumps(metadata))
 
-        def fake_append(recomp, elf_path, work_dir, metadata_path, addresses):
+        def fake_append(recomp, elf_path, work_dir, metadata_path, addresses,
+                        *, staged_metadata):
             assert work_dir == work and elf_path == elf
             calls["batches"].append(list(addresses))
-            metadata = json.loads(metadata_path.read_text())
+            assert json.loads(metadata_path.read_text())["function_count"] == 1
+            metadata = staged_metadata
             for entry in addresses:
                 emit_one(entry)
                 metadata["functions"].append({
@@ -136,7 +138,6 @@ def test_reconstruction_is_batched_and_linked_once():
                     "ir_path": str(work / "ir" / original_name(entry)),
                 })
             metadata["function_count"] = len(metadata["functions"])
-            metadata_path.write_text(json.dumps(metadata))
             return addresses
 
         def fake_link(*args, **kwargs):
@@ -222,30 +223,22 @@ def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
             "function_count": 2,
         }
         metadata_path.write_text(json.dumps(original))
-        try:
-            known.restore_missing_entries("recomp", work / "elf", work,
-                                          metadata_path, entries, False)
-        except ValueError as exc:
-            assert "0x00100010" in str(exc) and "0x00100030" in str(exc)
-        else:
-            raise AssertionError("strict recovery accepted missing entries")
-        assert json.loads(metadata_path.read_text()) == original
         calls = []
 
-        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries):
+        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries,
+                   staged_metadata):
             assert reserved_entries == {second, fourth}
             pc = addresses[0]
             calls.append(pc)
-            metadata = json.loads(path.read_text())
+            assert json.loads(path.read_text()) == original
+            metadata = staged_metadata
             assert pc not in known.run_game.covered_pcs(metadata)
             metadata["functions"].append({
                 "vaddr": hex(pc), "block_pcs": [hex(pc), hex(pc + 8)]})
             metadata["function_count"] = len(metadata["functions"])
-            path.write_text(json.dumps(metadata))
-
         with patch.object(known.run_game, "batch_append_functions", side_effect=append):
             known.restore_missing_entries("recomp", work / "elf", work,
-                                          metadata_path, entries, True)
+                                          metadata_path, entries)
         restored = json.loads(metadata_path.read_text())
         assert calls == [second, fourth]
         assert [int(fn["vaddr"], 0) for fn in restored["functions"]] == entries

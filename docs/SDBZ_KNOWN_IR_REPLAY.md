@@ -338,3 +338,20 @@ output directories are refused. Strict byte comparison is the default;
 if reconstruction differs, a separately named isolated benchmark with
 `--allow-ir-changes` can measure it without authorizing activation. Preserve
 both benchmark inventories for parity comparisons during R6/R7.
+
+### R6 serial baseline and deferred metadata
+
+Windows isolated reconstruction measured 191.000 s for 16,252/16,252 exact
+IR hashes, zero missing/extra/mismatched modules. The first strict attempt
+stopped at nine missing explicit entries; the relaxed attempt restored all
+nine without any IR byte difference. This is IR parity, not proof of
+original metadata or retail execution parity. Discovery 40.668 s, coverage
+8.437 s, emission 22.133 s, metadata publication 27.787 s, metadata parsing
+8.766 s, two IR scans 23.657 s, 137 recompiler invocations. Stages overlap.
+
+Isolated reconstruction now retains the growing function map in memory and
+publishes it only after final module inventory/hash checks. Live expansion
+continues to publish each batch normally. Strict reconstruction attempts
+explicit entry restoration before evaluating byte parity; changed IR still
+requires explicit acceptance. The original 128-entry batch boundaries are
+retained. No speedup claimed before measured comparison.

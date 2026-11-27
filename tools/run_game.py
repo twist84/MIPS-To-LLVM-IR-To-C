@@ -1010,7 +1010,7 @@ def covered_pcs(metadata):
 
 @metrics.measure("batch_transaction")
 def batch_append_functions(recomp, elf, work, metadata_path, addresses,
-                           *, reserved_entries=()):
+                           *, reserved_entries=(), staged_metadata=None):
     """Translate a group of newly reachable entries in one discovery pass.
 
     The EE CFG emitter writes one IR/metadata result per requested function.
@@ -1018,8 +1018,15 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     translations and preserving existing guest block-PC ownership.
     Return the exact NEW IR paths for incremental object emission.
     """
-    with metrics.stage("metadata_read_parse"):
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if staged_metadata is None:
+        with metrics.stage("metadata_read_parse"):
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    else:
+        # Only the isolated reconstruction driver may defer publication.
+        # Never allow a caller to bypass live shared-map authentication.
+        if shared_ir.active(metadata_path) or (work / "translation-cache.json").exists():
+            raise ValueError("deferred metadata requires an unpublished reconstruction")
+        metadata = staged_metadata
     shared_state = None
     if shared_ir.active(metadata_path):
         recorded = shared_ir.read_json(metadata_path.parent / shared_ir.PROVENANCE)
@@ -1137,11 +1144,14 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
             function for _, _, function in pending
         )
         metadata["function_count"] = len(metadata["functions"])
-        tmp_meta = metadata_path.with_name(metadata_path.name + ".tmp")
-        with metrics.stage("metadata_serialization_publication"):
-            tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
-                                encoding="utf-8")
-            tmp_meta.replace(metadata_path)
+        if staged_metadata is None:
+            tmp_meta = metadata_path.with_name(metadata_path.name + ".tmp")
+            with metrics.stage("metadata_serialization_publication"):
+                tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
+                                    encoding="utf-8")
+                tmp_meta.replace(metadata_path)
+        else:
+            metrics.count("deferred_metadata_batches")
     except (OSError, ValueError):
         for temporary, _ in staged:
             temporary.unlink(missing_ok=True)
