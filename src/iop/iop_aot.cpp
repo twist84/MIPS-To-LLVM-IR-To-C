@@ -172,7 +172,15 @@ bool c_iop_aot::open(const std::string& path, std::string* error)
         return false;
     }
     m_libraries.push_back(library);
-    add_modules(modules(), count());
+    const auto* descriptors = modules();
+    const uint32_t module_count = count();
+    add_modules(descriptors, module_count);
+    const auto chain = reinterpret_cast<t_iop_aot_entry>(
+        lookup("iop_aot_chain_entry_v1"));
+    if (chain != nullptr && module_count == 1u)
+    {
+        m_chain_entries.emplace(descriptors, chain);
+    }
     return true;
 }
 
@@ -201,6 +209,7 @@ void c_iop_aot::refresh(const c_cpu& cpu)
         }
     } timer{started, &m_refresh_milliseconds};
     m_active.clear();
+    m_active_chain_entries.clear();
     std::vector<uint8_t> bytes;
     for (const s_iop_aot_module* module : m_modules)
     {
@@ -217,6 +226,29 @@ void c_iop_aot::refresh(const c_cpu& cpu)
         if (iop_aot_hash(bytes.data(), bytes.size()) == module->m_hash)
         {
             m_active.push_back(module);
+        }
+    }
+    for (const auto* module : m_active)
+    {
+        const auto chain = m_chain_entries.find(module);
+        if (chain == m_chain_entries.end())
+        {
+            continue;
+        }
+        bool overlap = false;
+        for (const auto* other : m_active)
+        {
+            if (other != module &&
+                static_cast<uint64_t>(module->m_base) < static_cast<uint64_t>(other->m_base) + other->m_size &&
+                static_cast<uint64_t>(other->m_base) < static_cast<uint64_t>(module->m_base) + module->m_size)
+            {
+                overlap = true;
+                break;
+            }
+        }
+        if (!overlap)
+        {
+            m_active_chain_entries.emplace(module, chain->second);
         }
     }
 }
