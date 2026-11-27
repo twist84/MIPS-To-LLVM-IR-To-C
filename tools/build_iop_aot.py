@@ -136,7 +136,64 @@ def prepare_captures(capture, destination):
     return len(records)
 
 
-def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False):
+def relocation_receipt_roots(receipt, metadata, data, baseline):
+    """Select unique capture identity and recheck each proposed linked JAL.
+
+    The receipt is candidate evidence, not authoritative ownership.
+    Recompute the entire CFG using the current capture and discovery code.
+    """
+    if receipt.get("schema") != 1 or receipt.get("kind") != "iop_original_irx_metadata":
+        raise ValueError("invalid relocation receipt schema")
+    identity = {"base": metadata["base"], "text_size": len(data),
+                "hash": metadata["hash"].lower()}
+    matches = []
+    for records in receipt["matches"].values():
+        if len(records) != 1:
+            continue
+        record = records[0]
+        shadow = record.get("relocation_discovery")
+        if shadow and shadow["capture_identity"] == identity:
+            matches.append(record)
+    if len(matches) != 1:
+        raise ValueError("relocation receipt needs one unique capture identity")
+    record = matches[0]
+    shadow = record["relocation_discovery"]
+    if (shadow["previous_candidate_count"] != baseline["candidate_count"] or
+            shadow["previous_unvisited_words"] != baseline["unvisited_aligned_words"]):
+        raise ValueError("relocation receipt baseline differs from current discovery")
+    base = metadata["base"]
+    reached = {pc for region in baseline["regions"]
+               for pc in region["ordinary_pcs"] + region["delay_pcs"]}
+    executable = [(base + section["address"],
+                   base + section["address"] + section["size"])
+                  for section in record["metadata"]["sections"]
+                  if section["flags"] & 4]
+    verified = {(call["site"], call["target"])
+                for call in record["comparison"]["verified_relocated_calls"]}
+
+    def valid_pc(pc):
+        return (type(pc) is int and pc % 4 == 0 and
+                base <= pc <= base + len(data) - 4 and
+                any(lo <= pc and pc + 4 <= hi for lo, hi in executable))
+
+    roots = set()
+    for row in shadow["new_roots"]:
+        target = row["entry"]
+        if not valid_pc(target) or target in reached or target in roots or not row["call_sites"]:
+            raise ValueError("invalid relocation root")
+        for site in row["call_sites"]:
+            if not valid_pc(site) or (site, target) not in verified:
+                raise ValueError("missing relocation call evidence")
+            word = struct.unpack_from("<I", data, site - base)[0]
+            resolved = (((site + 4) & 0xf0000000) | ((word & 0x03ffffff) << 2))
+            if word >> 26 != 3 or resolved != target:
+                raise ValueError("linked JAL differs from relocation receipt")
+        roots.add(target)
+    return sorted(roots)
+
+
+def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
+                        relocation_receipt=None):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
@@ -149,6 +206,12 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False)
     if extended and not residual:
         raise ValueError("extended discovery requires residual dispatch coverage")
     report = inventory(metadata, data, extended=extended)
+    if relocation_receipt is not None:
+        if not (extended and residual):
+            raise ValueError("relocation discovery requires extended residual coverage")
+        roots = relocation_receipt_roots(relocation_receipt, metadata, data, report)
+        report = inventory(metadata, data, extended=True, relocated_call_entries=roots)
+        print(f"split relocations: {len(roots)} verified candidate roots")
     if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"] or
             report["rejected_seeds"] or len(data) % 4):
         raise ValueError("split pilot refuses ambiguous or invalid ownership")
@@ -345,9 +408,14 @@ def main():
                         help="Add one residual region covering every remaining aligned PC")
     parser.add_argument("--split-extended", action="store_true",
                         help="Experimental extended discovery; requires --split-residual")
+    parser.add_argument("--split-relocation-receipt", type=Path,
+                        help="Use unique relocation evidence from an original IRX audit")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
+    if args.split_relocation_receipt is not None and not (
+            args.split_module and args.split_extended and args.split_residual):
+        parser.error("--split-relocation-receipt requires extended residual splitting")
     if args.split_extended and not (args.split_module and args.split_residual):
         parser.error("--split-extended requires --split-module and --split-residual")
     if args.split_residual and not args.split_module:
@@ -417,7 +485,10 @@ def build(args, out):
             pilot = staged / "pilot"
             plan = prepare_split_pilot(staged, args.split_module, pilot,
                                        residual=args.split_residual,
-                                       extended=args.split_extended)
+                                       extended=args.split_extended,
+                                       relocation_receipt=json.loads(
+                                           args.split_relocation_receipt.read_text(encoding="utf-8"))
+                                       if args.split_relocation_receipt is not None else None)
             subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
             if args.region_cache is not None:
                 args.region_cache.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,8 @@ from pathlib import Path
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
-from build_iop_aot import prepare_split_pilot, cached_split_object, split_cache_key
+from build_iop_aot import (prepare_split_pilot, cached_split_object, split_cache_key,
+                           relocation_receipt_roots)
 from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
                                     discover_relocation_roots)
 
@@ -220,7 +221,32 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(inventory(meta, linked, extended=True), baseline)
         self.assertEqual(capture_mismatches(dict(meta, gp=0), linked, parsed),
                          {"gp": {"captured": 0, "elf": BASE + 0x80}})
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{"metadata": parsed, "comparison": match,
+                                              "relocation_discovery": shadow}]}}
+        self.assertEqual(relocation_receipt_roots(receipt, meta, linked, baseline),
+                         [BASE + 16])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "MCMAN.json").write_text(json.dumps(meta))
+            (root / "MCMAN.bin").write_bytes(linked)
+            plan = prepare_split_pilot(root, "MCMAN", root / "pilot", residual=True,
+                                       extended=True, relocation_receipt=receipt)
+            self.assertEqual(plan.read_text().splitlines()[1:], [
+                f"1 {BASE}", f"1 {BASE + 16}",
+                f"4 {BASE + 4} {BASE + 8} {BASE + 12} {BASE + 20}"])
+        changed = bytearray(linked)
+        struct.pack_into("<I", changed, 8, jump(3, BASE + 12))
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, meta, changed, baseline)
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, dict(meta, hash="0"), linked, baseline)
+        self.assertEqual(capture_mismatches(
+            dict(meta, name="ARIKA_IOP_Control_Driver"), linked,
+            dict(parsed, name="ARIKA IOP-Control-Driver")), {})
         parsed["sections"][0]["flags"] = 0
+        with self.assertRaises(ValueError):
+            relocation_receipt_roots(receipt, meta, linked, baseline)
         self.assertEqual(discover_relocation_roots(meta, linked, parsed, match,
                                                    baseline)["new_roots"], [])
         with self.assertRaises(ValueError):

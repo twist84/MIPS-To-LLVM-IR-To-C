@@ -7,6 +7,7 @@ Never authorizes native lowering or interprets all pointers as functions.
 import argparse
 import hashlib
 import json
+import re
 import struct
 from pathlib import Path
 
@@ -108,7 +109,9 @@ def parse_irx(data):
 def capture_mismatches(metadata, linked, parsed):
     base = metadata["base"]
     fields = {
-        "name": (metadata["name"], parsed["name"]),
+        # Capture callback in ee_game_runner_main.cpp replaces every
+        # non-alphanumeric byte with an underscore (ASCII module names).
+        "name": (metadata["name"], re.sub(r"[^A-Za-z0-9]", "_", parsed["name"])),
         "text_size": (len(linked), parsed["text_size"]),
         "entry": (metadata.get("entry"), base + parsed["entry_offset"]),
         "gp": (metadata.get("gp"), base + parsed["gp_offset"]),
@@ -154,6 +157,8 @@ def compare_capture(metadata, linked, parsed, original, discovery):
         if site not in reloc_sites and original[site:site + 4] != linked[site:site + 4]:
             differing.append(base + site)
     return {"metadata_match_only": True,
+            "raw_elf_name": parsed["name"],
+            "captured_name": metadata["name"],
             "nonrelocation_changed_word_count": len(differing),
             "nonrelocation_changed_pcs": differing,
             "verified_relocated_calls": verified,

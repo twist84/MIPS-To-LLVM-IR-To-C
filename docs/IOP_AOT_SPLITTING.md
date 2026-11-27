@@ -321,3 +321,30 @@ IR size, object size, elapsed compile/cache time, reuse status, wall-stage
 timings and linked library SHA256. The five slowest objects print to the
 console. This measures the suspected CRI_ADXI residual bottleneck rather
 than assuming it. No emitted IR or runtime changes; old outputs stay intact.
+
+## I9 measured relocation discovery / I10 build integration
+
+Receipt iop-i9-discovery.zip SHA256
+bbf3eb37ca71a18aba35747522b27566fa04aff4fe7a886a8b19e1b66f751904.
+176 new roots, 9,293 newly reached words across six matched IRXs, no
+shared ordinary PCs, ordinary/delay conflicts or rejected seeds. Including
+unchanged ARKD_DVD: 1,071 candidates and 48,688/56,668 reached words
+(85.9%). CRI_ADXI residual plan projected 4,549 PCs (from 8,235);
+PADMAN 3,060, MCMAN 4,589, MCSERV 412, LIBSD 1,465, SIO2MAN 427.
+CRI_ADXI largest eligible function 1,745 PCs; no claim that residual is
+necessarily the slowest compiler object.
+
+ARKD_DVD only mismatch was sanitized capture name versus original
+ARIKA IOP-Control-Driver. Match ASCII punctuation normalization exactly
+as the capture callback does, still requiring all numeric fields and
+unique match. No runtime activation identity change.
+
+Opt-in `--split-relocation-receipt FILE` requires extended residual
+splitting. Match receipt by linked base/size/hash rather than canonical
+staged name; revalidate each root's executable section, previously
+unreached status, verified JAL site and linked opcode/target. Recompute
+CFG and reject ownership conflicts through the existing builder. Never
+consume saved ownership lists as authoritative. Existing full dispatch
+partition, C++ fallback, cache plan hash and runner remain unchanged.
+The receipt is candidate evidence rather than a cryptographic proof of
+original ELF provenance. No default build changes or I7 artifact changes.
