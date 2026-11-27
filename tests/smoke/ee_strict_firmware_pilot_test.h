@@ -116,24 +116,35 @@ bool test_strict_firmware_pilot()
 
     // ROM ownership, live RAM writes/reads, and unsupported instruction
     // refusal with no clock advancement.
-    auto rom = make_firmware_pilot_rom({
-        0x40806000u, 0x3c04a000u, 0x34021234u, 0xac820000u,
-        0x8c830000u, 0xffffffffu});
-    ee::c_ee_strict_firmware_pilot pilot(rom);
-    rom[0] = 0xffu;
-    for (uint32_t i = 0u; i < 5u; ++i)
+    for (const uint32_t word : {0x00000001u, 0xffffffffu})
     {
-        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        // SPECIAL funct 1 is unsupported; ffffffff is now a decoded
+        // SD ra,-1(ra), so its unaligned access must refuse as data.
+        auto rom = make_firmware_pilot_rom({
+            0x40806000u, 0x3c04a000u, 0x34021234u, 0xac820000u,
+            0x8c830000u, word});
+        ee::c_ee_strict_firmware_pilot pilot(rom);
+        rom[0] = 0xffu;
+        for (uint32_t i = 0u; i < 5u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto refused = pilot.step(1u);
+        const auto expected = word == 0xffffffffu ? result::DATA_UNAVAILABLE :
+            result::UNSUPPORTED_OPCODE;
+        if (refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != expected ||
+            pilot.cycle() != 5u || pilot.retired() != 5u ||
+            pilot.cpu().m_pc != 0xbfc00014u || pilot.cpu().m_gpr[3].m_lo != 0x1234u ||
+            ee::ee_read_instruction_word(pilot.ram().data()) != 0x1234u)
         {
             return false;
         }
     }
-    const auto refused = pilot.step(1u);
-    return refused.m_boundary == boundary::HOST_REFUSAL &&
-        refused.m_instruction.m_result == result::UNSUPPORTED_OPCODE &&
-        pilot.cycle() == 5u && pilot.retired() == 5u &&
-        pilot.cpu().m_pc == 0xbfc00014u && pilot.cpu().m_gpr[3].m_lo == 0x1234u &&
-        ee::ee_read_instruction_word(pilot.ram().data()) == 0x1234u;
+    return true;
 }
 
 bool test_strict_firmware_interrupts()
@@ -355,7 +366,7 @@ bool test_strict_firmware_cop0_clock()
     {
         ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
             0x40806000u, 0x2402fffeu, 0x40824800u, 0x40034800u,
-            0x40804800u, 0x40805800u, 0x40055800u, 0x40004800u, 0xffffffffu}));
+            0x40804800u, 0x40805800u, 0x40055800u, 0x40004800u, 0x00000001u}));
         for (uint32_t i = 0u; i < 8u; ++i)
         {
             const auto step = pilot.step(1u);

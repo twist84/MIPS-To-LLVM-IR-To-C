@@ -1706,3 +1706,15 @@ BEV1 handler COP0 read test. Require at least 13 more retirements
 through the authentic context-save sequence, retaining the exact
 syscall entry and backing assertions. Pending real-ROM CI.
 No retail replay required; no host frame or fabricated syscall result.
+
+H3E9B2 workflow 46065262316 at 4621dda0 compiled successfully,
+but both jobs stopped at the existing scheduler-owned strict
+firmware pilot regression before real-ROM execution. The old
+unsupported sentinel ffffffff is SD ra,-1(ra), now recognized and
+correctly refused as an unaligned/unavailable data access. Replace
+the opcode sentinel with unsupported SPECIAL funct 1 and preserve
+the original word in an explicit data-refusal regression. Both
+variants retain identical no-retirement, PC, RAM and clock checks.
+Use the same unsupported sentinel in the Count wrap fixture.
+No executor changes, no reduced real-ROM thresholds. Pending CI.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46065262316
