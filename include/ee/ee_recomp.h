@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include <memory>
 
 namespace ee {
 
@@ -96,5 +97,19 @@ bool ee_recomp(const char* elf_path,
                s_recompiled_elf* result,
                std::string* error = nullptr,
                const s_recomp_options& opts = {});
+
+struct s_ee_recomp_session_state;
+class c_ee_recomp_session
+{
+public:
+    c_ee_recomp_session();
+    ~c_ee_recomp_session();
+    bool recompile(const char* elf_path, const char* output_dir,
+                   s_recompiled_elf* result, std::string* error,
+                   const s_recomp_options& opts);
+
+private:
+    std::unique_ptr<s_ee_recomp_session_state> m_state;
+};
 
 } // namespace ee

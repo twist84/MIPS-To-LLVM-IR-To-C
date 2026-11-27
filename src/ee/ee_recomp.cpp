@@ -445,18 +445,54 @@ std::set<uint32_t> collect_address_taken_entries(const elf_loader& loader)
 
 } // namespace
 
-bool ee_recomp(const char* elf_path,
-               const char* output_dir,
-               s_recompiled_elf* result,
-               std::string* error,
-               const s_recomp_options& opts)
+struct s_ee_recomp_session_state
+{
+    elf_loader m_loader;
+    std::string m_elf_path;
+    std::string m_cache_path;
+    uint64_t m_fingerprint = 0;
+    bool m_snapshot_loaded = false;
+    std::map<uint32_t, s_ee_instruction> m_insns;
+    std::vector<uint32_t> m_entries;
+    std::set<uint32_t> m_jalr_targets;
+    std::set<uint32_t> m_jalr_only;
+    std::vector<s_static_jalr_site> m_sites;
+};
+
+static bool ee_recomp_impl(const char* elf_path,
+                          const char* output_dir,
+                          s_recompiled_elf* result,
+                          std::string* error,
+                          const s_recomp_options& opts,
+                          s_ee_recomp_session_state* session)
 {
     const auto started = std::chrono::steady_clock::now();
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
 
-    elf_loader loader;
-    if (!loader.load_file(elf_path, error)) return false;
+    elf_loader local_loader;
+    elf_loader& loader = session ? session->m_loader : local_loader;
+    if (!session || session->m_elf_path.empty())
+    {
+        if (!loader.load_file(elf_path, error))
+        {
+            return false;
+        }
+        if (session)
+        {
+            session->m_elf_path = elf_path;
+        }
+    }
+    else if (session->m_elf_path != elf_path ||
+             session->m_cache_path.empty() ||
+             session->m_cache_path != opts.discovery_cache_path)
+    {
+        if (error)
+        {
+            *error = "reconstruction session ELF/discovery identity changed";
+        }
+        return false;
+    }
 
     result->path = elf_path;
     result->entry_point = loader.entry_point();
@@ -683,6 +719,19 @@ bool ee_recomp(const char* elf_path,
         {
             std::fprintf(stderr,
                 "ee_recomp: warning: discovery snapshot not saved\n");
+            if (session)
+            {
+                if (error)
+                {
+                    *error = "reconstruction session requires a complete discovery snapshot";
+                }
+                return false;
+            }
+        }
+        else if (session)
+        {
+            session->m_cache_path = cache_path;
+            session->m_fingerprint = fingerprint;
         }
     }
     else
@@ -696,12 +745,38 @@ bool ee_recomp(const char* elf_path,
             return false;
         }
 
-        const uint64_t fingerprint = elf_fingerprint(elf_path);
-        if (fingerprint == 0 ||
-            !read_discovery_cache(
+        bool loaded = false;
+        if (session)
+        {
+            if (!session->m_snapshot_loaded)
+            {
+                session->m_snapshot_loaded = read_discovery_cache(
+                    opts.discovery_cache_path, session->m_fingerprint,
+                    &session->m_insns, &session->m_entries,
+                    &session->m_jalr_targets, &session->m_jalr_only,
+                    &session->m_sites);
+            }
+            loaded = session->m_snapshot_loaded;
+            if (loaded)
+            {
+                // Each batch starts from exactly the same immutable snapshot.
+                // Never retain dynamic discoveries or entry boundaries.
+                global_insns = session->m_insns;
+                entries = session->m_entries;
+                static_jalr_targets = session->m_jalr_targets;
+                jalr_only_entries = session->m_jalr_only;
+                jalr_site_audit = session->m_sites;
+            }
+        }
+        else
+        {
+            const uint64_t fingerprint = elf_fingerprint(elf_path);
+            loaded = fingerprint != 0 && read_discovery_cache(
                 opts.discovery_cache_path, fingerprint, &global_insns,
                 &entries, &static_jalr_targets, &jalr_only_entries,
-                &jalr_site_audit))
+                &jalr_site_audit);
+        }
+        if (!loaded)
         {
             if (error)
             {
@@ -1297,6 +1372,27 @@ bool ee_recomp(const char* elf_path,
     }
 
     return true;
+}
+
+bool ee_recomp(const char* elf_path, const char* output_dir,
+               s_recompiled_elf* result, std::string* error,
+               const s_recomp_options& opts)
+{
+    return ee_recomp_impl(elf_path, output_dir, result, error, opts, nullptr);
+}
+
+c_ee_recomp_session::c_ee_recomp_session()
+    : m_state(std::make_unique<s_ee_recomp_session_state>())
+{
+}
+
+c_ee_recomp_session::~c_ee_recomp_session() = default;
+
+bool c_ee_recomp_session::recompile(const char* elf_path, const char* output_dir,
+                                    s_recompiled_elf* result, std::string* error,
+                                    const s_recomp_options& opts)
+{
+    return ee_recomp_impl(elf_path, output_dir, result, error, opts, m_state.get());
 }
 
 } // namespace ee
