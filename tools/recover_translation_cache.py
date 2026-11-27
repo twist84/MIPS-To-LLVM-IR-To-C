@@ -470,18 +470,17 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             else:
                 metadata_path = work / "ir" / "ee_functions.json"
                 print("Migrating verified guest IR without retranslation", flush=True)
-                # Existing O0 objects are reusable only if the incremental
-                # emitter verifies both IR and object hashes after relocation.
-                source_objects = candidate.parent / "objects"
-                if manifest.get("emit_opt") == 0 and source_objects.is_dir():
-                    shutil.copytree(source_objects, work / "objects")
-                    obj_manifest = work / "objects" / "objects.json"
-                    if obj_manifest.is_file():
-                        objects = shared_ir.read_json(obj_manifest)
-                        for item in objects["objects"]:
-                            item["input"] = "../ir/" + Path(item["input"]).name
-                        objects["path_format"] = "manifest-relative-v1"
-                        shared_ir.write_json(obj_manifest, objects)
+                # Reuse exact matching O0 objects from any extant source,
+                # not just the selected known-function inventory.
+                from build_optimized_cache import seed_candidate_objects
+                from verify_ir import llvm, native_target_identity, ir_pipeline_id
+                candidates = [candidate.parent, previous_cache, base_work,
+                              *legacy_recovery_directories(base_work)]
+                candidates.extend(sorted(base_work.glob("retained-*"), reverse=True))
+                with metrics.stage("native_object_seeding"):
+                    seed_candidate_objects(
+                        candidates, work, metadata_path, manifest["ir_hashes"], 0,
+                        llvm, native_target_identity, ir_pipeline_id)
                 run_game.build_linked_library(
                     source_root, work, metadata_path, work / "objects",
                     work / library_name, 0, emit_jobs=jobs)

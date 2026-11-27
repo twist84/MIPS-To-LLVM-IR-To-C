@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Emit an independent optimized EE library from verified existing IR."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -281,48 +282,74 @@ def seed_backup_objects(source_work, work, metadata_path, hashes, opt):
 
 def seed_candidate_objects(candidates, work, metadata_path, hashes, opt,
                            llvm, native_target_identity, ir_pipeline_id):
-    best = None
-    for source in candidates:
+    """Combine compatible candidates, preferring the first intact object per IR."""
+    from verify_ir import backend_opt
+    import recovery_metrics as metrics
+
+    matches = {}
+    destination = work / "objects"
+    if destination.exists():
+        raise ValueError("object seeding requires a fresh destination")
+    identity = {
+        "optimization_level": opt,
+        "backend_optimization_level": backend_opt(opt),
+        "ir_pipeline": ir_pipeline_id(opt),
+        "native_target": native_target_identity(opt),
+        "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+        "target_triple": llvm.get_default_triple(),
+    }
+    for source in dict.fromkeys(candidates):
+        if len(matches) == len(hashes):
+            break
         directory = source / "objects"
         try:
             manifest = shared_ir.read_json(directory / "objects.json")
             if (manifest.get("complete") is not True or
-                    manifest.get("optimization_level") != opt or
-                    manifest.get("ir_pipeline") != ir_pipeline_id(opt) or
-                    manifest.get("native_target") != native_target_identity(opt) or
-                    manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info)) or
-                    manifest.get("target_triple") != llvm.get_default_triple()):
+                    any(manifest.get(key) != value for key, value in identity.items())):
                 continue
-            matches = {}
-            for item in manifest["objects"]:
-                name = Path(item["input"]).name
-                if (name not in hashes or item.get("ir_sha256") != hashes[name] or
+            entries = manifest["objects"]
+            names = [Path(item["input"]).name for item in entries]
+            if len(names) != len(set(names)):
+                continue
+            for item, name in zip(entries, names):
+                if (name in matches or name not in hashes or
+                        item.get("ir_sha256") != hashes[name] or
                         item.get("object") != Path(name).stem + ".o" or
                         not isinstance(item.get("size_bytes"), int) or
                         item["size_bytes"] < 1 or
-                        not (directory / item["object"]).is_file()):
+                        not isinstance(item.get("defined_symbols"), list) or
+                        not item["defined_symbols"]):
                     continue
-                if name in matches:
-                    raise ValueError("duplicate backup object")
-                matches[name] = item
-            if matches and (best is None or len(matches) > len(best[2])):
-                best = (directory, manifest, matches)
+                candidate = directory / item["object"]
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue
+                if (len(data) != item["size_bytes"] or
+                        hashlib.sha256(data).hexdigest() != item.get("sha256")):
+                    metrics.count("seed_corrupt_objects")
+                    continue
+                destination.mkdir(exist_ok=True)
+                target = destination / item["object"]
+                try:
+                    target.write_bytes(data)
+                except OSError as error:
+                    raise RuntimeError(f"cannot seed native object {target}: {error}") from error
+                matches[name] = dict(item, input=shared_ir.relative_path(
+                    metadata_path.parent / name, destination))
         except (OSError, ValueError, KeyError, TypeError):
+            # Unreadable/invalid candidates must not block other inventories.
             continue
-    if best is None:
+    if not matches:
         return 0
-    directory, manifest, matches = best
-    destination = work / "objects"
-    destination.mkdir()
-    copied = []
-    for name, item in matches.items():
-        shutil.copy2(directory / item["object"], destination / item["object"])
-        copied.append(dict(item, input=shared_ir.relative_path(
-            metadata_path.parent / name, destination)))
+    copied = [matches[name] for name in hashes if name in matches]
     shared_ir.write_json(destination / "objects.json", dict(
-        manifest, path_format="manifest-relative-v1",
+        identity, complete=True, path_format="manifest-relative-v1",
         input_module_count=len(copied), object_count=len(copied),
         object_bytes=sum(item["size_bytes"] for item in copied), objects=copied))
+    metrics.count("seeded_objects", len(copied))
     print(f"Seeded {len(copied)} candidate O{opt} objects from backup; "
           "incremental emitter will verify every reused object", flush=True)
     return len(copied)

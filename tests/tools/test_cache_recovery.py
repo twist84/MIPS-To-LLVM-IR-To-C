@@ -639,6 +639,78 @@ def test_real_7z_backup_if_available():
             assert recovered == {b"O5-native", b"legacy-O5-native", b"legacy-recovery-42-O5-native"}
 
 
+def test_seed_objects_combines_verified_candidates():
+    from build_optimized_cache import seed_candidate_objects
+    from verify_ir import llvm, native_target_identity, ir_pipeline_id, backend_opt
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        hashes = {name: digest(name.encode()) for name in ("a.ll", "b.ll", "c.ll")}
+        identity = {
+            "complete": True, "optimization_level": 0,
+            "backend_optimization_level": backend_opt(0),
+            "ir_pipeline": ir_pipeline_id(0), "native_target": native_target_identity(0),
+            "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+            "target_triple": llvm.get_default_triple(),
+        }
+
+        def candidate(label, names, *, corrupt=(), wrong_profile=False):
+            directory = root / label / "objects"
+            directory.mkdir(parents=True)
+            entries = []
+            for name in names:
+                obj = Path(name).stem + ".o"
+                data = name.encode()
+                (directory / obj).write_bytes(b"corrupt" if name in corrupt else data)
+                entries.append({"input": "../ir/" + name, "object": obj,
+                                "ir_sha256": hashes[name], "sha256": digest(data),
+                                "size_bytes": len(data), "defined_symbols": [obj[:-2]]})
+            manifest = dict(identity, objects=entries)
+            if wrong_profile:
+                manifest["optimization_level"] = 5
+            shared_ir.write_json(directory / "objects.json", manifest)
+            return directory.parent
+
+        sources = [candidate("first", ("a.ll", "b.ll"), corrupt=("b.ll",)),
+                   candidate("wrong", ("b.ll",), wrong_profile=True),
+                   candidate("second", ("b.ll", "c.ll"))]
+        work = root / "stage"
+        work.mkdir()
+        metadata = work / "ir" / "ee_functions.json"
+        count = seed_candidate_objects(sources, work, metadata, hashes, 0,
+                                       llvm, native_target_identity, ir_pipeline_id)
+        assert count == 3
+        assert all((work / "objects" / (Path(name).stem + ".o")).read_bytes()
+                   == name.encode() for name in hashes)
+        receipt = shared_ir.read_json(work / "objects" / "objects.json")
+        assert [Path(item["input"]).name for item in receipt["objects"]] == list(hashes)
+        assert (sources[0] / "objects" / "b.o").read_bytes() == b"corrupt"
+
+
+def test_identical_native_reuse_requires_verified_objects():
+    from verify_ir import llvm
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        cache = root / "translation-cache.json"
+        library = root / "game-translated.dll"
+        metadata = root / "ir" / "ee_functions.json"
+        cache.write_bytes(b"receipt")
+        library.write_bytes(b"library")
+        hashes = {"a.ll": digest(b"IR")}
+        sources = {"ELF": "same"}
+        records = {str(metadata.parent / "a.ll"): {"ir_sha256": hashes["a.ll"]}}
+        with patch.object(run_game, "validate_cached_library_identity",
+                          return_value={"ir_sources": sources, "ir_hashes": hashes}), \
+             patch.object(shared_ir, "current_state"), \
+             patch("verify_ir.append_cached_objects", return_value=records), \
+             patch("link_native_objects.load_inputs") as load:
+            assert refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
+            load.side_effect = ValueError("corrupt object")
+            assert not refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
+
+
 def test_overwrite_ir_uses_active_inventory_and_selected_profile():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -744,6 +816,8 @@ def test_overwrite_launcher_routes_before_preflight():
 
 
 def main():
+    test_seed_objects_combines_verified_candidates()
+    test_identical_native_reuse_requires_verified_objects()
     test_overwrite_ir_uses_active_inventory_and_selected_profile()
     test_overwrite_launcher_routes_before_preflight()
     test_ir_only_backup_partition_preserves_native_and_authenticates()

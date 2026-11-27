@@ -52,6 +52,32 @@ def active_manifest(elf, base):
     return manifest
 
 
+def reuse_identical_native_cache(cache, inputs, sources, opt, metadata, library, hashes):
+    """Skip native work only for a fully authenticated, unchanged profile."""
+    if not cache.is_file() or not library.is_file():
+        return False
+    try:
+        from link_native_objects import load_inputs
+        from verify_ir import append_cached_objects, llvm
+        objects = library.parent / "objects"
+        snapshot = run_game.validate_cached_library_identity(
+            cache, inputs, opt, metadata, library)
+        if (not shared_ir.matching_sources(snapshot.get("ir_sources"), sources) or
+                snapshot.get("ir_hashes") != hashes):
+            return False
+        shared_ir.current_state(metadata, sources, hashes)
+        records = append_cached_objects(objects, opt, llvm.get_default_triple(), [])
+        if ({Path(name).name: item["ir_sha256"] for name, item in records.items()} != hashes or
+                len(records) != len(hashes) or
+                any(Path(name).resolve() != (metadata.parent / Path(name).name).resolve()
+                    for name in records)):
+            return False
+        load_inputs(metadata, objects)
+        return True
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def refresh(elf, build, config, base, opt, jobs):
     elf = elf.resolve(strict=True)
     base = base.resolve(strict=True)
@@ -120,10 +146,18 @@ def refresh(elf, build, config, base, opt, jobs):
             library = work / library_name
             # Existing objects are incremental candidates only. verify_ir
             # checks current IR bytes, target, LLVM version and object SHA.
-            run_game.build_linked_library(root, work, metadata_path, work / "objects",
-                                          library, opt, emit_jobs=jobs)
-            run_game.write_translation_cache(cache, inputs, opt, metadata_path,
-                                             library, sources)
+            with metrics.stage("native_reuse_preflight"):
+                reused = reuse_identical_native_cache(
+                    cache, inputs, sources, opt, metadata_path, library, hashes)
+            if reused:
+                metrics.count("native_link_skipped")
+                print(f"Overwrite EE IR: O{opt} native cache unchanged; "
+                      "compilation and linking skipped", flush=True)
+            else:
+                run_game.build_linked_library(root, work, metadata_path, work / "objects",
+                                              library, opt, emit_jobs=jobs)
+                run_game.write_translation_cache(cache, inputs, opt, metadata_path,
+                                                 library, sources)
             with metrics.stage("cache_validation"):
                 run_game.validate_translation_cache(cache, inputs, opt, metadata_path, library)
         except BaseException:

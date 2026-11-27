@@ -281,3 +281,20 @@ suppressing the original exception. No extra IR scan is performed for timing.
 The existing native discovery timing cannot separately resolve ELF loading
 or internal metadata serialization; the Python metadata timings cover the
 instrumented Python operations. A report is not execution or cache provenance.
+
+
+## Native object reuse (R4, first slice)
+
+Fresh native object stores can combine matching candidates across multiple
+inventories instead of selecting only the largest inventory. Every copied
+object must match the current IR digest, LLVM version, target triple, native
+CPU target, optimization profile, backend level, pipeline and exact object
+size/SHA-256. Corrupt candidates are skipped; the ordinary incremental
+emitter and linker still verify the result. Verified IR migration also
+checks extant canonical/legacy/retained O0 object stores. The original
+candidate files are not modified.
+
+Overwrite-IR can skip native compilation and linking only when the existing
+DLL receipt, current shared metadata and hashes, source/native inputs, and
+complete native object inventory all validate. Any mismatch follows the
+ordinary incremental build path. This does not skip requested IR generation.
