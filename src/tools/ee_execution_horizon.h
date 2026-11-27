@@ -83,6 +83,7 @@ inline bool ee_horizon_checkpoint_ready(const s_ee_runtime& runtime,
 // The result is advisory until native ownership and code provenance are
 // established; source bytes alone cannot certify a loaded native entry.
 template<typename t_read>
+    requires t_ee_instruction_reader<const t_read>
 constexpr uint32_t ee_horizon_alu_exit_slots(uint32_t pc, const t_read& read)
 {
     constexpr uint32_t max_slots = 32u;
