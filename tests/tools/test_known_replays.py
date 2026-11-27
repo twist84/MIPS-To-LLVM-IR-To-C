@@ -125,10 +125,12 @@ def test_reconstruction_is_batched_and_linked_once():
             }
             (work / "ir" / "ee_functions.json").write_text(json.dumps(metadata))
 
-        def fake_append(recomp, elf_path, work_dir, metadata_path, addresses):
+        def fake_append(recomp, elf_path, work_dir, metadata_path, addresses,
+                        *, staged_metadata):
             assert work_dir == work and elf_path == elf
             calls["batches"].append(list(addresses))
-            metadata = json.loads(metadata_path.read_text())
+            assert json.loads(metadata_path.read_text())["function_count"] == 1
+            metadata = staged_metadata
             for entry in addresses:
                 emit_one(entry)
                 metadata["functions"].append({
@@ -136,7 +138,6 @@ def test_reconstruction_is_batched_and_linked_once():
                     "ir_path": str(work / "ir" / original_name(entry)),
                 })
             metadata["function_count"] = len(metadata["functions"])
-            metadata_path.write_text(json.dumps(metadata))
             return addresses
 
         def fake_link(*args, **kwargs):
@@ -154,8 +155,14 @@ def test_reconstruction_is_batched_and_linked_once():
              patch.object(known.run_game, "write_translation_cache", side_effect=fake_cache), \
              patch.object(known.run_game, "translation_inputs", return_value={}), \
              patch.object(known.run_game, "ir_generation_inputs", return_value={}):
-            compare = known.reconstruct(manifest, entries, elf, root, "Release",
-                                        work, 8, False)
+            verified = {}
+            with patch.object(known.run_game, "hash_ir_modules",
+                              wraps=known.run_game.hash_ir_modules) as scan:
+                compare = known.reconstruct(manifest, entries, elf, root, "Release",
+                                            work, 8, False, verified_hashes=verified)
+                scan.assert_called_once()
+            assert verified == manifest["ir_hashes"]
+            assert list(verified) == list(manifest["ir_hashes"])
             assert compare["matching"] == 260
             assert calls["seed"] == 1
             assert [len(batch) for batch in calls["batches"]] == [128, 128, 3]
@@ -208,6 +215,66 @@ def test_real_append_reserves_future_missing_entries():
         assert known.run_game.covered_pcs(final) == {first, second, third}
 
 
+def test_staged_append_moves_ir_and_rolls_back():
+    with tempfile.TemporaryDirectory() as temp:
+        work = Path(temp).resolve()
+        ir = work / "ir"
+        ir.mkdir()
+        metadata_path = ir / "ee_functions.json"
+        first, second, third = 0x100008, 0x100010, 0x100020
+        metadata = {
+            "function_count": 1,
+            "functions": [{"vaddr": hex(first), "block_pcs": [hex(first)],
+                           "ir_path": "first.ll"}],
+        }
+        metadata_path.write_text(json.dumps(metadata))
+        original = metadata_path.read_bytes()
+        sources = []
+
+        def fake_recompiler(command):
+            output = Path(command[2])
+            output.mkdir(parents=True, exist_ok=True)
+            functions = []
+            sources.clear()
+            for value in command[3].split("=")[1].split(","):
+                pc = int(value, 0)
+                path = output / f"sub_{pc:x}.ll"
+                path.write_bytes(str(pc).encode())
+                sources.append(path)
+                functions.append({"vaddr": hex(pc), "block_pcs": [hex(pc)],
+                                  "ir_path": str(path)})
+            (output / "ee_functions.json").write_text(json.dumps({"functions": functions}))
+
+        replace = Path.replace
+
+        def fail_second(path, target):
+            if Path(target).name == f"sub_{third:x}.ll":
+                raise OSError("synthetic publication failure")
+            return replace(path, target)
+
+        with patch.object(known.run_game, "run", side_effect=fake_recompiler):
+            with patch.object(Path, "replace", fail_second):
+                try:
+                    known.run_game.batch_append_functions(
+                        "recomp", work / "elf", work, metadata_path, [second, third],
+                        staged_metadata=metadata)
+                except OSError as error:
+                    assert "synthetic" in str(error)
+                else:
+                    raise AssertionError("failed IR move accepted")
+            assert all(path.is_file() for path in sources)
+            assert not list(ir.glob("*.ll"))
+            assert metadata["function_count"] == 1
+            assert metadata_path.read_bytes() == original
+            result = known.run_game.batch_append_functions(
+                "recomp", work / "elf", work, metadata_path, [second, third],
+                staged_metadata=metadata)
+        assert len(result) == 2 and all(path.is_file() for path in result)
+        assert all(not path.exists() for path in sources)
+        assert metadata["function_count"] == 3
+        assert metadata_path.read_bytes() == original
+
+
 def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
@@ -222,30 +289,22 @@ def test_explicit_entry_restoration_keeps_all_entries_and_blocks():
             "function_count": 2,
         }
         metadata_path.write_text(json.dumps(original))
-        try:
-            known.restore_missing_entries("recomp", work / "elf", work,
-                                          metadata_path, entries, False)
-        except ValueError as exc:
-            assert "0x00100010" in str(exc) and "0x00100030" in str(exc)
-        else:
-            raise AssertionError("strict recovery accepted missing entries")
-        assert json.loads(metadata_path.read_text()) == original
         calls = []
 
-        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries):
+        def append(recomp, elf, work_dir, path, addresses, *, reserved_entries,
+                   staged_metadata):
             assert reserved_entries == {second, fourth}
             pc = addresses[0]
             calls.append(pc)
-            metadata = json.loads(path.read_text())
+            assert json.loads(path.read_text()) == original
+            metadata = staged_metadata
             assert pc not in known.run_game.covered_pcs(metadata)
             metadata["functions"].append({
                 "vaddr": hex(pc), "block_pcs": [hex(pc), hex(pc + 8)]})
             metadata["function_count"] = len(metadata["functions"])
-            path.write_text(json.dumps(metadata))
-
         with patch.object(known.run_game, "batch_append_functions", side_effect=append):
             known.restore_missing_entries("recomp", work / "elf", work,
-                                          metadata_path, entries, True)
+                                          metadata_path, entries)
         restored = json.loads(metadata_path.read_text())
         assert calls == [second, fourth]
         assert [int(fn["vaddr"], 0) for fn in restored["functions"]] == entries
@@ -265,7 +324,8 @@ def test_reconstruction_hash_mismatch_fails_closed():
         def fake_seed(command):
             (work / "ir" / "sub_0x100008_0x100008.ll").write_bytes(b"; different IR")
             (work / "ir" / "ee_functions.json").write_text(json.dumps({
-                "functions": [{"vaddr": "0x100008"}], "function_count": 1,
+                "functions": [{"vaddr": "0x100008",
+                               "ir_path": "sub_0x100008_0x100008.ll"}], "function_count": 1,
             }))
         with patch.object(known.run_game, "native_executable", return_value=root / "ee_recomp"), \
              patch.object(known.run_game, "run", side_effect=fake_seed), \
@@ -445,6 +505,7 @@ def main():
     test_hash_comparison()
     test_reconstruction_is_batched_and_linked_once()
     test_real_append_reserves_future_missing_entries()
+    test_staged_append_moves_ir_and_rolls_back()
     test_explicit_entry_restoration_keeps_all_entries_and_blocks()
     test_reconstruction_hash_mismatch_fails_closed()
     test_replay_pair_is_cpu_only_and_uses_one_library()

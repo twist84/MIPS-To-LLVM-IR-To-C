@@ -296,9 +296,9 @@ def test_windows_launcher_preserves_guest_cache():
     # Optimized full replays defer source validation to the shared IR
     # builder. Only profile 0 enters the native-library probes below.
     optimized = cache_probes.index(
-        'if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\\translation-cache.json" (')
+        'if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="recover" if exist "%WORK_DIR%\\ir\\ee_functions.json" (')
     baseline = cache_probes.index(
-        'if not defined CACHE_FLAG if exist "%WORK_DIR%\\translation-cache.json" (')
+        'if not defined CACHE_FLAG if "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\\translation-cache.json" (')
     assert optimized < baseline
     assert 'set "CACHE_FLAG=--no-recompile"' in cache_probes[optimized:baseline]
     assert '--link-only' not in cache_probes[optimized:baseline]

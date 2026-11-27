@@ -30,6 +30,7 @@ _tools_path = str(Path(__file__).resolve().parent)
 if _tools_path not in sys.path:
     sys.path.insert(0, _tools_path)
 import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
 
 
 STOP_PATTERN = re.compile(
@@ -66,6 +67,7 @@ def sha256_path(path):
     return digest.hexdigest()
 
 
+@metrics.measure("native_input_fingerprints")
 def translation_inputs(elf, recomp, source_root):
     """Fingerprint the ELF and every local input that builds translated code."""
     paths = [
@@ -88,7 +90,7 @@ def translation_inputs(elf, recomp, source_root):
         for path in sorted(directory.rglob("*")):
             if path.is_file() and path.suffix in (".h", ".hpp", ".cpp"):
                 paths.append((path.relative_to(source_root).as_posix(), path))
-    inputs = {name: sha256_path(path) for name, path in paths}
+    inputs = shared_ir.fingerprint_sources(paths, binary_keys={"ELF", "ee_recomp"})
     # Certificate mode changes only the linked host library. Never reuse
     # a DLL from the opposite mode as if it contained the requested table.
     mode = b"1" if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1" else b"0"
@@ -97,6 +99,7 @@ def translation_inputs(elf, recomp, source_root):
 
 
 
+@metrics.measure("source_fingerprints")
 def ir_generation_inputs(elf, source_root):
     """Separate guest lowering source fingerprints from host-only runtime code."""
     paths = [("ELF", elf)]
@@ -122,9 +125,10 @@ def ir_generation_inputs(elf, source_root):
         "src/tools/ee_recomp_main.cpp",
         source_root / "src/tools/ee_recomp_main.cpp"
     ))
-    return {name: sha256_path(item) for name, item in paths}
+    return shared_ir.fingerprint_sources(paths, binary_keys={"ELF"})
 
 
+@metrics.measure("ir_hash_verification")
 def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
     """Hash every module, resolving the ordinary directory only once.
 
@@ -340,11 +344,11 @@ def validate_preserved_translation(path, inputs, ir_sources,
             isinstance(saved_sources, dict)
             and old_host_key in saved_sources
             and old_host_key not in ir_sources
-            and saved_sources[old_host_key] == inputs.get(new_host_key)
-            and {
+            and shared_ir.fingerprint_matches(saved_sources[old_host_key], inputs, new_host_key)
+            and shared_ir.matching_sources({
                 name: digest for name, digest in saved_sources.items()
                 if name != old_host_key
-            } == ir_sources
+            }, ir_sources)
         )
         # Dispatch hotspot observations are also host-only. The two exact
         # historical header revisions (LF and CRLF checkouts) below never
@@ -365,21 +369,22 @@ def validate_preserved_translation(path, inputs, ir_sources,
                 saved_sources[old_diagnostics_key]
             and old_diagnostics_key not in ir_sources
             and "src/runtime/ee_hot_loop_diagnostics.h" in inputs
-            and {
+            and shared_ir.matching_sources({
                 name: digest for name, digest in saved_sources.items()
                 if name != old_diagnostics_key
-            } == ir_sources
+            }, ir_sources)
         )
         if (not isinstance(saved_sources, dict) or
-                (saved_sources != ir_sources and not migrated_host_header
+                (not shared_ir.matching_sources(saved_sources, ir_sources) and not migrated_host_header
                  and not migrated_diagnostics_header)):
             changed = next((
                 name for name in sorted(
                     set(saved_sources if isinstance(saved_sources, dict) else {}) |
                     set(ir_sources)
                 )
-                if (saved_sources.get(name) if isinstance(saved_sources, dict) else None)
-                   != ir_sources.get(name)
+                if not shared_ir.fingerprint_matches(
+                    saved_sources.get(name) if isinstance(saved_sources, dict) else None,
+                    ir_sources, name)
             ), "unknown")
             raise ValueError(f"guest IR generation input changed: {changed}")
         if migrated_host_header:
@@ -461,6 +466,7 @@ def validate_preserved_translation(path, inputs, ir_sources,
     return [], True
 
 
+@metrics.measure("manifest_archive")
 def archive_known_function_manifest(path, snapshot):
     """Save verified entry/hash snapshots outside the disposable guest cache.
 
@@ -511,6 +517,7 @@ def archive_known_function_manifest(path, snapshot):
         temporary.unlink(missing_ok=True)
 
 
+@metrics.measure("translation_receipt_publication")
 def write_translation_cache(path, inputs, emit_opt, metadata_path, library,
                             ir_sources=None):
     """Commit provenance only after the complete translated library is linked."""
@@ -555,8 +562,8 @@ def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, libr
     saved = snapshot.get("inputs")
     if not isinstance(saved, dict):
         raise ValueError("cached translation has invalid input fingerprints")
-    for name, digest in inputs.items():
-        if saved.get(name) != digest:
+    for name in inputs:
+        if not shared_ir.fingerprint_matches(saved.get(name), inputs, name):
             raise ValueError(
                 f"cached translation is stale: {name} changed; "
                 "rerun without --no-recompile"
@@ -585,7 +592,7 @@ def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, libr
 
 
 def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
-                               *, verified_ir_hashes=None):
+                               *, verified_ir_hashes=None, ir_sources=None):
     """Authenticate native identity and current IR before execution."""
     started = time.monotonic()
     snapshot = validate_cached_library_identity(
@@ -594,7 +601,11 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
     if shared_ir.active(metadata_path):
         current = (translated_ir_hashes(metadata_path) if verified_ir_hashes is None
                    else verified_ir_hashes)
-        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"), current)
+        saved_sources = snapshot.get("ir_sources")
+        if ir_sources is not None and not shared_ir.matching_sources(saved_sources, ir_sources):
+            raise ValueError("cached native profile lowering inputs changed")
+        shared_ir.current_state(metadata_path, ir_sources if ir_sources is not None
+                                else saved_sources, current)
         if current != snapshot.get("ir_hashes"):
             raise ValueError("cached native profile IR does not match shared source")
     elif verified_ir_hashes is not None:
@@ -922,8 +933,35 @@ def parse_trace_v0(value):
 
 def run(command, capture=False, timeout_seconds=None):
     print("+ " + subprocess.list2cmdline([str(item) for item in command]), flush=True)
+    argv = [str(item) for item in command]
+    kind = Path(argv[0]).stem
+    if kind.startswith("python") and len(argv) > 1:
+        kind = Path(argv[1]).stem
+    measured = metrics.active() is not None and kind in {
+        "ee_recomp", "verify_ir", "link_native_objects"}
+    if measured:
+        metrics.count(kind + "_invocations")
+    # Recovery tools have no subprocess timeout; stream their progress as
+    # before, while retaining only the small timing records. Leave ordinary
+    # guest execution and capture/timeout behavior untouched.
+    if measured and not capture and timeout_seconds is None:
+        with metrics.stage(kind + "_process_wall"):
+            with subprocess.Popen(argv, text=True, stdout=subprocess.PIPE,
+                                  env=dict(os.environ, EE_RECOVERY_TIMINGS="1")) as child:
+                try:
+                    for line in child.stdout:
+                        print(line, end="", flush=True)
+                        metrics.observe_line(line, kind)
+                    code = child.wait()
+                except BaseException:
+                    child.kill()
+                    child.wait()
+                    raise
+                if code:
+                    raise subprocess.CalledProcessError(code, argv)
+            return subprocess.CompletedProcess(argv, code)
     result = subprocess.run(
-        [str(item) for item in command],
+        argv,
         text=True,
         capture_output=capture,
         check=not capture,
@@ -935,6 +973,71 @@ def run(command, capture=False, timeout_seconds=None):
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr, flush=True)
     return result
+
+
+class c_recomp_session:
+    """One child for a fresh reconstruction; fail closed on protocol errors."""
+
+    def __init__(self, recomp, elf, ir_jobs=1):
+        if not 1 <= ir_jobs <= 32:
+            raise ValueError("IR worker count must be in 1..32")
+        self.m_argv = [str(recomp), str(elf), "--serve-reconstruction"]
+        if ir_jobs != 1:
+            self.m_argv.append(f"--ir-jobs={ir_jobs}")
+        self.m_child = None
+
+    def __enter__(self):
+        with metrics.stage("ee_recomp_session_start"):
+            self.m_child = subprocess.Popen(
+                self.m_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, env=dict(os.environ, EE_RECOVERY_TIMINGS="1"))
+        metrics.count("ee_recomp_invocations")
+        return self
+
+    def __call__(self, command):
+        if ([str(command[0]), str(command[1])] != self.m_argv[:2] or
+                len(command) not in (4, 5)):
+            raise ValueError("unexpected persistent recompiler command")
+        option = str(command[3])
+        if option.startswith("--function=") and len(command) == 4:
+            mode, values = "seed", option.split("=", 1)[1]
+        elif option.startswith("--functions=") and len(command) == 5 and str(
+                command[4]).startswith("--discovery-cache="):
+            mode, values = "batch", option.split("=", 1)[1]
+        else:
+            raise ValueError("persistent session requires explicit entries and seed cache")
+        output = str(command[2])
+        if any(char in output for char in "\t\r\n"):
+            raise ValueError("invalid persistent recompiler output path")
+        print("+ " + subprocess.list2cmdline([str(item) for item in command]) +
+              " [persistent]", flush=True)
+        metrics.count("ee_recomp_session_requests")
+        with metrics.stage("ee_recomp_process_wall"):
+            self.m_child.stdin.write(f"{mode}\t{output}\t{values}\n")
+            self.m_child.stdin.flush()
+            for line in self.m_child.stdout:
+                if line.rstrip("\r\n") == "ee_recomp session result: ok":
+                    return
+                print(line, end="", flush=True)
+                metrics.observe_line(line, "ee_recomp")
+        raise RuntimeError("persistent recompiler exited before completing request")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        child = self.m_child
+        try:
+            if exc_type is None:
+                child.stdin.write("quit\n")
+                child.stdin.flush()
+                _, _ = child.communicate()
+                if child.returncode:
+                    raise subprocess.CalledProcessError(child.returncode, self.m_argv)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            child.stdin.close()
+            child.stdout.close()
+        return False
 
 
 def native_executable(build_dir, name, config="Release"):
@@ -961,6 +1064,7 @@ def native_executable(build_dir, name, config="Release"):
     return executable
 
 
+@metrics.measure("python_coverage")
 def covered_pcs(metadata):
     return {
         int(pc, 0)
@@ -969,8 +1073,9 @@ def covered_pcs(metadata):
     }
 
 
+@metrics.measure("batch_transaction")
 def batch_append_functions(recomp, elf, work, metadata_path, addresses,
-                           *, reserved_entries=()):
+                           *, reserved_entries=(), staged_metadata=None, run_recompiler=None):
     """Translate a group of newly reachable entries in one discovery pass.
 
     The EE CFG emitter writes one IR/metadata result per requested function.
@@ -978,7 +1083,15 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     translations and preserving existing guest block-PC ownership.
     Return the exact NEW IR paths for incremental object emission.
     """
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    if staged_metadata is None:
+        with metrics.stage("metadata_read_parse"):
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    else:
+        # Only the isolated reconstruction driver may defer publication.
+        # Never allow a caller to bypass live shared-map authentication.
+        if shared_ir.active(metadata_path) or (work / "translation-cache.json").exists():
+            raise ValueError("deferred metadata requires an unpublished reconstruction")
+        metadata = staged_metadata
     shared_state = None
     if shared_ir.active(metadata_path):
         recorded = shared_ir.read_json(metadata_path.parent / shared_ir.PROVENANCE)
@@ -1005,10 +1118,13 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     discovery_cache = metadata_path.parent / "ee_discovery_cache.bin"
     if discovery_cache.is_file():
         command.append(f"--discovery-cache={discovery_cache}")
-    run(command)
-    extra_metadata = json.loads(
-        (output_dir / "ee_functions.json").read_text(encoding="utf-8")
-    )
+    if run_recompiler is not None and staged_metadata is None:
+        raise ValueError("persistent recompiler requires isolated staged metadata")
+    (run_recompiler or run)(command)
+    with metrics.stage("metadata_read_parse"):
+        extra_metadata = json.loads(
+            (output_dir / "ee_functions.json").read_text(encoding="utf-8")
+        )
     raw_functions = extra_metadata.get("functions")
     if not isinstance(raw_functions, list):
         raise ValueError("batch recompiler emitted invalid function metadata")
@@ -1080,13 +1196,24 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
         raise ValueError("batched expansion yielded no dispatchable entries")
 
     # Stage all new modules before writing the authoritative function map.
-    # A partial error cannot make metadata point at missing/misnamed IR.
+    # Fresh reconstruction owns both directories on the same volume.
+    # Move its temporary IR instead of storing a second copy; live append
+    # retains its existing diagnostic files and copy-based transaction.
     staged = []
     committed = []
+    moved = []
     try:
         for source, destination, _ in pending:
             temporary = destination.with_name(destination.name + ".tmp")
-            shutil.copyfile(source, temporary)
+            if staged_metadata is not None:
+                if (source.parent != output_dir.resolve() or
+                        source.suffix != ".ll" or temporary.exists() or
+                        temporary.is_symlink()):
+                    raise ValueError("unexpected staged reconstruction IR path")
+                source.rename(temporary)
+                moved.append((source, temporary, destination))
+            else:
+                shutil.copyfile(source, temporary)
             staged.append((temporary, destination))
         for temporary, destination in staged:
             temporary.replace(destination)
@@ -1095,15 +1222,27 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
             function for _, _, function in pending
         )
         metadata["function_count"] = len(metadata["functions"])
-        tmp_meta = metadata_path.with_name(metadata_path.name + ".tmp")
-        tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
-                            encoding="utf-8")
-        tmp_meta.replace(metadata_path)
+        if staged_metadata is None:
+            tmp_meta = metadata_path.with_name(metadata_path.name + ".tmp")
+            with metrics.stage("metadata_serialization_publication"):
+                tmp_meta.write_text(json.dumps(metadata, indent=2) + "\n",
+                                    encoding="utf-8")
+                tmp_meta.replace(metadata_path)
+        else:
+            metrics.count("deferred_metadata_batches")
+            metrics.count("moved_staged_ir_modules", len(moved))
     except (OSError, ValueError):
-        for temporary, _ in staged:
-            temporary.unlink(missing_ok=True)
-        for destination in committed:
-            destination.unlink(missing_ok=True)
+        if staged_metadata is not None:
+            # Restore diagnostic inputs if a batch cannot be committed.
+            # Never delete the only copy of a newly emitted module.
+            for source, temporary, destination in reversed(moved):
+                location = destination if destination in committed else temporary
+                location.rename(source)
+        else:
+            for temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+            for destination in committed:
+                destination.unlink(missing_ok=True)
         raise
 
     if shared_state is not None:
@@ -1125,10 +1264,11 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
     """
     try:
         snapshot = shared_ir.read_json(cache_path)
-        if (snapshot.get("ir_sources") != ir_sources or
+        if (not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
                 snapshot.get("metadata_sha256") != sha256_path(metadata_path) or
-                snapshot.get("inputs", {}).get("tools/verify_ir.py") !=
-                    inputs.get("tools/verify_ir.py")):
+                not shared_ir.fingerprint_matches(
+                    snapshot.get("inputs", {}).get("tools/verify_ir.py"),
+                    inputs, "tools/verify_ir.py")):
             return False
         from verify_ir import append_cached_objects, llvm
         records = append_cached_objects(object_dir, emit_opt,
@@ -1149,9 +1289,11 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
         return False
 
 
+@metrics.measure("native_build_total")
 def build_linked_library(source_root, work, metadata_path, object_dir, library,
                          emit_opt, pdb=False, reuse_objects=False, emit_jobs=2,
-                         appended_ir=None, cache_base=None, emit_only=False):
+                         appended_ir=None, cache_base=None, emit_only=False,
+                         record_link_identity=False):
     if not reuse_objects:
         # Full verification is mandatory on the initial build. An append
         # pass has already validated the existing provenance and only new
@@ -1181,6 +1323,8 @@ def build_linked_library(source_root, work, metadata_path, object_dir, library,
     ]
     if pdb:
         command.append("--pdb")
+    if record_link_identity:
+        command.append("--record-link-identity")
     if cache_base is not None:
         command.append(f"--cache-base={cache_base}")
     run(command)
@@ -1674,7 +1818,8 @@ def main(argv=None):
                 )
             else:
                 validate_translation_cache(
-                    cache_path, inputs, args.emit_opt, metadata_path, library
+                    cache_path, inputs, args.emit_opt, metadata_path, library,
+                    ir_sources=ir_sources
                 )
                 if args.pdb:
                     build_linked_library(

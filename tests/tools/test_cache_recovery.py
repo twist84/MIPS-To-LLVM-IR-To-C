@@ -14,6 +14,7 @@ import refresh_known_ir as refresh
 import run_game
 import shared_ee_ir as shared_ir
 import cache_backup
+import recovery_metrics as metrics
 import subprocess
 
 
@@ -159,24 +160,37 @@ def test_link_or_validation_failure_does_not_activate():
         builds = []
 
         def fake_reconstruct(manifest, entries, elf_path, build_dir, config,
-                             work, jobs, allow_mismatches):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None,
+                             persistent=False, ir_jobs=1):
+            assert persistent and ir_jobs == 8
+            assert ir_only
             assert entries == [0x100008, 0x100010]
             assert not allow_mismatches
             assert saved.read_bytes() == b"original guest code"
             assert not recovery.pointer_path(base).exists()
             (work / "ir").mkdir(parents=True)
             metadata = work / "ir" / "ee_functions.json"
+            functions = []
+            for pc, name in zip(entries, manifest["ir_hashes"]):
+                (metadata.parent / name).write_bytes(str(pc).encode())
+                functions.append({"ir_path": name, "vaddr": hex(pc), "block_pcs": [hex(pc)]})
             shared_ir.write_json(metadata, {"elf": shared_ir.relative_path(elf, metadata.parent),
-                                            "path_format": "manifest-relative-v1"})
-            shared_ir.write_json(work / "translation-cache.json",
-                                 {"metadata_sha256": run_game.sha256_path(metadata)})
+                                            "path_format": "manifest-relative-v1",
+                                            "functions": functions,
+                                            "function_count": len(functions)})
             builds.append(work)
+            verified_hashes.update(manifest["ir_hashes"])
             return comparison
+
+        def fake_build(source, work, metadata, objects, library, opt, **kwargs):
+            assert opt == 0
+            library.write_bytes(b"native")
 
         with patch.object(recovery.run_game, "native_executable", return_value=build / "ee_recomp"), \
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
-             patch.object(recovery.run_game, "translation_inputs", return_value={}), \
+             patch.object(recovery.run_game, "build_linked_library", side_effect=fake_build), \
+             patch.object(recovery.run_game, "translation_inputs", return_value={"ELF": sources["ELF"]}), \
              patch.object(recovery, "validate_portable_cache", side_effect=ValueError("bad linked library")):
             try:
                 recovery.recover(elf, build, "Release", base, 8)
@@ -192,7 +206,8 @@ def test_link_or_validation_failure_does_not_activate():
         with patch.object(recovery.run_game, "native_executable", return_value=build / "ee_recomp"), \
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
-             patch.object(recovery.run_game, "translation_inputs", return_value={}), \
+             patch.object(recovery.run_game, "build_linked_library", side_effect=fake_build), \
+             patch.object(recovery.run_game, "translation_inputs", return_value={"ELF": sources["ELF"]}), \
              patch.object(recovery, "validate_portable_cache"), \
              patch.object(cache_backup, "seven_zip", return_value=None):
             promoted = recovery.recover(elf, build, "Release", base, 8)
@@ -201,9 +216,17 @@ def test_link_or_validation_failure_does_not_activate():
         assert not saved.exists()
         backups = list(base.glob("backup-*"))
         assert len(backups) == 1
-        assert (backups[0] / "sentinel.ll").read_bytes() == b"original guest code"
+        assert backups[0].name.endswith("-ir")
+        cache_backup.verify_ir_backup(backups[0])
+        retained = list(base.glob("retained-*"))
+        assert len(retained) == 1
+        assert (retained[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
-        assert len(builds) == 2
+        # The failed staged native validation left a complete, authenticated
+        # IR receipt. Retry can copy those exact modules rather than relift.
+        assert len(builds) == 1
+        assert builds[0].is_dir()
+        assert (builds[0] / "translation-cache.json").is_file()
 
 
 def test_verified_legacy_migration_preserves_ir_and_relocates():
@@ -240,6 +263,190 @@ def test_verified_legacy_migration_preserves_ir_and_relocates():
         assert shared_ir.elf_path(promoted, base / "ir") == elf
         assert run_game.translated_ir_hashes(base / "ir" / "ee_functions.json") == manifest["ir_hashes"]
         assert (backup / "ir" / "ee_functions.json").is_file()
+
+
+def test_cold_ir_benchmark_isolated():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        base = root / "cache"
+        base.mkdir()
+        marker = base / "sentinel"
+        marker.write_bytes(b"untouched")
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        sources = {"ELF": digest(b"ELF")}
+        entries = [0x100008, 0x100010]
+        manifest = manifest_for(elf, entries, sources)
+        run_game.archive_known_function_manifest(base / "translation-cache.json", manifest)
+        output = root / "ir-baseline"
+
+        def fake_reconstruct(saved, requested, elf_arg, build, config, work, jobs,
+                             allow_mismatches, *, ir_only=False, verified_hashes=None):
+            assert requested == entries and ir_only and not allow_mismatches
+            assert marker.read_bytes() == b"untouched"
+            ir = work / "ir"
+            ir.mkdir()
+            functions = []
+            for pc, name in zip(entries, saved["known_entries"]):
+                (ir / name).write_bytes(str(pc).encode())
+                functions.append({"ir_path": name, "vaddr": hex(pc), "block_pcs": [hex(pc)]})
+            shared_ir.write_json(ir / "ee_functions.json", {
+                "elf": shared_ir.relative_path(elf, ir),
+                "path_format": "manifest-relative-v1",
+                "function_count": len(functions), "functions": functions})
+            verified_hashes.update({name: saved["ir_hashes"][name]
+                                    for name in saved["known_entries"]})
+            return {"missing": [], "extra": [], "mismatched_sha256": []}
+
+        with patch.object(run_game, "ir_generation_inputs", return_value=sources), \
+             patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
+             patch.object(run_game, "build_linked_library",
+                          side_effect=AssertionError("must not emit/link")):
+            recovery.benchmark_reconstruction(elf, root, "Release", base, output, 2)
+            for unsafe in (base, base / "inside", output):
+                try:
+                    recovery.benchmark_reconstruction(elf, root, "Release", base, unsafe, 2)
+                except ValueError:
+                    pass
+                else:
+                    raise AssertionError("benchmark accepted existing/unsafe output")
+        assert marker.read_bytes() == b"untouched"
+        assert shared_ir.read_json(output / "benchmark-output.json")["ir_hashes"] == manifest["ir_hashes"]
+        assert not (output / "objects").exists()
+        assert not list(base.glob("backup-*"))
+
+
+def test_host_cache_seed_copies_only_candidate_artifacts():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        source = root / "source"
+        target = root / "target"
+        source.mkdir()
+        target.mkdir()
+        library = "game-translated.dll"
+        for name in (library, library + ".dispatch.o", library + ".dispatch.o.json",
+                     "translation-cache.json"):
+            (source / name).write_bytes(name.encode())
+        runtime = source / (library + ".runtime-cache")
+        runtime.mkdir()
+        (runtime / "runtime-objects.json").write_bytes(b"receipt")
+        (runtime / "example.o").write_bytes(b"object")
+        assert recovery.seed_host_link_cache([source], target, library) == 4
+        assert not (target / library).exists()
+        assert not (target / "translation-cache.json").exists()
+        assert (target / runtime.name / "example.o").read_bytes() == b"object"
+        (target / runtime.name / "example.o").write_bytes(b"changed")
+        assert (runtime / "example.o").read_bytes() == b"object"
+
+
+def test_portable_validation_uses_one_fresh_ir_scan():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        stage = root / "cache"
+        ir = stage / "ir"
+        ir.mkdir(parents=True)
+        module = ir / "sub_0x100008_0x100008.ll"
+        module.write_bytes(b"guest")
+        metadata = ir / "ee_functions.json"
+        shared_ir.write_json(metadata, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": module.name, "vaddr": "0x100008",
+                           "block_pcs": ["0x100008"]}],
+        })
+        hashes = {module.name: digest(b"guest")}
+        sources = {"ELF": digest(b"ELF")}
+        shared_ir.publish(metadata, sources, hashes)
+        profile = recovery.native_profile(stage, 5)
+        (profile / "objects").mkdir(parents=True)
+        shared_ir.attach(profile, ir)
+        shared_ir.write_json(profile / "translation-cache.json",
+                             {"ir_sources": sources, "ir_hashes": hashes})
+        manifest = {"path_format": "manifest-relative-v1", "objects": [{
+            "input": shared_ir.relative_path(module, profile / "objects"),
+            "ir_sha256": hashes[module.name]}]}
+        with patch.object(run_game, "hash_ir_modules",
+                          wraps=run_game.hash_ir_modules) as scan, \
+             patch.object(run_game, "validate_translation_cache") as validate, \
+             patch("link_native_objects.load_inputs", return_value=({}, manifest, [], [])), \
+             patch("verify_ir.append_cached_objects"):
+            recovery.validate_portable_cache(stage, elf, {}, sources, "game-translated.dll", 5)
+            scan.assert_called_once()
+            assert validate.call_args.kwargs["verified_ir_hashes"] == hashes
+            module.write_bytes(b"changed")
+            try:
+                recovery.validate_portable_cache(stage, elf, {}, sources, "game-translated.dll", 5)
+            except ValueError as error:
+                assert "IR differs" in str(error)
+            else:
+                raise AssertionError("changed IR accepted on second validation")
+            assert scan.call_count == 2
+            validate.assert_called_once()
+
+
+def test_selected_profile_promotion_without_o0():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        base = root / "cache"
+        stage = base / "recovery-123"
+        ir = stage / "ir"
+        ir.mkdir(parents=True)
+        name = "sub_0x100008_0x100008.ll"
+        (ir / name).write_bytes(b"guest")
+        meta = ir / "ee_functions.json"
+        shared_ir.write_json(meta, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": name, "vaddr": "0x100008",
+                           "block_pcs": ["0x100008"]}],
+        })
+        sources = {"ELF": digest(b"ELF")}
+        hashes = {name: digest(b"guest")}
+        shared_ir.publish(meta, sources, hashes)
+        profile = recovery.native_profile(stage, 5)
+        profile.mkdir()
+        shared_ir.attach(profile, ir)
+        shared_ir.write_json(profile / "translation-cache.json", {
+            "metadata_sha256": run_game.sha256_path(meta),
+            "ir_sources": sources, "ir_hashes": hashes, "emit_opt": 5,
+        })
+        (profile / "game-translated.dll").write_bytes(b"selected native")
+        original = meta.read_bytes()
+        original_provenance = (ir / shared_ir.PROVENANCE).read_bytes()
+
+        def validate(directory):
+            metadata = directory / "ir" / "ee_functions.json"
+            assert shared_ir.elf_path(shared_ir.read_json(metadata), metadata.parent) == elf
+            shared_ir.current_state(metadata, sources, hashes)
+            native = recovery.native_profile(directory, 5)
+            assert shared_ir.ir_directory(native) == metadata.parent
+            assert shared_ir.read_json(native / "translation-cache.json")[
+                "metadata_sha256"] == run_game.sha256_path(metadata)
+            assert not (directory / "translation-cache.json").exists()
+
+        def fail(directory):
+            validate(directory)
+            raise ValueError("synthetic post-promotion failure")
+
+        try:
+            recovery.promote_canonical(base, stage, fail, elf=elf, opt=5)
+        except ValueError as error:
+            assert "synthetic" in str(error)
+        else:
+            raise AssertionError("failed selected-profile promotion accepted")
+        assert meta.read_bytes() == original
+        assert (ir / shared_ir.PROVENANCE).read_bytes() == original_provenance
+        assert not list(base.glob("backup-*"))
+        recovery.promote_canonical(base, stage, validate, elf=elf, opt=5)
+        validate(base)
+        assert (base / "O2-native/game-translated.dll").read_bytes() == b"selected native"
+        assert not (base / "objects").exists()
 
 
 def test_canonical_promotion_rolls_back_all_names():
@@ -321,6 +528,61 @@ def test_active_source_preflight_rejects_stale_shared_provenance():
         assert provenance.read_bytes() == original
 
 
+def test_source_fingerprint_migration_does_not_build_or_replace_ir():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "SLUS_214.42"
+        elf.write_bytes(b"fixture-elf")
+        source = root / "test.cpp"
+        source.write_bytes(b"int f();\r\n")
+        legacy = {"ELF": run_game.sha256_path(elf),
+                  "test.cpp": run_game.sha256_path(source)}
+        source.write_bytes(b"int f();\n")
+        sources = shared_ir.fingerprint_sources(
+            [("ELF", elf), ("test.cpp", source)], binary_keys={"ELF"})
+        work = root / "ps2-game-hle"
+        ir = work / "ir"
+        ir.mkdir(parents=True)
+        module = ir / "sub_0x100008_0x100008.ll"
+        module.write_bytes(b"; exact IR\r\n")
+        meta = ir / "ee_functions.json"
+        shared_ir.write_json(meta, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": module.name}],
+        })
+        hashes = {module.name: run_game.sha256_path(module)}
+        shared_ir.publish(meta, legacy, hashes)
+        provenance = ir / shared_ir.PROVENANCE
+        original = provenance.read_bytes()
+        metadata_bytes = meta.read_bytes()
+        native = work / "O2-native"
+        native.mkdir()
+        receipt = native / "translation-cache.json"
+        receipt.write_bytes(b"native receipt unchanged")
+        with patch.object(run_game, "ir_generation_inputs", return_value=sources), \
+             patch.object(run_game, "build_linked_library",
+                          side_effect=AssertionError("must not build")), \
+             patch.object(recovery.run_known_replays, "reconstruct",
+                          side_effect=AssertionError("must not reconstruct")):
+            module.write_bytes(b"corrupted")
+            try:
+                recovery.migrate_source_fingerprints(elf, work, root)
+            except ValueError as error:
+                assert "module hashes changed" in str(error)
+            else:
+                raise AssertionError("corrupt IR migrated")
+            assert provenance.read_bytes() == original
+            module.write_bytes(b"; exact IR\r\n")
+            assert recovery.migrate_source_fingerprints(elf, work, root) == 1
+            assert recovery.migrate_source_fingerprints(elf, work, root) == 0
+        assert meta.read_bytes() == metadata_bytes
+        assert module.read_bytes() == b"; exact IR\r\n"
+        assert receipt.read_bytes() == b"native receipt unchanged"
+        assert shared_ir.read_json(provenance)["source_fingerprint_migrations"] == [legacy]
+
+
 def test_launcher_recovers_before_automatic_rebuild():
     batch = (ROOT / "scripts" / "run_ps2_game.bat").read_text(encoding="utf-8")
     assert 'if /I "%~1"=="--recover-cache" (' in batch
@@ -354,6 +616,182 @@ def test_launcher_recovers_before_automatic_rebuild():
     assert "choice /C YN" not in batch
 
 
+def test_ir_only_backup_partition_preserves_native_and_authenticates():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        base = root / "ps2-game-hle"
+        stage = base / "recovery-123"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        (ir / "example.ll").write_bytes(b"old IR")
+        (ir / "ee_functions.json").write_bytes(b"old metadata")
+        (ir / shared_ir.PROVENANCE).write_bytes(b"old provenance")
+        (base / "translation-cache.json").write_bytes(b"old receipt")
+        (base / "game-translated.dll").write_bytes(b"old DLL")
+        displaced = base / "objects"
+        displaced.mkdir()
+        (displaced / "old.o").write_bytes(b"old object")
+        (displaced / "objects.json").write_bytes(b"old object receipt")
+        profile = base / "O2-native"
+        objects = profile / "objects"
+        objects.mkdir(parents=True)
+        (objects / "example.o").write_bytes(b"native")
+        (objects / "objects.json").write_bytes(b"object receipt")
+        (profile / "translation-cache.json").write_bytes(b"profile receipt")
+        shared_ir.attach(profile, ir)
+        (base / "report.json").write_bytes(b"old report")
+        (stage / "ir").mkdir(parents=True)
+        (stage / "ir" / "example.ll").write_bytes(b"new IR")
+        (stage / "ir" / shared_ir.PROVENANCE).write_bytes(b"new provenance")
+        existing_backup = base / "backup-existing"
+        existing_backup.mkdir()
+        (existing_backup / "sentinel").write_bytes(b"existing backup")
+        profiles = recovery.canonical_shared_profiles(base, stage)
+        assert profiles == [profile]
+        backup = recovery.promote_canonical(base, stage, lambda _: None,
+                                           preserved_profiles=profiles)
+        # A native directory containing thousands of objects should move
+        # once, while its receipt is copied back for archive recovery.
+        with patch.object(cache_backup, "verify_ir_backup",
+                          side_effect=ValueError("synthetic inventory failure")):
+            try:
+                cache_backup.partition_backup(backup, profiles)
+            except ValueError as error:
+                assert "synthetic" in str(error)
+            else:
+                raise AssertionError("failed backup partition accepted")
+        assert (backup / "objects/old.o").read_bytes() == b"old object"
+        assert (backup / "objects/objects.json").read_bytes() == b"old object receipt"
+        assert not (base / "retained-123").exists()
+        report = root / "partition-timings.json"
+        with metrics.report("backup-partition", report):
+            result = cache_backup.partition_backup(backup, profiles)
+        assert shared_ir.read_json(report)["counts"]["backup_directory_moves"] >= 1
+        assert result.name == "backup-123-ir"
+        inventory = cache_backup.verify_ir_backup(result)
+        assert set(inventory["files"]) == {
+            "ir/example.ll", "ir/ee_functions.json", "ir/.shared-ir-provenance.json",
+            "translation-cache.json", "objects/objects.json", "O2-native/translation-cache.json",
+            "O2-native/shared-ir.json", "O2-native/objects/objects.json",
+        }
+        assert (result / "ir/example.ll").read_bytes() == b"old IR"
+        assert (base / "ir/example.ll").read_bytes() == b"new IR"
+        assert (objects / "example.o").read_bytes() == b"native"
+        assert (base / "retained-123/game-translated.dll").read_bytes() == b"old DLL"
+        assert (base / "retained-123/report.json").read_bytes() == b"old report"
+        assert (base / "retained-123/objects/old.o").read_bytes() == b"old object"
+        assert (base / "retained-123/objects/objects.json").read_bytes() == b"old object receipt"
+        assert (existing_backup / "sentinel").read_bytes() == b"existing backup"
+        (result / "ir/example.ll").write_bytes(b"tampered")
+        try:
+            cache_backup.verify_ir_backup(result)
+        except ValueError as error:
+            assert "inventory/hash mismatch" in str(error)
+        else:
+            raise AssertionError("modified backup accepted")
+
+
+def test_backup_benchmark_payload_selection_and_timings():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        cache = root / "cache"
+        ir = cache / "ir"
+        ir.mkdir(parents=True)
+        (ir / "test.ll").write_bytes(b"IR")
+        (ir / "ee_functions.json").write_bytes(b"metadata")
+        (cache / "game-translated.dll").write_bytes(b"native")
+        prior = cache / "backup-prior"
+        prior.mkdir()
+        (prior / "test").write_bytes(b"not a benchmark input")
+        retained = cache / "retained-old"
+        retained.mkdir()
+        (retained / "test").write_bytes(b"not a benchmark input")
+        full, subset = cache_backup.benchmark_payloads(cache)
+        assert len(full) == 3 and len(subset) == 2
+        assert (cache / "game-translated.dll") in full
+        assert (cache / "game-translated.dll") not in subset
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append(command)
+            if command[1] == "a":
+                listing = Path(command[-1][1:])
+                names = listing.read_text(encoding="utf-8").splitlines()
+                assert "backup-prior/test" not in names
+                assert "retained-old/test" not in names
+                Path(command[-2]).write_bytes(b"archive")
+
+        report = root / "benchmark.json"
+        with patch.object(cache_backup, "seven_zip", return_value="7z"), \
+             patch.object(cache_backup.subprocess, "run", side_effect=fake_run):
+            cache_backup.benchmark_compression(cache, report)
+        results = json.loads(report.read_text(encoding="utf-8"))["results"]
+        assert [(row["scope"], row["level"]) for row in results] == [
+            ("full", 9), ("ir", 9), ("ir", 3), ("ir", 1)]
+        assert [row["files"] for row in results] == [3, 2, 2, 2]
+        assert all(row["archive_bytes"] == 7 for row in results)
+        assert [call[1] for call in calls] == ["a", "t"] * 4
+        assert (ir / "test.ll").read_bytes() == b"IR"
+        assert (cache / "game-translated.dll").read_bytes() == b"native"
+        assert not list(root.glob(".ee-backup-benchmark-*"))
+
+
+def test_recovery_timing_report_is_opt_in_and_preserves_failures():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        output = root / "timings.json"
+        with metrics.report("test", output, jobs=2):
+            with metrics.stage("outer"):
+                metrics.count("ee_recomp_invocations")
+                metrics.observe_line(
+                    "ee_recomp timings: discovery=200.0ms coverage=30.0ms IR=10.0ms",
+                    "ee_recomp")
+            metrics.observe_line("ee_recomp IR worker launches: 8", "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=8 modules=128", "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=2 modules=2", "ee_recomp")
+            metrics.observe_line("ee_recomp parallel IR: workers=99 modules=128", "ee_recomp")
+            metrics.observe_line(metrics.CHILD_PREFIX + json.dumps({
+                "tool": "verify_ir", "stages": {"native_compile_wall": 2.0},
+                "worker_seconds": 3.5, "cache_hits": 4, "cache_misses": 2,
+                "slowest_modules": [{"path": "example.ll", "seconds": 1.5}],
+            }), "verify_ir")
+            child = root / "verify_ir.py"
+            child.write_text(
+                "import json\nprint('EE_RECOVERY_METRICS ' + json.dumps("
+                "{'tool': 'verify_ir', 'stages': {'native_compile_wall': 1.0}, "
+                "'worker_seconds': 1.0, 'cache_hits': 1, 'cache_misses': 1}))\n",
+                encoding="utf-8")
+            run_game.run([sys.executable, child])
+        report = json.loads(output.read_text(encoding="utf-8"))
+        assert report["status"] == "success"
+        assert report["stages"]["discovery"]["seconds"] == 0.2
+        assert report["stages"]["native_compile_wall"]["seconds"] == 3.0
+        assert report["child_reports"][0]["worker_seconds"] == 3.5
+        assert report["worker_seconds"] == 4.5
+        assert report["counts"]["native_cache_hits"] == 5
+        assert report["counts"]["native_cache_misses"] == 3
+        assert report["native_throughput_modules_per_second"] == 1.0
+        assert report["slowest_modules"][0]["path"] == "example.ll"
+        assert report["counts"]["verify_ir_invocations"] == 1
+        assert report["counts"]["recompiler_timing_records"] == 1
+        assert report["counts"]["parallel_ir_batches"] == 2
+        assert report["counts"]["parallel_ir_modules"] == 130
+        assert report["counts"]["parallel_ir_worker_launches"] == 8
+        assert report["counts"]["parallel_ir_worker_assignments"] == 10
+        assert report["counts"]["parallel_ir_peak_workers"] == 8
+        assert metrics.active() is None
+        failure = root / "failed.json"
+        try:
+            with metrics.report("test", failure):
+                raise ValueError("fixture failure")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("timing instrumentation suppressed an error")
+        assert json.loads(failure.read_text(encoding="utf-8"))["status"] == "failed"
+        assert metrics.active() is None
+
+
 def test_verified_maximum_compression_backup():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -383,7 +821,7 @@ def test_verified_maximum_compression_backup():
 
         with patch.object(cache_backup, "seven_zip", return_value="7z"), \
              patch.object(cache_backup.subprocess, "run", side_effect=fake_run):
-            archive = cache_backup.compress_backup(backup)
+            archive = cache_backup.compress_backup(backup, level=9)
             assert archive == root / "backup-123.7z"
             assert archive.is_file() and not backup.exists()
             with cache_backup.backup_object_candidates(root, "O5-native") as candidates:
@@ -398,6 +836,7 @@ def test_verified_maximum_compression_backup():
         archive.unlink()
         def failed_test(command, **kwargs):
             if command[1] == "a":
+                assert "-mx=1" in command
                 Path(command[-2]).write_bytes(b"invalid")
             else:
                 raise subprocess.CalledProcessError(2, command)
@@ -425,6 +864,88 @@ def test_real_7z_backup_if_available():
             recovered = {(p / "objects" / "example.o").read_bytes()
                          for p in candidates if (p / "objects" / "example.o").is_file()}
             assert recovered == {b"O5-native", b"legacy-O5-native", b"legacy-recovery-42-O5-native"}
+
+
+def test_seed_objects_combines_verified_candidates():
+    from build_optimized_cache import seed_candidate_objects
+    from verify_ir import llvm, native_target_identity, ir_pipeline_id, backend_opt
+
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        hashes = {name: digest(name.encode()) for name in ("a.ll", "b.ll", "c.ll")}
+        identity = {
+            "complete": True, "optimization_level": 0,
+            "backend_optimization_level": backend_opt(0),
+            "ir_pipeline": ir_pipeline_id(0), "native_target": native_target_identity(0),
+            "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+            "target_triple": llvm.get_default_triple(),
+        }
+
+        def candidate(label, names, *, corrupt=(), wrong_profile=False):
+            directory = root / label / "objects"
+            directory.mkdir(parents=True)
+            entries = []
+            for name in names:
+                obj = Path(name).stem + ".o"
+                data = name.encode()
+                (directory / obj).write_bytes(b"corrupt" if name in corrupt else data)
+                entries.append({"input": "../ir/" + name, "object": obj,
+                                "ir_sha256": hashes[name], "sha256": digest(data),
+                                "size_bytes": len(data), "defined_symbols": [obj[:-2]]})
+            manifest = dict(identity, objects=entries)
+            if wrong_profile:
+                manifest["optimization_level"] = 5
+            shared_ir.write_json(directory / "objects.json", manifest)
+            return directory.parent
+
+        sources = [candidate("first", ("a.ll", "b.ll"), corrupt=("b.ll",)),
+                   candidate("wrong", ("b.ll",), wrong_profile=True),
+                   candidate("second", ("b.ll", "c.ll"))]
+        work = root / "stage"
+        work.mkdir()
+        metadata = work / "ir" / "ee_functions.json"
+        count = seed_candidate_objects(sources, work, metadata, hashes, 0,
+                                       llvm, native_target_identity, ir_pipeline_id)
+        assert count == 3
+        assert all((work / "objects" / (Path(name).stem + ".o")).read_bytes()
+                   == name.encode() for name in hashes)
+        receipt = shared_ir.read_json(work / "objects" / "objects.json")
+        assert [Path(item["input"]).name for item in receipt["objects"]] == list(hashes)
+        assert (sources[0] / "objects" / "b.o").read_bytes() == b"corrupt"
+
+
+def test_identical_native_reuse_requires_verified_objects():
+    from verify_ir import llvm
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        cache = root / "translation-cache.json"
+        library = root / "game-translated.dll"
+        metadata = root / "ir" / "ee_functions.json"
+        cache.write_bytes(b"receipt")
+        library.write_bytes(b"library")
+        hashes = {"a.ll": digest(b"IR")}
+        sources = {"ELF": "same"}
+        records = {str(metadata.parent / "a.ll"): {"ir_sha256": hashes["a.ll"]}}
+        identity = {"schema": "fixture"}
+        receipt = library.with_suffix(library.suffix + ".link.json")
+        shared_ir.write_json(receipt, {"complete": True, "library_sha256": digest(b"library"),
+                                       "toolchain_identity": identity})
+        with patch.object(run_game, "validate_cached_library_identity",
+                          return_value={"ir_sources": sources, "ir_hashes": hashes,
+                                        "library_sha256": digest(b"library")}), \
+             patch.object(shared_ir, "current_state"), \
+             patch("verify_ir.append_cached_objects", return_value=records), \
+             patch("link_native_objects.link_toolchain_identity", return_value=identity) as toolchain, \
+             patch("link_native_objects.load_inputs") as load:
+            assert refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
+            toolchain.return_value = {"schema": "changed"}
+            assert not refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
+            toolchain.return_value = identity
+            load.side_effect = ValueError("corrupt object")
+            assert not refresh.reuse_identical_native_cache(
+                cache, {}, sources, 0, metadata, library, hashes)
 
 
 def test_overwrite_ir_uses_active_inventory_and_selected_profile():
@@ -466,11 +987,13 @@ def test_overwrite_ir_uses_active_inventory_and_selected_profile():
         calls = []
 
         def fake_reconstruct(manifest, known_entries, elf_arg, build, config,
-                             work, jobs, allow_mismatches, *, ir_only=False):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None,
+                             persistent=False, ir_jobs=1):
+            assert persistent and ir_jobs == 8
             assert known_entries == entries
             assert manifest["ir_hashes"] == old_hashes
             assert allow_mismatches and ir_only and elf_arg == elf
-            write_ir(work / "ir", b"new")
+            verified_hashes.update(write_ir(work / "ir", b"new"))
             return {"missing": [], "extra": [], "mismatched_sha256": names}
 
         def fake_build(source, work, metadata, objects, library, opt, **kwargs):
@@ -532,8 +1055,13 @@ def test_overwrite_launcher_routes_before_preflight():
 
 
 def main():
+    test_seed_objects_combines_verified_candidates()
+    test_identical_native_reuse_requires_verified_objects()
     test_overwrite_ir_uses_active_inventory_and_selected_profile()
     test_overwrite_launcher_routes_before_preflight()
+    test_ir_only_backup_partition_preserves_native_and_authenticates()
+    test_backup_benchmark_payload_selection_and_timings()
+    test_recovery_timing_report_is_opt_in_and_preserves_failures()
     test_verified_maximum_compression_backup()
     test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()
@@ -541,8 +1069,13 @@ def main():
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
     test_verified_legacy_migration_preserves_ir_and_relocates()
+    test_cold_ir_benchmark_isolated()
+    test_host_cache_seed_copies_only_candidate_artifacts()
+    test_portable_validation_uses_one_fresh_ir_scan()
+    test_selected_profile_promotion_without_o0()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()
+    test_source_fingerprint_migration_does_not_build_or_replace_ir()
     test_launcher_recovers_before_automatic_rebuild()
     print("safe known-function cache recovery: PASS")
 

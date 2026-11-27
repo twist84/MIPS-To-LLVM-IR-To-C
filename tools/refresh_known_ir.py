@@ -12,12 +12,14 @@ import recover_translation_cache as recovery
 import run_game
 import run_known_replays as known
 import shared_ee_ir as shared_ir
+import recovery_metrics as metrics
 
 
 PROFILE_DIRS = {0: "", 1: "O1", 2: "O2", 3: "O3",
                 4: "IR-O2", 5: "O2-native"}
 
 
+@metrics.measure("manifest_selection")
 def active_manifest(elf, base):
     """Use the actual shared inventory, not a possibly stale O0 snapshot."""
     metadata_path = base / "ir" / "ee_functions.json"
@@ -50,7 +52,40 @@ def active_manifest(elf, base):
     return manifest
 
 
-def refresh(elf, build, config, base, opt, jobs):
+def reuse_identical_native_cache(cache, inputs, sources, opt, metadata, library, hashes):
+    """Skip native work only for a fully authenticated, unchanged profile."""
+    if not cache.is_file() or not library.is_file():
+        return False
+    try:
+        from link_native_objects import load_inputs, link_toolchain_identity
+        from verify_ir import append_cached_objects, llvm
+        objects = library.parent / "objects"
+        snapshot = run_game.validate_cached_library_identity(
+            cache, inputs, opt, metadata, library)
+        if (not shared_ir.matching_sources(snapshot.get("ir_sources"), sources) or
+                snapshot.get("ir_hashes") != hashes):
+            return False
+        link_receipt = shared_ir.read_json(library.with_suffix(library.suffix + ".link.json"))
+        if (link_receipt.get("complete") is not True or
+                link_receipt.get("library_sha256") != snapshot.get("library_sha256") or
+                not link_receipt.get("toolchain_identity") or
+                link_receipt["toolchain_identity"] != link_toolchain_identity()):
+            return False
+        shared_ir.current_state(metadata, sources, hashes)
+        records = append_cached_objects(objects, opt, llvm.get_default_triple(), [])
+        if ({Path(name).name: item["ir_sha256"] for name, item in records.items()} != hashes or
+                len(records) != len(hashes) or
+                any(Path(name).resolve() != (metadata.parent / Path(name).name).resolve()
+                    for name in records)):
+            return False
+        load_inputs(metadata, objects)
+        return True
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return False
+
+
+def refresh(elf, build, config, base, opt, jobs, *, ir_jobs=8):
+    options = known.recovery_recompiler_options(ir_jobs)
     elf = elf.resolve(strict=True)
     base = base.resolve(strict=True)
     work = base / PROFILE_DIRS[opt]
@@ -68,6 +103,8 @@ def refresh(elf, build, config, base, opt, jobs):
         sources = run_game.ir_generation_inputs(elf, root)
         recomp = run_game.native_executable(build, "ee_recomp", config)
         inputs = run_game.translation_inputs(elf, recomp, root)
+        metrics.details("source_fingerprints", dict(sources))
+        metrics.details("native_input_fingerprints", dict(inputs))
         stage = Path(tempfile.mkdtemp(prefix=".overwrite-ir-", dir=base))
         previous = stage / "previous-ir"
         staged_ir = stage / "ir"
@@ -80,26 +117,30 @@ def refresh(elf, build, config, base, opt, jobs):
             shared_ir.write_json(inventory, manifest)
             manifest, entries = known.read_manifest(inventory)
             print(f"Overwrite EE IR: {len(entries)} known entries; selected O{opt}", flush=True)
+            hashes = {}
             comparison = known.reconstruct(
                 manifest, entries, elf, build, config, stage, jobs, True,
-                ir_only=True)
+                ir_only=True, verified_hashes=hashes, **options)
+            metrics.details("known_modules", len(entries))
+            metrics.details("ir_comparison", comparison)
             if comparison["missing"] or comparison["extra"]:
                 raise ValueError("re-emitted module inventory changed")
             staged_meta = staged_ir / "ee_functions.json"
             metadata = shared_ir.read_json(staged_meta)
-            hashes = run_game.hash_ir_modules(staged_ir, metadata["functions"],
-                                              require_owned_directory=True)
             if list(hashes) != manifest["known_entries"]:
                 raise ValueError("re-emitted ordered EE inventory changed")
+            if run_game.ir_generation_inputs(elf, root) != sources:
+                raise ValueError("lowering inputs changed during overwrite")
             # Rebase the external ELF reference BEFORE publishing the new
             # provenance record and moving the directory into its final path.
             metadata["elf"] = shared_ir.relative_path(elf, ir)
             shared_ir.write_json(staged_meta, metadata)
             shared_ir.publish(staged_meta, sources, hashes)
-            ir.rename(previous)
-            old_moved = True
-            staged_ir.rename(ir)
-            active_replaced = True
+            with metrics.stage("cache_promotion"):
+                ir.rename(previous)
+                old_moved = True
+                staged_ir.rename(ir)
+                active_replaced = True
             metadata_path = ir / "ee_functions.json"
             if shared_ir.elf_path(metadata, ir) != elf:
                 raise ValueError("re-emitted ELF reference changed")
@@ -113,11 +154,21 @@ def refresh(elf, build, config, base, opt, jobs):
             library = work / library_name
             # Existing objects are incremental candidates only. verify_ir
             # checks current IR bytes, target, LLVM version and object SHA.
-            run_game.build_linked_library(root, work, metadata_path, work / "objects",
-                                          library, opt, emit_jobs=jobs)
-            run_game.write_translation_cache(cache, inputs, opt, metadata_path,
-                                             library, sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata_path, library)
+            with metrics.stage("native_reuse_preflight"):
+                reused = reuse_identical_native_cache(
+                    cache, inputs, sources, opt, metadata_path, library, hashes)
+            if reused:
+                metrics.count("native_link_skipped")
+                print(f"Overwrite EE IR: O{opt} native cache unchanged; "
+                      "compilation and linking skipped", flush=True)
+            else:
+                run_game.build_linked_library(root, work, metadata_path, work / "objects",
+                                              library, opt, emit_jobs=jobs,
+                                              record_link_identity=True)
+                run_game.write_translation_cache(cache, inputs, opt, metadata_path,
+                                                 library, sources)
+            with metrics.stage("cache_validation"):
+                run_game.validate_translation_cache(cache, inputs, opt, metadata_path, library)
         except BaseException:
             # Do not authorize a replay on failure. Restore source and its
             # old snapshot; modified native objects still need validation.
@@ -146,12 +197,20 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", required=True, type=Path)
     parser.add_argument("--emit-opt", type=int, choices=range(6), required=True)
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--ir-jobs", type=int, choices=range(33), default=8,
+                        help="IR workers; 0 independent processes, 1 persistent serial")
+    parser.add_argument("--timings-report", type=Path,
+                        help="new JSON report path; default is beside the cache")
     args = parser.parse_args(argv)
     if not 1 <= args.emit_jobs <= 32:
         parser.error("--emit-jobs must be in 1..32")
     try:
-        refresh(args.elf, args.build_dir, args.config, args.base_work_dir,
-                args.emit_opt, args.emit_jobs)
+        output = args.timings_report or metrics.default_report(args.base_work_dir, "refresh")
+        with metrics.report("refresh", output, cache=str(args.base_work_dir.resolve()),
+                            elf=str(args.elf.resolve()), jobs=args.emit_jobs,
+                            profile=args.emit_opt, ir_jobs=args.ir_jobs):
+            refresh(args.elf, args.build_dir, args.config, args.base_work_dir,
+                    args.emit_opt, args.emit_jobs, ir_jobs=args.ir_jobs)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             subprocess.SubprocessError) as error:
         print(f"EE IR overwrite failed; replay not started: {error}", file=sys.stderr)

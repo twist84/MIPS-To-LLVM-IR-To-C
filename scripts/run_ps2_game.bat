@@ -26,6 +26,7 @@ rem Without either switch, retain explicitly configured pad variables.
 set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
+set "FULL_NATIVE_BACKUP="
 set "OVERWRITE_IR="
 set "CACHE_MISS_ARGS="
 set "LIVE_RELINK_ARG="
@@ -126,6 +127,11 @@ if /I "%~1"=="--overwrite-ir" (
     shift
     goto :parse_launcher_options
 )
+if /I "%~1"=="--full-native-backup" (
+    set "FULL_NATIVE_BACKUP=--full-native-backup"
+    shift
+    goto :parse_launcher_options
+)
 if /I "%~1"=="--accept-new-ir" (
     set "ACCEPT_NEW_IR=--allow-ir-changes"
     shift
@@ -152,7 +158,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: scripts\run_ps2_game.bat [--p40 or --p40-listen] [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: scripts\run_ps2_game.bat [--p40 or --p40-listen] [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--full-native-backup] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
@@ -166,12 +172,16 @@ if not "%SDBZ_EE_OPT%"=="0" if not "%SDBZ_EE_OPT%"=="1" if not "%SDBZ_EE_OPT%"==
     echo ERROR: SDBZ_EE_OPT must be 0..5 ^(4=O2 IR + O2 backend, 5=host-native O2 backend^).
     exit /b 2
 )
-if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
-    echo ERROR: Optimized EE cache experiments require --full.
+if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
+    echo ERROR: Optimized EE cache experiments require --full or --recover-cache.
     exit /b 2
 )
 if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full" (
     echo ERROR: --overwrite-ir requires --full and an existing canonical cache.
+    exit /b 2
+)
+if defined FULL_NATIVE_BACKUP if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
+    echo ERROR: --full-native-backup requires --recover-cache.
     exit /b 2
 )
 if defined ACCEPT_NEW_IR if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
@@ -382,19 +392,19 @@ if defined OVERWRITE_IR (
 )
 rem Optimized full replay validates the shared source IR in the profile
 rem builder. Neither an O0 DLL nor an O2 DLL is a prerequisite.
-if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
+if not defined CACHE_FLAG if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="recover" if exist "%WORK_DIR%\ir\ee_functions.json" (
     echo === Validating shared EE IR for selected optimization profile ===
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
         --base-work-dir "%CD%\%BASE_WORK_DIR%" --check-active-source --require-portable
     if errorlevel 1 (
         echo ERROR: Shared source is not current. Existing caches retained.
-        echo Run with SDBZ_EE_OPT=0 and --recover-cache --accept-new-ir
+        echo Run with the selected SDBZ_EE_OPT and --recover-cache --accept-new-ir
         echo only when changed lowering is intentional, or use --full --overwrite-ir.
         exit /b 1
     )
     set "CACHE_FLAG=--no-recompile"
 )
-if not defined CACHE_FLAG if exist "%WORK_DIR%\translation-cache.json" (
+if not defined CACHE_FLAG if "%SDBZ_EE_OPT%"=="0" if exist "%WORK_DIR%\translation-cache.json" (
     echo === Validating saved EE translation ===
     python tools\run_game.py "%GAME_ELF%" ^
         --build-dir build --config Release ^
@@ -435,7 +445,7 @@ if /I "%REQUESTED_SESSION_MODE%"=="recover" (
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
         --build-dir build --config Release ^
         --base-work-dir "%CD%\%BASE_WORK_DIR%" ^
-        --emit-jobs=%EMIT_JOBS% %ACCEPT_NEW_IR%
+        --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS% %ACCEPT_NEW_IR% %FULL_NATIVE_BACKUP%
     exit /b
 )
 
@@ -453,7 +463,7 @@ if not defined CACHE_FLAG (
         python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
             --build-dir build --config Release ^
             --base-work-dir "%CD%\%BASE_WORK_DIR%" ^
-            --emit-jobs=%EMIT_JOBS%
+            --emit-opt=%SDBZ_EE_OPT% --emit-jobs=%EMIT_JOBS%
         if not errorlevel 1 (
             for /f "usebackq delims=" %%I in (`python "tools\recover_translation_cache.py" --base-work-dir "%CD%\%BASE_WORK_DIR%" --print-active`) do set "WORK_DIR=%%I"
             set "CACHE_FLAG=--no-recompile"

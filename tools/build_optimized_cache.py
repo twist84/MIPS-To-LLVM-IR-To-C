@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Emit an independent optimized EE library from verified existing IR."""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,7 +34,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
     cache = work / "translation-cache.json"
     try:
         run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
-                                            verified_ir_hashes=verified_ir_hashes)
+                                            verified_ir_hashes=verified_ir_hashes,
+                                            ir_sources=ir_sources)
     except ValueError:
         # The canonical shared source may have been refreshed independently
         # while this native profile still records the old lowering inputs.
@@ -46,7 +48,7 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                             snapshot.get("emit_opt") == opt and
                             snapshot.get("ir_pipeline") != run_game.ir_pipeline_id(opt))
         if (pipeline_changed and shared_ir.active(metadata) and
-                snapshot.get("ir_sources") == ir_sources):
+                shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources)):
             hashes = (verified_ir_hashes if verified_ir_hashes is not None
                       else run_game.translated_ir_hashes(metadata))
             shared_ir.current_state(metadata, ir_sources, hashes)
@@ -58,7 +60,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 opt, emit_jobs=jobs)
             run_game.write_translation_cache(
                 cache, inputs, opt, metadata, library, ir_sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
             return
         if (verified_ir_hashes is not None and
                 shared_ir.active(metadata) and
@@ -66,9 +69,15 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 snapshot.get("emit_opt") == opt and
                 isinstance(snapshot.get("ir_sources"), dict) and
                 snapshot["ir_sources"].get("ELF") == ir_sources.get("ELF") and
-                snapshot["ir_sources"] != ir_sources):
+                (not shared_ir.matching_sources(snapshot["ir_sources"], ir_sources) or
+                 snapshot.get("ir_hashes") != verified_ir_hashes or
+                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata)) and
+                not shared_ir.verified_extension(snapshot, metadata, ir_sources,
+                                                 verified_ir_hashes)):
             shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
-            print("Optimized profile lowering provenance is stale; "
+            reason = ("lowering" if not shared_ir.matching_sources(
+                snapshot["ir_sources"], ir_sources) else "IR inventory")
+            print(f"Optimized profile {reason} provenance is stale; "
                   "revalidating native objects against current shared IR",
                   flush=True)
             # The ordinary incremental emitter authenticates every candidate
@@ -80,7 +89,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 opt, emit_jobs=jobs)
             run_game.write_translation_cache(
                 cache, inputs, opt, metadata, library, ir_sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
             return
         result = run_game.main([
             str(elf), "--build-dir", str(build), "--config", config,
@@ -88,7 +98,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
             "--relink-existing", "--link-only"])
         if result != 0:
             raise ValueError("optimized cache relink failed")
-        run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+        run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
 
 
 def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
@@ -98,7 +109,7 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
     old = shared_ir.read_json(old_path)
     hashes = old_cache["ir_hashes"]
     if (old_cache.get("schema") != run_game.CACHE_SCHEMA or
-            old_cache.get("ir_sources") != ir_sources or
+            not shared_ir.matching_sources(old_cache.get("ir_sources"), ir_sources) or
             old_cache.get("metadata_sha256") != run_game.sha256_path(old_path)):
         raise ValueError("legacy EE IR provenance cannot be verified")
     verify_modules(work, old, hashes)
@@ -226,7 +237,7 @@ def validate_source_ir(elf, source_work, source_opt, ir_sources):
         snapshot = shared_ir.read_json(source_work / "translation-cache.json")
         if (snapshot.get("schema") != run_game.CACHE_SCHEMA or
                 snapshot.get("emit_opt") != source_opt or
-                snapshot.get("ir_sources") != ir_sources or
+                not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata_path)):
             raise ValueError("source IR provenance is stale; recover the source cache explicitly")
         hashes = snapshot["ir_hashes"]
@@ -251,7 +262,7 @@ def warm_profile_ready(source_work, work, inputs, ir_sources, opt, library):
         snapshot = run_game.validate_cached_library_identity(
             work / "translation-cache.json", inputs, opt, metadata, library)
         state = shared_ir.current_state(metadata, ir_sources)
-        return (snapshot.get("ir_sources") == ir_sources and
+        return (shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) and
                 snapshot.get("ir_hashes") == state["ir_hashes"] and
                 (work / "objects" / "objects.json").is_file())
     except (OSError, ValueError, KeyError, TypeError):
@@ -271,48 +282,76 @@ def seed_backup_objects(source_work, work, metadata_path, hashes, opt):
 
 def seed_candidate_objects(candidates, work, metadata_path, hashes, opt,
                            llvm, native_target_identity, ir_pipeline_id):
-    best = None
-    for source in candidates:
+    """Combine compatible candidates, preferring the first intact object per IR."""
+    from verify_ir import backend_opt
+    import recovery_metrics as metrics
+
+    matches = {}
+    destination = work / "objects"
+    if destination.exists():
+        raise ValueError("object seeding requires a fresh destination")
+    identity = {
+        "optimization_level": opt,
+        "backend_optimization_level": backend_opt(opt),
+        "ir_pipeline": ir_pipeline_id(opt),
+        "native_target": native_target_identity(opt),
+        "llvm_version": ".".join(map(str, llvm.llvm_version_info)),
+        "target_triple": llvm.get_default_triple(),
+    }
+    for source in dict.fromkeys(candidates):
+        if len(matches) == len(hashes):
+            break
         directory = source / "objects"
         try:
             manifest = shared_ir.read_json(directory / "objects.json")
-            if (manifest.get("complete") is not True or
-                    manifest.get("optimization_level") != opt or
-                    manifest.get("ir_pipeline") != ir_pipeline_id(opt) or
-                    manifest.get("native_target") != native_target_identity(opt) or
-                    manifest.get("llvm_version") != ".".join(map(str, llvm.llvm_version_info)) or
-                    manifest.get("target_triple") != llvm.get_default_triple()):
+            if (not isinstance(manifest, dict) or manifest.get("complete") is not True or
+                    any(manifest.get(key) != value for key, value in identity.items())):
                 continue
-            matches = {}
-            for item in manifest["objects"]:
-                name = Path(item["input"]).name
-                if (name not in hashes or item.get("ir_sha256") != hashes[name] or
+            entries = manifest["objects"]
+            if not isinstance(entries, list) or any(not isinstance(item, dict) for item in entries):
+                continue
+            names = [Path(item["input"]).name for item in entries]
+            if len(names) != len(set(names)):
+                continue
+            for item, name in zip(entries, names):
+                if (name in matches or name not in hashes or
+                        item.get("ir_sha256") != hashes[name] or
                         item.get("object") != Path(name).stem + ".o" or
                         not isinstance(item.get("size_bytes"), int) or
                         item["size_bytes"] < 1 or
-                        not (directory / item["object"]).is_file()):
+                        not isinstance(item.get("defined_symbols"), list) or
+                        not item["defined_symbols"]):
                     continue
-                if name in matches:
-                    raise ValueError("duplicate backup object")
-                matches[name] = item
-            if matches and (best is None or len(matches) > len(best[2])):
-                best = (directory, manifest, matches)
+                candidate = directory / item["object"]
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                try:
+                    data = candidate.read_bytes()
+                except OSError:
+                    continue
+                if (len(data) != item["size_bytes"] or
+                        hashlib.sha256(data).hexdigest() != item.get("sha256")):
+                    metrics.count("seed_corrupt_objects")
+                    continue
+                destination.mkdir(exist_ok=True)
+                target = destination / item["object"]
+                try:
+                    target.write_bytes(data)
+                except OSError as error:
+                    raise RuntimeError(f"cannot seed native object {target}: {error}") from error
+                matches[name] = dict(item, input=shared_ir.relative_path(
+                    metadata_path.parent / name, destination))
         except (OSError, ValueError, KeyError, TypeError):
+            # Unreadable/invalid candidates must not block other inventories.
             continue
-    if best is None:
+    if not matches:
         return 0
-    directory, manifest, matches = best
-    destination = work / "objects"
-    destination.mkdir()
-    copied = []
-    for name, item in matches.items():
-        shutil.copy2(directory / item["object"], destination / item["object"])
-        copied.append(dict(item, input=shared_ir.relative_path(
-            metadata_path.parent / name, destination)))
+    copied = [matches[name] for name in hashes if name in matches]
     shared_ir.write_json(destination / "objects.json", dict(
-        manifest, path_format="manifest-relative-v1",
+        identity, complete=True, path_format="manifest-relative-v1",
         input_module_count=len(copied), object_count=len(copied),
         object_bytes=sum(item["size_bytes"] for item in copied), objects=copied))
+    metrics.count("seeded_objects", len(copied))
     print(f"Seeded {len(copied)} candidate O{opt} objects from backup; "
           "incremental emitter will verify every reused object", flush=True)
     return len(copied)
@@ -363,7 +402,7 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
         run_game.write_translation_cache(
             cache, inputs, opt, metadata_path, library, ir_sources)
         run_game.validate_translation_cache(
-            cache, inputs, opt, metadata_path, library)
+            cache, inputs, opt, metadata_path, library, ir_sources=ir_sources)
         if run_game.translated_ir_hashes(metadata_path) != hashes:
             raise ValueError("optimized build changed the original IR")
     except BaseException:

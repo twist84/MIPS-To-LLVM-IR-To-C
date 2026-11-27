@@ -12,6 +12,11 @@
 #include "module_builder.h"
 
 #include <algorithm>
+#include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
+#include <thread>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -445,18 +450,163 @@ std::set<uint32_t> collect_address_taken_entries(const elf_loader& loader)
 
 } // namespace
 
-bool ee_recomp(const char* elf_path,
-               const char* output_dir,
-               s_recompiled_elf* result,
-               std::string* error,
-               const s_recomp_options& opts)
+// One bounded worker group for a reconstruction session. A submitted task
+// borrows batch-local immutable data only until run() returns.
+class c_ir_worker_pool
 {
+public:
+    explicit c_ir_worker_pool(size_t count)
+    {
+        try
+        {
+            m_threads.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                m_threads.emplace_back([this, i]() { worker(i); });
+            }
+        }
+        catch (...)
+        {
+            stop();
+            throw;
+        }
+    }
+
+    ~c_ir_worker_pool()
+    {
+        stop();
+    }
+
+    size_t size() const
+    {
+        return m_threads.size();
+    }
+
+    void run(size_t active, const std::function<void()>& task)
+    {
+        std::unique_lock lock(m_mutex);
+        m_task = &task;
+        m_active = active;
+        m_remaining = active;
+        ++m_generation;
+        m_ready.notify_all();
+        m_finished.wait(lock, [this]() { return m_remaining == 0; });
+        m_task = nullptr;
+    }
+
+private:
+    void stop()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_stopping = true;
+        }
+        m_ready.notify_all();
+        for (auto& thread : m_threads)
+        {
+            thread.join();
+        }
+    }
+
+    void worker(size_t index)
+    {
+        size_t seen = 0;
+        std::unique_lock lock(m_mutex);
+        for (;;)
+        {
+            m_ready.wait(lock, [this, &seen]()
+            {
+                return m_stopping || seen != m_generation;
+            });
+            if (m_stopping)
+            {
+                return;
+            }
+            seen = m_generation;
+            if (index >= m_active || !m_task)
+            {
+                continue;
+            }
+            const auto* task = m_task;
+            lock.unlock();
+            // The submitted emission task catches its own exceptions.
+            (*task)();
+            lock.lock();
+            if (--m_remaining == 0)
+            {
+                m_finished.notify_one();
+            }
+        }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_ready;
+    std::condition_variable m_finished;
+    std::vector<std::thread> m_threads;
+    const std::function<void()>* m_task = nullptr;
+    size_t m_generation = 0;
+    size_t m_active = 0;
+    size_t m_remaining = 0;
+    bool m_stopping = false;
+};
+
+struct s_ee_recomp_session_state
+{
+    elf_loader m_loader;
+    std::string m_elf_path;
+    std::string m_cache_path;
+    uint64_t m_fingerprint = 0;
+    bool m_snapshot_loaded = false;
+    std::map<uint32_t, s_ee_instruction> m_insns;
+    std::vector<uint32_t> m_entries;
+    std::set<uint32_t> m_jalr_targets;
+    std::set<uint32_t> m_jalr_only;
+    std::vector<s_static_jalr_site> m_sites;
+    std::unique_ptr<c_ir_worker_pool> m_ir_pool;
+};
+
+static bool ee_recomp_impl(const char* elf_path,
+                          const char* output_dir,
+                          s_recompiled_elf* result,
+                          std::string* error,
+                          const s_recomp_options& opts,
+                          s_ee_recomp_session_state* session)
+{
+    if (opts.ir_jobs == 0 || opts.ir_jobs > 32)
+    {
+        if (error)
+        {
+            *error = "IR worker count must be in 1..32";
+        }
+        return false;
+    }
     const auto started = std::chrono::steady_clock::now();
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
 
-    elf_loader loader;
-    if (!loader.load_file(elf_path, error)) return false;
+    elf_loader local_loader;
+    elf_loader& loader = session ? session->m_loader : local_loader;
+    if (!session || session->m_elf_path.empty())
+    {
+        if (!loader.load_file(elf_path, error))
+        {
+            return false;
+        }
+        if (session)
+        {
+            session->m_elf_path = elf_path;
+        }
+    }
+    else if (session->m_elf_path != elf_path ||
+             session->m_cache_path.empty() ||
+             session->m_cache_path != opts.discovery_cache_path)
+    {
+        if (error)
+        {
+            *error = "reconstruction session ELF/discovery identity changed";
+        }
+        return false;
+    }
 
     result->path = elf_path;
     result->entry_point = loader.entry_point();
@@ -683,6 +833,19 @@ bool ee_recomp(const char* elf_path,
         {
             std::fprintf(stderr,
                 "ee_recomp: warning: discovery snapshot not saved\n");
+            if (session)
+            {
+                if (error)
+                {
+                    *error = "reconstruction session requires a complete discovery snapshot";
+                }
+                return false;
+            }
+        }
+        else if (session)
+        {
+            session->m_cache_path = cache_path;
+            session->m_fingerprint = fingerprint;
         }
     }
     else
@@ -696,12 +859,38 @@ bool ee_recomp(const char* elf_path,
             return false;
         }
 
-        const uint64_t fingerprint = elf_fingerprint(elf_path);
-        if (fingerprint == 0 ||
-            !read_discovery_cache(
+        bool loaded = false;
+        if (session)
+        {
+            if (!session->m_snapshot_loaded)
+            {
+                session->m_snapshot_loaded = read_discovery_cache(
+                    opts.discovery_cache_path, session->m_fingerprint,
+                    &session->m_insns, &session->m_entries,
+                    &session->m_jalr_targets, &session->m_jalr_only,
+                    &session->m_sites);
+            }
+            loaded = session->m_snapshot_loaded;
+            if (loaded)
+            {
+                // Each batch starts from exactly the same immutable snapshot.
+                // Never retain dynamic discoveries or entry boundaries.
+                global_insns = session->m_insns;
+                entries = session->m_entries;
+                static_jalr_targets = session->m_jalr_targets;
+                jalr_only_entries = session->m_jalr_only;
+                jalr_site_audit = session->m_sites;
+            }
+        }
+        else
+        {
+            const uint64_t fingerprint = elf_fingerprint(elf_path);
+            loaded = fingerprint != 0 && read_discovery_cache(
                 opts.discovery_cache_path, fingerprint, &global_insns,
                 &entries, &static_jalr_targets, &jalr_only_entries,
-                &jalr_site_audit))
+                &jalr_site_audit);
+        }
+        if (!loaded)
         {
             if (error)
             {
@@ -808,6 +997,7 @@ bool ee_recomp(const char* elf_path,
     }
     function_analyzer analyzer;
     llvm::llvm_context ctx("ee_game");
+    const bool parallel_ir = opts.ir_jobs > 1 && !opts.only_functions.empty();
 
     // ------------------------------------------------------------------
     // Function-scoped coverage: every PC belonging to a CFG built from a
@@ -884,6 +1074,14 @@ bool ee_recomp(const char* elf_path,
 
     const auto coverage_done = std::chrono::steady_clock::now();
     std::set<uint32_t> emitted_blocks;
+    struct s_ir_job
+    {
+        s_ee_function m_function;
+        std::string m_host_symbol;
+        std::string m_path;
+    };
+    std::vector<s_ir_job> ir_jobs;
+    bool serial_write_failed = false;
 
     auto emit_entry = [&](uint32_t entry) -> bool {
         // Pass full entry set so CFGs stop at other functions (stop-at-other-entry).
@@ -909,11 +1107,18 @@ bool ee_recomp(const char* elf_path,
         // ELF symbol names are not guaranteed to be unique across aliases or
         // stripped/partially-symbolized images; the guest entry VA is.
         const std::string host_symbol = native_function_symbol(entry);
-        llvm::module_builder builder(ctx, opts.opt_level);
-        builder.emit_function_cfg(fn, global_insns, host_symbol.c_str());
         std::string ir_name = sanitize_name(fn.name) + "_" + u32hex(entry) + ".ll";
         std::string ir_path = std::string(output_dir) + "/" + ir_name;
-        ctx.write_ir_to_file(ir_path.c_str());
+        if (!parallel_ir)
+        {
+            llvm::module_builder builder(ctx, opts.opt_level);
+            builder.emit_function_cfg(fn, global_insns, host_symbol.c_str());
+            if (!ctx.write_ir_to_file(ir_path.c_str()))
+            {
+                serial_write_failed = true;
+                return false;
+            }
+        }
 
         s_recompiled_fn rfn;
         rfn.name = fn.name;
@@ -985,6 +1190,10 @@ bool ee_recomp(const char* elf_path,
                     static_cast<uint32_t>(unsupported_samples.size()),
                 static_cast<uint32_t>(k_max_unsupported_samples));
         }
+        if (parallel_ir)
+        {
+            ir_jobs.push_back({std::move(fn), host_symbol, ir_path});
+        }
         return true;
     };
 
@@ -1022,6 +1231,90 @@ bool ee_recomp(const char* elf_path,
             }
             emit_entry(ep);
         }
+    }
+
+    if (serial_write_failed)
+    {
+        if (error)
+        {
+            *error = "serial IR emission failed";
+        }
+        return false;
+    }
+    if (parallel_ir && !ir_jobs.empty())
+    {
+        // Planning, ownership and result order were established above.
+        // Workers only read the frozen instruction map, and each owns its
+        // builder/context and a distinct output path. Bound memory by the
+        // existing explicit batch size and the selected worker count.
+        const auto& instructions = std::as_const(global_insns);
+        const auto& jobs = std::as_const(ir_jobs);
+        std::atomic<size_t> next{0};
+        std::atomic<bool> failed{false};
+        const size_t workers = std::min<size_t>(opts.ir_jobs, jobs.size());
+        const auto emit = [&]()
+        {
+            try
+            {
+                llvm::llvm_context worker_ctx("ee_game");
+                for (; !failed.load();)
+                {
+                    const size_t index = next.fetch_add(1);
+                    if (index >= jobs.size())
+                    {
+                        break;
+                    }
+                    const auto& job = jobs[index];
+                    llvm::module_builder builder(worker_ctx, opts.opt_level);
+                    builder.emit_function_cfg(job.m_function, instructions,
+                                              job.m_host_symbol.c_str());
+                    if (!worker_ctx.write_ir_to_file(job.m_path.c_str()))
+                    {
+                        failed.store(true);
+                    }
+                }
+            }
+            catch (...)
+            {
+                failed.store(true);
+            }
+        };
+        try
+        {
+            if (session)
+            {
+                if (!session->m_ir_pool || session->m_ir_pool->size() != opts.ir_jobs)
+                {
+                    session->m_ir_pool = std::make_unique<c_ir_worker_pool>(opts.ir_jobs);
+                    std::printf("ee_recomp IR worker launches: %u\n", opts.ir_jobs);
+                }
+                session->m_ir_pool->run(workers, emit);
+            }
+            else
+            {
+                std::vector<std::jthread> threads;
+                threads.reserve(workers);
+                for (size_t i = 0; i < workers; ++i)
+                {
+                    threads.emplace_back(emit);
+                }
+                std::printf("ee_recomp IR worker launches: %zu\n", workers);
+            } // Join standalone workers before checking failure.
+        }
+        catch (...)
+        {
+            failed.store(true);
+        }
+        if (failed.load())
+        {
+            if (error)
+            {
+                *error = "parallel IR emission failed";
+            }
+            return false;
+        }
+        std::printf("ee_recomp parallel IR: workers=%zu modules=%zu\n",
+                    workers, jobs.size());
     }
 
     const auto emission_done = std::chrono::steady_clock::now();
@@ -1297,6 +1590,27 @@ bool ee_recomp(const char* elf_path,
     }
 
     return true;
+}
+
+bool ee_recomp(const char* elf_path, const char* output_dir,
+               s_recompiled_elf* result, std::string* error,
+               const s_recomp_options& opts)
+{
+    return ee_recomp_impl(elf_path, output_dir, result, error, opts, nullptr);
+}
+
+c_ee_recomp_session::c_ee_recomp_session()
+    : m_state(std::make_unique<s_ee_recomp_session_state>())
+{
+}
+
+c_ee_recomp_session::~c_ee_recomp_session() = default;
+
+bool c_ee_recomp_session::recompile(const char* elf_path, const char* output_dir,
+                                    s_recompiled_elf* result, std::string* error,
+                                    const s_recomp_options& opts)
+{
+    return ee_recomp_impl(elf_path, output_dir, result, error, opts, m_state.get());
 }
 
 } // namespace ee
