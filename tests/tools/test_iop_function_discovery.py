@@ -275,6 +275,39 @@ class DiscoveryTest(unittest.TestCase):
         self.assertEqual(result["observations"], [])
         self.assertEqual(len(result["unresolved"]), 1)
 
+    def test_cross_block_indirect_target_in_predecessor_delay_slot(self):
+        # LUI t9,1; j BASE+16; addiu t9,t9,24 (delay); unreachable;
+        # jr t9; nop; jr ra; nop.
+        meta, data = capture([0x3c190001, jump(2, BASE + 16), 0x27390018,
+                              0, 0x03200008, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        local = constant_indirect_targets(meta, data, report, audit_producers=True)
+        self.assertEqual(local["new_jump_targets"], [])
+        cross = constant_indirect_targets(meta, data, report, audit_producers=True,
+                                          cross_block=True)
+        self.assertEqual(cross["new_jump_targets"], [BASE + 24])
+        self.assertEqual(cross["observations"][0]["producer_pcs"], [BASE, BASE + 8])
+        self.assertEqual(cross["observations"][0]["crossed_edges"], [
+            {"pc": BASE + 4, "target": BASE + 16, "kind": "jump",
+             "delay_pc": BASE + 8}])
+        self.assertEqual(inventory(meta, data, extended=True), report)
+
+    def test_cross_block_stops_at_call_and_ambiguous_predecessor(self):
+        # JAL does not imply a unique register state at the resume PC.
+        meta, data = capture([0x3c190001, jump(3, BASE + 24), 0x27390018,
+                              0x03200008, 0, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           cross_block=True)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(result["unresolved"][0]["crossed_edges"], [])
+        # Both conditional branch outcomes reach the same successor.
+        meta, data = capture([0x3c190001, 0x10800001, 0x27390018,
+                              0x03200008, 0, 0, 0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True),
+                                           cross_block=True)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(result["unresolved"][0]["crossed_edges"], [])
+
     def test_indirect_target_shadow_does_not_assume_load_values(self):
         meta, data = capture([0x3c190001, 0x37390018, 0x8f390000,
                               0x0320f809, 0, 0x03e00008, 0])
