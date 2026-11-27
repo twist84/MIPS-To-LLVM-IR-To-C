@@ -219,7 +219,11 @@ def test_link_or_validation_failure_does_not_activate():
         assert len(retained) == 1
         assert (retained[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
-        assert len(builds) == 2
+        # The failed staged native validation left a complete, authenticated
+        # IR receipt. Retry can copy those exact modules rather than relift.
+        assert len(builds) == 1
+        assert builds[0].is_dir()
+        assert (builds[0] / "translation-cache.json").is_file()
 
 
 def test_verified_legacy_migration_preserves_ir_and_relocates():
