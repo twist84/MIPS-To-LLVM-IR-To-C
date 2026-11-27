@@ -627,7 +627,23 @@ def test_ir_only_backup_partition_preserves_native_and_authenticates():
         assert profiles == [profile]
         backup = recovery.promote_canonical(base, stage, lambda _: None,
                                            preserved_profiles=profiles)
-        result = cache_backup.partition_backup(backup, profiles)
+        # A native directory containing thousands of objects should move
+        # once, while its receipt is copied back for archive recovery.
+        with patch.object(cache_backup, "verify_ir_backup",
+                          side_effect=ValueError("synthetic inventory failure")):
+            try:
+                cache_backup.partition_backup(backup, profiles)
+            except ValueError as error:
+                assert "synthetic" in str(error)
+            else:
+                raise AssertionError("failed backup partition accepted")
+        assert (backup / "objects/old.o").read_bytes() == b"old object"
+        assert (backup / "objects/objects.json").read_bytes() == b"old object receipt"
+        assert not (base / "retained-123").exists()
+        report = root / "partition-timings.json"
+        with metrics.report("backup-partition", report):
+            result = cache_backup.partition_backup(backup, profiles)
+        assert shared_ir.read_json(report)["counts"]["backup_directory_moves"] >= 1
         assert result.name == "backup-123-ir"
         inventory = cache_backup.verify_ir_backup(result)
         assert set(inventory["files"]) == {

@@ -55,7 +55,12 @@ def file_record(path):
 def backup_files(root):
     """Refuse links/reparse points rather than following external files."""
     files = []
-    for current, dirs, names in os.walk(root, followlinks=False):
+    def walk_error(error):
+        raise error
+    stat = root.lstat()
+    if root.is_symlink() or getattr(stat, "st_file_attributes", 0) & 0x400:
+        raise ValueError(f"backup root contains a link or reparse point: {root}")
+    for current, dirs, names in os.walk(root, followlinks=False, onerror=walk_error):
         for name in sorted(dirs + names):
             path = Path(current) / name
             stat = path.lstat()
@@ -99,24 +104,50 @@ def partition_backup(backup, preserved_profiles=()):
     copied = []
     retained_receipts = []
     try:
-        for path in original_files:
-            relative = path.relative_to(backup)
-            if not recovery_file(relative):
+        # The full traversal above has already rejected links/reparse
+        # points. Partition by maximal directory subtrees, not individual
+        # native files. An object directory may travel intact when its
+        # only recovery file is its own manifest; copy that receipt back.
+        recovery_paths = {path.relative_to(backup) for path in original_files
+                          if recovery_file(path.relative_to(backup))}
+        protected = {parent for path in recovery_paths for parent in path.parents}
+        receipt_copies = []
+        pending = [backup]
+        while pending:
+            directory = pending.pop()
+            for path in sorted(directory.iterdir()):
+                relative = path.relative_to(backup)
+                if relative in recovery_paths:
+                    continue
+                if path.is_dir() and relative in protected:
+                    receipt = relative / "objects.json"
+                    object_only = (path.name == "objects" and receipt in recovery_paths
+                                   and not any(other != receipt and relative in other.parents
+                                               for other in recovery_paths))
+                    if not object_only:
+                        pending.append(path)
+                        continue
+                    receipt_copies.append(receipt)
                 target = retained / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
                 path.rename(target)
                 moved.append((path, target))
-        # Keep native object manifests beside displaced object payloads as
-        # well as in the IR backup. They remain candidates, not authorization.
-        for path in original_files:
-            relative = path.relative_to(backup)
-            if relative.name != "objects.json" or not recovery_file(relative):
+                metrics.count("backup_directory_moves" if target.is_dir() else "backup_file_moves")
+        for relative in receipt_copies:
+            target = backup / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            copied.append(target)
+            shutil.copyfile(retained / relative, target)
+        # Other layouts may contain a retained payload next to an original
+        # receipt. Preserve that receipt in both stores too.
+        for relative in sorted(recovery_paths):
+            if relative.name != "objects.json" or relative in receipt_copies:
                 continue
             target = retained / relative
             if not target.parent.is_dir():
                 continue
             retained_receipts.append(target)
-            shutil.copyfile(path, target)
+            shutil.copyfile(backup / relative, target)
         # Shared native profiles remain in the canonical store. Copy only
         # their small receipts; their DLL/object bytes are not backed up.
         for profile in preserved_profiles:
@@ -150,6 +181,8 @@ def partition_backup(backup, preserved_profiles=()):
             target.unlink(missing_ok=True)
         for source, target in reversed(moved):
             source.parent.mkdir(parents=True, exist_ok=True)
+            if target.is_dir() and source.is_dir() and not any(source.iterdir()):
+                source.rmdir()
             target.rename(source)
         if retained.exists():
             for directory in sorted((p for p in retained.rglob("*") if p.is_dir()),

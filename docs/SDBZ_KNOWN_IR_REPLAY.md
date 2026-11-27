@@ -471,3 +471,11 @@ Each portable-cache validation now passes its own freshly computed owned IR
 hashes to the nested translation receipt validator. Independent scans before
 and after canonical promotion remain; no persisted or stale hash inventory
 substitutes for fresh authentication.
+
+Backup partitioning now relocates maximal native-only subtrees in one
+rename, including complete object directories whose sole recovery artifact
+is the object manifest (copied back into the archive tree). Native receipts
+remain beside native objects, and both original directory moves and receipt
+copies are rolled back on partition failure. The full link/reparse-point
+check and exact archive inventory verification remain mandatory. Timing
+reports distinguish whole-directory and individual-file moves.
