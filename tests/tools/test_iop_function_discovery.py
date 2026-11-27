@@ -720,7 +720,7 @@ fallback:
                 for pc in (0, base - 4, *range(base, base + 17), 0xffffffff):
                     outcomes = []
                     for fn in functions:
-                        ctx = ctypes.create_string_buffer(b"\\x5a" * 80, 80)
+                        ctx = ctypes.create_string_buffer(b"Z" * 80, 80)
                         struct.pack_into("<I", ctx, 56, budget)
                         result = fn(ctx, pc)
                         outcomes.append((result, ctx.raw))
