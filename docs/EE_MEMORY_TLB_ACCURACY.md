@@ -1948,3 +1948,29 @@ C++23 syntax checks with both local compilers after the change.
 No test removal, acceptance threshold changes or additional runtime
 capabilities. Full integration and firmware replay pending CI.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46071267911
+
+## M6E3H3E9B8A: GS background and bounded cold GIF reset
+
+H3E9B7B passed both ROMs at f3b3f58b, ROM0 workflow 46071557600.
+Both advanced 243 retirements to 819184 / 819376, IOP 102398 /
+102422 with zero debt. Both completed two CRT commits, returned to
+OSDSYS, and programmed SMODE2=1 PMODE=ff25 DISPFB1=1400
+DISPLAY1=001bf9ff0183228c. Actual stop is SD fc860000 at 00100054,
+EA b20000e0 (BGCOLOR). Serial=179 bytes.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46071557600
+
+Add BGCOLOR to the common privileged display raw latch snapshot and
+bounded scheduled MMIO whitelist. Preserve 32-bit half and 64-bit
+write behavior. No display compositing or background rendering claim.
+Both pinned osd/osd.c display_init next enable DMAE and reset GIF.
+Bind a real PATH3 parser to the existing GS sink and accept one cold
+GIF_CTRL.RST=1 when no active DMA, mask or accepted GIF traffic exists.
+Reset the parser only, not GS state, VRAM, timers, interrupts or DMA.
+Reference ps2-web-recomp SDBZ runtime/src/gs/gif.cpp reset/write and
+PCSX2 Gif_Unit.h reset separation. No actual GIF traffic accepted yet;
+PATH1/PATH2 arbitration, live GIF reset, GIF DMA and rasterization
+remain separate checkpoints. Tests cover reset and latch preservation,
+unsupported repeat/no scanout, D_CTRL and synchronized IOP. CI requires
+real reset retirement and exact display state. No retail replay; pending
+CI. Shared BGCOLOR latch expands existing hardware-bus register coverage;
+production presentation composition remains unchanged.

@@ -83,7 +83,7 @@ jobs:
           log = Path("dual-rom0-v06.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 818941, log
+          assert stop and int(stop[1]) > 819184, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818763 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696458 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
           assert serial and int(serial[1]) >= 104, log
@@ -95,6 +95,8 @@ jobs:
           assert len(commits) >= 2 and [x[:2] for x in commits[:2]] == [("1", "3"), ("2", "1")], log
           assert int(commits[0][2]) < int(commits[1][2]) <= int(stop[1]), log
           assert all(int(x[3]) == int(x[2]) - 1 + 4920115 for x in commits[:2]), log
+          assert re.search(r"^Dual ROM0 GIF reset: count=1 retired=[1-9][0-9]* bgcolor=0000000000000000 dmac=1$", log, re.M), log
+          assert re.search(r"^Dual ROM0 GS display: smode2=0000000000000001 pmode=000000000000ff25 dispfb1=0000000000001400 display1=001bf9ff0183228c ", log, re.M), log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
           assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
@@ -325,7 +327,7 @@ jobs:
           log = Path("dual-rom0-v07.log").read_text()
           stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
           serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
-          assert stop and int(stop[1]) > 819133, log
+          assert stop and int(stop[1]) > 819376, log
           assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818955 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
           assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696650 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
           assert serial and int(serial[1]) >= 104, log
@@ -337,6 +339,8 @@ jobs:
           assert len(commits) >= 2 and [x[:2] for x in commits[:2]] == [("1", "3"), ("2", "1")], log
           assert int(commits[0][2]) < int(commits[1][2]) <= int(stop[1]), log
           assert all(int(x[3]) == int(x[2]) - 1 + 4920115 for x in commits[:2]), log
+          assert re.search(r"^Dual ROM0 GIF reset: count=1 retired=[1-9][0-9]* bgcolor=0000000000000000 dmac=1$", log, re.M), log
+          assert re.search(r"^Dual ROM0 GS display: smode2=0000000000000001 pmode=000000000000ff25 dispfb1=0000000000001400 display1=001bf9ff0183228c ", log, re.M), log
           assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
           assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
           assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log

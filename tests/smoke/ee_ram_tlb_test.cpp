@@ -4631,6 +4631,7 @@ int main()
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
         !check(test_strict_firmware_gs_repeat(), "scheduler-owned repeated cold GS timing transition") ||
         !check(test_strict_firmware_gs_timing(), "scheduler-owned GS timing transition") ||
+        !check(test_strict_firmware_gs_background_gif_reset(), "scheduler-owned GS background and cold GIF reset") ||
         !check(test_strict_firmware_gs_display(), "scheduler-owned GS display writes") ||
         !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||

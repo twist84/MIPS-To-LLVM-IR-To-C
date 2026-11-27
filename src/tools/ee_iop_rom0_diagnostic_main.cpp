@@ -89,6 +89,7 @@ int main(int argc, char** argv)
     uint64_t syscalls = 0u;
     bool osdsys_entry_retired = false;
     uint32_t crt_completed = 0u;
+    uint32_t gif_resets = 0u;
     for (; pilot.retired() < budget;)
     {
         const uint32_t pc = pilot.cpu().m_pc;
@@ -154,6 +155,14 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(crt.m_words[3]),
                 static_cast<unsigned long long>(pilot.retired()),
                 static_cast<unsigned long long>(pilot.next_scanout_event()));
+        }
+        if (pilot.gif_reset_count() != gif_resets)
+        {
+            gif_resets = pilot.gif_reset_count();
+            std::printf("Dual ROM0 GIF reset: count=%u retired=%llu bgcolor=%016llx dmac=%u\n",
+                gif_resets, static_cast<unsigned long long>(pilot.retired()),
+                static_cast<unsigned long long>(pilot.gs_display_registers().m_bgcolor),
+                pilot.dmac_control());
         }
         // Observation only, never a control-flow shortcut.
         if (!osdsys_entry_retired && pc == 0x00100000u)

@@ -173,6 +173,7 @@ public:
         case 0x12000080u: return 3; // DISPLAY1
         case 0x12000090u: return 4; // DISPFB2
         case 0x120000a0u: return 5; // DISPLAY2
+        case 0x120000e0u: return 6; // BGCOLOR
         default: return -1;
         }
     }

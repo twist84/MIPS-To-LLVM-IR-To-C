@@ -110,6 +110,7 @@ public:
         m_hardware.bind_vif0(&m_vif0);
         m_hardware.bind_vif1(&m_vif1);
         m_hardware.bind_gs(&m_gs);
+        m_gif_path3.bind_event_sink(&m_gs, &c_ee_gs_state::gif_events);
         m_hardware.bind_device_transfer(this, &vif_dma);
     }
 
@@ -140,6 +141,7 @@ public:
     uint64_t fields_ended() { return m_hardware.scanout().fields_ended(); }
     uint64_t gs_csr() { return m_hardware.scanout().csr(); }
     uint32_t gs_reset_count() const { return m_gs_reset_count; }
+    uint32_t gif_reset_count() const { return m_gif_reset_count; }
     uint32_t gs_upper_count() const { return m_gs_upper_count; }
     uint64_t gs_siglblid() const { return m_gs.siglblid(); }
     uint32_t gs_crt_mode() const { return m_hardware.gs_crt_mode(); }
@@ -1022,6 +1024,23 @@ private:
             return true; // reserved upper word, no control bits
         }
         const uint32_t dmac_word = static_cast<uint32_t>(value->m_lo);
+        if (address == 0x10003000u)
+        {
+            // Cold GIF reset only. Reset the actual parser, not GS
+            // VRAM, scanout, or DMA. No queued or live path is admitted.
+            if (!self.m_hardware.scanout().enabled() || dmac_word != 1u ||
+                self.m_gif_reset_count != 0u ||
+                self.m_hardware.dmac().started_channels() != 0u ||
+                self.m_hardware.dmac().gif_path3_masked() ||
+                self.m_gif_path3.state().m_active ||
+                self.m_gif_path3.counters().m_accepted_batches != 0u)
+            {
+                return false;
+            }
+            self.m_gif_path3.reset();
+            ++self.m_gif_reset_count;
+            return true;
+        }
         if (address == k_d_ctrl)
         {
             if ((dmac_word & ~1u) != 0u ||
@@ -1122,6 +1141,8 @@ private:
     c_ee_vif1 m_vif0{};
     c_ee_vif1 m_vif1{};
     c_ee_gs_state m_gs{};
+    c_ee_gif_path3 m_gif_path3{};
+    uint32_t m_gif_reset_count = 0u;
     s_ee_strict_gs_timing m_gs_timing{};
     uint32_t m_gs_reset_count = 0u;
     uint32_t m_gs_upper_count = 0u;

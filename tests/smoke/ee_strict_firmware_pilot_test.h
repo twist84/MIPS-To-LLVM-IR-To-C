@@ -1385,6 +1385,62 @@ bool test_strict_firmware_gs_timing()
     return true;
 }
 
+bool test_strict_firmware_gs_background_gif_reset()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    const auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b200u, 0x34021234u, 0xfc8200e0u,
+        0x34025678u, 0xac8200e4u,
+        0x3c04b000u, 0x3484e000u, 0x34020001u, 0xac820000u,
+        0x8c830000u, // D_CTRL read
+        0x3c04b000u, 0x34843000u, 0xac820000u, // GIF_CTRL.RST
+        0xac820000u}); // repeated reset refused
+    for (bool configured : {false, true})
+    {
+        ee::c_ee_strict_firmware_pilot pilot(rom);
+        if (configured && (!pilot.configure_scanout(3u, 0u) ||
+            !pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true)))
+        {
+            return false;
+        }
+        const uint64_t epoch = pilot.next_scanout_event();
+        const uint32_t count = configured ? 14u : 3u;
+        for (uint32_t i = 0u; i < count; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED ||
+                pilot.cycle() != i + 1u ||
+                pilot.next_scanout_event() != epoch ||
+                pilot.fields_started() != 0u || pilot.intc_status() != 0u ||
+                pilot.gif_reset_count() != (i == 13u ? 1u : 0u) ||
+                pilot.gs_reset_count() != 0u)
+            {
+                return false;
+            }
+        }
+        if (configured &&
+            (pilot.gs_display_registers().m_bgcolor != 0x0000567800001234ull ||
+             pilot.cpu().m_gpr[3].m_lo != 1u || pilot.dmac_control() != 1u ||
+             pilot.dmac_status() != 0u || pilot.dmac_started() != 0u ||
+             pilot.iop_cycles() != 1u))
+        {
+            return false;
+        }
+        const auto refused = pilot.step(1u);
+        if (refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+            pilot.cycle() != count || pilot.gif_reset_count() != (configured ? 1u : 0u) ||
+            pilot.gs_display_registers().m_bgcolor !=
+                (configured ? 0x0000567800001234ull : 0u) ||
+            pilot.next_scanout_event() != epoch)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_gs_display()
 {
     using boundary = ee::e_ee_firmware_boundary;
