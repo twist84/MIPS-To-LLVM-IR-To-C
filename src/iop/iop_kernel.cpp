@@ -1,5 +1,7 @@
 #include "iop_kernel.h"
 
+#include <chrono>
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -1681,7 +1683,7 @@ void c_kernel::wake_due()
 }
 
 s_kernel_run_result c_kernel::run(
-    uint64_t cycle_budget, uint32_t quantum
+    uint64_t cycle_budget, uint32_t quantum, s_kernel_phase_sample* sample
 )
 {
     s_kernel_run_result result{};
@@ -1727,9 +1729,28 @@ s_kernel_run_result c_kernel::run(
         return result;
     }
 
+    using t_phase_clock = std::chrono::steady_clock;
+    t_phase_clock::time_point phase_start{};
+    const auto mark_phase = [&](e_kernel_phase phase)
+    {
+        if (sample != nullptr)
+        {
+            const auto now = t_phase_clock::now();
+            const auto index = static_cast<uint32_t>(phase);
+            ++sample->m_calls[index];
+            sample->m_ns[index] += static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    now - phase_start).count());
+            phase_start = now;
+        }
+    };
     uint64_t remaining = cycle_budget;
     while (remaining != 0u)
     {
+        if (sample != nullptr)
+        {
+            phase_start = t_phase_clock::now();
+        }
         // No software event can wake a thread while all three
         // conservative deadlines remain in the future. Keep the actual
         // wake ordering and interrupt-suspension checks in wake_due().
@@ -1799,8 +1820,10 @@ s_kernel_run_result c_kernel::run(
                 }
             }
         }
+        mark_phase(e_kernel_phase::wake_irq);
         uint64_t next_wake = std::numeric_limits<uint64_t>::max();
         const uint32_t id = next_ready(next_wake);
+        mark_phase(e_kernel_phase::ready);
         if (id == 0u)
         {
             if (!m_hle_events.empty() &&
@@ -1849,6 +1872,7 @@ s_kernel_run_result c_kernel::run(
                     }
                 }
             }
+            mark_phase(e_kernel_phase::idle_deadline);
             if (next_wake ==
                 std::numeric_limits<uint64_t>::max())
             {
@@ -1863,6 +1887,7 @@ s_kernel_run_result c_kernel::run(
                     to_advance -= step;
                 }
                 m_cycles += remaining;
+                mark_phase(e_kernel_phase::idle_advance);
                 result.m_stop = e_kernel_stop::idle;
                 break;
             }
@@ -1885,6 +1910,7 @@ s_kernel_run_result c_kernel::run(
                 to_advance -= quantum_cycles;
             }
             m_cycles += skipped;
+            mark_phase(e_kernel_phase::idle_advance);
             remaining -= skipped;
             continue;
         }
@@ -1905,7 +1931,9 @@ s_kernel_run_result c_kernel::run(
         const uint32_t slice = static_cast<uint32_t>(
             std::min<uint64_t>(remaining, quantum)
         );
+        mark_phase(e_kernel_phase::guest_context);
         const s_run_result step_result = m_cpu.run(slice);
+        mark_phase(e_kernel_phase::guest_cpu);
         ++thread.m_guest_slices;
         thread.m_guest_instructions += step_result.m_instructions;
         m_cycles += step_result.m_instructions;
