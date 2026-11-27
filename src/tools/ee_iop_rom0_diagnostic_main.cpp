@@ -207,6 +207,14 @@ int main(int argc, char** argv)
     std::printf("Dual ROM0 GS reset: count=%u upper=%u siglblid=%016llx\n",
         pilot.gs_reset_count(), pilot.gs_upper_count(),
         static_cast<unsigned long long>(pilot.gs_siglblid()));
+    const auto& display = pilot.gs_display_registers();
+    std::printf("Dual ROM0 GS display: smode2=%016llx pmode=%016llx dispfb1=%016llx display1=%016llx dispfb2=%016llx display2=%016llx\n",
+        static_cast<unsigned long long>(display.m_smode2),
+        static_cast<unsigned long long>(display.m_pmode),
+        static_cast<unsigned long long>(display.m_dispfb[0]),
+        static_cast<unsigned long long>(display.m_display[0]),
+        static_cast<unsigned long long>(display.m_dispfb[1]),
+        static_cast<unsigned long long>(display.m_display[1]));
     const auto serial = pilot.serial_output();
     std::printf("Dual ROM0 serial: bytes=%zu\n", serial.size());
     // Hex encoding preserves control bytes and avoids guest text being

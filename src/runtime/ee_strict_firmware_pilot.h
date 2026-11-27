@@ -141,6 +141,10 @@ public:
     uint32_t gs_reset_count() const { return m_gs_reset_count; }
     uint32_t gs_upper_count() const { return m_gs_upper_count; }
     uint64_t gs_siglblid() const { return m_gs.siglblid(); }
+    const s_ee_gs_display_registers& gs_display_registers() const
+    {
+        return m_hardware.gs_display_registers();
+    }
 
     // Install a second reset domain before either processor executes.
     // Only immutable ROM input is supplied; no guest RAM/register
@@ -901,6 +905,13 @@ private:
         if (self.m_branch_transaction || value == nullptr)
         {
             return false;
+        }
+        if (self.m_hardware.scanout().enabled() &&
+            s_ee_reset_mmio::gs_display_write_address(address + 0xa0000000u, width))
+        {
+            // Latch the exact guest value using the shared GS model.
+            // No synthesized timing change, draw, field or IRQ.
+            return c_ee_hw_bus::mmio_write(&self.m_hardware, address, width, value);
         }
         if (width == 16u && (address == c_ee_vif1::k_vif0_fifo_base ||
                             address == c_ee_vif1::k_fifo_base))

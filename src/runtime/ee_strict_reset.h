@@ -416,9 +416,28 @@ struct s_ee_reset_mmio
             m_read(m_user, bus.m_address, bus.m_width, &value);
     }
 
+    // Only the display latches already implemented by the hardware bus.
+    // Timing/PLL registers require a separate guest-driven clock contract.
+    static constexpr bool gs_display_write_address(uint32_t address, uint32_t width)
+    {
+        if ((width != 4u && width != 8u) || (address & (width - 1u)) != 0u)
+        {
+            return false;
+        }
+        switch (address & ~4u)
+        {
+        case 0xb2000000u: case 0xb2000020u: case 0xb2000070u:
+        case 0xb2000080u: case 0xb2000090u: case 0xb20000a0u:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address,
         const s_ee_u128& value) const
     {
+        const bool display = m_scheduled_scanout && gs_display_write_address(address, bus.m_width);
         const bool reset = bus.m_width == 4u && static_cast<uint32_t>(value.m_lo) == 1u &&
             (address == 0xb0003810u || address == 0xb0003c10u);
         const bool fifo = bus.m_width == 16u &&
@@ -440,10 +459,17 @@ struct s_ee_reset_mmio
               (static_cast<uint32_t>(value.m_lo) & ~8u) == 0u));
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
-            (reset || fifo || intc || timer || dmac || sif || gs) && bus.m_address == address - 0xa0000000u &&
+            (reset || fifo || intc || timer || dmac || sif || gs || display) &&
+            bus.m_address == address - 0xa0000000u &&
             m_write(m_user, bus.m_address, bus.m_width, &value);
     }
 };
+
+static_assert(s_ee_reset_mmio::gs_display_write_address(0xb2000020u, 8u));
+static_assert(s_ee_reset_mmio::gs_display_write_address(0xb2000024u, 4u));
+static_assert(!s_ee_reset_mmio::gs_display_write_address(0xb2000024u, 8u));
+static_assert(!s_ee_reset_mmio::gs_display_write_address(0xb2000030u, 8u));
+static_assert(!s_ee_reset_mmio::gs_display_write_address(0xb2000020u, 16u));
 
 // Explicit opt-in for an isolated cold cache domain. All accepted
 // instruction/data backing paths bypass caches; no line can become

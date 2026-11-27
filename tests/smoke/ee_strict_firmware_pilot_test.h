@@ -1211,6 +1211,100 @@ bool test_strict_firmware_hblank_timer()
     return true;
 }
 
+bool test_strict_firmware_gs_display()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t base = 0xbfc00000u;
+    const auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b200u, 0x3c021234u, 0x34425678u,
+        0x0002103cu, 0x34429abcu, 0xfc820020u, // SD SMODE2
+        0x24030003u, 0xac830020u, // SW low half
+        0xac830024u, // SW high half
+        0x10000001u, 0xfc820070u, // SD DISPFB1 in slot
+        0xfc820030u}); // unmodeled SRFSH
+    for (uint32_t mode = 0u; mode < 3u; ++mode)
+    {
+        ee::c_ee_strict_firmware_pilot pilot(rom);
+        if (mode != 0u && !pilot.configure_scanout(3u, 0u))
+        {
+            return false;
+        }
+        if (mode == 2u && !pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+        {
+            return false;
+        }
+        const auto epoch = pilot.next_scanout_event();
+        for (uint32_t i = 0u; i < 6u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto first = pilot.step(1u);
+        if (mode == 0u)
+        {
+            if (first.m_boundary != boundary::HOST_REFUSAL ||
+                first.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+                pilot.cycle() != 6u || pilot.gs_display_registers().m_smode2 != 0u)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (first.m_boundary != boundary::RETIRED ||
+            pilot.gs_display_registers().m_smode2 != 0x1234567800009abcull)
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 3u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (pilot.gs_display_registers().m_smode2 != 0x0000000300000003ull ||
+            pilot.next_scanout_event() != epoch || pilot.fields_started() != 0u ||
+            pilot.intc_status() != 0u)
+        {
+            return false;
+        }
+        if (mode == 1u)
+        {
+            const auto refused = pilot.step(2u);
+            if (refused.m_boundary != boundary::HOST_REFUSAL ||
+                refused.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+                pilot.cycle() != 10u || pilot.cpu().m_pc != base + 40u ||
+                pilot.gs_display_registers().m_dispfb[0] != 0u)
+            {
+                return false;
+            }
+            continue;
+        }
+        if (pilot.step(1u).m_boundary != boundary::RETIRED ||
+            !pilot.delay_slot_pending() || pilot.gs_display_registers().m_dispfb[0] != 0u ||
+            pilot.step(1u).m_boundary != boundary::RETIRED ||
+            pilot.delay_slot_pending() ||
+            pilot.gs_display_registers().m_dispfb[0] != 0x1234567800009abcull)
+        {
+            return false;
+        }
+        const auto refused = pilot.step(1u);
+        if (refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != result::DATA_UNAVAILABLE ||
+            refused.m_instruction.m_data_address != 0xb2000030u ||
+            pilot.cycle() != 12u || pilot.iop_cycles() != 1u ||
+            pilot.next_scanout_event() != epoch || pilot.fields_started() != 0u ||
+            pilot.intc_status() != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_gs_reset()
 {
     using boundary = ee::e_ee_firmware_boundary;

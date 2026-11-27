@@ -1783,3 +1783,28 @@ semantics, slot overwriting the sampled operand, caller-budget
 and IOP deadline splits, unchanged link register. Preserve prior
 firmware acceptance assertions and require progress past BLEZ.
 No production lowering or HLE changes, no retail replay. Pending CI.
+
+## M6E3H3E9B5A: real privileged GS display writes
+
+H3E9B4 passed both pinned ROMs at e596849e, workflow 46066942045.
+Both advanced 101938 EE retirements, to 798696 / 798888, with zero
+IOP debt and 104 real serial bytes. Reconstructed serial confirms
+[openbios:ee] LoadExecPS2 rom0:OSDSYS. Actual stop is SD t0,0(a2)
+fcc80000 at a0018318 / a0018338, data address b2000020 (SMODE2).
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46066942045
+
+Route only the six existing privileged GS display latches through
+scheduler-owned canonical uncached 32/64-bit writes to c_ee_hw_bus.
+Retain refusal of atomic MMIO slots, allow synchronized split slots,
+no opt-in for the isolated probe, no readback claims. Add constexpr
+whitelist checks, guest test for exact halves, refused timing write,
+unchanged scanout epoch and clocks, and actual display snapshot in
+diagnostic output. CI now checks the complete serial LoadExecPS2
+line and SMODE2=3 plus advancement beyond the observed SD.
+The guest SetGsCrt routine also writes SRFSH/SYNCH1/SYNCH2/SYNCV and
+SMODE1. These are not implemented by the existing bus; do not accept
+those as inert successful writes. The host reset reference remains
+PAL progressive, and SMODE2 latch changes alone do not establish
+NTSC timing or reschedule scanout. Next checkpoint must model the
+actual guest timing/PLL programming and safe epoch transition.
+No HLE, no retail replay. Pending CI.
