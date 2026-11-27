@@ -994,6 +994,11 @@ bool c_hw::read(
         *value = m_cdvd_i_stat;
         return true;
     }
+    if (address == k_cdvd_drive_status && width == 1u)
+    {
+        *value = k_cdvd_stopped;
+        return true;
+    }
     if (address == k_cdvd_dec_set && width == 1u)
     {
         *value = m_cdvd_dec_set;

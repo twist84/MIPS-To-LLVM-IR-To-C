@@ -110,6 +110,9 @@ public:
     static constexpr uint8_t k_cdvd_ncmd_busy = 0x80u;
     // CDVD I_STAT: byte-wide interrupt-reason register, write-one-to-clear.
     static constexpr uint32_t k_cdvd_i_stat = 0x1f402008u;
+    // CDVD drive status is byte-wide and read-only; stop/no-media is 0.
+    static constexpr uint32_t k_cdvd_drive_status = 0x1f40200au;
+    static constexpr uint8_t k_cdvd_stopped = 0x00u;
     // CDVD decryption configuration byte. This is register storage,
     // not a disc-sector decryption implementation.
     static constexpr uint32_t k_cdvd_dec_set = 0x1f40203au;

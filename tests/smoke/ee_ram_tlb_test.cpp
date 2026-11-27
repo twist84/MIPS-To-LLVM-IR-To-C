@@ -3309,6 +3309,68 @@ bool test_strict_reset_word_shifts()
     return true;
 }
 
+bool test_strict_reset_multiply()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[4u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t word)
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            bytes[lane] = static_cast<uint8_t>(word >> (lane * 8u));
+        }
+    };
+    const auto execute = [&](uint32_t rs, uint32_t rt, uint32_t rd, uint32_t function)
+    {
+        cpu.m_pc = pc;
+        put((rs << 21u) | (rt << 16u) | (rd << 11u) | function);
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+    };
+
+    cpu.m_gpr[4] = {0x12345678fffffffeull, 0xaaaaaaaau};
+    cpu.m_gpr[5] = {0xabcdef0100000003ull, 0xbbbbbbbbu};
+    cpu.m_gpr[6].m_hi = 0xccccccccu;
+    auto step = execute(4u, 5u, 6u, 0x18u); // mult a0,a1,a2
+    if (step.m_result != result::COMMITTED || step.m_retired != 1u ||
+        cpu.m_hi != 0xffffffffffffffffull || cpu.m_lo != 0xfffffffffffffffaull ||
+        cpu.m_gpr[6].m_lo != 0xfffffffffffffffaull ||
+        cpu.m_gpr[6].m_hi != 0xccccccccu)
+    {
+        return false;
+    }
+
+    cpu.m_gpr[7] = {0xffffffffu, 0u};
+    cpu.m_gpr[8] = {2u, 0u};
+    step = execute(7u, 8u, 9u, 0x19u); // multu a3,t0,t1
+    if (step.m_result != result::COMMITTED ||
+        cpu.m_hi != 1u || cpu.m_lo != 0xfffffffffffffffeull ||
+        cpu.m_gpr[9].m_lo != 0xfffffffffffffffeull)
+    {
+        return false;
+    }
+
+    cpu.m_gpr[10] = {7u, 0u};
+    cpu.m_gpr[11] = {9u, 0u};
+    step = execute(10u, 11u, 10u, 0x19u); // aliased destination
+    if (step.m_result != result::COMMITTED || cpu.m_hi != 0u || cpu.m_lo != 63u ||
+        cpu.m_gpr[10].m_lo != 63u)
+    {
+        return false;
+    }
+
+    cpu.m_hi = 0x12345678u;
+    cpu.m_lo = 0xabcdef01u;
+    cpu.m_gpr[6].m_lo = 0x7777u;
+    step = execute(4u, 5u, 6u, 0x58u); // invalid MULT shamt
+    return step.m_result == result::UNSUPPORTED_OPCODE && step.m_retired == 0u &&
+        cpu.m_pc == pc && cpu.m_hi == 0x12345678u && cpu.m_lo == 0xabcdef01u &&
+        cpu.m_gpr[6].m_lo == 0x7777u;
+}
+
 bool test_strict_reset_wired()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -5006,6 +5068,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_word_shifts(), "strict reset immediate word shifts regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_multiply(), "strict reset signed and unsigned MULT regression"))
     {
         return 1;
     }

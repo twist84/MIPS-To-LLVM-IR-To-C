@@ -873,6 +873,36 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
                 (cpu.m_sa >> 3u) & 15u;
             break;
         }
+        if (function == 0x18u || function == 0x19u) // MULT/MULTU
+        {
+            if ((opcode & 0x7c0u) != 0u)
+            {
+                return false;
+            }
+            const uint32_t lhs = static_cast<uint32_t>(read_gpr(cpu, rs));
+            const uint32_t rhs = static_cast<uint32_t>(read_gpr(cpu, rt));
+            uint64_t product = 0u;
+            if (function == 0x18u)
+            {
+                product = scalar_constant::sign_extend<32>(lhs) *
+                    scalar_constant::sign_extend<32>(rhs);
+            }
+            else
+            {
+                product = static_cast<uint64_t>(lhs) * rhs;
+            }
+            const uint64_t lo = sign_extend_word(static_cast<uint32_t>(product));
+            const uint64_t hi = sign_extend_word(static_cast<uint32_t>(product >> 32u));
+            cpu.m_lo = lo;
+            cpu.m_hi = hi;
+            dest = (opcode >> 11u) & 31u;
+            if (dest != 0u)
+            {
+                // R5900 MULT/MULTU also write sign-extended LO to rd.
+                cpu.m_gpr[dest].m_lo = lo;
+            }
+            return true;
+        }
         switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
         case 0x21u: // ADDU: low 32-bit wrapping sum

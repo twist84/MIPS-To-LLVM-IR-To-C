@@ -1985,14 +1985,18 @@ tests verify little-endian visibility, mirror aliases, uncached TLB aliases,
 and that refused accesses have no side effects. The synchronized test has
 the IOP guest publish an ordinary marker; it does not seed mailbox state.
 
-Local Release run with the pinned OpenPS2BIOS v0.6 and v0.7 images passed
-`ee_ram_tlb` and reached the same real firmware mailbox at EE physical
-`0x1C042F00`: words `4F424344, 00000005, 00000000, FFFFFFF9, 00000000`.
-The EE loop was reading the mailbox state at `0xBC042F04`. Both runs then
-stopped at the unmodeled IOP CDVD byte read `0xBF40200A` (IOP PC
-`0x0001DAF8`, opcode `0x92220000`); that stop is reported as the next hardware
-boundary, not treated as successful disc service. The diagnostic prints the
-actual IOP RAM words and memory-fault address. CI now runs the synchronized
-diagnostic with a 16,000,000 EE-slot budget and asserts the same firmware-
-produced mailbox and CDVD stop for both pinned releases. No request
-completion or CDVD response is synthesized.
+Local Release runs with the pinned OpenPS2BIOS v0.6 and v0.7 images passed
+`ee_ram_tlb` and `iop_hw`. The real IOP firmware published mailbox magic
+`4F424344`; the EE observed its mailbox through `0xBC042F04`. Added the
+read-only CDVD drive-status byte at `0xBF40200A`, reporting stopped/no-media
+as zero. No command completion, IRQ, or disc data is synthesized. With this
+byte available, both releases advance beyond the earlier IOP CDVD read fault.
+
+The next synchronized stop is now an EE cached store at virtual address
+`0x00107A88` (`SW`, opcode `0xAC230008`), refused by the bounded strict D-cache
+path. The mailbox remains guest-owned; both final snapshots show
+`4F424344, 00000000, 00000000, 00000000, 00000000`. The diagnostic prints the
+actual IOP RAM words and any IOP memory-fault address. CI runs the synchronized
+diagnostic with a 16,000,000 EE-slot budget and asserts the live mailbox,
+absence of the old CDVD memory fault, and this next fail-closed EE boundary
+for both pinned releases.
