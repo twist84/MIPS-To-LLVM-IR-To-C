@@ -546,7 +546,7 @@ def test_verified_maximum_compression_backup():
 
         with patch.object(cache_backup, "seven_zip", return_value="7z"), \
              patch.object(cache_backup.subprocess, "run", side_effect=fake_run):
-            archive = cache_backup.compress_backup(backup)
+            archive = cache_backup.compress_backup(backup, level=9)
             assert archive == root / "backup-123.7z"
             assert archive.is_file() and not backup.exists()
             with cache_backup.backup_object_candidates(root, "O5-native") as candidates:
@@ -561,6 +561,7 @@ def test_verified_maximum_compression_backup():
         archive.unlink()
         def failed_test(command, **kwargs):
             if command[1] == "a":
+                assert "-mx=1" in command
                 Path(command[-2]).write_bytes(b"invalid")
             else:
                 raise subprocess.CalledProcessError(2, command)

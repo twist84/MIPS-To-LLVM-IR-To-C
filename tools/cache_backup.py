@@ -165,8 +165,10 @@ def partition_backup(backup, preserved_profiles=()):
     return ir_backup
 
 
-def compress_backup(backup):
+def compress_backup(backup, *, level=1):
     """Archive only after promotion succeeds; preserve the directory on failure."""
+    if level not in (1, 3, 5, 7, 9):
+        raise ValueError("unsupported backup compression level")
     executable = seven_zip()
     archive = backup.with_suffix(".7z")
     if not executable:
@@ -185,7 +187,7 @@ def compress_backup(backup):
         pending = Path(temp) / archive.name
         try:
             started = time.monotonic()
-            subprocess.run([executable, "a", "-t7z", "-mx=9", "-m0=LZMA2",
+            subprocess.run([executable, "a", "-t7z", f"-mx={level}", "-m0=LZMA2",
                             "-ms=on", "-y", str(pending), "*"],
                            cwd=backup, check=True)
             compression_seconds = time.monotonic() - started
@@ -198,7 +200,7 @@ def compress_backup(backup):
         except (OSError, subprocess.CalledProcessError) as error:
             print(f"WARNING: 7-Zip backup failed ({error}); retained: {backup}", flush=True)
             return backup
-    print(f"Backup compression: level=9 input_bytes={total_bytes} "
+    print(f"Backup compression: level={level} input_bytes={total_bytes} "
           f"archive_bytes={archive.stat().st_size} "
           f"compression={compression_seconds:.3f}s "
           f"verification={verification_seconds:.3f}s", flush=True)

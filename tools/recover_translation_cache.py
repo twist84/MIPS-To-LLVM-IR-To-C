@@ -510,7 +510,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                 else:
                     backup = cache_backup.compress_backup(backup)
             else:
-                backup = cache_backup.compress_backup(backup)
+                backup = cache_backup.compress_backup(backup, level=9)
         if preserved_profiles:
             print("Preserved shared native profiles in place: " +
                   ", ".join(profile.name for profile in preserved_profiles), flush=True)

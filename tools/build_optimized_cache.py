@@ -70,7 +70,9 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 snapshot["ir_sources"].get("ELF") == ir_sources.get("ELF") and
                 (not shared_ir.matching_sources(snapshot["ir_sources"], ir_sources) or
                  snapshot.get("ir_hashes") != verified_ir_hashes or
-                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata))):
+                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata)) and
+                not shared_ir.verified_extension(snapshot, metadata, ir_sources,
+                                                 verified_ir_hashes)):
             shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
             print("Optimized profile source provenance is stale; "
                   "revalidating native objects against current shared IR",

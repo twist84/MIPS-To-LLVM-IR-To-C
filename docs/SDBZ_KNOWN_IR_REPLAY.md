@@ -207,9 +207,28 @@ native backup behavior, opt in:
 
     scripts\run_ps2_game.bat --recover-cache --full-native-backup
 
-Compression remains synchronous at level 9 pending controlled timing
-measurements; the console reports input/archive size and compression/test
-elapsed time. The temporary archive is tested before the old directory is
+Compression remains synchronous so the completed archive is tested
+before deleting the source directory. IR-only backups use level 1;
+explicit full native backups retain level 9. The console reports
+input/archive size and compression/test elapsed time.
+
+### Windows compression benchmark (2026-11-27)
+
+Measured on the canonical 16,252-module cache with the benchmark at
+`41ff520`. Sizes below are decimal MB; times include archive testing.
+
+| Scope | Level | Input MB | Archive MB | Compress + test (s) |
+| --- | ---: | ---: | ---: | ---: |
+| Full | 9 | 3042.085 | 152.274 | 299.312 |
+| IR only | 9 | 1021.734 | 41.372 | 87.016 |
+| IR only | 3 | 1021.734 | 81.658 | 10.141 |
+| IR only | 1 | 1021.734 | 97.999 | 6.000 |
+
+Level 1 reduces measured compression/test time by 293.312 s (49.89x)
+relative to full level 9. Relative to IR level 3 it costs 16.341 MB
+more per archive and saves 4.141 s. This benchmark excludes backup
+partitioning, inventory authentication, promotion and native builds;
+it does not establish an end-to-end recovery speedup. The temporary archive is tested before the old directory is
 removed. If partitioning fails, the full displaced tree is retained
 uncompressed. Legacy full backups remain readable by the existing
 object-seeding path.
