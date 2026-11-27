@@ -93,3 +93,29 @@ native lowering, ABI, hardware events, or guest clocks. I3/I4 should use
 fresh build directories, synthetic differential tests, then a separately
 pinned split-versus-monolithic G8D.2 replay. Do not combine with a changed
 EE timing producer in the same retail experiment.
+
+## I2a: read-only candidate inventory
+
+`tools/audit_iop_function_discovery.py` reads the original capture metadata
+and linked bytes, validates the FNV-1a identity, discovers candidate entries
+from recorded roots and reachable direct calls, and emits deterministic
+ordinary/delay ownership, overlaps, boundary and unresolved-edge records.
+The narrow R3000A classifier stops at unsupported encodings and does not
+claim that all visited bytes are code or that all unvisited bytes are data.
+Call continuations are candidates only. Delay words never seed functions
+unless independently reached or explicitly exported. Indirect targets,
+unsupported delay slots and external edges are reported, not invented.
+The offline Python tool does not feed the C++ lifter; actual native region
+certification should share the runtime decoder/lifter semantics. Receipts
+are exclusively created and no capture or existing receipt is replaced.
+
+Synthetic CTest `iop_function_discovery` covers direct calls, unreachable
+words, shared tails, explicit delay entry, rejected seeds, indirect calls,
+unsupported delays and capture identity. Next collect the existing retail
+capture receipt before choosing a bounded native region pilot:
+
+```bat
+python tools\\audit_iop_function_discovery.py --capture build\\iop-g8d-capture --out iop-g8d-discovery.json
+```
+
+No new retail run or AOT rebuild is needed for this inventory.
