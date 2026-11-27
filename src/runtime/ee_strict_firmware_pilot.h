@@ -4,6 +4,7 @@
 #include "../tools/ee_host_timers.h"
 
 #include <cstdlib>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -26,6 +27,7 @@ struct s_ee_firmware_step
     s_ee_reset_prefix_step m_instruction{};
     bool m_timer_serviced = false;
     uint32_t m_interrupt_vector = 0u;
+    bool m_cop0_compare_crossed = false;
 };
 
 // Reference policy reserves two slots for supported branches and their delay
@@ -42,6 +44,19 @@ static_assert(ee_firmware_reference_slots(0u) == 1u);
 static_assert(ee_firmware_reference_slots(0x10000001u) == 2u);
 static_assert(ee_firmware_reference_slots(0x0ff00010u) == 2u);
 static_assert(ee_firmware_reference_slots(0x03e00008u) == 2u);
+
+// Count advances modulo 2^32 under the existing compatibility clock.
+// Starting at equality is not a new compare event until a full wrap.
+// An already asserted IP7 is a level, not a second interrupt edge.
+inline constexpr uint64_t ee_firmware_compare_distance(uint32_t count, uint32_t compare)
+{
+    const uint32_t distance = compare - count;
+    return distance == 0u ? (1ull << 32u) : distance;
+}
+
+static_assert(ee_firmware_compare_distance(0u, 0u) == (1ull << 32u));
+static_assert(ee_firmware_compare_distance(0xfffffffeu, 0u) == 2u);
+static_assert(ee_firmware_compare_distance(12u, 14u) == 2u);
 
 class c_ee_strict_firmware_pilot
 {
@@ -72,6 +87,15 @@ public:
     uint64_t cycle() const { return m_runtime.m_ee_cycle_scheduler.current_cycle(); }
     e_ee_cycle_source source() const { return m_runtime.m_ee_cycle_scheduler.source(); }
     uint64_t next_timer_event() const { return m_timers.next_event(); }
+    uint64_t next_compare_event() const
+    {
+        if ((m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u)
+        {
+            return std::numeric_limits<uint64_t>::max();
+        }
+        return cycle() + ee_firmware_compare_distance(
+            m_cpu.m_cop0[COP0_Count], m_cpu.m_cop0[COP0_Compare]);
+    }
     uint32_t timer_mode(uint32_t index) const { return m_timers.current_mode(index); }
     uint32_t timer_count(uint32_t index) const { return m_timers.current_count(index); }
     uint32_t intc_status() { return m_hardware.intc().status(); }
@@ -98,7 +122,7 @@ public:
         // The reference executor commits branch+slot atomically. Refuse
         // an intervening deadline instead of processing it late or
         // committing a partial branch. An event exactly at end is legal.
-        if (m_timers.next_event() < end)
+        if (m_timers.next_event() < end || next_compare_event() < end)
         {
             return {boundary::TIMER_DEADLINE};
         }
@@ -115,7 +139,7 @@ public:
             if (slot != nullptr)
             {
                 const uint32_t word = ee_read_instruction_word(slot);
-                if (status_write(word) || word == k_eret)
+                if (owned_control(word))
                 {
                     return {boundary::HOST_REFUSAL,
                         {result::UNSUPPORTED_OPCODE, word, 0u, slot_pc}};
@@ -137,7 +161,7 @@ public:
         {
             action = ee_execute_strict_reset_prefix(m_cpu, rom);
         }
-        else if (code != nullptr && (status_write(opcode) || opcode == k_eret))
+        else if (code != nullptr && owned_control(opcode))
         {
             action = execute_control(opcode);
         }
@@ -173,13 +197,16 @@ public:
         // due timers (production timer model uses ascending channel order).
         const bool due = m_timers.next_event() <= timestamp;
         m_timers.service();
+        const bool ip7_before = (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
         ee_cop0_clock_sync(&m_cpu, &m_runtime);
+        const bool compare_crossed = !ip7_before &&
+            (m_cpu.m_cop0[COP0_Cause] & (1u << 15u)) != 0u;
         // Compatibility policy: Status is effective at its retirement
         // boundary; no calibrated MTC0 pipeline hazard is claimed.
         // An atomic branch has completed its slot, so EPC is its next PC
         // and BD is clear. Intra-branch deadlines still refuse above.
         const uint32_t vector = ee_check_interrupts(&m_cpu, &m_runtime, m_cpu.m_pc, 0u);
-        return {boundary::RETIRED, action, due, vector};
+        return {boundary::RETIRED, action, due, vector, compare_crossed};
     }
 
 private:
@@ -188,6 +215,25 @@ private:
     static constexpr bool status_write(uint32_t opcode)
     {
         return (opcode & 0xffe0ffffu) == 0x40806000u;
+    }
+
+    static constexpr bool clock_write(uint32_t opcode)
+    {
+        const uint32_t canonical = opcode & 0xffe0ffffu;
+        return canonical == 0x40804800u || canonical == 0x40805800u;
+    }
+
+    static constexpr bool clock_read(uint32_t opcode)
+    {
+        const uint32_t canonical = opcode & 0xffe0ffffu;
+        return canonical == 0x40004800u || canonical == 0x40005800u ||
+            canonical == 0x40006800u || canonical == 0x40007000u;
+    }
+
+    static constexpr bool owned_control(uint32_t opcode)
+    {
+        return status_write(opcode) || clock_write(opcode) ||
+            clock_read(opcode) || opcode == k_eret;
     }
 
     s_ee_reset_prefix_step execute_control(uint32_t opcode)
@@ -206,6 +252,26 @@ private:
                 return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
             }
             (void)ee_exception_return(&m_cpu);
+        }
+        else if (clock_write(opcode))
+        {
+            // All previous elapsed time is committed. The shared helper
+            // writes the core-global clock and acknowledges IP7 on Compare.
+            const uint32_t reg = (opcode >> 11u) & 31u;
+            const uint32_t value = static_cast<uint32_t>(
+                strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u));
+            ee_cop0_clock_write(&m_cpu, &m_runtime, reg, value);
+            m_cpu.m_pc += 4u;
+        }
+        else if (clock_read(opcode))
+        {
+            const uint32_t reg = (opcode >> 11u) & 31u;
+            const uint32_t rt = (opcode >> 16u) & 31u;
+            if (rt != 0u)
+            {
+                m_cpu.m_gpr[rt].m_lo = strict_reset_detail::sign_extend_word(m_cpu.m_cop0[reg]);
+            }
+            m_cpu.m_pc += 4u;
         }
         else
         {

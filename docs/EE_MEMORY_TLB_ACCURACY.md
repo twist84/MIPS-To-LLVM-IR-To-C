@@ -1315,3 +1315,26 @@ same-boundary and prior pending timers, masks, BEV selection,
 branch completion, real guest INTC acknowledgement and ERET.
 No dual-processor coordination, full firmware boot or native lift
 asserted. Pending CI. No production retail path changes.
+
+## M6E3H3A: Count/Compare deadlines and simultaneous sources
+
+M6E3H2 passed both firmware versions on 393f10db:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46057428203
+Both directed interrupt regressions and isolated checkpoints passed.
+
+Use existing core-global COP0 compatibility clock helpers for
+canonical MTC0 Count/Compare and MFC0 Count/Compare/Cause/EPC.
+Read at the committed instruction-start timestamp; write Count or
+Compare at that same timestamp, then charge the retired instruction.
+No calibrated pipeline timing. Count progresses modulo 2^32;
+equality at start schedules the next wrap, Compare writes clear
+only IP7, and Count writes do not clear the pending latch.
+Add the next unlatched Compare deadline to the same atomic branch
+preflight as EE timers. A deadline inside a branch refuses;
+a deadline at completion is serviced before interrupt eligibility.
+Preserve the independent IP2 and IP7 levels when they occur together.
+Directed ROM tests verify simultaneous real timer and COP0 events,
+guest acknowledgement of each independently, ERET, wrap, sign
+extension, zero register, and deadline refusal/commit. All new
+clock transfers refuse in delay slots until finer scheduling exists.
+No Random, DMA, IOP or physical issue timing added. Pending CI.

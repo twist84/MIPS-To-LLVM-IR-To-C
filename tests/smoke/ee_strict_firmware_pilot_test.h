@@ -271,4 +271,151 @@ bool test_strict_firmware_interrupts()
     }
     return true;
 }
+
+bool test_strict_firmware_cop0_clock()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    constexpr uint32_t base = 0xbfc00000u;
+    constexpr uint32_t vector = 0xbfc00400u;
+    // Timer0 and Count/Compare both cross at slot 14. The guest
+    // enables IE/EIE and both masks on that same retirement.
+    auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c04b000u, 0x34020003u, 0xac820020u,
+        0x34020200u, 0x3485f010u, 0xaca20000u, 0x34020180u,
+        0xac820010u, 0x3402000eu, 0x40825800u, 0x3c020041u,
+        0x34428401u, 0x40826000u, 0u});
+    const uint32_t handler[] = {
+        0x40036800u, // MFC0 v1,Cause
+        0x40805800u, // MTC0 zero,Compare: clear IP7 only
+        0x40086800u, // MFC0 t0,Cause
+        0x3485f000u, 0x34030200u, 0xaca30000u, // acknowledge INTC
+        0x42000018u};
+    size_t offset = 0x400u;
+    for (const uint32_t word : handler)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset++] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    }
+    {
+        ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+        for (uint32_t i = 0u; i < 13u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u ||
+                step.m_cop0_compare_crossed || step.m_timer_serviced)
+            {
+                return false;
+            }
+        }
+        if (pilot.next_compare_event() != 14u || pilot.next_timer_event() != 14u)
+        {
+            return false;
+        }
+        const auto interrupt = pilot.step(1u);
+        if (interrupt.m_boundary != boundary::RETIRED || !interrupt.m_cop0_compare_crossed ||
+            !interrupt.m_timer_serviced || interrupt.m_interrupt_vector != vector ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0x8400u ||
+            pilot.cpu().m_cop0[ee::COP0_EPC] != base + 56u ||
+            pilot.cpu().m_cop0[ee::COP0_Count] != 14u || pilot.intc_status() != 0x200u)
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 7u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED || step.m_interrupt_vector != 0u)
+            {
+                return false;
+            }
+            if (i == 0u && pilot.cpu().m_gpr[3].m_lo != 0x8400u)
+            {
+                return false;
+            }
+            if (i == 1u && (pilot.cpu().m_cop0[ee::COP0_Cause] != 0x400u ||
+                           pilot.intc_status() != 0x200u))
+            {
+                return false;
+            }
+        }
+        if (pilot.cpu().m_gpr[8].m_lo != 0x400u || pilot.cpu().m_pc != base + 56u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0u ||
+            (pilot.cpu().m_cop0[ee::COP0_Status] & ee::STATUS_EXL) != 0u ||
+            pilot.intc_status() != 0u || pilot.cycle() != 21u)
+        {
+            return false;
+        }
+    }
+    // Count wraps from ffffffff to zero; MFC0 observes the start
+    // timestamp, sign extends the low word, and the Compare latch
+    // survives a Count write but is cleared by a Compare write.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x2402fffeu, 0x40824800u, 0x40034800u,
+            0x40804800u, 0x40805800u, 0x40055800u, 0x40004800u, 0xffffffffu}));
+        for (uint32_t i = 0u; i < 8u; ++i)
+        {
+            const auto step = pilot.step(1u);
+            if (step.m_boundary != boundary::RETIRED ||
+                step.m_cop0_compare_crossed != (i == 3u))
+            {
+                return false;
+            }
+            if (i == 2u && (pilot.cpu().m_cop0[ee::COP0_Count] != 0xffffffffu ||
+                           pilot.next_compare_event() != 4u))
+            {
+                return false;
+            }
+            if (i == 3u && (pilot.cpu().m_cop0[ee::COP0_Count] != 0u ||
+                           pilot.cpu().m_gpr[3].m_lo != 0xffffffffffffffffull))
+            {
+                return false;
+            }
+            if (i == 4u && (pilot.cpu().m_cop0[ee::COP0_Cause] & 0x8000u) == 0u)
+            {
+                return false;
+            }
+        }
+        if (pilot.cpu().m_gpr[5].m_lo != 0u || pilot.cpu().m_gpr[0].m_lo != 0u ||
+            pilot.cpu().m_cop0[ee::COP0_Cause] != 0u || pilot.cycle() != 8u ||
+            pilot.step(1u).m_boundary != boundary::HOST_REFUSAL || pilot.cycle() != 8u)
+        {
+            return false;
+        }
+    }
+    // Compare deadline strictly inside a branch refuses; equality at
+    // the completed branch boundary is allowed, with no link leakage.
+    for (uint32_t compare : {5u, 6u})
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x34020000u | compare, 0x40825800u, 0u,
+            0x0ff00006u, 0x34030007u, 0u}));
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto step = pilot.step(2u);
+        if (compare == 5u)
+        {
+            if (step.m_boundary != boundary::TIMER_DEADLINE || pilot.cycle() != 4u ||
+                pilot.cpu().m_pc != base + 16u || pilot.cpu().m_gpr[31].m_lo != 0u ||
+                pilot.cpu().m_gpr[3].m_lo != 0u || pilot.cpu().m_cop0[ee::COP0_Cause] != 0u)
+            {
+                return false;
+            }
+        }
+        else if (step.m_boundary != boundary::RETIRED || !step.m_cop0_compare_crossed ||
+                 pilot.cycle() != 6u || pilot.cpu().m_pc != base + 24u ||
+                 pilot.cpu().m_gpr[3].m_lo != 7u ||
+                 pilot.cpu().m_cop0[ee::COP0_Cause] != 0x8000u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace
