@@ -2934,7 +2934,8 @@ int main(int argc, char** argv)
     {
         if ((disc_folder_path == nullptr && iop_irx_paths.empty() &&
              iop_rom0_path == nullptr) ||
-            !memory_card.mount(std::filesystem::u8path(memory_card_path)))
+            !memory_card.mount(std::filesystem::path(std::u8string(
+                memory_card_path, memory_card_path + std::strlen(memory_card_path)))))
         {
             std::fprintf(stderr,
                 "[mc] mounting requires an active IOP and an exact "
@@ -3255,7 +3256,8 @@ int main(int argc, char** argv)
                 auto folder_source =
                     std::make_unique<iop::c_folder_sector_source>(
                         disc_root, memory_card.mounted()
-                            ? std::filesystem::u8path(memory_card_path)
+                            ? std::filesystem::path(std::u8string(
+                memory_card_path, memory_card_path + std::strlen(memory_card_path)))
                             : std::filesystem::path{});
                 if (!folder_source->valid())
                 {
