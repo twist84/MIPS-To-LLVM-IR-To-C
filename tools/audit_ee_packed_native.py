@@ -142,7 +142,7 @@ def audit(control_path, candidate_path, control_dir, candidate_dir,
             entry = {"module": row["module"], "symbol": row["symbol"]}
             for arm, (_, objects, records) in zip(("control", "candidate"), images):
                 path = objects / records[row["module"]]["object"]
-                proc = subprocess.run([dumpbin, "/DISASM", "/NOBYTES", str(path)],
+                proc = subprocess.run([dumpbin, "/DISASM", str(path)],
                                       check=True, capture_output=True, text=True,
                                       errors="replace")
                 entry[arm] = proc.stdout
