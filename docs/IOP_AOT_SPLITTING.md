@@ -1042,3 +1042,38 @@ retained-router validation pending. Only after examining the mapped
 edges should we implement an opt-in budget-preserving chaining path,
 retaining exact per-instruction MMIO/device/interrupt boundaries and
 interpreter fallback.
+
+## I17f — Single-edge chaining pilot
+
+I17e reports 3,504,116 cross-region positive-progress ordinary
+remaining-budget candidates, with a conservative non-horizon lower
+bound of 3,127,029. ARKD_DVD contributes 2,232,815 candidates; the
+selected exact raw entry/resume pair 0x703c4 -> 0x72410 contributes
+1,881,040. These are advisory, not safe-chain counts.
+
+The alternate DLL entry is opt-in, resolves only for a non-overlapping
+active module and exact exported source PC, and allows at most one
+additional region call under the original budget. The CPU permits it
+only strictly before the modeled device horizon (or without devices),
+with verification disabled. The original entry and context ABI remain.
+The alternate entry checks ordinary resume state, remaining budget,
+positive progress and return reason; it preserves fallback behavior
+on a zero-progress second call.
+
+Windows targeted CTest: iop_aot, iop_exit_ownership and iop_chain_pilot
+all passed (1.18 s total). I17f single-module O2 build receipt SHA-256
+29e5f8de828c783c9686a47bf690e588928f0af7c01b13e1363319560051f8ed;
+165 objects, zero cache hits, 1,133,376 object bytes, 4.532 s compile,
+0.140 s link. ARKD_DVD DLL 774,144 bytes versus 775,680 I17c2,
+SHA-256 4e96714c3794a03cc37dc22edbdef6202687741e45571b28b04215e7deaeb335.
+DLL bytes have not been independently received here. Retain I17c2
+inventory and the I17d runner unchanged.
+
+Replay option --compare-iop-chain uses identical pinned new runner
+and composed seven-DLL inventory in both arms, removes inherited
+chain/exit-profile flags and enables chaining only in the candidate.
+Require exact pinned architectural report, trace, screen and input,
+all native libraries active, equal retired native instructions and
+fewer host native entries in each matched pair. No exit profiling
+in this mode. Single pair is a correctness/entry-count checkpoint,
+not performance acceptance. Latest CI and retail behavior pending.
