@@ -1763,3 +1763,23 @@ rollback coverage. No runtime changes or reduced thresholds.
 Reviewed other unsupported-opcode fixtures in the strict tests;
 real-ROM progress remains pending CI.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46066209290
+
+## M6E3H3E9B4: ordinary signed conditional branches
+
+H3E9B3 passed both pinned ROMs at 878cb91c, workflow 46066563349.
+Both advanced 185 retirements beyond XOR, stopping on BLEZ s8
+1bc00063 at a0018ae0 / a0018b00, 696758 / 696950 retirements,
+seven resident I-cache lines and zero IOP debt.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46066563349
+
+Add ordinary BLEZ/BGTZ and REGIMM BLTZ/BGEZ. Shared constexpr
+validation, 64-bit signed decisions and PC-relative targets serve
+both atomic reset execution and the synchronized split-slot owner.
+Reference ps2-web-recomp recomp/r5900.cpp opcode tables and PCSX2
+Interpreter.cpp. Reject reserved rt, likely/annul and link forms.
+Test zero, signed 64-bit extremes and values with differing low-word
+sign, backwards displacement, refusal rollback, zero-register
+semantics, slot overwriting the sampled operand, caller-budget
+and IOP deadline splits, unchanged link register. Preserve prior
+firmware acceptance assertions and require progress past BLEZ.
+No production lowering or HLE changes, no retail replay. Pending CI.

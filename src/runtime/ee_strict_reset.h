@@ -1115,24 +1115,21 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     const bool indirect = ee_strict_jr_supported(opcode) || jalr;
     const bool direct_jump = primary == 2u || primary == 3u;
     const uint32_t link_reg = primary == 3u ? 31u : jalr ? (opcode >> 11u) & 31u : 0u;
-    if (primary == 4u || primary == 5u || indirect || direct_jump)
+    if (ee_strict_conditional_branch_supported(opcode) || indirect || direct_jump)
     {
         if (budget < 2u)
         {
             return {result::BUDGET_EXHAUSTED, opcode};
         }
         const uint32_t pc = cpu.m_pc;
-        const bool equal = strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u) ==
-            strict_reset_detail::read_gpr(cpu, (opcode >> 16u) & 31u);
-        const bool taken = primary == 4u ? equal : !equal;
-        const uint32_t imm = opcode & 0xffffu;
-        const uint32_t disp = (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u)) << 2u;
+        const uint64_t lhs = strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u);
+        const uint64_t rhs = strict_reset_detail::read_gpr(cpu, (opcode >> 16u) & 31u);
         // Sample the indirect target before the delay slot. Its
         // alignment and backing are checked only on the next fetch.
         const uint32_t next = indirect
             ? static_cast<uint32_t>(strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u))
             : direct_jump ? ee_strict_direct_jump_target(pc, opcode)
-            : taken ? pc + 4u + disp : pc + 8u;
+            : ee_strict_conditional_branch_target(pc, opcode, lhs, rhs);
         const uint8_t* slot = fetch(pc + 4u);
         if (slot == nullptr)
         {

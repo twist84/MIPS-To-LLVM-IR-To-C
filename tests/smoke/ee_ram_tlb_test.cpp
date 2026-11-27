@@ -2141,6 +2141,76 @@ bool test_strict_reset_direct_jumps()
 }
 
 
+bool test_strict_reset_signed_branches()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[32u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    constexpr uint32_t branches[] = {0x18800003u, 0x1c800003u, 0x04800003u, 0x04810003u};
+    constexpr uint64_t values[] = {0u, 1u, 0x80000000u, 0x100000000ull,
+        0x8000000000000000ull, ~0ull};
+    constexpr bool expected[4][6] = {
+        {true, false, false, false, true, true},
+        {false, true, true, true, false, false},
+        {false, false, false, false, true, true},
+        {true, true, true, true, false, false}};
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    for (uint32_t branch = 0u; branch < 4u; ++branch)
+    {
+        for (uint32_t i = 0u; i < 6u; ++i)
+        {
+            cpu.m_pc = pc;
+            cpu.m_gpr[4] = {values[i], 0x1234u};
+            cpu.m_gpr[31] = {0x55u, 0x66u};
+            put(0u, branches[branch]);
+            put(4u, 0x00000001u);
+            if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+                step(2u).m_result != result::UNSUPPORTED_OPCODE ||
+                cpu.m_pc != pc || cpu.m_gpr[4].m_lo != values[i])
+            {
+                return false;
+            }
+            put(4u, 0x2404ffffu); // overwrite the compared register
+            if (step(2u).m_retired != 2u ||
+                cpu.m_pc != pc + (expected[branch][i] ? 16u : 8u) ||
+                cpu.m_gpr[4].m_lo != ~0ull || cpu.m_gpr[4].m_hi != 0x1234u ||
+                cpu.m_gpr[31].m_lo != 0x55u || cpu.m_gpr[31].m_hi != 0x66u)
+            {
+                return false;
+            }
+        }
+    }
+    for (uint32_t word : {0x18810003u, 0x1c810003u, 0x04820003u, 0x04900003u})
+    {
+        cpu.m_pc = pc;
+        put(0u, word);
+        if (step(2u).m_result != result::UNSUPPORTED_OPCODE ||
+            cpu.m_pc != pc || cpu.m_gpr[4].m_lo != ~0ull || cpu.m_gpr[31].m_lo != 0x55u)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc + 8u;
+    cpu.m_gpr[0] = {~0ull, ~0ull};
+    put(8u, 0x1800fffdu); // BLEZ zero, backwards to pc
+    put(12u, 0u);
+    return step(2u).m_retired == 2u && cpu.m_pc == pc &&
+        cpu.m_gpr[0].m_lo == ~0ull && cpu.m_gpr[0].m_hi == ~0ull;
+}
+
 bool test_strict_reset_jalr()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4330,6 +4400,7 @@ int main()
         !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||
         !check(test_strict_firmware_serial(), "scheduler-owned serial byte transport") ||
+        !check(test_strict_firmware_signed_branches(), "scheduler-owned signed branch slots") ||
         !check(test_strict_firmware_split_slots(), "scheduler-owned resumable branch slots") ||
         !check(test_strict_firmware_iop_clock(), "scheduler-owned synchronized EE/IOP clock") ||
         !check(test_strict_firmware_scanout(), "scheduler-owned GS scanout and VBlank edges") ||
@@ -4603,6 +4674,7 @@ int main()
     if (!check(test_strict_reset_cached_kernel_fetch(), "strict reset cached KSEG0 fetch") ||
         !check(test_strict_reset_instruction_cache(), "strict reset transactional I-cache fills") ||
         !check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
+        !check(test_strict_reset_signed_branches(), "strict reset signed conditional branches") ||
         !check(test_strict_reset_jalr(), "strict reset JALR link and rollback") ||
         !check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
     {
