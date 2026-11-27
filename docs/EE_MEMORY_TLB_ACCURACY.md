@@ -486,3 +486,29 @@ emission. This is a pilot: native multi-instruction CFG, delay-slot
 precision, native handler dispatch, cache/device ordering, invalidation
 and integration with the actual BIOS/retail runner are still open.
 No production lowering selection or runtime ABI change. CI pending.
+
+## Strict memory follow-up M6D2: remaining native GPR memory forms
+
+Extend the experimental LLVM entry to all 21 integer GPR memory
+opcodes: eleven scalar, LQ/SQ and eight left/right transfers. Shared
+constexpr decode describes width, direction and transfer kind.
+Keep the original word preparation symbol as a restricted wrapper.
+The generalized preparation helper returns the first enabled byte
+pointer and partial EA lane only after strict fetch, live-code check,
+translation, permission and whole selected-span backing validation.
+
+Native LLVM emits scalar byte assembly/sign extension, both quadword
+halves, and partial register merge or selected-byte stores. Partial
+lane variants are separate fixed-offset blocks: no dynamic shifts
+by 64, no unselected-byte access, and no guest RMW read. An invalid
+lane fails closed. PC advances only after the transfer. Neither the
+interpreter nor a host memory operation substitutes for LLVM execution.
+
+The existing MCJIT test now covers every opcode, register 2 and zero,
+O0/O2, the twelve original scenarios plus every offset in the
+container. Compare full affected quadword, GPR and COP0 state against
+the strict interpreter; independently require modeled fault/success
+outcomes and complete quadword transfer. Existing M6A/B directed
+fixtures remain. Production CFG lowering, delay slots, BIOS/retail
+integration, cache/device state and native invalidation remain open.
+No change to default lowering or existing retail ABI. CI pending.

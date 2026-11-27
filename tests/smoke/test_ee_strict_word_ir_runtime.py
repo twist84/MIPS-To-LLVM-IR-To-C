@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run opt-in strict native LW/SW against independent interpreter state."""
+"""Run all 21 opt-in strict native GPR memory forms against interpreter state."""
 
 import ctypes
 import pathlib
@@ -17,8 +17,8 @@ def main():
     fixture = pathlib.Path(sys.argv[1]).resolve()
     helper = ctypes.CDLL(str(pathlib.Path(sys.argv[2]).resolve()))
     llvm.add_symbol(
-        "ee_strict_native_prepare_word",
-        ctypes.cast(helper.ee_strict_native_prepare_word, ctypes.c_void_p).value,
+        "ee_strict_native_prepare_transfer",
+        ctypes.cast(helper.ee_strict_native_prepare_transfer, ctypes.c_void_p).value,
     )
     test = helper.ee_test_strict_native_word
     test.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
@@ -29,7 +29,13 @@ def main():
     count = 0
     with tempfile.TemporaryDirectory(prefix="ee-strict-word-") as tmp:
         path = pathlib.Path(tmp) / "word.ll"
-        for primary in (0x23, 0x2b):
+        widths = {
+            0x20: 1, 0x24: 1, 0x21: 2, 0x25: 2, 0x23: 4, 0x27: 4, 0x37: 8,
+            0x28: 1, 0x29: 2, 0x2b: 4, 0x3f: 8, 0x1e: 16, 0x1f: 16,
+            0x22: 4, 0x26: 4, 0x1a: 8, 0x1b: 8,
+            0x2a: 4, 0x2e: 4, 0x2c: 8, 0x2d: 8,
+        }
+        for primary, width in widths.items():
             for rt in (0, 2):
                 opcode = (primary << 26) | (4 << 21) | (rt << 16) | 0xfffc
                 subprocess.run([str(fixture), str(path), "0x00400000", hex(opcode)], check=True)
@@ -49,9 +55,10 @@ def main():
                     engine.add_module(module)
                     engine.finalize_object()
                     address = engine.get_function_address("guest_strict_word")
-                    if not address or test(address, opcode) != 12:
-                        raise RuntimeError(f"strict native LW/SW failed: {opcode:#x} O{opt}")
-                    count += 12
+                    expected = 12 + width
+                    if not address or test(address, opcode) != expected:
+                        raise RuntimeError(f"strict native transfer failed: {opcode:#x} O{opt}")
+                    count += expected
         # The separate emitter must not accept arbitrary instructions.
         rejected = subprocess.run([str(fixture), str(path), "0x00400000", "0x0"])
         if rejected.returncode != 3:
