@@ -28,7 +28,7 @@ struct s_ee_access_decision
     uint32_t m_scratchpad_offset = 0u;
 };
 
-inline s_ee_access_decision ee_resolve_access(const c_ee_tlb& tlb,
+inline constexpr s_ee_access_decision ee_resolve_access(const c_ee_tlb& tlb,
     uint32_t address, uint32_t status, uint32_t config, uint32_t entry_hi,
     bool write_access)
 {
