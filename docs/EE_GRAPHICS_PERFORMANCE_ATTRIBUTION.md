@@ -1274,7 +1274,7 @@ retain G8D.1 libraries. One matched pair first, ee-iop-g8d2.
 No EE IR/relink, IOP AOT rebuild, recapture or VU1 rebuild.
 Compilation, CI and retail validation pending.
 
-## G8D.2 — correctness accepted; IOP optimization paused
+## G8D.2 — correctness accepted; IOP execution micro-optimization paused
 
 All five CI workflows passed at b9bcaa0f951bc81bc9624bff375eef96e593fc08.
 Archive ee-iop-g8d2.zip SHA-256:
@@ -1301,7 +1301,7 @@ different/unpaired samples against reference. SIO2 last start PC
 nominal throughput +4.8425%. Single pair, correctness accepted,
 performance not established. Retain runtime and lifter corrections.
 Do not default-enable IOP AOT or require extra performance repeats.
-Preserve runner, captures and G8D.1 libraries. Further IOP AOT
-dispatch/function splitting and optimization deferred at user's
-direction. Next objective practical timing compatibility with
+Preserve runner, captures and G8D.1 libraries. Further IOP AOT execution micro-optimization remains deferred.
+Function splitting and parallel compilation are active in #174; see
+IOP_AOT_SPLITTING.md. Next objective practical timing compatibility with
 PCSX2 and ps2-web-recomp, not cycle-exact physical hardware.
