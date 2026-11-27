@@ -627,6 +627,55 @@ class DiscoveryTest(unittest.TestCase):
                 cached_split_object(source, obj, cache, context, compile_object)
             self.assertEqual(len(calls), 3)
 
+    def test_exact_ir_cache_reuses_across_plans_and_validates_legacy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cache = root / "cache"
+            cache.mkdir()
+            source = root / "region.ll"
+            source.write_bytes(b"exact IR")
+            obj = root / "region.o"
+            calls = []
+
+            def compile_object(src, dst):
+                calls.append(src.read_bytes())
+                dst.write_bytes(b"object:" + src.read_bytes())
+
+            old = {"plan_sha256": "plan-a", "capture_sha256": "capture",
+                   "metadata_sha256": "metadata", "lifter_sha256": "lifter",
+                   "compiler_sha256": "compiler", "options": ["-O3"]}
+            new = dict(old, plan_sha256="plan-b")
+            self.assertNotEqual(split_cache_key(source, old), split_cache_key(source, new))
+            self.assertEqual(split_cache_key(source, old, True),
+                             split_cache_key(source, new, True))
+            self.assertFalse(cached_split_object(source, obj, cache, old, compile_object))
+            legacy = cache / split_cache_key(source, old)
+            self.assertTrue(cached_split_object(source, obj, cache, old, compile_object,
+                                                reuse_ir=True))
+            self.assertTrue(legacy.is_dir())
+            self.assertTrue(cached_split_object(source, obj, cache, new, compile_object,
+                                                reuse_ir=True))
+            self.assertEqual(len(calls), 1)
+            for key in ("capture_sha256", "metadata_sha256", "lifter_sha256",
+                        "compiler_sha256", "options"):
+                changed = dict(new, **{key: "changed"})
+                self.assertNotEqual(split_cache_key(source, new, True),
+                                    split_cache_key(source, changed, True))
+            renamed = root / "other.ll"
+            renamed.write_bytes(source.read_bytes())
+            self.assertNotEqual(split_cache_key(source, new, True),
+                                split_cache_key(renamed, new, True))
+            entry = cache / split_cache_key(source, new, True)
+            (entry / "object.o").write_bytes(b"corrupt")
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, new, compile_object, reuse_ir=True)
+            (legacy / "object.o").write_bytes(b"corrupt")
+            import shutil
+            shutil.rmtree(entry)
+            with self.assertRaises(ValueError):
+                cached_split_object(source, obj, cache, old, compile_object, reuse_ir=True)
+            self.assertEqual(len(calls), 1)
+
     def test_multi_split_selection_and_global_schedule(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
