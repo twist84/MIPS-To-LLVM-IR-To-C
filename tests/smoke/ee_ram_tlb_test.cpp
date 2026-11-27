@@ -733,6 +733,104 @@ constexpr bool test_data_bus_spans()
 
 static_assert(test_data_bus_spans(), "strict physical span and cache policy regression");
 
+bool test_ee_iop_ram_aperture()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    iop::c_cpu iop_cpu;
+    auto iop_ram = iop_cpu.ram_span();
+    constexpr uint32_t mailbox_offset = 0x00042f00u;
+    constexpr uint32_t mailbox_magic = 0x4f424344u;
+    if (!iop_cpu.write32(0x80042f00u, mailbox_magic))
+    {
+        check(false, "IOP CPU seeds its real 2 MiB RAM backing");
+        return false;
+    }
+    const auto rom_bytes = make_firmware_pilot_rom({
+        0x8c220000u, 0xac220004u, 0x8c230000u, 0x8c240000u,
+        0x8c250000u, 0x8c260000u});
+    const ee::s_ee_strict_rom0_view rom{rom_bytes.data(), rom_bytes.size()};
+    const ee::s_ee_reset_ram_view backing{nullptr, 0u, false, nullptr, nullptr,
+        iop_ram.data(), iop_ram.size()};
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    cpu.m_gpr[1].m_lo = 0xbc042f00u;
+    cpu.m_gpr[2].m_lo = 0xa1b2c3d4u;
+    ee::c_ee_tlb tlb{};
+    const uint32_t entry_lo = ((0x1c042000u >> 12u) << 6u) | (2u << 3u) | 6u;
+    if (!tlb.write(0u, 0u, 0x00400000u, entry_lo, entry_lo))
+    {
+        check(false, "EE TLB maps an uncached IOP aperture alias");
+        return false;
+    }
+
+    const auto load = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    if (load.m_result != result::COMMITTED || load.m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != mailbox_magic || cpu.m_pc != 0xbfc00004u)
+    {
+        check(false, "EE LW reads the IOP-published mailbox magic");
+        return false;
+    }
+    cpu.m_gpr[2].m_lo = 0xa1b2c3d4u;
+    const auto store = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    uint32_t observed = 0u;
+    if (store.m_result != result::COMMITTED || store.m_retired != 1u ||
+        !iop_cpu.read32(0x00042f04u, &observed) ||
+        observed != 0xa1b2c3d4u || cpu.m_pc != 0xbfc00008u)
+    {
+        check(false, "EE SW commits little-endian bytes visible to the IOP");
+        return false;
+    }
+
+    // The EE's next 2 MiB mirror resolves to the same live IOP backing.
+    cpu.m_gpr[1].m_lo = 0xbc442f00u;
+    const auto mirror = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    if (mirror.m_result != result::COMMITTED ||
+        cpu.m_gpr[3].m_lo != mailbox_magic || cpu.m_pc != 0xbfc0000cu)
+    {
+        check(false, "EE IOP RAM mirrors alias the same backing");
+        return false;
+    }
+
+    // A translated, uncached EE alias reaches the same physical aperture.
+    cpu.m_gpr[1].m_lo = 0x00400f00u;
+    const auto translated = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    if (translated.m_result != result::COMMITTED ||
+        cpu.m_gpr[4].m_lo != mailbox_magic || cpu.m_pc != 0xbfc00010u)
+    {
+        check(false, "uncached translated EE alias reaches IOP RAM");
+        return false;
+    }
+
+    // Cached and out-of-aperture aliases refuse without changing state.
+    cpu.m_gpr[1].m_lo = 0x9c042f00u;
+    const uint64_t previous = cpu.m_gpr[5].m_lo;
+    const auto cached = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    if (cached.m_result != result::DATA_UNAVAILABLE ||
+        cached.m_retired != 0u || cpu.m_gpr[5].m_lo != previous ||
+        cpu.m_pc != 0xbfc00010u)
+    {
+        check(false, "cached IOP RAM alias refuses without side effects");
+        return false;
+    }
+    cpu.m_gpr[1].m_lo = 0xbc800000u;
+    const auto outside = ee::ee_execute_strict_rom_register_step(
+        cpu, rom, 1u, backing, nullptr, &tlb);
+    const bool valid = outside.m_result == result::DATA_UNAVAILABLE &&
+        outside.m_retired == 0u && cpu.m_gpr[6].m_lo == 0u &&
+        cpu.m_pc == 0xbfc00010u &&
+        iop_ram[mailbox_offset] == static_cast<uint8_t>(mailbox_magic);
+    if (!valid)
+    {
+        check(false, "out-of-aperture read refuses without side effects");
+    }
+    return valid;
+}
+
 constexpr bool test_memory_fault_commit()
 {
     using kind = ee::e_ee_memory_request_kind;
@@ -4809,6 +4907,10 @@ int main()
         return 1;
     }
     if (!check(test_data_bus_spans(), "strict physical span and cache policy regression"))
+    {
+        return 1;
+    }
+    if (!check(test_ee_iop_ram_aperture(), "shared EE-to-IOP RAM aperture regression"))
     {
         return 1;
     }

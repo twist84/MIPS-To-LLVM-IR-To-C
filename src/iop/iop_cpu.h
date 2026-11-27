@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace iop
@@ -92,6 +93,8 @@ public:
 
     const s_cpu_state& state() const;
     s_cpu_state& state();
+    std::span<uint8_t> ram_span();
+    std::span<const uint8_t> ram_span() const;
 
     uint64_t cycles() const;
     const s_memory_fault& last_memory_fault() const;

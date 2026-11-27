@@ -368,6 +368,8 @@ struct s_ee_reset_ram_view
     bool m_mapped_fetch = false;
     c_ee_reset_instruction_cache::c_transaction* m_instruction_cache = nullptr;
     c_ee_reset_data_cache::c_transaction* m_data_cache = nullptr;
+    uint8_t* m_iop_ram_bytes = nullptr;
+    size_t m_iop_ram_size = 0u;
 
     constexpr uint8_t* cached_span(uint32_t address, const s_ee_bus_span_plan& bus,
         bool store) const
@@ -420,6 +422,28 @@ struct s_ee_reset_ram_view
             return nullptr;
         }
         return m_bytes + bus.m_address;
+    }
+
+    constexpr uint8_t* iop_ram_span(const s_ee_bus_span_plan& bus) const
+    {
+        if (m_iop_ram_bytes == nullptr ||
+            bus.m_region != e_ee_bus_region::IOP_RAM ||
+            bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED ||
+            m_iop_ram_size < k_iop_ram_backing_size ||
+            ee_classify_physical_span(bus.m_address, bus.m_width, m_size,
+                m_iop_ram_size) != e_ee_bus_region::IOP_RAM ||
+            bus.m_address < k_ee_iop_ram_aperture_base)
+        {
+            return nullptr;
+        }
+        const uint32_t offset = (bus.m_address - k_ee_iop_ram_aperture_base) &
+            (k_iop_ram_backing_size - 1u);
+        if (offset > k_iop_ram_backing_size ||
+            bus.m_width > k_iop_ram_backing_size - offset)
+        {
+            return nullptr;
+        }
+        return m_iop_ram_bytes + offset;
     }
 
     constexpr const uint8_t* read_span(const s_ee_bus_span_plan& bus) const
@@ -1286,7 +1310,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         store, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
     const auto bus = ee_plan_data_bus_span(plan.m_access, plan.m_width,
-        cpu.m_cop0[COP0_Config], ram.m_bytes != nullptr ? ram.m_size : 0u);
+        cpu.m_cop0[COP0_Config], ram.m_bytes != nullptr ? ram.m_size : 0u,
+        ram.m_iop_ram_size);
     // Restrict RAM accesses to canonical KSEG1, with no alias or
     // speculative fallback. ROM remains separately read-only.
     const uint32_t access_address = plan.m_virtual_address;
@@ -1307,7 +1332,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
             return {result::COMMITTED, opcode, 0u, pc};
         }
         uint8_t* target = plan.m_fault.m_valid ? nullptr :
-            ram_address ? ram.write_span(bus) : ram.cached_span(access_address, bus, true);
+            ram_address ? ram.write_span(bus) :
+            bus.m_region == e_ee_bus_region::IOP_RAM ? ram.iop_ram_span(bus) :
+            ram.cached_span(access_address, bus, true);
         if (target == nullptr)
         {
             return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
@@ -1335,6 +1362,10 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         if (ram_address)
         {
             bytes = ram.read_span(bus);
+        }
+        else if (bus.m_region == e_ee_bus_region::IOP_RAM)
+        {
+            bytes = ram.iop_ram_span(bus);
         }
         else if (access_address >= 0xbfc00000u && access_address < 0xc0000000u)
         {

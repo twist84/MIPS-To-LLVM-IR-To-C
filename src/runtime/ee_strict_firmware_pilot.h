@@ -289,7 +289,9 @@ public:
                 ? &m_data_cache : nullptr;
         c_ee_reset_data_cache::c_transaction data_transaction(active_data_cache);
         const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size),
-            k_ram_size, m_iop_synchronized, &cache_transaction, &data_transaction};
+            k_ram_size, m_iop_synchronized, &cache_transaction, &data_transaction,
+            m_iop != nullptr ? m_iop->cpu().ram_span().data() : nullptr,
+            m_iop != nullptr ? m_iop->cpu().ram_span().size() : 0u};
         const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
             m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
@@ -314,7 +316,9 @@ public:
         {
             c_ee_reset_instruction_cache::c_transaction probe(active_cache);
             const s_ee_reset_ram_view probe_ram{m_memory.physical_ram_span(0u, k_ram_size),
-                k_ram_size, true, &probe};
+                k_ram_size, true, &probe, nullptr,
+                m_iop != nullptr ? m_iop->cpu().ram_span().data() : nullptr,
+                m_iop != nullptr ? m_iop->cpu().ram_span().size() : 0u};
             const auto slot_fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc + 4u,
                 m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
                 m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
