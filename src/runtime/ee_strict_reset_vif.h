@@ -2,11 +2,12 @@
 
 #include "ee_strict_reset.h"
 #include "ee_vif1.h"
+#include "ee_intc.h"
 
 namespace ee
 {
-// Reuse the production VIF command-state reset and FIFO parser, with isolated cold
-// devices and no DMA, interrupt or VU execution callbacks attached.
+// Reuse the production VIF and INTC register models with isolated cold
+// devices. No DMA, interrupt sources, or VU execution callbacks attached.
 class c_ee_reset_vif_devices
 {
 public:
@@ -15,10 +16,18 @@ public:
         m_vif0.bind_vu0(&m_vu0);
     }
 
-    s_ee_reset_vif_write transport()
+    s_ee_reset_mmio transport()
     {
-        return {this, &write};
+        return {this, &write, &read};
     }
+
+    uint32_t intc_mask() const { return m_intc.mask(); }
+    uint32_t intc_status() const { return m_intc.status(); }
+    uint32_t intc_read_count() const { return m_intc_read_count; }
+    uint32_t intc_write_count() const { return m_intc_write_count; }
+    uint32_t first_intc_read() const { return m_first_intc_read; }
+    uint32_t first_intc_write() const { return m_first_intc_write; }
+    uint32_t first_intc_mask() const { return m_first_intc_mask; }
 
     uint32_t reset_count(uint32_t channel) const
     {
@@ -41,11 +50,44 @@ public:
     }
 
 private:
+    static bool read(void* user, uint32_t address, uint32_t width, s_ee_u128* value)
+    {
+        if (user == nullptr || value == nullptr || address != c_ee_intc::k_mask_address ||
+            width != 4u)
+        {
+            return false;
+        }
+        auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
+        if (!c_ee_intc::mmio_read(&self.m_intc, address, width, value))
+        {
+            return false;
+        }
+        if (self.m_intc_read_count++ == 0u)
+        {
+            self.m_first_intc_read = static_cast<uint32_t>(value->m_lo);
+        }
+        return true;
+    }
+
     static bool write(void* user, uint32_t address, uint32_t width, const s_ee_u128* value)
     {
         if (user == nullptr || value == nullptr)
         {
             return false;
+        }
+        auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
+        if (address == c_ee_intc::k_mask_address && width == 4u)
+        {
+            if (!c_ee_intc::mmio_write(&self.m_intc, address, width, value))
+            {
+                return false;
+            }
+            if (self.m_intc_write_count++ == 0u)
+            {
+                self.m_first_intc_write = static_cast<uint32_t>(value->m_lo);
+                self.m_first_intc_mask = self.m_intc.mask();
+            }
+            return true;
         }
         const bool reset = width == 4u && static_cast<uint32_t>(value->m_lo) == 1u &&
             (address == 0x10003810u || address == 0x10003c10u);
@@ -54,7 +96,6 @@ private:
         {
             return false;
         }
-        auto& self = *static_cast<c_ee_reset_vif_devices*>(user);
         const uint32_t channel = address == 0x10003810u || address == 0x10004000u ? 0u : 1u;
         if (!c_ee_vif1::mmio_write(&self.device(channel), address, width, value))
         {
@@ -78,5 +119,11 @@ private:
     uint32_t m_reset_count[2]{};
     uint32_t m_fifo_count[2]{};
     s_ee_u128 m_last_fifo[2]{};
+    c_ee_intc m_intc{};
+    uint32_t m_intc_read_count = 0u;
+    uint32_t m_intc_write_count = 0u;
+    uint32_t m_first_intc_read = 0u;
+    uint32_t m_first_intc_write = 0u;
+    uint32_t m_first_intc_mask = 0u;
 };
 } // namespace ee

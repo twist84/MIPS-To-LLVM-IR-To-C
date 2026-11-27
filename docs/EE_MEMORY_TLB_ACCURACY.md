@@ -1106,3 +1106,24 @@ RAM alignment, zero, missing backing, device refusal, parser
 rejection and real STCYCL state effects. Next anticipated
 boundary is INTC register b000f010; no fake IRQ readiness.
 No retail replay. New acceptance checks pending CI.
+
+## M6E3E3: real INTC_MASK register initialization
+
+M6E3E2 passed both releases on 63c5dee1:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46052277820
+VIF0/VIF1 each accepted exactly one genuine packet with words
+01000404,05000000,00000000,00000000. Both stopped at the
+INTC_MASK read (b000f010): v0.6 671592 / a00166b8,
+v0.7 671784 / a00166d8, opcode 8c610000.
+
+Generalize the isolated reset transport to explicit MMIO read/write
+callbacks and admit only the canonical uncached word INTC_MASK
+address in addition to existing VIF operations. Reuse c_ee_intc's
+real zero-initialized mask and write-one-to-toggle semantics.
+No synthetic status, interrupt sources or scheduling; the isolated
+controller is not bound to guest interrupt delivery. Test repeated
+toggles, load to zero, preserved GPR upper half, refused addresses
+and widths, missing transport, and delay-slot budget refusal.
+Require first actual transition read=0, write=2, mask=2, status=0
+at 671597 / a00166cc and 671789 / a00166ec respectively.
+Compilation and predicted checkpoints pending CI. No retail replay.

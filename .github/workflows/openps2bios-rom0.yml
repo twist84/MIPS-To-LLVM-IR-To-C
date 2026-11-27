@@ -291,6 +291,7 @@ jobs:
           grep -Fx 'EE exploration initial TLB writes: retired=654101 count=13' ee-rom0-v07.log
           grep -Fx 'EE exploration VIF resets: vif0=1 vif1=1' ee-rom0-v07.log
           grep -Fx 'EE exploration VIF FIFO: vif0=1 vif1=1' ee-rom0-v07.log
+          grep -Fx 'EE exploration INTC first write: retired=671789 pc=a00166ec read=00000000 write=00000002 mask=00000002 status=00000000' ee-rom0-v07.log
           echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
 
       - name: Explore authentic v0.7 IOP reset execution

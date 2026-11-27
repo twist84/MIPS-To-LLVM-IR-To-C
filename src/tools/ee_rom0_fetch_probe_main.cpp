@@ -40,6 +40,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     ee::c_ee_reset_vif_devices vif_devices;
     const auto vif = vif_devices.transport();
     bool entered_ram = false;
+    bool first_intc_write = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
@@ -60,6 +61,13 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!first_intc_write && vif_devices.intc_write_count() != 0u)
+        {
+            first_intc_write = true;
+            std::printf("EE exploration INTC first write: retired=%u pc=%08x read=%08x write=%08x mask=%08x status=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_intc_read(), vif_devices.first_intc_write(),
+                vif_devices.first_intc_mask(), vif_devices.intc_status());
+        }
         if (action.m_opcode == 0x42000002u)
         {
             ++tlb_write_count;
@@ -111,6 +119,9 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
             static_cast<unsigned long long>(value.m_hi),
             static_cast<unsigned>(vif_devices.device(channel).diagnostic().m_reason));
     }
+    std::printf("EE exploration INTC: reads=%u writes=%u mask=%08x status=%08x\n",
+        vif_devices.intc_read_count(), vif_devices.intc_write_count(),
+        vif_devices.intc_mask(), vif_devices.intc_status());
     std::printf("EE exploration COP0: status=%08x config=%08x wired=%u random=%u\n",
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
@@ -1181,6 +1192,8 @@ int main(int argc, char** argv)
     ee::c_ee_reset_vif_devices vif_devices;
     const auto vif = vif_devices.transport();
     const uint32_t exploration_limit = compare_done + 32768u;
+    uint32_t first_intc_retired = 0u;
+    uint32_t first_intc_pc = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -1197,6 +1210,14 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (first_intc_retired == 0u && vif_devices.intc_write_count() != 0u)
+        {
+            first_intc_retired = retired;
+            first_intc_pc = cpu.m_pc;
+            std::printf("EELOAD INTC first write: retired=%u pc=%08x read=%08x write=%08x mask=%08x status=%08x\n",
+                retired, cpu.m_pc, vif_devices.first_intc_read(), vif_devices.first_intc_write(),
+                vif_devices.first_intc_mask(), vif_devices.intc_status());
+        }
         if (retired >= compare_done + 17000u)
         {
             std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
@@ -1247,6 +1268,18 @@ int main(int argc, char** argv)
         }
     }
     std::printf("EELOAD VIF FIFO payload: 16/16 bytes matched per channel\n");
+    if (first_intc_retired != 671597u || first_intc_pc != 0xa00166ccu ||
+        vif_devices.intc_read_count() == 0u || vif_devices.first_intc_read() != 0u ||
+        vif_devices.first_intc_write() != 2u || vif_devices.first_intc_mask() != 2u ||
+        vif_devices.intc_status() != 0u)
+    {
+        std::fprintf(stderr, "EELOAD INTC checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 75;
+    }
+    std::printf("EELOAD INTC: reads=%u writes=%u mask=%08x status=%08x\n",
+        vif_devices.intc_read_count(), vif_devices.intc_write_count(),
+        vif_devices.intc_mask(), vif_devices.intc_status());
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);
