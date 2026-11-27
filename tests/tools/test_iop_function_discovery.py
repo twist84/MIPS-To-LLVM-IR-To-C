@@ -85,6 +85,39 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 prepare_split_pilot(root, "SIO2MAN", root / "ambiguous")
 
+    def test_extended_frames_and_interpreter_continuations(self):
+        meta, data = capture([
+            0x88820000,  # LWL: native audit stops, interpreter can continue
+            0x03e00008, 0,
+            0x27bdfff0, 0xafb00008, 0xafbf000c,  # separate stack frame
+            0x03e00008, 0x27bd0010,
+            0x27bdfff0, 0xafbf0014,  # RA outside frame: reject
+            0x0000000c,  # syscall: no invented continuation
+        ])
+        baseline = inventory(meta, data)
+        self.assertEqual(baseline["candidate_count"], 1)
+        self.assertEqual(baseline["ordinary_count"], 1)
+        report = inventory(meta, data, extended=True)
+        extra = report["extended"]
+        self.assertEqual(report["candidate_count"], 2)
+        self.assertEqual(extra["heuristic_frame_seeds"],
+                         [{"entry": BASE + 12, "ra_save_pc": BASE + 20}])
+        self.assertEqual(extra["interpreter_linear_pcs"], [BASE])
+        self.assertEqual(extra["newly_reached_pcs"],
+                         list(range(BASE + 4, BASE + 32, 4)))
+        self.assertEqual(inventory(meta, data), baseline)
+
+    def test_extended_interpreter_delay_preserves_control_flow(self):
+        meta, data = capture([jump(2, BASE + 12), 0x88820000, 0,
+                              0x03e00008, 0])
+        baseline = inventory(meta, data)
+        self.assertEqual(baseline["ordinary_count"], 1)
+        report = inventory(meta, data, extended=True)
+        self.assertEqual(report["ordinary_count"], 2)
+        self.assertEqual(report["extended"]["interpreter_linear_pcs"], [BASE + 4])
+        self.assertIn("unsupported_delay", {x["kind"] for x in report["unresolved"]})
+        self.assertNotIn(BASE + 8, report["extended"]["newly_reached_pcs"])
+
     def test_residual_plan_preserves_legacy_dispatch_domain(self):
         # Unsupported ordinary word, inline delay word and an unvisited
         # tail are all residual entries, not inferred function ownership.

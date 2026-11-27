@@ -59,7 +59,52 @@ def classify(word):
     return "unsupported"
 
 
-def inventory(metadata, data):
+def interpreter_linear(word):
+    """Known sequential operations in c_cpu::step, absent from native IR.
+
+    This is a possible successful continuation, not a guarantee that a
+    memory access succeeds or that COP0 does not change interrupt state.
+    """
+    op = word >> 26
+    if op in (0x22, 0x26, 0x2a, 0x2e):  # LWL/LWR/SWL/SWR
+        return True
+    if op != 0x10:
+        return False
+    rs, rd = (word >> 21) & 31, (word >> 11) & 31
+    return (word == 0x42000010 or
+            ((word & 0x7ff) == 0 and
+             ((rs == 0 and rd in (12, 13, 14, 15)) or
+              (rs == 4 and rd in (12, 13, 14)))))
+
+
+def frame_candidates(base, data, excluded):
+    """Candidate-only scan: stack allocation followed by in-frame RA save.
+
+    Linked .text can contain tables/data, so even this paired signature
+    is heuristic. Never interpret an isolated JAL word as an entry root.
+    """
+    words = [word[0] for word in struct.iter_unpack("<I", data[:len(data) & ~3])]
+    for i, word in enumerate(words):
+        pc = base + i * 4
+        if pc in excluded or word >> 16 != 0x27bd:
+            continue
+        frame = 0x10000 - (word & 0xffff)
+        if not 8 <= frame <= 0x8000 or frame % 8:
+            continue
+        # Require contiguous stores of registers into the new stack frame.
+        for j in range(i + 1, min(i + 7, len(words))):
+            save = words[j]
+            if save >> 26 != 0x2b or (save >> 21) & 31 != 29:
+                break
+            offset = save & 0xffff
+            if offset % 4 or offset + 4 > frame:
+                break
+            if (save >> 16) & 31 == 31:
+                yield pc, base + j * 4
+                break
+
+
+def inventory(metadata, data, extended=False):
     base, size = metadata["base"], metadata["text_size"]
     digest = metadata["hash"]
     if (type(base) is not int or type(size) is not int or base & 3 or
@@ -90,6 +135,16 @@ def inventory(metadata, data):
     seed(metadata.get("entry"), "module_entry")
     for pc in exports:
         seed(pc, "export")
+    baseline = None
+    frame_evidence = []
+    interpreter_edges = set()
+    if extended:
+        baseline = inventory(metadata, data)
+        excluded = {pc for region in baseline["regions"]
+                    for pc in region["ordinary_pcs"] + region["delay_pcs"]}
+        for pc, save_pc in frame_candidates(base, data, excluded):
+            seed(pc, "heuristic_stack_frame")
+            frame_evidence.append({"entry": pc, "ra_save_pc": save_pc})
     pending = collections.deque(sorted(seeds))
     graph = {}
     delay_by_branch = {}
@@ -112,7 +167,11 @@ def inventory(metadata, data):
         word = word_at(pc)
         kind = classify(word)
         if kind == "unsupported":
-            unresolved.add((pc, pc, "unsupported"))
+            if extended and interpreter_linear(word):
+                interpreter_edges.add(pc)
+                edge(pc, (pc + 4) & MASK, "interpreter_next")
+            else:
+                unresolved.add((pc, pc, "unsupported"))
             continue
         if kind == "simple":
             edge(pc, (pc + 4) & MASK, "next")
@@ -125,7 +184,9 @@ def inventory(metadata, data):
         delay_by_branch[pc] = slot
         if classify(word_at(slot)) != "simple":
             unresolved.add((pc, slot, "unsupported_delay"))
-            continue
+            if not extended or not interpreter_linear(word_at(slot)):
+                continue
+            interpreter_edges.add(slot)
 
         resume = (pc + 8) & MASK
         if kind in ("call", "jump"):
@@ -183,7 +244,7 @@ def inventory(metadata, data):
     ordinary = set(graph)
     overlaps = [{"pc": pc, "entries": sorted(entries)}
                 for pc, entries in sorted(owners.items()) if len(entries) > 1]
-    return {
+    result = {
         "name": metadata["name"], "base": base, "text_size": size,
         "hash": digest.lower(), "candidate_count": len(seeds),
         "ordinary_count": len(ordinary), "delay_count": len(delay_pcs),
@@ -196,12 +257,31 @@ def inventory(metadata, data):
         "unresolved": [{"pc": pc, "target": target, "kind": kind}
                        for pc, target, kind in sorted(unresolved)],
     }
+    if extended:
+        # Report changes separately; no extended result feeds production.
+        old_pcs = {pc for region in baseline["regions"]
+                   for pc in region["ordinary_pcs"] + region["delay_pcs"]}
+        new_pcs = ordinary | delay_pcs
+        result["extended"] = {
+            "baseline_candidate_count": baseline["candidate_count"],
+            "baseline_ordinary_count": baseline["ordinary_count"],
+            "baseline_delay_count": baseline["delay_count"],
+            "baseline_unvisited_aligned_words": baseline["unvisited_aligned_words"],
+            "newly_reached_pcs": sorted(new_pcs - old_pcs),
+            "heuristic_frame_seeds": frame_evidence,
+            "interpreter_linear_pcs": sorted(interpreter_edges),
+            "largest_region_ordinary_pcs": max(
+                (len(region["ordinary_pcs"]) for region in regions), default=0),
+        }
+    return result
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--capture", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--extended", action="store_true",
+                        help="Shadow audit of heuristic frames and interpreter continuations")
     args = parser.parse_args()
     captures = sorted(args.capture.glob("*.json"))
     if not captures:
@@ -210,12 +290,14 @@ def main():
     try:
         for path in captures:
             record = inventory(json.loads(path.read_text(encoding="utf-8")),
-                               path.with_suffix(".bin").read_bytes())
+                               path.with_suffix(".bin").read_bytes(),
+                               extended=args.extended)
             record["capture_stem"] = path.stem
             modules.append(record)
         # Exclusive creation: never replace a capture or previous receipt.
         with args.out.open("x", encoding="utf-8") as output:
-            json.dump({"schema": 1, "kind": "iop_candidate_discovery",
+            json.dump({"schema": 1, "kind": ("iop_extended_discovery" if args.extended
+                                             else "iop_candidate_discovery"),
                        "modules": modules}, output, indent=2)
             output.write("\n")
     except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -226,6 +308,12 @@ def main():
               f"{record['delay_count']} delay PCs, "
               f"{len(record['shared_ordinary_pcs'])} shared PCs, "
               f"{len(record['unresolved'])} unresolved edges")
+        if args.extended:
+            extra = record["extended"]
+            print(f"  extended: {len(extra['heuristic_frame_seeds'])} frame seeds, "
+                  f"{len(extra['interpreter_linear_pcs'])} interpreter continuations, "
+                  f"{len(extra['newly_reached_pcs'])} newly reached words, "
+                  f"{record['unvisited_aligned_words']} unvisited words")
     print(f"Receipt: {args.out}")
 
 

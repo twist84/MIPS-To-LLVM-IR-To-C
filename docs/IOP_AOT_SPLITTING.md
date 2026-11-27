@@ -221,3 +221,27 @@ batch lengths or native retirement, since region exits still return to
 the scheduler. Compare exact retail state and native retirement/entry
 counts before considering this default. One residual object per IRX may
 still be large; further partitioning or chaining is a separate experiment.
+
+## I8a: extended discovery shadow audit
+
+CRI_ADXI I7 screenshot: dispatcher about 408 KB, region 0 about 131 KB,
+residual region 27 about 8,371 KB (Explorer display units). The residual
+is a compatibility partition, not satisfactory function discovery.
+
+`audit_iop_function_discovery.py --extended` compares the original seed
+inventory against two independent additions: plausible unvisited stack
+frames (aligned negative ADDIU SP followed by in-frame stores ending in
+an RA save), and possible sequential continuation through CPU-supported
+LWL/LWR/SWL/SWR and exact supported COP0 encodings, including delay slots.
+Unsupported delay boundaries remain reported. These are candidate-only
+heuristics, not a proof of function ownership or native support; linked
+text may contain data. Baseline discovery and all existing build/cache
+paths are unchanged. The extended receipt records new reached words,
+frame seed evidence, interpreter continuations and ownership conflicts.
+Do not promote heuristics directly into the builder until audited.
+
+Next: compare receipts for CRI_ADXI/ARKD_DVD; then mine original IRX ELF
+symbols and relocations, preserve linked import stubs and code/data
+metadata, and resolve indirect targets from bounded register value
+analysis and observed guest PCs. Retain residual compatibility; if large
+regions remain, test bounded partitions separately from discovery.
