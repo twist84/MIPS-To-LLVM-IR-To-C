@@ -393,3 +393,25 @@ No guest memory is dereferenced; no GP value or table bounds assumed.
 Unknown incoming paths and producer values outside the window remain
 unresolved. This is diagnostic only; existing constant audit results,
 I11 build, runner, ABI and EE/VU1 artifacts are unchanged.
+
+## I12b measured result / I13a relocation-backed table shadow
+
+I12b receipt SHA256 d6e766e43278b5c2486996d3c0f82d13f0eec8f389052c7ca0402c50c3dffd0e:
+91 unresolved sites; 41 live-in, 38 register-address loads, 11 scaled-index
+loads, one constant-address load. ARKD_DVD four scaled-index JR sites:
+0x67790 / 0x724a8, 0x683b4 / 0x72548, 0x689c4 / 0x72620,
+0x69474 / 0x726c0 (site / table base). All bases beyond captured text.
+CRI_ADXI nested pointer loads are consistent with callback/vtable access,
+not proof of dynamic targets.
+
+I13a adds audit_iop_jump_tables.py. Reconstructs accepted discovery and
+producer slices; reopens the unique original ELF and verifies its SHA256
+against I10. Recognizes direct LW of constant plus index<<2 and signed
+offset, requires a unique allocated non-executable file-backed PROGBITS
+section, and scans at most 256 consecutive uniquely R_MIPS_32-relocated
+slots with aligned executable text targets. Reports original addend-based
+targets, whether a linked word was available for verification, known
+ownership and the first stopping reason. These are pointer-run candidates,
+not proven switch bounds or immutable live values. No automatic roots,
+CFG changes, builder changes or runtime changes. Missing scale/base
+producers and indirect calls remain outside this audit.

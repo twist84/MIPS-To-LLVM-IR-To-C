@@ -17,6 +17,7 @@ from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatch
 
 
 from audit_iop_indirect_targets import constant_indirect_targets
+from audit_iop_jump_tables import indexed_load_base, table_candidates
 
 
 BASE = 0x10000
@@ -314,6 +315,36 @@ class DiscoveryTest(unittest.TestCase):
         result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True))
         self.assertEqual(result["new_jump_targets"], [BASE + 16])
         self.assertEqual(result["new_call_candidates"], [])
+
+    def test_jump_table_shadow_outside_linked_text(self):
+        # index=a0, table=BASE+32, JR v0; two unvisited return targets.
+        meta, linked = capture([0x00041080, 0x3c030001, 0x00431021,
+                                 0x8c420020, 0x00400008, 0,
+                                 0x03e00008, 0])
+        discovery = inventory(meta, linked, extended=True)
+        indirect = constant_indirect_targets(meta, linked, discovery,
+                                             audit_producers=True)
+        self.assertEqual(indexed_load_base(indirect["unresolved"][0]["producer"]),
+                         BASE + 32)
+        original = linked + struct.pack("<3I", 24, 24, 24)
+        parsed = {"sections": [
+            {"name": ".text", "type": 1, "flags": 6, "address": 0, "size": 32},
+            {"name": ".data", "type": 1, "flags": 3, "address": 32, "size": 12}],
+            "relocations": [{"offset": 32, "type": 2}, {"offset": 36, "type": 2}]}
+        tables = table_candidates(meta, linked, parsed, original, discovery, indirect)
+        self.assertEqual(len(tables), 1)
+        table = tables[0]
+        self.assertEqual([x["target"] for x in table["entries"]], [BASE + 24] * 2)
+        self.assertEqual(table["stop"], "missing_or_ambiguous_r_mips_32")
+        self.assertFalse(table["bound_proven"])
+        self.assertFalse(table["entries"][0]["linked_word_verified"])
+        self.assertFalse(table["entries"][0]["already_ordinary"])
+        parsed["relocations"].append({"offset": 36, "type": 2})
+        self.assertEqual(len(table_candidates(meta, linked, parsed, original,
+                                              discovery, indirect)[0]["entries"]), 1)
+        parsed["sections"][1]["flags"] = 6
+        self.assertEqual(table_candidates(meta, linked, parsed, original,
+                                          discovery, indirect)[0]["entries"], [])
 
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:
