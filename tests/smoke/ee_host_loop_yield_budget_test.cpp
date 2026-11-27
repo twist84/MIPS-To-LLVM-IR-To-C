@@ -5,14 +5,16 @@
 
 namespace
 {
-int fail(const char* message)
+constexpr bool fail(const char* message)
 {
-    std::fprintf(stderr, "EE host loop yield budget: %s\n", message);
-    return 1;
+    if !consteval
+    {
+        std::fprintf(stderr, "EE host loop yield budget: %s\n", message);
+    }
+    return false;
 }
-}
-
-int main()
+ 
+consteval bool test_watchdog_budget()
 {
     // The old implementation exhausted sixteen *lifetime* resumes,
     // even when VBlank, GIF DMA and IOP RPC made real progress.
@@ -81,6 +83,14 @@ int main()
         return fail("fresh watchdog state was not bounded");
     }
 
-    std::puts("EE host loop yield budget: PASS");
+    return true;
+}
+
+static_assert(test_watchdog_budget(), "EE host loop yield budget regression");
+} // namespace
+
+int main()
+{
+    std::puts("EE host loop yield budget: compile-time PASS");
     return 0;
 }

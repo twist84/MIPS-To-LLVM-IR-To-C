@@ -13,7 +13,7 @@ namespace ee
 class c_host_loop_yield_budget
 {
 public:
-    bool try_resume(
+    constexpr bool try_resume(
         uint32_t limit, uint64_t gs_fields,
         uint64_t iop_rpc_sequence, uint64_t gif_writes
     )
@@ -41,17 +41,17 @@ public:
         return allowed;
     }
 
-    uint32_t without_progress() const
+    constexpr uint32_t without_progress() const
     {
         return m_without_progress;
     }
 
-    uint64_t total_resumes() const
+    constexpr uint64_t total_resumes() const
     {
         return m_total_resumes;
     }
 
-    uint64_t progress_resets() const
+    constexpr uint64_t progress_resets() const
     {
         return m_progress_resets;
     }
