@@ -199,7 +199,19 @@ public:
     }
     // A copied sound DMA is a real device event even when no IOP
     // guest threads are runnable. Needed for bounded idle scheduling.
-    uint32_t spu2_dma_cycles_remaining() const;
+    uint32_t spu2_dma_cycles_remaining() const
+    {
+        // Only active AutoDMA with bytes left requires the refill query.
+        if ((m_spu2_auto[0u].m_active && m_spu2_auto[0u].m_bytes != 0u) ||
+            (m_spu2_auto[1u].m_active && m_spu2_auto[1u].m_bytes != 0u))
+        {
+            return spu2_dma_refill_cycles_remaining();
+        }
+        const uint32_t first = m_spu2_dma_remaining[0u];
+        const uint32_t second = m_spu2_dma_remaining[1u];
+        return first == 0u ? second :
+            (second == 0u || first < second ? first : second);
+    }
     // Conservative interval to the next modeled device transition.
     // UINT64_MAX means none known; zero requires immediate service.
     // Does not authorize deferring externally initiated MMIO or DMA.
@@ -369,6 +381,7 @@ private:
     void assert_dma_irq(uint32_t& control, bool sif_channel);
     void start_spu2_dma(uint32_t core);
     void advance_spu2_dma(uint32_t cycles);
+    uint32_t spu2_dma_refill_cycles_remaining() const;
     void feed_spu2_input(uint32_t core);
     void advance_spu2_devices(uint32_t cycles);
     bool process_sio2_packet();
