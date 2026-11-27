@@ -349,42 +349,64 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
-def split_cache_key(source, provenance):
+def split_cache_key(source, provenance, reuse_ir=False):
     payload = {"schema": 1, "ir_sha256": sha256_file(source),
                "provenance": provenance}
+    if reuse_ir:
+        # The entire plan is validated before lifting. For the object cache
+        # only, identical IR and compiler inputs can survive a plan change.
+        # Retain capture, staged metadata, lifter and compiler identities.
+        if not isinstance(provenance, dict) or "plan_sha256" not in provenance:
+            raise ValueError("IR cache reuse requires plan provenance")
+        payload = {"schema": 2, "ir_sha256": payload["ir_sha256"],
+                   "source_name": source.name,
+                   "provenance": {key: value for key, value in provenance.items()
+                                  if key != "plan_sha256"}}
     return hashlib.sha256(json.dumps(payload, sort_keys=True,
                                     separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def cached_split_object(source, obj, cache, provenance, compile_object):
-    """Validate a complete immutable entry; publish only a successful object."""
+def cached_split_object(source, obj, cache, provenance, compile_object,
+                        reuse_ir=False):
+    """Validate immutable entries and optionally migrate the current plan's hit."""
     if cache is None:
         compile_object(source, obj)
         return False
-    key = split_cache_key(source, provenance)
+    key = split_cache_key(source, provenance, reuse_ir)
     entry = cache / key
 
-    def valid_entry():
+    def valid_entry(path, expected_key):
         try:
-            meta = json.loads((entry / "receipt.json").read_text(encoding="utf-8"))
-            binary = entry / "object.o"
-            return (meta["key"] == key and binary.stat().st_size > 0 and
+            meta = json.loads((path / "receipt.json").read_text(encoding="utf-8"))
+            binary = path / "object.o"
+            return (meta["key"] == expected_key and binary.stat().st_size > 0 and
                     meta["size"] == binary.stat().st_size and
                     meta["sha256"] == sha256_file(binary))
         except (OSError, ValueError, KeyError, TypeError):
             return False
 
     if entry.exists():
-        if not valid_entry():
+        if not valid_entry(entry, key):
             raise ValueError(f"invalid split object cache entry: {entry}")
         shutil.copyfile(entry / "object.o", obj)
         return True
 
-    compile_object(source, obj)
+    # Promote only the exact legacy key for this validated plan. Never
+    # scan or trust arbitrary old cache receipts from unrelated plans.
+    hit = False
+    if reuse_ir:
+        legacy_key = split_cache_key(source, provenance)
+        legacy = cache / legacy_key
+        if legacy.exists():
+            if not valid_entry(legacy, legacy_key):
+                raise ValueError(f"invalid split object cache entry: {legacy}")
+            shutil.copyfile(legacy / "object.o", obj)
+            hit = True
+    if not hit:
+        compile_object(source, obj)
     if obj.stat().st_size == 0:
         raise ValueError("empty split object")
-    # A temporary sibling directory makes the receipt and object visible
-    # together. A competing writer may win; never replace an existing key.
+    # Publish receipt and object atomically; keep legacy entries unchanged.
     with tempfile.TemporaryDirectory(prefix=".pending-", dir=cache) as tmp:
         pending = Path(tmp) / "entry"
         pending.mkdir()
@@ -395,9 +417,9 @@ def cached_split_object(source, obj, cache, provenance, compile_object):
         try:
             pending.rename(entry)
         except OSError:
-            if not valid_entry():
+            if not valid_entry(entry, key):
                 raise
-    return False
+    return hit
 
 
 def select_split_stems(staged, selected, all_modules=False):
@@ -448,7 +470,8 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
         obj = obj_dir / (source.stem + ".o")
         start = time.monotonic()
         hit = cached_split_object(source, obj, args.region_cache,
-                                  provenance_by_stem[stem], compile_object)
+                                  provenance_by_stem[stem], compile_object,
+                                  reuse_ir=getattr(args, "region_cache_ir_key", False))
         finish = time.monotonic()
         return stem, obj, start, finish, {
             "source": source.name, "object": obj.name, "cached": hit,
@@ -570,6 +593,8 @@ def main():
                         help="Experimental cross-block table ownership with adjacent candidate caps")
     parser.add_argument("--split-table-disc-root", type=Path,
                         help="Experimental: rederive non-exhaustive table edges from original IRXs")
+    parser.add_argument("--region-cache-ir-key", action="store_true",
+                        help="Opt-in exact-IR cache reuse across validated ownership plans")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
@@ -588,6 +613,8 @@ def main():
         parser.error("--split-residual-max-pcs requires --split-residual and a positive limit")
     if args.split_residual and not split_mode:
         parser.error("--split-residual requires --split-module or --split-all")
+    if args.region_cache_ir_key and args.region_cache is None:
+        parser.error("--region-cache-ir-key requires --region-cache")
     if args.region_cache is not None:
         if not split_mode:
             parser.error("--region-cache requires --split-module or --split-all")
