@@ -179,6 +179,53 @@ def iop_aot_observation(stderr, expected_libraries):
             "translated_ms": float(matches[0][5]), "refresh_ms": float(matches[0][6])}
 
 
+def iop_exit_profile(stderr, observation):
+    """Validate diagnostic rows against the existing terminal AOT totals."""
+    header = None
+    rows = []
+    keys = set()
+    pattern = (r"IOP EXIT ROW: base=([0-9a-f]{8}) hash=([0-9a-f]{16}) "
+               r"entry=([0-9a-f]{8}) resume=([0-9a-f]{8}) reason=(\d+) "
+               r"delay=(\d+) entries=(\d+) retired=(\d+) budget=(\d+) "
+               r"horizon=(\d+) zero=(\d+)")
+    with stderr.open(encoding="utf-8", errors="replace") as stream:
+        for line in stream:
+            line = line.strip()
+            if line.startswith("IOP EXIT PROFILE:"):
+                match = re.fullmatch(r"IOP EXIT PROFILE: keys=(\d+) dropped=(\d+)", line)
+                if header is not None or not match:
+                    raise ValueError("invalid or duplicate IOP exit profile header")
+                header = tuple(map(int, match.groups()))
+            elif line.startswith("IOP EXIT ROW:"):
+                match = re.fullmatch(pattern, line)
+                if header is None or not match:
+                    raise ValueError("invalid IOP exit profile row")
+                values = [int(v, 16) for v in match.groups()[:4]]
+                values += list(map(int, match.groups()[4:]))
+                key = tuple(values[:6])
+                entries, retired, budget, horizon, zero = values[6:]
+                if (key in keys or key[4] not in (0, 1) or key[5] not in (0, 1)
+                        or entries < 1 or max(budget, horizon, zero) > entries
+                        or budget + zero > entries or retired < entries - zero):
+                    raise ValueError("inconsistent IOP exit profile counters")
+                keys.add(key)
+                rows.append(dict(zip(("base", "hash", "entry", "resume", "reason",
+                                      "delay", "entries", "retired", "budget",
+                                      "horizon", "zero"), values)))
+    if observation is None:
+        if header is not None or rows:
+            raise ValueError("unexpected IOP exit profile in interpreter arm")
+        return None
+    if header != (len(rows), 0) or not rows:
+        raise ValueError("missing, incomplete or truncated IOP exit profile")
+    if (sum(r["entries"] for r in rows) != observation["entries"]
+            or sum(r["retired"] for r in rows) != observation["instructions"]):
+        raise ValueError("IOP exit profile totals differ from native totals")
+    return {"schema": 1, "keys": len(rows), "dropped": 0,
+            "entries": observation["entries"], "retired": observation["instructions"],
+            "rows": rows}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("runner", "elf", "disc", "profile", "source", "source-receipt",
@@ -188,6 +235,8 @@ def main():
                         help="single interpreter replay capturing linked IRX text outside archive")
     parser.add_argument("--candidate-iop-aot", type=Path,
                         help="compare interpreter against one IOP AOT library directory")
+    parser.add_argument("--profile-iop-exits", action="store_true",
+                        help="Diagnostic native exit attribution on IOP candidate only")
     parser.add_argument("--candidate-runner", type=Path,
                         help="matched alternative runner; same EE and VU1 images")
     parser.add_argument("--control-runner-sha256",
@@ -210,6 +259,8 @@ def main():
     try:
         if not 1 <= args.repeats <= 10 or not 1 <= args.max_dispatches <= 0xffffffff:
             raise ValueError("invalid repetitions or dispatch limit")
+        if args.profile_iop_exits and args.candidate_iop_aot is None:
+            raise ValueError("--profile-iop-exits requires --candidate-iop-aot")
         if args.profile_vu1 and args.candidate_vu1 is None:
             raise ValueError("--profile-vu1 requires --candidate-vu1")
         if bool(args.candidate_source) != bool(args.candidate_source_receipt):
@@ -270,6 +321,7 @@ def main():
                    SDBZ_PAD0_REPLAY=str(args.recording), SDBZ_VU1_AOT=str(args.vu1),
                    SDBZ_PROFILE_PCS="0", SDBZ_REPORT_BOUNDARY_TIMING="0",
                    SDBZ_REPORT_HOTSPOTS="0")
+        env.pop("SDBZ_IOP_AOT_EXIT_PROFILE", None)
         if args.capture_iop or iop_inventory is not None:
             for key in ("SDBZ_IOP_AOT", "SDBZ_IOP_AOT_VERIFY", "SDBZ_IOP_AOT_CAPTURE",
                         "SDBZ_IOP_AOT_BUILD_OUT"):
@@ -309,6 +361,7 @@ def main():
         elif iop_inventory is not None:
             receipt["schema"] = "ee-graphics-iop-aot-comparison-v1"
             receipt["candidate_iop_inventory"] = iop_inventory
+            receipt["profile_iop_exits"] = args.profile_iop_exits
             receipt["profile_both_arms"] = False
         elif args.capture_iop is not None:
             receipt["schema"] = "ee-graphics-iop-capture-v1"
@@ -337,6 +390,8 @@ def main():
                         arm_env["SDBZ_IOP_AOT_CAPTURE"] = str(args.capture_iop)
                     if iop_inventory is not None and name == "candidate":
                         arm_env["SDBZ_IOP_AOT"] = str(args.candidate_iop_aot)
+                        if args.profile_iop_exits:
+                            arm_env["SDBZ_IOP_AOT_EXIT_PROFILE"] = "1"
                     run = run_one(arm_args, image, directory, arm_env)
                     receipt["runs"][name].append(run)
                     run["directory"] = directory.name
@@ -360,6 +415,13 @@ def main():
                                 f"{name} exited {run['returncode']} before terminal budget")
                         run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
                             len(iop_inventory) if iop_inventory and name == "candidate" else 0)
+                        if args.profile_iop_exits:
+                            exits = iop_exit_profile(directory / "stderr.log", run["iop_aot"])
+                            if exits is not None:
+                                (directory / "iop-exit-profile.json").write_text(
+                                    json.dumps(exits, indent=2) + "\n", encoding="utf-8")
+                                run["iop_exit_profile"] = {
+                                    key: exits[key] for key in ("keys", "dropped", "entries", "retired")}
                     run.update(validate_run(args, directory, args.reference, args.recording, polls, run))
                     report = read_json(directory / "report.json")
                     require_match(report, reference)
