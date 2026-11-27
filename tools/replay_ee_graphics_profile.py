@@ -235,6 +235,8 @@ def main():
                         help="single interpreter replay capturing linked IRX text outside archive")
     parser.add_argument("--candidate-iop-aot", type=Path,
                         help="compare interpreter against one IOP AOT library directory")
+    parser.add_argument("--compare-iop-chain", action="store_true",
+                        help="Compare chain off/on using identical IOP DLLs and runner")
     parser.add_argument("--profile-iop-exits", action="store_true",
                         help="Diagnostic native exit attribution on IOP candidate only")
     parser.add_argument("--candidate-runner", type=Path,
@@ -259,6 +261,8 @@ def main():
     try:
         if not 1 <= args.repeats <= 10 or not 1 <= args.max_dispatches <= 0xffffffff:
             raise ValueError("invalid repetitions or dispatch limit")
+        if args.compare_iop_chain and (args.candidate_iop_aot is None or args.profile_iop_exits):
+            raise ValueError("--compare-iop-chain requires --candidate-iop-aot without exit profiling")
         if args.profile_iop_exits and args.candidate_iop_aot is None:
             raise ValueError("--profile-iop-exits requires --candidate-iop-aot")
         if args.profile_vu1 and args.candidate_vu1 is None:
@@ -322,6 +326,7 @@ def main():
                    SDBZ_PROFILE_PCS="0", SDBZ_REPORT_BOUNDARY_TIMING="0",
                    SDBZ_REPORT_HOTSPOTS="0")
         env.pop("SDBZ_IOP_AOT_EXIT_PROFILE", None)
+        env.pop("SDBZ_IOP_AOT_CHAIN", None)
         if args.capture_iop or iop_inventory is not None:
             for key in ("SDBZ_IOP_AOT", "SDBZ_IOP_AOT_VERIFY", "SDBZ_IOP_AOT_CAPTURE",
                         "SDBZ_IOP_AOT_BUILD_OUT"):
@@ -362,6 +367,9 @@ def main():
             receipt["schema"] = "ee-graphics-iop-aot-comparison-v1"
             receipt["candidate_iop_inventory"] = iop_inventory
             receipt["profile_iop_exits"] = args.profile_iop_exits
+            receipt["compare_iop_chain"] = args.compare_iop_chain
+            if args.compare_iop_chain:
+                receipt["schema"] = "ee-graphics-iop-chain-comparison-v1"
             receipt["profile_both_arms"] = False
         elif args.capture_iop is not None:
             receipt["schema"] = "ee-graphics-iop-capture-v1"
@@ -388,14 +396,18 @@ def main():
                                    SDBZ_VU1_AOT=str(aot))
                     if args.capture_iop:
                         arm_env["SDBZ_IOP_AOT_CAPTURE"] = str(args.capture_iop)
-                    if iop_inventory is not None and name == "candidate":
+                    if iop_inventory is not None and (name == "candidate" or args.compare_iop_chain):
                         arm_env["SDBZ_IOP_AOT"] = str(args.candidate_iop_aot)
                         if args.profile_iop_exits:
                             arm_env["SDBZ_IOP_AOT_EXIT_PROFILE"] = "1"
+                        if args.compare_iop_chain and name == "candidate":
+                            arm_env["SDBZ_IOP_AOT_CHAIN"] = "1"
                     run = run_one(arm_args, image, directory, arm_env)
                     receipt["runs"][name].append(run)
                     run["directory"] = directory.name
                     run["profile_enabled"] = enabled
+                    if args.compare_iop_chain:
+                        run["chain_enabled"] = name == "candidate"
                     if args.capture_iop or iop_inventory is not None:
                         # Partial observations remain useful even when a strict
                         # PAD replay stop prevents terminal AOT statistics.
@@ -414,7 +426,10 @@ def main():
                             raise ValueError(
                                 f"{name} exited {run['returncode']} before terminal budget")
                         run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
-                            len(iop_inventory) if iop_inventory and name == "candidate" else 0)
+                            len(iop_inventory) if iop_inventory and
+                            (name == "candidate" or args.compare_iop_chain) else 0)
+                        if args.compare_iop_chain and run["iop_aot"]["active"] != len(iop_inventory):
+                            raise ValueError("chain comparison requires all IOP libraries active")
                         if args.profile_iop_exits:
                             exits = iop_exit_profile(directory / "stderr.log", run["iop_aot"])
                             if exits is not None:
@@ -442,6 +457,18 @@ def main():
                                                   receipt["runs"]["candidate"])]
             elif not args.capture_iop:
                 receipt["profiling_overhead_ratio"] = medians["profiled"] / medians["control"] - 1
+            if args.compare_iop_chain:
+                pairs = []
+                for control, candidate in zip(receipt["runs"]["control"], receipt["runs"]["candidate"]):
+                    a, b = control["iop_aot"], candidate["iop_aot"]
+                    if a["instructions"] != b["instructions"]:
+                        raise ValueError("chain comparison native retirement changed")
+                    saved = a["entries"] - b["entries"]
+                    if saved <= 0:
+                        raise ValueError("chain comparison did not demonstrate fewer native entries")
+                    pairs.append({"control_entries": a["entries"], "candidate_entries": b["entries"],
+                                  "entries_saved": saved, "retired": a["instructions"]})
+                receipt["chain_pairs"] = pairs
             receipt["correctness_accepted"] = True
         except (OSError, ValueError, KeyError, TypeError) as error:
             receipt["error"] = str(error)
