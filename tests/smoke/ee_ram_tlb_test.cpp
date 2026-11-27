@@ -2824,6 +2824,123 @@ bool test_strict_reset_vif_devices()
         devices.device(1u).read_register(0x100u) == 0x5678u;
 }
 
+bool test_strict_reset_quadword_fifo()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[80u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    ee::c_ee_reset_vif_devices devices;
+    const auto vif = devices.transport();
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram,
+            nullptr, nullptr, &vif);
+    };
+    // Four real commands, two STCYCL separated by NOPs.
+    put(32u, 0x01000101u);
+    put(36u, 0u);
+    put(40u, 0x01000202u);
+    put(44u, 0u);
+    put(0u, 0x78880000u); // lq t0,0(a0)
+    put(4u, 0x7ca80000u); // sq t0,0(a1)
+    cpu.m_pc = pc;
+    cpu.m_gpr[4].m_lo = pc + 47u; // align down
+    cpu.m_gpr[8] = {~uint64_t{0}, ~uint64_t{0}};
+    if (step(1u).m_retired != 1u || cpu.m_gpr[8].m_lo != 0x01000101u ||
+        cpu.m_gpr[8].m_hi != 0x01000202u)
+    {
+        return false;
+    }
+    cpu.m_gpr[5].m_lo = pc + 63u;
+    if (step(1u).m_retired != 1u)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        if (code[48u + i] != code[32u + i])
+        {
+            return false;
+        }
+    }
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        cpu.m_pc = pc + 4u;
+        cpu.m_gpr[5].m_lo = channel == 0u ? 0xb000400fu : 0xb000500fu;
+        if (step(1u).m_retired != 1u || devices.fifo_count(channel) != 1u ||
+            devices.device(channel).read_register(0x40u) != 0x0202u ||
+            devices.last_fifo(channel).m_lo != 0x01000101u ||
+            devices.last_fifo(channel).m_hi != 0x01000202u)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc + 4u;
+    cpu.m_gpr[5].m_lo = 0xb0004000u;
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_pc != pc + 4u || devices.fifo_count(0u) != 1u)
+    {
+        return false;
+    }
+    cpu.m_gpr[5].m_lo = 0x90004000u;
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc + 4u)
+    {
+        return false;
+    }
+    cpu.m_gpr[5].m_lo = 0xb0004010u;
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || devices.fifo_count(0u) != 1u)
+    {
+        return false;
+    }
+    // A rejected parser command is not an accepted FIFO transfer.
+    cpu.m_gpr[5].m_lo = 0xb0004000u;
+    cpu.m_gpr[8] = {0x0f000000u, 0u};
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc + 4u ||
+        devices.fifo_count(0u) != 1u || devices.device(0u).read_register(0x40u) != 0x0202u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[4].m_lo = pc + 80u;
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+        cpu.m_gpr[8].m_lo != 0x0f000000u)
+    {
+        return false;
+    }
+    cpu.m_gpr[0] = {~uint64_t{0}, ~uint64_t{0}};
+    cpu.m_gpr[4].m_lo = pc + 32u;
+    put(0u, 0x78800000u); // lq zero,0(a0)
+    if (step(1u).m_retired != 1u || cpu.m_gpr[0].m_lo != ~uint64_t{0} ||
+        cpu.m_gpr[0].m_hi != ~uint64_t{0})
+    {
+        return false;
+    }
+    put(4u, 0x7ca00000u); // sq zero,0(a1)
+    cpu.m_gpr[5].m_lo = pc + 48u;
+    if (step(1u).m_retired != 1u)
+    {
+        return false;
+    }
+    for (uint32_t i = 48u; i < 64u; ++i)
+    {
+        if (code[i] != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3051,6 +3168,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_quadword_fifo(), "strict reset quadword RAM and VIF FIFO regression"))
     {
         return 1;
     }

@@ -187,22 +187,25 @@ struct s_ee_reset_sio_tx
 };
 
 // Opt-in device write transport for the isolated reset probe.
-// Only the observed canonical uncached VIF reset stores are admitted.
-// The device callback must commit a real reset or refuse without effects.
+// Only canonical uncached VIF reset stores and first FIFO ports are
+// admitted. The device callback must accept the real transfer or refuse.
 struct s_ee_reset_vif_write
 {
-    using t_write = bool (*)(void*, uint32_t, uint32_t);
+    using t_write = bool (*)(void*, uint32_t, uint32_t, const s_ee_u128*);
     void* m_user = nullptr;
     t_write m_write = nullptr;
 
-    constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address, uint32_t value) const
+    constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address,
+        const s_ee_u128& value) const
     {
+        const bool reset = bus.m_width == 4u && static_cast<uint32_t>(value.m_lo) == 1u &&
+            (address == 0xb0003810u || address == 0xb0003c10u);
+        const bool fifo = bus.m_width == 16u &&
+            (address == 0xb0004000u || address == 0xb0005000u);
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
-            bus.m_width == 4u && value == 1u &&
-            (address == 0xb0003810u || address == 0xb0003c10u) &&
-            bus.m_address == address - 0xa0000000u &&
-            m_write(m_user, bus.m_address, value);
+            (reset || fifo) && bus.m_address == address - 0xa0000000u &&
+            m_write(m_user, bus.m_address, bus.m_width, &value);
     }
 };
 
@@ -430,7 +433,7 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     return true;
 }
 
-// LBU/LW read ROM or explicitly backed uncached RAM; SB/SW write RAM.
+// LBU/LW/LQ read ROM or explicitly backed uncached RAM; SB/SW/SQ write RAM.
 // SB to the exact SIO TX register additionally requires an explicit sink.
 // Validate even with register zero. A refusal is diagnostic only;
 // this reset probe does not deliver architectural guest faults.
@@ -442,8 +445,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
-    const bool store = primary == 0x28u || primary == 0x2bu;
-    if (primary != 0x24u && primary != 0x23u && !store)
+    const bool quad = primary == 0x1eu || primary == 0x1fu;
+    const bool store = primary == 0x28u || primary == 0x2bu || primary == 0x1fu;
+    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu && !store)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -454,7 +458,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
     const bool word = primary == 0x23u || primary == 0x2bu;
-    const auto kind = word ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
+    const auto kind = quad ? e_ee_data_access_kind::GPR_QUADWORD :
+        word ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
     const auto plan = ee_plan_data_access(tlb, kind,
         store, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
@@ -462,8 +467,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         cpu.m_cop0[COP0_Config], ram.m_bytes != nullptr ? ram.m_size : 0u);
     // Restrict RAM accesses to canonical KSEG1, with no alias or
     // speculative fallback. ROM remains separately read-only.
-    const bool ram_address = address >= 0xa0000000u && address < 0xa2000000u &&
-        bus.m_address == address - 0xa0000000u;
+    const uint32_t access_address = plan.m_virtual_address;
+    const bool ram_address = access_address >= 0xa0000000u && access_address < 0xa2000000u &&
+        bus.m_address == access_address - 0xa0000000u;
     if (store)
     {
         if (!plan.m_fault.m_valid && sio != nullptr &&
@@ -471,8 +477,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
+        const s_ee_u128 value{read_gpr(cpu, rt), rt == 0u ? 0u : cpu.m_gpr[rt].m_hi};
         if (!plan.m_fault.m_valid && vif != nullptr &&
-            vif->write(bus, address, static_cast<uint32_t>(read_gpr(cpu, rt))))
+            vif->write(bus, access_address, value))
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
@@ -481,10 +488,10 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         {
             return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
         }
-        const uint32_t value = static_cast<uint32_t>(read_gpr(cpu, rt));
         for (uint32_t i = 0u; i < plan.m_width; ++i)
         {
-            target[i] = static_cast<uint8_t>(value >> (i * 8u));
+            const uint64_t half = i < 8u ? value.m_lo : value.m_hi;
+            target[i] = static_cast<uint8_t>(half >> ((i & 7u) * 8u));
         }
         return {result::COMMITTED, opcode, 0u, pc};
     }
@@ -495,7 +502,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         {
             bytes = ram.read_span(bus);
         }
-        else if (address >= 0xbfc00000u && address < 0xc0000000u)
+        else if (access_address >= 0xbfc00000u && access_address < 0xc0000000u)
         {
             bytes = rom.read_span(bus);
         }
@@ -506,9 +513,22 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     }
     if (rt != 0u)
     {
-        cpu.m_gpr[rt].m_lo = primary == 0x23u
-            ? sign_extend_word(ee_read_instruction_word(bytes))
-            : static_cast<uint64_t>(*bytes);
+        if (quad)
+        {
+            s_ee_u128 value{};
+            for (uint32_t i = 0u; i < 8u; ++i)
+            {
+                value.m_lo |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+                value.m_hi |= static_cast<uint64_t>(bytes[i + 8u]) << (i * 8u);
+            }
+            cpu.m_gpr[rt] = value;
+        }
+        else
+        {
+            cpu.m_gpr[rt].m_lo = primary == 0x23u
+                ? sign_extend_word(ee_read_instruction_word(bytes))
+                : static_cast<uint64_t>(*bytes);
+        }
     }
     return {result::COMMITTED, opcode, 0u, pc};
 }

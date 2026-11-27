@@ -101,6 +101,16 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         stop.m_opcode, stop.m_data_address, static_cast<unsigned>(entered_ram));
     std::printf("EE exploration VIF resets: vif0=%u vif1=%u\n",
         vif_devices.reset_count(0u), vif_devices.reset_count(1u));
+    std::printf("EE exploration VIF FIFO: vif0=%u vif1=%u\n",
+        vif_devices.fifo_count(0u), vif_devices.fifo_count(1u));
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        const auto value = vif_devices.last_fifo(channel);
+        std::printf("EE exploration VIF payload: channel=%u lo=%016llx hi=%016llx rejection=%u\n",
+            channel, static_cast<unsigned long long>(value.m_lo),
+            static_cast<unsigned long long>(value.m_hi),
+            static_cast<unsigned>(vif_devices.device(channel).diagnostic().m_reason));
+    }
     std::printf("EE exploration COP0: status=%08x config=%08x wired=%u random=%u\n",
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
@@ -1202,6 +1212,41 @@ int main(int argc, char** argv)
             retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
         return 72;
     }
+    // The two guest SQ stores must carry the same 16 bytes from the
+    // original image, not a canned initialization packet.
+    constexpr uint32_t vif_packet_offset = 0x0001a200u - destination;
+    static_assert(vif_packet_offset + 16u <= image_size);
+    const uint8_t* expected_packet = bytes.data() + source_offset + vif_packet_offset;
+    std::printf("EELOAD VIF FIFO: vif0=%u vif1=%u\n",
+        vif_devices.fifo_count(0u), vif_devices.fifo_count(1u));
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        const auto value = vif_devices.last_fifo(channel);
+        std::printf("EELOAD VIF payload: channel=%u lo=%016llx hi=%016llx rejection=%u\n",
+            channel, static_cast<unsigned long long>(value.m_lo),
+            static_cast<unsigned long long>(value.m_hi),
+            static_cast<unsigned>(vif_devices.device(channel).diagnostic().m_reason));
+    }
+    if (vif_devices.fifo_count(0u) != 1u || vif_devices.fifo_count(1u) != 1u)
+    {
+        std::fprintf(stderr, "EELOAD VIF FIFO checkpoint refused: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 73;
+    }
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        const auto value = vif_devices.last_fifo(channel);
+        for (uint32_t i = 0u; i < 16u; ++i)
+        {
+            const uint64_t half = i < 8u ? value.m_lo : value.m_hi;
+            if (static_cast<uint8_t>(half >> ((i & 7u) * 8u)) != expected_packet[i])
+            {
+                std::fprintf(stderr, "EELOAD VIF FIFO payload mismatch: channel=%u byte=%u\n", channel, i);
+                return 74;
+            }
+        }
+    }
+    std::printf("EELOAD VIF FIFO payload: 16/16 bytes matched per channel\n");
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);

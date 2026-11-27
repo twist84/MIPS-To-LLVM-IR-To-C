@@ -1083,3 +1083,26 @@ Extend v0.6 exploration to 32768 retirements and require both
 real reset writes and Wired=31; v0.7 requires both resets.
 LQ/SQ FIFO upload and later device dependencies remain blocked.
 New checkpoints and compilation pending CI. No retail replay.
+
+## M6E3E2: genuine firmware LQ/SQ and VIF FIFO uploads
+
+Both releases passed M6E3E1 on 29d55c1c:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46051791312
+VIF0/VIF1 each reset once, Wired=31. v0.6 stopped at
+671586 / a00166a0, v0.7 at 671778 / a00166c0, opcode
+78880000 (LQ t0,0(a0)). Packet source a001a200/a001a220.
+
+Use existing GPR_QUADWORD access planner (align down before
+translation) and full little-endian 128-bit RAM/ROM loads and
+RAM stores. Architectural zero reads/stores and load suppression
+apply to both halves. Full backing and canonical uncached
+access required. Admit SQ only to first canonical VIF FIFO
+ports via existing device parser, not generic device writes.
+Record accepted packets separately per channel; refused
+parser commands do not increment counts. Validate both
+v0.6 payloads against the original ROM's 16 bytes and require
+one actual accepted upload to each VIF in v0.7. Tests include
+RAM alignment, zero, missing backing, device refusal, parser
+rejection and real STCYCL state effects. Next anticipated
+boundary is INTC register b000f010; no fake IRQ readiness.
+No retail replay. New acceptance checks pending CI.
