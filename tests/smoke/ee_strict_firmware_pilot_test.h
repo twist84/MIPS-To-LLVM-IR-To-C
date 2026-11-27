@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdio>
+
 #include "ee_strict_firmware_pilot.h"
 #include <initializer_list>
 
@@ -923,21 +925,24 @@ bool test_strict_firmware_split_slots()
     constexpr uint32_t base = 0xbfc00000u;
     const auto iop_rom = make_firmware_pilot_rom({0x1000ffffu, 0u});
 
-    // JAL link visible to slot, Compare IRQ at interior cycle 8.
+    // JAL link visible to slot via 64-bit OR (not sign-extending ADDU).
+    // Compare IRQ at interior cycle 8.
     // Device time advances immediately; EE IRQ is sampled after slot.
     {
         ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
             0x40806000u, 0x34020008u, 0x40825800u, 0x3c020041u,
-            0x34428001u, 0x40826000u, 0u, 0x0ff00010u, 0x03e01821u}));
+            0x34428001u, 0x40826000u, 0u, 0x0ff00010u, 0x03e01825u}));
         if (!pilot.attach_iop(iop_rom, true))
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 1\n");
             return false;
         }
         for (uint32_t i = 0u; i < 7u; ++i)
         {
             if (pilot.step(1u).m_boundary != boundary::RETIRED)
             {
-                return false;
+                std::fprintf(stderr, "split-slot regression checkpoint 2\n");
+            return false;
             }
         }
         const auto first = pilot.step(2u);
@@ -947,6 +952,7 @@ bool test_strict_firmware_split_slots()
             pilot.cpu().m_gpr[31].m_lo != ee::ee_strict_link_address(base + 28u) ||
             pilot.cycle() != 8u || pilot.cpu().m_pc != base + 32u)
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 3\n");
             return false;
         }
         const auto slot = pilot.step(1u);
@@ -956,6 +962,7 @@ bool test_strict_firmware_split_slots()
             pilot.cpu().m_cop0[ee::COP0_EPC] != base + 64u ||
             (pilot.cpu().m_cop0[ee::COP0_Cause] & 0x80008000u) != 0x8000u)
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 4\n");
             return false;
         }
     }
@@ -970,6 +977,7 @@ bool test_strict_firmware_split_slots()
             pilot.step(1u).m_boundary != boundary::RETIRED ||
             !pilot.delay_slot_pending())
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 5\n");
             return false;
         }
         for (uint32_t attempt = 0u; attempt < 2u; ++attempt)
@@ -981,7 +989,8 @@ bool test_strict_firmware_split_slots()
                 pilot.cpu().m_pc != base + 8u ||
                 pilot.cpu().m_gpr[31].m_lo != ee::ee_strict_link_address(base + 4u))
             {
-                return false;
+                std::fprintf(stderr, "split-slot regression checkpoint 6\n");
+            return false;
             }
         }
     }
@@ -993,18 +1002,21 @@ bool test_strict_firmware_split_slots()
             0x40806000u, 0x3c04bfc0u, 0x34840040u, 0x00800008u, 0x34040001u}));
         if (!pilot.attach_iop(iop_rom, true))
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 7\n");
             return false;
         }
         for (uint32_t i = 0u; i < 5u; ++i)
         {
             if (pilot.step(1u).m_boundary != boundary::RETIRED)
             {
-                return false;
+                std::fprintf(stderr, "split-slot regression checkpoint 8\n");
+            return false;
             }
         }
         if (pilot.cpu().m_pc != base + 64u || pilot.cpu().m_gpr[4].m_lo != 1u ||
             pilot.delay_slot_pending() || pilot.cycle() != 5u)
         {
+            std::fprintf(stderr, "split-slot regression checkpoint 9\n");
             return false;
         }
     }
