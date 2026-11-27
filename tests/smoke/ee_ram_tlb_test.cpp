@@ -1704,6 +1704,109 @@ bool test_strict_reset_rom_word_and_logic()
     return true;
 }
 
+bool test_strict_reset_range_checks_and_byte_store()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xbfc00000u;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    std::vector<uint8_t> ram(0x2000u, 0xa5u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    const ee::s_ee_reset_ram_view backing{ram.data(), ram.size()};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    put(0u, 0x0065102bu); // sltu r2,r3,r5
+    struct s_compare
+    {
+        uint64_t m_left;
+        uint64_t m_right;
+        uint64_t m_expected;
+    };
+    constexpr s_compare comparisons[] =
+    {
+        {0u, 0u, 0u}, {0u, 1u, 1u},
+        {0x100000000ull, 1u, 0u},
+        {1u, 0x100000000ull, 1u},
+        {0xffffffffffffffffull, 1u, 0u},
+        {0x7fffffffffffffffull, 0x8000000000000000ull, 1u},
+        {0xffffffffbfc01090ull, 0xffffffffc0000000ull, 1u}
+    };
+    for (const auto& item : comparisons)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[2] = {0x9999u, 0x1234u};
+        cpu.m_gpr[3].m_lo = item.m_left;
+        cpu.m_gpr[5].m_lo = item.m_right;
+        if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+            cpu.m_gpr[2].m_lo != item.m_expected || cpu.m_gpr[2].m_hi != 0x1234u)
+        {
+            return false;
+        }
+    }
+
+    // Real LBU -> SB sequence with a negative store displacement.
+    put(4u, 0x90820000u);
+    put(8u, 0xa0c2ffffu);
+    rom[0x1000u] = 0xe7u;
+    cpu.m_pc = pc + 4u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfc01000ull;
+    cpu.m_gpr[6].m_lo = 0xffffffffa0001001ull;
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u, backing).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xe7u ||
+        ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_pc != pc + 8u || ram[0x1000u] != 0xa5u ||
+        ee::ee_execute_strict_rom_register_step(cpu, view, 1u, backing).m_retired != 1u ||
+        ram[0x1000u] != 0xe7u || ram[0xfffu] != 0xa5u || ram[0x1001u] != 0xa5u)
+    {
+        return false;
+    }
+    // Never write ROM, MMIO, cached/accelerated aliases, unmapped
+    // virtual addresses, or bytes outside actual backing.
+    put(12u, 0xa0c20000u);
+    for (const uint32_t address : {0xbfc01000u, 0xb0000000u, 0x80001000u,
+                                  0xa0002000u, 0xa2000000u, 0x00401000u})
+    {
+        cpu.m_pc = pc + 12u;
+        cpu.m_gpr[6].m_lo = address;
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, view, 1u, backing);
+        if (step.m_result != result::DATA_UNAVAILABLE || step.m_retired != 0u ||
+            step.m_data_address != address || cpu.m_pc != pc + 12u ||
+            rom[0x1000u] != 0xe7u || ram[0x1000u] != 0xe7u)
+        {
+            return false;
+        }
+    }
+    // SB zero ignores the stored contents of the architectural zero
+    // register. Execute it in a delay slot at the last backed byte.
+    put(16u, 0x10000003u);
+    put(20u, 0xa0c00000u);
+    cpu.m_pc = pc + 16u;
+    cpu.m_gpr[0] = {0xdeadbeefu, 0x1234u};
+    cpu.m_gpr[6].m_lo = 0xa0002000u;
+    const auto rejected = ee::ee_execute_strict_rom_register_step(cpu, view, 2u, backing);
+    if (rejected.m_result != result::DATA_UNAVAILABLE ||
+        rejected.m_detail_pc != pc + 20u || cpu.m_pc != pc + 16u ||
+        ram.back() != 0xa5u)
+    {
+        return false;
+    }
+    cpu.m_gpr[6].m_lo = 0xa0001fffu;
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u, backing).m_result != result::BUDGET_EXHAUSTED ||
+        ram.back() != 0xa5u || cpu.m_pc != pc + 16u)
+    {
+        return false;
+    }
+    return ee::ee_execute_strict_rom_register_step(cpu, view, 2u, backing).m_retired == 2u &&
+           cpu.m_pc == pc + 32u && ram.back() == 0u &&
+           ram[ram.size() - 2u] == 0xa5u && cpu.m_gpr[0].m_lo == 0xdeadbeefu;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1931,6 +2034,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_range_checks_and_byte_store(), "strict reset SLTU and RAM byte store regression"))
     {
         return 1;
     }

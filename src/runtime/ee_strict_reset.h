@@ -82,6 +82,27 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
     return {result::COMMITTED, opcode, 1u};
 }
 
+// Explicit caller-owned, isolated main RAM backing for the reset copy.
+// The physical bus planner excludes aliases, ROM and device windows;
+// no guest fetch from this mutable view is supported yet.
+struct s_ee_reset_ram_view
+{
+    uint8_t* m_bytes = nullptr;
+    size_t m_size = 0u;
+
+    constexpr uint8_t* write_span(const s_ee_bus_span_plan& bus) const
+    {
+        if (m_bytes == nullptr || bus.m_region != e_ee_bus_region::RAM ||
+            bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED ||
+            !ee_bus_span_inside(bus.m_address, bus.m_width, 0u, 0x02000000u) ||
+            static_cast<uint64_t>(bus.m_address) + bus.m_width > m_size)
+        {
+            return nullptr;
+        }
+        return m_bytes + bus.m_address;
+    }
+};
+
 namespace strict_reset_detail
 {
 inline constexpr uint64_t read_gpr(const s_ee_cpu_state& cpu, uint32_t reg)
@@ -124,6 +145,9 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         case 0x27u: // NOR: both low 64-bit operands
             value = ~(read_gpr(cpu, rs) | read_gpr(cpu, rt));
             break;
+        case 0x2bu: // SLTU: unsigned comparison of both low 64-bit halves
+            value = read_gpr(cpu, rs) < read_gpr(cpu, rt) ? 1u : 0u;
+            break;
         default:
             return false;
         }
@@ -162,15 +186,18 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     return true;
 }
 
-// LBU/LW must validate even when the destination is zero. A refusal
-// is diagnostic only: this ROM probe does not deliver guest faults.
+// LBU/LW read only ROM; SB writes only explicitly supplied isolated RAM.
+// Validate even with register zero. A refusal is diagnostic only;
+// this reset probe does not deliver architectural guest faults.
 inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
-    const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode)
+    const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode,
+    const s_ee_reset_ram_view& ram)
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
-    if (primary != 0x24u && primary != 0x23u)
+    const bool store = primary == 0x28u;
+    if (primary != 0x24u && primary != 0x23u && !store)
     {
         return {execute_register_word(cpu, opcode) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -183,10 +210,20 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const auto kind = primary == 0x23u
         ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
     const auto plan = ee_plan_data_access(tlb, kind,
-        false, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
+        store, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
     const auto bus = ee_plan_data_bus_span(plan.m_access, plan.m_width,
-        cpu.m_cop0[COP0_Config], 0u);
+        cpu.m_cop0[COP0_Config], ram.m_bytes != nullptr ? ram.m_size : 0u);
+    if (store)
+    {
+        uint8_t* target = plan.m_fault.m_valid ? nullptr : ram.write_span(bus);
+        if (target == nullptr)
+        {
+            return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+        }
+        *target = static_cast<uint8_t>(read_gpr(cpu, rt));
+        return {result::COMMITTED, opcode, 0u, pc};
+    }
     const uint8_t* bytes = plan.m_fault.m_valid ? nullptr : rom.read_span(bus);
     if (bytes == nullptr)
     {
@@ -202,13 +239,14 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 }
 } // namespace strict_reset_detail
 
-// Isolated post-Status-clear ROM-only execution. The caller owns all
-// state and establishes the absence of pending clock/device effects.
-// BEQ/BNE and their supported register/ROM-read slots are a single
-// bounded transaction: an unavailable/unsupported slot leaves the
-// branch PC and GPRs unchanged. No guest fault is invented by refusal.
+// Isolated post-Status-clear ROM instruction execution. The caller
+// owns all backing/state and excludes pending clock/device effects.
+// BEQ/BNE and their supported register/ROM-read/RAM-store slots are
+// a single bounded transaction. A refused slot changes no state.
+// No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
-    s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget)
+    s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
+    const s_ee_reset_ram_view& ram = {})
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -253,7 +291,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
             return {result::FETCH_UNAVAILABLE, 0u, 0u, pc + 4u};
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-            pc + 4u, ee_read_instruction_word(slot));
+            pc + 4u, ee_read_instruction_word(slot), ram);
         if (action.m_result != result::COMMITTED)
         {
             return action;
@@ -262,7 +300,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-        cpu.m_pc, opcode);
+        cpu.m_pc, opcode, ram);
     if (action.m_result != result::COMMITTED)
     {
         return action;

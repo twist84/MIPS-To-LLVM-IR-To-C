@@ -159,9 +159,67 @@ int main(int argc, char** argv)
         static_cast<unsigned long long>(cpu.m_gpr[8].m_lo),
         static_cast<unsigned long long>(cpu.m_gpr[9].m_lo), cpu.m_pc);
 
+    // Independently validate the pinned image's matched directory
+    // record and all observed range checks through the first copy byte.
+    constexpr uint32_t match_checkpoint = 183u;
+    while (retired < match_checkpoint)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            match_checkpoint - retired);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > match_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EE reset directory match refused: pc=%08x opcode=%08x result=%u retired=%u\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 15;
+        }
+        retired += action.m_retired;
+    }
+    constexpr uint32_t source_offset = 0x1090u;
+    constexpr uint32_t image_size = 0xa3a8u;
+    constexpr uint32_t destination = 0x10000u;
+    const uint32_t directory_size = ee::ee_read_instruction_word(bytes.data() + 0x104cu);
+    if (cpu.m_pc != 0xbfc000d0u ||
+        cpu.m_gpr[8].m_lo != 0xffffffffbfc01040ull ||
+        cpu.m_gpr[9].m_lo != 0xffffffffbfc01090ull ||
+        cpu.m_gpr[10].m_lo != image_size || directory_size != image_size ||
+        cpu.m_gpr[11].m_lo != 0xffffffffa0010000ull)
+    {
+        std::fprintf(stderr, "EE matched directory entry mismatch\n");
+        return 16;
+    }
+    constexpr uint32_t copy_read_checkpoint = 199u;
+    while (retired < copy_read_checkpoint)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            copy_read_checkpoint - retired);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > copy_read_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EE reset range validation refused: pc=%08x opcode=%08x result=%u retired=%u\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 17;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xbfc00110u ||
+        cpu.m_gpr[12].m_lo != bytes[source_offset] ||
+        cpu.m_gpr[13].m_lo != 0xffffffffbfc0b438ull)
+    {
+        std::fprintf(stderr, "EE first image byte state mismatch\n");
+        return 18;
+    }
+    std::printf("EE reset image read: retired=%u source=bfc01090 size=%08x byte=%02x destination=a0010000 pc=%08x\n",
+        retired, image_size, static_cast<unsigned>(bytes[source_offset]), cpu.m_pc);
+    // Main RAM is diagnostic caller-owned backing, not live runtime
+    // state. Initialize to a sentinel to distinguish guest stores from
+    // unchanged host storage; never pre-copy the firmware.
+    std::vector<uint8_t> ram_bytes(0x02000000u, 0xa5u);
+    const ee::s_ee_reset_ram_view ram{ram_bytes.data(), ram_bytes.size()};
+
     // Explore the actual supported prefix, not an invented device
     // response. Preserve a small committed tail for diagnosis.
-    constexpr uint32_t exploration_budget = 65536u;
+    constexpr uint32_t exploration_budget = 1000000u;
     struct s_trace
     {
         uint32_t m_pc;
@@ -178,7 +236,7 @@ int main(int argc, char** argv)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_budget - retired);
+            exploration_budget - retired, ram);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -207,6 +265,26 @@ int main(int argc, char** argv)
         std::printf("EE reset GPR: r%02u=%016llx\n", i,
             static_cast<unsigned long long>(i == 0u ? 0u : cpu.m_gpr[i].m_lo));
     }
+    // Count content equality, not assumed stores: an unchanged
+    // sentinel can coincidentally equal a ROM byte. A complete match
+    // verifies contents, not transfer count or execution of RAM code.
+    uint32_t matching = 0u;
+    uint32_t matching_prefix = 0u;
+    for (uint32_t i = 0u; i < image_size; ++i)
+    {
+        if (ram_bytes[destination + i] == bytes[source_offset + i])
+        {
+            ++matching;
+            if (matching_prefix == i)
+            {
+                ++matching_prefix;
+            }
+        }
+    }
+    std::printf("EE reset RAM image: matching=%u/%u matching_prefix=%u guard_before=%02x guard_after=%02x\n",
+        matching, image_size, matching_prefix,
+        static_cast<unsigned>(ram_bytes[destination - 1u]),
+        static_cast<unsigned>(ram_bytes[destination + image_size]));
     const auto next = ee::ee_plan_instruction_fetch(tlb, cpu.m_pc,
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);

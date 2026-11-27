@@ -743,3 +743,35 @@ width, reserved encoding and six directory file sizes.
 The authentic checkpoint is not yet validated; CI pending.
 No production native/HLE changes, RAM execution, device response
 or retail replay.
+
+## Strict memory follow-up M6E2E: ROM image bounds and isolated RAM stores
+
+M6E2D CI run 46044342913/job 140659711102 validated the first
+directory iteration and reached 183 retirements. Guest ROM scan
+matched the entry at bfc01040, source bfc01090, length a3a8,
+destination a0010000; next unsupported opcode was 014d682b
+(SLTU) at bfc000d0.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46044342913/job/140659711102
+
+Add canonical unsigned 64-bit SLTU and SB to the reset interpreter.
+SB requires explicit caller-owned backing and the existing write
+translation, uncached canonical RAM bus classification and actual
+allocation bounds. Do not accept ROM stores, devices, cached or
+unmapped addresses. Preserve all non-written bytes. A rejected
+slot leaves the branch restart state intact. No default RAM backing
+or production path changes.
+
+The pinned image probe independently requires the observed 183
+retirements and matching directory record, then 199 retirements
+through the first image byte read and bounds checks. The RAM
+allocation is sentinel-initialized, not preloaded with firmware.
+Explore up to one million actual retirements with explicit RAM
+backing, reporting matched image byte count and contiguous prefix
+against the immutable source. A match is a content comparison,
+not a store count. No RAM instruction fetch, device access,
+cache/clock simulation or synthetic boot result is introduced.
+
+Directed tests cover full-width unsigned comparisons, byte copying,
+negative displacement, zero-register stores, missing backing,
+wrong regions, physical bounds, and successful/refused/budgeted
+delay-slot stores. CI pending; no retail replay.
