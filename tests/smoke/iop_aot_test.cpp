@@ -8,6 +8,7 @@
 
 #include "iop_aot.h"
 #include "iop_cpu.h"
+#include "iop_hw.h"
 #include "iop_ir_lifter.h"
 
 #include <cstdio>
@@ -22,6 +23,7 @@ namespace
 {
 constexpr uint32_t k_base = 0x00010000u;
 constexpr uint32_t k_data = 0x00020000u;
+constexpr uint32_t k_mmio_pc = k_base + 0x200u;
 
 uint32_t r_type(uint32_t rs, uint32_t rt, uint32_t rd, uint32_t sa, uint32_t funct)
 {
@@ -100,6 +102,20 @@ std::vector<uint32_t> program()
     p.push_back(r_type(ra, 0, 0, 0, 0x08));             // jr ra
     p.push_back(i_type(0x09, v0, v0, 1));               // addiu v0,v0,1 (delay)
     p[call_site] = j_type(0x03, func);
+    p.resize((k_mmio_pc - k_base) / 4u, 0u);
+    // Native RAM/ALU work followed by device accesses, including a
+    // device read in a translated branch's delay slot.
+    p.push_back(i_type(0x0f, zero, t0, 0x1f80));
+    p.push_back(i_type(0x0d, t0, t0, 0x14a0));
+    p.push_back(i_type(0x09, zero, t1, 7));
+    p.push_back(i_type(0x2b, t0, t1, 0)); // timer5 COUNT = 7
+    p.push_back(i_type(0x23, t0, t2, 0)); // reads COUNT after retirement
+    p.push_back(i_type(0x04, zero, zero, 2));
+    p.push_back(i_type(0x23, t0, t3, 0)); // MMIO in delay slot
+    p.push_back(i_type(0x09, zero, t3, 0x5555)); // skipped
+    p.push_back(i_type(0x23, t0, t4, 4)); // timer5 MODE
+    p.push_back(i_type(0x23, t0, t5, 0));
+    p.push_back(0x0000000cu); // syscall
     return p;
 }
 
@@ -197,6 +213,66 @@ bool compare_slices(iop::c_iop_aot& aot, uint32_t budget)
     }
     return false;
 }
+bool compare_hardware_slices(iop::c_iop_aot& aot, uint32_t budget)
+{
+    iop::c_hw reference_hw, translated_hw;
+    iop::c_cpu reference, translated;
+    reference.bind_hardware(&reference_hw);
+    translated.bind_hardware(&translated_hw);
+    const auto code = program();
+    for (auto* cpu : {&reference, &translated})
+    {
+        cpu->reset(k_mmio_pc);
+        for (size_t i = 0u; i < code.size(); ++i)
+        {
+            if (!cpu->write32(k_base + static_cast<uint32_t>(i) * 4u, code[i]))
+            {
+                return false;
+            }
+        }
+        // A real timer compare interrupts the native instruction window.
+        if (!cpu->write32(iop::c_hw::k_timer5_target, 2u) ||
+            !cpu->write32(iop::c_hw::k_timer5_mode, 0x58u))
+        {
+            return false;
+        }
+    }
+    aot.refresh(translated);
+    translated.set_aot(&aot);
+    const uint64_t native_before = aot.instructions();
+    for (uint32_t slice = 0u; slice < 32u; ++slice)
+    {
+        const auto a = reference.run(budget);
+        const auto b = translated.run(budget);
+        const auto& x = reference.state();
+        const auto& y = translated.state();
+        const auto h1 = reference_hw.scheduler_checkpoint();
+        const auto h2 = translated_hw.scheduler_checkpoint();
+        if (a.m_result != b.m_result || a.m_instructions != b.m_instructions ||
+            a.m_pc != b.m_pc || a.m_opcode != b.m_opcode ||
+            reference.cycles() != translated.cycles() ||
+            x.m_pc != y.m_pc || x.m_next_pc != y.m_next_pc ||
+            x.m_in_delay_slot != y.m_in_delay_slot ||
+            x.m_branch_pc != y.m_branch_pc ||
+            std::memcmp(x.m_gpr, y.m_gpr, sizeof(x.m_gpr)) != 0 ||
+            h1.m_timer_count != h2.m_timer_count ||
+            h1.m_timer_mode != h2.m_timer_mode ||
+            h1.m_timer_remainder != h2.m_timer_remainder ||
+            h1.m_timer_armed != h2.m_timer_armed ||
+            h1.m_irq_stat != h2.m_irq_stat)
+        {
+            std::fprintf(stderr, "IOP device slice mismatch: budget=%u slice=%u\n",
+                budget, slice);
+            return false;
+        }
+        if (a.m_result != iop::e_step_result::budget_exhausted)
+        {
+            return a.m_result == iop::e_step_result::syscall &&
+                aot.instructions() > native_before;
+        }
+    }
+    return false;
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -278,6 +354,7 @@ int main(int argc, char** argv)
         for (uint32_t budget = 1u; budget <= 17u; ++budget)
         {
             check(compare_slices(aot, budget), "exact per-slice native budget and state");
+            check(compare_hardware_slices(aot, budget), "exact MMIO and timer retirement");
         }
         for (int r = 0; r < 32; ++r)
         {
