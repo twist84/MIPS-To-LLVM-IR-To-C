@@ -848,3 +848,55 @@ unprofiled report/screenshot hashes. No EE IR, EE DLL, or VU1
 regeneration required. Select the next deeper IOP attribution or
 optimization from measured counts and sampled costs rather than
 assuming all zero-guest batches are dispensable.
+
+## G8A — matched retail attribution results
+
+ee-iop-g8a.zip SHA-256
+672614cbf0bd8e51cc1312a7574d4fbc5da0aa9b97a1ac0d003496c8014a8f12.
+Runner SHA-256 c30ef749a044b3cdaf3a39de10c43c65280960cc6f9779c17a005e1b15d86e6d.
+G6A EE DLL and receipt match accepted identities; V30, fixed RTC,
+synchronous workers, quiet/coalescing disabled. Receipt reports input
+integrity; original binaries are not included in the archive.
+
+All four arms reached 40M dispatches, 3127/3127 PAD polls, 184700
+matching sampled transitions, 21910026110 EE attempts, 22115080673
+EE cycles, 4494 fields, 3221 presentations, 394881 native VU1 runs,
+445669423 native pairs, 84 programs, no fallbacks, IOP guest faults,
+timing observer failures or IOP cycle debt. Independently verified
+both raw control terminal report hashes, all four PPM hashes,
+normalized architectural reports, archived dispatch maps (184719
+trace lines, 184700 unique dispatches) and PAD footers.
+
+| Pair | Control s | Profiled s |
+|---|---:|---:|
+| 1 | 41.204 | 48.343 |
+| 2 | 41.188 | 48.500 |
+
+Median 41.196 -> 48.4215s, combined profiling overhead 17.54%.
+Mean profiled runner wall 44.6594785s; IOP exclusive 7.38566495s
+(16.54%), VU1 compiled 11.38917265s, EE native 7.98029805s.
+IOP service scope counts match 40031635 scheduled checkpoints.
+
+Both profiled arms: 7689405 checkpoints without debt (19.21%),
+42578752 physical batches, 37351298 no-guest batches (87.72%),
+5227454 guest batches (12.28%), 80966947 executed instructions,
+2764385078 requested cycles, zero quiet advances, 42578752 RPC
+pumps. 145939 no-guest and 20384 guest samples per arm (166323
+total; final partial sample group contributed none). No profile
+lines in control. Mean pooled sampled nanoseconds per batch:
+
+| Scope | No guest | Guest |
+|---|---:|---:|
+| Planner | 24.95 | 25.68 |
+| Kernel | 79.83 | 653.70 |
+| RPC | 25.64 | 24.90 |
+
+Small timings include measurement overhead; naive scaling is not
+a validated exclusive decomposition. In particular no-guest does
+not imply no device work. Prior quiet/coalescing short matched
+experiments at f8c379a/fb6da91 did not establish a speedup despite
+avoiding many scheduler calls. Do not simply enable those options
+or repeat their implementation. Next attribute inside the kernel
+and select improvements to necessary work. G8A retail correctness
+accepted; CI at 225f663 had four passed, Build and test running
+at first review; no new performance gain claimed.
