@@ -136,12 +136,8 @@ def prepare_captures(capture, destination):
     return len(records)
 
 
-def relocation_receipt_roots(receipt, metadata, data, baseline):
-    """Select unique capture identity and recheck each proposed linked JAL.
-
-    The receipt is candidate evidence, not authoritative ownership.
-    Recompute the entire CFG using the current capture and discovery code.
-    """
+def relocation_receipt_match(receipt, metadata, data):
+    """Select the single original ELF record for a linked capture identity."""
     if receipt.get("schema") != 1 or receipt.get("kind") != "iop_original_irx_metadata":
         raise ValueError("invalid relocation receipt schema")
     identity = {"base": metadata["base"], "text_size": len(data),
@@ -156,7 +152,12 @@ def relocation_receipt_roots(receipt, metadata, data, baseline):
             matches.append(record)
     if len(matches) != 1:
         raise ValueError("relocation receipt needs one unique capture identity")
-    record = matches[0]
+    return matches[0]
+
+
+def relocation_receipt_roots(receipt, metadata, data, baseline):
+    """Recheck linked JALs; never consume saved ownership lists."""
+    record = relocation_receipt_match(receipt, metadata, data)
     shadow = record["relocation_discovery"]
     if (shadow["previous_candidate_count"] != baseline["candidate_count"] or
             shadow["previous_unvisited_words"] != baseline["unvisited_aligned_words"]):
@@ -192,8 +193,48 @@ def relocation_receipt_roots(receipt, metadata, data, baseline):
     return sorted(roots)
 
 
+def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root):
+    """Reconstruct candidate edges from the original ELF and linked bytes.
+
+    Tables are not assumed immutable or exhaustive. Only discovery ownership
+    changes; the residual and dynamic indirect dispatch domains remain intact.
+    """
+    from audit_iop_indirect_targets import constant_indirect_targets
+    from audit_iop_irx_metadata import (parse_irx, capture_mismatches,
+                                        compare_capture, discover_relocation_roots)
+    from audit_iop_jump_tables import table_candidates, discover_table_edges
+
+    record = relocation_receipt_match(receipt, metadata, data)
+    disc = disc_root.resolve()
+    elf = (disc / record["path"]).resolve()
+    if not elf.is_relative_to(disc):
+        raise ValueError("ELF path escapes disc root")
+    raw = elf.read_bytes()
+    if hashlib.sha256(raw).hexdigest() != record["elf_sha256"]:
+        raise ValueError(f"original ELF changed: {elf}")
+    parsed, original = parse_irx(raw)
+    # Staging intentionally canonicalizes the descriptor name. Recover the
+    # original captured name from the identity-matched receipt for ELF checks.
+    original_metadata = dict(metadata, name=record["comparison"]["captured_name"])
+    if capture_mismatches(original_metadata, data, parsed):
+        raise ValueError(f"original ELF metadata differs: {elf}")
+    initial = inventory(metadata, data, extended=True)
+    comparison = compare_capture(original_metadata, data, parsed, original, initial)
+    verified = discover_relocation_roots(metadata, data, parsed, comparison, initial)
+    if sorted(row["entry"] for row in verified["new_roots"]) != roots:
+        raise ValueError("original ELF relocation roots differ from receipt")
+    indirect = constant_indirect_targets(metadata, data, baseline, audit_producers=True)
+    tables = table_candidates(metadata, data, parsed, original, baseline, indirect)
+    shadow = discover_table_edges(metadata, data, baseline, roots, tables)
+    expanded = shadow["inventory"]
+    print(f"split tables: {len(shadow['candidate_edges'])} candidate edges, "
+          f"{len(shadow['newly_reached_pcs'])} newly reached words, "
+          f"{len(shadow['new_function_entries'])} new roots")
+    return expanded
+
+
 def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
-                        relocation_receipt=None):
+                        relocation_receipt=None, table_disc_root=None):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
@@ -206,12 +247,20 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
     if extended and not residual:
         raise ValueError("extended discovery requires residual dispatch coverage")
     report = inventory(metadata, data, extended=extended)
+    if table_disc_root is not None and relocation_receipt is None:
+        raise ValueError("table discovery requires relocation evidence")
     if relocation_receipt is not None:
         if not (extended and residual):
             raise ValueError("relocation discovery requires extended residual coverage")
         roots = relocation_receipt_roots(relocation_receipt, metadata, data, report)
         report = inventory(metadata, data, extended=True, relocated_call_entries=roots)
         print(f"split relocations: {len(roots)} verified candidate roots")
+        if table_disc_root is not None:
+            if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"]
+                    or report["rejected_seeds"]):
+                raise ValueError("ambiguous baseline ownership")
+            report = table_backed_inventory(metadata, data, report, relocation_receipt,
+                                            roots, table_disc_root)
     if (report["shared_ordinary_pcs"] or report["ordinary_delay_overlap"] or
             report["rejected_seeds"] or len(data) % 4):
         raise ValueError("split pilot refuses ambiguous or invalid ownership")
@@ -487,10 +536,14 @@ def main():
                         help="Experimental extended discovery; requires --split-residual")
     parser.add_argument("--split-relocation-receipt", type=Path,
                         help="Use unique relocation evidence from an original IRX audit")
+    parser.add_argument("--split-table-disc-root", type=Path,
+                        help="Experimental: rederive non-exhaustive table edges from original IRXs")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
     split_mode = args.split_all or bool(args.split_module)
+    if args.split_table_disc_root is not None and args.split_relocation_receipt is None:
+        parser.error("--split-table-disc-root requires --split-relocation-receipt")
     if args.split_relocation_receipt is not None and not (
             split_mode and args.split_extended and args.split_residual):
         parser.error("--split-relocation-receipt requires extended residual splitting")
@@ -583,7 +636,8 @@ def build(args, out):
                 plan = prepare_split_pilot(staged, stem, pilot,
                                            residual=args.split_residual,
                                            extended=args.split_extended,
-                                           relocation_receipt=relocation_receipt)
+                                           relocation_receipt=relocation_receipt,
+                                           table_disc_root=args.split_table_disc_root)
                 subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
                 provenance_by_stem[stem] = (
                     {**common_provenance,
