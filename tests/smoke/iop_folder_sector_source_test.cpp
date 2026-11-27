@@ -218,6 +218,28 @@ int main()
         fs::remove(card);
     }
 
+    {
+        // Non-ASCII host card names must remain UTF-8 and be excluded
+        // before validating the guest ISO9660 filename alphabet.
+        const fs::path card = temporary.m_path / fs::path(u8"Mcd-\u00e9.ps2");
+        if (!write_file(card, {'M', 'C'}))
+        {
+            return fail("cannot create UTF-8 host card fixture");
+        }
+        const iop::c_folder_sector_source with_card(temporary.m_path, card);
+        if (!with_card.valid() || with_card.sector_count() != source.sector_count())
+        {
+            return fail("UTF-8 mounted card affected guest disc layout");
+        }
+        const iop::c_folder_sector_source without_card(temporary.m_path);
+        if (without_card.valid() ||
+            without_card.error().find("Mcd-\xc3\xa9.ps2") == std::string::npos)
+        {
+            return fail("non-ISO9660 UTF-8 filename was not reported byte-exactly");
+        }
+        fs::remove(card);
+    }
+
 #ifndef _WIN32
     {
         const fs::path duplicate_root = temporary.m_path / "COLLISION";
