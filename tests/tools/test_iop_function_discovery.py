@@ -21,7 +21,8 @@ from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatch
 
 
 from audit_iop_indirect_targets import constant_indirect_targets
-from audit_iop_jump_tables import indexed_load_base, table_candidates, discover_table_edges
+from audit_iop_jump_tables import (indexed_load_base, table_candidates,
+                                   cap_adjacent_tables, discover_table_edges)
 
 
 BASE = 0x10000
@@ -451,6 +452,50 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "requires relocation evidence"):
                 prepare_split_pilot(root, "CANONICAL", root / "missing",
                                     residual=True, extended=True, table_disc_root=disc)
+
+    def test_adjacent_table_cap_is_candidate_only(self):
+        def table(site, address, targets):
+            return {"site": site, "table_base": address, "bound_proven": False,
+                    "stop": "missing_or_ambiguous_r_mips_32",
+                    "entries": [{"slot": address + 4 * i, "target": target}
+                                for i, target in enumerate(targets)]}
+
+        tables = [table(BASE, BASE + 64, [BASE + 16, BASE + 24, BASE + 28]),
+                  table(BASE + 8, BASE + 68, [BASE + 24, BASE + 28]),
+                  table(BASE + 12, BASE + 68, [BASE + 24, BASE + 28]),
+                  table(BASE + 4, BASE + 72, [])]
+        capped = cap_adjacent_tables(tables)
+        self.assertEqual(len(tables[0]["entries"]), 3)
+        self.assertEqual(len(capped[0]["entries"]), 1)
+        self.assertEqual(capped[0]["uncapped_entry_count"], 3)
+        self.assertEqual(capped[0]["adjacent_table_base"], BASE + 68)
+        self.assertEqual(capped[0]["adjacent_table_sites"], [BASE + 8, BASE + 12])
+        self.assertEqual(capped[0]["stop"], "adjacent_table_candidate")
+        self.assertFalse(capped[0]["bound_proven"])
+        self.assertEqual(capped[1:], tables[1:])
+
+    def test_adjacent_cap_eliminates_spurious_shared_ownership(self):
+        meta, data = capture([0x00400008, 0, 0x00600008, 0,
+                              0x03e00008, 0, 0x03e00008, 0],
+                             exports=(BASE + 8,))
+        baseline = inventory(meta, data, extended=True)
+        def table(site, address, targets):
+            return {"site": site, "table_base": address, "bound_proven": False,
+                    "stop": "missing_or_ambiguous_r_mips_32",
+                    "entries": [{"slot": address + 4 * i, "target": target}
+                                for i, target in enumerate(targets)]}
+        tables = [table(BASE, BASE + 64, [BASE + 16, BASE + 24]),
+                  table(BASE + 8, BASE + 68, [BASE + 24])]
+        uncapped = discover_table_edges(meta, data, baseline, [], tables)
+        capped = discover_table_edges(meta, data, baseline, [],
+                                      cap_adjacent_tables(tables))
+        self.assertTrue(uncapped["inventory"]["shared_ordinary_pcs"])
+        self.assertEqual(capped["inventory"]["shared_ordinary_pcs"], [])
+        self.assertEqual(uncapped["newly_reached_pcs"], capped["newly_reached_pcs"])
+        self.assertEqual(capped["new_function_entries"], [])
+        self.assertFalse(capped["bounds_proven"])
+        self.assertEqual({row["pc"] for row in capped["inventory"]["unresolved"]
+                          if row["kind"] == "indirect_jump"}, {BASE, BASE + 8})
 
     def test_table_shadow_reports_shared_ownership(self):
         # Two independently seeded JR paths reach the same return block.
