@@ -2930,12 +2930,14 @@ int main(int argc, char** argv)
     std::string memory_card_environment;
     const char* memory_card_path = read_host_environment(
         "SDBZ_MEMCARD", &memory_card_environment);
+    std::filesystem::path memory_card_file;
     if (memory_card_path != nullptr && *memory_card_path != '\0')
     {
+        memory_card_file = std::filesystem::path(std::u8string(
+            memory_card_path, memory_card_path + std::strlen(memory_card_path)));
         if ((disc_folder_path == nullptr && iop_irx_paths.empty() &&
              iop_rom0_path == nullptr) ||
-            !memory_card.mount(std::filesystem::path(std::u8string(
-                memory_card_path, memory_card_path + std::strlen(memory_card_path)))))
+            !memory_card.mount(memory_card_file))
         {
             std::fprintf(stderr,
                 "[mc] mounting requires an active IOP and an exact "
@@ -3256,8 +3258,7 @@ int main(int argc, char** argv)
                 auto folder_source =
                     std::make_unique<iop::c_folder_sector_source>(
                         disc_root, memory_card.mounted()
-                            ? std::filesystem::path(std::u8string(
-                memory_card_path, memory_card_path + std::strlen(memory_card_path)))
+                            ? memory_card_file
                             : std::filesystem::path{});
                 if (!folder_source->valid())
                 {
