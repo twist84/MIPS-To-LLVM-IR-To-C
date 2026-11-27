@@ -523,3 +523,69 @@ with unchanged I11 libraries for the other five modules and run a matched
 retail replay before accepting the ownership change. Regression coverage
 includes canonical staged naming, original ELF hash rejection and exact
 residual partition preservation. CI and real retail validation pending.
+
+## I13c and I16a acceptance
+
+I13c retail archive `ee-iop-i13c.zip`, SHA-256
+`bd182cbfb7021e418c7f496a936dc7e3b83139b60c959982745c9f74a8f7e5f6`,
+is accepted for correctness. Candidate:
+`build/iop-native-split-i13c-candidate/modules`. All five unchanged
+library hashes match I11, and the two replacements match the I13c
+build receipt. At 40,000,000 EE dispatches: 184,700 common trace samples,
+zero divergent/unpaired samples, 3,127/3,127 polls, 7/7 active IOP modules,
+67,846,006 native retired instructions, 12,611,090 entry attempts.
+Report and framebuffer independently match byte-for-byte. EE attempts,
+cycles, GS fields and VU1 native pairs match I11; inputs unchanged.
+Interpreter 40.938 s, native 40.171 s, native execution 590.0 ms,
+refresh 1.8 ms. One pair is insufficient for performance acceptance.
+I11 remains a rollback baseline.
+
+The two-module I13c compile took 5.782 s with zero cache hits and 0.249 s
+linking (244 objects). ARKD_DVD DLL: 1,049,600 bytes; LIBSD: 443,904 bytes.
+LIBSD residual IR fell from 781,137 to 528,541 bytes, compile time
+4.891 to 2.016 s (different build concurrency). ARKD_DVD residual IR
+fell from 753,389 to 632,664 bytes.
+
+I16a acceptance: all 21 uploaded DLLs match their receipt SHA-256 values.
+I11 versus both I16a builds differs only at byte offsets 0x80/0x81
+inside the COFF TimeDateStamp field (PE signature offset 0x78).
+With only the four-byte COFF timestamp normalized, all seven modules'
+full-file hashes match across all three builds. No extra retail replay
+is required for I16a. I16b adds `-Wl,/timestamp:0` to the Windows
+split and monolithic linker commands; compilation and cache keys are
+unchanged. A local Clang/LLD cross-target smoke test confirmed the PE
+timestamp is zero. Actual Windows full-build raw hash reproducibility
+remains to be validated on the next needed link.
+
+## I14a — Cross-block indirect producer shadow
+
+`audit_iop_indirect_targets.py` and `audit_iop_jump_tables.py` accept
+`--cross-block`. This opt-in shadow audit walks unique known sequential
+and non-linking branch/jump predecessors, includes simple predecessor
+delay-slot instructions in execution order and records crossed CFG
+edges. It stops at roots, multiple incoming edges, calls/returns,
+unsupported instructions, cycles or the existing bounded window limit.
+Unknown dynamic incoming edges and R3000A load-delay state prevent
+the resulting producer evidence from being exhaustive or authoritative.
+No guest memory values are assumed. Default discovery and I13c
+production ownership are unchanged. Tests cover a constant formed in
+a jump delay slot and barriers at call resumes and ambiguous incoming
+edges.
+
+```bat
+python tools\audit_iop_indirect_targets.py ^
+    --capture build\iop-g8d-capture ^
+    --relocation-receipt iop-i10-discovery.json ^
+    --audit-producers --cross-block ^
+    --out iop-i14a-indirect.json
+
+python tools\audit_iop_jump_tables.py ^
+    --capture build\iop-g8d-capture ^
+    --disc-root PS2_GAME ^
+    --relocation-receipt iop-i10-discovery.json ^
+    --discover-targets --cross-block ^
+    --out iop-i14a-tables.json
+```
+
+Compare against I12/I13b before enabling any new candidate edges in
+production. No native rebuild or replay is needed for this audit.
