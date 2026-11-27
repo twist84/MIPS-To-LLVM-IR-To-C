@@ -31,7 +31,11 @@ jobs:
             --user "$(id -u):$(id -g)" \
             -v "$PWD/build/ee-issue-hardware:/work" -w /work \
             --entrypoint /bin/sh "$PS2DEV_IMAGE" -ec \
-            'mips64r5900el-ps2-elf-gcc --version > compiler-version.txt; make -j2'
+            'cc=mips64r5900el-ps2-elf-gcc
+            "$cc" --version > compiler-version.txt
+            "$cc" -D_EE -G0 -O2 -Wall -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" -c bench_main.c -o bench_main.o
+            "$cc" -D_EE -G0 -O2 -c bench.S -o bench.o
+            "$cc" -T"$PS2SDK/ee/startup/linkfile" -O2 -o ee_issue_counter.elf bench_main.o bench.o -L"$PS2SDK/ee/lib" -Wl,-zmax-page-size=128 -lc'
       - name: Verify exact linked opcodes and record provenance
         run: |
           python3 tools/verify_ee_issue_bench.py build/ee-issue-hardware/ee_issue_counter.elf
