@@ -30,26 +30,28 @@ def generate(out: Path) -> list[dict]:
     assembly = [".text", ".set noreorder", ".set noat"]
     header = ["/* Generated; do not edit. */", "#pragma once",
               "#include <stdint.h>",
-              "typedef uint32_t (*bench_fn)(const uint32_t *);"]
+              "typedef uint32_t (*bench_fn)(const uint32_t *, uint32_t *);"]
     rows = []
     for name, block in CASES.items():
         for repeat in REPEATS:
             symbol = f"bench_{name}_{repeat}"
             words = block * repeat
             # Setup uses known initialized positive operands; f0=f1=f2=1.
-            # Align the body after the two fixed start-boundary instructions.
+            # Align after the four-word read/fence prefix. PCR1 uses
+            # caller-saved $12/$13 and $5 is the output pointer.
             assembly += [".balign 16", f".globl {symbol}", f"{symbol}:",
                          "    addiu $8,$0,1", "    addiu $9,$0,2",
                          "    lui $11,0x3f80", "    mtc1 $11,$f0",
                          "    mtc1 $11,$f1", "    mtc1 $11,$f2",
-                         ".balign 16", "    .word 0", "    .word 0",
-                         "    sync.p", "    mfpc $2,0",
+                         ".balign 16", "    .word 0",
+                         "    sync.p", "    mfpc $2,0", "    mfpc $12,1",
                          f".globl {symbol}_body", f"{symbol}_body:"]
             assembly += [f"    .word 0x{word:08x}" for word in words]
             assembly += [f".globl {symbol}_body_end", f"{symbol}_body_end:",
-                         "    sync.p", "    mfpc $3,0",
-                         "    subu $2,$3,$2", "    jr $31", "    nop"]
-            header.append(f"extern uint32_t {symbol}(const uint32_t *);")
+                         "    sync.p", "    mfpc $3,0", "    mfpc $13,1",
+                         "    subu $2,$3,$2", "    subu $13,$13,$12",
+                         "    sw $13,0($5)", "    jr $31", "    nop"]
+            header.append(f"extern uint32_t {symbol}(const uint32_t *, uint32_t *);")
             trace = f"{symbol}.csv"
             base = 0x1000
             lines = ["attempt,pc,opcode_word,kind,reference_slot,hle_service"]

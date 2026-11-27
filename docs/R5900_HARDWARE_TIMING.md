@@ -80,3 +80,24 @@ Strict candidate CSV export now rejects an empty stream, a missing ordinary or
 likely delay slot, an illegal executed nested branch, and a trace ending with an
 unresolved delay slot even if its footer says non-truncated. Partial valid
 prefixes remain available to offline analysis but are not complete timelines.
+
+## Single-issue and dual-issue capture (COP0 #160)
+
+The benchmark now makes two separate passes over the same 27 aligned
+bodies. The first retains the cycle-only V1 log; the second programs
+PCCR 0x8001785e (PCR0 selector 2: single issue; PCR1 selector 2: dual
+issue, all modes) and records 297 pairs of raw deltas between
+EE_ISSUE_PAIR_COUNTER_V1 and EE_ISSUE_PAIR_COUNTER_END. Zero is a valid
+event count. Both counters and the original control word are restored
+after each case. PCR reads are adjacent, not simultaneous; additional
+fixed read/fence overhead differs from the older cycle-only executable.
+Do not claim identical absolute measurements across the two versions.
+
+The comparator accepts historical cycle-only logs and additionally
+requires complete, unique paired samples when pair markers appear.
+It reports separate raw min/median/max and exact length slopes for each
+event, compared with the candidate's disjoint single/dual issue counts.
+No counter value is assigned to a particular instruction, cancellation
+or retirement, and no candidate source is authorized. Generated body
+words and trace identity remain unchanged. Console execution and
+independent timing measurements remain outstanding.

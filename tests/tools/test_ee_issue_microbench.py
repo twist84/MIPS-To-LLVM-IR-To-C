@@ -23,6 +23,15 @@ def main():
         for row in rows:
             body = assembly.split(row["symbol"] + "_body:\n", 1)[1].split(
                 ".globl " + row["symbol"] + "_body_end", 1)[0]
+            prefix = assembly.split(row["symbol"] + ":\n", 1)[1].split(
+                ".globl " + row["symbol"] + "_body\n", 1)[0]
+            suffix = assembly.split(row["symbol"] + "_body_end:\n", 1)[1].split(
+                ".balign 16", 1)[0]
+            assert prefix.endswith(".balign 16\n    .word 0\n    sync.p\n"
+                                   "    mfpc $2,0\n    mfpc $12,1\n")
+            assert suffix.startswith("    sync.p\n    mfpc $3,0\n    mfpc $13,1\n"
+                                     "    subu $2,$3,$2\n    subu $13,$13,$12\n"
+                                     "    sw $13,0($5)\n")
             words = [int(line.split()[1], 16) for line in body.splitlines()]
             assert words == list(CASES[row["case"]]) * row["repeat"]
             with (out / row["trace"]).open(newline="") as stream:
