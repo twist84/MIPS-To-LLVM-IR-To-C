@@ -273,7 +273,7 @@ def test_graphics_ee_comparison(root):
         else:
             assert "SDBZ_IOP_AOT" not in env
             assert "SDBZ_IOP_AOT_CAPTURE" not in env
-        return {"wall_seconds": 1.0}
+        return {"wall_seconds": 1.0, "returncode": 4}
 
     iop_args = args[:args.index("--candidate-source")]
     iop_args[iop_args.index("--repeats") + 1] = "1"
@@ -307,6 +307,32 @@ def test_graphics_ee_comparison(root):
     assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
     assert receipt["runs"]["control"][0]["iop_aot"] is None
     assert receipt["runs"]["candidate"][0]["iop_aot"]["instructions"] == 42
+    def failed_replay(args, image, directory, env):
+        run = replay_iop(args, image, directory, env)
+        if directory.name.startswith("candidate"):
+            (directory / "stderr.log").write_text(
+                "IOP AOT: loaded 1 translated module(s)\n"
+                "PAD0 input summary: replay consumed=0 total=1 valid=0\n")
+            run["returncode"] = 1
+        return run
+
+    iop_args[iop_args.index("--output") + 1] = str(root / "failed-iop-replay")
+    with patch.multiple(
+            harness, validate_source_libraries=validate,
+            aot_identity=lambda path: inventory,
+            terminal_budget=lambda path, budget: True,
+            read_json=lambda path: report, record_count=lambda path: 1,
+            replay_environment=lambda path: {}, run_one=failed_replay,
+            validate_run=lambda *args: {}, require_match=lambda *args: None,
+            extract_profile=lambda *args: None):
+        with patch.object(sys, "argv", iop_args + ["--candidate-iop-aot", str(library_dir)]):
+            assert harness.main() == 1
+    failed = json.loads((root / "failed-iop-replay" / "profiling-receipt.json").read_text())
+    assert failed["error"] == "candidate exited 1 before terminal budget"
+    assert not failed["correctness_accepted"] and failed["inputs_unchanged"]
+    assert failed["runs"]["candidate"][0]["pad"]["valid"] is False
+    assert failed["runs"]["candidate"][0]["iop_aot_partial_log"]
+
     stderr = root / "iop-replay" / "candidate-1" / "stderr.log"
     for count in (0, 2):
         try:
