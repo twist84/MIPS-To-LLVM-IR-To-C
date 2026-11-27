@@ -74,7 +74,9 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 not shared_ir.verified_extension(snapshot, metadata, ir_sources,
                                                  verified_ir_hashes)):
             shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
-            print("Optimized profile source provenance is stale; "
+            reason = ("lowering" if not shared_ir.matching_sources(
+                snapshot["ir_sources"], ir_sources) else "IR inventory")
+            print(f"Optimized profile {reason} provenance is stale; "
                   "revalidating native objects against current shared IR",
                   flush=True)
             # The ordinary incremental emitter authenticates every candidate
