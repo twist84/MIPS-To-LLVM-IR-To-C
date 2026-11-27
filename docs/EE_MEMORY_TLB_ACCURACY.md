@@ -1936,3 +1936,15 @@ syscall evidence. Add constexpr refusal/repeat checks and two complete
 guest CRT sequences with synchronized IOP and preserved HBlank count.
 Require advancement beyond the actual new stop; no previous milestone
 is waived. Production HLE unchanged. Pending CI, no retail replay.
+
+H3E9B7B at 87d3c94c, ROM0 workflow 46071267911, failed the v0.7
+compile-time repeated CRT assertion with a non-constant condition.
+The original isolated assertion compiles locally with GCC 14.2 and
+Clang, so the precise runner-specific cause is not established.
+Replace recursive staging/aggregate assignment with direct validated
+first-word staging, preserving prior state on refusal and the count
+on success. The unchanged full static_assert passes standalone
+C++23 syntax checks with both local compilers after the change.
+No test removal, acceptance threshold changes or additional runtime
+capabilities. Full integration and firmware replay pending CI.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46071267911

@@ -34,17 +34,23 @@ struct s_ee_strict_gs_timing
     constexpr bool write(uint32_t address, uint64_t value, uint64_t smode2)
     {
         // A completed profile may be followed by a new programming
-        // sequence. Validate the first word on a fresh staging object,
-        // preserving the committed sequence count on refusal.
+        // sequence. Validate the first word before resetting staged words,
+        // preserving all state on refusal and the completion count on success.
         if (m_stage == 6u)
         {
-            s_ee_strict_gs_timing next{};
-            next.m_completed = m_completed;
-            if (!next.write(address, value, smode2))
+            if (smode2 > 3u || address != 0x12000030u ||
+                value != profile_word(2u, static_cast<uint32_t>(smode2), 0u))
             {
                 return false;
             }
-            *this = next;
+            for (uint32_t i = 0u; i < 5u; ++i)
+            {
+                m_words[i] = 0u;
+            }
+            m_words[0] = value;
+            m_stage = 1u;
+            m_mode = 0u;
+            m_smode2 = static_cast<uint32_t>(smode2);
             return true;
         }
         if (smode2 > 3u || m_stage > 6u ||
