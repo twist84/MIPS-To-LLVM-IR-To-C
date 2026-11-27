@@ -1273,3 +1273,35 @@ kernel tests. Use same new runner for both arms, pin its hash,
 retain G8D.1 libraries. One matched pair first, ee-iop-g8d2.
 No EE IR/relink, IOP AOT rebuild, recapture or VU1 rebuild.
 Compilation, CI and retail validation pending.
+
+## G8D.2 — correctness accepted; IOP optimization paused
+
+All five CI workflows passed at b9bcaa0f951bc81bc9624bff375eef96e593fc08.
+Archive ee-iop-g8d2.zip SHA-256:
+47c0016ea53211a2b3d10f133fd060ac97391c4ed9d82a12abe459b7543c70b7.
+Runner SHA-256:
+6cb539ba63b4790d1e034eb041d04ce5c42eec7a614e7346057389bec40b977f.
+Both arms used the same runner, G6A EE DLL, V30 VU1, fixed RTC
+and PAD; seven G8D.1 libraries in candidate, all active.
+Receipt reports unchanged inputs; binaries not included in archive.
+Both exit 4, 40M dispatches, 21910026110 EE attempts,
+22115080673 EE cycles, 4494 GS fields, 394881 VU1 runs,
+445669423 native pairs, 3127/3127 valid PAD polls, zero IOP
+fault, timing observer failure or IOP debt. 42578752 physical
+and logical service turns, zero quiet advances. Independently
+verified both raw report SHA-256
+9d8743b4bb82fe4f0feafc8e7e0664f8ba47bba7238560ec5f533c8c6db2982d
+and both PPM SHA-256
+9382a6cdc6a77656a1d5e9652ceffd592bde1e8fcf365a4bddcc6e49d3842f08
+against pinned reference. All 184719 trace lines identical between
+arms (184700 unique dispatch keys); receipt reports zero
+different/unpaired samples against reference. SIO2 last start PC
+0x20008 in both. Native IOP 9106977 entries, 67846006 instructions,
+584.4ms translated, 1.7ms refresh. Wall 41.937 -> 40.000s,
+nominal throughput +4.8425%. Single pair, correctness accepted,
+performance not established. Retain runtime and lifter corrections.
+Do not default-enable IOP AOT or require extra performance repeats.
+Preserve runner, captures and G8D.1 libraries. Further IOP AOT
+dispatch/function splitting and optimization deferred at user's
+direction. Next objective practical timing compatibility with
+PCSX2 and ps2-web-recomp, not cycle-exact physical hardware.
