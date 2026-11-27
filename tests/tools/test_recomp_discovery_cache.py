@@ -256,6 +256,7 @@ def test_persistent_session(ee_recomp):
                                   capture_output=True, text=True)
         assert parallel.returncode == 0, parallel.stdout + parallel.stderr
         assert "ee_recomp parallel IR: workers=2 modules=2" in parallel.stdout
+        assert parallel.stdout.count("ee_recomp IR worker launches: 4") == 1
         for i in range(3):
             a = json.loads((root / f"serial-{i}" / "ee_functions.json").read_text())
             b = json.loads((root / f"parallel-{i}" / "ee_functions.json").read_text())

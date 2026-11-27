@@ -414,3 +414,16 @@ live emission remain serial. The original 128-entry batch limit remains.
 Use strict IR hash and reconstructed metadata comparison against the accepted
 R6.4 benchmark. Do not activate experimental results. Worker startup and
 scheduling overhead may reduce gains for small batches; measure first.
+
+R7.1 Windows acceptance: 108.672 s wall time; 16,252 exact IR hashes and
+byte-identical reconstructed metadata. IR emission 22.477 -> 8.625 s,
+136 parallel batches, 16,251 parallel-path modules, 1,025 thread launches.
+Total reduction from 191.000 s baseline: 43.10%.
+
+R7.2 replaces per-batch thread creation in persistent sessions with a
+bounded session-owned worker pool. Batch-local data is borrowed only until
+all active workers finish. The standalone path retains its joined worker
+group; serial emission is unchanged. Timing reports now distinguish actual
+thread launches from per-batch worker assignments. Test identical bytes
+and metadata before selecting a default worker count. No R7.2 speedup
+claimed until measured.

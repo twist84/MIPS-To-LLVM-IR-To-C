@@ -13,6 +13,9 @@
 
 #include <algorithm>
 #include <atomic>
+#include <condition_variable>
+#include <functional>
+#include <mutex>
 #include <thread>
 #include <chrono>
 #include <cstdio>
@@ -447,6 +450,106 @@ std::set<uint32_t> collect_address_taken_entries(const elf_loader& loader)
 
 } // namespace
 
+// One bounded worker group for a reconstruction session. A submitted task
+// borrows batch-local immutable data only until run() returns.
+class c_ir_worker_pool
+{
+public:
+    explicit c_ir_worker_pool(size_t count)
+    {
+        try
+        {
+            m_threads.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                m_threads.emplace_back([this, i]() { worker(i); });
+            }
+        }
+        catch (...)
+        {
+            stop();
+            throw;
+        }
+    }
+
+    ~c_ir_worker_pool()
+    {
+        stop();
+    }
+
+    size_t size() const
+    {
+        return m_threads.size();
+    }
+
+    void run(size_t active, const std::function<void()>& task)
+    {
+        std::unique_lock lock(m_mutex);
+        m_task = &task;
+        m_active = active;
+        m_remaining = active;
+        ++m_generation;
+        m_ready.notify_all();
+        m_finished.wait(lock, [this]() { return m_remaining == 0; });
+        m_task = nullptr;
+    }
+
+private:
+    void stop()
+    {
+        {
+            std::lock_guard lock(m_mutex);
+            m_stopping = true;
+        }
+        m_ready.notify_all();
+        for (auto& thread : m_threads)
+        {
+            thread.join();
+        }
+    }
+
+    void worker(size_t index)
+    {
+        size_t seen = 0;
+        std::unique_lock lock(m_mutex);
+        for (;;)
+        {
+            m_ready.wait(lock, [this, &seen]()
+            {
+                return m_stopping || seen != m_generation;
+            });
+            if (m_stopping)
+            {
+                return;
+            }
+            seen = m_generation;
+            if (index >= m_active || !m_task)
+            {
+                continue;
+            }
+            const auto* task = m_task;
+            lock.unlock();
+            // The submitted emission task catches its own exceptions.
+            (*task)();
+            lock.lock();
+            if (--m_remaining == 0)
+            {
+                m_finished.notify_one();
+            }
+        }
+    }
+
+    std::mutex m_mutex;
+    std::condition_variable m_ready;
+    std::condition_variable m_finished;
+    std::vector<std::thread> m_threads;
+    const std::function<void()>* m_task = nullptr;
+    size_t m_generation = 0;
+    size_t m_active = 0;
+    size_t m_remaining = 0;
+    bool m_stopping = false;
+};
+
 struct s_ee_recomp_session_state
 {
     elf_loader m_loader;
@@ -459,6 +562,7 @@ struct s_ee_recomp_session_state
     std::set<uint32_t> m_jalr_targets;
     std::set<uint32_t> m_jalr_only;
     std::vector<s_static_jalr_site> m_sites;
+    std::unique_ptr<c_ir_worker_pool> m_ir_pool;
 };
 
 static bool ee_recomp_impl(const char* elf_path,
@@ -1148,40 +1252,59 @@ static bool ee_recomp_impl(const char* elf_path,
         std::atomic<size_t> next{0};
         std::atomic<bool> failed{false};
         const size_t workers = std::min<size_t>(opts.ir_jobs, jobs.size());
+        const auto emit = [&]()
         {
-            std::vector<std::jthread> threads;
-            threads.reserve(workers);
-            for (size_t i = 0; i < workers; ++i)
+            try
             {
-                threads.emplace_back([&]()
+                llvm::llvm_context worker_ctx("ee_game");
+                for (; !failed.load();)
                 {
-                    try
+                    const size_t index = next.fetch_add(1);
+                    if (index >= jobs.size())
                     {
-                        llvm::llvm_context worker_ctx("ee_game");
-                        for (; !failed.load();)
-                        {
-                            const size_t index = next.fetch_add(1);
-                            if (index >= jobs.size())
-                            {
-                                break;
-                            }
-                            const auto& job = jobs[index];
-                            llvm::module_builder builder(worker_ctx, opts.opt_level);
-                            builder.emit_function_cfg(job.m_function, instructions,
-                                                      job.m_host_symbol.c_str());
-                            if (!worker_ctx.write_ir_to_file(job.m_path.c_str()))
-                            {
-                                failed.store(true);
-                            }
-                        }
+                        break;
                     }
-                    catch (...)
+                    const auto& job = jobs[index];
+                    llvm::module_builder builder(worker_ctx, opts.opt_level);
+                    builder.emit_function_cfg(job.m_function, instructions,
+                                              job.m_host_symbol.c_str());
+                    if (!worker_ctx.write_ir_to_file(job.m_path.c_str()))
                     {
                         failed.store(true);
                     }
-                });
+                }
             }
-        } // Join every worker before inspecting failure or publishing metadata.
+            catch (...)
+            {
+                failed.store(true);
+            }
+        };
+        try
+        {
+            if (session)
+            {
+                if (!session->m_ir_pool || session->m_ir_pool->size() != opts.ir_jobs)
+                {
+                    session->m_ir_pool = std::make_unique<c_ir_worker_pool>(opts.ir_jobs);
+                    std::printf("ee_recomp IR worker launches: %u\n", opts.ir_jobs);
+                }
+                session->m_ir_pool->run(workers, emit);
+            }
+            else
+            {
+                std::vector<std::jthread> threads;
+                threads.reserve(workers);
+                for (size_t i = 0; i < workers; ++i)
+                {
+                    threads.emplace_back(emit);
+                }
+                std::printf("ee_recomp IR worker launches: %zu\n", workers);
+            } // Join standalone workers before checking failure.
+        }
+        catch (...)
+        {
+            failed.store(true);
+        }
         if (failed.load())
         {
             if (error)
