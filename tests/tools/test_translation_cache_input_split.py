@@ -256,7 +256,80 @@ def verify_ir_directory_scan():
             rejected(functions)
 
 
+def verify_line_ending_migration():
+    shared = run_game.shared_ir
+    with tempfile.TemporaryDirectory(prefix="ee-source-migration-") as directory:
+        root = Path(directory)
+        first = root / "first.h"
+        second = root / "second.cpp"
+        elf = root / "game.elf"
+        first.write_bytes(b"first\r\nline\r\n")
+        second.write_bytes(b"second\nline\n")
+        elf.write_bytes(b"ELF\r\n")
+        paths = [("first.h", first), ("second.cpp", second), ("ELF", elf)]
+        legacy = {name: run_game.sha256_path(path) for name, path in paths}
+
+        def fingerprints(entries=paths):
+            return shared.fingerprint_sources(entries, binary_keys={"ELF"})
+
+        original = fingerprints()
+        first.write_bytes(b"first\nline\n")
+        second.write_bytes(b"second\r\nline\r\n")
+        current = fingerprints()
+        assert original == current
+        assert shared.matching_sources(legacy, current)
+        assert shared.matching_sources(json.loads(json.dumps(current)), current)
+        assert not shared.matching_sources(legacy, fingerprints(paths[:-1]))
+        assert not shared.matching_sources(legacy, fingerprints([
+            ("renamed.h", first), *paths[1:]]))
+        assert not shared.matching_sources(legacy, fingerprints([
+            *paths, ("added.h", first)]))
+        elf.write_bytes(b"ELF\n")
+        assert not shared.matching_sources(legacy, fingerprints())
+        elf.write_bytes(b"ELF\r\n")
+
+        ir = root / "fn.ll"
+        ir.write_bytes(b"; verified IR\r\n")
+        metadata = root / "ee_functions.json"
+        shared.write_json(metadata, {
+            "function_count": 1, "functions": [{"ir_path": ir.name}],
+        })
+        hashes = {ir.name: shared.digest(ir)}
+        shared.publish(metadata, legacy, hashes)
+        provenance = root / shared.PROVENANCE
+        old_bytes = provenance.read_bytes()
+        old_history = shared.read_json(provenance)["history"]
+        shared.current_state(metadata, current, hashes)
+        assert provenance.read_bytes() == old_bytes, "preflight must be read-only"
+
+        first.write_bytes(b"changed lowering\n")
+        changed = fingerprints()
+        for operation in (
+            lambda: shared.current_state(metadata, changed, hashes),
+            lambda: shared.publish(metadata, changed, hashes),
+        ):
+            try:
+                operation()
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("changed source migrated")
+            assert provenance.read_bytes() == old_bytes
+        first.write_bytes(b"first\nline\n")
+
+        shared.publish(metadata, current, hashes)
+        migrated = shared.read_json(provenance)
+        assert migrated["ir_sources"] == current
+        assert migrated["history"] == old_history
+        assert migrated["source_fingerprint_migrations"] == [legacy]
+        assert ir.read_bytes() == b"; verified IR\r\n"
+        shared.current_state(metadata, fingerprints(), hashes)
+        ir.write_bytes(b"; verified IR\n")
+        assert shared.digest(ir) != hashes[ir.name]
+
+
 if __name__ == "__main__":
+    verify_line_ending_migration()
     verify_ir_directory_scan()
     verify_real_probe_location()
     verify_preservation_when_host_only_inputs_change()

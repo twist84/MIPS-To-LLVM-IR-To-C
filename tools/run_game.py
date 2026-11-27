@@ -88,7 +88,7 @@ def translation_inputs(elf, recomp, source_root):
         for path in sorted(directory.rglob("*")):
             if path.is_file() and path.suffix in (".h", ".hpp", ".cpp"):
                 paths.append((path.relative_to(source_root).as_posix(), path))
-    inputs = {name: sha256_path(path) for name, path in paths}
+    inputs = shared_ir.fingerprint_sources(paths, binary_keys={"ELF", "ee_recomp"})
     # Certificate mode changes only the linked host library. Never reuse
     # a DLL from the opposite mode as if it contained the requested table.
     mode = b"1" if os.environ.get("SDBZ_NATIVE_ALU_CERTIFICATES") == "1" else b"0"
@@ -122,7 +122,7 @@ def ir_generation_inputs(elf, source_root):
         "src/tools/ee_recomp_main.cpp",
         source_root / "src/tools/ee_recomp_main.cpp"
     ))
-    return {name: sha256_path(item) for name, item in paths}
+    return shared_ir.fingerprint_sources(paths, binary_keys={"ELF"})
 
 
 def hash_ir_modules(ir_dir, functions, *, require_owned_directory=False):
@@ -340,11 +340,11 @@ def validate_preserved_translation(path, inputs, ir_sources,
             isinstance(saved_sources, dict)
             and old_host_key in saved_sources
             and old_host_key not in ir_sources
-            and saved_sources[old_host_key] == inputs.get(new_host_key)
-            and {
+            and shared_ir.fingerprint_matches(saved_sources[old_host_key], inputs, new_host_key)
+            and shared_ir.matching_sources({
                 name: digest for name, digest in saved_sources.items()
                 if name != old_host_key
-            } == ir_sources
+            }, ir_sources)
         )
         # Dispatch hotspot observations are also host-only. The two exact
         # historical header revisions (LF and CRLF checkouts) below never
@@ -365,21 +365,22 @@ def validate_preserved_translation(path, inputs, ir_sources,
                 saved_sources[old_diagnostics_key]
             and old_diagnostics_key not in ir_sources
             and "src/runtime/ee_hot_loop_diagnostics.h" in inputs
-            and {
+            and shared_ir.matching_sources({
                 name: digest for name, digest in saved_sources.items()
                 if name != old_diagnostics_key
-            } == ir_sources
+            }, ir_sources)
         )
         if (not isinstance(saved_sources, dict) or
-                (saved_sources != ir_sources and not migrated_host_header
+                (not shared_ir.matching_sources(saved_sources, ir_sources) and not migrated_host_header
                  and not migrated_diagnostics_header)):
             changed = next((
                 name for name in sorted(
                     set(saved_sources if isinstance(saved_sources, dict) else {}) |
                     set(ir_sources)
                 )
-                if (saved_sources.get(name) if isinstance(saved_sources, dict) else None)
-                   != ir_sources.get(name)
+                if not shared_ir.fingerprint_matches(
+                    saved_sources.get(name) if isinstance(saved_sources, dict) else None,
+                    ir_sources, name)
             ), "unknown")
             raise ValueError(f"guest IR generation input changed: {changed}")
         if migrated_host_header:
@@ -555,8 +556,8 @@ def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, libr
     saved = snapshot.get("inputs")
     if not isinstance(saved, dict):
         raise ValueError("cached translation has invalid input fingerprints")
-    for name, digest in inputs.items():
-        if saved.get(name) != digest:
+    for name in inputs:
+        if not shared_ir.fingerprint_matches(saved.get(name), inputs, name):
             raise ValueError(
                 f"cached translation is stale: {name} changed; "
                 "rerun without --no-recompile"
@@ -585,7 +586,7 @@ def validate_cached_library_identity(path, inputs, emit_opt, metadata_path, libr
 
 
 def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
-                               *, verified_ir_hashes=None):
+                               *, verified_ir_hashes=None, ir_sources=None):
     """Authenticate native identity and current IR before execution."""
     started = time.monotonic()
     snapshot = validate_cached_library_identity(
@@ -594,7 +595,11 @@ def validate_translation_cache(path, inputs, emit_opt, metadata_path, library,
     if shared_ir.active(metadata_path):
         current = (translated_ir_hashes(metadata_path) if verified_ir_hashes is None
                    else verified_ir_hashes)
-        shared_ir.current_state(metadata_path, snapshot.get("ir_sources"), current)
+        saved_sources = snapshot.get("ir_sources")
+        if ir_sources is not None and not shared_ir.matching_sources(saved_sources, ir_sources):
+            raise ValueError("cached native profile lowering inputs changed")
+        shared_ir.current_state(metadata_path, ir_sources if ir_sources is not None
+                                else saved_sources, current)
         if current != snapshot.get("ir_hashes"):
             raise ValueError("cached native profile IR does not match shared source")
     elif verified_ir_hashes is not None:
@@ -1125,10 +1130,11 @@ def can_relink_verified_objects(cache_path, inputs, ir_sources, emit_opt,
     """
     try:
         snapshot = shared_ir.read_json(cache_path)
-        if (snapshot.get("ir_sources") != ir_sources or
+        if (not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
                 snapshot.get("metadata_sha256") != sha256_path(metadata_path) or
-                snapshot.get("inputs", {}).get("tools/verify_ir.py") !=
-                    inputs.get("tools/verify_ir.py")):
+                not shared_ir.fingerprint_matches(
+                    snapshot.get("inputs", {}).get("tools/verify_ir.py"),
+                    inputs, "tools/verify_ir.py")):
             return False
         from verify_ir import append_cached_objects, llvm
         records = append_cached_objects(object_dir, emit_opt,
@@ -1674,7 +1680,8 @@ def main(argv=None):
                 )
             else:
                 validate_translation_cache(
-                    cache_path, inputs, args.emit_opt, metadata_path, library
+                    cache_path, inputs, args.emit_opt, metadata_path, library,
+                    ir_sources=ir_sources
                 )
                 if args.pdb:
                     build_linked_library(

@@ -33,7 +33,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
     cache = work / "translation-cache.json"
     try:
         run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
-                                            verified_ir_hashes=verified_ir_hashes)
+                                            verified_ir_hashes=verified_ir_hashes,
+                                            ir_sources=ir_sources)
     except ValueError:
         # The canonical shared source may have been refreshed independently
         # while this native profile still records the old lowering inputs.
@@ -46,7 +47,7 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                             snapshot.get("emit_opt") == opt and
                             snapshot.get("ir_pipeline") != run_game.ir_pipeline_id(opt))
         if (pipeline_changed and shared_ir.active(metadata) and
-                snapshot.get("ir_sources") == ir_sources):
+                shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources)):
             hashes = (verified_ir_hashes if verified_ir_hashes is not None
                       else run_game.translated_ir_hashes(metadata))
             shared_ir.current_state(metadata, ir_sources, hashes)
@@ -58,7 +59,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 opt, emit_jobs=jobs)
             run_game.write_translation_cache(
                 cache, inputs, opt, metadata, library, ir_sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
             return
         if (verified_ir_hashes is not None and
                 shared_ir.active(metadata) and
@@ -66,7 +68,7 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 snapshot.get("emit_opt") == opt and
                 isinstance(snapshot.get("ir_sources"), dict) and
                 snapshot["ir_sources"].get("ELF") == ir_sources.get("ELF") and
-                snapshot["ir_sources"] != ir_sources):
+                not shared_ir.matching_sources(snapshot["ir_sources"], ir_sources)):
             shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
             print("Optimized profile lowering provenance is stale; "
                   "revalidating native objects against current shared IR",
@@ -80,7 +82,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 opt, emit_jobs=jobs)
             run_game.write_translation_cache(
                 cache, inputs, opt, metadata, library, ir_sources)
-            run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+            run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
             return
         result = run_game.main([
             str(elf), "--build-dir", str(build), "--config", config,
@@ -88,7 +91,8 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
             "--relink-existing", "--link-only"])
         if result != 0:
             raise ValueError("optimized cache relink failed")
-        run_game.validate_translation_cache(cache, inputs, opt, metadata, library)
+        run_game.validate_translation_cache(cache, inputs, opt, metadata, library,
+                                                ir_sources=ir_sources)
 
 
 def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
@@ -98,7 +102,7 @@ def migrate_legacy(work, metadata_path, ir_sources, inputs, opt):
     old = shared_ir.read_json(old_path)
     hashes = old_cache["ir_hashes"]
     if (old_cache.get("schema") != run_game.CACHE_SCHEMA or
-            old_cache.get("ir_sources") != ir_sources or
+            not shared_ir.matching_sources(old_cache.get("ir_sources"), ir_sources) or
             old_cache.get("metadata_sha256") != run_game.sha256_path(old_path)):
         raise ValueError("legacy EE IR provenance cannot be verified")
     verify_modules(work, old, hashes)
@@ -226,7 +230,7 @@ def validate_source_ir(elf, source_work, source_opt, ir_sources):
         snapshot = shared_ir.read_json(source_work / "translation-cache.json")
         if (snapshot.get("schema") != run_game.CACHE_SCHEMA or
                 snapshot.get("emit_opt") != source_opt or
-                snapshot.get("ir_sources") != ir_sources or
+                not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata_path)):
             raise ValueError("source IR provenance is stale; recover the source cache explicitly")
         hashes = snapshot["ir_hashes"]
@@ -251,7 +255,7 @@ def warm_profile_ready(source_work, work, inputs, ir_sources, opt, library):
         snapshot = run_game.validate_cached_library_identity(
             work / "translation-cache.json", inputs, opt, metadata, library)
         state = shared_ir.current_state(metadata, ir_sources)
-        return (snapshot.get("ir_sources") == ir_sources and
+        return (shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) and
                 snapshot.get("ir_hashes") == state["ir_hashes"] and
                 (work / "objects" / "objects.json").is_file())
     except (OSError, ValueError, KeyError, TypeError):
@@ -363,7 +367,7 @@ def prepare_locked(elf, build, config, source_work, work, opt, jobs, source_opt,
         run_game.write_translation_cache(
             cache, inputs, opt, metadata_path, library, ir_sources)
         run_game.validate_translation_cache(
-            cache, inputs, opt, metadata_path, library)
+            cache, inputs, opt, metadata_path, library, ir_sources=ir_sources)
         if run_game.translated_ir_hashes(metadata_path) != hashes:
             raise ValueError("optimized build changed the original IR")
     except BaseException:

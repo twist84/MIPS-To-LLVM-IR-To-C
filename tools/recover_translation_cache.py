@@ -69,7 +69,7 @@ def check_source_header(elf, work, ir_sources):
             raise ValueError("source cache ELF differs")
         if snapshot.get("emit_opt") != 0:
             raise ValueError("source cache is not the base EE profile")
-        if snapshot.get("ir_sources") != ir_sources:
+        if not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources):
             raise ValueError("source cache lowering inputs differ")
         if snapshot.get("metadata_sha256") != run_game.sha256_path(metadata):
             raise ValueError("source cache function metadata differs")
@@ -157,7 +157,7 @@ def select_manifest(base_work, elf, ir_sources, allow_ir_changes=False):
                 if (not candidate.name.endswith("-" + digest + ".json") or
                         candidate.read_bytes() != canonical):
                     continue
-            same_sources = manifest.get("ir_sources") == ir_sources
+            same_sources = shared_ir.matching_sources(manifest.get("ir_sources"), ir_sources)
             if not same_sources and not allow_ir_changes:
                 continue
             selected.append((len(entries), same_sources,
@@ -212,7 +212,7 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
         shared_ir.current_state(metadata_path, ir_sources, hashes)
     elif manifest.get("metadata_sha256") != run_game.sha256_path(metadata_path):
         raise ValueError("legacy function map is not authenticated")
-    if manifest.get("ir_sources") != ir_sources:
+    if not shared_ir.matching_sources(manifest.get("ir_sources"), ir_sources):
         raise ValueError("legacy lowering inputs changed")
     destination = work / "ir"
     destination.mkdir(parents=True, exist_ok=False)
@@ -340,11 +340,12 @@ def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
     snapshot = shared_ir.read_json(cache_path)
     hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
                                       require_owned_directory=True)
-    if (snapshot.get("ir_sources") != ir_sources or
+    if (not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
             snapshot.get("ir_hashes") != hashes):
         raise ValueError("recovered guest IR differs from verified provenance")
     run_game.validate_translation_cache(cache_path, inputs, 0,
-                                        metadata_path, directory / library_name)
+                                        metadata_path, directory / library_name,
+                                        ir_sources=ir_sources)
     _, objects, _, _ = load_inputs(metadata_path, directory / "objects")
     if objects.get("path_format") != "manifest-relative-v1":
         raise ValueError("recovered object manifest is not portable")

@@ -21,6 +21,64 @@ def digest(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+# The tag versions text fingerprints independently of the manifest schema.
+# Untagged SHA-256 values are legacy byte-exact fingerprints.
+TEXT_FINGERPRINT_PREFIX = "text-lf-v1:"
+
+
+def normalized_source_bytes(raw):
+    """Normalize only LF/CRLF text; ambiguous bare CR or NUL stays exact."""
+    normalized = raw.replace(b"\r\n", b"\n")
+    if b"\r" in normalized or b"\0" in normalized:
+        return raw
+    return normalized
+
+
+class SourceFingerprints(dict):
+    """Persist canonical values; keep proven legacy alternatives in memory."""
+
+    def __init__(self):
+        super().__init__()
+        self.legacy = {}
+
+
+def fingerprint_sources(paths, *, binary_keys):
+    result = SourceFingerprints()
+    for name, path in paths:
+        if name in binary_keys:
+            result[name] = digest(path)
+            continue
+        raw = path.read_bytes()
+        normalized = normalized_source_bytes(raw)
+        if b"\r" in normalized or b"\0" in normalized:
+            result[name] = hashlib.sha256(raw).hexdigest()
+            continue
+        result[name] = TEXT_FINGERPRINT_PREFIX + hashlib.sha256(normalized).hexdigest()
+        result.legacy[name] = {
+            hashlib.sha256(raw).hexdigest(),
+            hashlib.sha256(normalized).hexdigest(),
+            hashlib.sha256(normalized.replace(b"\n", b"\r\n")).hexdigest(),
+        }
+    return result
+
+
+def fingerprint_matches(saved, current, name):
+    if not isinstance(current, dict) or name not in current:
+        return False
+    return saved == current[name] or (
+        isinstance(current, SourceFingerprints) and isinstance(saved, str)
+        and saved in current.legacy.get(name, ())
+    )
+
+
+def matching_sources(saved, current):
+    """Never infer equivalence between two unverified historical maps."""
+    return (isinstance(saved, dict) and isinstance(current, dict)
+            and saved.keys() == current.keys()
+            and all(fingerprint_matches(value, current, name)
+                    for name, value in saved.items()))
+
+
 def write_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
     try:
@@ -162,11 +220,11 @@ def current_state(metadata_path, ir_sources, hashes=None):
     if state.get("schema") != SCHEMA:
         raise ValueError(f"{prefix}: unsupported schema")
     saved_sources = state.get("ir_sources")
-    if saved_sources != ir_sources:
+    if not matching_sources(saved_sources, ir_sources):
         if not isinstance(saved_sources, dict) or not isinstance(ir_sources, dict):
             raise ValueError(f"{prefix}: missing lowering fingerprints")
         changed = sorted(name for name in set(saved_sources) | set(ir_sources)
-                         if saved_sources.get(name) != ir_sources.get(name))
+                         if not fingerprint_matches(saved_sources.get(name), ir_sources, name))
         raise ValueError(f"{prefix}: lowering inputs changed: " +
                          ", ".join(changed[:8]))
     if state.get("metadata_sha256") != digest(metadata_path):
@@ -187,16 +245,21 @@ def publish(metadata_path, ir_sources, hashes, alias=None):
     path = metadata_path.parent / PROVENANCE
     sha = digest(metadata_path)
     history = {}
+    migrations = []
     if path.is_file():
         old = read_json(path)
         previous_count = len(old["ir_hashes"])
         previous = old["history"][old["metadata_sha256"]]
-        if (old.get("schema") != SCHEMA or old.get("ir_sources") != ir_sources or
+        if (old.get("schema") != SCHEMA or
+                not matching_sources(old.get("ir_sources"), ir_sources) or
                 previous_count > count or previous["count"] != previous_count or
                 previous["map"] != map_digest(metadata, previous_count) or
                 prefix_hashes(metadata, hashes, previous_count) != old["ir_hashes"]):
             raise ValueError("shared EE IR may only extend a verified function map")
         history = dict(old["history"])
+        migrations = list(old.get("source_fingerprint_migrations", []))
+        if old["ir_sources"] != ir_sources:
+            migrations.append(old["ir_sources"])
     history[sha] = {"count": count, "map": map_digest(metadata)}
     if alias is not None:
         old_sha, old_count, old_map = alias
@@ -205,6 +268,8 @@ def publish(metadata_path, ir_sources, hashes, alias=None):
         history[old_sha] = {"count": old_count, "map": old_map}
     value = {"schema": SCHEMA, "ir_sources": ir_sources,
              "metadata_sha256": sha, "ir_hashes": hashes, "history": history}
+    if migrations:
+        value["source_fingerprint_migrations"] = migrations
     if not path.is_file() or read_json(path) != value:
         write_json(path, value)
 
@@ -218,7 +283,7 @@ def verified_extension(snapshot, metadata_path, ir_sources, hashes):
         previous = state["history"][snapshot["metadata_sha256"]]
         metadata = read_json(metadata_path)
         old_count = previous["count"]
-        return (snapshot.get("ir_sources") == ir_sources and
+        return (matching_sources(snapshot.get("ir_sources"), ir_sources) and
                 0 < old_count <= len(metadata["functions"]) and
                 previous["map"] == map_digest(metadata, old_count) and
                 prefix_hashes(metadata, hashes, old_count) == snapshot["ir_hashes"])
