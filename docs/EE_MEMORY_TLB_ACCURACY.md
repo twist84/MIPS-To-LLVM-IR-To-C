@@ -715,3 +715,31 @@ extension, zero destination, ADDU wrapping/sign extension, upper
 GPR preservation, cached/RAM/unmapped data refusal, final ROM byte
 and successful/refused delay-slot reads. CI pending. No retail
 replay required; use actual firmware stop for the next checkpoint.
+
+## Strict memory follow-up M6E2D: ROM directory word scan
+
+M6E2C OpenPS2BIOS CI run 46043812695/job 140657921145 passed
+the first ROM byte read (0x52 at bfc01000), then stopped after
+27 retired instructions at bfc00090 / 8d0a000c (LW t2,12(t0)).
+The first compared byte was 0x52, the sought byte 0x45.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46043812695/job/140657921145
+
+Extend the isolated reset executor with aligned little-endian LW
+(sign-extended low 64-bit result), canonical AND and NOR (64-bit
+logical operands). Reuse the data access/bus planner and const ROM
+span. Misaligned, cached, unmapped or unbacked reads refuse even
+for zero destinations; no architectural fault delivery is claimed.
+Preserve upper GPR halves and reject nonzero reserved shift fields.
+
+The pinned-image probe now requires 38 retirements through the
+first complete directory mismatch/advance iteration, including
+the backward BNE and its slot. Independently assemble the image
+file-size word at offset 0x100c, verify the 16-byte rounding,
+directory and file pointers, remaining entry count and next PC
+bfc00054. Then retain the existing 65,536-instruction exploration
+budget and diagnostic trace. Add independent synthetic tests for
+signed LW, last ROM word, zero destination refusal, logical
+width, reserved encoding and six directory file sizes.
+The authentic checkpoint is not yet validated; CI pending.
+No production native/HLE changes, RAM execution, device response
+or retail replay.

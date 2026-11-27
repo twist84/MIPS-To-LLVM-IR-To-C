@@ -1588,6 +1588,122 @@ bool test_strict_reset_rom_data()
            cpu.m_gpr[2].m_hi == 0x55667788u;
 }
 
+bool test_strict_reset_rom_word_and_logic()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xbfc00000u;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    cpu.m_gpr[4].m_lo = 0xffffffffbfc01004ull;
+    cpu.m_gpr[2] = {0u, 0x123456789abcdef0ull};
+    put(0x1000u, 0x80ff8180u);
+    put(0u, 0x8c82fffcu); // lw r2,-4(r4)
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0xffffffff80ff8180ull ||
+        cpu.m_gpr[2].m_hi != 0x123456789abcdef0ull)
+    {
+        return false;
+    }
+    put(4u, 0x8c80fffcu); // lw zero,-4(r4): must check alignment/backing
+    cpu.m_gpr[0] = {0xdeadbeefu, 0xcafebabeu};
+    for (const uint32_t address : {0xbfc01005u, 0xbfc01006u, 0xbfc01007u,
+                                  0x9fc01004u, 0xa0001004u, 0xc0000004u})
+    {
+        cpu.m_gpr[4].m_lo = address;
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, view, 1u);
+        if (step.m_result != result::DATA_UNAVAILABLE ||
+            step.m_detail_pc != pc + 4u || step.m_data_address != address - 4u ||
+            step.m_retired != 0u || cpu.m_pc != pc + 4u ||
+            cpu.m_gpr[0].m_lo != 0xdeadbeefu || cpu.m_gpr[0].m_hi != 0xcafebabeu)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[4].m_lo = 0xbfc01004u;
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[0].m_lo != 0xdeadbeefu)
+    {
+        return false;
+    }
+    // AND/NOR use all 64 low bits and preserve the upper half.
+    cpu.m_gpr[3].m_lo = 0xfedcba9876543210ull;
+    cpu.m_gpr[5].m_lo = 0x0f0f0f0f0f0f0f0full;
+    put(8u, 0x00651024u); // and r2,r3,r5
+    put(12u, 0x00651027u); // nor r2,r3,r5
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != (0xfedcba9876543210ull & 0x0f0f0f0f0f0f0f0full) ||
+        ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != ~(0xfedcba9876543210ull | 0x0f0f0f0f0f0f0f0full) ||
+        cpu.m_gpr[2].m_hi != 0x123456789abcdef0ull)
+    {
+        return false;
+    }
+    // Last aligned ROM word succeeds; misaligned end refuses.
+    put(0x3ffffcu, 0x7f010203u);
+    put(16u, 0x8c820000u);
+    cpu.m_gpr[4].m_lo = 0xbffffffcu;
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_retired != 1u ||
+        cpu.m_gpr[2].m_lo != 0x7f010203u)
+    {
+        return false;
+    }
+    // Reserved shamt is not accepted as an ordinary logical opcode.
+    put(20u, 0x00651064u);
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_result != result::UNSUPPORTED_OPCODE ||
+        cpu.m_pc != pc + 20u || cpu.m_gpr[2].m_lo != 0x7f010203u)
+    {
+        return false;
+    }
+    // The directory scan's first mismatch/advance sequence, using
+    // independent synthetic file sizes including unaligned lengths.
+    constexpr uint32_t scan[] =
+    {
+        0x8d0a000cu, 0u, 0x254a000fu, 0x340b000fu, 0x01605827u,
+        0x014b5024u, 0x012a4821u, 0x25080010u, 0x25ceffffu,
+        0x15c0ffe7u, 0u
+    };
+    for (uint32_t i = 0u; i < sizeof(scan) / sizeof(scan[0]); ++i)
+    {
+        put(0x90u + i * 4u, scan[i]);
+    }
+    for (const uint32_t size : {0u, 1u, 15u, 16u, 17u, 0x12345u})
+    {
+        cpu.m_pc = pc + 0x90u;
+        cpu.m_gpr[8].m_lo = 0xffffffffbfc01000ull;
+        cpu.m_gpr[9].m_lo = 0xffffffffbfc00000ull;
+        cpu.m_gpr[14].m_lo = 32u;
+        put(0x100cu, size);
+        uint32_t retired = 0u;
+        while (retired < 11u)
+        {
+            const auto step = ee::ee_execute_strict_rom_register_step(cpu, view, 11u - retired);
+            if (step.m_result != result::COMMITTED || step.m_retired == 0u)
+            {
+                return false;
+            }
+            retired += step.m_retired;
+        }
+        const uint32_t rounded = ((size + 15u) / 16u) * 16u;
+        if (retired != 11u || cpu.m_pc != pc + 0x54u ||
+            cpu.m_gpr[8].m_lo != 0xffffffffbfc01010ull ||
+            cpu.m_gpr[9].m_lo != 0xffffffffbfc00000ull + rounded ||
+            cpu.m_gpr[10].m_lo != rounded || cpu.m_gpr[14].m_lo != 31u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1811,6 +1927,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_data(), "strict reset ROM data and ADDU regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
     {
         return 1;
     }

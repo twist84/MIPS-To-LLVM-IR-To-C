@@ -117,6 +117,48 @@ int main(int argc, char** argv)
     std::printf("EE reset ROM read: retired=%u address=bfc01000 byte=%02x next=%08x\n",
         retired, first_byte, cpu.m_pc);
 
+    // The pinned image's first directory entry differs from the
+    // sought name. Require execution of one complete mismatch/advance
+    // iteration and independently reconstruct its little-endian size.
+    // The interpreter reads the original image, not this expectation.
+    constexpr uint32_t directory_checkpoint = 38u;
+    while (retired < directory_checkpoint)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            directory_checkpoint - retired);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > directory_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EE reset directory scan refused: pc=%08x opcode=%08x result=%u retired=%u\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 13;
+        }
+        retired += action.m_retired;
+    }
+    const uint32_t file_size = static_cast<uint32_t>(bytes[0x100cu]) |
+        (static_cast<uint32_t>(bytes[0x100du]) << 8u) |
+        (static_cast<uint32_t>(bytes[0x100eu]) << 16u) |
+        (static_cast<uint32_t>(bytes[0x100fu]) << 24u);
+    const uint32_t padded_size = (file_size + 15u) & ~15u;
+    const uint32_t next_file = 0xbfc00000u + padded_size;
+    const uint64_t expected_file = (next_file & 0x80000000u) != 0u
+        ? 0xffffffff00000000ull | next_file : next_file;
+    if (first_byte != 0x52u || bytes[0x12cu] != 0x45u ||
+        cpu.m_pc != 0xbfc00054u ||
+        cpu.m_gpr[8].m_lo != 0xffffffffbfc01010ull ||
+        cpu.m_gpr[9].m_lo != expected_file ||
+        cpu.m_gpr[10].m_lo != padded_size ||
+        cpu.m_gpr[14].m_lo != 31u)
+    {
+        std::fprintf(stderr, "EE first directory iteration mismatch: pc=%08x size=%08x padded=%08x\n",
+            cpu.m_pc, file_size, padded_size);
+        return 14;
+    }
+    std::printf("EE reset directory advance: retired=%u size=%08x padded=%08x next_entry=%016llx next_file=%016llx pc=%08x\n",
+        retired, file_size, padded_size,
+        static_cast<unsigned long long>(cpu.m_gpr[8].m_lo),
+        static_cast<unsigned long long>(cpu.m_gpr[9].m_lo), cpu.m_pc);
+
     // Explore the actual supported prefix, not an invented device
     // response. Preserve a small committed tail for diagnosis.
     constexpr uint32_t exploration_budget = 65536u;

@@ -111,13 +111,22 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         {
             return true;
         }
-        if ((opcode & 0x7ffu) != 0x21u) // canonical ADDU, shamt=0
+        dest = (opcode >> 11u) & 31u;
+        switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
+        case 0x21u: // ADDU: low 32-bit wrapping sum
+            value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
+                                     static_cast<uint32_t>(read_gpr(cpu, rt)));
+            break;
+        case 0x24u: // AND: both low 64-bit operands
+            value = read_gpr(cpu, rs) & read_gpr(cpu, rt);
+            break;
+        case 0x27u: // NOR: both low 64-bit operands
+            value = ~(read_gpr(cpu, rs) | read_gpr(cpu, rt));
+            break;
+        default:
             return false;
         }
-        dest = (opcode >> 11u) & 31u;
-        value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
-                                 static_cast<uint32_t>(read_gpr(cpu, rt)));
         break;
     case 0x10u:
         if ((opcode & 0xffe0ffffu) != 0x40007800u)
@@ -153,14 +162,15 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     return true;
 }
 
-// LBU must validate even when the destination is zero. A refusal
+// LBU/LW must validate even when the destination is zero. A refusal
 // is diagnostic only: this ROM probe does not deliver guest faults.
 inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
     const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode)
 {
     using result = e_ee_reset_prefix_result;
-    if ((opcode >> 26u) != 0x24u)
+    const uint32_t primary = opcode >> 26u;
+    if (primary != 0x24u && primary != 0x23u)
     {
         return {execute_register_word(cpu, opcode) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -170,7 +180,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t imm = opcode & 0xffffu;
     const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
-    const auto plan = ee_plan_data_access(tlb, e_ee_data_access_kind::BYTE,
+    const auto kind = primary == 0x23u
+        ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
+    const auto plan = ee_plan_data_access(tlb, kind,
         false, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
     const auto bus = ee_plan_data_bus_span(plan.m_access, plan.m_width,
@@ -182,7 +194,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     }
     if (rt != 0u)
     {
-        cpu.m_gpr[rt].m_lo = *bytes;
+        cpu.m_gpr[rt].m_lo = primary == 0x23u
+            ? sign_extend_word(ee_read_instruction_word(bytes))
+            : static_cast<uint64_t>(*bytes);
     }
     return {result::COMMITTED, opcode, 0u, pc};
 }
