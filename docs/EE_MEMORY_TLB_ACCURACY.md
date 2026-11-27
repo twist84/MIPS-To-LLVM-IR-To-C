@@ -805,3 +805,29 @@ Directed tests cover target capture before slot mutation, zero GPR,
 reserved encodings, budget and refused slots, live guest-written
 instruction bytes, missing/short backing, cached/unmapped/device
 targets and deferred misalignment. No retail replay required.
+
+## Strict memory follow-up M6E2G1: EELOAD Status and guest RAM clear
+
+M6E2F passed CI run 46045545827/job 140663768635: exact 251576
+retirements at a0010000, physical 00010000, matching 41896/41896
+bytes and intact guards. The next LUI t0,7000 retired from live
+guest-written RAM. Stop: 251577 retirements, a0010004 / 40886000
+(MTC0 t0,Status), t0=70000000.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46045545827/job/140663768635
+
+Allow canonical MTC0 rt,Status with only CU0/CU1/CU2 bits set,
+using the actual low 32-bit source and architectural zero. Keep
+all other Status bits, other COP0 writes, interrupts, exception
+levels, privilege changes and timing hazards outside this isolated
+experiment. Permit subsequent strict steps within this subset.
+No production runtime changes.
+
+Require the Status checkpoint at 251578 retirements, pc a0010008.
+Execute the authentic guest clear loop with the existing BEQ/SB/
+ADDIU implementation. Require 653348 retirements at a001003c,
+stack a007ffe0 and 80352 zero bytes in [0002a3b0,0003dd90), with
+both adjacent sentinels intact and the copied image unchanged.
+Check the initial range is entirely sentinel-filled. These values
+are predictions from the observed instruction stream, pending CI.
+Do not replace the loop with a host memset. Report the next actual
+stop and bounded live lookahead. No retail replay required.

@@ -334,9 +334,115 @@ int main(int argc, char** argv)
         std::printf("EE reset lookahead: pc=%08x opcode=%08x decoded=%s\n",
             pc, opcode, decoded.mnemonic);
     }
-    // The handoff above is an enforced milestone. A further bounded
-    // run is diagnostic: report the first genuine unsupported action.
-    constexpr uint32_t exploration_limit = handoff_checkpoint + 4096u;
+    // The pinned image sets CU0/CU1/CU2 without changing privilege or
+    // enabling interrupts, then clears a RAM range via guest SB.
+    // Require both milestones, without skipping the guest loop.
+    constexpr uint32_t status_checkpoint = handoff_checkpoint + 2u;
+    for (; retired < status_checkpoint;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            status_checkpoint - retired, ram);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > status_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD Status refused: pc=%08x opcode=%08x result=%u retired=%u\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 22;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0010008u || cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_gpr[8].m_lo != 0x70000000u)
+    {
+        std::fprintf(stderr, "EELOAD Status checkpoint mismatch\n");
+        return 23;
+    }
+    std::printf("EELOAD Status: retired=%u pc=%08x status=%08x\n",
+        retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Status]);
+
+    constexpr uint32_t clear_begin = 0x0002a3b0u;
+    constexpr uint32_t clear_end = 0x0003dd90u;
+    constexpr uint32_t clear_size = clear_end - clear_begin;
+    // Ten initial instructions, five per byte, then the final taken
+    // BEQ and its slot. Check the whole region before and after.
+    constexpr uint32_t clear_checkpoint = handoff_checkpoint + 10u + 5u * clear_size + 2u;
+    static_assert(clear_size == 80352u);
+    static_assert(clear_checkpoint == 653348u);
+    for (uint32_t i = clear_begin - 1u; i <= clear_end; ++i)
+    {
+        if (ram_bytes[i] != 0xa5u)
+        {
+            std::fprintf(stderr, "EELOAD clear initial sentinel mismatch: physical=%08x\n", i);
+            return 24;
+        }
+    }
+    for (; retired < clear_checkpoint;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            clear_checkpoint - retired, ram);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > clear_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD clear refused: pc=%08x opcode=%08x result=%u retired=%u detail_pc=%08x address=%08x\n",
+                cpu.m_pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired,
+                action.m_detail_pc, action.m_data_address);
+            return 25;
+        }
+        retired += action.m_retired;
+    }
+    uint32_t cleared = 0u;
+    for (uint32_t i = clear_begin; i < clear_end; ++i)
+    {
+        if (ram_bytes[i] == 0u)
+        {
+            ++cleared;
+        }
+    }
+    if (cpu.m_pc != 0xa001003cu || cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_gpr[8].m_lo != 0xffffffffa003dd90ull ||
+        cpu.m_gpr[9].m_lo != 0xffffffffa003dd90ull ||
+        cpu.m_gpr[29].m_lo != 0xffffffffa007ffe0ull ||
+        cleared != clear_size || ram_bytes[clear_begin - 1u] != 0xa5u ||
+        ram_bytes[clear_end] != 0xa5u)
+    {
+        std::fprintf(stderr, "EELOAD clear checkpoint mismatch: pc=%08x cleared=%u/%u\n",
+            cpu.m_pc, cleared, clear_size);
+        return 26;
+    }
+    for (uint32_t i = 0u; i < image_size; ++i)
+    {
+        if (ram_bytes[destination + i] != bytes[source_offset + i])
+        {
+            std::fprintf(stderr, "EELOAD image changed during clear: offset=%08x\n", i);
+            return 27;
+        }
+    }
+    if (ram_bytes[destination - 1u] != 0xa5u || ram_bytes[destination + image_size] != 0xa5u)
+    {
+        return 28;
+    }
+    std::printf("EELOAD clear: retired=%u pc=%08x range=%08x-%08x cleared=%u/%u guard_before=%02x guard_after=%02x sp=%016llx\n",
+        retired, cpu.m_pc, clear_begin, clear_end, cleared, clear_size,
+        static_cast<unsigned>(ram_bytes[clear_begin - 1u]), static_cast<unsigned>(ram_bytes[clear_end]),
+        static_cast<unsigned long long>(cpu.m_gpr[29].m_lo));
+
+    // Inspect the next real blocker after the enforced clear loop.
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        const uint32_t pc = cpu.m_pc + i * 4u;
+        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+            cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+        const uint8_t* look = ee::ee_fetch_strict_reset_word(plan, rom, ram);
+        if (look == nullptr)
+        {
+            break;
+        }
+        const uint32_t opcode = ee::ee_read_instruction_word(look);
+        std::printf("EELOAD next lookahead: pc=%08x opcode=%08x decoded=%s\n",
+            pc, opcode, ee::decode(pc, opcode).mnemonic);
+    }
+    constexpr uint32_t exploration_limit = clear_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -350,7 +456,7 @@ int main(int argc, char** argv)
         }
         if (action.m_retired == 0u || action.m_retired > exploration_limit - retired)
         {
-            return 22;
+            return 29;
         }
         retired += action.m_retired;
         std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",

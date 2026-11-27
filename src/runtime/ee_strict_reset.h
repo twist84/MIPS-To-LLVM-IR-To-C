@@ -145,7 +145,21 @@ inline constexpr uint64_t sign_extend_word(uint32_t word)
         ? uint64_t{word} | 0xffffffff00000000ull : uint64_t{word};
 }
 
-// No memory, branches, clocks or side-effectful COP0 registers.
+// Only CU0/CU1/CU2 enable bits are supported in post-reset Status.
+// They do not change kernel mode, enable interrupts or enter exception
+// levels. Other Status bits and COP0 timing/hazards remain unmodeled.
+inline constexpr bool status_supported(uint32_t status)
+{
+    return (status & ~0x70000000u) == 0u;
+}
+static_assert(status_supported(0u));
+static_assert(status_supported(0x70000000u));
+static_assert(!status_supported(STATUS_ERL));
+static_assert(!status_supported(STATUS_BEV));
+static_assert(!status_supported(0x70000001u));
+static_assert(!status_supported(0x80000000u));
+
+// No memory, branches, clocks or general COP0 side effects.
 inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode)
 {
     const uint32_t primary = opcode >> 26u;
@@ -182,6 +196,16 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         break;
     case 0x10u:
+        if ((opcode & 0xffe0ffffu) == 0x40806000u) // canonical MTC0 rt,Status
+        {
+            const uint32_t status = static_cast<uint32_t>(read_gpr(cpu, rt));
+            if (!status_supported(status))
+            {
+                return false;
+            }
+            cpu.m_cop0[COP0_Status] = status;
+            return true;
+        }
         if ((opcode & 0xffe0ffffu) != 0x40007800u)
         {
             return false;
@@ -279,7 +303,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
-        cpu.m_cop0[COP0_Status] != 0u)
+        !strict_reset_detail::status_supported(cpu.m_cop0[COP0_Status]))
     {
         return {result::UNSAFE_BOUNDARY};
     }

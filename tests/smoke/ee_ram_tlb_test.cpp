@@ -1936,6 +1936,93 @@ bool test_strict_reset_jr_and_ram_fetch()
         ram[0xfffu] == 0xa5u;
 }
 
+bool test_strict_reset_status()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[16u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    cpu.m_pc = pc;
+    cpu.m_gpr[8] = {0x1234567870000000ull, 0xabcdefu};
+    put(0u, 0x40886000u); // mtc0 t0,Status
+    put(4u, 0x10000001u); // beq zero,zero,+1
+    put(8u, 0xa0800000u); // sb zero,0(r4)
+    cpu.m_gpr[4].m_lo = pc + 15u;
+    bytes[15] = 0xa5u;
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    if (step(1u).m_retired != 1u || cpu.m_pc != pc + 4u ||
+        cpu.m_cop0[ee::COP0_Status] != 0x70000000u ||
+        cpu.m_gpr[8].m_lo != 0x1234567870000000ull || cpu.m_gpr[8].m_hi != 0xabcdefu ||
+        step(2u).m_retired != 2u || cpu.m_pc != pc + 12u ||
+        bytes[15] != 0u)
+    {
+        return false;
+    }
+    for (const uint32_t invalid : {1u, ee::STATUS_ERL, ee::STATUS_EXL,
+                                   ee::STATUS_BEV, 0x10u, 0x80000000u, 0x70010000u})
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[8].m_lo = invalid;
+        const auto rejected = step(1u);
+        if (rejected.m_result != result::UNSUPPORTED_OPCODE ||
+            rejected.m_retired != 0u || cpu.m_pc != pc ||
+            cpu.m_cop0[ee::COP0_Status] != 0x70000000u)
+        {
+            return false;
+        }
+    }
+    for (const uint32_t invalid : {0x40886001u, 0x40886800u})
+    {
+        put(0u, invalid);
+        cpu.m_gpr[8].m_lo = 0u;
+        if (step(1u).m_result != result::UNSUPPORTED_OPCODE ||
+            cpu.m_pc != pc || cpu.m_cop0[ee::COP0_Status] != 0x70000000u)
+        {
+            return false;
+        }
+    }
+    put(0u, 0x40806000u); // mtc0 zero,Status
+    cpu.m_gpr[0].m_lo = 0xffffffffffffffffull;
+    if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_Status] != 0u ||
+        cpu.m_gpr[0].m_lo != 0xffffffffffffffffull)
+    {
+        return false;
+    }
+    // A disallowed Status value in a delay slot must not change
+    // either the Status register or the restart PC.
+    put(4u, 0x10000001u);
+    put(8u, 0x40886000u);
+    cpu.m_gpr[8].m_lo = 1u;
+    const auto rejected = step(2u);
+    if (rejected.m_result != result::UNSUPPORTED_OPCODE ||
+        rejected.m_detail_pc != pc + 8u || cpu.m_pc != pc + 4u ||
+        cpu.m_cop0[ee::COP0_Status] != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[8].m_lo = 0x70000000u;
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 12u ||
+        cpu.m_cop0[ee::COP0_Status] != 0x70000000u)
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_Status] = 0x70000001u;
+    return step(1u).m_result == result::UNSAFE_BOUNDARY &&
+        cpu.m_pc == pc + 12u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2163,6 +2250,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_status(), "strict reset restricted COP0 Status regression"))
     {
         return 1;
     }
