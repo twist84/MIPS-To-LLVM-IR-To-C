@@ -1006,3 +1006,37 @@ and quiet/coalescing disabled. Use G6A EE source, V30 inventory,
 same reference and output ee-iop-g8c1. Compare median and spread
 before retaining any performance claim. No EE IR, native EE or
 VU1 rebuild required. CI pending.
+
+## G8C.1 — correctness accepted, throughput neutral; production change dropped
+
+All five workflows passed at 97b2eeb5ead5d0257e1952636c027850fb050fa5.
+Archive ee-iop-g8c1.zip SHA-256
+f02e7a83096d500e10653f56d7d5f2ed31b246975b889f8e80dbc642cd6a4dfa.
+Pinned G8B control runner
+a02d72ff2844dd6c86059e3deb9629b57b88dc6f63b1306211c29c06964016c8;
+candidate runner
+dd828c1a264299879d735806e86e5e8a6bbb0421de2fde204be15b7f4f22633a.
+Receipt reports unchanged input identities, fixed G6A/V30, RTC/PAD,
+both synchronous workers and profiling/quiet/coalescing disabled.
+Binaries themselves are not supplied. All eight raw reports and PPM
+hashes independently matched reference; all archived dispatch maps
+(184719 lines, 184700 unique keys) identical; PAD footers 3127/3127.
+All completed 40M dispatches, 21910026110 attempts, 22115080673 EE
+cycles, 4494 fields, 394881 VU1 runs, 445669423 pairs, 84 programs,
+no fallback/fault/observer failure. 42578752 logical and physical
+IOP turns, all general kernel runs, zero debt; no IOP profile lines.
+
+| Pair | G8B s | G8C.1 s |
+|---|---:|---:|
+| 1 | 42.828 | 41.187 |
+| 2 | 41.812 | 42.391 |
+| 3 | 41.906 | 41.985 |
+| 4 | 41.875 | 41.828 |
+
+Median 41.8905 -> 41.9065s, nominal throughput -0.03818%.
+Two faster/two slower; 16ms median delta versus 1.016/1.204s
+within-arm spreads. No demonstrated gain. Removed incremental phase
+state and restored G8B SPU2 production implementation (a3fb546,
+85274ba) to avoid maintaining an extra invariant without benefit.
+Retain fractional-phase regression and runner-only replay tooling.
+G8B remains pinned control.
