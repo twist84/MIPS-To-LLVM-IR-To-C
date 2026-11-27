@@ -1,13 +1,17 @@
-cmake_minimum_required(VERSION 3.18)
-project(ps2_recompiler C CXX)
+cmake_minimum_required(VERSION 4.5.1)
+project(ps2_recompiler LANGUAGES C CXX)
 
 option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
 option(EE_CLANG_WARNINGS_AS_ERRORS "Treat project Clang compiler warnings as errors" ON)
 
 set(CMAKE_C_STANDARD 11)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+# No project target uses C++ modules. Avoid unnecessary dependency scans.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
 # Use the LLVM-provided clang/clang++ and lld-link when available. LLVM is kept
 # optional: the core decoder/runtime build without LLVM (PLAN.md section 6).
@@ -172,14 +176,17 @@ target_link_libraries(ee_smoke_test PRIVATE ee_core)
 # Build a native object for the reference/interpreter smoke harness. This is
 # deliberately not described as LLVM IR object emission: the actual LLVM text
 # path is verified separately by tools/verify_ir.py when llvmlite is available.
+add_library(ee_native_smoke_object OBJECT EXCLUDE_FROM_ALL
+    tests/smoke/native_smoke.cpp)
+# Use the configured C++ language mode and compiler driver for this legacy
+# object too, instead of a separate GNU-only compiler command.
 add_custom_command(
     OUTPUT ${CMAKE_BINARY_DIR}/recompiled/guest_fn_0x100000.obj
-    COMMAND ${CMAKE_CXX_COMPILER} -O2 -Wall -Wextra -c
-        -I${CMAKE_SOURCE_DIR}/include/ee
-        -I${CMAKE_SOURCE_DIR}/src/runtime
-        ${CMAKE_SOURCE_DIR}/tests/smoke/native_smoke.cpp
-        -o ${CMAKE_BINARY_DIR}/recompiled/guest_fn_0x100000.obj
-    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/recompiled"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_OBJECTS:ee_native_smoke_object>
+        "${CMAKE_BINARY_DIR}/recompiled/guest_fn_0x100000.obj"
+    DEPENDS ee_native_smoke_object $<TARGET_OBJECTS:ee_native_smoke_object>
     COMMENT "Emitting native object for lifted guest function"
     VERBATIM
 )
