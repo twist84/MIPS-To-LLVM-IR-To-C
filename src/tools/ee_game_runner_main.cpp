@@ -4055,6 +4055,9 @@ int main(int argc, char** argv)
         "SDBZ_RUNTIME_PROFILE", &runtime_profile_environment);
     ee::runtime_profile_begin(runtime_profile_value != nullptr &&
         std::strcmp(runtime_profile_value, "1") == 0);
+    const bool attribute_iop = ee::g_runtime_profile.m_enabled &&
+        iop_attribution_value != nullptr &&
+        std::strcmp(iop_attribution_value, "1") == 0;
     if (ee::g_runtime_profile.m_enabled)
     {
         runtime.m_vu0_sync = runner_vu0_profiled_sync;
@@ -4818,9 +4821,6 @@ int main(int argc, char** argv)
                         : "IOP clock refused accumulated cycle overflow");
                 return 1;
             }
-            const bool attribute_iop = ee::g_runtime_profile.m_enabled &&
-                iop_attribution_value != nullptr &&
-                std::strcmp(iop_attribution_value, "1") == 0;
             if (attribute_iop)
             {
                 iop_attribution.checkpoint(iop_clock.due() != 0u);
@@ -9657,8 +9657,7 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(iop_quiet_advances),
             static_cast<unsigned long long>(iop_clock.due()));
     }
-    if (ee::g_runtime_profile.m_enabled && iop_attribution_value != nullptr &&
-        std::strcmp(iop_attribution_value, "1") == 0)
+    if (attribute_iop)
     {
         std::fprintf(stderr, "IOP service profile: checkpoints=%llu no_debt=%llu "
             "batches=%llu sample_group=%u\n",
