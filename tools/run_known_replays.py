@@ -177,7 +177,7 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
 @metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
                 allow_mismatches, *, ir_only=False, verified_hashes=None,
-                persistent=False):
+                persistent=False, ir_jobs=1):
     """Build known guest entries without any intermediate game execution."""
     ir_dir = work / "ir"
     for candidate in (ir_dir, work / "objects", work / "translation-cache.json",
@@ -201,7 +201,9 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
     # Subsequent batches reuse the discovery cache and exact ownership logic
     # used by production auto-expansion, WITHOUT replaying the game.
     print(f"Known-function reconstruction: {len(entries)} entries", flush=True)
-    with (run_game.c_recomp_session(recomp, elf) if persistent else
+    if not 1 <= ir_jobs <= 32 or (ir_jobs != 1 and not persistent):
+        raise ValueError("parallel IR emission requires persistent reconstruction")
+    with (run_game.c_recomp_session(recomp, elf, ir_jobs) if persistent else
           nullcontext(run_game.run)) as recompiler:
         recompiler([recomp, elf, ir_dir, f"--function=0x{entries[0]:08x}"])
         with metrics.stage("metadata_read_parse"):

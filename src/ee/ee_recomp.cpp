@@ -12,6 +12,8 @@
 #include "module_builder.h"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -466,6 +468,14 @@ static bool ee_recomp_impl(const char* elf_path,
                           const s_recomp_options& opts,
                           s_ee_recomp_session_state* session)
 {
+    if (opts.ir_jobs == 0 || opts.ir_jobs > 32)
+    {
+        if (error)
+        {
+            *error = "IR worker count must be in 1..32";
+        }
+        return false;
+    }
     const auto started = std::chrono::steady_clock::now();
     std::error_code ec;
     std::filesystem::create_directories(output_dir, ec);
@@ -883,6 +893,7 @@ static bool ee_recomp_impl(const char* elf_path,
     }
     function_analyzer analyzer;
     llvm::llvm_context ctx("ee_game");
+    const bool parallel_ir = opts.ir_jobs > 1 && !opts.only_functions.empty();
 
     // ------------------------------------------------------------------
     // Function-scoped coverage: every PC belonging to a CFG built from a
@@ -959,6 +970,14 @@ static bool ee_recomp_impl(const char* elf_path,
 
     const auto coverage_done = std::chrono::steady_clock::now();
     std::set<uint32_t> emitted_blocks;
+    struct s_ir_job
+    {
+        s_ee_function m_function;
+        std::string m_host_symbol;
+        std::string m_path;
+    };
+    std::vector<s_ir_job> ir_jobs;
+    bool serial_write_failed = false;
 
     auto emit_entry = [&](uint32_t entry) -> bool {
         // Pass full entry set so CFGs stop at other functions (stop-at-other-entry).
@@ -984,11 +1003,18 @@ static bool ee_recomp_impl(const char* elf_path,
         // ELF symbol names are not guaranteed to be unique across aliases or
         // stripped/partially-symbolized images; the guest entry VA is.
         const std::string host_symbol = native_function_symbol(entry);
-        llvm::module_builder builder(ctx, opts.opt_level);
-        builder.emit_function_cfg(fn, global_insns, host_symbol.c_str());
         std::string ir_name = sanitize_name(fn.name) + "_" + u32hex(entry) + ".ll";
         std::string ir_path = std::string(output_dir) + "/" + ir_name;
-        ctx.write_ir_to_file(ir_path.c_str());
+        if (!parallel_ir)
+        {
+            llvm::module_builder builder(ctx, opts.opt_level);
+            builder.emit_function_cfg(fn, global_insns, host_symbol.c_str());
+            if (!ctx.write_ir_to_file(ir_path.c_str()))
+            {
+                serial_write_failed = true;
+                return false;
+            }
+        }
 
         s_recompiled_fn rfn;
         rfn.name = fn.name;
@@ -1060,6 +1086,10 @@ static bool ee_recomp_impl(const char* elf_path,
                     static_cast<uint32_t>(unsupported_samples.size()),
                 static_cast<uint32_t>(k_max_unsupported_samples));
         }
+        if (parallel_ir)
+        {
+            ir_jobs.push_back({std::move(fn), host_symbol, ir_path});
+        }
         return true;
     };
 
@@ -1097,6 +1127,71 @@ static bool ee_recomp_impl(const char* elf_path,
             }
             emit_entry(ep);
         }
+    }
+
+    if (serial_write_failed)
+    {
+        if (error)
+        {
+            *error = "serial IR emission failed";
+        }
+        return false;
+    }
+    if (parallel_ir && !ir_jobs.empty())
+    {
+        // Planning, ownership and result order were established above.
+        // Workers only read the frozen instruction map, and each owns its
+        // builder/context and a distinct output path. Bound memory by the
+        // existing explicit batch size and the selected worker count.
+        const auto& instructions = std::as_const(global_insns);
+        const auto& jobs = std::as_const(ir_jobs);
+        std::atomic<size_t> next{0};
+        std::atomic<bool> failed{false};
+        const size_t workers = std::min<size_t>(opts.ir_jobs, jobs.size());
+        {
+            std::vector<std::jthread> threads;
+            threads.reserve(workers);
+            for (size_t i = 0; i < workers; ++i)
+            {
+                threads.emplace_back([&]()
+                {
+                    try
+                    {
+                        llvm::llvm_context worker_ctx("ee_game");
+                        for (; !failed.load();)
+                        {
+                            const size_t index = next.fetch_add(1);
+                            if (index >= jobs.size())
+                            {
+                                break;
+                            }
+                            const auto& job = jobs[index];
+                            llvm::module_builder builder(worker_ctx, opts.opt_level);
+                            builder.emit_function_cfg(job.m_function, instructions,
+                                                      job.m_host_symbol.c_str());
+                            if (!worker_ctx.write_ir_to_file(job.m_path.c_str()))
+                            {
+                                failed.store(true);
+                            }
+                        }
+                    }
+                    catch (...)
+                    {
+                        failed.store(true);
+                    }
+                });
+            }
+        } // Join every worker before inspecting failure or publishing metadata.
+        if (failed.load())
+        {
+            if (error)
+            {
+                *error = "parallel IR emission failed";
+            }
+            return false;
+        }
+        std::printf("ee_recomp parallel IR: workers=%zu modules=%zu\n",
+                    workers, jobs.size());
     }
 
     const auto emission_done = std::chrono::steady_clock::now();

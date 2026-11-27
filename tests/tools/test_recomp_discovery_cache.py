@@ -232,7 +232,7 @@ def test_persistent_session(ee_recomp):
         # Exercise the actual Python driver as well as the raw line protocol.
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
         import run_game
-        with run_game.c_recomp_session(ee_recomp, elf) as session:
+        with run_game.c_recomp_session(ee_recomp, elf, ir_jobs=4) as session:
             driver_seed = root / "driver-seed"
             session([ee_recomp, elf, driver_seed, "--function=0x00100008"])
             driver_batch = root / "driver-batch"
@@ -245,6 +245,25 @@ def test_persistent_session(ee_recomp):
             x["ir_path"] = Path(x["ir_path"]).name
             y["ir_path"] = Path(y["ir_path"]).name
         assert a == b
+
+        # Repeated parallel batches must match serial IR and ordered metadata.
+        parallel_lines = [f"seed\t{root / 'parallel-seed'}\t0x00100008"]
+        for i, pcs in enumerate(selections):
+            parallel_lines.append(f"batch\t{root / f'parallel-{i}'}\t" +
+                                  ",".join(hex(pc) for pc in pcs))
+        parallel = subprocess.run([ee_recomp, str(elf), "--serve-reconstruction", "--ir-jobs=4"],
+                                  input="\n".join(parallel_lines + ["quit", ""]),
+                                  capture_output=True, text=True)
+        assert parallel.returncode == 0, parallel.stdout + parallel.stderr
+        assert "ee_recomp parallel IR: workers=2 modules=2" in parallel.stdout
+        for i in range(3):
+            a = json.loads((root / f"serial-{i}" / "ee_functions.json").read_text())
+            b = json.loads((root / f"parallel-{i}" / "ee_functions.json").read_text())
+            for x, y in zip(a["functions"], b["functions"], strict=True):
+                assert Path(x["ir_path"]).read_bytes() == Path(y["ir_path"]).read_bytes()
+                x["ir_path"] = Path(x["ir_path"]).name
+                y["ir_path"] = Path(y["ir_path"]).name
+            assert a == b
 
         denied = subprocess.run([ee_recomp, str(elf), "--serve-reconstruction"],
                                 input="batch\tbad\t0x00100080\n",

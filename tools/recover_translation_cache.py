@@ -590,7 +590,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
 
 def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
                              allow_ir_changes=False, *, persistent=False,
-                             allow_source_changes=False):
+                             allow_source_changes=False, ir_jobs=1):
     """Cold IR-only reconstruction in a fresh directory outside active cache."""
     base_work = base_work.resolve()
     output = output.resolve()
@@ -613,7 +613,7 @@ def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
         output.mkdir(parents=True, exist_ok=False)
         shared_ir.write_json(output / "benchmark-input.json", manifest)
     hashes = {}
-    extra = {"persistent": True} if persistent else {}
+    extra = {"persistent": True, "ir_jobs": ir_jobs} if persistent else {}
     comparison = run_known_replays.reconstruct(
         manifest, entries, elf, build, config, output, jobs,
         allow_ir_changes, ir_only=True, verified_hashes=hashes, **extra)
@@ -635,6 +635,8 @@ def main(argv=None):
     parser.add_argument("--elf", type=Path)
     parser.add_argument("--benchmark-reconstruct", type=Path, metavar="FRESH_WORK_DIR",
                         help="cold IR-only reconstruction; never activate output")
+    parser.add_argument("--ir-jobs", type=int, choices=range(1, 33), default=1,
+                        help="parallel IR emission workers in persistent benchmark")
     parser.add_argument("--persistent-recomp", action="store_true",
                         help="benchmark one persistent recompiler process")
     parser.add_argument("--benchmark-allow-source-changes", action="store_true",
@@ -662,6 +664,8 @@ def main(argv=None):
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
     args = parser.parse_args(argv)
+    if args.ir_jobs != 1 and not (args.persistent_recomp and args.benchmark_reconstruct):
+        parser.error("--ir-jobs requires --persistent-recomp and --benchmark-reconstruct")
     if (args.persistent_recomp or args.benchmark_allow_source_changes) and not args.benchmark_reconstruct:
         parser.error("persistent recompiler/source-change experiment requires --benchmark-reconstruct")
     if args.benchmark_reconstruct and (
@@ -688,13 +692,15 @@ def main(argv=None):
                                 elf=str(elf), jobs=args.emit_jobs,
                                 work=str(args.benchmark_reconstruct.resolve()),
                                 persistent_recomp=args.persistent_recomp,
+                                ir_jobs=args.ir_jobs,
                                 allow_source_changes=args.benchmark_allow_source_changes,
                                 allow_ir_changes=args.allow_ir_changes):
                 benchmark_reconstruction(
                     elf, build, args.config, base_work, args.benchmark_reconstruct,
                     args.emit_jobs, args.allow_ir_changes,
                     persistent=args.persistent_recomp,
-                    allow_source_changes=args.benchmark_allow_source_changes)
+                    allow_source_changes=args.benchmark_allow_source_changes,
+                    ir_jobs=args.ir_jobs)
         elif args.migrate_source_fingerprints:
             migrate_source_fingerprints(elf, base_work, Path(__file__).resolve().parents[1])
         elif args.check_active_source:

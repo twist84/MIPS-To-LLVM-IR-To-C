@@ -978,8 +978,12 @@ def run(command, capture=False, timeout_seconds=None):
 class c_recomp_session:
     """One child for a fresh reconstruction; fail closed on protocol errors."""
 
-    def __init__(self, recomp, elf):
+    def __init__(self, recomp, elf, ir_jobs=1):
+        if not 1 <= ir_jobs <= 32:
+            raise ValueError("IR worker count must be in 1..32")
         self.m_argv = [str(recomp), str(elf), "--serve-reconstruction"]
+        if ir_jobs != 1:
+            self.m_argv.append(f"--ir-jobs={ir_jobs}")
         self.m_child = None
 
     def __enter__(self):

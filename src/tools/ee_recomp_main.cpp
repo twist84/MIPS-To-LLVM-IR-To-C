@@ -78,7 +78,7 @@ static bool parse_function_addresses(const std::string& text,
 
 // Line protocol used only by isolated reconstruction: seed/batch, output,
 // comma-separated PCs. A failed request terminates the session.
-static int serve_reconstruction(const char* elf_path)
+static int serve_reconstruction(const char* elf_path, uint32_t ir_jobs)
 {
     ee::c_ee_recomp_session session;
     std::string cache_path;
@@ -105,6 +105,7 @@ static int serve_reconstruction(const char* elf_path)
             return 2;
         }
         ee::s_recomp_options opts;
+        opts.ir_jobs = ir_jobs;
         if (mode == "seed" && cache_path.empty() && addresses.size() == 1)
         {
             opts.only_function = addresses.front();
@@ -142,9 +143,33 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    if (argc == 3 && std::strcmp(argv[2], "--serve-reconstruction") == 0)
+    if (argc >= 3 && std::strcmp(argv[2], "--serve-reconstruction") == 0)
     {
-        return serve_reconstruction(argv[1]);
+        uint32_t ir_jobs = 1;
+        if (argc == 4)
+        {
+            const std::string arg = argv[3];
+            if (!arg.starts_with("--ir-jobs="))
+            {
+                return 2;
+            }
+            const std::string value = arg.substr(10);
+            if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos ||
+                value.size() > 2)
+            {
+                return 2;
+            }
+            ir_jobs = parse_u32(value);
+            if (ir_jobs == 0 || ir_jobs > 32)
+            {
+                return 2;
+            }
+        }
+        else if (argc != 3)
+        {
+            return 2;
+        }
+        return serve_reconstruction(argv[1], ir_jobs);
     }
 
     const char* elf_path = nullptr;

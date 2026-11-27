@@ -81,6 +81,8 @@ struct s_recomp_options
     std::vector<uint32_t> only_functions;
     // LLVM optimisation level hint (0-3); currently logged only.
     int opt_level = 0;
+    // Bounded parallel emission for explicit batches only; ownership is serial.
+    uint32_t ir_jobs = 1;
     // Reuse a verified full-ELF discovery snapshot when emitting one function.
     // The snapshot is tied to the exact source ELF and discovery format.
     std::string discovery_cache_path;

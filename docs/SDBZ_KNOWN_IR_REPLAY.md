@@ -398,3 +398,19 @@ it does not authorize activation or accept changed IR. The report counts
 actual child launches separately from logical session requests. Compare
 metadata bytes against the accepted relaxed baseline. No measured speedup
 for the persistent experiment yet.
+
+R6.4 Windows acceptance: 120.031 s wall time, 16,252 exact IR hashes and
+byte-identical reconstructed metadata. One process, 137 requests; discovery
+46.087 -> 21.540 s. Cumulative reduction from 191.000 s is 37.16%.
+
+### R7 bounded parallel emission experiment
+
+Persistent benchmark accepts `--ir-jobs 1..32` (default 1). CFG analysis,
+block ownership, metadata and diagnostic order are established serially;
+explicit batches then emit independent modules with private contexts and
+builders using a bounded worker group. Workers join before metadata is
+published; failed writes fail the isolated reconstruction. Seed and normal
+live emission remain serial. The original 128-entry batch limit remains.
+Use strict IR hash and reconstructed metadata comparison against the accepted
+R6.4 benchmark. Do not activate experimental results. Worker startup and
+scheduling overhead may reduce gains for small batches; measure first.
