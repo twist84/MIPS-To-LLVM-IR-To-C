@@ -1,5 +1,7 @@
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
+#include "ee_memory_bus_plan.h"
+#include "ee_memory_fault_commit.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 
@@ -559,6 +561,168 @@ s_ee_ram_execution ee_execute_ram_callback(
         ? e_ee_ram_result::RETURNED
         : e_ee_ram_result::INSTRUCTION_BUDGET;
     return result;
+}
+
+e_ee_strict_ram_step_result ee_execute_strict_ram_step(
+    s_ee_cpu_state& cpu, ee_memory& memory, bool& actual_delay_slot,
+    const s_ee_strict_ram_evidence& evidence)
+{
+    using result = e_ee_strict_ram_step_result;
+    using data_kind = e_ee_data_access_kind;
+    if (!evidence.m_ordinary_boundary || !evidence.m_isolated_ram ||
+        cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
+        (cpu.m_cop0[COP0_Status] & STATUS_ERL) != 0u)
+    {
+        return result::UNSAFE_BOUNDARY;
+    }
+    const uint32_t pc = cpu.m_pc;
+    const uint32_t status = cpu.m_cop0[COP0_Status];
+    const uint32_t config = cpu.m_cop0[COP0_Config];
+    const uint32_t context = cpu.m_cop0[COP0_Context];
+    const uint32_t entry_hi = cpu.m_cop0[COP0_EntryHi];
+    auto& tlb = memory.tlb();
+    s_ee_memory_fault_request request{};
+    request.m_kind = e_ee_memory_request_kind::FETCH;
+    request.m_address = pc;
+    request.m_faulting_pc = pc;
+    request.m_architectural_state_restored = true;
+    const auto commit_fault = [&]()
+    {
+        return ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) ==
+            e_ee_memory_fault_commit_result::COMMITTED
+                ? result::FAULT_COMMITTED : result::UNMODELED_ACCESS;
+    };
+
+    const auto fetch = ee_plan_instruction_fetch(tlb, pc, status, config,
+                                                context, entry_hi);
+    if (fetch.m_fault.m_valid)
+    {
+        return commit_fault();
+    }
+    // Only ordinary uncached physical RAM, not cached/disabled-cache,
+    // accelerated, scratchpad, ROM, device or unmodeled access.
+    constexpr uint32_t retail_ram_end = 0x02000000u;
+    const auto ram_span = [&](const s_ee_access_decision& access, uint32_t width)
+        -> uint8_t*
+    {
+        const auto bus = ee_plan_data_bus_span(access, width, config, retail_ram_end);
+        if (bus.m_region != e_ee_bus_region::RAM ||
+            bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED)
+        {
+            return nullptr;
+        }
+        // Check the actual allocation, without a second alias transform.
+        return memory.physical_ram_span(bus.m_address, bus.m_width);
+    };
+    if (fetch.m_route != e_ee_fetch_route::CACHE_BYPASS_PHYSICAL)
+    {
+        return result::UNMODELED_ACCESS;
+    }
+    const uint8_t* code = ram_span(fetch.m_access, 4u);
+    if (code == nullptr)
+    {
+        return result::UNMODELED_ACCESS;
+    }
+    const uint32_t instruction = static_cast<uint32_t>(code[0]) |
+        (static_cast<uint32_t>(code[1]) << 8u) |
+        (static_cast<uint32_t>(code[2]) << 16u) |
+        (static_cast<uint32_t>(code[3]) << 24u);
+    const uint32_t primary = instruction >> 26u;
+    const uint32_t rs = (instruction >> 21u) & 31u;
+    const uint32_t rt = (instruction >> 16u) & 31u;
+    const uint32_t offset = static_cast<uint32_t>(
+        static_cast<int32_t>(static_cast<int16_t>(instruction & 0xffffu)));
+    const uint32_t address = static_cast<uint32_t>(read_reg(cpu, rs)) + offset;
+    bool store = false;
+    bool sign_extend = false;
+    data_kind kind = data_kind::BYTE;
+    switch (primary)
+    {
+    case 0x20u: // LB
+        sign_extend = true;
+        break;
+    case 0x24u: // LBU
+        break;
+    case 0x21u: // LH
+        sign_extend = true;
+        kind = data_kind::HALFWORD;
+        break;
+    case 0x25u: // LHU
+        kind = data_kind::HALFWORD;
+        break;
+    case 0x23u: // LW
+        sign_extend = true;
+        kind = data_kind::WORD;
+        break;
+    case 0x27u: // LWU
+        kind = data_kind::WORD;
+        break;
+    case 0x37u: // LD
+        kind = data_kind::DOUBLEWORD;
+        break;
+    case 0x28u: // SB
+        store = true;
+        break;
+    case 0x29u: // SH
+        store = true;
+        kind = data_kind::HALFWORD;
+        break;
+    case 0x2bu: // SW
+        store = true;
+        kind = data_kind::WORD;
+        break;
+    case 0x3fu: // SD
+        store = true;
+        kind = data_kind::DOUBLEWORD;
+        break;
+    default:
+        return result::UNSUPPORTED_INSTRUCTION;
+    }
+    request.m_kind = e_ee_memory_request_kind::DATA;
+    request.m_address = address;
+    request.m_data_kind = kind;
+    request.m_write_access = store;
+    const auto access = ee_plan_data_access(tlb, kind, store, address,
+                                           status, config, context, entry_hi);
+    if (access.m_fault.m_valid)
+    {
+        return commit_fault();
+    }
+    uint8_t* bytes = ram_span(access.m_access, access.m_width);
+    if (bytes == nullptr)
+    {
+        return result::UNMODELED_ACCESS;
+    }
+    // All potentially failing checks precede the first architectural
+    // write. Explicit byte order avoids host alignment/endian assumptions.
+    if (store)
+    {
+        const uint64_t value = read_reg(cpu, rt);
+        for (uint32_t i = 0u; i < access.m_width; ++i)
+        {
+            bytes[i] = static_cast<uint8_t>(value >> (i * 8u));
+        }
+    }
+    else
+    {
+        uint64_t value = 0u;
+        for (uint32_t i = 0u; i < access.m_width; ++i)
+        {
+            value |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+        }
+        if (sign_extend)
+        {
+            const uint32_t bits = access.m_width * 8u;
+            const uint64_t sign = uint64_t{1} << (bits - 1u);
+            if ((value & sign) != 0u)
+            {
+                value |= ~((uint64_t{1} << bits) - 1u);
+            }
+        }
+        write_dword(cpu, rt, value);
+    }
+    cpu.m_pc = pc + 4u;
+    return result::COMMITTED;
 }
 
 const char* ee_ram_result_name(e_ee_ram_result result)

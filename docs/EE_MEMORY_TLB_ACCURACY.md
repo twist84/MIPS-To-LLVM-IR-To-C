@@ -369,3 +369,36 @@ M6 must integrate a bounded opt-in path, explicitly route real guest
 handlers and prove rejected accesses leave no partial side effects
 before any compatibility-path activation. No retail replay required
 for this commit. CI pending.
+
+## Strict memory follow-up M6A: isolated scalar instruction execution
+
+Add an explicit opt-in single-instruction entry point to the bounded
+RAM interpreter, not a new default memory mode. It fetches actual guest
+instruction bytes via the strict fetch planner, decodes LB/LBU/LH/LHU/
+LW/LWU/LD and SB/SH/SW/SD, resolves data translation and permission,
+checks physical aperture and actual backing, and commits the register
+or RAM update only after every check succeeds. It never reinterprets
+a physical address through the HLE alias mapper. Sign extension,
+little-endian bytes, GPR zero, and preservation of upper GPR halves
+are explicit. A modeled fetch/data fault commits through M5 before
+any data write; unsupported or unmodeled paths leave state unchanged.
+
+Scope is deliberately limited to ordinary uncached physical RAM with
+explicit caller evidence of an isolated ordinary dispatch boundary.
+No pending cache/write-buffer or DMA/device effects, native code
+coherence, elapsed-clock or interrupt work may be inferred from that
+evidence. Cached (including disabled-cache attributes), accelerated,
+scratchpad, ROM, MMIO, delay slots, ERL and other opcodes are deferred.
+The caller owns clock publication and real handler dispatch. The old
+RAM callback, native LLVM memory helpers and production front ends are
+unchanged; no new retail replay or cache rebuild required for this
+isolated opt-in path.
+
+Runtime tests execute real little-endian opcodes from TLB-mapped
+virtual addresses, all eleven scalar load/store forms, clean-page
+store rejection, unaligned load, fetch ASID miss, zero-register load
+fault, absent evidence, unsupported opcode, cached mappings, unbacked
+physical RAM and HLE-only physical aliases. M1-M5 constexpr/static_assert
+fixtures remain. CI pending. Next M6B: quadword and partial transfers
+through this isolated executor, then bounded handler/ERET integration
+and native strict lowering strategy without changing the default path.

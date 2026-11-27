@@ -895,6 +895,149 @@ static_assert(test_access_and_fault_plans(), "EE memory fault plan regression");
 static_assert(test_scratchpad_mapping(), "EE scratchpad mapping regression");
 
 
+bool test_strict_ram_execution()
+{
+    using result = ee::e_ee_strict_ram_step_result;
+    constexpr uint32_t pc = 0x00400000u;
+    constexpr uint32_t data = pc + 0x1000u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    constexpr uint32_t lo_code = (1u << 6u) | 0x12u;
+    constexpr uint32_t lo_data = (2u << 6u) | 0x16u;
+    constexpr uint64_t original = 0x8877665580ff8180ull;
+    constexpr uint64_t marker = 0x1122334455667788ull;
+    ee::ee_memory memory(0x3000u);
+    memory.set_kseg_ram_aliases(true);
+    if (!memory.tlb().write(0u, 0u, pc | 0xabu, lo_code, lo_data))
+    {
+        return false;
+    }
+    ee::s_ee_cpu_state cpu{};
+    bool actual_delay_slot = true;
+    const ee::s_ee_strict_ram_evidence evidence{true, true};
+    const auto reset = [&](uint32_t primary, uint32_t address, uint32_t rt = 2u)
+    {
+        cpu = {};
+        cpu.m_pc = pc;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[ee::COP0_Status] = 0x10u;
+        cpu.m_cop0[ee::COP0_EntryHi] = 0xabu;
+        cpu.m_gpr[4].m_lo = address + 4u;
+        cpu.m_gpr[2] = {marker, marker};
+        actual_delay_slot = true;
+        memory.write32(0x1000u, (primary << 26u) | (4u << 21u) |
+            (rt << 16u) | 0xfffcu);
+        memory.write64(0x2000u, original);
+    };
+    constexpr uint32_t loads[] = {0x20u, 0x24u, 0x21u, 0x25u, 0x23u, 0x27u, 0x37u};
+    constexpr uint64_t expected[] =
+    {
+        0xffffffffffffff80ull, 0x80ull, 0xffffffffffff8180ull,
+        0x8180ull, 0xffffffff80ff8180ull, 0x80ff8180ull, original
+    };
+    for (uint32_t i = 0u; i < 7u; ++i)
+    {
+        reset(loads[i], data);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::COMMITTED ||
+            cpu.m_pc != pc + 4u || cpu.m_exit_reason != dispatch ||
+            cpu.m_gpr[2].m_lo != expected[i] || cpu.m_gpr[2].m_hi != marker ||
+            memory.read64(0x2000u) != original || !actual_delay_slot)
+        {
+            return false;
+        }
+    }
+    constexpr uint32_t stores[] = {0x28u, 0x29u, 0x2bu, 0x3fu};
+    constexpr uint64_t stored[] =
+    {
+        0x8877665580ff8188ull, 0x8877665580ff7788ull,
+        0x8877665555667788ull, marker
+    };
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        reset(stores[i], data);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::COMMITTED || cpu.m_pc != pc + 4u ||
+            memory.read64(0x2000u) != stored[i] ||
+            cpu.m_gpr[2].m_lo != marker || cpu.m_gpr[2].m_hi != marker)
+        {
+            return false;
+        }
+    }
+    reset(0x23u, data + 1u);
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::FAULT_COMMITTED ||
+        cpu.m_pc != ee::VEC_COMMON_BEV0 || cpu.m_exit_reason != exception ||
+        cpu.m_cop0[ee::COP0_EPC] != pc || cpu.m_cop0[ee::COP0_BadVAddr] != data + 1u ||
+        cpu.m_cop0[ee::COP0_Cause] != (ee::EX_AdEL << 2u) ||
+        cpu.m_gpr[2].m_lo != marker || cpu.m_gpr[2].m_hi != marker ||
+        memory.read64(0x2000u) != original || actual_delay_slot)
+    {
+        return false;
+    }
+    if (!memory.tlb().write(0u, 0u, pc | 0xabu, lo_code, lo_data & ~4u))
+    {
+        return false;
+    }
+    reset(0x2bu, data);
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::FAULT_COMMITTED ||
+        cpu.m_cop0[ee::COP0_Cause] != (ee::EX_Mod << 2u) ||
+        cpu.m_pc != ee::VEC_COMMON_BEV0 || memory.read64(0x2000u) != original)
+    {
+        return false;
+    }
+    // A load to zero still performs translation and can fault.
+    reset(0x23u, 0x00600000u, 0u);
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::FAULT_COMMITTED || cpu.m_pc != ee::VEC_TLB_REFILL_BEV0 ||
+        cpu.m_cop0[ee::COP0_BadVAddr] != 0x00600000u ||
+        cpu.m_gpr[0].m_lo != 0u || memory.read64(0x2000u) != original)
+    {
+        return false;
+    }
+    reset(0x23u, data);
+    cpu.m_cop0[ee::COP0_EntryHi] = 0xacu;
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::FAULT_COMMITTED || cpu.m_pc != ee::VEC_TLB_REFILL_BEV0 ||
+        cpu.m_cop0[ee::COP0_BadVAddr] != pc || cpu.m_gpr[2].m_lo != marker)
+    {
+        return false;
+    }
+    reset(0x23u, data);
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, {}) !=
+            result::UNSAFE_BOUNDARY ||
+        cpu.m_pc != pc || cpu.m_gpr[2].m_lo != marker || !actual_delay_slot)
+    {
+        return false;
+    }
+    // Refuse cached data, missing RAM backing, and HLE-only aliases.
+    constexpr uint32_t rejected_pfn[] = {(2u << 6u) | 0x1eu, (3u << 6u) | 0x16u,
+                                        (0x20000u << 6u) | 0x16u};
+    for (const uint32_t lo : rejected_pfn)
+    {
+        if (!memory.tlb().write(0u, 0u, pc | 0xabu, lo_code, lo))
+        {
+            return false;
+        }
+        reset(0x23u, data);
+        cpu.m_cop0[ee::COP0_Config] = 1u << 16u;
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::UNMODELED_ACCESS ||
+            cpu.m_pc != pc || cpu.m_exit_reason != dispatch ||
+            cpu.m_gpr[2].m_lo != marker || memory.read64(0x2000u) != original ||
+            !actual_delay_slot)
+        {
+            return false;
+        }
+    }
+    reset(0x03u, data);
+    return ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) ==
+               result::UNSUPPORTED_INSTRUCTION &&
+           cpu.m_pc == pc && cpu.m_gpr[2].m_lo == marker &&
+           memory.read64(0x2000u) == original && actual_delay_slot;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1090,6 +1233,10 @@ int main()
     }
     if (!check(test_memory_fault_commit() && test_memory_fault_commit_guards(),
                "precise Level 1 memory fault commitment"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_ram_execution(), "isolated strict RAM execution regression"))
     {
         return 1;
     }
