@@ -155,7 +155,7 @@ def producer_slice(pcs, word_at, target_register):
 
 
 def constant_indirect_targets(metadata, data, report, max_words=32,
-                              audit_producers=False):
+                              audit_producers=False, cross_block=False):
     if max_words < 1:
         raise ValueError("max_words must be positive")
     base = metadata["base"]
@@ -170,20 +170,41 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
         return struct.unpack_from("<I", data, pc - base)[0]
 
     def preceding_words(site):
-        # Walk only a unique known sequential predecessor, never through
-        # a call return, branch target, delay slot or another entry root.
-        # Unknown indirect incoming edges are why this is shadow evidence.
+        # Default: unique sequential predecessor only. Opt-in: follow
+        # unique known non-call predecessors, including their delay slots.
+        # Unknown indirect edges and R3000A load-delay state prevent this
+        # from being proof of a dynamic target or exact reaching definition.
         result = []
+        crossed = []
+        seen = {site}
         pc = site
         while len(result) < max_words and pc not in entries:
-            prev = pc - 4
-            if (prev not in ordinary or prev in delay or
-                    incoming[pc] != {(prev, "next")} or
-                    classify(word_at(prev)) != "simple"):
+            predecessors = incoming[pc]
+            if len(predecessors) != 1:
                 break
-            result.append(prev)
+            prev, kind = next(iter(predecessors))
+            if prev not in ordinary or prev in delay or prev in seen:
+                break
+            if (kind == "next" and prev == pc - 4 and
+                    classify(word_at(prev)) == "simple"):
+                result.append(prev)
+                seen.add(prev)
+            elif (cross_block and kind in ("branch", "branch_fallthrough", "jump") and
+                    classify(word_at(prev)) in ("branch", "jump")):
+                slot = prev + 4
+                # Branch/jump itself has no GPR write; the slot executes
+                # before the successor. Never follow calls or unknown edges.
+                if (slot not in delay or slot in ordinary or slot in seen or
+                        classify(word_at(slot)) != "simple"):
+                    break
+                result.append(slot)
+                seen.update((prev, slot))
+                crossed.append({"pc": prev, "target": pc, "kind": kind,
+                                "delay_pc": slot})
+            else:
+                break
             pc = prev
-        return list(reversed(result))
+        return list(reversed(result)), list(reversed(crossed))
 
     def interpret_constants(pcs):
         values = {0: (0, ())}
@@ -224,12 +245,14 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
         if site not in ordinary or site in delay or classify(word_at(site)) != kind:
             continue
         rs = (word_at(site) >> 21) & 31
-        pcs = preceding_words(site)
+        pcs, crossed = preceding_words(site)
         value = interpret_constants(pcs).get(rs)
         if value is None:
             observation = {"site": site, "kind": kind, "register": rs}
             if audit_producers:
                 observation["producer"] = producer_slice(pcs, word_at, rs)
+            if cross_block:
+                observation["crossed_edges"] = crossed
             unresolved.append(observation)
             continue
         target, evidence = value
@@ -240,6 +263,8 @@ def constant_indirect_targets(metadata, data, report, max_words=32,
             "already_entry": target in entries, "already_ordinary": target in ordinary,
             "already_delay": target in delay,
         })
+        if cross_block:
+            observations[-1]["crossed_edges"] = crossed
     return {"observations": observations, "unresolved": unresolved,
             "new_call_candidates": sorted({row["target"] for row in observations
                 if row["kind"] == "indirect_call" and row["in_text"] and
@@ -256,6 +281,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--audit-producers", action="store_true",
                         help="Report bounded local reaching definitions for unresolved sites")
+    parser.add_argument("--cross-block", action="store_true",
+                        help="Shadow traversal of unique non-call CFG predecessors and delay slots")
     args = parser.parse_args()
     try:
         receipt = json.loads(args.relocation_receipt.read_text(encoding="utf-8"))
@@ -270,7 +297,8 @@ def main():
                     or report["rejected_seeds"]):
                 raise ValueError(f"ambiguous ownership: {path.stem}")
             result = constant_indirect_targets(metadata, data, report,
-                                               audit_producers=args.audit_producers)
+                                               audit_producers=args.audit_producers,
+                                               cross_block=args.cross_block)
             result.update({"capture_stem": path.stem, "base": metadata["base"],
                            "hash": metadata["hash"], "text_size": len(data)})
             modules.append(result)
@@ -278,6 +306,7 @@ def main():
             raise ValueError("no captured IRXs")
         with args.out.open("x", encoding="utf-8") as output:
             json.dump({"schema": 1, "kind": "iop_indirect_target_shadow",
+                       "cross_block": args.cross_block,
                        "modules": modules}, output, indent=2)
             output.write("\n")
         for module in modules:
