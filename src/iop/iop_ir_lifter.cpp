@@ -288,9 +288,8 @@ private:
             exit_const(target);
             return;
         }
-        // Check the slice budget on every internal transfer (not only
-        // backward ones) so translated code overshoots the kernel quantum
-        // by at most one straight-line run of instructions.
+        // Check the slice budget on every internal transfer. Branch
+        // retirement checks separately before executing its delay slot.
         (void)source;
         const std::string nv = tmp();
         const std::string over = tmp();
@@ -535,6 +534,21 @@ private:
         add_n(1u);
     }
 
+    // A branch can consume the last available instruction. Preserve
+    // the selected successor and delay-slot identity for the interpreter
+    // instead of executing the slot beyond the kernel slice budget.
+    void check_delay_budget(uint32_t branch_pc, const std::string& next)
+    {
+        const std::string nv = tmp(), over = tmp();
+        const std::string stop = label(), execute = label();
+        line("  " + nv + " = load i32, ptr %n");
+        line("  " + over + " = icmp uge i32 " + nv + ", %budget");
+        line("  br i1 " + over + ", label %" + stop + ", label %" + execute);
+        line(stop + ":");
+        exit_to(c32(branch_pc + 4u), next, "1", c32(branch_pc), 0);
+        line(execute + ":");
+    }
+
     void emit_instruction(uint32_t pc)
     {
         const uint32_t w = word(pc);
@@ -564,6 +578,7 @@ private:
                 set(f.rd, c32(fall));
             }
             add_n(1u);
+            check_delay_budget(pc, target);
             emit_simple(delay_pc, delay, s_fail{delay_pc, target, true, pc});
             line("  store i32 " + target + ", ptr %pcs");
             const std::string nv = tmp(), over = tmp(), next = tmp();
@@ -584,6 +599,7 @@ private:
                 set(31u, c32(fall));
             }
             add_n(1u);
+            check_delay_budget(pc, c32(target));
             emit_simple(delay_pc, delay, s_fail{delay_pc, c32(target), true, pc});
             jump(pc, target);
             return;
@@ -611,6 +627,7 @@ private:
         const std::string next = tmp();
         line("  " + next + " = select i1 " + taken + ", i32 " + c32(target) +
              ", i32 " + c32(fall));
+        check_delay_budget(pc, next);
         emit_simple(delay_pc, delay, s_fail{delay_pc, next, true, pc});
         const std::string yes = label();
         const std::string no = label();
