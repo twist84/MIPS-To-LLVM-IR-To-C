@@ -193,3 +193,31 @@ regions when the linked image, plan or lifter changes; finer reuse across
 such changes is not yet claimed. Synthetic tests cover hits, input/option
 invalidation and corruption. MCMAN is the next retail split candidate;
 validate cold/warm reuse independently of runtime performance.
+
+## I5/I6 measured results and I7a residual coverage
+
+MCMAN cold/warm O3/jobs=8: 161 regions, 11,593 eligible PCs, 163 objects;
+3.563s/0.187s compile/cache stage, 0.125s/0.141s link, 4.1s/0.7s total;
+163/163 warm objects reused. Both DLLs 1,199,616 bytes (size equality only).
+I5b retained split SIO2MAN and MCMAN: 40M dispatches, 3,127 polls,
+184,700 exact trace samples, seven active libraries, exact report/PPM,
+65,068,824 native instructions and 11,468,684 entry attempts.
+I6 all-split archive SHA256 20cd8b1c4ff7f006211149ec23ea730af21bbb02abad1a63cd4ec0d14308466e:
+same correctness gates, but only 7,272,474 native instructions and
+53,526,827 entry attempts. Matched interpreter 40.750s vs candidate 44.015s;
+performance rejected. Only 17,689 aligned PCs remain eligible in the
+conservative function plans out of 56,668 captured words. Static coverage
+cannot identify which module accounts for most dynamic loss. Keep I5b.
+
+I7a adds opt-in `--split-residual`: preserve candidate regions and append
+one disjoint residual region containing every remaining aligned PC,
+including independently enterable delay words and classifier stops.
+These are dispatch entries, not newly discovered functions or proven code.
+The existing C++ lifter retains its own unsupported/exception/MMIO
+fallback and reads delay words from the full linked image. No ABI, runner,
+EE or VU1 change. The cache plan hash separates conservative and residual
+builds. This restores the legacy dispatch domain, not necessarily legacy
+batch lengths or native retirement, since region exits still return to
+the scheduler. Compare exact retail state and native retirement/entry
+counts before considering this default. One residual object per IRX may
+still be large; further partitioning or chaining is a separate experiment.

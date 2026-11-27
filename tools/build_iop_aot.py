@@ -136,7 +136,7 @@ def prepare_captures(capture, destination):
     return len(records)
 
 
-def prepare_split_pilot(staged, selected, pilot):
+def prepare_split_pilot(staged, selected, pilot, residual=False):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
@@ -159,6 +159,21 @@ def prepare_split_pilot(staged, selected, pilot):
     regions = [region for region in regions if region]
     if not regions:
         raise ValueError("split pilot has no eligible regions")
+    discovered_count = sum(map(len, regions))
+    residual_count = 0
+    if residual:
+        # Preserve the legacy lifter's dispatch domain, not a claim that
+        # unvisited words are code. The same C++ decoder will decide whether
+        # an actual entry executes natively or requests interpreter fallback.
+        owned = {pc for region in regions for pc in region}
+        remaining = [pc for pc in range(report["base"],
+                                         report["base"] + len(data), 4)
+                     if pc not in owned]
+        residual_count = len(remaining)
+        if remaining:
+            regions.append(remaining)
+        if discovered_count + residual_count != len(data) // 4:
+            raise ValueError("split residual coverage is not an exact partition")
     pilot.mkdir()
     shutil.copyfile(meta, pilot / meta.name)
     shutil.copyfile(binary, pilot / binary.name)
@@ -169,6 +184,10 @@ def prepare_split_pilot(staged, selected, pilot):
     plan.write_text("\n".join(lines) + "\n", encoding="ascii")
     print(f"split pilot: {meta.stem}, {len(regions)} regions, "
           f"{sum(map(len, regions))} ordinary PCs")
+    if residual:
+        print(f"split residual: {discovered_count} discovered PCs, "
+              f"{residual_count} residual PCs, "
+              f"{len(data) // 4} aligned dispatch PCs")
     return plan
 
 
@@ -285,9 +304,13 @@ def main():
                         help="Build missing libraries without clearing existing output files")
     parser.add_argument("--split-module",
                         help="Experimental: compile one exact staged IRX stem in regions")
+    parser.add_argument("--split-residual", action="store_true",
+                        help="Add one residual region covering every remaining aligned PC")
     parser.add_argument("--region-cache", type=Path,
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
+    if args.split_residual and not args.split_module:
+        parser.error("--split-residual requires --split-module")
     if args.region_cache is not None:
         if not args.split_module:
             parser.error("--region-cache requires --split-module")
@@ -351,7 +374,8 @@ def build(args, out):
         prepare_captures(args.capture, staged)
         if args.split_module:
             pilot = staged / "pilot"
-            plan = prepare_split_pilot(staged, args.split_module, pilot)
+            plan = prepare_split_pilot(staged, args.split_module, pilot,
+                                       residual=args.split_residual)
             subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
             if args.region_cache is not None:
                 args.region_cache.mkdir(parents=True, exist_ok=True)
