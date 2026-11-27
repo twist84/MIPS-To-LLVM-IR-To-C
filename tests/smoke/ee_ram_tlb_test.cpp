@@ -3032,6 +3032,86 @@ bool test_strict_reset_intc_mask()
         devices.intc_status() == 0u && devices.first_intc_read() == 0u;
 }
 
+bool test_strict_reset_timer3()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[32u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    ee::c_ee_reset_vif_devices devices;
+    const auto mmio = devices.transport();
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram,
+            nullptr, nullptr, &mmio);
+    };
+    put(0u, 0xac820000u);
+    constexpr uint32_t addresses[] = {0xb0001810u, 0xb0001800u, 0xb0001820u, 0xb0001810u};
+    constexpr uint32_t values[] = {0xc00u, 0u, 0xffffu, 0x83u};
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = addresses[i];
+        cpu.m_gpr[2] = {values[i], 0x1234u};
+        if (step(1u).m_retired != 1u || devices.timer_write_count() != i + 1u)
+        {
+            return false;
+        }
+        const auto actual = devices.timer_write(i);
+        if (actual.m_address != addresses[i] - 0xa0000000u ||
+            actual.m_value != values[i] || actual.m_mode != (i == 3u ? 0x83u : 0u) ||
+            actual.m_count != 0u)
+        {
+            return false;
+        }
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x8c820000u); // no clock, no timer read
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    put(0u, 0xac820000u);
+    for (const uint32_t address : {0xb0001811u, 0xb0001830u, 0xb0001010u, 0x90001810u})
+    {
+        cpu.m_gpr[4].m_lo = address;
+        if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+            devices.timer_write_count() != 4u)
+        {
+            return false;
+        }
+    }
+    // SH is a two-byte RAM store, not a device word or aligned-down SQ.
+    put(0u, 0xa4820000u);
+    cpu.m_gpr[4].m_lo = pc + 18u;
+    cpu.m_gpr[2] = {0x123456789abcdef0ull, 0x5678u};
+    code[17] = code[18] = code[19] = code[20] = 0xa5u;
+    if (step(1u).m_retired != 1u || code[17] != 0xa5u || code[18] != 0xf0u ||
+        code[19] != 0xdeu || code[20] != 0xa5u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[4].m_lo = pc + 19u;
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+        code[19] != 0xdeu || code[20] != 0xa5u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xb0001810u;
+    return step(1u).m_result == result::DATA_UNAVAILABLE &&
+        cpu.m_pc == pc && devices.timer_write_count() == 4u && devices.intc_status() == 0u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -3259,6 +3339,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_timer3(), "strict reset Timer3 programming and SH regression"))
     {
         return 1;
     }

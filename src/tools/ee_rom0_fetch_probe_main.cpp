@@ -41,6 +41,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     const auto vif = vif_devices.transport();
     bool entered_ram = false;
     bool first_intc_write = false;
+    uint32_t timer_logged = 0u;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
@@ -61,6 +62,12 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (timer_logged < 4u && timer_logged < vif_devices.timer_write_count())
+        {
+            const auto event = vif_devices.timer_write(timer_logged++);
+            std::printf("EE exploration Timer3 write: retired=%u pc=%08x address=%08x value=%08x mode=%08x count=%08x\n",
+                retired, cpu.m_pc, event.m_address, event.m_value, event.m_mode, event.m_count);
+        }
         if (!first_intc_write && vif_devices.intc_write_count() != 0u)
         {
             first_intc_write = true;
@@ -1194,6 +1201,9 @@ int main(int argc, char** argv)
     const uint32_t exploration_limit = compare_done + 32768u;
     uint32_t first_intc_retired = 0u;
     uint32_t first_intc_pc = 0u;
+    uint32_t timer_logged = 0u;
+    uint32_t timer_fourth_retired = 0u;
+    uint32_t timer_fourth_pc = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -1210,6 +1220,17 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (timer_logged < 4u && timer_logged < vif_devices.timer_write_count())
+        {
+            const auto event = vif_devices.timer_write(timer_logged++);
+            std::printf("EELOAD Timer3 write: retired=%u pc=%08x address=%08x value=%08x mode=%08x count=%08x\n",
+                retired, cpu.m_pc, event.m_address, event.m_value, event.m_mode, event.m_count);
+            if (timer_logged == 4u)
+            {
+                timer_fourth_retired = retired;
+                timer_fourth_pc = cpu.m_pc;
+            }
+        }
         if (first_intc_retired == 0u && vif_devices.intc_write_count() != 0u)
         {
             first_intc_retired = retired;
@@ -1280,6 +1301,37 @@ int main(int argc, char** argv)
     std::printf("EELOAD INTC: reads=%u writes=%u mask=%08x status=%08x\n",
         vif_devices.intc_read_count(), vif_devices.intc_write_count(),
         vif_devices.intc_mask(), vif_devices.intc_status());
+    constexpr ee::c_ee_reset_vif_devices::s_timer_write expected_timer[] =
+    {
+        {0x10001810u, 0x0c00u, 0u, 0u},
+        {0x10001800u, 0u, 0u, 0u},
+        {0x10001820u, 0xffffu, 0u, 0u},
+        {0x10001810u, 0x83u, 0x83u, 0u}
+    };
+    if (timer_logged != 4u || timer_fourth_retired != 672554u ||
+        timer_fourth_pc != 0xa0014cecu)
+    {
+        std::fprintf(stderr, "EELOAD Timer3 checkpoint missing: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 76;
+    }
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        const auto actual = vif_devices.timer_write(i);
+        const auto expected = expected_timer[i];
+        if (actual.m_address != expected.m_address || actual.m_value != expected.m_value ||
+            actual.m_mode != expected.m_mode || actual.m_count != expected.m_count)
+        {
+            std::fprintf(stderr, "EELOAD Timer3 write mismatch: index=%u\n", i);
+            return 77;
+        }
+    }
+    if (ram_bytes[0x23824u] != 0u || ram_bytes[0x23825u] != 0u)
+    {
+        std::fprintf(stderr, "EELOAD Timer3 RAM halfword mismatch\n");
+        return 78;
+    }
+    std::printf("EELOAD Timer3 initialization: four writes verified, clock unavailable\n");
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);

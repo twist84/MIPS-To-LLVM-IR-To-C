@@ -1127,3 +1127,21 @@ and widths, missing transport, and delay-slot budget refusal.
 Require first actual transition read=0, write=2, mask=2, status=0
 at 671597 / a00166cc and 671789 / a00166ec respectively.
 Compilation and predicted checkpoints pending CI. No retail replay.
+
+## M6E3E4: Timer3 register programming and SH
+
+M6E3E3 passed both releases on 03fd9678:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46052671338
+Both reached a0014cc4 / ac430000, SW v1,0(v0), address
+b0001810, value 0c00, at 672544 (v0.6) / 672736 (v0.7).
+The fourth EE timer (index 3) is selected by 0x1800.
+Reuse c_ee_host_timers without a clock or hardware bus for isolated
+register programming only. Admit canonical uncached Timer3 word
+COUNT/MODE/COMP writes; all guest timer reads remain refused until
+a clock is available. No timer ticks, IRQs or ready flags invented.
+Implement naturally aligned SH to backed RAM and verify two-byte
+store behavior, invalid width/address/backing and register semantics.
+Require original guest sequence MODE=0c00, COUNT=0, COMP=ffff,
+MODE=83; validate post-write MODE/COUNT and exact fourth-write
+retirement 672554 / 672746 at a0014cec. v0.6 checks physical
+23824 halfword zero. No runtime clock or retail changes. Pending CI.

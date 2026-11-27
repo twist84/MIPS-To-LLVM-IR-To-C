@@ -215,9 +215,11 @@ struct s_ee_reset_mmio
         const bool fifo = bus.m_width == 16u &&
             (address == 0xb0004000u || address == 0xb0005000u);
         const bool intc = bus.m_width == 4u && address == 0xb000f010u;
+        const bool timer = bus.m_width == 4u &&
+            (address == 0xb0001800u || address == 0xb0001810u || address == 0xb0001820u);
         return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
-            (reset || fifo || intc) && bus.m_address == address - 0xa0000000u &&
+            (reset || fifo || intc || timer) && bus.m_address == address - 0xa0000000u &&
             m_write(m_user, bus.m_address, bus.m_width, &value);
     }
 };
@@ -459,7 +461,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
     const bool quad = primary == 0x1eu || primary == 0x1fu;
-    const bool store = primary == 0x28u || primary == 0x2bu || primary == 0x1fu;
+    const bool half = primary == 0x29u; // SH
+    const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu;
     if (primary != 0x24u && primary != 0x23u && primary != 0x1eu && !store)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
@@ -472,7 +475,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
     const bool word = primary == 0x23u || primary == 0x2bu;
     const auto kind = quad ? e_ee_data_access_kind::GPR_QUADWORD :
-        word ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
+        word ? e_ee_data_access_kind::WORD :
+        half ? e_ee_data_access_kind::HALFWORD : e_ee_data_access_kind::BYTE;
     const auto plan = ee_plan_data_access(tlb, kind,
         store, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
