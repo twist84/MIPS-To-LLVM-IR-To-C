@@ -891,3 +891,41 @@ Outlining may increase hot-path call overhead, so do not infer a
 runtime speedup from smaller binaries. Tests cover all three widths,
 unchanged memory-free regions, unexpected call shapes and comparison
 of compiled inline/shared RAM and callback paths. CI pending.
+
+## I17c acceptance
+
+Archive `ee-iop-i17c.zip`, SHA-256
+`09dd102df2e1f2b2abe1112cd3165f5576256afdba4dc2a20cbb839182b6cac8`.
+Accept `build/iop-native-split-i17c-candidate/modules` for retail
+correctness and linked size. MCMAN's DLL SHA-256 independently matches
+the build and replay receipts; the other six inventory hashes, pinned
+inputs, VU1 inventory and environment match I17b. COFF timestamp zero.
+Report and framebuffer independently byte-identical. 40M dispatches,
+184,700 matching trace samples, zero divergent or unpaired, 3,127/3,127
+polls, 7/7 native modules, 67,846,006 retired instructions, 12,611,093
+entries. Interpreter 41.312 s, candidate 40.296 s, native execution
+585.4 ms, refresh 1.7 ms; one matched pair, performance acceptance false.
+
+MCMAN DLL size 1,690,112 -> 1,308,160 B (-381,952 B, -22.60%).
+Object bytes 2,215,711 -> 1,903,573. 221 objects, 45 hits, 176 misses,
+4.000 s compile, 0.156 s link. Shared helper object 1,720 B.
+All seven DLLs now total 5,057,536 B. I17b remains rollback baseline.
+
+## I17c rollout (I17c2)
+
+Apply the existing shared-memory-helper option to the remaining six
+IRXs without changing ownership, partitioning or router encoding.
+Build CRI_ADXI/PADMAN with 1,024-PC residual partitions and
+ARKD_DVD/LIBSD/MCSERV/SIO2MAN with unpartitioned residual regions.
+Use compact+narrow router options in both builds (CRI_ADXI retains
+i16 because its region count exceeds 255). Preserve the accepted
+I17c MCMAN DLL, exact-IR cache, pinned EE/VU1/runner artifacts and
+all previous original-ELF validation options.
+
+Compose a fresh seven-library candidate and perform one pinned
+40M-dispatch correctness replay before accepting the rollout.
+Do not infer runtime performance from linked size or a single pair.
+If a performance regression appears, retain rollback and isolate
+modules with repeated matched runs before adopting the new lowering.
+Cross-region execution attribution and budget-aware chaining remain
+subsequent checkpoints; no runtime rebuild is required for this rollout.
