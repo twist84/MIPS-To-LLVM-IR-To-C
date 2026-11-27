@@ -157,6 +157,38 @@ consteval bool test_idle_prediction()
 
 static_assert(test_idle_prediction(), "idle-loop prediction semantics");
 
+// Compare the actual polling ALU against independently expressed guest
+// operations, including ignored upper bits and negative shift operands.
+consteval bool test_idle_scalar_operations()
+{
+    using namespace ee::idle_loop_detail;
+    uint64_t gpr[32]{};
+    gpr[4] = 0x8000000080000000ull;
+    gpr[5] = 0x0123456780000000ull;
+    for (uint32_t shift = 0u; shift < 32u; ++shift)
+    {
+        const uint32_t word = (5u << 16u) | (6u << 11u) | (shift << 6u);
+        const uint64_t expected_word = UINT64_MAX << (31u - shift);
+        const uint64_t expected_double = UINT64_MAX << (63u - shift);
+        if (alu(word | 3u, gpr) != expected_word ||
+            alu((word ^ ((5u ^ 4u) << 16u)) | 0x3bu, gpr) !=
+                (expected_double | (uint64_t{1} << (31u - shift))) ||
+            alu((word ^ ((5u ^ 4u) << 16u)) | 0x3fu, gpr) !=
+                (UINT64_MAX << (31u - shift)))
+        {
+            return false;
+        }
+    }
+    return alu(0x0085302au, gpr) == 1u &&
+        alu(0x2886ffffu, gpr) == 1u &&
+        extend_load(0x80000000u, 0x80u) == 0xffffffffffffff80ull &&
+        extend_load(0x84000000u, 0x8000u) == 0xffffffffffff8000ull &&
+        extend_load(0x8c000000u, 0x80000000u) == 0xffffffff80000000ull;
+}
+
+static_assert(test_idle_scalar_operations(), "shared scalar arithmetic in idle-loop prediction");
+
+
 } // namespace
 
 int main()
