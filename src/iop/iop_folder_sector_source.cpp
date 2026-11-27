@@ -24,6 +24,14 @@ uint32_t align_sector(uint32_t value)
     return static_cast<uint32_t>(sectors(value) * k_sector_size);
 }
 
+// ISO9660 validation and guest path matching operate on UTF-8 bytes,
+// not the host's locale-dependent narrow filesystem encoding.
+std::string path_utf8_bytes(const std::filesystem::path& path)
+{
+    const std::u8string utf8 = path.generic_u8string();
+    return std::string(reinterpret_cast<const char*>(utf8.data()), utf8.size());
+}
+
 std::string ascii_upper(std::string value)
 {
     for (char& ch : value)
@@ -179,7 +187,7 @@ bool c_folder_sector_source::build(const std::filesystem::path& root,
         return fail("disc root must be a real directory");
     }
 
-    const std::string card_name = ascii_upper(mounted_card.filename().generic_u8string());
+    const std::string card_name = ascii_upper(path_utf8_bytes(mounted_card.filename()));
     m_nodes.emplace("", s_node{root, "", "", 0u, 0u, true});
     fs::recursive_directory_iterator it(root, error), end;
     if (error)
@@ -198,7 +206,7 @@ bool c_folder_sector_source::build(const std::filesystem::path& root,
             return fail("file outside extracted disc");
         }
         const std::string top = ascii_upper(
-            (*relative.begin()).generic_u8string()
+            path_utf8_bytes(*relative.begin())
         );
         if (top == "GAME" || top == "NATIVE" || top == ".PS2-DISC")
         {
@@ -214,7 +222,7 @@ bool c_folder_sector_source::build(const std::filesystem::path& root,
         {
             return fail("unsupported entry in extracted disc");
         }
-        const std::string name = relative.filename().generic_u8string();
+        const std::string name = path_utf8_bytes(relative.filename());
         // The mounted card is host storage even when it sits beside the disc files.
         if (!card_name.empty() && fs::is_regular_file(status) &&
             ascii_upper(name) == card_name)
@@ -227,7 +235,7 @@ bool c_folder_sector_source::build(const std::filesystem::path& root,
         }
         if (!valid_name(name))
         {
-            return fail("non-ISO9660 filename in extracted disc: " + relative.generic_u8string());
+            return fail("non-ISO9660 filename in extracted disc: " + path_utf8_bytes(relative));
         }
         std::string key;
         std::string parent;
@@ -239,7 +247,7 @@ bool c_folder_sector_source::build(const std::filesystem::path& root,
                 parent = key;
                 key += '/';
             }
-            key += ascii_upper(part.generic_u8string());
+            key += ascii_upper(path_utf8_bytes(part));
             if (++depth > 16u)
             {
                 return fail("extracted disc path too deep");

@@ -22,6 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
+
       - name: Check toolchain
         run: |
           cmake --version
@@ -85,6 +90,11 @@ jobs:
         shard: [game-0, game-1, game-2, game-3, fast-0, fast-1, fast-2]
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
 
       - name: Download configured CTest build
         uses: actions/download-artifact@v4
