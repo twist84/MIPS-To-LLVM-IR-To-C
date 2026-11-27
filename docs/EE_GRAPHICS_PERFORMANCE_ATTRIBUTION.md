@@ -807,3 +807,44 @@ G6A is an IR simplification, not a native optimization. Defer
 G6B lazy residency absent new evidence of residual publication
 cost. Keep G6A, preserve previous artifacts; move to G8 IOP
 attribution ahead of G7 (VIF1 UNPACK cost previously ~40ms).
+
+## G8A — sampled scheduled IOP service attribution
+
+G4A measured IOP service at 7.319s (15.90% of profiled runner wall).
+The existing outer scope includes EE-to-IOP clock observation, batch
+planning, idle checks, kernel.run, RPC pump, clock consumption and
+checkpoint diagnostics. It excludes separate HLE wait-path IOP runs.
+Do not interpret it as R3000 execution time.
+
+Add opt-in SDBZ_PROFILE_IOP_SERVICE=1, active only in the existing
+runtime-profiled arm. Resolve the toggle once per session. Count exact
+scheduled checkpoints, no-debt checkpoints, physical batches, requested
+cycles, retired guest instructions and RPC pump calls, grouped by
+zero guest instructions, guest instructions, or quiet fast advance.
+Sample one varying offset per complete group of 256 physical batches;
+a final partial group may contribute zero or one sample. Measure
+planner (including existing pre-run trace check), kernel/quiet attempt
+and RPC pump durations separately. Samples are elapsed steady-clock
+time, not CPU time; counts classify completed runs, not a proof of
+idle device state. Kernel time includes scheduler, guest CPU and
+device work; RPC calls may be no-ops. Sampled durations do not cover
+all service work and must not be added to the outer profile scope.
+No extra guest reads, altered service cadence, changed event ordering,
+new EE lowering, or runtime ABI change. Counters go to stderr only,
+leaving the existing terminal-report normalization contract unchanged.
+Unit test covers exact counts and sampling; matched replay verifies
+behavior. Final CI and retail measurements pending.
+
+Preserve the previously accepted G4A runner before rebuilding
+ee_game_runner and the new ee_iop_service_attribution_test target.
+Run the existing graphics profile on/off harness with G6A EE image,
+V30 VU1 inventory, fixed RTC, recorded PAD and unchanged fastmem
+settings, two repeats. Retain the existing IOP scheduling mode from
+the accepted G6A replay; do not enable experimental coalescing or
+quiet advances for this attribution. Collect the entire archive,
+including IOP service profile lines in profiled stderr; control
+must not emit them. Verify fixed architectural endpoints and raw
+unprofiled report/screenshot hashes. No EE IR, EE DLL, or VU1
+regeneration required. Select the next deeper IOP attribution or
+optimization from measured counts and sampled costs rather than
+assuming all zero-guest batches are dispensable.
