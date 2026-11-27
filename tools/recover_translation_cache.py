@@ -487,7 +487,16 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             raise ValueError("reconstructed IR did not meet the recovery policy")
         preserved_profiles = ([] if full_native_backup else
                               canonical_shared_profiles(base_work, work))
-        backup = promote_canonical(base_work, work, validate, elf=elf,
+        def validate_promoted(directory):
+            validate(directory)
+            # Retained shared profiles must still resolve their marker after
+            # promotion. Publish only the newly authenticated guest map.
+            if preserved_profiles:
+                metadata = directory / "ir" / "ee_functions.json"
+                receipt = shared_ir.read_json(directory / "translation-cache.json")
+                shared_ir.publish(metadata, ir_sources, receipt["ir_hashes"])
+
+        backup = promote_canonical(base_work, work, validate_promoted, elf=elf,
                                    preserved_profiles=preserved_profiles)
         if backup is not None:
             if not full_native_backup:

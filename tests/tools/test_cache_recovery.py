@@ -425,6 +425,10 @@ def test_ir_only_backup_partition_preserves_native_and_authenticates():
         (ir / shared_ir.PROVENANCE).write_bytes(b"old provenance")
         (base / "translation-cache.json").write_bytes(b"old receipt")
         (base / "game-translated.dll").write_bytes(b"old DLL")
+        displaced = base / "objects"
+        displaced.mkdir()
+        (displaced / "old.o").write_bytes(b"old object")
+        (displaced / "objects.json").write_bytes(b"old object receipt")
         profile = base / "O2-native"
         objects = profile / "objects"
         objects.mkdir(parents=True)
@@ -448,7 +452,7 @@ def test_ir_only_backup_partition_preserves_native_and_authenticates():
         inventory = cache_backup.verify_ir_backup(result)
         assert set(inventory["files"]) == {
             "ir/example.ll", "ir/ee_functions.json", "ir/.shared-ir-provenance.json",
-            "translation-cache.json", "O2-native/translation-cache.json",
+            "translation-cache.json", "objects/objects.json", "O2-native/translation-cache.json",
             "O2-native/shared-ir.json", "O2-native/objects/objects.json",
         }
         assert (result / "ir/example.ll").read_bytes() == b"old IR"
@@ -456,6 +460,8 @@ def test_ir_only_backup_partition_preserves_native_and_authenticates():
         assert (objects / "example.o").read_bytes() == b"native"
         assert (base / "retained-123/game-translated.dll").read_bytes() == b"old DLL"
         assert (base / "retained-123/report.json").read_bytes() == b"old report"
+        assert (base / "retained-123/objects/old.o").read_bytes() == b"old object"
+        assert (base / "retained-123/objects/objects.json").read_bytes() == b"old object receipt"
         assert (existing_backup / "sentinel").read_bytes() == b"existing backup"
         (result / "ir/example.ll").write_bytes(b"tampered")
         try:

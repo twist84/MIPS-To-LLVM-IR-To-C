@@ -68,9 +68,11 @@ def refresh_profile(elf, build, config, work, opt, jobs, inputs, library,
                 snapshot.get("emit_opt") == opt and
                 isinstance(snapshot.get("ir_sources"), dict) and
                 snapshot["ir_sources"].get("ELF") == ir_sources.get("ELF") and
-                not shared_ir.matching_sources(snapshot["ir_sources"], ir_sources)):
+                (not shared_ir.matching_sources(snapshot["ir_sources"], ir_sources) or
+                 snapshot.get("ir_hashes") != verified_ir_hashes or
+                 snapshot.get("metadata_sha256") != run_game.sha256_path(metadata))):
             shared_ir.current_state(metadata, ir_sources, verified_ir_hashes)
-            print("Optimized profile lowering provenance is stale; "
+            print("Optimized profile source provenance is stale; "
                   "revalidating native objects against current shared IR",
                   flush=True)
             # The ordinary incremental emitter authenticates every candidate

@@ -95,6 +95,7 @@ def partition_backup(backup, preserved_profiles=()):
         raise ValueError("backup inventory already exists")
     moved = []
     copied = []
+    retained_receipts = []
     try:
         for path in original_files:
             relative = path.relative_to(backup)
@@ -103,6 +104,17 @@ def partition_backup(backup, preserved_profiles=()):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 path.rename(target)
                 moved.append((path, target))
+        # Keep native object manifests beside displaced object payloads as
+        # well as in the IR backup. They remain candidates, not authorization.
+        for path in original_files:
+            relative = path.relative_to(backup)
+            if relative.name != "objects.json" or not recovery_file(relative):
+                continue
+            target = retained / relative
+            if not target.parent.is_dir():
+                continue
+            retained_receipts.append(target)
+            shutil.copyfile(path, target)
         # Shared native profiles remain in the canonical store. Copy only
         # their small receipts; their DLL/object bytes are not backed up.
         for profile in preserved_profiles:
@@ -132,7 +144,7 @@ def partition_backup(backup, preserved_profiles=()):
         backup.rename(ir_backup)
     except BaseException:
         (backup / BACKUP_INVENTORY).unlink(missing_ok=True)
-        for target in reversed(copied):
+        for target in reversed(copied + retained_receipts):
             target.unlink(missing_ok=True)
         for source, target in reversed(moved):
             source.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +175,11 @@ def compress_backup(backup):
     if archive.exists():
         print(f"WARNING: Archive already exists; uncompressed backup retained: {backup}", flush=True)
         return backup
-    total_bytes = sum(path.stat().st_size for path in backup_files(backup))
+    try:
+        total_bytes = sum(path.stat().st_size for path in backup_files(backup))
+    except (OSError, ValueError) as error:
+        print(f"WARNING: Backup inventory unavailable ({error}); retained: {backup}", flush=True)
+        return backup
     # A temporary sibling avoids publishing a partial archive on interruption.
     with tempfile.TemporaryDirectory(prefix=".backup-archive-", dir=backup.parent) as temp:
         pending = Path(temp) / archive.name
