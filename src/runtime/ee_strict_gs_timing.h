@@ -13,6 +13,7 @@ struct s_ee_strict_gs_timing
     uint32_t m_stage = 0u;
     uint32_t m_mode = 0u;
     uint32_t m_smode2 = 0u;
+    uint32_t m_completed = 0u;
 
     static constexpr uint64_t profile_word(uint32_t mode, uint32_t smode2, uint32_t index)
     {
@@ -32,7 +33,21 @@ struct s_ee_strict_gs_timing
 
     constexpr bool write(uint32_t address, uint64_t value, uint64_t smode2)
     {
-        if (smode2 > 3u || m_stage >= 6u ||
+        // A completed profile may be followed by a new programming
+        // sequence. Validate the first word on a fresh staging object,
+        // preserving the committed sequence count on refusal.
+        if (m_stage == 6u)
+        {
+            s_ee_strict_gs_timing next{};
+            next.m_completed = m_completed;
+            if (!next.write(address, value, smode2))
+            {
+                return false;
+            }
+            *this = next;
+            return true;
+        }
+        if (smode2 > 3u || m_stage > 6u ||
             (m_stage != 0u && smode2 != m_smode2))
         {
             return false;
@@ -45,6 +60,7 @@ struct s_ee_strict_gs_timing
             }
             m_words[4] = value;
             ++m_stage;
+            ++m_completed;
             return true;
         }
         const uint32_t expected = m_stage < 4u
@@ -94,6 +110,17 @@ static_assert([]()
         timing.m_mode == 2u && timing.m_stage == 5u &&
         !timing.write(0x12000010u, 0x0740814504ull, 2u) &&
         timing.write(0x12000010u, 0x0740814504ull, 3u) &&
-        timing.m_stage == 6u;
+        timing.m_stage == 6u && timing.m_completed == 1u &&
+        !timing.write(0x12000010u, 0x0740814504ull, 1u) &&
+        !timing.write(0x12000030u, 7u, 1u) &&
+        timing.m_stage == 6u && timing.m_smode2 == 3u &&
+        timing.write(0x12000030u, 8u, 1u) &&
+        timing.m_stage == 1u && timing.m_completed == 1u &&
+        timing.write(0x12000040u, 0x7f5b61f06f040ull, 1u) &&
+        timing.write(0x12000050u, 0x33a4d8ull, 1u) &&
+        timing.write(0x12000060u, 0xc7800601a01801ull, 1u) &&
+        timing.write(0x12000010u, 0x0740834504ull, 1u) &&
+        timing.write(0x12000010u, 0x0740814504ull, 1u) &&
+        timing.m_stage == 6u && timing.m_completed == 2u && timing.m_smode2 == 1u;
 }());
 } // namespace ee

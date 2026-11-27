@@ -88,6 +88,7 @@ int main(int argc, char** argv)
     uint64_t interrupts = 0u;
     uint64_t syscalls = 0u;
     bool osdsys_entry_retired = false;
+    uint32_t crt_completed = 0u;
     for (; pilot.retired() < budget;)
     {
         const uint32_t pc = pilot.cpu().m_pc;
@@ -133,6 +134,26 @@ int main(int argc, char** argv)
         {
             std::fprintf(stderr, "invalid synchronized retirement accounting\n");
             return 2;
+        }
+        const auto& crt = pilot.gs_timing();
+        if (crt.m_completed != crt_completed)
+        {
+            if (crt.m_completed != crt_completed + 1u || crt.m_stage != 6u ||
+                pilot.gs_crt_mode() != crt.m_mode)
+            {
+                std::fprintf(stderr, "invalid GS timing commit accounting\n");
+                return 2;
+            }
+            crt_completed = crt.m_completed;
+            std::printf("Dual ROM0 GS timing commit: count=%u mode=%u smode2=%u smode1=%016llx srfsh=%016llx synch1=%016llx synch2=%016llx syncv=%016llx retired=%llu next=%llu\n",
+                crt_completed, crt.m_mode, crt.m_smode2,
+                static_cast<unsigned long long>(crt.m_words[4]),
+                static_cast<unsigned long long>(crt.m_words[0]),
+                static_cast<unsigned long long>(crt.m_words[1]),
+                static_cast<unsigned long long>(crt.m_words[2]),
+                static_cast<unsigned long long>(crt.m_words[3]),
+                static_cast<unsigned long long>(pilot.retired()),
+                static_cast<unsigned long long>(pilot.next_scanout_event()));
         }
         // Observation only, never a control-flow shortcut.
         if (!osdsys_entry_retired && pc == 0x00100000u)

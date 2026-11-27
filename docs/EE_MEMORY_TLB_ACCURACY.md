@@ -1912,3 +1912,27 @@ Add nonidentity TLB, hit/dirty, uncached alias, refusal, conflict,
 and branch-slot tests. Require dirty D-cache, actual OSDSYS entry
 retirement, and advancement past the stack SW in CI. No HLE or
 production LLVM changes, no retail replay. Pending CI.
+
+## M6E3H3E9B7B: repeated pre-field CRT programming
+
+H3E9B7A at ca11f482, ROM0 run 46070875691, passed compilation
+and all directed tests but failed the stale final SMODE2=3 assertion.
+Both actually retired 347 more instructions to 818941 / 819133,
+with 4 / 3 D-cache lines, 2 dirty each, 11 I-cache lines and zero
+IOP debt. Both emitted authentic [openbios:osd] boot screen and
+entered syscall 2 at 00100038 (818763 / 818955). Both pinned
+osd/osd.c display_init requests SetGsCrt(1,2,0), so SMODE2=1 is
+correct. Actual refusal is the second SRFSH write at a001836c /
+a001838c. The prior one-shot profile rejected a valid repeat.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46070875691
+
+Allow fresh validated register staging after a completed profile,
+keeping an actual completion count. Reuse the existing pre-first-field
+clock/timer transition and refusal checks, no live-field support.
+Record each complete tuple at retirement; replace stale final
+snapshot assertions with chronological exact commits (SMODE2=3 then
+1), actual release epoch arithmetic, boot screen serial and second
+syscall evidence. Add constexpr refusal/repeat checks and two complete
+guest CRT sequences with synchronized IOP and preserved HBlank count.
+Require advancement beyond the actual new stop; no previous milestone
+is waived. Production HLE unchanged. Pending CI, no retail replay.

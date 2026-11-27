@@ -1211,6 +1211,88 @@ bool test_strict_firmware_hblank_timer()
     return true;
 }
 
+bool test_strict_firmware_gs_repeat()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    auto rom = make_firmware_pilot_rom({0x40806000u, 0x3c04b200u});
+    uint32_t slots = 2u;
+    const auto emit = [&](uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[slots * 4u + i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+        ++slots;
+    };
+    const auto store = [&](uint32_t offset, uint64_t value)
+    {
+        emit(0x34020000u | static_cast<uint32_t>(value >> 48u));
+        for (uint32_t shift : {32u, 16u, 0u})
+        {
+            emit(0x00021438u);
+            emit(0x34420000u | static_cast<uint32_t>((value >> shift) & 0xffffu));
+        }
+        emit(0xfc820000u | offset);
+    };
+    uint32_t ends[2]{};
+    for (uint32_t pass = 0u; pass < 2u; ++pass)
+    {
+        const uint32_t smode2 = pass == 0u ? 3u : 1u;
+        store(0x20u, smode2);
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            store(0x30u + i * 0x10u,
+                ee::s_ee_strict_gs_timing::profile_word(2u, smode2, i));
+        }
+        const uint64_t held = ee::s_ee_strict_gs_timing::profile_word(2u, smode2, 4u);
+        store(0x10u, held);
+        emit(0x0000000fu);
+        store(0x10u, held & ~(1ull << 17u));
+        ends[pass] = slots;
+        if (pass == 0u)
+        {
+            slots += 19000u;
+        }
+    }
+    ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+    if (!pilot.configure_scanout(3u, 0u) ||
+        !pilot.attach_iop(make_firmware_pilot_rom({0x1000ffffu, 0u}), true))
+    {
+        return false;
+    }
+    uint64_t epoch = pilot.next_scanout_event();
+    for (uint32_t i = 0u; i < slots; ++i)
+    {
+        const uint32_t before = pilot.timer_count(3u);
+        const auto action = pilot.step(1u);
+        if (action.m_boundary != boundary::RETIRED ||
+            pilot.fields_started() != 0u || pilot.fields_ended() != 0u ||
+            pilot.intc_status() != 0u || pilot.iop_cycles() != (i + 1u) / 8u)
+        {
+            return false;
+        }
+        if (i + 1u == ends[0] || i + 1u == ends[1])
+        {
+            const bool second = i + 1u == ends[1];
+            epoch = i + 4920115u;
+            if (pilot.gs_timing().m_stage != 6u ||
+                pilot.gs_timing().m_completed != (second ? 2u : 1u) ||
+                pilot.gs_timing().m_smode2 != (second ? 1u : 3u) ||
+                pilot.gs_display_registers().m_smode2 != (second ? 1u : 3u) ||
+                pilot.gs_crt_mode() != 2u || pilot.timer_count(3u) != before ||
+                before != (second ? 1u : 0u))
+            {
+                return false;
+            }
+        }
+        if (pilot.next_scanout_event() != epoch)
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool test_strict_firmware_gs_timing()
 {
     using boundary = ee::e_ee_firmware_boundary;
