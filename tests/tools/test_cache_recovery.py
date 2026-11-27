@@ -258,6 +258,68 @@ def test_verified_legacy_migration_preserves_ir_and_relocates():
         assert (backup / "ir" / "ee_functions.json").is_file()
 
 
+def test_selected_profile_promotion_without_o0():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        elf = root / "fixture.elf"
+        elf.write_bytes(b"ELF")
+        base = root / "cache"
+        stage = base / "recovery-123"
+        ir = stage / "ir"
+        ir.mkdir(parents=True)
+        name = "sub_0x100008_0x100008.ll"
+        (ir / name).write_bytes(b"guest")
+        meta = ir / "ee_functions.json"
+        shared_ir.write_json(meta, {
+            "elf": shared_ir.relative_path(elf, ir),
+            "path_format": "manifest-relative-v1",
+            "function_count": 1,
+            "functions": [{"ir_path": name, "vaddr": "0x100008",
+                           "block_pcs": ["0x100008"]}],
+        })
+        sources = {"ELF": digest(b"ELF")}
+        hashes = {name: digest(b"guest")}
+        shared_ir.publish(meta, sources, hashes)
+        profile = recovery.native_profile(stage, 5)
+        profile.mkdir()
+        shared_ir.attach(profile, ir)
+        shared_ir.write_json(profile / "translation-cache.json", {
+            "metadata_sha256": run_game.sha256_path(meta),
+            "ir_sources": sources, "ir_hashes": hashes, "emit_opt": 5,
+        })
+        (profile / "game-translated.dll").write_bytes(b"selected native")
+        original = meta.read_bytes()
+        original_provenance = (ir / shared_ir.PROVENANCE).read_bytes()
+
+        def validate(directory):
+            metadata = directory / "ir" / "ee_functions.json"
+            assert shared_ir.elf_path(shared_ir.read_json(metadata), metadata.parent) == elf
+            shared_ir.current_state(metadata, sources, hashes)
+            native = recovery.native_profile(directory, 5)
+            assert shared_ir.ir_directory(native) == metadata.parent
+            assert shared_ir.read_json(native / "translation-cache.json")[
+                "metadata_sha256"] == run_game.sha256_path(metadata)
+            assert not (directory / "translation-cache.json").exists()
+
+        def fail(directory):
+            validate(directory)
+            raise ValueError("synthetic post-promotion failure")
+
+        try:
+            recovery.promote_canonical(base, stage, fail, elf=elf, opt=5)
+        except ValueError as error:
+            assert "synthetic" in str(error)
+        else:
+            raise AssertionError("failed selected-profile promotion accepted")
+        assert meta.read_bytes() == original
+        assert (ir / shared_ir.PROVENANCE).read_bytes() == original_provenance
+        assert not list(base.glob("backup-*"))
+        recovery.promote_canonical(base, stage, validate, elf=elf, opt=5)
+        validate(base)
+        assert (base / "O2-native/game-translated.dll").read_bytes() == b"selected native"
+        assert not (base / "objects").exists()
+
+
 def test_canonical_promotion_rolls_back_all_names():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -841,6 +903,7 @@ def main():
     test_pointer_rejects_unsafe_paths_and_rollback()
     test_link_or_validation_failure_does_not_activate()
     test_verified_legacy_migration_preserves_ir_and_relocates()
+    test_selected_profile_promotion_without_o0()
     test_canonical_promotion_rolls_back_all_names()
     test_active_source_preflight_rejects_stale_shared_provenance()
     test_source_fingerprint_migration_does_not_build_or_replace_ir()

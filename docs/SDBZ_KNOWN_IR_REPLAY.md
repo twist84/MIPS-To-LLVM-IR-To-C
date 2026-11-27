@@ -304,3 +304,22 @@ explicitly changed lowering, the current verified IR hashes are used to
 seed native objects from extant canonical, legacy and retained inventories.
 Only identical modules with compatible native identity can be reused.
 Strict recovery still refuses any change to module bytes or ordered entries.
+
+
+## Selected-profile recovery (R5)
+
+Recovery accepts `--emit-opt 0..5` and builds only that native profile.
+For nonzero profiles the staged canonical IR has independent shared
+provenance and the selected child owns the native objects/library/receipt.
+The complete selected profile is validated before and after transactional
+promotion. Existing unrelated native profiles remain candidates, not
+implicitly validated libraries. O0 remains the default for compatibility.
+
+    set SDBZ_EE_OPT=5
+    scripts\run_ps2_game.bat --recover-cache --accept-new-ir
+
+Omit `--accept-new-ir` for strict identical-lowering recovery. The launcher
+also recognizes a valid shared source without a root O0 translation receipt
+when preparing a subsequent optimized full replay. No intermediate O0 build
+or retail replay is required. The explicit recovery mode may rebuild a
+selected profile even when its current native cache is already valid.

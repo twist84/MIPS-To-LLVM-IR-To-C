@@ -81,6 +81,11 @@ def check_source_header(elf, work, ir_sources):
 
 
 PROFILE_SUFFIXES = ("-O1", "-O2", "-O3", "-IR-O2", "-O2-native")
+PROFILE_DIRS = ("", "O1", "O2", "O3", "IR-O2", "O2-native")
+
+
+def native_profile(root, opt):
+    return root / PROFILE_DIRS[opt]
 
 
 def legacy_recovery_directories(base_work):
@@ -269,7 +274,7 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
 
 @metrics.measure("cache_promotion")
 def promote_canonical(base_work, work, validate, *, elf=None,
-                      preserved_profiles=()):
+                      preserved_profiles=(), opt=0):
     """Promote a child staging cache, retaining old contents and legacy profiles.
 
     Locks remain in place. The only path that changes with nesting depth is
@@ -306,18 +311,31 @@ def promote_canonical(base_work, work, validate, *, elf=None,
     try:
         if elf is not None:
             meta = work / "ir" / "ee_functions.json"
-            cache = work / "translation-cache.json"
+            cache = native_profile(work, opt) / "translation-cache.json"
             original = {meta: meta.read_bytes(), cache: cache.read_bytes()}
             metadata = shared_ir.read_json(meta)
             snapshot = shared_ir.read_json(cache)
-            if (shared_ir.active(meta) or
-                    snapshot["metadata_sha256"] != run_game.sha256_path(meta) or
+            if (snapshot["metadata_sha256"] != run_game.sha256_path(meta) or
                     shared_ir.elf_path(metadata, meta.parent) != elf):
                 raise ValueError("staging metadata changed before promotion")
+            provenance = meta.parent / shared_ir.PROVENANCE
+            state = None
+            if shared_ir.active(meta):
+                state = shared_ir.current_state(
+                    meta, snapshot["ir_sources"], snapshot["ir_hashes"])
+                original[provenance] = provenance.read_bytes()
+            elif opt != 0:
+                raise ValueError("selected native profile requires shared provenance")
             metadata["elf"] = shared_ir.relative_path(elf, base_work / "ir")
             shared_ir.write_json(meta, metadata)
             snapshot["metadata_sha256"] = run_game.sha256_path(meta)
             shared_ir.write_json(cache, snapshot)
+            if state is not None:
+                # A fresh staging store has never been activated. Its map
+                # digest includes the ELF path, so rebuild its provenance
+                # after rebasing rather than claiming an append extension.
+                provenance.unlink()
+                shared_ir.publish(meta, state["ir_sources"], state["ir_hashes"])
         for source, target in previous:
             if target.exists():
                 raise ValueError(f"backup collision: {target}")
@@ -365,12 +383,15 @@ def promote_pointer(base_work, work):
 
 
 @metrics.measure("cache_validation")
-def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
+def validate_portable_cache(directory, elf, inputs, ir_sources, library_name, opt=0):
     """Authenticate the relocated guest IR and native objects before publication."""
     from link_native_objects import load_inputs
 
     metadata_path = directory / "ir" / "ee_functions.json"
-    cache_path = directory / "translation-cache.json"
+    profile = native_profile(directory, opt)
+    cache_path = profile / "translation-cache.json"
+    if opt and shared_ir.ir_directory(profile) != metadata_path.parent:
+        raise ValueError("recovered profile is not attached to staged shared IR")
     metadata = shared_ir.read_json(metadata_path)
     if (metadata.get("path_format") != "manifest-relative-v1" or
             shared_ir.elf_path(metadata, metadata_path.parent) != elf or
@@ -383,16 +404,18 @@ def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
     if (not shared_ir.matching_sources(snapshot.get("ir_sources"), ir_sources) or
             snapshot.get("ir_hashes") != hashes):
         raise ValueError("recovered guest IR differs from verified provenance")
-    run_game.validate_translation_cache(cache_path, inputs, 0,
-                                        metadata_path, directory / library_name,
+    run_game.validate_translation_cache(cache_path, inputs, opt,
+                                        metadata_path, profile / library_name,
                                         ir_sources=ir_sources)
-    _, objects, _, _ = load_inputs(metadata_path, directory / "objects")
+    _, objects, _, _ = load_inputs(metadata_path, profile / "objects")
+    from verify_ir import append_cached_objects, llvm
+    append_cached_objects(profile / "objects", opt, llvm.get_default_triple(), [])
     if objects.get("path_format") != "manifest-relative-v1":
         raise ValueError("recovered object manifest is not portable")
     observed = {}
     for item in objects["objects"]:
         path = Path(item["input"])
-        if path.is_absolute() or (directory / "objects" / path).resolve() != (
+        if path.is_absolute() or (profile / "objects" / path).resolve() != (
                 metadata_path.parent / path.name).resolve():
             raise ValueError("recovered object references unexpected guest IR")
         observed[path.name] = item["ir_sha256"]
@@ -417,8 +440,10 @@ def canonical_shared_profiles(base_work, work):
 
 
 def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
-            *, full_native_backup=False):
-    """Reconstruct, link, validate, then switch active cache without guest runs."""
+            *, full_native_backup=False, opt=0):
+    """Reconstruct, link only the selected profile, then validate and promote."""
+    if opt not in range(6):
+        raise ValueError("invalid recovery native profile")
     source_root = Path(__file__).resolve().parents[1]
     recomp = run_game.native_executable(build, "ee_recomp", config)
     ir_sources = run_game.ir_generation_inputs(elf, source_root)
@@ -443,7 +468,7 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
     metrics.details("known_manifest_metadata_sha256", manifest.get("metadata_sha256"))
 
     def validate(directory):
-        validate_portable_cache(directory, elf, inputs, ir_sources, library_name)
+        validate_portable_cache(directory, elf, inputs, ir_sources, library_name, opt)
 
     with ExitStack() as locks:
         # Lock the canonical and legacy source stores and all extant native
@@ -489,22 +514,35 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
         # lowering can still leave a large fraction of modules byte-identical.
         from build_optimized_cache import seed_candidate_objects
         from verify_ir import llvm, native_target_identity, ir_pipeline_id
-        candidates = [candidate.parent, previous_cache, base_work,
-                      *legacy_recovery_directories(base_work)]
-        candidates.extend(sorted(base_work.glob("retained-*"), reverse=True))
-        candidates.extend(path for path in sorted(base_work.glob("backup-*"), reverse=True)
-                          if path.is_dir() and not path.is_symlink()
-                          and not path.name.endswith("-ir"))
+        roots = [previous_cache, base_work, *legacy_recovery_directories(base_work)]
+        candidates = [candidate.parent]
+        for root in roots:
+            candidates.append(native_profile(root, opt))
+            if opt:
+                candidates.append(root.with_name(root.name + PROFILE_SUFFIXES[opt - 1]))
+        displaced = [*base_work.glob("retained-*"), *base_work.glob("backup-*")]
+        for old in sorted(displaced, reverse=True):
+            if not old.is_dir() or old.is_symlink() or old.name.endswith("-ir"):
+                continue
+            candidates.append(native_profile(old, opt))
+            if opt:
+                candidates.append(old / ("legacy" + PROFILE_SUFFIXES[opt - 1]))
+                candidates.extend(old.glob("legacy-recovery-*" + PROFILE_SUFFIXES[opt - 1]))
+        profile = native_profile(work, opt)
+        if opt:
+            shared_ir.publish(metadata_path, ir_sources, hashes)
+            profile.mkdir()
+            shared_ir.attach(profile, metadata_path.parent)
         with metrics.stage("native_object_seeding"):
             seed_candidate_objects(
-                candidates, work, metadata_path, hashes, 0,
+                candidates, profile, metadata_path, hashes, opt,
                 llvm, native_target_identity, ir_pipeline_id)
         run_game.build_linked_library(
-            source_root, work, metadata_path, work / "objects",
-            work / library_name, 0, emit_jobs=jobs)
+            source_root, profile, metadata_path, profile / "objects",
+            profile / library_name, opt, emit_jobs=jobs)
         run_game.write_translation_cache(
-            work / "translation-cache.json", inputs, 0, metadata_path,
-            work / library_name, ir_sources)
+            profile / "translation-cache.json", inputs, opt, metadata_path,
+            profile / library_name, ir_sources)
         metrics.details("ir_comparison", comparison)
         (work / "ir-comparison.json").write_text(
             json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
@@ -515,13 +553,13 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
             validate(directory)
             # Retained shared profiles must still resolve their marker after
             # promotion. Publish only the newly authenticated guest map.
-            if preserved_profiles:
+            if preserved_profiles and not opt:
                 metadata = directory / "ir" / "ee_functions.json"
                 receipt = shared_ir.read_json(directory / "translation-cache.json")
                 shared_ir.publish(metadata, ir_sources, receipt["ir_hashes"])
 
         backup = promote_canonical(base_work, work, validate_promoted, elf=elf,
-                                   preserved_profiles=preserved_profiles)
+                                   preserved_profiles=preserved_profiles, opt=opt)
         if backup is not None:
             if not full_native_backup:
                 try:
@@ -565,6 +603,8 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", type=Path,
                         default=Path("build/ps2-game-hle"))
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--emit-opt", type=int, choices=range(6), default=0,
+                        help="recover only this native profile (default O0)")
     parser.add_argument("--timings-report", type=Path,
                         help="new JSON report path; default is beside the cache")
     parser.add_argument("--full-native-backup", action="store_true",
@@ -601,11 +641,12 @@ def main(argv=None):
         else:
             report = args.timings_report or metrics.default_report(base_work, "recovery")
             with metrics.report("recovery", report, cache=str(base_work),
-                                elf=str(elf), jobs=args.emit_jobs, profile=0,
+                                elf=str(elf), jobs=args.emit_jobs, profile=args.emit_opt,
                                 allow_ir_changes=args.allow_ir_changes,
                                 full_native_backup=args.full_native_backup):
                 recover(elf, build, args.config, base_work, args.emit_jobs,
-                        args.allow_ir_changes, full_native_backup=args.full_native_backup)
+                        args.allow_ir_changes, full_native_backup=args.full_native_backup,
+                        opt=args.emit_opt)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
                   else "EE source preflight refused" if args.check_active_source
