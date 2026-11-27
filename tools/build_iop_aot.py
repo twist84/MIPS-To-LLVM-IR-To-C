@@ -244,8 +244,11 @@ def table_backed_inventory(metadata, data, baseline, receipt, roots, disc_root,
 
 def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
                         relocation_receipt=None, table_disc_root=None,
-                        cross_block_tables=False):
+                        cross_block_tables=False, residual_max_pcs=None):
     """Select one canonical capture, re-audit bytes, reject ambiguous owners."""
+    if residual_max_pcs is not None and (not residual or
+            type(residual_max_pcs) is not int or residual_max_pcs < 1):
+        raise ValueError("residual PC limit must be positive and requires residual coverage")
     candidates = [path for path in staged.glob("*.json")
                   if path.stem.casefold() == selected.casefold()]
     if len(candidates) != 1:
@@ -306,9 +309,17 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
                      if pc not in owned]
         residual_count = len(remaining)
         if remaining:
-            regions.append(remaining)
+            limit = residual_max_pcs or residual_count
+            # These are bounded dispatch partitions, not discovered functions.
+            # Preserve the original ascending PC order and all existing
+            # function region IDs. Delay-slot emission remains in the lifter.
+            regions.extend(remaining[i:i + limit]
+                           for i in range(0, residual_count, limit))
         if discovered_count + residual_count != len(data) // 4:
             raise ValueError("split residual coverage is not an exact partition")
+        flat = [pc for region in regions for pc in region]
+        if sorted(flat) != list(range(report["base"], report["base"] + len(data), 4)):
+            raise ValueError("split residual contains duplicate or missing dispatch PCs")
     pilot.mkdir()
     shutil.copyfile(meta, pilot / meta.name)
     shutil.copyfile(binary, pilot / binary.name)
@@ -323,6 +334,10 @@ def prepare_split_pilot(staged, selected, pilot, residual=False, extended=False,
         print(f"split residual: {discovered_count} discovered PCs, "
               f"{residual_count} residual PCs, "
               f"{len(data) // 4} aligned dispatch PCs")
+        if residual_max_pcs is not None:
+            count = (residual_count + residual_max_pcs - 1) // residual_max_pcs
+            print(f"split residual partitions: {count}, "
+                  f"at most {residual_max_pcs} PCs each (not functions)")
     return plan
 
 
@@ -543,6 +558,8 @@ def main():
                            help="Compile an exact staged IRX stem in regions (repeatable)")
     selection.add_argument("--split-all", action="store_true",
                            help="Compile all staged IRXs in regions")
+    parser.add_argument("--split-residual-max-pcs", type=int,
+                        help="Experimental: bound residual dispatch partitions, not function regions")
     parser.add_argument("--split-residual", action="store_true",
                         help="Add one residual region covering every remaining aligned PC")
     parser.add_argument("--split-extended", action="store_true",
@@ -566,6 +583,9 @@ def main():
         parser.error("--split-relocation-receipt requires extended residual splitting")
     if args.split_extended and not (split_mode and args.split_residual):
         parser.error("--split-extended requires --split-module or --split-all and --split-residual")
+    if args.split_residual_max_pcs is not None and (
+            not args.split_residual or args.split_residual_max_pcs < 1):
+        parser.error("--split-residual-max-pcs requires --split-residual and a positive limit")
     if args.split_residual and not split_mode:
         parser.error("--split-residual requires --split-module or --split-all")
     if args.region_cache is not None:
@@ -655,7 +675,8 @@ def build(args, out):
                                            extended=args.split_extended,
                                            relocation_receipt=relocation_receipt,
                                            table_disc_root=args.split_table_disc_root,
-                                           cross_block_tables=args.split_cross_block_tables)
+                                           cross_block_tables=args.split_cross_block_tables,
+                                           residual_max_pcs=args.split_residual_max_pcs)
                 subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
                 provenance_by_stem[stem] = (
                     {**common_provenance,
