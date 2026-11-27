@@ -21,7 +21,7 @@ public:
 
     static constexpr uint64_t k_no_deadline = std::numeric_limits<uint64_t>::max();
 
-    e_result observe(uint64_t cycle)
+    constexpr e_result observe(uint64_t cycle)
     {
         if (!m_active)
         {
@@ -47,9 +47,9 @@ public:
         return e_result::accepted;
     }
 
-    uint64_t due() const { return m_due; }
+    constexpr uint64_t due() const { return m_due; }
 
-    bool consume(uint64_t cycles)
+    constexpr bool consume(uint64_t cycles)
     {
         if (cycles > m_due)
         {
@@ -63,7 +63,7 @@ public:
     // IOP work due. An outstanding backlog is due immediately. A
     // not-yet-anchored or unrepresentable deadline cannot authorize
     // native chaining; the caller must handle those cases separately.
-    uint64_t next_cycle() const
+    constexpr uint64_t next_cycle() const
     {
         if (!m_active)
         {
@@ -81,7 +81,7 @@ public:
     // Project a relative kernel/device deadline onto the compatibility
     // clock. Existing debt must first be serviced; do not extrapolate
     // from an unanchored clock or overflow the timestamp.
-    uint64_t cycle_after_iop(uint64_t cycles) const
+    constexpr uint64_t cycle_after_iop(uint64_t cycles) const
     {
         if (!m_active || cycles == k_no_deadline)
         {
@@ -102,12 +102,12 @@ public:
 
     // A projection is only meaningful from the actual published EE
     // boundary, not a stale observation before a host continuation.
-    bool anchored_at(uint64_t cycle) const
+    constexpr bool anchored_at(uint64_t cycle) const
     {
         return m_active && cycle != k_no_deadline && m_last_cycle == cycle;
     }
 
-    bool active() const { return m_active; }
+    constexpr bool active() const { return m_active; }
 
 private:
     uint64_t m_last_cycle = 0u;
@@ -124,7 +124,7 @@ struct s_ee_iop_service_batch
     uint32_t m_turns = 0u;
 };
 
-inline s_ee_iop_service_batch ee_iop_service_batch(
+inline constexpr s_ee_iop_service_batch ee_iop_service_batch(
     uint64_t due, uint32_t turns_left, uint64_t idle_interval)
 {
     constexpr uint32_t turn_cycles = 256u;
