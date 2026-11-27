@@ -416,6 +416,95 @@ constexpr bool test_instruction_data_access()
 
 static_assert(test_instruction_data_access(), "instruction data access alignment regression");
 
+constexpr bool test_partial_access_plans()
+{
+    using kind = ee::e_ee_partial_access_kind;
+    using result = ee::e_ee_access_status;
+    ee::c_ee_tlb tlb{};
+    constexpr uint32_t virt = 0x00400000u;
+    constexpr uint32_t asid = 0xabu;
+    constexpr uint32_t lo0 = (0x100u << 6u) | 0x1eu;
+    constexpr uint32_t lo1 = (0x200u << 6u) | 0x1au;
+    if (!tlb.write(0u, 0u, virt | asid, lo0, lo1))
+    {
+        return false;
+    }
+    constexpr kind kinds[] =
+    {
+        kind::WORD_LEFT, kind::WORD_RIGHT,
+        kind::DOUBLEWORD_LEFT, kind::DOUBLEWORD_RIGHT
+    };
+    constexpr uint32_t masks[4][8] =
+    {
+        {1u, 3u, 7u, 15u},
+        {15u, 14u, 12u, 8u},
+        {1u, 3u, 7u, 15u, 31u, 63u, 127u, 255u},
+        {255u, 254u, 252u, 248u, 240u, 224u, 192u, 128u}
+    };
+    for (uint32_t i = 0u; i < 4u; ++i)
+    {
+        const uint32_t width = i < 2u ? 4u : 8u;
+        for (uint32_t offset = 0u; offset < width; ++offset)
+        {
+            for (uint32_t store = 0u; store < 2u; ++store)
+            {
+                const uint32_t address = virt + 0x1000u - width + offset;
+                const auto plan = ee::ee_plan_partial_access(tlb, kinds[i],
+                    store != 0u, address, 0u, 3u, 0u, asid);
+                const bool left = (i & 1u) == 0u;
+                if (plan.m_width != width ||
+                    plan.m_effective_address != address ||
+                    plan.m_aligned_virtual_address != virt + 0x1000u - width ||
+                    plan.m_access.m_status != result::PHYSICAL ||
+                    plan.m_access.m_physical_address != 0x100000u + address - virt ||
+                    plan.m_aligned_physical_address != 0x101000u - width ||
+                    plan.m_memory_first_lane != (left ? 0u : offset) ||
+                    plan.m_register_first_lane != (left ? width - offset - 1u : 0u) ||
+                    plan.m_lane_count != (left ? offset + 1u : width - offset) ||
+                    plan.m_memory_byte_mask != masks[i][offset] ||
+                    plan.m_sign_extend_word_load !=
+                        (store == 0u && width == 4u && (left || offset == 0u)) ||
+                    plan.m_fault.m_valid)
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    const auto clean_read = ee::ee_plan_partial_access(tlb, kind::WORD_RIGHT,
+        false, virt + 0x1003u, 0u, 3u, 0u, asid);
+    const auto clean_write = ee::ee_plan_partial_access(tlb, kind::WORD_RIGHT,
+        true, virt + 0x1003u, 0u, 3u, 0u, asid);
+    const auto miss = ee::ee_plan_partial_access(tlb, kind::DOUBLEWORD_LEFT,
+        true, 0x00500005u, 0u, 3u, 0u, asid);
+    const auto privilege = ee::ee_plan_partial_access(tlb, kind::WORD_LEFT,
+        false, 0x80000001u, 0x10u, 3u, 0u, asid);
+    const auto invalid = ee::ee_plan_partial_access(tlb, static_cast<kind>(255u),
+        false, virt, 0u, 3u, 0u, asid);
+    if (!tlb.write(1u, 0u, 0x00600000u | asid, 0x80000006u, 6u))
+    {
+        return false;
+    }
+    const auto scratch = ee::ee_plan_partial_access(tlb, kind::DOUBLEWORD_RIGHT,
+        true, 0x00603fffu, 0u, 3u, 0u, asid);
+    return clean_read.m_access.m_status == result::PHYSICAL &&
+           clean_write.m_access.m_status == result::TLB_MODIFIED &&
+           clean_write.m_fault.m_code == ee::EX_Mod &&
+           clean_write.m_fault.m_bad_vaddr == virt + 0x1003u &&
+           miss.m_access.m_status == result::TLB_REFILL &&
+           miss.m_fault.m_code == ee::EX_TLBS &&
+           miss.m_fault.m_bad_vaddr == 0x00500005u &&
+           privilege.m_access.m_status == result::ADDRESS_ERROR &&
+           privilege.m_fault.m_bad_vaddr == 0x80000001u &&
+           invalid.m_width == 0u && !invalid.m_fault.m_valid &&
+           scratch.m_access.m_status == result::SCRATCHPAD &&
+           scratch.m_access.m_scratchpad_offset == 0x3fffu &&
+           scratch.m_aligned_scratchpad_offset == 0x3ff8u &&
+           scratch.m_memory_byte_mask == 128u && !scratch.m_fault.m_valid;
+}
+
+static_assert(test_partial_access_plans(), "left/right partial access regression");
+
 // Separate page sizes keep each constant-evaluation budget bounded.
 static_assert(test_tlb_page_mask(0u), "4 KiB TLB page regression");
 static_assert(test_tlb_page_mask(0x6000u), "16 KiB TLB page regression");
@@ -608,6 +697,10 @@ int main()
     }
 
     if (!check(test_instruction_data_access(), "instruction data access alignment regression"))
+    {
+        return 1;
+    }
+    if (!check(test_partial_access_plans(), "left/right partial access regression"))
     {
         return 1;
     }

@@ -249,3 +249,31 @@ M5: compose precise Level 1 fault entry and side-effect ordering.
 M6: opt-in native/interpreter integration only after matching directed
 tests and bounded retail validation. Keep cache timing and physical
 console calibration open; never substitute estimated cycles for evidence.
+
+## Strict memory follow-up M2: left/right partial transfers
+
+The EE Instruction Set Manual v6.0 LWL/LWR (pp. 80–83), SDL/SDR
+(pp. 99–102), SWL/SWR (pp. 117–120) specifies original-EA translation
+without natural-alignment faults, and store translation for the
+partial stores. Retain the original address for BadVAddr, aligned
+container addresses for physical/scratchpad backing, explicit memory
+byte masks and register lane ranges. LWL sign-extends the merged
+word; LWR sign-extends only when the entire word is loaded. The upper
+64 GPR bits are outside the transfer. No host byte order assumption
+or actual load/merge/store is introduced.
+https://studylib.net/doc/28989088/ee-insns
+
+Pinned PCSX2 R5900OpcodeImpl.cpp reads an aligned word/doubleword and
+merges it for partial stores. That implementation technique is not a
+license to issue a guest MMIO read; the strict plan requests only store
+permission and enabled write lanes. Pinned ps2-web-recomp codegen
+delegates these instructions to left/right helpers. Neither reference
+is treated as measured bus timing. C++ constexpr/static_assert and
+runtime cases exercise every offset/direction (48 combinations), lane
+masks, sign extension eligibility, clean-page reads versus modified
+stores, original fault addresses, privilege and scratchpad boundary.
+
+This planner does not issue bus transactions, perform register merges,
+change HLE aliases or enable strict memory execution. Cache/bus lane
+semantics and precise commitment still require separate validation.
+No retail replay required for M2; CI pending.

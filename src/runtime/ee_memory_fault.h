@@ -180,4 +180,84 @@ inline constexpr s_ee_data_access_plan ee_plan_data_access(
     return plan;
 }
 
+// The EE is little-endian for these transfers. Unlike LQ/SQ, the
+// original EA is the translation/fault address. The aligned container
+// and selected byte lanes describe the architectural transfer, not the
+// number or width of cache/bus transactions.
+enum class e_ee_partial_access_kind : uint8_t
+{
+    WORD_LEFT,
+    WORD_RIGHT,
+    DOUBLEWORD_LEFT,
+    DOUBLEWORD_RIGHT
+};
+
+struct s_ee_partial_access_plan
+{
+    uint32_t m_effective_address = 0u;
+    uint32_t m_aligned_virtual_address = 0u;
+    uint32_t m_width = 0u;
+    uint32_t m_memory_first_lane = 0u;
+    uint32_t m_register_first_lane = 0u;
+    uint32_t m_lane_count = 0u;
+    uint32_t m_memory_byte_mask = 0u;
+    uint32_t m_aligned_physical_address = 0u;
+    uint32_t m_aligned_scratchpad_offset = 0u;
+    bool m_sign_extend_word_load = false;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// MIPS left/right operations (EE Instruction Set Manual v6.0):
+// left transfers EA lane down to lane zero; right transfers EA lane
+// through the highest lane. Register bytes are numbered low to high.
+// A partial store is a STORE translation, never a guest load followed
+// by a store. A backing implementation must preserve disabled lanes
+// without requiring a read from a potentially side-effectful device.
+inline constexpr s_ee_partial_access_plan ee_plan_partial_access(
+    const c_ee_tlb& tlb, e_ee_partial_access_kind kind, bool write_access,
+    uint32_t address, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using k = e_ee_partial_access_kind;
+    s_ee_partial_access_plan plan{};
+    plan.m_effective_address = address;
+    bool left = false;
+    switch (kind)
+    {
+    case k::WORD_LEFT: plan.m_width = 4u; left = true; break;
+    case k::WORD_RIGHT: plan.m_width = 4u; break;
+    case k::DOUBLEWORD_LEFT: plan.m_width = 8u; left = true; break;
+    case k::DOUBLEWORD_RIGHT: plan.m_width = 8u; break;
+    default: break;
+    }
+    if (plan.m_width != 0u)
+    {
+        const uint32_t offset = address & (plan.m_width - 1u);
+        plan.m_aligned_virtual_address = address - offset;
+        plan.m_memory_first_lane = left ? 0u : offset;
+        plan.m_lane_count = left ? offset + 1u : plan.m_width - offset;
+        plan.m_register_first_lane = left ? plan.m_width - plan.m_lane_count : 0u;
+        plan.m_memory_byte_mask =
+            ((1u << plan.m_lane_count) - 1u) << plan.m_memory_first_lane;
+        plan.m_sign_extend_word_load = !write_access && plan.m_width == 4u &&
+            (left || offset == 0u);
+        plan.m_access = ee_resolve_access(tlb, address, status, config,
+                                          entry_hi, write_access);
+        if (plan.m_access.m_status == e_ee_access_status::PHYSICAL)
+        {
+            plan.m_aligned_physical_address =
+                plan.m_access.m_physical_address & ~(plan.m_width - 1u);
+        }
+        else if (plan.m_access.m_status == e_ee_access_status::SCRATCHPAD)
+        {
+            plan.m_aligned_scratchpad_offset =
+                plan.m_access.m_scratchpad_offset & ~(plan.m_width - 1u);
+        }
+        plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+            write_access, address, status, context, entry_hi);
+    }
+    return plan;
+}
+
 } // namespace ee
