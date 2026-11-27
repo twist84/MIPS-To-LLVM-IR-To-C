@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 import json
 import hashlib
+import ctypes
+import shutil
 import struct
 import subprocess
 import sys
@@ -15,7 +17,8 @@ sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
 from build_iop_aot import (prepare_split_pilot, cached_split_object, split_cache_key,
                            relocation_receipt_roots, select_split_stems,
-                           split_compile_schedule, compile_split_modules)
+                           split_compile_schedule, compile_split_modules,
+                           compact_split_router)
 from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
                                     discover_relocation_roots)
 
@@ -626,6 +629,106 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cached_split_object(source, obj, cache, context, compile_object)
             self.assertEqual(len(calls), 3)
+
+    @staticmethod
+    def compact_router_fixture():
+        base = 0x80000000
+        plan = f"IOPREG1 {base} 16 1 2\n2 {base} {base + 12}\n1 {base + 4}\n"
+        router = """define i32 @region0(ptr %c, i32 %start) {
+entry:
+  ret i32 11
+}
+define i32 @region1(ptr %c, i32 %start) {
+entry:
+  ret i32 12
+}
+define i32 @router(ptr %c, i32 %start) {
+entry:
+  %budgetp = getelementptr i8, ptr %c, i64 56
+  %budget = load i32, ptr %budgetp
+  %empty = icmp eq i32 %budget, 0
+  br i1 %empty, label %fallback, label %dispatch
+dispatch:
+  switch i32 %start, label %fallback [
+    i32 -2147483648, label %region_0
+    i32 -2147483636, label %region_0
+    i32 -2147483644, label %region_1
+  ]
+region_0:
+  %r0 = call i32 @region0(ptr %c, i32 %start)
+  ret i32 %r0
+region_1:
+  %r1 = call i32 @region1(ptr %c, i32 %start)
+  ret i32 %r1
+fallback:
+  %next = add i32 %start, 4
+  %executedp = getelementptr i8, ptr %c, i64 60
+  store i32 0, ptr %executedp
+  %pcp = getelementptr i8, ptr %c, i64 64
+  store i32 %start, ptr %pcp
+  %nextp = getelementptr i8, ptr %c, i64 68
+  store i32 %next, ptr %nextp
+  %delayp = getelementptr i8, ptr %c, i64 72
+  store i32 0, ptr %delayp
+  %branchp = getelementptr i8, ptr %c, i64 76
+  store i32 0, ptr %branchp
+  %reason = select i1 %empty, i32 0, i32 1
+  ret i32 %reason
+}
+"""
+        return base, plan, router
+
+    def test_compact_router_checks_ownership_and_keeps_fallback(self):
+        base, plan, router = self.compact_router_fixture()
+        compact = compact_split_router(router, plan)
+        self.assertIn("[4 x i16] [\n  i16 0, i16 1, i16 -1, i16 0", compact)
+        self.assertIn("icmp ult i32 %map_offset, 16", compact)
+        self.assertIn("and i32 %map_offset, 3", compact)
+        self.assertIn("switch i16 %map_id, label %fallback", compact)
+        self.assertEqual(compact[compact.index("region_0:\n"):],
+                         router[router.index("region_0:\n"):])
+        with self.assertRaises(ValueError):
+            compact_split_router(router.replace("label %region_1\n", "label %region_0\n"),
+                                 plan)
+        with self.assertRaises(ValueError):
+            compact_split_router(router, plan.replace(str(base + 4), str(base)))
+        with self.assertRaises(ValueError):
+            compact_split_router(router, plan.replace(str(base + 4), str(base + 1)))
+        with self.assertRaises(ValueError):
+            compact_split_router(compact, plan)
+
+    @unittest.skipUnless(sys.platform.startswith("linux") and shutil.which("clang"),
+                         "requires Linux host Clang for native router comparison")
+    def test_compact_router_native_matches_original(self):
+        base, plan, router = self.compact_router_fixture()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            functions = []
+            for name, ir in (("original", router),
+                             ("compact", compact_split_router(router, plan))):
+                source = root / f"{name}.ll"
+                library = root / f"{name}.so"
+                source.write_text(ir)
+                subprocess.run(["clang", "-O3", "-shared", "-fPIC",
+                                "-Wno-override-module", str(source), "-o",
+                                str(library)], check=True)
+                fn = ctypes.CDLL(str(library)).router
+                fn.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+                fn.restype = ctypes.c_uint32
+                functions.append(fn)
+            for budget in (0, 1, 100):
+                for pc in (0, base - 4, *range(base, base + 17), 0xffffffff):
+                    outcomes = []
+                    for fn in functions:
+                        ctx = ctypes.create_string_buffer(b"\\x5a" * 80, 80)
+                        struct.pack_into("<I", ctx, 56, budget)
+                        result = fn(ctx, pc)
+                        outcomes.append((result, ctx.raw))
+                    self.assertEqual(outcomes[0], outcomes[1], (budget, pc))
+                    expected = (0 if not budget else
+                                11 if pc in (base, base + 12) else
+                                12 if pc == base + 4 else 1)
+                    self.assertEqual(outcomes[1][0], expected)
 
     def test_exact_ir_cache_reuses_across_plans_and_validates_legacy(self):
         with tempfile.TemporaryDirectory() as tmp:
