@@ -22,7 +22,9 @@ typedef struct s_iop_aot_context
     uint32_t* m_lo;
     uint8_t* m_ram;         // 2 MiB IOP RAM
     void* m_cpu;            // opaque c_cpu for slow-path accesses
-    // Non-RAM or faulting accesses. Return non-zero on success.
+    // Non-RAM or faulting accesses. Zero requests interpreter fallback;
+    // the runtime deliberately returns zero to preserve exact device timing.
+    // Retain the callback layout for existing exact-budget libraries.
     int (*m_read)(void* cpu, uint32_t address, uint32_t width,
                   uint32_t* value);
     int (*m_write)(void* cpu, uint32_t address, uint32_t width,
