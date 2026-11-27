@@ -374,3 +374,27 @@ instead of copying each file, while retaining per-batch diagnostic metadata.
 Failed batch moves are reversed; live append retains copy-based publication.
 Final portable metadata uses the already authenticated ordered paths and is
 serialized once. No changes to CFG/discovery boundaries or emitted IR.
+
+R6.2/R6.3 Windows acceptance: 147.390 s wall time (43.610 s below the
+191.000 s baseline), 16,252 exact IR hashes and byte-identical reconstructed
+metadata. One exact hash scan (12.875 s); 16,251 staged IR modules moved.
+
+### R6.4 persistent discovery experiment
+
+The opt-in benchmark retains one loaded ELF and one decoded immutable
+discovery snapshot in a child process. Each batch starts with a separate
+copy of the original discovery map and boundaries; dynamic discoveries do
+not accumulate across requests. Python still chooses the original ordered
+128-entry batches and restores missing entries independently. The child
+fails closed on incomplete requests. Normal recovery and live expansion
+continue using the independent-process path until parity is established.
+
+    cmake --build build --config Release --target ee_recomp
+    python tools/recover_translation_cache.py --elf PS2_GAME/SLUS_214.42 --benchmark-reconstruct build/ee-r6-persistent --persistent-recomp --benchmark-allow-source-changes --timings-report ee-r6-persistent.json
+
+The generator fingerprints changed because the recompiler source changed.
+The benchmark-only source override still requires exact original IR hashes;
+it does not authorize activation or accept changed IR. The report counts
+actual child launches separately from logical session requests. Compare
+metadata bytes against the accepted relaxed baseline. No measured speedup
+for the persistent experiment yet.

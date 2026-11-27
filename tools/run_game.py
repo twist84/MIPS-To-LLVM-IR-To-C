@@ -975,6 +975,67 @@ def run(command, capture=False, timeout_seconds=None):
     return result
 
 
+class c_recomp_session:
+    """One child for a fresh reconstruction; fail closed on protocol errors."""
+
+    def __init__(self, recomp, elf):
+        self.m_argv = [str(recomp), str(elf), "--serve-reconstruction"]
+        self.m_child = None
+
+    def __enter__(self):
+        with metrics.stage("ee_recomp_session_start"):
+            self.m_child = subprocess.Popen(
+                self.m_argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                text=True, env=dict(os.environ, EE_RECOVERY_TIMINGS="1"))
+        metrics.count("ee_recomp_invocations")
+        return self
+
+    def __call__(self, command):
+        if ([str(command[0]), str(command[1])] != self.m_argv[:2] or
+                len(command) not in (4, 5)):
+            raise ValueError("unexpected persistent recompiler command")
+        option = str(command[3])
+        if option.startswith("--function=") and len(command) == 4:
+            mode, values = "seed", option.split("=", 1)[1]
+        elif option.startswith("--functions=") and len(command) == 5 and str(
+                command[4]).startswith("--discovery-cache="):
+            mode, values = "batch", option.split("=", 1)[1]
+        else:
+            raise ValueError("persistent session requires explicit entries and seed cache")
+        output = str(command[2])
+        if any(char in output for char in "\t\r\n"):
+            raise ValueError("invalid persistent recompiler output path")
+        print("+ " + subprocess.list2cmdline([str(item) for item in command]) +
+              " [persistent]", flush=True)
+        metrics.count("ee_recomp_session_requests")
+        with metrics.stage("ee_recomp_process_wall"):
+            self.m_child.stdin.write(f"{mode}\t{output}\t{values}\n")
+            self.m_child.stdin.flush()
+            for line in self.m_child.stdout:
+                if line.rstrip("\r\n") == "ee_recomp session result: ok":
+                    return
+                print(line, end="", flush=True)
+                metrics.observe_line(line, "ee_recomp")
+        raise RuntimeError("persistent recompiler exited before completing request")
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        child = self.m_child
+        try:
+            if exc_type is None:
+                child.stdin.write("quit\n")
+                child.stdin.flush()
+                _, _ = child.communicate()
+                if child.returncode:
+                    raise subprocess.CalledProcessError(child.returncode, self.m_argv)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+            child.stdin.close()
+            child.stdout.close()
+        return False
+
+
 def native_executable(build_dir, name, config="Release"):
     suffix = ".exe" if os.name == "nt" else ""
     cache = build_dir / "CMakeCache.txt"
@@ -1010,7 +1071,7 @@ def covered_pcs(metadata):
 
 @metrics.measure("batch_transaction")
 def batch_append_functions(recomp, elf, work, metadata_path, addresses,
-                           *, reserved_entries=(), staged_metadata=None):
+                           *, reserved_entries=(), staged_metadata=None, run_recompiler=None):
     """Translate a group of newly reachable entries in one discovery pass.
 
     The EE CFG emitter writes one IR/metadata result per requested function.
@@ -1053,7 +1114,9 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
     discovery_cache = metadata_path.parent / "ee_discovery_cache.bin"
     if discovery_cache.is_file():
         command.append(f"--discovery-cache={discovery_cache}")
-    run(command)
+    if run_recompiler is not None and staged_metadata is None:
+        raise ValueError("persistent recompiler requires isolated staged metadata")
+    (run_recompiler or run)(command)
     with metrics.stage("metadata_read_parse"):
         extra_metadata = json.loads(
             (output_dir / "ee_functions.json").read_text(encoding="utf-8")

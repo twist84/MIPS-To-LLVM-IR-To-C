@@ -589,7 +589,8 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
 
 
 def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
-                             allow_ir_changes=False):
+                             allow_ir_changes=False, *, persistent=False,
+                             allow_source_changes=False):
     """Cold IR-only reconstruction in a fresh directory outside active cache."""
     base_work = base_work.resolve()
     output = output.resolve()
@@ -602,7 +603,7 @@ def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
     with shared_ir.ir_lock(base_work):
         sources = run_game.ir_generation_inputs(elf, source_root)
         candidate, manifest, entries, same_sources = select_manifest(
-            base_work, elf, sources, allow_ir_changes)
+            base_work, elf, sources, allow_ir_changes or allow_source_changes)
         metrics.details("selected_manifest", str(candidate))
         metrics.details("known_modules", len(entries))
         metrics.details("lowering_sources_match", same_sources)
@@ -612,9 +613,10 @@ def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
         output.mkdir(parents=True, exist_ok=False)
         shared_ir.write_json(output / "benchmark-input.json", manifest)
     hashes = {}
+    extra = {"persistent": True} if persistent else {}
     comparison = run_known_replays.reconstruct(
         manifest, entries, elf, build, config, output, jobs,
-        allow_ir_changes, ir_only=True, verified_hashes=hashes)
+        allow_ir_changes, ir_only=True, verified_hashes=hashes, **extra)
     metadata_path = output / "ir" / "ee_functions.json"
     if (list(hashes) != manifest.get("known_entries", list(manifest["ir_hashes"])) or
             comparison["missing"] or comparison["extra"] or
@@ -633,6 +635,10 @@ def main(argv=None):
     parser.add_argument("--elf", type=Path)
     parser.add_argument("--benchmark-reconstruct", type=Path, metavar="FRESH_WORK_DIR",
                         help="cold IR-only reconstruction; never activate output")
+    parser.add_argument("--persistent-recomp", action="store_true",
+                        help="benchmark one persistent recompiler process")
+    parser.add_argument("--benchmark-allow-source-changes", action="store_true",
+                        help="benchmark only: permit changed generator fingerprints, not changed IR hashes")
     parser.add_argument("--print-active", action="store_true",
                         help="print only the selected active work directory")
     parser.add_argument("--check-active-source", action="store_true",
@@ -656,6 +662,8 @@ def main(argv=None):
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
     args = parser.parse_args(argv)
+    if (args.persistent_recomp or args.benchmark_allow_source_changes) and not args.benchmark_reconstruct:
+        parser.error("persistent recompiler/source-change experiment requires --benchmark-reconstruct")
     if args.benchmark_reconstruct and (
             args.print_active or args.check_active_source or
             args.migrate_source_fingerprints or args.full_native_backup):
@@ -679,10 +687,14 @@ def main(argv=None):
             with metrics.report("ir-benchmark", report, cache=str(base_work),
                                 elf=str(elf), jobs=args.emit_jobs,
                                 work=str(args.benchmark_reconstruct.resolve()),
+                                persistent_recomp=args.persistent_recomp,
+                                allow_source_changes=args.benchmark_allow_source_changes,
                                 allow_ir_changes=args.allow_ir_changes):
                 benchmark_reconstruction(
                     elf, build, args.config, base_work, args.benchmark_reconstruct,
-                    args.emit_jobs, args.allow_ir_changes)
+                    args.emit_jobs, args.allow_ir_changes,
+                    persistent=args.persistent_recomp,
+                    allow_source_changes=args.benchmark_allow_source_changes)
         elif args.migrate_source_fingerprints:
             migrate_source_fingerprints(elf, base_work, Path(__file__).resolve().parents[1])
         elif args.check_active_source:

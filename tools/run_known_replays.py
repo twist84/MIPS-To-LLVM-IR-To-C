@@ -17,6 +17,7 @@ The archived SHA-256 list authenticates IR identities, not their contents.
 """
 import argparse
 import csv
+from contextlib import nullcontext
 from datetime import datetime
 import hashlib
 import json
@@ -111,7 +112,7 @@ def compare_hashes(hashes, observed):
 
 @metrics.measure("explicit_entry_restoration")
 def restore_missing_entries(recomp, elf, work, metadata_path, entries,
-                            *, staged_metadata=None):
+                            *, staged_metadata=None, run_recompiler=None):
     """Restore explicit entries in an unpublished reconstruction.
 
     Different batch boundaries may assign an explicit entry to another
@@ -149,9 +150,10 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
             raise ValueError("existing entry lost its dispatch block")
     for pc in missing:
         print(f"Restoring explicit known entry 0x{pc:08x}", flush=True)
+        extra = {"run_recompiler": run_recompiler} if run_recompiler is not None else {}
         run_game.batch_append_functions(recomp, elf, work, metadata_path, [pc],
                                         reserved_entries=reserved,
-                                        staged_metadata=metadata)
+                                        staged_metadata=metadata, **extra)
     by_entry = {int(fn["vaddr"], 0): fn for fn in metadata["functions"]}
     if (len(by_entry) != len(metadata["functions"]) or
             set(by_entry) != expected):
@@ -174,7 +176,8 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
 
 @metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
-                allow_mismatches, *, ir_only=False, verified_hashes=None):
+                allow_mismatches, *, ir_only=False, verified_hashes=None,
+                persistent=False):
     """Build known guest entries without any intermediate game execution."""
     ir_dir = work / "ir"
     for candidate in (ir_dir, work / "objects", work / "translation-cache.json",
@@ -198,18 +201,24 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
     # Subsequent batches reuse the discovery cache and exact ownership logic
     # used by production auto-expansion, WITHOUT replaying the game.
     print(f"Known-function reconstruction: {len(entries)} entries", flush=True)
-    run_game.run([recomp, elf, ir_dir, f"--function=0x{entries[0]:08x}"])
-    with metrics.stage("metadata_read_parse"):
-        staged_metadata = run_game.shared_ir.read_json(metadata_path)
-    for first in range(1, len(entries), 128):
-        batch = entries[first:first + 128]
-        print(f"Known IR entries {first + 1}..{first + len(batch)} "
-              f"of {len(entries)}", flush=True)
-        run_game.batch_append_functions(recomp, elf, work, metadata_path, batch,
-                                        staged_metadata=staged_metadata)
-
-    restore_missing_entries(recomp, elf, work, metadata_path, entries,
-                            staged_metadata=staged_metadata)
+    with (run_game.c_recomp_session(recomp, elf) if persistent else
+          nullcontext(run_game.run)) as recompiler:
+        recompiler([recomp, elf, ir_dir, f"--function=0x{entries[0]:08x}"])
+        with metrics.stage("metadata_read_parse"):
+            staged_metadata = run_game.shared_ir.read_json(metadata_path)
+        extra = {"run_recompiler": recompiler} if persistent else {}
+        for first in range(1, len(entries), 128):
+            batch = entries[first:first + 128]
+            print(f"Known IR entries {first + 1}..{first + len(batch)} "
+                  f"of {len(entries)}", flush=True)
+            run_game.batch_append_functions(recomp, elf, work, metadata_path, batch,
+                                            staged_metadata=staged_metadata, **extra)
+        restore_missing_entries(recomp, elf, work, metadata_path, entries,
+                                staged_metadata=staged_metadata, **extra)
+    if persistent:
+        with metrics.stage("elf_hashing"):
+            if run_game.sha256_path(elf) != expected_elf:
+                raise ValueError("ELF changed during persistent reconstruction")
     # Authenticate the exact owned module set in metadata order, once.
     # The caller can carry these hashes into the next staging operation;
     # no on-disk receipt is accepted as proof of this scan.
