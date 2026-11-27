@@ -213,6 +213,10 @@ public:
 
     bool usable_prefix() const { return m_configured && !m_failed; }
     uint64_t candidate_cycles() const { return m_probe.estimated_cycles(); }
+    const s_ee_probe_cycle_breakdown& cycle_breakdown() const
+    {
+        return m_probe.cycle_breakdown();
+    }
     // Distinct from issue time and NOT hardware retirement.
     uint64_t last_candidate_completion_cycle() const
     {

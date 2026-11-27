@@ -400,5 +400,16 @@ int main(int argc, char** argv)
         static_cast<unsigned long long>(
             replay.max_candidate_completion_cycle())
     );
+    const auto& breakdown = replay.cycle_breakdown();
+    std::printf(
+        "candidate_single_issue_cycles=%llu candidate_dual_issue_cycles=%llu "
+        "candidate_annulled_cycles=%llu candidate_register_idle_cycles=%llu "
+        "candidate_unit_idle_cycles=%llu candidate_hle_cycles=%llu\n",
+        static_cast<unsigned long long>(breakdown.m_single_issue),
+        static_cast<unsigned long long>(breakdown.m_dual_issue),
+        static_cast<unsigned long long>(breakdown.m_annulled),
+        static_cast<unsigned long long>(breakdown.m_register_idle),
+        static_cast<unsigned long long>(breakdown.m_unit_idle),
+        static_cast<unsigned long long>(breakdown.m_hle));
     return 0;
 }

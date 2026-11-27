@@ -104,6 +104,18 @@ struct s_ee_probe_instruction
     uint32_t m_gpr_128_write_mask = 0u;
 };
 
+// Disjoint candidate issue-window accounting. Result deadlines beyond the
+// last issue are not included. These counts are not hardware stall samples.
+struct s_ee_probe_cycle_breakdown
+{
+    uint64_t m_single_issue = 0u;
+    uint64_t m_dual_issue = 0u;
+    uint64_t m_annulled = 0u;
+    uint64_t m_register_idle = 0u;
+    uint64_t m_unit_idle = 0u;
+    uint64_t m_hle = 0u;
+};
+
 // A conservative, deterministic two-wide issue *candidate* for evaluating
 // instruction streams. Pairing checks documented logical pipe routing
 // (EE Core User's Manual v6.0, Tables 1-2/1-3) and rejects RAW/WAR/WAW
@@ -120,6 +132,7 @@ public:
         m_issued = 0u;
         m_annulled = 0u;
         m_hle_overhead = 0u;
+        m_breakdown = {};
         m_waw_policy = e_ee_probe_waw_policy::WAIT_FOR_RESULT;
         m_last_completion_cycle = 0u;
         m_max_completion_cycle = 0u;
@@ -314,12 +327,23 @@ public:
             candidate = m_fcsr_ready;
         }
 
+        // Idle time starts AFTER any previously occupied issue cycle.
+        // Register readiness is charged first; only additional unit delay
+        // is attributed to occupancy, avoiding double-counted stalls.
+        const uint64_t next_empty_cycle = m_cycle + (m_pair_count != 0u ? 1u : 0u);
+        const uint64_t register_idle = candidate > next_empty_cycle
+            ? candidate - next_empty_cycle : 0u;
+        const uint64_t after_registers = candidate > next_empty_cycle
+            ? candidate : next_empty_cycle;
         const uint32_t unit_index =
             static_cast<uint32_t>(instruction.m_unit);
         if (unit_index != 0u && candidate < m_unit_next_issue[unit_index])
         {
             candidate = m_unit_next_issue[unit_index];
         }
+
+        const uint64_t unit_idle = candidate > after_registers
+            ? candidate - after_registers : 0u;
 
         const uint32_t hilo_latency = instruction.m_hilo_result_latency == 0u
             ? instruction.m_result_latency
@@ -453,6 +477,18 @@ public:
             completes_at = candidate + vu0_vi_latency;
         }
 
+        // Commit statistics only after every issue validity/overflow check.
+        m_breakdown.m_register_idle += register_idle;
+        m_breakdown.m_unit_idle += unit_idle;
+        if (candidate == m_cycle && m_pair_count == 1u)
+        {
+            --m_breakdown.m_single_issue;
+            ++m_breakdown.m_dual_issue;
+        }
+        else
+        {
+            ++m_breakdown.m_single_issue;
+        }
         if (candidate != m_cycle)
         {
             m_cycle = candidate;
@@ -570,6 +606,7 @@ public:
         m_pair_count = 1u;
         m_pair_annulled = true;
         ++m_annulled;
+        ++m_breakdown.m_annulled;
         return true;
     }
 
@@ -588,12 +625,18 @@ public:
         m_cycle = finish + cycles;
         clear_pair();
         m_hle_overhead += cycles;
+        m_breakdown.m_hle += cycles;
         return true;
     }
 
     uint64_t estimated_cycles() const
     {
         return m_cycle + (m_pair_count != 0u ? 1u : 0u);
+    }
+
+    const s_ee_probe_cycle_breakdown& cycle_breakdown() const
+    {
+        return m_breakdown;
     }
 
     uint64_t instructions_issued() const
@@ -701,6 +744,7 @@ private:
     uint64_t m_issued = 0u;
     uint64_t m_annulled = 0u;
     uint64_t m_hle_overhead = 0u;
+    s_ee_probe_cycle_breakdown m_breakdown{};
     e_ee_probe_waw_policy m_waw_policy =
         e_ee_probe_waw_policy::WAIT_FOR_RESULT;
     uint64_t m_last_completion_cycle = 0u;

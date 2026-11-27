@@ -555,6 +555,49 @@ int main()
           clock.issue(packed, &at) && at == 0u,
           "packed full-width write coverage rejects inconsistent masks");
 
+    // Disjoint accounting: pair, register wait, functional-unit wait,
+    // annulment and HLE boundary. Artificial intervals exercise bookkeeping
+    // only, not measured R5900 latencies.
+    clock.reset();
+    s_ee_probe_instruction producer{};
+    producer.m_pipe = e_ee_probe_pipe::MULT_DIV;
+    producer.m_gpr_write_mask = 1u << 2u;
+    producer.m_result_latency = 4u;
+    producer.m_unit = ee::e_ee_probe_unit::MAC0;
+    producer.m_initiation_interval = 7u;
+    s_ee_probe_instruction consumer = producer;
+    consumer.m_gpr_read_mask = 1u << 2u;
+    consumer.m_gpr_write_mask = 1u << 8u;
+    check(clock.issue(producer, &at) && at == 0u &&
+          clock.issue(b, &at) && at == 0u &&
+          clock.issue(consumer, &at) && at == 7u &&
+          clock.reserve_annulled_delay_slot() &&
+          clock.charge_hle_overhead(3u) &&
+          clock.issue(c, &at) && at == 12u,
+          "mixed candidate issue-window accounting sequence");
+    const auto breakdown = clock.cycle_breakdown();
+    check(breakdown.m_single_issue == 2u &&
+          breakdown.m_dual_issue == 1u &&
+          breakdown.m_annulled == 1u &&
+          breakdown.m_register_idle == 3u &&
+          breakdown.m_unit_idle == 3u &&
+          breakdown.m_hle == 3u &&
+          clock.estimated_cycles() == 13u &&
+          clock.instructions_issued() == 4u,
+          "candidate cycle categories are disjoint and exhaustive");
+    check(!clock.issue(s_ee_probe_instruction{
+              0u, 0u, e_ee_probe_pipe::INTEGER, 0u
+          }) && clock.cycle_breakdown().m_single_issue == 2u &&
+          clock.cycle_breakdown().m_register_idle == 3u &&
+          clock.cycle_breakdown().m_unit_idle == 3u,
+          "failed candidate issue leaves cycle accounting unchanged");
+    clock.reset();
+    const auto empty = clock.cycle_breakdown();
+    check(empty.m_single_issue == 0u && empty.m_dual_issue == 0u &&
+          empty.m_annulled == 0u && empty.m_register_idle == 0u &&
+          empty.m_unit_idle == 0u && empty.m_hle == 0u,
+          "reset clears candidate cycle accounting");
+
     std::printf("ee_issue_timing_probe_test: %d failure(s)\n", g_failures);
     return g_failures != 0 ? 1 : 0;
 }

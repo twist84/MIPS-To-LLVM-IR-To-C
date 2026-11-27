@@ -33,6 +33,10 @@ def main() -> int:
             range(1, 8)
         ), events
         assert events[5]["kind"] == "1", events[5]
+        for field, value in (("single_issue", 4), ("dual_issue", 1),
+                             ("annulled", 1), ("register_idle", 2),
+                             ("unit_idle", 0), ("hle", 0)):
+            assert f"candidate_{field}_cycles={value}" in result.stdout, result.stdout
 
         manual_output = root / "manual.csv"
         manual = subprocess.run(
