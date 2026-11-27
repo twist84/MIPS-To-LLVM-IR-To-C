@@ -9,6 +9,36 @@
 
 namespace ee
 {
+namespace vu1_dependency_detail
+{
+struct s_lane_list
+{
+    std::array<uint8_t, 4> m_lanes{};
+    uint8_t m_count = 0u;
+};
+
+// VU destination masks use bits 3..0 for X..W. Expand the 16
+// possible masks once at compilation, retaining ascending lane order.
+consteval std::array<s_lane_list, 16> make_lane_lists()
+{
+    std::array<s_lane_list, 16> lists{};
+    for (uint32_t mask = 0u; mask < lists.size(); ++mask)
+    {
+        auto& list = lists[mask];
+        for (uint8_t lane = 0u; lane < 4u; ++lane)
+        {
+            if ((mask & (8u >> lane)) != 0u)
+            {
+                list.m_lanes[list.m_count++] = lane;
+            }
+        }
+    }
+    return lists;
+}
+
+inline constexpr auto k_lane_lists = make_lane_lists();
+} // namespace vu1_dependency_detail
+
 struct s_ee_vu1_use
 {
     std::array<uint8_t, 4> m_reg{};
@@ -50,13 +80,11 @@ struct s_ee_vu1_use
         {
             m_reg[m_n] = static_cast<uint8_t>(register_index);
             m_mask[m_n++] = static_cast<uint8_t>(mask);
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            const auto& lanes = vu1_dependency_detail::k_lane_lists[mask & 15u];
+            for (uint32_t index = 0u; index < lanes.m_count; ++index)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    m_read_lanes[m_read_lane_count++] =
-                        static_cast<uint8_t>(register_index * 4u + lane);
-                }
+                m_read_lanes[m_read_lane_count++] =
+                    static_cast<uint8_t>(register_index * 4u + lanes.m_lanes[index]);
             }
         }
     }
@@ -67,13 +95,11 @@ struct s_ee_vu1_use
         {
             m_wreg[m_wn] = static_cast<uint8_t>(register_index);
             m_wmask[m_wn++] = static_cast<uint8_t>(mask);
-            for (uint32_t lane = 0u; lane < 4u; ++lane)
+            const auto& lanes = vu1_dependency_detail::k_lane_lists[mask & 15u];
+            for (uint32_t index = 0u; index < lanes.m_count; ++index)
             {
-                if ((mask & (8u >> lane)) != 0u)
-                {
-                    m_write_lanes[m_write_lane_count++] =
-                        static_cast<uint8_t>(register_index * 4u + lane);
-                }
+                m_write_lanes[m_write_lane_count++] =
+                    static_cast<uint8_t>(register_index * 4u + lanes.m_lanes[index]);
             }
         }
     }
