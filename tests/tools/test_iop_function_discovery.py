@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import json
+import hashlib
 import struct
 import subprocess
 import sys
@@ -359,6 +360,64 @@ class DiscoveryTest(unittest.TestCase):
         parsed["sections"][1]["flags"] = 6
         self.assertEqual(table_candidates(meta, linked, parsed, original,
                                           discovery, indirect)[0]["entries"], [])
+
+    def test_table_backed_plan_recomputes_edges_and_preserves_residual(self):
+        meta, linked = capture([0x00041080, 0x3c030001, 0x00431021,
+                                0x8c420020, 0x00400008, 0,
+                                0x03e00008, 0])
+        meta["gp"] = BASE + 0x80
+        original = linked + struct.pack("<2I", 24, 24)
+        parsed = {"name": "synthetic", "entry_offset": 0, "gp_offset": 0x80,
+                  "text_size": len(linked), "function_symbols": [],
+                  "sections": [
+                      {"name": ".text", "type": 1, "flags": 6,
+                       "address": 0, "size": 32},
+                      {"name": ".rodata", "type": 1, "flags": 2,
+                       "address": 32, "size": 8}],
+                  "relocations": [{"offset": 32, "type": 2},
+                                  {"offset": 36, "type": 2}]}
+        baseline = inventory(meta, linked, extended=True)
+        comparison = compare_capture(meta, linked, parsed, original, baseline)
+        shadow = discover_relocation_roots(meta, linked, parsed, comparison, baseline)
+        receipt = {"schema": 1, "kind": "iop_original_irx_metadata",
+                   "matches": {"synthetic": [{
+                       "path": "module.irx", "elf_sha256": hashlib.sha256(original).hexdigest(),
+                       "metadata": parsed, "comparison": comparison,
+                       "relocation_discovery": shadow}]}}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            disc = root / "disc"
+            disc.mkdir()
+            elf = disc / "module.irx"
+            elf.write_bytes(original)
+            # Staging changes descriptor name but not linked identity.
+            (root / "CANONICAL.json").write_text(json.dumps(dict(meta, name="CANONICAL")))
+            (root / "CANONICAL.bin").write_bytes(linked)
+            old_plan = prepare_split_pilot(root, "CANONICAL", root / "old",
+                                           residual=True, extended=True,
+                                           relocation_receipt=receipt)
+            with patch("audit_iop_irx_metadata.parse_irx", return_value=(parsed, original)):
+                new_plan = prepare_split_pilot(root, "CANONICAL", root / "new",
+                                               residual=True, extended=True,
+                                               relocation_receipt=receipt,
+                                               table_disc_root=disc)
+                old_rows = [list(map(int, line.split()))[1:]
+                            for line in old_plan.read_text().splitlines()[1:]]
+                new_rows = [list(map(int, line.split()))[1:]
+                            for line in new_plan.read_text().splitlines()[1:]]
+                self.assertIn(BASE + 24, old_rows[-1])
+                self.assertIn(BASE + 24, new_rows[0])
+                self.assertNotIn(BASE + 24, new_rows[-1])
+                self.assertEqual(sorted(pc for row in new_rows for pc in row),
+                                 list(range(BASE, BASE + len(linked), 4)))
+                elf.write_bytes(original + b"changed")
+                with self.assertRaisesRegex(ValueError, "original ELF changed"):
+                    prepare_split_pilot(root, "CANONICAL", root / "bad",
+                                        residual=True, extended=True,
+                                        relocation_receipt=receipt, table_disc_root=disc)
+            with self.assertRaisesRegex(ValueError, "requires relocation evidence"):
+                prepare_split_pilot(root, "CANONICAL", root / "missing",
+                                    residual=True, extended=True, table_disc_root=disc)
 
     def test_table_shadow_reports_shared_ownership(self):
         # Two independently seeded JR paths reach the same return block.
