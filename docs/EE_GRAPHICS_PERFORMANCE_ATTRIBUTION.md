@@ -1212,3 +1212,64 @@ One matched pair to establish correctness first, output
 ee-iop-g8d1; expand to performance repeats only after acceptance.
 No EE IR/runner/VU1 rebuild or recapture needed. CI/local test
 execution pending.
+
+## G8D.1 — complete retail execution, strict mismatch remains
+
+All five CI workflows passed at cad45e79eaed769bf2041561f53d8b7c643e6b31.
+Archive ee-iop-g8d1.zip SHA-256
+7742ddd906f6980b9d5992cff280eb3b1cc0928dfab2c9eb87e5693b22d596f8.
+Receipt pins G8C.2 runner, G6A EE, V30 VU1, recorded PAD and
+reference hashes. Seven updated IOP library hashes, unchanged
+inputs reported. Native binaries absent from archive.
+Both exit 4 at 40M dispatches, 3127/3127 valid polls,
+21910026110 EE attempts, 22115080673 EE cycles, 4494 fields,
+42578752 physical/logical IOP turns and zero debt. Both PPMs
+match reference SHA-256 9382a6cdc6a77656a1d5e9652ceffd592bde1e8fcf365a4bddcc6e49d3842f08.
+Interpreter report SHA-256
+9d8743b4bb82fe4f0feafc8e7e0664f8ba47bba7238560ec5f533c8c6db2982d;
+AOT report SHA-256
+80151c22f20a493b138f989a9e1319d65dc605f808e86477c5e585f9df3100b9.
+All seven module return cycles now exactly match the interpreter.
+Control/candidate each 184700 unique sampled transitions, 184687
+common, zero differing common, 26 unpaired, first 7580546.
+All unpaired transitions are EE exceptions in clusters around
+7.58M and 8.23M dispatches. Sole differing report field:
+m2_iop_sio2.last_start_guest_pc, interpreter 0x20008, AOT 0x20258.
+Candidate reports seven active modules, 7086693 entries,
+68423064 native instructions, 529.9ms translated, 1.7ms refresh.
+Wall 40.672 -> 39.515s, nominal +2.93% throughput (one pair,
+strict mismatch, no performance acceptance). Do not waive the
+trace or report gate.
+
+## G8D.2 — exact non-RAM instruction and hardware boundaries
+
+The old runtime's slow-path callbacks invoke c_cpu::read/write
+while m_state.m_pc remains the native entry PC, and before
+preceding native instructions retire device cycles. SIO2 CTRL
+captures m_dma_cpu->state().m_pc at write time, explaining the
+incorrect recorded instruction PC. The timing defect also permits
+early MMIO reads/writes, including read-clear registers.
+Return zero from native non-RAM callbacks, causing generated
+code to exit with the precise instruction and delay-slot identity.
+The interpreter performs the operation exactly once after prior
+native retirements. Existing G8D.1 libraries support this protocol;
+no ABI layout change or recompile necessary.
+
+Cap native RAM-only slices to the existing hardware event horizon
+(c_hw::idle_event_cycles_remaining), or one instruction if an
+immediate/unknown event requires service. Permit retirement at
+the event boundary, not execution beyond it. Keep the actual
+hardware advance; preserve Timer5 rollover, sample and DMA
+boundaries and do not batch across an SPU2 clock wrap. Conservative
+AutoDMA/pending IRQ horizons may reduce performance; correctness
+first. Disable legacy verify when hardware attached because
+re-executing live retirement side effects is unsafe. No change to
+kernel scheduling decisions, EE lowering or guest binary.
+Regression adds an attached-hardware Timer5 program with compare,
+count write/read, branch-delay MMIO read and read-clear MODE;
+compare every slice for budgets 1..17. This is not proof of all
+device behavior. Rebuild runner, iop_aot_test and run hardware/
+kernel tests. Use same new runner for both arms, pin its hash,
+retain G8D.1 libraries. One matched pair first, ee-iop-g8d2.
+No EE IR/relink, IOP AOT rebuild, recapture or VU1 rebuild.
+Compilation, CI and retail validation pending.
