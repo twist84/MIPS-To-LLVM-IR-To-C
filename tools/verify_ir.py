@@ -24,6 +24,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextlib import nullcontext
 import glob
 import hashlib
+import heapq
 import json
 import multiprocessing
 import os
@@ -438,11 +439,17 @@ def main():
     slowest = (0.0, "")
     worker_seconds = 0.0
     worker_stages = collections.Counter()
+    slowest_modules = []
 
     def record(result):
         nonlocal ok, bad, object_bytes, slowest, worker_seconds
         worker_seconds += result["elapsed"]
         worker_stages.update(result.get("worker_stages", {}))
+        sample = (result["elapsed"], result["filename"])
+        if len(slowest_modules) < 10:
+            heapq.heappush(slowest_modules, sample)
+        elif sample > slowest_modules[0]:
+            heapq.heapreplace(slowest_modules, sample)
         if result["valid"]:
             ok += 1
             object_bytes += result["object_size"]
@@ -534,6 +541,8 @@ def main():
         "object_bytes": object_bytes, "worker_seconds": worker_seconds,
         "throughput_modules_per_second": len(pending) / compilation_wall if compilation_wall else 0.0,
         "slowest_module": {"path": slowest[1], "seconds": slowest[0]},
+        "slowest_modules": [{"path": path, "seconds": elapsed}
+                            for elapsed, path in sorted(slowest_modules, reverse=True)],
         "worker_stages": dict(worker_stages),
         "stages": {"native_object_reuse": reuse_seconds,
                    "native_compile_wall": compilation_wall,

@@ -91,6 +91,22 @@ def observe_line(line, command_kind):
             for name, value in stages.items():
                 add(name, value)
             report["child_reports"].append(data)
+            if command_kind == "verify_ir":
+                for name in ("total_modules", "cache_hits", "cache_misses",
+                             "valid_modules", "invalid_modules"):
+                    value = data.get(name)
+                    if isinstance(value, int) and value >= 0:
+                        count("native_" + name, value)
+                worker = data.get("worker_seconds")
+                if isinstance(worker, (float, int)) and math.isfinite(worker) and worker >= 0:
+                    report["worker_seconds"] += worker
+                for entry in data.get("slowest_modules", []):
+                    if (isinstance(entry, dict) and isinstance(entry.get("path"), str)
+                            and isinstance(entry.get("seconds"), (float, int))
+                            and math.isfinite(entry["seconds"]) and entry["seconds"] >= 0):
+                        report["slowest_modules"].append(entry)
+                report["slowest_modules"] = sorted(
+                    report["slowest_modules"], key=lambda item: (-item["seconds"], item["path"]))[:10]
         except (ValueError, KeyError, TypeError, OverflowError):
             return
 
@@ -114,7 +130,8 @@ def report(mode, output, **configuration):
         raise ValueError(f"timing report already exists: {output}")
     data = {"schema": "ee-recovery-timings-v1", "mode": mode,
             "configuration": configuration, "status": "failed",
-            "stages": {}, "counts": {}, "details": {}, "child_reports": []}
+            "stages": {}, "counts": {}, "details": {}, "child_reports": [],
+            "worker_seconds": 0.0, "slowest_modules": []}
     token = _active.set(data)
     started = time.monotonic()
     try:
@@ -130,6 +147,17 @@ def report(mode, output, **configuration):
               f"({data['status']}); stage timings are inclusive", flush=True)
         for name, item in sorted(data["stages"].items()):
             print(f"  {name}: {item['seconds']:.3f}s ({item['calls']} calls)", flush=True)
+        for name, value in sorted(data["counts"].items()):
+            print(f"  {name}: {value}", flush=True)
+        if any(child["tool"] == "verify_ir" for child in data["child_reports"]):
+            elapsed = data["stages"].get("native_compile_wall", {}).get("seconds", 0.0)
+            misses = data["counts"].get("native_cache_misses", 0)
+            data["native_throughput_modules_per_second"] = misses / elapsed if elapsed else 0.0
+            print(f"  native worker time: {data['worker_seconds']:.3f}s; "
+                  f"throughput: {data['native_throughput_modules_per_second']:.2f} modules/s",
+                  flush=True)
+            for entry in data["slowest_modules"]:
+                print(f"  slow module: {entry['seconds']:.3f}s {entry['path']}", flush=True)
         try:
             output.parent.mkdir(parents=True, exist_ok=True)
             with output.open("x", encoding="utf-8", newline="\n") as stream:

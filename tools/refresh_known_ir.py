@@ -70,6 +70,8 @@ def refresh(elf, build, config, base, opt, jobs):
         sources = run_game.ir_generation_inputs(elf, root)
         recomp = run_game.native_executable(build, "ee_recomp", config)
         inputs = run_game.translation_inputs(elf, recomp, root)
+        metrics.details("source_fingerprints", dict(sources))
+        metrics.details("native_input_fingerprints", dict(inputs))
         stage = Path(tempfile.mkdtemp(prefix=".overwrite-ir-", dir=base))
         previous = stage / "previous-ir"
         staged_ir = stage / "ir"

@@ -531,12 +531,26 @@ def test_recovery_timing_report_is_opt_in_and_preserves_failures():
             metrics.observe_line(metrics.CHILD_PREFIX + json.dumps({
                 "tool": "verify_ir", "stages": {"native_compile_wall": 2.0},
                 "worker_seconds": 3.5, "cache_hits": 4, "cache_misses": 2,
+                "slowest_modules": [{"path": "example.ll", "seconds": 1.5}],
             }), "verify_ir")
+            child = root / "verify_ir.py"
+            child.write_text(
+                "import json\nprint('EE_RECOVERY_METRICS ' + json.dumps("
+                "{'tool': 'verify_ir', 'stages': {'native_compile_wall': 1.0}, "
+                "'worker_seconds': 1.0, 'cache_hits': 1, 'cache_misses': 1}))\n",
+                encoding="utf-8")
+            run_game.run([sys.executable, child])
         report = json.loads(output.read_text(encoding="utf-8"))
         assert report["status"] == "success"
         assert report["stages"]["discovery"]["seconds"] == 0.2
-        assert report["stages"]["native_compile_wall"]["seconds"] == 2.0
+        assert report["stages"]["native_compile_wall"]["seconds"] == 3.0
         assert report["child_reports"][0]["worker_seconds"] == 3.5
+        assert report["worker_seconds"] == 4.5
+        assert report["counts"]["native_cache_hits"] == 5
+        assert report["counts"]["native_cache_misses"] == 3
+        assert report["native_throughput_modules_per_second"] == 1.0
+        assert report["slowest_modules"][0]["path"] == "example.ll"
+        assert report["counts"]["verify_ir_invocations"] == 1
         assert report["counts"]["recompiler_timing_records"] == 1
         assert metrics.active() is None
         failure = root / "failed.json"

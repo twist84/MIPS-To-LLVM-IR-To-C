@@ -438,6 +438,9 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                     "libgame-translated.dylib" if sys.platform == "darwin" else
                     "libgame-translated.so")
     inputs = run_game.translation_inputs(elf, recomp, source_root)
+    metrics.details("source_fingerprints", dict(ir_sources))
+    metrics.details("native_input_fingerprints", dict(inputs))
+    metrics.details("known_manifest_metadata_sha256", manifest.get("metadata_sha256"))
 
     def validate(directory):
         validate_portable_cache(directory, elf, inputs, ir_sources, library_name)
