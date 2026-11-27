@@ -1428,6 +1428,87 @@ bool test_strict_reset_prefix()
            cpu.m_pc == 0xbfc00004u;
 }
 
+bool test_strict_reset_register_execution()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            rom[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    const uint32_t words[] =
+    {
+        0x40806000u, 0u, 0u, 0x40087800u, 0u, 0x3108ff00u,
+        0x34092e00u, 0x11090006u, 0u, 0x3c18a000u, 0x37181000u,
+        0x3c0fbfc0u, 0x10000004u, 0x25ef0133u, 0x3c18a001u,
+        0x3c0fbfc0u, 0x25ef012cu
+    };
+    for (uint32_t i = 0u; i < sizeof(words) / sizeof(words[0]); ++i)
+    {
+        put(i * 4u, words[i]);
+    }
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    if (ee::ee_execute_strict_reset_prefix(cpu, view).m_result != result::COMMITTED)
+    {
+        return false;
+    }
+    uint32_t retired = 1u;
+    while (retired < 12u)
+    {
+        const auto step = ee::ee_execute_strict_rom_register_step(cpu, view, 12u - retired);
+        if (step.m_result != result::COMMITTED || step.m_retired == 0u ||
+            step.m_retired > 12u - retired)
+        {
+            return false;
+        }
+        retired += step.m_retired;
+    }
+    if (cpu.m_pc != 0xbfc00044u || cpu.m_gpr[8].m_lo != 0x2e00u ||
+        cpu.m_gpr[24].m_lo != 0xffffffffa0010000ull ||
+        cpu.m_gpr[15].m_lo != 0xffffffffbfc0012cull)
+    {
+        return false;
+    }
+    // Branch operands sampled before the slot, even if it overwrites
+    // an operand. Upper GPR half remains unchanged.
+    cpu.m_pc = 0xbfc00100u;
+    cpu.m_gpr[2] = {1u, 0x1234u};
+    cpu.m_gpr[3].m_lo = 1u;
+    put(0x100u, 0x10430003u); // beq r2,r3,+3
+    put(0x104u, 0x24420001u); // addiu r2,r2,1
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 1u).m_result != result::BUDGET_EXHAUSTED ||
+        cpu.m_pc != 0xbfc00100u || cpu.m_gpr[2].m_lo != 1u)
+    {
+        return false;
+    }
+    put(0x104u, 0xac820000u); // unsupported store in slot
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_result != result::UNSUPPORTED_OPCODE ||
+        cpu.m_pc != 0xbfc00100u || cpu.m_gpr[2].m_lo != 1u)
+    {
+        return false;
+    }
+    put(0x104u, 0x24420001u);
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_retired != 2u ||
+        cpu.m_pc != 0xbfc00110u || cpu.m_gpr[2].m_lo != 2u || cpu.m_gpr[2].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    cpu.m_pc = 0xbfc00100u;
+    if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_retired != 2u ||
+        cpu.m_pc != 0xbfc00108u || cpu.m_gpr[2].m_lo != 3u)
+    {
+        return false;
+    }
+    cpu.m_pc = 0xbfc00100u;
+    cpu.m_cop0[ee::COP0_Status] = ee::STATUS_ERL;
+    return ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_result == result::UNSAFE_BOUNDARY &&
+        cpu.m_pc == 0xbfc00100u && cpu.m_gpr[2].m_lo == 3u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1643,6 +1724,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_prefix(), "strict reset prefix regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_register_execution(), "strict reset processor selection regression"))
     {
         return 1;
     }

@@ -652,3 +652,32 @@ host stop, not a guest fault or successful boot. Synthetic tests
 cover missing backing, wrong opcode, unsafe boundary, zero source
 and repeat refusal. Next: use the actual lookahead to establish
 the next bounded execution prefix. No retail replay required.
+
+## Strict memory follow-up M6E2B: authentic processor-selection prefix
+
+CI run 46041193709/job 140649051618 confirmed the first MTC0
+retirement and exposed the next real firmware instructions.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46041193709/job/140649051618
+
+Use the reference-compatible R5900 PRId 0x00002e20 from PCSX2
+cpuReset (not a universal physical revision claim).
+https://sources.debian.org/src/pcsx2/1.6.0%2Bdfsg-2/pcsx2/R5900.cpp/
+
+Add a bounded isolated post-Status-clear ROM register executor:
+NOP, MFC0 PRId, ANDI, ORI, LUI, ADDIU, BEQ/BNE with a supported
+register-only delay slot. Capture branch operands before the slot,
+preserve upper GPR halves, respect architectural zero, count both
+retirements, and refuse a slot without committing the branch if
+unsupported, unavailable or over budget. No new guest exception,
+clock, COP0 hazard, cache, device or arbitrary ERL behavior is
+implied. This is interpreted instruction execution, not LLVM.
+
+The authentic pinned firmware probe now requires twelve actual
+retirements (including the initial MTC0 and taken BEQ slot),
+PC 0xbfc00044, t0/t1 0x2e00, t8 0xffffffffa0010000 and
+t7 0xffffffffbfc0012c. It records the actual successor and
+sixteen lookahead words for the next batch. The budget is deliberate,
+not a firmware fault or boot completion. A synthetic regression
+covers this observed prefix, taken/not-taken delay slots, a slot
+changing the compared register, budget refusal and unsupported slot.
+Production runtime unchanged. CI pending; no retail replay.

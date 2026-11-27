@@ -58,6 +58,37 @@ int main(int argc, char** argv)
     }
     std::printf("EE reset prefix: retired=1 pc=%08x status=%08x opcode=%08x\n",
         cpu.m_pc, cpu.m_cop0[ee::COP0_Status], step.m_opcode);
+    // Twelve actual retirements include the initial Status write and
+    // the selected EE path, skipping the unexecuted IOP setup.
+    constexpr uint32_t budget = 12u;
+    uint32_t retired = step.m_retired;
+    while (retired < budget)
+    {
+        const uint32_t pc = cpu.m_pc;
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom, budget - retired);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > budget - retired)
+        {
+            std::fprintf(stderr, "EE reset register stop: pc=%08x opcode=%08x result=%u retired=%u\n",
+                pc, action.m_opcode, static_cast<unsigned>(action.m_result), retired);
+            return 8;
+        }
+        retired += action.m_retired;
+        std::printf("EE reset register step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
+            pc, action.m_opcode, action.m_retired, cpu.m_pc, retired);
+    }
+    if (retired != budget || cpu.m_pc != 0xbfc00044u ||
+        cpu.m_gpr[8].m_lo != 0x2e00u || cpu.m_gpr[9].m_lo != 0x2e00u ||
+        cpu.m_gpr[24].m_lo != 0xffffffffa0010000ull ||
+        cpu.m_gpr[15].m_lo != 0xffffffffbfc0012cull)
+    {
+        std::fprintf(stderr, "EE processor-selection state mismatch\n");
+        return 9;
+    }
+    std::printf("EE reset selection: retired=%u pc=%08x prid=%08x t8=%016llx t7=%016llx\n",
+        retired, cpu.m_pc, cpu.m_cop0[ee::COP0_PRId],
+        static_cast<unsigned long long>(cpu.m_gpr[24].m_lo),
+        static_cast<unsigned long long>(cpu.m_gpr[15].m_lo));
     const auto next = ee::ee_plan_instruction_fetch(tlb, cpu.m_pc,
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
@@ -68,7 +99,7 @@ int main(int argc, char** argv)
     }
     const uint32_t word = ee::ee_read_instruction_word(code);
     const auto ins = ee::decode(cpu.m_pc, word);
-    std::printf("EE reset prefix stop: pc=%08x opcode=%08x decoded=%s valid=%u (one-instruction budget)\n",
+    std::printf("EE reset prefix stop: pc=%08x opcode=%08x decoded=%s valid=%u (twelve-instruction budget)\n",
         cpu.m_pc, word, ins.mnemonic, static_cast<unsigned>(ins.valid));
     // Capture a bounded lookahead for the next implementation batch;
     // these words are fetched and decoded only, never executed.
