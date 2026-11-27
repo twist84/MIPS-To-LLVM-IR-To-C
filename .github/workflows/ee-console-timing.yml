@@ -1,0 +1,57 @@
+name: R5900 console timing ELF
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/ee-console-timing.yml'
+      - 'tests/hardware/ee_issue/**'
+      - 'tools/generate_ee_issue_bench.py'
+      - 'tools/verify_ee_issue_bench.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-console-elf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      PS2DEV_IMAGE: ghcr.io/ps2dev/ps2dev@sha256:8e6dc4564598ecce94d078d3111b8c4803f88faa94a6f183ac60240a0ae010a1
+    steps:
+      - uses: actions/checkout@v4
+      - name: Generate exact benchmark bodies
+        run: |
+          python3 tools/generate_ee_issue_bench.py --out build/ee-issue-hardware
+          cp tests/hardware/ee_issue/bench_main.c tests/hardware/ee_issue/Makefile build/ee-issue-hardware/
+      - name: Compile with pinned PS2DEV SDK
+        run: |
+          docker pull "$PS2DEV_IMAGE"
+          docker run --rm --network none \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD/build/ee-issue-hardware:/work" -w /work \
+            --entrypoint /bin/sh "$PS2DEV_IMAGE" -ec \
+            'cc=mips64r5900el-ps2-elf-gcc
+            "$cc" --version > compiler-version.txt
+            "$cc" -D_EE -G0 -O2 -Wall -I"$PS2SDK/ee/include" -I"$PS2SDK/common/include" -c bench_main.c -o bench_main.o
+            "$cc" -D_EE -G0 -O2 -c bench.S -o bench.o
+            "$cc" -T"$PS2SDK/ee/startup/linkfile" -O2 -o ee_issue_counter.elf bench_main.o bench.o -L"$PS2SDK/ee/lib" -Wl,-zmax-page-size=128 -lc'
+      - name: Verify exact linked opcodes and record provenance
+        run: |
+          python3 tools/verify_ee_issue_bench.py build/ee-issue-hardware/ee_issue_counter.elf
+          cd build/ee-issue-hardware
+          printf 'source_commit=%s\nsdk_image=%s\n' "$GITHUB_SHA" "$PS2DEV_IMAGE" > provenance.txt
+          sha256sum ee_issue_counter.elf bench.S bench_cases.h cases.json > SHA256SUMS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ee-issue-counter-console-elf
+          path: |
+            build/ee-issue-hardware/ee_issue_counter.elf
+            build/ee-issue-hardware/bench.S
+            build/ee-issue-hardware/bench_cases.h
+            build/ee-issue-hardware/cases.json
+            build/ee-issue-hardware/*.csv
+            build/ee-issue-hardware/compiler-version.txt
+            build/ee-issue-hardware/provenance.txt
+            build/ee-issue-hardware/SHA256SUMS
+          if-no-files-found: error

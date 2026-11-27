@@ -84,11 +84,14 @@ int main(int argc, char** argv)
         packed_arg.rfind(k_packed_option, 0u) == 0u;
     const int argc_without_packed =
         argc_without_export - (explicit_packed ? 1 : 0);
+    const bool cop1_a_stage_pairing = argc_without_packed > 1 &&
+        std::string(argv[argc_without_packed - 1]) == "--cop1-a-stage-pairing";
+    const int argc_without_a_stage = argc_without_packed - (cop1_a_stage_pairing ? 1 : 0);
     const bool ordered_waw_overlap =
-        argc_without_packed > 1 &&
-        std::string(argv[argc_without_packed - 1]) == "--ordered-waw-overlap";
+        argc_without_a_stage > 1 &&
+        std::string(argv[argc_without_a_stage - 1]) == "--ordered-waw-overlap";
     const int argc_without_overlap =
-        argc_without_packed - (ordered_waw_overlap ? 1 : 0);
+        argc_without_a_stage - (ordered_waw_overlap ? 1 : 0);
     constexpr const char* k_throughput_option = "--throughput=";
     const std::string throughput_arg = argc_without_overlap > 1
         ? argv[argc_without_overlap - 1] : "";
@@ -122,11 +125,11 @@ int main(int argc, char** argv)
             "<vu0-vi-transfer-latency>] "
             "[--throughput=<mac-mult>,<mac-div>,<mac-acc>,"
             "<cop1-arith>,<cop1-div>,<cop1-sqrt>,<cop1-rsqrt>] "
-            "[--ordered-waw-overlap] "
+            "[--ordered-waw-overlap] [--cop1-a-stage-pairing] "
             "[--packed-mmi-latency=<explicit-positive-value>] "
             "[--candidate-events=<path>|--candidate-completions=<path>]\n"
             "or: ee_issue_trace_candidate <trace.csv> --manual-cache-hit "
-            "[--ordered-waw-overlap] [--packed-mmi-latency=<value>] "
+            "[--ordered-waw-overlap] [--cop1-a-stage-pairing] [--packed-mmi-latency=<value>] "
             "[--candidate-events=<path>|--candidate-completions=<path>]\n"
             "Diagnostic only. Manual cache-hit latencies are NOT a validated R5900 clock.\n");
         return 2;
@@ -240,6 +243,7 @@ int main(int argc, char** argv)
         profile.m_require_throughput = true;
     }
     profile.m_allow_ordered_waw_overlap = ordered_waw_overlap;
+    profile.m_cop1_a_stage_pairing = cop1_a_stage_pairing;
 
     std::ifstream input(argv[1]);
     if (!input)
@@ -325,10 +329,10 @@ int main(int argc, char** argv)
         }
         ++event_count;
     }
-    if (!complete_footer || std::getline(input, line))
+    if (!complete_footer || !replay.complete_stream() || std::getline(input, line))
     {
         std::fprintf(stderr,
-            "trace is truncated or lacks a complete footer "
+            "trace is empty, truncated, ends in an unresolved delay slot or lacks a complete footer "
             "(NO absolute timing claimed)\n");
         return 3;
     }
@@ -400,5 +404,20 @@ int main(int argc, char** argv)
         static_cast<unsigned long long>(
             replay.max_candidate_completion_cycle())
     );
+    std::printf("cop1_a_stage_pairing=%s candidate_cop1_a_stage_pairs=%llu "
+                "(candidate R issue / delayed second result; backpressure unmodeled)\n",
+                cop1_a_stage_pairing ? "enabled" : "disabled",
+                static_cast<unsigned long long>(replay.cop1_a_stage_pairs()));
+    const auto& breakdown = replay.cycle_breakdown();
+    std::printf(
+        "candidate_single_issue_cycles=%llu candidate_dual_issue_cycles=%llu "
+        "candidate_annulled_cycles=%llu candidate_register_idle_cycles=%llu "
+        "candidate_unit_idle_cycles=%llu candidate_hle_cycles=%llu\n",
+        static_cast<unsigned long long>(breakdown.m_single_issue),
+        static_cast<unsigned long long>(breakdown.m_dual_issue),
+        static_cast<unsigned long long>(breakdown.m_annulled),
+        static_cast<unsigned long long>(breakdown.m_register_idle),
+        static_cast<unsigned long long>(breakdown.m_unit_idle),
+        static_cast<unsigned long long>(breakdown.m_hle));
     return 0;
 }

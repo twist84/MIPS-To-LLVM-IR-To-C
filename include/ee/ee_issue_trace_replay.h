@@ -63,6 +63,7 @@ struct s_ee_issue_replay_profile
     // LWC1 is not an integer load: EE manual section 2.12 specifies
     // a distinct cache-hit result latency through the C1/LS pipes.
     uint32_t m_fpu_load_latency = 0u;
+    bool m_cop1_a_stage_pairing = false;
 };
 
 // Manual-based, cache-hit candidate, not a validated clock. Leave
@@ -125,7 +126,8 @@ public:
         if (!m_probe.configure_waw_policy(
                 profile.m_allow_ordered_waw_overlap
                     ? e_ee_probe_waw_policy::ORDERED_OVERLAP
-                    : e_ee_probe_waw_policy::WAIT_FOR_RESULT))
+                    : e_ee_probe_waw_policy::WAIT_FOR_RESULT) ||
+            !m_probe.configure_cop1_a_stage_pairing(profile.m_cop1_a_stage_pairing))
         {
             return false;
         }
@@ -134,6 +136,7 @@ public:
         m_failed = false;
         m_next_slot = 1u;
         m_next_attempt = 1u;
+        m_pending_delay_slot = false;
         m_pending_likely_slot = false;
         m_delay_pc = 0u;
         m_failure_pc = 0u;
@@ -166,7 +169,7 @@ public:
         {
             return fail(e_ee_issue_replay_status::INCOMPLETE_STREAM, entry.m_pc);
         }
-        if (m_pending_likely_slot && entry.m_pc != m_delay_pc)
+        if (m_pending_delay_slot && entry.m_pc != m_delay_pc)
         {
             return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
         }
@@ -178,6 +181,7 @@ public:
             {
                 return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
             }
+            m_pending_delay_slot = false;
             m_pending_likely_slot = false;
             m_last_event_cycle = m_probe.estimated_cycles() - 1u;
             ++m_next_slot;
@@ -191,6 +195,12 @@ public:
         }
 
         const s_ee_instruction decoded = decode(entry.m_pc, entry.m_opcode_word);
+        // EE Core Manual section 1.3.6: a branch in an executed branch
+        // delay slot is illegal. Do not synthesize its successor timeline.
+        if (m_pending_delay_slot && decoded.has_delay_slot)
+        {
+            return fail(e_ee_issue_replay_status::INVALID_SLOT, entry.m_pc);
+        }
         s_ee_probe_instruction instruction{};
         if (decoded.valid != e_ee_valid::VALID ||
             !classify(decoded, &instruction))
@@ -204,6 +214,7 @@ public:
         }
         m_last_event_cycle = issue_cycle;
 
+        m_pending_delay_slot = decoded.has_delay_slot;
         m_pending_likely_slot = decoded.branch_likely;
         m_delay_pc = decoded.pc + 4u;
         ++m_next_slot;
@@ -212,7 +223,17 @@ public:
     }
 
     bool usable_prefix() const { return m_configured && !m_failed; }
+    bool complete_stream() const
+    {
+        return usable_prefix() && !m_pending_delay_slot &&
+               m_probe.instructions_issued() != 0u;
+    }
     uint64_t candidate_cycles() const { return m_probe.estimated_cycles(); }
+    const s_ee_probe_cycle_breakdown& cycle_breakdown() const
+    {
+        return m_probe.cycle_breakdown();
+    }
+    uint64_t cop1_a_stage_pairs() const { return m_probe.cop1_a_stage_pairs(); }
     // Distinct from issue time and NOT hardware retirement.
     uint64_t last_candidate_completion_cycle() const
     {
@@ -995,7 +1016,8 @@ private:
             {
                 return false;
             }
-            instruction->m_pipe = e_ee_probe_pipe::LOAD;
+            // Tables 1-1/1-3 classify COP1 memory transfers as COP1 Move.
+            instruction->m_pipe = e_ee_probe_pipe::COPROCESSOR_MOVE;
             instruction->m_gpr_read_mask = rs;
             instruction->m_fpr_write_mask = fpr_mask(decoded.rt);
             instruction->m_fpr_result_latency = m_profile.m_fpu_load_latency;
@@ -1020,6 +1042,7 @@ private:
     s_ee_issue_replay_profile m_profile{};
     bool m_configured = false;
     bool m_failed = false;
+    bool m_pending_delay_slot = false;
     bool m_pending_likely_slot = false;
     uint32_t m_delay_pc = 0u;
     uint32_t m_failure_pc = 0u;

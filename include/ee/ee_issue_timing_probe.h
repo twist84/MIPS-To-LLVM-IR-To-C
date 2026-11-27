@@ -104,6 +104,18 @@ struct s_ee_probe_instruction
     uint32_t m_gpr_128_write_mask = 0u;
 };
 
+// Disjoint candidate issue-window accounting. Result deadlines beyond the
+// last issue are not included. These counts are not hardware stall samples.
+struct s_ee_probe_cycle_breakdown
+{
+    uint64_t m_single_issue = 0u;
+    uint64_t m_dual_issue = 0u;
+    uint64_t m_annulled = 0u;
+    uint64_t m_register_idle = 0u;
+    uint64_t m_unit_idle = 0u;
+    uint64_t m_hle = 0u;
+};
+
 // A conservative, deterministic two-wide issue *candidate* for evaluating
 // instruction streams. Pairing checks documented logical pipe routing
 // (EE Core User's Manual v6.0, Tables 1-2/1-3) and rejects RAW/WAR/WAW
@@ -120,6 +132,9 @@ public:
         m_issued = 0u;
         m_annulled = 0u;
         m_hle_overhead = 0u;
+        m_breakdown = {};
+        m_cop1_a_stage_pairing = false;
+        m_cop1_a_stage_pairs = 0u;
         m_waw_policy = e_ee_probe_waw_policy::WAIT_FOR_RESULT;
         m_last_completion_cycle = 0u;
         m_max_completion_cycle = 0u;
@@ -167,6 +182,22 @@ public:
         m_waw_policy = policy;
         return true;
     }
+
+    // Table 1-3 permits COP1 Operate/Move to pair at R, with a one-cycle
+    // A-stage delay for the second operation. This optional model shifts
+    // only that operation's result and unit deadlines. Subsequent pipeline
+    // backpressure remains unmodeled; it is not a calibrated clock.
+    bool configure_cop1_a_stage_pairing(bool enabled)
+    {
+        if (m_issued != 0u || m_annulled != 0u || m_hle_overhead != 0u)
+        {
+            return false;
+        }
+        m_cop1_a_stage_pairing = enabled;
+        return true;
+    }
+
+    uint64_t cop1_a_stage_pairs() const { return m_cop1_a_stage_pairs; }
 
     e_ee_probe_waw_policy waw_policy() const
     {
@@ -243,9 +274,11 @@ public:
             (!instruction.m_fcsr_read || !m_pair_fcsr_write) &&
             (!instruction.m_fcsr_write ||
                 (!m_pair_fcsr_read && !m_pair_fcsr_write));
+        const bool cop1_a_stage_pair = m_cop1_a_stage_pairing &&
+            is_cop1_a_stage_pair(m_pair_pipe, instruction.m_pipe);
         const bool may_pair =
             m_pair_count == 1u && !m_pair_annulled && independent &&
-            compatible_pipes(m_pair_pipe, instruction.m_pipe);
+            (compatible_pipes(m_pair_pipe, instruction.m_pipe) || cop1_a_stage_pair);
 
         if (m_pair_count != 0u && !may_pair)
         {
@@ -314,12 +347,23 @@ public:
             candidate = m_fcsr_ready;
         }
 
+        // Idle time starts AFTER any previously occupied issue cycle.
+        // Register readiness is charged first; only additional unit delay
+        // is attributed to occupancy, avoiding double-counted stalls.
+        const uint64_t next_empty_cycle = m_cycle + (m_pair_count != 0u ? 1u : 0u);
+        const uint64_t register_idle = candidate > next_empty_cycle
+            ? candidate - next_empty_cycle : 0u;
+        const uint64_t after_registers = candidate > next_empty_cycle
+            ? candidate : next_empty_cycle;
         const uint32_t unit_index =
             static_cast<uint32_t>(instruction.m_unit);
         if (unit_index != 0u && candidate < m_unit_next_issue[unit_index])
         {
             candidate = m_unit_next_issue[unit_index];
         }
+
+        const uint64_t unit_idle = candidate > after_registers
+            ? candidate - after_registers : 0u;
 
         const uint32_t hilo_latency = instruction.m_hilo_result_latency == 0u
             ? instruction.m_result_latency
@@ -348,19 +392,25 @@ public:
         // A failed issue cannot change the scoreboard. Validate ALL result
         // domains before mutating any state or accepting a new issue.
         const uint64_t max_cycle = std::numeric_limits<uint64_t>::max();
-        if (candidate >= max_cycle ||
-            instruction.m_result_latency > max_cycle - candidate ||
-            (hwrites != 0u && hilo_latency > max_cycle - candidate) ||
-            (fwrites != 0u && fpr_latency > max_cycle - candidate) ||
+        if (candidate >= max_cycle)
+        {
+            return false;
+        }
+        const bool delayed_a_stage = may_pair && cop1_a_stage_pair && candidate == m_cycle;
+        const uint64_t execution_cycle = candidate + (delayed_a_stage ? 1u : 0u);
+        if (execution_cycle >= max_cycle ||
+            instruction.m_result_latency > max_cycle - execution_cycle ||
+            (hwrites != 0u && hilo_latency > max_cycle - execution_cycle) ||
+            (fwrites != 0u && fpr_latency > max_cycle - execution_cycle) ||
             (instruction.m_acc_write &&
-                acc_latency > max_cycle - candidate) ||
+                acc_latency > max_cycle - execution_cycle) ||
             (instruction.m_fcsr_write &&
-                fcsr_latency > max_cycle - candidate) ||
-            (cwrites != 0u && cop0_latency > max_cycle - candidate) ||
-            (vfwrites != 0u && vu0_vf_latency > max_cycle - candidate) ||
-            (viwrites != 0u && vu0_vi_latency > max_cycle - candidate) ||
+                fcsr_latency > max_cycle - execution_cycle) ||
+            (cwrites != 0u && cop0_latency > max_cycle - execution_cycle) ||
+            (vfwrites != 0u && vu0_vf_latency > max_cycle - execution_cycle) ||
+            (viwrites != 0u && vu0_vi_latency > max_cycle - execution_cycle) ||
             (unit_index != 0u &&
-                instruction.m_initiation_interval > max_cycle - candidate))
+                instruction.m_initiation_interval > max_cycle - execution_cycle))
         {
             return false;
         }
@@ -375,7 +425,7 @@ public:
             for (uint32_t reg = 1u; reg < 32u; ++reg)
             {
                 if ((writes & (uint32_t{1} << reg)) != 0u &&
-                    candidate + instruction.m_result_latency <=
+                    execution_cycle + instruction.m_result_latency <=
                         m_gpr_ready[reg])
                 {
                     return false;
@@ -384,7 +434,7 @@ public:
             for (uint32_t reg = 0u; reg < 4u; ++reg)
             {
                 if ((hwrites & (1u << reg)) != 0u &&
-                    candidate + hilo_latency <= m_hilo_ready[reg])
+                    execution_cycle + hilo_latency <= m_hilo_ready[reg])
                 {
                     return false;
                 }
@@ -392,7 +442,7 @@ public:
             for (uint32_t reg = 0u; reg < 32u; ++reg)
             {
                 if ((fwrites & (1u << reg)) != 0u &&
-                    candidate + fpr_latency <= m_fpr_ready[reg])
+                    execution_cycle + fpr_latency <= m_fpr_ready[reg])
                 {
                     return false;
                 }
@@ -401,58 +451,74 @@ public:
             {
                 const uint32_t bit = 1u << reg;
                 if (((cwrites & bit) != 0u &&
-                     candidate + cop0_latency <= m_cop0_ready[reg]) ||
+                     execution_cycle + cop0_latency <= m_cop0_ready[reg]) ||
                     ((vfwrites & bit) != 0u &&
-                     candidate + vu0_vf_latency <= m_vu0_ready[reg]) ||
+                     execution_cycle + vu0_vf_latency <= m_vu0_ready[reg]) ||
                     ((viwrites & bit) != 0u &&
-                     candidate + vu0_vi_latency <= m_vu0_ready[reg]))
+                     execution_cycle + vu0_vi_latency <= m_vu0_ready[reg]))
                 {
                     return false;
                 }
             }
             if (instruction.m_acc_write &&
-                candidate + acc_latency <= m_acc_ready)
+                execution_cycle + acc_latency <= m_acc_ready)
             {
                 return false;
             }
             if (instruction.m_fcsr_write &&
-                candidate + fcsr_latency <= m_fcsr_ready)
+                execution_cycle + fcsr_latency <= m_fcsr_ready)
             {
                 return false;
             }
         }
 
-        uint64_t completes_at = candidate + instruction.m_result_latency;
-        if (hwrites != 0u && candidate + hilo_latency > completes_at)
+        uint64_t completes_at = execution_cycle + instruction.m_result_latency;
+        if (hwrites != 0u && execution_cycle + hilo_latency > completes_at)
         {
-            completes_at = candidate + hilo_latency;
+            completes_at = execution_cycle + hilo_latency;
         }
-        if (fwrites != 0u && candidate + fpr_latency > completes_at)
+        if (fwrites != 0u && execution_cycle + fpr_latency > completes_at)
         {
-            completes_at = candidate + fpr_latency;
+            completes_at = execution_cycle + fpr_latency;
         }
-        if (instruction.m_acc_write && candidate + acc_latency > completes_at)
+        if (instruction.m_acc_write && execution_cycle + acc_latency > completes_at)
         {
-            completes_at = candidate + acc_latency;
+            completes_at = execution_cycle + acc_latency;
         }
         if (instruction.m_fcsr_write &&
-            candidate + fcsr_latency > completes_at)
+            execution_cycle + fcsr_latency > completes_at)
         {
-            completes_at = candidate + fcsr_latency;
+            completes_at = execution_cycle + fcsr_latency;
         }
-        if (cwrites != 0u && candidate + cop0_latency > completes_at)
+        if (cwrites != 0u && execution_cycle + cop0_latency > completes_at)
         {
-            completes_at = candidate + cop0_latency;
+            completes_at = execution_cycle + cop0_latency;
         }
-        if (vfwrites != 0u && candidate + vu0_vf_latency > completes_at)
+        if (vfwrites != 0u && execution_cycle + vu0_vf_latency > completes_at)
         {
-            completes_at = candidate + vu0_vf_latency;
+            completes_at = execution_cycle + vu0_vf_latency;
         }
-        if (viwrites != 0u && candidate + vu0_vi_latency > completes_at)
+        if (viwrites != 0u && execution_cycle + vu0_vi_latency > completes_at)
         {
-            completes_at = candidate + vu0_vi_latency;
+            completes_at = execution_cycle + vu0_vi_latency;
         }
 
+        // Commit statistics only after every issue validity/overflow check.
+        m_breakdown.m_register_idle += register_idle;
+        m_breakdown.m_unit_idle += unit_idle;
+        if (delayed_a_stage)
+        {
+            ++m_cop1_a_stage_pairs;
+        }
+        if (candidate == m_cycle && m_pair_count == 1u)
+        {
+            --m_breakdown.m_single_issue;
+            ++m_breakdown.m_dual_issue;
+        }
+        else
+        {
+            ++m_breakdown.m_single_issue;
+        }
         if (candidate != m_cycle)
         {
             m_cycle = candidate;
@@ -480,21 +546,21 @@ public:
             if ((writes & (uint32_t{1} << reg)) != 0u)
             {
                 m_gpr_ready[reg] =
-                    candidate + instruction.m_result_latency;
+                    execution_cycle + instruction.m_result_latency;
             }
         }
         for (uint32_t reg = 0u; reg < 4u; ++reg)
         {
             if ((hwrites & (1u << reg)) != 0u)
             {
-                m_hilo_ready[reg] = candidate + hilo_latency;
+                m_hilo_ready[reg] = execution_cycle + hilo_latency;
             }
         }
         for (uint32_t reg = 0u; reg < 32u; ++reg)
         {
             if ((fwrites & (1u << reg)) != 0u)
             {
-                m_fpr_ready[reg] = candidate + fpr_latency;
+                m_fpr_ready[reg] = execution_cycle + fpr_latency;
             }
         }
         for (uint32_t reg = 0u; reg < 32u; ++reg)
@@ -502,7 +568,7 @@ public:
             const uint32_t bit = 1u << reg;
             if ((cwrites & bit) != 0u)
             {
-                m_cop0_ready[reg] = candidate + cop0_latency;
+                m_cop0_ready[reg] = execution_cycle + cop0_latency;
             }
             if ((vu_writes & bit) != 0u)
             {
@@ -511,28 +577,28 @@ public:
                 uint64_t ready = 0u;
                 if ((vfwrites & bit) != 0u)
                 {
-                    ready = candidate + vu0_vf_latency;
+                    ready = execution_cycle + vu0_vf_latency;
                 }
                 if ((viwrites & bit) != 0u &&
-                    candidate + vu0_vi_latency > ready)
+                    execution_cycle + vu0_vi_latency > ready)
                 {
-                    ready = candidate + vu0_vi_latency;
+                    ready = execution_cycle + vu0_vi_latency;
                 }
                 m_vu0_ready[reg] = ready;
             }
         }
         if (instruction.m_acc_write)
         {
-            m_acc_ready = candidate + acc_latency;
+            m_acc_ready = execution_cycle + acc_latency;
         }
         if (instruction.m_fcsr_write)
         {
-            m_fcsr_ready = candidate + fcsr_latency;
+            m_fcsr_ready = execution_cycle + fcsr_latency;
         }
         if (unit_index != 0u)
         {
             m_unit_next_issue[unit_index] =
-                candidate + instruction.m_initiation_interval;
+                execution_cycle + instruction.m_initiation_interval;
         }
         ++m_issued;
         m_last_completion_cycle = completes_at;
@@ -570,6 +636,7 @@ public:
         m_pair_count = 1u;
         m_pair_annulled = true;
         ++m_annulled;
+        ++m_breakdown.m_annulled;
         return true;
     }
 
@@ -588,12 +655,18 @@ public:
         m_cycle = finish + cycles;
         clear_pair();
         m_hle_overhead += cycles;
+        m_breakdown.m_hle += cycles;
         return true;
     }
 
     uint64_t estimated_cycles() const
     {
         return m_cycle + (m_pair_count != 0u ? 1u : 0u);
+    }
+
+    const s_ee_probe_cycle_breakdown& cycle_breakdown() const
+    {
+        return m_breakdown;
     }
 
     uint64_t instructions_issued() const
@@ -645,6 +718,14 @@ private:
         }
     }
 
+    static bool is_cop1_a_stage_pair(e_ee_probe_pipe first, e_ee_probe_pipe second)
+    {
+        return (first == e_ee_probe_pipe::COPROCESSOR_OP &&
+                second == e_ee_probe_pipe::COPROCESSOR_MOVE) ||
+               (first == e_ee_probe_pipe::COPROCESSOR_MOVE &&
+                second == e_ee_probe_pipe::COPROCESSOR_OP);
+    }
+
     static bool compatible_pipes(e_ee_probe_pipe first,
                                  e_ee_probe_pipe second)
     {
@@ -660,10 +741,7 @@ private:
         }
         if ((first == e_ee_probe_pipe::BRANCH &&
              second == e_ee_probe_pipe::BRANCH) ||
-            (first == e_ee_probe_pipe::COPROCESSOR_OP &&
-             second == e_ee_probe_pipe::COPROCESSOR_MOVE) ||
-            (first == e_ee_probe_pipe::COPROCESSOR_MOVE &&
-             second == e_ee_probe_pipe::COPROCESSOR_OP))
+            is_cop1_a_stage_pair(first, second))
         {
             // Branch+branch is X; COP1 operation+move is Y (one A-stage
             // resource stall), not an unqualified same-cycle issue.
@@ -701,6 +779,9 @@ private:
     uint64_t m_issued = 0u;
     uint64_t m_annulled = 0u;
     uint64_t m_hle_overhead = 0u;
+    s_ee_probe_cycle_breakdown m_breakdown{};
+    bool m_cop1_a_stage_pairing = false;
+    uint64_t m_cop1_a_stage_pairs = 0u;
     e_ee_probe_waw_policy m_waw_policy =
         e_ee_probe_waw_policy::WAIT_FOR_RESULT;
     uint64_t m_last_completion_cycle = 0u;

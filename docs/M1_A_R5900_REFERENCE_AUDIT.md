@@ -237,3 +237,20 @@ Example: `ee_issue_trace_candidate trace.csv --manual-cache-hit --candidate-comp
 The output reports the profile provenance, and tests check load/FPR
 hazards, preservation of unknown categories and explicit CLI selection.
 Physical-console cycle comparisons remain required.
+
+## PR #159 workstream — disjoint candidate cycle accounting
+
+The offline candidate now reports single-issue, dual-issue, annulled,
+register-idle, additional unit-idle and explicitly configured HLE cycles.
+The six categories sum to the candidate issue-window duration; result
+completion deadlines after the last issue are excluded. A register stall
+is charged only for cycles with no prior instruction in the issue window.
+Unit occupancy contributes only its incremental delay beyond register
+readiness, so overlapping stalls are not added twice. Unpaired instructions
+are counted as single-issue cycles, not full-cycle bubbles. Invalid issues
+must leave counters unchanged. This is deterministic accounting of the
+existing candidate, not measured hardware stall attribution or a change to
+pairing, latency, retirement, the reference compatibility clock or devices.
+
+The synthetic mixed MAC/GPR test and original candidate CSV exercise the
+accounting identity. Independent console microbenchmarks are still required.
