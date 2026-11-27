@@ -2055,7 +2055,7 @@ bool test_strict_reset_direct_jumps()
     constexpr uint64_t old_link = 0xfedcba9876543210ull;
     constexpr uint64_t link = 0x00000000a0000008ull;
     put(0u, 0x0c000004u); // jal a0000010
-    put(4u, 0x03e01026u); // unsupported XOR r2,ra,zero
+    put(4u, 0x03e01066u); // XOR r2,ra,zero with reserved shamt=1
     const auto step = [&](uint32_t budget)
     {
         return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
@@ -2072,6 +2072,17 @@ bool test_strict_reset_direct_jumps()
     {
         return false;
     }
+    // The canonical XOR must see the new JAL link, unlike a refused
+    // reserved encoding. Restore the fixture before the store cases.
+    put(4u, 0x03e01026u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
+        cpu.m_gpr[2].m_lo != link || cpu.m_gpr[31].m_lo != link ||
+        cpu.m_gpr[31].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    cpu.m_gpr[31].m_lo = old_link;
     put(4u, 0xa09f0000u); // sb ra,0(r4)
     cpu.m_gpr[4].m_lo = pc + sizeof(bytes);
     const auto bad_store = step(2u);
@@ -2149,7 +2160,7 @@ bool test_strict_reset_jalr()
     cpu.m_gpr[25].m_lo = pc + 16u;
     cpu.m_gpr[7] = {0xfedcba9876543210ull, 0x1234u};
     put(0u, 0x03203809u); // JALR a3,t9
-    put(4u, 0x00e01026u); // unsupported XOR
+    put(4u, 0x00e01066u); // XOR v0,a3,zero with reserved shamt=1
     const auto step = [&](uint32_t budget)
     {
         return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
@@ -2160,12 +2171,17 @@ bool test_strict_reset_jalr()
     {
         return false;
     }
-    put(4u, 0x00e01025u); // OR v0,a3,zero
-    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
-        cpu.m_gpr[7].m_lo != pc + 8u || cpu.m_gpr[7].m_hi != 0x1234u ||
-        cpu.m_gpr[2].m_lo != pc + 8u)
+    for (const uint32_t word : {0x00e01025u, 0x00e01026u}) // OR and XOR v0,a3,zero
     {
-        return false;
+        cpu.m_pc = pc;
+        cpu.m_gpr[7].m_lo = 0xfedcba9876543210ull;
+        put(4u, word);
+        if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
+            cpu.m_gpr[7].m_lo != pc + 8u || cpu.m_gpr[7].m_hi != 0x1234u ||
+            cpu.m_gpr[2].m_lo != pc + 8u)
+        {
+            return false;
+        }
     }
     cpu.m_pc = pc;
     put(0u, 0x03200009u); // JALR zero,t9

@@ -1751,3 +1751,15 @@ budget refusal and boundary shift counts. No trapping arithmetic,
 new data routes, HLE service or production lowering changes.
 Require both ROMs to advance beyond their observed XOR stop,
 retaining all prior entry/backing/clock assertions. Pending CI.
+
+H3E9B3 workflow 46066209290 at 794cd34b compiled and passed the
+new scalar execution regression, but both jobs stopped at the
+existing JALR rollback fixture. JAL has the same outdated XOR
+refusal assumption. Use nonzero reserved shamt encodings for
+negative cases, and explicitly execute the original canonical XOR
+in both JAL/JALR slots to verify that the newly written link is
+visible. Preserve the previous OR, store, invalid target and
+rollback coverage. No runtime changes or reduced thresholds.
+Reviewed other unsupported-opcode fixtures in the strict tests;
+real-ROM progress remains pending CI.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46066209290
