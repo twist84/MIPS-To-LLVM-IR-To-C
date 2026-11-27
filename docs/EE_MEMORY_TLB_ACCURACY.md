@@ -867,3 +867,27 @@ ra 00000000a0010044 and unchanged stack. Fetch and decode the
 live RAM callee, then explore a bounded 4096 further instructions
 and report the actual next stop and lookahead. Pending CI; no
 retail replay or production dispatch changes.
+
+## Strict memory follow-up M6E2G3: EELOAD stack frame and RAM scalar transfers
+
+M6E2G2 passed CI run 46046905599/job 140668315724: 653350
+retirements at a00161dc, RA 00000000a0010044. The callee
+allocated 56 bytes and stopped after 653351 retirements at
+a00161e0 / afbf0034 (SW ra,52(sp)), SP ffffffffa007ffa8.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46046905599/job/140668315724
+
+Extend the isolated transfer path to aligned SW and allow LW/LBU
+from explicit canonical uncached RAM. Reuse architectural access,
+alignment and physical span classification; no cached, accelerated,
+unmapped, device or partial backing accesses. SW writes only the
+low 32 bits little-endian; LW sign-extends the result; LBU zero-
+extends. Preserve register upper halves and architectural zero.
+Refuse before modifying RAM or registers, including delay slots.
+
+Require actual guest prologue stores at physical 0007ffd8 (s0=0)
+and 0007ffdc (ra=a0010044), all neighboring stack bytes unchanged,
+then the nested call and argument-producing slot. Expected at
+653356 retirements: PC a0010528, RA 00000000a00161f4,
+a0 ffffffffa00197e6, SP ffffffffa007ffa8. These are predicted
+from the observed words, pending CI. No host stack preparation,
+fake calls, production dispatch changes or retail replay.

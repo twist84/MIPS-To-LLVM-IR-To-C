@@ -111,12 +111,16 @@ struct s_ee_reset_ram_view
     {
         if (m_bytes == nullptr || bus.m_region != e_ee_bus_region::RAM ||
             bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED ||
-            !ee_bus_span_inside(bus.m_address, bus.m_width, 0u, 0x02000000u) ||
-            static_cast<uint64_t>(bus.m_address) + bus.m_width > m_size)
+            ee_classify_physical_span(bus.m_address, bus.m_width, m_size) != e_ee_bus_region::RAM)
         {
             return nullptr;
         }
         return m_bytes + bus.m_address;
+    }
+
+    constexpr const uint8_t* read_span(const s_ee_bus_span_plan& bus) const
+    {
+        return write_span(bus);
     }
 };
 
@@ -239,7 +243,7 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
     return true;
 }
 
-// LBU/LW read only ROM; SB writes only explicitly supplied isolated RAM.
+// LBU/LW read ROM or explicitly backed uncached RAM; SB/SW write RAM.
 // Validate even with register zero. A refusal is diagnostic only;
 // this reset probe does not deliver architectural guest faults.
 inline constexpr s_ee_reset_prefix_step execute_rom_word(
@@ -249,7 +253,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
-    const bool store = primary == 0x28u;
+    const bool store = primary == 0x28u || primary == 0x2bu;
     if (primary != 0x24u && primary != 0x23u && !store)
     {
         return {execute_register_word(cpu, opcode) ? result::COMMITTED :
@@ -260,24 +264,43 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t imm = opcode & 0xffffu;
     const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
-    const auto kind = primary == 0x23u
-        ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
+    const bool word = primary == 0x23u || primary == 0x2bu;
+    const auto kind = word ? e_ee_data_access_kind::WORD : e_ee_data_access_kind::BYTE;
     const auto plan = ee_plan_data_access(tlb, kind,
         store, address, cpu.m_cop0[COP0_Status], cpu.m_cop0[COP0_Config],
         cpu.m_cop0[COP0_Context], cpu.m_cop0[COP0_EntryHi]);
     const auto bus = ee_plan_data_bus_span(plan.m_access, plan.m_width,
         cpu.m_cop0[COP0_Config], ram.m_bytes != nullptr ? ram.m_size : 0u);
+    // Restrict RAM accesses to canonical KSEG1, with no alias or
+    // speculative fallback. ROM remains separately read-only.
+    const bool ram_address = address >= 0xa0000000u && address < 0xa2000000u &&
+        bus.m_address == address - 0xa0000000u;
     if (store)
     {
-        uint8_t* target = plan.m_fault.m_valid ? nullptr : ram.write_span(bus);
+        uint8_t* target = plan.m_fault.m_valid || !ram_address ? nullptr : ram.write_span(bus);
         if (target == nullptr)
         {
             return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
         }
-        *target = static_cast<uint8_t>(read_gpr(cpu, rt));
+        const uint32_t value = static_cast<uint32_t>(read_gpr(cpu, rt));
+        for (uint32_t i = 0u; i < plan.m_width; ++i)
+        {
+            target[i] = static_cast<uint8_t>(value >> (i * 8u));
+        }
         return {result::COMMITTED, opcode, 0u, pc};
     }
-    const uint8_t* bytes = plan.m_fault.m_valid ? nullptr : rom.read_span(bus);
+    const uint8_t* bytes = nullptr;
+    if (!plan.m_fault.m_valid)
+    {
+        if (ram_address)
+        {
+            bytes = ram.read_span(bus);
+        }
+        else if (address >= 0xbfc00000u && address < 0xc0000000u)
+        {
+            bytes = rom.read_span(bus);
+        }
+    }
     if (bytes == nullptr)
     {
         return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
@@ -294,7 +317,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 
 // Isolated post-Status-clear ROM and uncached RAM execution. The caller
 // owns all backing/state and excludes pending clock/device effects.
-// BEQ/BNE/J/JAL/JR and supported register/ROM-read/RAM-store slots are
+// BEQ/BNE/J/JAL/JR and supported register/ROM/RAM transfer slots are
 // a single bounded transaction. A refused slot changes no state.
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(

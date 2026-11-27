@@ -495,7 +495,64 @@ int main(int argc, char** argv)
         std::printf("EELOAD callee lookahead: pc=%08x opcode=%08x decoded=%s\n",
             pc, opcode, ee::decode(pc, opcode).mnemonic);
     }
-    constexpr uint32_t exploration_limit = call_checkpoint + 4096u;
+    // Require the actual callee prologue and nested call. Stack RAM
+    // has never been preloaded: both saved words must originate in SW.
+    constexpr uint32_t stack_frame = 0x0007ffa8u;
+    constexpr uint32_t saved_s0 = stack_frame + 48u;
+    constexpr uint32_t saved_ra = stack_frame + 52u;
+    constexpr uint32_t nested_checkpoint = call_checkpoint + 6u;
+    static_assert(saved_s0 == 0x0007ffd8u && saved_ra == 0x0007ffdcu);
+    static_assert(nested_checkpoint == 653356u);
+    for (uint32_t i = stack_frame - 1u; i <= saved_ra + 4u; ++i)
+    {
+        if (ram_bytes[i] != 0xa5u)
+        {
+            std::fprintf(stderr, "EELOAD stack initial sentinel mismatch: physical=%08x\n", i);
+            return 32;
+        }
+    }
+    for (; retired < nested_checkpoint;)
+    {
+        const uint32_t pc = cpu.m_pc;
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            nested_checkpoint - retired, ram);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > nested_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD prologue refused: pc=%08x opcode=%08x result=%u detail_pc=%08x address=%08x retired=%u\n",
+                pc, action.m_opcode, static_cast<unsigned>(action.m_result),
+                action.m_detail_pc, action.m_data_address, retired);
+            return 33;
+        }
+        retired += action.m_retired;
+    }
+    const uint32_t saved_s0_word = ee::ee_read_instruction_word(ram_bytes.data() + saved_s0);
+    const uint32_t saved_ra_word = ee::ee_read_instruction_word(ram_bytes.data() + saved_ra);
+    if (cpu.m_pc != 0xa0010528u || cpu.m_gpr[29].m_lo != 0xffffffffa007ffa8ull ||
+        cpu.m_gpr[31].m_lo != 0x00000000a00161f4ull ||
+        cpu.m_gpr[4].m_lo != 0xffffffffa00197e6ull ||
+        saved_s0_word != 0u || saved_ra_word != 0xa0010044u ||
+        ram_bytes[saved_ra + 4u] != 0xa5u)
+    {
+        std::fprintf(stderr, "EELOAD prologue mismatch: pc=%08x sp=%016llx ra=%016llx a0=%016llx saved_s0=%08x saved_ra=%08x\n",
+            cpu.m_pc, static_cast<unsigned long long>(cpu.m_gpr[29].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[31].m_lo),
+            static_cast<unsigned long long>(cpu.m_gpr[4].m_lo), saved_s0_word, saved_ra_word);
+        return 34;
+    }
+    for (uint32_t i = stack_frame - 1u; i < saved_s0; ++i)
+    {
+        if (ram_bytes[i] != 0xa5u)
+        {
+            std::fprintf(stderr, "EELOAD stack unexpected write: physical=%08x\n", i);
+            return 35;
+        }
+    }
+    std::printf("EELOAD prologue: retired=%u pc=%08x sp=%016llx ra=%016llx a0=%016llx saved_s0=%08x saved_ra=%08x\n",
+        retired, cpu.m_pc, static_cast<unsigned long long>(cpu.m_gpr[29].m_lo),
+        static_cast<unsigned long long>(cpu.m_gpr[31].m_lo),
+        static_cast<unsigned long long>(cpu.m_gpr[4].m_lo), saved_s0_word, saved_ra_word);
+    constexpr uint32_t exploration_limit = nested_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {

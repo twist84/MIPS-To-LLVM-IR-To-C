@@ -1485,7 +1485,7 @@ bool test_strict_reset_register_execution()
     {
         return false;
     }
-    put(0x104u, 0xac820000u); // unsupported store in slot
+    put(0x104u, 0xfc820000u); // unsupported SD in slot
     if (ee::ee_execute_strict_rom_register_step(cpu, view, 2u).m_result != result::UNSUPPORTED_OPCODE ||
         cpu.m_pc != 0xbfc00100u || cpu.m_gpr[2].m_lo != 1u)
     {
@@ -2117,6 +2117,106 @@ bool test_strict_reset_direct_jumps()
         cpu.m_gpr[31].m_lo == link && cpu.m_gpr[31].m_hi == 0x1234u;
 }
 
+bool test_strict_reset_ram_scalar()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[40u]{};
+    for (auto& byte : bytes)
+    {
+        byte = 0xa5u;
+    }
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[4].m_lo = 0xffffffffa0000024ull;
+    cpu.m_gpr[2] = {0x1122334480abcdefull, 0x4567u};
+    cpu.m_gpr[3] = {0x7654u, 0x89abu};
+    put(0u, 0xac82fffcu); // sw r2,-4(r4)
+    put(4u, 0x8c83fffcu); // lw r3,-4(r4)
+    put(8u, 0x9085fffdu); // lbu r5,-3(r4)
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    if (step(1u).m_retired != 1u || cpu.m_pc != pc + 4u ||
+        bytes[32] != 0xefu || bytes[33] != 0xcdu ||
+        bytes[34] != 0xabu || bytes[35] != 0x80u ||
+        bytes[31] != 0xa5u || bytes[36] != 0xa5u ||
+        step(1u).m_retired != 1u || cpu.m_gpr[3].m_lo != 0xffffffff80abcdefull ||
+        cpu.m_gpr[3].m_hi != 0x89abu ||
+        step(1u).m_retired != 1u || cpu.m_gpr[5].m_lo != 0xcdu ||
+        cpu.m_gpr[2].m_lo != 0x1122334480abcdefull || cpu.m_gpr[2].m_hi != 0x4567u)
+    {
+        return false;
+    }
+    put(12u, 0xac800000u); // sw zero,0(r4)
+    put(16u, 0x8c800000u); // lw zero,0(r4)
+    cpu.m_gpr[0] = {0xfeedfaceu, 0x9876u};
+    if (step(1u).m_retired != 1u || step(1u).m_retired != 1u ||
+        ee::ee_read_instruction_word(bytes + 36u) != 0u ||
+        cpu.m_gpr[0].m_lo != 0xfeedfaceu || cpu.m_gpr[0].m_hi != 0x9876u)
+    {
+        return false;
+    }
+    // Reject all unsupported data paths even when rt is zero, without
+    // changing any byte or architectural state.
+    for (const uint32_t address : {pc + 33u, pc + 40u, 0xa2000000u,
+                                   0x80000020u, 0x00400020u, 0xb0000000u})
+    {
+        cpu.m_gpr[4].m_lo = address;
+        for (const uint32_t offset : {12u, 16u})
+        {
+            cpu.m_pc = pc + offset;
+            const auto refused = step(1u);
+            if (refused.m_result != result::DATA_UNAVAILABLE || refused.m_retired != 0u ||
+                refused.m_data_address != address || cpu.m_pc != pc + offset ||
+                ee::ee_read_instruction_word(bytes + 32u) != 0x80abcdefu ||
+                ee::ee_read_instruction_word(bytes + 36u) != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    // The full word must fit in backing, not just its first byte.
+    cpu.m_pc = pc + 12u;
+    cpu.m_gpr[4].m_lo = pc + 36u;
+    const ee::s_ee_reset_ram_view short_ram{bytes, 39u};
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, short_ram).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_pc != pc + 12u)
+    {
+        return false;
+    }
+    // A JAL delay-slot SW sees the link; refusal rolls it back.
+    put(20u, 0x0c000007u); // jal a000001c
+    put(24u, 0xac9f0000u); // sw ra,0(r4)
+    cpu.m_pc = pc + 20u;
+    cpu.m_gpr[31] = {0x12345678u, 0xabcdefu};
+    cpu.m_gpr[4].m_lo = pc + 34u;
+    const auto rejected = step(2u);
+    if (rejected.m_result != result::DATA_UNAVAILABLE ||
+        rejected.m_detail_pc != pc + 24u || cpu.m_pc != pc + 20u ||
+        cpu.m_gpr[31].m_lo != 0x12345678u ||
+        ee::ee_read_instruction_word(bytes + 32u) != 0x80abcdefu)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = pc + 36u;
+    return step(2u).m_retired == 2u && cpu.m_pc == pc + 28u &&
+        cpu.m_gpr[31].m_lo == 0x00000000a000001cull &&
+        cpu.m_gpr[31].m_hi == 0xabcdefu &&
+        ee::ee_read_instruction_word(bytes + 36u) == 0xa000001cu &&
+        ee::ee_read_instruction_word(bytes + 32u) == 0x80abcdefu;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2344,6 +2444,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_ram_scalar(), "strict reset RAM scalar transfer regression"))
     {
         return 1;
     }
