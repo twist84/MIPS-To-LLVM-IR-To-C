@@ -891,3 +891,30 @@ then the nested call and argument-producing slot. Expected at
 a0 ffffffffa00197e6, SP ffffffffa007ffa8. These are predicted
 from the observed words, pending CI. No host stack preparation,
 fake calls, production dispatch changes or retail replay.
+
+## Strict memory follow-up M6E3A: first EE device access (SIO TX)
+
+M6E2G3 passed CI run 46047391615/job 140669955776: stack stores
+and nested call at 653356 retirements, then reached 653362 at
+a0010540 / a0820000 (SB v0,0(a0)), address b000f180, byte 5b.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46047391615/job/140669955776
+
+PS2SDK identifies physical 1000f180 as SIO_TXFIFO:
+https://ps2dev.github.io/ps2sdk/sio_8h.html
+PS2tek also documents the one-byte console output register:
+https://psi-rockin.github.io/ps2tek/
+
+Model only ordered diagnostic byte delivery to an explicit bounded
+caller-owned sink, not hardware FIFO timing or readiness. Require
+canonical uncached translated DEVICE address and width one. Missing
+or full sink, other registers, aliases, widths and reads refuse
+without effects. No generic MMIO acceptance, fake read values,
+interrupts or completion. Add canonical full-low-64-bit OR for the
+observed string loop's delay slot.
+
+The probe independently reads the NUL-terminated string from the
+pinned ROM image at the copied EELOAD offset 97e6. Require each
+guest-emitted byte to match it, exact retirement count 653364 +
+5*length, return to a00161f4, and unchanged stack. Report the
+actual bytes and subsequent blocker. The string and retirement
+count remain pending CI validation. No retail replay required.

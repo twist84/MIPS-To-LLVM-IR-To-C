@@ -136,6 +136,29 @@ inline constexpr const uint8_t* ee_fetch_strict_reset_word(
 
 static_assert(s_ee_reset_ram_view{}.fetch_span({}) == nullptr);
 
+// Explicit diagnostic transport for the EE SIO TX byte register.
+// This models only ordered byte delivery to a caller-provided sink,
+// not serial timing, FIFO fullness, receive state or interrupts.
+struct s_ee_reset_sio_tx
+{
+    uint8_t* m_bytes = nullptr;
+    size_t m_capacity = 0u;
+    size_t m_count = 0u;
+
+    constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address, uint8_t value)
+    {
+        if (address != 0xb000f180u || bus.m_address != 0x1000f180u ||
+            bus.m_region != e_ee_bus_region::DEVICE ||
+            bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED ||
+            bus.m_width != 1u || m_bytes == nullptr || m_count >= m_capacity)
+        {
+            return false;
+        }
+        m_bytes[m_count++] = value;
+        return true;
+    }
+};
+
 namespace strict_reset_detail
 {
 inline constexpr uint64_t read_gpr(const s_ee_cpu_state& cpu, uint32_t reg)
@@ -188,6 +211,9 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             break;
         case 0x24u: // AND: both low 64-bit operands
             value = read_gpr(cpu, rs) & read_gpr(cpu, rt);
+            break;
+        case 0x25u: // OR: both low 64-bit operands
+            value = read_gpr(cpu, rs) | read_gpr(cpu, rt);
             break;
         case 0x27u: // NOR: both low 64-bit operands
             value = ~(read_gpr(cpu, rs) | read_gpr(cpu, rt));
@@ -244,12 +270,13 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
 }
 
 // LBU/LW read ROM or explicitly backed uncached RAM; SB/SW write RAM.
+// SB to the exact SIO TX register additionally requires an explicit sink.
 // Validate even with register zero. A refusal is diagnostic only;
 // this reset probe does not deliver architectural guest faults.
 inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
     const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode,
-    const s_ee_reset_ram_view& ram)
+    const s_ee_reset_ram_view& ram, s_ee_reset_sio_tx* sio)
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
@@ -277,6 +304,11 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         bus.m_address == address - 0xa0000000u;
     if (store)
     {
+        if (!plan.m_fault.m_valid && sio != nullptr &&
+            sio->write(bus, address, static_cast<uint8_t>(read_gpr(cpu, rt))))
+        {
+            return {result::COMMITTED, opcode, 0u, pc};
+        }
         uint8_t* target = plan.m_fault.m_valid || !ram_address ? nullptr : ram.write_span(bus);
         if (target == nullptr)
         {
@@ -322,7 +354,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
-    const s_ee_reset_ram_view& ram = {})
+    const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr)
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -382,7 +414,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
             cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-            pc + 4u, ee_read_instruction_word(slot), ram);
+            pc + 4u, ee_read_instruction_word(slot), ram, sio);
         if (action.m_result != result::COMMITTED)
         {
             if (link)
@@ -395,7 +427,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-        cpu.m_pc, opcode, ram);
+        cpu.m_pc, opcode, ram, sio);
     if (action.m_result != result::COMMITTED)
     {
         return action;

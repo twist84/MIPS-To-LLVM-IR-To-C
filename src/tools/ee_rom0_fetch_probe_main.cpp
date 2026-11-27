@@ -552,13 +552,84 @@ int main(int argc, char** argv)
         retired, cpu.m_pc, static_cast<unsigned long long>(cpu.m_gpr[29].m_lo),
         static_cast<unsigned long long>(cpu.m_gpr[31].m_lo),
         static_cast<unsigned long long>(cpu.m_gpr[4].m_lo), saved_s0_word, saved_ra_word);
-    constexpr uint32_t exploration_limit = nested_checkpoint + 4096u;
+    // The first nested function emits a NUL-terminated string through
+    // EE SIO_TXFIFO. Derive expected bytes from the original ROM image,
+    // independently of the guest's live RAM reads and SIO writes.
+    constexpr uint32_t message_physical = 0x000197e6u;
+    constexpr uint32_t message_offset = message_physical - destination;
+    static_assert(message_offset < image_size);
+    constexpr uint32_t tx_capacity = 1024u;
+    uint8_t tx_bytes[tx_capacity]{};
+    ee::s_ee_reset_sio_tx sio{tx_bytes, tx_capacity, 0u};
+    uint32_t message_size = 0u;
+    for (; message_offset + message_size < image_size && message_size < tx_capacity; ++message_size)
+    {
+        if (bytes[source_offset + message_offset + message_size] == 0u)
+        {
+            break;
+        }
+    }
+    if (message_size == 0u || message_size == tx_capacity ||
+        message_offset + message_size >= image_size ||
+        bytes[source_offset + message_offset] != 0x5bu)
+    {
+        std::fprintf(stderr, "EELOAD expected console string invalid\n");
+        return 36;
+    }
+    // First LBU/BEQ+slot/ADDIU/LUI/ORI = six retirements.
+    // Each byte then takes SB/ADDIU/LBU/BNE+slot, followed by JR+slot.
+    const uint32_t console_checkpoint = nested_checkpoint + 8u + 5u * message_size;
+    for (; retired < console_checkpoint;)
+    {
+        const uint32_t pc = cpu.m_pc;
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            console_checkpoint - retired, ram, &sio);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > console_checkpoint - retired)
+        {
+            std::fprintf(stderr, "EELOAD console refused: pc=%08x opcode=%08x result=%u detail_pc=%08x address=%08x retired=%u bytes=%zu\n",
+                pc, action.m_opcode, static_cast<unsigned>(action.m_result),
+                action.m_detail_pc, action.m_data_address, retired, sio.m_count);
+            return 37;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa00161f4u || sio.m_count != message_size ||
+        cpu.m_gpr[2].m_lo != 0u || cpu.m_gpr[29].m_lo != 0xffffffffa007ffa8ull)
+    {
+        std::fprintf(stderr, "EELOAD console checkpoint mismatch: retired=%u pc=%08x bytes=%zu/%u\n",
+            retired, cpu.m_pc, sio.m_count, message_size);
+        return 38;
+    }
+    for (uint32_t i = 0u; i < message_size; ++i)
+    {
+        if (tx_bytes[i] != bytes[source_offset + message_offset + i])
+        {
+            std::fprintf(stderr, "EELOAD console byte mismatch: offset=%u\n", i);
+            return 39;
+        }
+    }
+    std::printf("EELOAD console: retired=%u pc=%08x bytes=%zu hex=", retired, cpu.m_pc, sio.m_count);
+    for (uint32_t i = 0u; i < message_size; ++i)
+    {
+        std::printf("%02x", static_cast<unsigned>(tx_bytes[i]));
+    }
+    std::putchar('\n');
+    std::printf("EELOAD console text: ");
+    for (uint32_t i = 0u; i < message_size; ++i)
+    {
+        const uint8_t byte = tx_bytes[i];
+        std::putchar(byte >= 32u && byte <= 126u ? byte : '.');
+    }
+    std::putchar('\n');
+
+    const uint32_t exploration_limit = console_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_limit - retired, ram);
+            exploration_limit - retired, ram, &sio);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
