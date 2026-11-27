@@ -1,6 +1,7 @@
 // Decoder regression test for the MMI classification and the VALID/UNSUPPORTED
 // contract. Words are composed from fields so each row documents the encoding.
 #include "ee_decoder.h"
+#include "ee_decoder_detail.h"
 #include "instruction_lifter.h"
 #include "function_analyzer.h"
 #include "ee_recomp.h"
@@ -8,10 +9,28 @@
 #include <map>
 #include <cstring>
 #include <set>
+#include <string_view>
 using namespace ee;
 static int g_pass = 0, g_fail = 0;
-static uint32_t R(uint32_t op, uint32_t rs, uint32_t rt, uint32_t rd, uint32_t sa, uint32_t funct)
+static constexpr uint32_t R(uint32_t op, uint32_t rs, uint32_t rt, uint32_t rd, uint32_t sa, uint32_t funct)
 { return (op << 26) | (rs << 21) | (rt << 16) | (rd << 11) | (sa << 6) | funct; }
+
+static consteval bool decoder_matches(uint32_t word, std::string_view mnemonic,
+                                      e_ee_valid validity)
+{
+    const auto instruction = decoder_detail::decode(0x100000u, word);
+    return std::string_view(instruction.mnemonic) == mnemonic &&
+        instruction.valid == validity;
+}
+
+// Guest branch and jump targets must wrap at both signed and unsigned
+// boundaries, regardless of the host's signed integer representation.
+static_assert(static_cast<uint32_t>(
+    decoder_detail::decode(0x7ffffff8u, 0x10000001u).branch_target) == 0x80000000u);
+static_assert(static_cast<uint32_t>(
+    decoder_detail::decode(0xfffffffcu, 0x1000ffffu).branch_target) == 0xfffffffcu);
+static_assert(decoder_detail::decode(0x0ffffffcu, 0x08000000u).jump_target == 0x10000000u);
+static_assert(decoder_detail::decode(0xfffffffcu, 0x08000000u).jump_target == 0u);
 
 static void expect(const char* what, uint32_t word, const char* mn, e_ee_valid v)
 {
@@ -23,7 +42,7 @@ static void expect(const char* what, uint32_t word, const char* mn, e_ee_valid v
 
 int main()
 {
-    const auto V = e_ee_valid::VALID, U = e_ee_valid::UNSUPPORTED, X = e_ee_valid::INVALID;
+    constexpr auto V = e_ee_valid::VALID, U = e_ee_valid::UNSUPPORTED, X = e_ee_valid::INVALID;
     // Signed-overflow arithmetic and both integer trap families now
     // enter the real native EX_Ov / EX_Tr exception path. The independent
     // legacy C++ emitter must not alias them to unchecked arithmetic/ERET.
@@ -35,8 +54,8 @@ int main()
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL signed checked SPECIAL 0x%x\n", funct);
     }
-    expect("DADD bad sa", R(0x00,4,5,6,1,0x2c), "signed_arith", U);
-    expect("DSUB bad sa", R(0x00,4,5,6,1,0x2e), "signed_arith", U);
+    static_assert(decoder_matches(R(0x00,4,5,6,1,0x2c), "signed_arith", U), "DADD bad sa");
+    static_assert(decoder_matches(R(0x00,4,5,6,1,0x2e), "signed_arith", U), "DSUB bad sa");
     for (uint32_t opcode : {0x08u, 0x18u})
     {
         const auto ins = decode(0x00150000u,
@@ -67,41 +86,38 @@ int main()
         if (!ok) std::printf("FAIL checked REGIMM trap 0x%x\n", rt);
     }
     // Scalar comparisons are lowered exactly as 64-bit signed/unsigned tests.
-    expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
-    expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
-    expect("slt bad sa", R(0x00,4,5,6,1,0x2a), "slt", U);
-    expect("sltu bad sa", R(0x00,4,5,6,1,0x2b), "sltu", U);
-    expect("slti", (0x0au << 26) | (4u << 21) | (6u << 16) | 0xffffu,
-           "slti", V);
-    expect("sltiu", (0x0bu << 26) | (4u << 21) | (6u << 16) | 0xffffu,
-           "sltiu", V);
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x2a), "slt", V), "slt");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x2b), "sltu", V), "sltu");
+    static_assert(decoder_matches(R(0x00,4,5,6,1,0x2a), "slt", U), "slt bad sa");
+    static_assert(decoder_matches(R(0x00,4,5,6,1,0x2b), "sltu", U), "sltu bad sa");
+    static_assert(decoder_matches((0x0au << 26) | (4u << 21) | (6u << 16) | 0xffffu, "slti", V), "slti");
+    static_assert(decoder_matches((0x0bu << 26) | (4u << 21) | (6u << 16) | 0xffffu, "sltiu", V), "sltiu");
     // The R5900 standard table has LD at primary 0x37 only.
     // In particular 0x38, though SC on some MIPS variants, is not
     // a second LD encoding on PS2. Unknown selectors fail closed.
-    expect("ld primary", R(0x37, 4, 5, 0, 0, 0), "ld", V);
+    static_assert(decoder_matches(R(0x37, 4, 5, 0, 0, 0), "ld", V), "ld primary");
     // SC is a defined MIPS opcode but deliberately unavailable on EE.
-    expect("0x38 EE-unsupported SC", R(0x38, 4, 5, 0, 0, 0), "sc", X);
-    expect("0x30 reserved", R(0x30, 4, 5, 0, 0, 0), "unknown", X);
-    expect("0x35 reserved", R(0x35, 4, 5, 0, 0, 0), "unknown", X);
-    expect("0x3d reserved", R(0x3d, 4, 5, 0, 0, 0), "unknown", X);
+    static_assert(decoder_matches(R(0x38, 4, 5, 0, 0, 0), "sc", X), "0x38 EE-unsupported SC");
+    static_assert(decoder_matches(R(0x30, 4, 5, 0, 0, 0), "unknown", X), "0x30 reserved");
+    static_assert(decoder_matches(R(0x35, 4, 5, 0, 0, 0), "unknown", X), "0x35 reserved");
+    static_assert(decoder_matches(R(0x3d, 4, 5, 0, 0, 0), "unknown", X), "0x3d reserved");
     // SPECIAL 0x28/0x29 are real R5900 SA transfers, not UNKNOWN
     // and not yet implemented; other reserved functs are INVALID.
-    expect("mfsa", R(0x00, 0, 0, 6, 0, 0x28), "mfsa", V);
-    expect("mtsa", R(0x00, 4, 0, 0, 0, 0x29), "mtsa", V);
-    expect("mfsa bad rs", R(0x00, 4, 0, 6, 0, 0x28), "mfsa", U);
-    expect("mtsa bad rd", R(0x00, 4, 0, 6, 0, 0x29), "mtsa", U);
-    expect("pexch", R(0x1c, 0, 5, 6, 0x1a, 0x29), "pexch", V);
-    expect("pexcw", R(0x1c, 0, 5, 6, 0x1e, 0x29), "pexcw", V);
-    expect("pexch bad rs", R(0x1c, 4, 5, 6, 0x1a, 0x29), "pexch", U);
-    expect("pexcw bad rs", R(0x1c, 4, 5, 6, 0x1e, 0x29), "pexcw", U);
-    expect("special reserved", R(0x00, 4, 5, 6, 0, 0x01),
-           "special_rsvd", X);
+    static_assert(decoder_matches(R(0x00, 0, 0, 6, 0, 0x28), "mfsa", V), "mfsa");
+    static_assert(decoder_matches(R(0x00, 4, 0, 0, 0, 0x29), "mtsa", V), "mtsa");
+    static_assert(decoder_matches(R(0x00, 4, 0, 6, 0, 0x28), "mfsa", U), "mfsa bad rs");
+    static_assert(decoder_matches(R(0x00, 4, 0, 6, 0, 0x29), "mtsa", U), "mtsa bad rd");
+    static_assert(decoder_matches(R(0x1c, 0, 5, 6, 0x1a, 0x29), "pexch", V), "pexch");
+    static_assert(decoder_matches(R(0x1c, 0, 5, 6, 0x1e, 0x29), "pexcw", V), "pexcw");
+    static_assert(decoder_matches(R(0x1c, 4, 5, 6, 0x1a, 0x29), "pexch", U), "pexch bad rs");
+    static_assert(decoder_matches(R(0x1c, 4, 5, 6, 0x1e, 0x29), "pexcw", U), "pexcw bad rs");
+    static_assert(decoder_matches(R(0x00, 4, 5, 6, 0, 0x01), "special_rsvd", X), "special reserved");
     // MMI groups: funct 0x08=MMI0, 0x28=MMI1, 0x09=MMI2, 0x29=MMI3; sub-op in sa.
     // The packed shifts have reserved rs=0 and independent lane
     // sizes. PLZCW consumes rs but writes only the first two rd words.
-    expect("plzcw", R(0x1c,4,0,6,0,0x04), "plzcw", V);
-    expect("plzcw reserved rt", R(0x1c,4,5,6,0,0x04), "plzcw", U);
-    expect("plzcw reserved sa", R(0x1c,4,0,6,1,0x04), "plzcw", U);
+    static_assert(decoder_matches(R(0x1c,4,0,6,0,0x04), "plzcw", V), "plzcw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x04), "plzcw", U), "plzcw reserved rt");
+    static_assert(decoder_matches(R(0x1c,4,0,6,1,0x04), "plzcw", U), "plzcw reserved sa");
     for (uint32_t funct : {0x34u, 0x36u, 0x37u,
                            0x3cu, 0x3eu, 0x3fu})
     {
@@ -135,19 +151,19 @@ int main()
             std::printf("FAIL MMI0 selector %u decode/lift\n", subop);
         }
     }
-    expect("pext5 bad rs", R(0x1c,4,5,6,0x1e,0x08), "pext5", U);
-    expect("ppac5 bad rs", R(0x1c,4,5,6,0x1f,0x08), "ppac5", U);
-    expect("paddw",   R(0x1c,4,5,6,0x00,0x08), "paddw",  V);
-    expect("psubh",   R(0x1c,4,5,6,0x05,0x08), "psubh",  V);
-    expect("pmaxh",   R(0x1c,4,5,6,0x07,0x08), "pmaxh",  V);
-    expect("paddb",   R(0x1c,4,5,6,0x08,0x08), "paddb",  V);
-    expect("pand",    R(0x1c,4,5,6,0x12,0x09), "pand",   V);
-    expect("pxor",    R(0x1c,4,5,6,0x13,0x09), "pxor",   V);
-    expect("por",     R(0x1c,4,5,6,0x12,0x29), "por",    V);
-    expect("pnor",    R(0x1c,4,5,6,0x13,0x29), "pnor",   V);
-    expect("pcpyud",  R(0x1c,4,5,6,0x0e,0x29), "pcpyud", V);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1e,0x08), "pext5", U), "pext5 bad rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1f,0x08), "ppac5", U), "ppac5 bad rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x00,0x08), "paddw", V), "paddw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x05,0x08), "psubh", V), "psubh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x07,0x08), "pmaxh", V), "pmaxh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x08,0x08), "paddb", V), "paddb");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x12,0x09), "pand", V), "pand");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x13,0x09), "pxor", V), "pxor");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x12,0x29), "por", V), "por");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x13,0x29), "pnor", V), "pnor");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x0e,0x29), "pcpyud", V), "pcpyud");
     // Verified from the US SDBZ ELF: PC 0x0018E154.
-    expect("pcpyud SDBZ", 0x70491ba9u, "pcpyud", V);
+    static_assert(decoder_matches(0x70491ba9u, "pcpyud", V), "pcpyud SDBZ");
     {
         // This exact SDBZ instruction was decoded VALID but lift() used
         // to return LOP_UNSUPPORTED, producing a false coverage gap.
@@ -187,40 +203,40 @@ int main()
             }
         }
     }
-    expect("mfhi1",   R(0x1c,0,0,6,0,0x10),    "mfhi1",  V);
-    expect("mtlo1",   R(0x1c,4,0,0,0,0x13),    "mtlo1",  V);
+    static_assert(decoder_matches(R(0x1c,0,0,6,0,0x10), "mfhi1", V), "mfhi1");
+    static_assert(decoder_matches(R(0x1c,4,0,0,0,0x13), "mtlo1", V), "mtlo1");
     // Real ops that are NOT lowered exactly must never be VALID (previously a
     // silent fallback add/and/or/move was emitted for them).
-    expect("paddsw",  R(0x1c,4,5,6,0x10,0x08), "paddsw", V);   // saturating, not plain add
-    expect("pextlw",  R(0x1c,4,5,6,0x12,0x08), "pextlw", V);   // exact rt/rs interleave
-    expect("pcpyld",  R(0x1c,4,5,6,0x0e,0x09), "pcpyld", V);   // exact lower-64 interleave
-    expect("pcpyh",   R(0x1c,0,5,6,0x1b,0x29), "pcpyh",  V);   // independent halfword broadcast
-    expect("pcpyh-bad-rs", R(0x1c,4,5,6,0x1b,0x29), "pcpyh", U); // unary instruction requires rs=0
-    expect("pabsw",  R(0x1c,0,5,6,0x01,0x28), "pabsw",  V);
-    expect("pceqw",  R(0x1c,4,5,6,0x02,0x28), "pceqw",  V);
-    expect("pminw",  R(0x1c,4,5,6,0x03,0x28), "pminw",  V);
-    expect("pabsh",  R(0x1c,0,5,6,0x05,0x28), "pabsh",  V);
-    expect("pceqh",  R(0x1c,4,5,6,0x06,0x28), "pceqh",  V);
-    expect("pminh",  R(0x1c,4,5,6,0x07,0x28), "pminh",  V);
-    expect("pceqb",  R(0x1c,4,5,6,0x0a,0x28), "pceqb",  V);
-    expect("padsbh", R(0x1c,4,5,6,0x04,0x28), "padsbh", V);
-    expect("pextuw", R(0x1c,4,5,6,0x12,0x28), "pextuw", V);
-    expect("pextuh", R(0x1c,4,5,6,0x16,0x28), "pextuh", V);
-    expect("pextub", R(0x1c,4,5,6,0x1a,0x28), "pextub", V);
-    expect("qfsrv",  R(0x1c,4,5,6,0x1b,0x28), "qfsrv",  V);
-    expect("padduw", R(0x1c,4,5,6,0x10,0x28), "padduw", V);
-    expect("psubuw", R(0x1c,4,5,6,0x11,0x28), "psubuw", V);
-    expect("padduh", R(0x1c,4,5,6,0x14,0x28), "padduh", V);
-    expect("psubuh", R(0x1c,4,5,6,0x15,0x28), "psubuh", V);
-    expect("paddub", R(0x1c,4,5,6,0x18,0x28), "paddub", V);
-    expect("psubub", R(0x1c,4,5,6,0x19,0x28), "psubub", V);
-    expect("pabsw rs",R(0x1c,4,5,6,0x01,0x28), "pabsw", U);
-    expect("mmi1 reserved", R(0x1c,4,5,6,0x00,0x28), "reserved", X);
-    expect("madd",    R(0x1c,4,5,6,0,0x00),    "madd",   V);
-    expect("maddu",   R(0x1c,4,5,6,0,0x01),    "maddu",  V);
-    expect("madd1",   R(0x1c,4,5,6,0,0x20),    "madd1",  V);
-    expect("maddu1",  R(0x1c,4,5,6,0,0x21),    "maddu1", V);
-    expect("madd bad sa", R(0x1c,4,5,6,1,0x00), "madd", U);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x10,0x08), "paddsw", V), "paddsw");   // saturating, not plain add
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x12,0x08), "pextlw", V), "pextlw");   // exact rt/rs interleave
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x0e,0x09), "pcpyld", V), "pcpyld");   // exact lower-64 interleave
+    static_assert(decoder_matches(R(0x1c,0,5,6,0x1b,0x29), "pcpyh", V), "pcpyh");   // independent halfword broadcast
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1b,0x29), "pcpyh", U), "pcpyh-bad-rs"); // unary instruction requires rs=0
+    static_assert(decoder_matches(R(0x1c,0,5,6,0x01,0x28), "pabsw", V), "pabsw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x02,0x28), "pceqw", V), "pceqw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x03,0x28), "pminw", V), "pminw");
+    static_assert(decoder_matches(R(0x1c,0,5,6,0x05,0x28), "pabsh", V), "pabsh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x06,0x28), "pceqh", V), "pceqh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x07,0x28), "pminh", V), "pminh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x0a,0x28), "pceqb", V), "pceqb");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x04,0x28), "padsbh", V), "padsbh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x12,0x28), "pextuw", V), "pextuw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x16,0x28), "pextuh", V), "pextuh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1a,0x28), "pextub", V), "pextub");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1b,0x28), "qfsrv", V), "qfsrv");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x10,0x28), "padduw", V), "padduw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x11,0x28), "psubuw", V), "psubuw");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x14,0x28), "padduh", V), "padduh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x15,0x28), "psubuh", V), "psubuh");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x18,0x28), "paddub", V), "paddub");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x19,0x28), "psubub", V), "psubub");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x01,0x28), "pabsw", U), "pabsw rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x00,0x28), "reserved", X), "mmi1 reserved");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x00), "madd", V), "madd");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x01), "maddu", V), "maddu");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x20), "madd1", V), "madd1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x21), "maddu1", V), "maddu1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,1,0x00), "madd", U), "madd bad sa");
     {
         const auto madd = decode(0x100000, R(0x1c,4,5,6,0,0x00));
         const auto maddu = decode(0x100000, R(0x1c,4,5,6,0,0x01));
@@ -281,13 +297,13 @@ int main()
         ok ? ++g_pass : ++g_fail;
         if (!ok) std::printf("FAIL MADD/MADDU/MULT1/DIV1/MMI1 pipeline lift mapping\n");
     }
-    expect("mult1",   R(0x1c,4,5,6,0,0x18),    "mult1",  V);
-    expect("multu1",  R(0x1c,4,5,6,0,0x19),    "multu1", V);
-    expect("div1",    R(0x1c,4,5,6,0,0x1a),    "div1",   V);
-    expect("divu1",   R(0x1c,4,5,6,0,0x1b),    "divu1",  V);
-    expect("div1 bad sa", R(0x1c,4,5,6,1,0x1a), "div1", U);
-    expect("divu1 bad sa", R(0x1c,4,5,6,1,0x1b), "divu1", U);
-    expect("mult1 bad sa", R(0x1c,4,5,6,1,0x18), "mult1", U);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x18), "mult1", V), "mult1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x19), "multu1", V), "multu1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x1a), "div1", V), "div1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0,0x1b), "divu1", V), "divu1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,1,0x1a), "div1", U), "div1 bad sa");
+    static_assert(decoder_matches(R(0x1c,4,5,6,1,0x1b), "divu1", U), "divu1 bad sa");
+    static_assert(decoder_matches(R(0x1c,4,5,6,1,0x18), "mult1", U), "mult1 bad sa");
     // PMFHL uses five legal format selectors; its operands are HI/LO.
     // PMTHL reads rs and selectively writes four HI/LO low words.
     for (uint32_t mode = 0u; mode <= 4u; ++mode)
@@ -301,10 +317,10 @@ int main()
             std::printf("FAIL PMFHL mode %u decoder/lifter\n", mode);
         }
     }
-    expect("pmfhl mode 5", R(0x1c,0,0,6,5,0x30), "pmfhl", U);
-    expect("pmfhl mode 31", R(0x1c,0,0,6,31,0x30), "pmfhl", U);
-    expect("pmfhl bad rs", R(0x1c,4,0,6,0,0x30), "pmfhl", U);
-    expect("pmfhl bad rt", R(0x1c,0,4,6,0,0x30), "pmfhl", U);
+    static_assert(decoder_matches(R(0x1c,0,0,6,5,0x30), "pmfhl", U), "pmfhl mode 5");
+    static_assert(decoder_matches(R(0x1c,0,0,6,31,0x30), "pmfhl", U), "pmfhl mode 31");
+    static_assert(decoder_matches(R(0x1c,4,0,6,0,0x30), "pmfhl", U), "pmfhl bad rs");
+    static_assert(decoder_matches(R(0x1c,0,4,6,0,0x30), "pmfhl", U), "pmfhl bad rt");
     {
         const auto ins = decode(0x00170000u, R(0x1c,4,0,0,0,0x31));
         const bool ok = ins.valid == V &&
@@ -315,10 +331,10 @@ int main()
             std::printf("FAIL PMTHL mode zero decoder/lifter\n");
         }
     }
-    expect("pmthl rs zero", R(0x1c,0,0,0,0,0x31), "pmthl", V);
-    expect("pmthl bad rt", R(0x1c,4,5,0,0,0x31), "pmthl", U);
-    expect("pmthl bad rd", R(0x1c,4,0,6,0,0x31), "pmthl", U);
-    expect("pmthl bad sa", R(0x1c,4,0,0,1,0x31), "pmthl", U);
+    static_assert(decoder_matches(R(0x1c,0,0,0,0,0x31), "pmthl", V), "pmthl rs zero");
+    static_assert(decoder_matches(R(0x1c,4,5,0,0,0x31), "pmthl", U), "pmthl bad rt");
+    static_assert(decoder_matches(R(0x1c,4,0,6,0,0x31), "pmthl", U), "pmthl bad rd");
+    static_assert(decoder_matches(R(0x1c,4,0,0,1,0x31), "pmthl", U), "pmthl bad sa");
     // MMI2/MMI3 packed word arithmetic uses two independent low words,
     // with HI0/LO0 and HI1/LO1 as the destination accumulators.
     // PMFHI/PMFLO and PMTHI/PMTLO transfer full 128-bit banks.
@@ -358,12 +374,12 @@ int main()
             }
         }
     }
-    expect("pmfhi bad rs", R(0x1c,4,0,6,8,0x09), "pmfhi", U);
-    expect("pmflo bad rt", R(0x1c,0,5,6,9,0x09), "pmflo", U);
-    expect("pmthi bad rt", R(0x1c,4,5,0,8,0x29), "pmthi", U);
-    expect("pmtlo bad rd", R(0x1c,4,0,6,9,0x29), "pmtlo", U);
-    expect("pdivw bad rd", R(0x1c,4,5,6,0xd,0x09), "pdivw", U);
-    expect("pdivuw bad rd", R(0x1c,4,5,6,0xd,0x29), "pdivuw", U);
+    static_assert(decoder_matches(R(0x1c,4,0,6,8,0x09), "pmfhi", U), "pmfhi bad rs");
+    static_assert(decoder_matches(R(0x1c,0,5,6,9,0x09), "pmflo", U), "pmflo bad rt");
+    static_assert(decoder_matches(R(0x1c,4,5,0,8,0x29), "pmthi", U), "pmthi bad rt");
+    static_assert(decoder_matches(R(0x1c,4,0,6,9,0x29), "pmtlo", U), "pmtlo bad rd");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0xd,0x09), "pdivw", U), "pdivw bad rd");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0xd,0x29), "pdivuw", U), "pdivuw bad rd");
     for (const uint32_t rs : {0u, 4u})
     {
         for (const uint32_t rt : {0u, 4u, 5u})
@@ -380,11 +396,11 @@ int main()
             }
         }
     }
-    expect("pdivbw bad rd", R(0x1c,4,5,6,0x1d,0x09), "pdivbw", U);
-    expect("pdivbw reserved MMI3", R(0x1c,4,5,0,0x1d,0x29), "reserved", X);
-    expect("pdivbw reserved neighbor", R(0x1c,4,5,0,0x17,0x09), "reserved", X);
-    expect("pmultw zero rd", R(0x1c,4,5,0,0xc,0x09), "pmultw", V);
-    expect("pmultuw zero rd", R(0x1c,4,5,0,0xc,0x29), "pmultuw", V);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1d,0x09), "pdivbw", U), "pdivbw bad rd");
+    static_assert(decoder_matches(R(0x1c,4,5,0,0x1d,0x29), "reserved", X), "pdivbw reserved MMI3");
+    static_assert(decoder_matches(R(0x1c,4,5,0,0x17,0x09), "reserved", X), "pdivbw reserved neighbor");
+    static_assert(decoder_matches(R(0x1c,4,5,0,0xc,0x09), "pmultw", V), "pmultw zero rd");
+    static_assert(decoder_matches(R(0x1c,4,5,0,0xc,0x29), "pmultuw", V), "pmultuw zero rd");
     // Signed/unsigned packed word accumulation: independent MAC class.
     for (const auto encoding :
          {std::pair<uint32_t,uint32_t>{0x09u, 0x00u},
@@ -461,10 +477,8 @@ int main()
             }
         }
     }
-    expect("mmi2 reserved interleave sa0b",
-           R(0x1c,4,5,6,0x0b,0x09), "reserved", X);
-    expect("mmi3 reserved interleave sa0b",
-           R(0x1c,4,5,6,0x0b,0x29), "reserved", X);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x0b,0x09), "reserved", X), "mmi2 reserved interleave sa0b");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x0b,0x29), "reserved", X), "mmi3 reserved interleave sa0b");
     // Only MMI2 unary permutation encodings with rs=$zero are valid.
     for (const uint32_t subop : {0x1au, 0x1bu, 0x1eu, 0x1fu})
     {
@@ -482,13 +496,13 @@ int main()
             }
         }
     }
-    expect("pexeh with reserved rs", R(0x1c,4,5,6,0x1a,0x09), "pexeh", U);
-    expect("prevh with reserved rs", R(0x1c,4,5,6,0x1b,0x09), "prevh", U);
-    expect("pexew with reserved rs", R(0x1c,4,5,6,0x1e,0x09), "pexew", U);
-    expect("prot3w with reserved rs", R(0x1c,4,5,6,0x1f,0x09), "prot3w", U);
-    expect("mmi3 reserved variable sa2", R(0x1c,4,5,6,2,0x29), "reserved", X);
-    expect("mmi2 reserved mac sa1", R(0x1c,4,5,6,1,0x09), "reserved", X);
-    expect("mmi3 reserved mac sa4", R(0x1c,4,5,6,4,0x29), "reserved", X);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1a,0x09), "pexeh", U), "pexeh with reserved rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1b,0x09), "prevh", U), "prevh with reserved rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1e,0x09), "pexew", U), "pexew with reserved rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1f,0x09), "prot3w", U), "prot3w with reserved rs");
+    static_assert(decoder_matches(R(0x1c,4,5,6,2,0x29), "reserved", X), "mmi3 reserved variable sa2");
+    static_assert(decoder_matches(R(0x1c,4,5,6,1,0x09), "reserved", X), "mmi2 reserved mac sa1");
+    static_assert(decoder_matches(R(0x1c,4,5,6,4,0x29), "reserved", X), "mmi3 reserved mac sa4");
     // MMI2 halfword multiply/add/sub and horizontal pair variants.
     for (const uint32_t subop : {0x10u, 0x11u, 0x14u, 0x15u, 0x1cu})
     {
@@ -506,17 +520,17 @@ int main()
             }
         }
     }
-    expect("mmi2 reserved half sa16", R(0x1c,4,5,6,0x16,0x09), "reserved", X);
-    expect("mmi3 reserved half sa10", R(0x1c,4,5,6,0x10,0x29), "reserved", X);
-    expect("mmi3 reserved half sa1c", R(0x1c,4,5,6,0x1c,0x29), "reserved", X);
-    expect("psllh",   R(0x1c,0,5,6,3,0x34),    "psllh",  V);
-    expect("reserved",R(0x1c,0,0,0,0x1f,0x28), "reserved", X);
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x16,0x09), "reserved", X), "mmi2 reserved half sa16");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x10,0x29), "reserved", X), "mmi3 reserved half sa10");
+    static_assert(decoder_matches(R(0x1c,4,5,6,0x1c,0x29), "reserved", X), "mmi3 reserved half sa1c");
+    static_assert(decoder_matches(R(0x1c,0,5,6,3,0x34), "psllh", V), "psllh");
+    static_assert(decoder_matches(R(0x1c,0,0,0,0x1f,0x28), "reserved", X), "reserved");
     // COP2 field decoding is hierarchical: rs selects transfer, BC2, or VU0
     // macro mode; the low funct/sa fields are only interpreted inside macro mode.
-    expect("qmfc2",   R(0x12,1,4,6,0,0), "qmfc2", V);
-    expect("cfc2",    R(0x12,2,4,6,0,0), "cfc2", V);
-    expect("qmtc2",   R(0x12,5,4,6,0,0), "qmtc2", V);
-    expect("ctc2",    R(0x12,6,4,6,0,0), "ctc2", V);
+    static_assert(decoder_matches(R(0x12,1,4,6,0,0), "qmfc2", V), "qmfc2");
+    static_assert(decoder_matches(R(0x12,2,4,6,0,0), "cfc2", V), "cfc2");
+    static_assert(decoder_matches(R(0x12,5,4,6,0,0), "qmtc2", V), "qmtc2");
+    static_assert(decoder_matches(R(0x12,6,4,6,0,0), "ctc2", V), "ctc2");
 
     // Bit 0 is the actual VU0 transfer interlock, NOT a reserved bit.
     for (uint32_t selector : {1u, 2u, 5u, 6u})
@@ -574,18 +588,18 @@ int main()
 
     // All four transfer forms reserve sa/funct. Do not classify malformed
     // words as merely unsupported valid instructions.
-    expect("qmfc2 bad sa",   R(0x12,1,4,6,1,0), "qmfc2", X);
-    expect("qmfc2 bad funct",R(0x12,1,4,6,0,2), "qmfc2", X);
-    expect("cfc2 bad sa",    R(0x12,2,4,6,1,0), "cfc2", X);
-    expect("cfc2 bad funct", R(0x12,2,4,6,0,2), "cfc2", X);
-    expect("qmtc2 bad sa",   R(0x12,5,4,6,1,0), "qmtc2", X);
-    expect("qmtc2 bad funct",R(0x12,5,4,6,0,2), "qmtc2", X);
-    expect("ctc2 bad sa",    R(0x12,6,4,6,1,0), "ctc2", X);
-    expect("ctc2 bad funct", R(0x12,6,4,6,0,2), "ctc2", X);
-    expect("vadd",    R(0x12,0x10,4,5,0,0x28), "vu0_macro", V);
-    expect("vadda",   R(0x12,0x10,4,5,0,0x3c), "vu0_macro", V); // SPECIAL2 index 0
-    expect("vcallms", R(0x12,0x10,0,0,0,0x38), "vcallms", V);
-    expect("vcallmsr", R(0x12,0x10,0,0,0,0x39), "vcallmsr", V);
+    static_assert(decoder_matches(R(0x12,1,4,6,1,0), "qmfc2", X), "qmfc2 bad sa");
+    static_assert(decoder_matches(R(0x12,1,4,6,0,2), "qmfc2", X), "qmfc2 bad funct");
+    static_assert(decoder_matches(R(0x12,2,4,6,1,0), "cfc2", X), "cfc2 bad sa");
+    static_assert(decoder_matches(R(0x12,2,4,6,0,2), "cfc2", X), "cfc2 bad funct");
+    static_assert(decoder_matches(R(0x12,5,4,6,1,0), "qmtc2", X), "qmtc2 bad sa");
+    static_assert(decoder_matches(R(0x12,5,4,6,0,2), "qmtc2", X), "qmtc2 bad funct");
+    static_assert(decoder_matches(R(0x12,6,4,6,1,0), "ctc2", X), "ctc2 bad sa");
+    static_assert(decoder_matches(R(0x12,6,4,6,0,2), "ctc2", X), "ctc2 bad funct");
+    static_assert(decoder_matches(R(0x12,0x10,4,5,0,0x28), "vu0_macro", V), "vadd");
+    static_assert(decoder_matches(R(0x12,0x10,4,5,0,0x3c), "vu0_macro", V), "vadda"); // SPECIAL2 index 0
+    static_assert(decoder_matches(R(0x12,0x10,0,0,0,0x38), "vcallms", V), "vcallms");
+    static_assert(decoder_matches(R(0x12,0x10,0,0,0,0x39), "vcallmsr", V), "vcallmsr");
 
     // Directly from SDBZ (US) 0x00108240..0x0010827C: a 4x4 matrix
     // multiply using the VU0 accumulator. Decode the actual 16 words
@@ -694,10 +708,10 @@ int main()
         }
     }
 
-    expect("reserved macro", R(0x12,0x10,4,5,0,0x33), "cop2_reserved", X);
-    expect("reserved special2", R(0x12,0x10,4,5,20,0x3c), "cop2_reserved", X); // index 80
-    expect("reserved rs", R(0x12,0,4,5,0,0), "cop2_reserved", X);
-    expect("reserved class", R(0x12,9,4,5,0,0), "cop2_reserved", X);
+    static_assert(decoder_matches(R(0x12,0x10,4,5,0,0x33), "cop2_reserved", X), "reserved macro");
+    static_assert(decoder_matches(R(0x12,0x10,4,5,20,0x3c), "cop2_reserved", X), "reserved special2"); // index 80
+    static_assert(decoder_matches(R(0x12,0,4,5,0,0), "cop2_reserved", X), "reserved rs");
+    static_assert(decoder_matches(R(0x12,9,4,5,0,0), "cop2_reserved", X), "reserved class");
     {
         const auto b = decode(0x100000, R(0x12,8,0,0,0,0x02));
         const bool ok = b.valid == V && b.flow == e_ee_flow::FLOW_BRANCH &&
@@ -733,8 +747,8 @@ int main()
     }
     // The BC2 table has 32 entries, but only rt=0..3 are defined. Do not
     // silently alias higher rt values through rt & 3.
-    expect("bc2 rt=4",  R(0x12,8,4,0,0,0x02), "cop2_reserved", X);
-    expect("bc2 rt=31", R(0x12,8,31,0,0,0x02), "cop2_reserved", X);
+    static_assert(decoder_matches(R(0x12,8,4,0,0,0x02), "cop2_reserved", X), "bc2 rt=4");
+    static_assert(decoder_matches(R(0x12,8,31,0,0,0x02), "cop2_reserved", X), "bc2 rt=31");
 
     // Exhaustively check the published SPECIAL1/SPECIAL2 dispatch tables.
     // Reserved encodings remain INVALID. Every defined macro executes via
@@ -781,58 +795,58 @@ int main()
 
     // COP1/COP0 validity is an emitter contract, not a claim that every
     // reserved or merely decoded coprocessor operation has been lowered.
-    expect("mfc1", R(0x11,0x00,4,5,0,0), "cop1_transfer", V);
-    expect("mtc1", R(0x11,0x04,4,5,0,0), "cop1_transfer", V);
-    expect("cfc1 fcsr", R(0x11,0x02,4,31,0,0), "cop1_fcsr", V);
-    expect("ctc1 fcsr", R(0x11,0x06,4,31,0,0), "cop1_fcsr", V);
-    expect("cfc1 fcr0", R(0x11,0x02,4,0,0,0), "cop1_control", V);
-    expect("cfc1 fcr0 alias", R(0x11,0x02,4,15,0,0), "cop1_control", V);
-    expect("cfc1 fcr31 alias", R(0x11,0x02,4,16,0,0), "cop1_control", V);
-    expect("ctc1 fcr0", R(0x11,0x06,4,0,0,0), "cop1_control", V);
-    expect("ctc1 other", R(0x11,0x06,4,16,0,0), "cop1_control", U);
-    expect("add.s", R(0x11,0x10,5,6,7,0x00), "cop1_s", V);
-    expect("rsqrt.s", R(0x11,0x10,5,6,7,0x16), "cop1_s", V);
-    expect("madda.s", R(0x11,0x10,5,6,7,0x1e), "cop1_s", V);
-    expect("max.s", R(0x11,0x10,5,6,7,0x28), "cop1_s", V);
-    expect("min.s", R(0x11,0x10,5,6,7,0x29), "cop1_s", V);
-    expect("c.f.s", R(0x11,0x10,5,6,0,0x30), "cop1_s", V);
-    expect("c.eq.s", R(0x11,0x10,5,6,0,0x32), "cop1_s", V);
-    expect("c.lt.s", R(0x11,0x10,5,6,0,0x34), "cop1_s", V);
-    expect("c.le.s", R(0x11,0x10,5,6,0,0x36), "cop1_s", V);
-    expect("c.eq.fcc1", R(0x11,0x10,5,6,1,0x32), "cop1_s", U);
-    expect("c.lt.fcc1", R(0x11,0x10,5,6,1,0x34), "cop1_s", U);
-    expect("cvt.w.s", R(0x11,0x10,5,6,7,0x24), "cop1_s", V);
-    expect("unknown.s", R(0x11,0x10,5,6,7,0x08), "cop1_reserved", X);
-    expect("unknown.s 0x1b", R(0x11,0x10,5,6,7,0x1b), "cop1_reserved", X);
-    expect("cvt.s.w", R(0x11,0x14,0,6,7,0x20), "cvt_s_w", V);
-    expect("bad.w", R(0x11,0x14,0,6,7,0x21), "cop1_reserved", X);
-    expect("fmt.d", R(0x11,0x11,5,6,7,0x00), "cop1_reserved", X);
-    expect("fmt.l", R(0x11,0x15,5,6,7,0x00), "cop1_reserved", X);
-    expect("bc1 rt=4", R(0x11,0x08,4,0,0,0x00), "cop1_reserved", X);
+    static_assert(decoder_matches(R(0x11,0x00,4,5,0,0), "cop1_transfer", V), "mfc1");
+    static_assert(decoder_matches(R(0x11,0x04,4,5,0,0), "cop1_transfer", V), "mtc1");
+    static_assert(decoder_matches(R(0x11,0x02,4,31,0,0), "cop1_fcsr", V), "cfc1 fcsr");
+    static_assert(decoder_matches(R(0x11,0x06,4,31,0,0), "cop1_fcsr", V), "ctc1 fcsr");
+    static_assert(decoder_matches(R(0x11,0x02,4,0,0,0), "cop1_control", V), "cfc1 fcr0");
+    static_assert(decoder_matches(R(0x11,0x02,4,15,0,0), "cop1_control", V), "cfc1 fcr0 alias");
+    static_assert(decoder_matches(R(0x11,0x02,4,16,0,0), "cop1_control", V), "cfc1 fcr31 alias");
+    static_assert(decoder_matches(R(0x11,0x06,4,0,0,0), "cop1_control", V), "ctc1 fcr0");
+    static_assert(decoder_matches(R(0x11,0x06,4,16,0,0), "cop1_control", U), "ctc1 other");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x00), "cop1_s", V), "add.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x16), "cop1_s", V), "rsqrt.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x1e), "cop1_s", V), "madda.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x28), "cop1_s", V), "max.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x29), "cop1_s", V), "min.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,0,0x30), "cop1_s", V), "c.f.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,0,0x32), "cop1_s", V), "c.eq.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,0,0x34), "cop1_s", V), "c.lt.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,0,0x36), "cop1_s", V), "c.le.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,1,0x32), "cop1_s", U), "c.eq.fcc1");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,1,0x34), "cop1_s", U), "c.lt.fcc1");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x24), "cop1_s", V), "cvt.w.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x08), "cop1_reserved", X), "unknown.s");
+    static_assert(decoder_matches(R(0x11,0x10,5,6,7,0x1b), "cop1_reserved", X), "unknown.s 0x1b");
+    static_assert(decoder_matches(R(0x11,0x14,0,6,7,0x20), "cvt_s_w", V), "cvt.s.w");
+    static_assert(decoder_matches(R(0x11,0x14,0,6,7,0x21), "cop1_reserved", X), "bad.w");
+    static_assert(decoder_matches(R(0x11,0x11,5,6,7,0x00), "cop1_reserved", X), "fmt.d");
+    static_assert(decoder_matches(R(0x11,0x15,5,6,7,0x00), "cop1_reserved", X), "fmt.l");
+    static_assert(decoder_matches(R(0x11,0x08,4,0,0,0x00), "cop1_reserved", X), "bc1 rt=4");
 
     // Signed word/doubleword arithmetic and integer traps now have
     // checked LLVM lowering and precise EX_Ov/EX_Tr exception entry.
-    expect("addi overflow", R(0x08,4,5,0,0,0), "addi", V);
-    expect("daddi overflow", R(0x18,4,5,0,0,0), "daddi", V);
-    expect("slti", R(0x0a,4,5,0,0,0), "slti", V);
-    expect("sltiu", R(0x0b,4,5,0,0,0), "sltiu", V);
-    expect("add", R(0x00,4,5,6,0,0x20), "signed_arith", V);
-    expect("sub", R(0x00,4,5,6,0,0x22), "signed_arith", V);
-    expect("sub reserved shift", R(0x00,4,5,6,1,0x22), "signed_arith", U);
-    expect("dadd overflow", R(0x00,4,5,6,0,0x2c), "signed_arith", V);
-    expect("slt", R(0x00,4,5,6,0,0x2a), "slt", V);
-    expect("sltu", R(0x00,4,5,6,0,0x2b), "sltu", V);
-    expect("tge", R(0x00,4,5,0,0,0x30), "trap", V);
-    expect("bltzal", R(0x01,4,0x10,0,0,0), "bltzal", V);
-    expect("bgezal", R(0x01,4,0x11,0,0,0), "bgezal", V);
-    expect("bltzall", R(0x01,4,0x12,0,0,0), "bltzall", V);
-    expect("bgezall", R(0x01,4,0x13,0,0,0), "bgezall", V);
-    expect("bltzal rs=ra", R(0x01,31,0x10,0,0,0), "bltzal", U);
-    expect("bltzall rs=ra", R(0x01,31,0x12,0,0,0), "bltzall", U);
-    expect("tgei", R(0x01,4,0x08,0,0,0), "regimm_trap", V);
-    expect("mtsab", R(0x01,4,0x18,0,0,0), "mtsab", V);
-    expect("mtsah", R(0x01,4,0x19,0,0,0), "mtsah", V);
-    expect("reserved regimm", R(0x01,4,0x1f,0,0,0), "regimm_reserved", X);
+    static_assert(decoder_matches(R(0x08,4,5,0,0,0), "addi", V), "addi overflow");
+    static_assert(decoder_matches(R(0x18,4,5,0,0,0), "daddi", V), "daddi overflow");
+    static_assert(decoder_matches(R(0x0a,4,5,0,0,0), "slti", V), "slti");
+    static_assert(decoder_matches(R(0x0b,4,5,0,0,0), "sltiu", V), "sltiu");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x20), "signed_arith", V), "add");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x22), "signed_arith", V), "sub");
+    static_assert(decoder_matches(R(0x00,4,5,6,1,0x22), "signed_arith", U), "sub reserved shift");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x2c), "signed_arith", V), "dadd overflow");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x2a), "slt", V), "slt");
+    static_assert(decoder_matches(R(0x00,4,5,6,0,0x2b), "sltu", V), "sltu");
+    static_assert(decoder_matches(R(0x00,4,5,0,0,0x30), "trap", V), "tge");
+    static_assert(decoder_matches(R(0x01,4,0x10,0,0,0), "bltzal", V), "bltzal");
+    static_assert(decoder_matches(R(0x01,4,0x11,0,0,0), "bgezal", V), "bgezal");
+    static_assert(decoder_matches(R(0x01,4,0x12,0,0,0), "bltzall", V), "bltzall");
+    static_assert(decoder_matches(R(0x01,4,0x13,0,0,0), "bgezall", V), "bgezall");
+    static_assert(decoder_matches(R(0x01,31,0x10,0,0,0), "bltzal", U), "bltzal rs=ra");
+    static_assert(decoder_matches(R(0x01,31,0x12,0,0,0), "bltzall", U), "bltzall rs=ra");
+    static_assert(decoder_matches(R(0x01,4,0x08,0,0,0), "regimm_trap", V), "tgei");
+    static_assert(decoder_matches(R(0x01,4,0x18,0,0,0), "mtsab", V), "mtsab");
+    static_assert(decoder_matches(R(0x01,4,0x19,0,0,0), "mtsah", V), "mtsah");
+    static_assert(decoder_matches(R(0x01,4,0x1f,0,0,0), "regimm_reserved", X), "reserved regimm");
     {
         const auto jr_ra = decode(0x100000, R(0x00,31,0,0,0,0x08));
         const auto jr_v0 = decode(0x100000, R(0x00,2,0,0,0,0x08));
@@ -846,8 +860,8 @@ int main()
         if (!ok) std::printf("FAIL JR/JALR dynamic-flow decode or reserved fields\n");
     }
 
-    expect("mfc0", R(0x10,0x00,4,12,0,0), "mfc0", V);
-    expect("mtc0", R(0x10,0x04,4,12,0,0), "mtc0", V);
+    static_assert(decoder_matches(R(0x10,0x00,4,12,0,0), "mfc0", V), "mfc0");
+    static_assert(decoder_matches(R(0x10,0x04,4,12,0,0), "mtc0", V), "mtc0");
     for (uint32_t selector = 0; selector < 64; ++selector)
     {
         expect("perf read alias", R(0x10,0,4,25,0,selector),
@@ -855,10 +869,9 @@ int main()
         expect("perf write alias", R(0x10,4,4,25,0,selector),
                (selector & 1u) ? "mtpc" : "mtps", V);
     }
-    expect("perf reserved high selector", R(0x10,4,4,25,1,1),
-           "cop0_transfer", U);
-    expect("tlbwi", R(0x10,0x10,0,0,0,0x02), "tlb", U);
-    expect("bad cop0 co", R(0x10,0x10,0,0,0,0x3f), "cop0_reserved", X);
+    static_assert(decoder_matches(R(0x10,4,4,25,1,1), "cop0_transfer", U), "perf reserved high selector");
+    static_assert(decoder_matches(R(0x10,0x10,0,0,0,0x02), "tlb", U), "tlbwi");
+    static_assert(decoder_matches(R(0x10,0x10,0,0,0,0x3f), "cop0_reserved", X), "bad cop0 co");
     for (uint32_t rt = 0; rt < 4; ++rt)
     {
         const auto ins = decode(0x00100000u, R(0x10,0x08,rt,0,0,0x03));
@@ -867,7 +880,7 @@ int main()
             ins.branch_target == 0x00100010u && lift(ins).kind == LOP_BC0;
         ok ? ++g_pass : ++g_fail;
     }
-    expect("bc0 reserved rt", R(0x10,0x08,4,0,0,0x00), "cop0_reserved", X);
+    static_assert(decoder_matches(R(0x10,0x08,4,0,0,0x00), "cop0_reserved", X), "bc0 reserved rt");
     {
         const auto eret = decode(0x100000, R(0x10,0x10,0,0,0,0x18));
         const bool ok = eret.valid == V && eret.flow == e_ee_flow::FLOW_RETURN &&
