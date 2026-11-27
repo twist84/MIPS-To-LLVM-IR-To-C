@@ -841,3 +841,53 @@ This is a router-only experiment; legacy cache promotion on the
 four newly compact modules depends on retained cache provenance.
 Require unchanged native retirement/entry counts and exact retail
 trace/report/framebuffer before adoption; measure linked size separately.
+
+## I17b acceptance
+
+Archive `ee-iop-i17b.zip` SHA-256
+`5d95be3837a198bc6b39291c1a6ba0d6d65ce8b6def1eb5a0038b9a5b44784fa`.
+Accept `build/iop-native-split-i17b-candidate/modules` for retail
+correctness and linked size, not demonstrated performance. All six
+replacement DLL hashes independently verified against build/replay
+receipts; all six COFF timestamps zero. CRI_ADXI unchanged.
+Pinned input hashes, VU1 inventory and environment match I17a.
+Report and framebuffer independently match byte-for-byte; 184,700
+matching trace samples, zero divergent/unpaired, 3,127/3,127 polls,
+7/7 active modules, 67,846,006 native instructions and 12,611,093
+entry attempts. Interpreter 40.953 s, candidate 40.610 s, native
+execution 613.1 ms, refresh 1.9 ms. Native execution is 5.82% higher
+than I17a on a single pair; monitor with repeated matched runs.
+I17a remains rollback baseline.
+
+Partitioned build: 391/393 hits, compile 0.453 s, link 0.312 s.
+Remaining build: 398/402 hits, compile 1.109 s, link 0.470 s.
+Only six routers missed. I17b library sizes: ARKD_DVD 1,016,320 B,
+LIBSD 424,960 B, MCMAN 1,690,112 B, MCSERV 119,296 B,
+PADMAN 797,696 B, SIO2MAN 91,136 B, CRI_ADXI 1,299,968 B.
+All seven total 5,439,488 B; reduction 73,728 B from I17a and
+148,480 B from I16c. MCSERV and SIO2MAN linked sizes unchanged.
+
+## I17c — Shared memory helper pilot
+
+Opt-in `--split-shared-memory-helpers` requires split compilation.
+After validated lifting, check that region helper prefixes agree,
+and rewrite recognized width-constant memory calls to hidden,
+width-specialized shared wrappers. Each IRX gets its own helper
+object (STEM.helpers.ll) using the original lifter helper definitions.
+The wrapper calls the original always-inline implementation with
+constant width, preserving RAM mapping/alignment, mirroring, MMIO
+callbacks and return values without a runtime width switch after
+optimization. Caller guards, instruction retirement and delay/fault
+exits are untouched. No guest ABI/runtime or ownership changes.
+Unrecognized call shapes are rejected; unaffected region IR remains
+byte-identical and eligible for cache reuse. Existing router/table
+objects are unchanged.
+
+Pilot MCMAN only with the accepted I17b narrow router and 1,024-PC
+residual partition plan, using exact-IR caching. Replace only its DLL
+in the I17b inventory. Measure actual linked size, compile time and
+native execution time; use a pinned retail replay for correctness.
+Outlining may increase hot-path call overhead, so do not infer a
+runtime speedup from smaller binaries. Tests cover all three widths,
+unchanged memory-free regions, unexpected call shapes and comparison
+of compiled inline/shared RAM and callback paths. CI pending.
