@@ -290,9 +290,31 @@ bool test_spu2_sample_clock()
         return false;
     }
     hw.reset();
-    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u)
+    if (hw.spu2().clock_active() || hw.spu2().clock_cycles() != 0u ||
+        hw.spu2().sample_phase() != 0u ||
+        !hw.write(spu + 0x760u, 2u, 1u))
     {
         return false;
+    }
+    // Cross every fractional phase with zero, unit, exact-period and
+    // multi-period advances. The absolute clock remains the reference.
+    uint64_t expected_clock = 0u;
+    for (uint32_t phase = 0u; phase < period; ++phase)
+    {
+        const uint32_t adjustment = static_cast<uint32_t>(
+            (phase + period - expected_clock % period) % period);
+        const uint32_t steps[] = {adjustment, 0u, 1u, period, 2u * period + 7u};
+        for (const uint32_t step : steps)
+        {
+            hw.advance_cycles(step);
+            expected_clock += step;
+            if (hw.spu2().clock_cycles() != expected_clock ||
+                hw.spu2().elapsed_samples() != expected_clock / period ||
+                hw.spu2().sample_phase() != expected_clock % period)
+            {
+                return false;
+            }
+        }
     }
 
     // The attached CPU and kernel share the same hardware. A running
