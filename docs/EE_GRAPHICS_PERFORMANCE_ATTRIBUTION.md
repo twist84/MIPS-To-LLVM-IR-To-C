@@ -1140,3 +1140,75 @@ instruction count. If mismatch, isolate first divergent boundary
 before optimizing dispatch, timing or function discovery.
 Mock tests exercise capture pairing, environment isolation, runner
 pinning, inventory and terminal stats. Final CI/local tests pending.
+
+## G8D.0 — existing IOP AOT rejected; G8D.1 exact slice budget
+
+All five CI workflows passed at 1bd726b2827d8d39e51a1cb44d471880452ac056.
+Capture archive SHA-256
+439509184b974ee11d83aa9a3d6284d5a785d04f742765af60d3acc7d8c075e2.
+Comparison archive SHA-256
+19675e1bd1c48f66a956a268aef5129f1ade2fe6f3bc7cf6fb743964fb25913d.
+Capture and interpreter control terminal report and PPM match
+the accepted reference; capture receipt records seven linked
+IRX identities. Raw capture binaries and AOT DLLs are not in
+archives; receipt identities are not independent binary validation.
+All seven candidate libraries load/activate at recorded bases.
+Interpreter exit 4, 41.532s, 40M dispatches, 3127/3127 polls.
+Candidate exit 1, 5.547s, 13/3127 polls, valid=0; last traced
+dispatch 3664700. Candidate report is in_progress at dispatch 0,
+not terminal. No candidate PPM, no terminal AOT counters.
+No performance comparison is valid. Harness originally masked
+early PAD rejection with missing terminal statistics.
+
+Independently parsed stdout transitions: control 184700 unique,
+candidate 10359, 3961 common, 178 different common, first unpaired
+3500742 (candidate only), first different common 3501056, last
+common sampled transition before first unpaired 3500032.
+This is not an exact first guest divergence: earlier IOP clock
+differences are visible at module entry return.
+
+| Module | Interpreter cycles | AOT cycles |
+|---|---:|---:|
+| SIO2MAN | 3519 | 3519 |
+| MCMAN | 1888233 | 1888233 |
+| MCSERV | 1889363 | 1889364 |
+| LIBSD | 1890482 | 1890483 |
+| CRI_ADXI | 1892098 | 1892099 |
+| ARKD_DVD | 1893878 | 1893913 |
+| PADMAN | 9938981 | 9938525 |
+
+All module return values agree. First guest RPC entry 1894748
+vs 1894805 (+57 IOP cycles), seventh RPC completes 6433135
+vs 6432667. At 50000 EE dispatches pending RPC checkpoint
+1945925 vs 1948741 cycles (+2816). No faulted threads in those
+snapshots. Do not blame PADMAN alone or infer RPC hang from a
+pending checkpoint; token 7 eventually returns in both arms.
+
+G8D.1: source inspection confirms that the old lifter checks
+budget only after a translated branch AND delay instruction.
+When the branch consumes the last budget slot, it can retire one
+extra instruction beyond the kernel quantum. Add a budget check
+immediately after branch retirement on JR/JALR, J/JAL and
+conditional paths. On exhaustion return IOP_AOT_EXIT with delay
+PC, selected next PC, in-delay flag and branch PC; interpreter
+executes the pending slot on next scheduler slice. No ABI or
+runner changes. Existing test only compared final state, allowing
+an overrun to be compensated later. Add per-slice comparisons
+for budgets 1..17 (retirement count, run result, PC/next PC,
+delay identity, GPR/HI/LO, CPU cycles, RAM). This is a real
+contract defect but not proven sole retail root cause. Attached
+hardware advancement still occurs in native batches, rather
+than after each retired instruction; that remains a separate
+accuracy issue to isolate if needed. Do not enable legacy
+SDBZ_IOP_AOT_VERIFY because it repeats live side effects.
+
+Harness now records early exit code, PAD footer, partial AOT log
+and sampled trace comparison before rejecting nonterminal arms;
+never accepts partial evidence. Regression covers early rejection.
+Build iop_recomp and iop_aot_test only, use existing validated
+capture and new output build/iop-native-g8d1. Retain original
+libraries for comparison; same pinned G8C.2 runner/EE/V30/RTC/PAD.
+One matched pair to establish correctness first, output
+ee-iop-g8d1; expand to performance repeats only after acceptance.
+No EE IR/runner/VU1 rebuild or recapture needed. CI/local test
+execution pending.
