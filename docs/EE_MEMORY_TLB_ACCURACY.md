@@ -337,3 +337,35 @@ No pointer, bus transaction, read/modify/write, cache contents,
 writeback, ordering, device permission or synthesized DBE is provided.
 The classification is not a complete physical bus map. No production
 memory or ABI changes; no retail replay required for M4. CI pending.
+
+## Strict memory follow-up M5: precise Level 1 fault commitment
+
+The existing code-only ee_exception_vector() maps TLBL/TLBS to the
+refill vector for outer entry. It cannot distinguish a TLB miss from
+a matched invalid page. The strict path consumes a freshly computed
+instruction-specific fault, preserving this distinction (EE Core
+User's Manual v6.0, sections 4.1.2, 4.2.6–4.2.9).
+https://docs.alexrp.com/mips/ee.pdf
+
+Add a host-only strict fault commit API with explicit caller-supplied
+restored-boundary evidence, ordinary or adjacent delay-slot PC and
+live dispatch state. Recompute against the current TLB and COP0
+registers rather than accepting a stale fault projection. Commit
+Status.EXL, Cause.ExcCode, BadVAddr, Context/EntryHi for TLB faults,
+PC/vector, and the exception exit. Preserve nested EPC/BD together,
+pending IP, independent Level 2 fields, ErrorEPC, other COP0
+registers and GPRs. Keep actual trap PC/delay-slot diagnostics.
+Misaligned ordinary fetch PCs remain representable. ERL is explicitly
+deferred rather than guessing Level 1/Level 2 interactions.
+
+Tests cover 80 outer/nested, BEV, actual/saved delay-slot and
+fault-type combinations, plus bad requests, missing boundary evidence,
+ERL, duplicate entry, misaligned fetch and live TLB re-evaluation.
+Both compile-time and runtime fixtures exercise the same transaction.
+No production caller, legacy helper or ABI is changed. This does not
+prove caller rollback, compute elapsed clocks, read/write guest memory
+or dispatch a handler; the execution front end owns those steps.
+M6 must integrate a bounded opt-in path, explicitly route real guest
+handlers and prove rejected accesses leave no partial side effects
+before any compatibility-path activation. No retail replay required
+for this commit. CI pending.

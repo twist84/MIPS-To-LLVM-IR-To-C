@@ -3,6 +3,7 @@
 #include "ee_address_route.h"
 #include "ee_memory_fault.h"
 #include "ee_memory_bus_plan.h"
+#include "ee_memory_fault_commit.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
 
@@ -713,6 +714,173 @@ constexpr bool test_data_bus_spans()
 
 static_assert(test_data_bus_spans(), "strict physical span and cache policy regression");
 
+constexpr bool test_memory_fault_commit()
+{
+    using kind = ee::e_ee_memory_request_kind;
+    using result = ee::e_ee_memory_fault_commit_result;
+    constexpr uint32_t pc = 0x00100000u;
+    constexpr uint32_t virt = 0x00400000u;
+    constexpr uint32_t context = 0xab800000u;
+    constexpr uint32_t asid = 0xabu;
+    constexpr uint32_t pending = 0x40028400u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t exception = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_EXCEPTION);
+    ee::c_ee_tlb tlb{};
+    if (!tlb.write(0u, 0u, virt | asid, 0x1au, 0x18u))
+    {
+        return false;
+    }
+    for (uint32_t flags = 0u; flags < 16u; ++flags)
+    {
+        const bool nested = (flags & 1u) != 0u;
+        const bool bev = (flags & 2u) != 0u;
+        const bool delay = (flags & 4u) != 0u;
+        const bool saved_bd = (flags & 8u) != 0u;
+        for (uint32_t scenario = 0u; scenario < 5u; ++scenario)
+        {
+            ee::s_ee_cpu_state cpu{};
+            cpu.m_pc = pc;
+            cpu.m_exit_reason = dispatch;
+            cpu.m_gpr[3] = {0x1122334455667788ull, 0x99aabbccddeeff00ull};
+            cpu.m_cop0[ee::COP0_Status] = (nested ? ee::STATUS_EXL : 0u) |
+                (bev ? ee::STATUS_BEV : 0u);
+            const uint32_t old_status = cpu.m_cop0[ee::COP0_Status];
+            cpu.m_cop0[ee::COP0_Cause] = pending | (saved_bd ? ee::CAUSE_BD : 0u);
+            cpu.m_cop0[ee::COP0_EPC] = 0x12340000u;
+            cpu.m_cop0[ee::COP0_ErrorEPC] = 0x87654320u;
+            cpu.m_cop0[ee::COP0_Context] = context | 0x120u;
+            cpu.m_cop0[ee::COP0_EntryHi] = 0x00200000u | asid;
+            cpu.m_cop0[ee::COP0_EntryLo0] = 0x123u;
+            cpu.m_cop0[ee::COP0_Random] = 31u;
+            ee::s_ee_memory_fault_request request{};
+            request.m_kind = scenario == 4u ? kind::PARTIAL : kind::DATA;
+            request.m_data_kind = ee::e_ee_data_access_kind::WORD;
+            request.m_partial_kind = ee::e_ee_partial_access_kind::WORD_RIGHT;
+            request.m_faulting_pc = pc + (delay ? 4u : 0u);
+            request.m_branch_pc = delay ? pc : 0u;
+            request.m_in_delay_slot = delay;
+            request.m_architectural_state_restored = true;
+            request.m_write_access = scenario >= 3u;
+            constexpr uint32_t addresses[] =
+            {
+                0x00500000u, virt + 0x1000u, 0x00500001u,
+                virt + 0x1000u, virt + 3u
+            };
+            constexpr uint32_t codes[] =
+            {
+                ee::EX_TLBL, ee::EX_TLBL, ee::EX_AdEL, ee::EX_TLBS, ee::EX_Mod
+            };
+            request.m_address = addresses[scenario];
+            bool actual_delay_slot = !delay;
+            const uint32_t expected_vector = scenario == 0u && !nested
+                ? (bev ? ee::VEC_TLB_REFILL_BEV1 : ee::VEC_TLB_REFILL_BEV0)
+                : (bev ? ee::VEC_COMMON_BEV1 : ee::VEC_COMMON_BEV0);
+            const uint32_t expected_cause = pending | (codes[scenario] << 2u) |
+                ((nested ? saved_bd : delay) ? ee::CAUSE_BD : 0u);
+            if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+                    result::COMMITTED ||
+                cpu.m_pc != expected_vector || cpu.m_exit_reason != exception ||
+                cpu.m_cop0[ee::COP0_Status] != (old_status | ee::STATUS_EXL) ||
+                cpu.m_cop0[ee::COP0_Cause] != expected_cause ||
+                cpu.m_cop0[ee::COP0_EPC] != (nested ? 0x12340000u : pc) ||
+                cpu.m_cop0[ee::COP0_ErrorEPC] != 0x87654320u ||
+                cpu.m_cop0[ee::COP0_BadVAddr] != addresses[scenario] ||
+                cpu.m_cop0[ee::COP0_Context] != (scenario == 2u ? context | 0x120u :
+                    context | ((addresses[scenario] >> 9u) & 0x007ffff0u)) ||
+                cpu.m_cop0[ee::COP0_EntryHi] != (scenario == 2u ? 0x00200000u | asid :
+                    (addresses[scenario] & 0xffffe000u) | asid) ||
+                cpu.m_cop0[ee::COP0_EntryLo0] != 0x123u ||
+                cpu.m_cop0[ee::COP0_Random] != 31u ||
+                cpu.m_pad != request.m_faulting_pc || actual_delay_slot != delay ||
+                cpu.m_gpr[3].m_lo != 0x1122334455667788ull ||
+                cpu.m_gpr[3].m_hi != 0x99aabbccddeeff00ull ||
+                ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+                    result::UNSAFE_BOUNDARY)
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+constexpr bool test_memory_fault_commit_guards()
+{
+    using kind = ee::e_ee_memory_request_kind;
+    using result = ee::e_ee_memory_fault_commit_result;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    ee::c_ee_tlb tlb{};
+    ee::s_ee_cpu_state cpu{};
+    cpu.m_pc = 0x00400001u;
+    cpu.m_exit_reason = dispatch;
+    cpu.m_cop0[ee::COP0_BadVAddr] = 0x76543210u;
+    cpu.m_cop0[ee::COP0_Cause] = 0x80008400u;
+    bool actual_delay_slot = true;
+    ee::s_ee_memory_fault_request request{};
+    request.m_kind = kind::FETCH;
+    request.m_address = cpu.m_pc;
+    request.m_faulting_pc = cpu.m_pc;
+    if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+            result::UNSAFE_BOUNDARY)
+    {
+        return false;
+    }
+    request.m_architectural_state_restored = true;
+    request.m_branch_pc = 4u;
+    if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+            result::UNSAFE_BOUNDARY)
+    {
+        return false;
+    }
+    request.m_branch_pc = 0u;
+    request.m_write_access = true;
+    if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+            result::INVALID_REQUEST)
+    {
+        return false;
+    }
+    request.m_write_access = false;
+    cpu.m_cop0[ee::COP0_Status] = ee::STATUS_ERL;
+    if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+            result::UNMODELED_LEVEL)
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_Status] = 0u;
+    if (cpu.m_pc != 0x00400001u || cpu.m_exit_reason != dispatch ||
+        cpu.m_cop0[ee::COP0_BadVAddr] != 0x76543210u ||
+        cpu.m_cop0[ee::COP0_Cause] != 0x80008400u || !actual_delay_slot)
+    {
+        return false;
+    }
+    if (ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) !=
+            result::COMMITTED ||
+        cpu.m_cop0[ee::COP0_EPC] != 0x00400001u ||
+        cpu.m_cop0[ee::COP0_BadVAddr] != 0x00400001u ||
+        cpu.m_pc != ee::VEC_COMMON_BEV0 || actual_delay_slot)
+    {
+        return false;
+    }
+    // Recompute live translation: a mapping installed before entry
+    // makes a previously faulting aligned fetch succeed.
+    cpu = {};
+    cpu.m_pc = 0x00400000u;
+    cpu.m_exit_reason = dispatch;
+    request.m_address = cpu.m_pc;
+    request.m_faulting_pc = cpu.m_pc;
+    if (!tlb.write(0u, 0u, cpu.m_pc, 0x1eu, 0x1eu))
+    {
+        return false;
+    }
+    return ee::ee_commit_memory_fault_at_boundary(cpu, actual_delay_slot, tlb, request) ==
+               result::NO_MODELED_FAULT &&
+           cpu.m_pc == 0x00400000u && cpu.m_exit_reason == dispatch &&
+           cpu.m_cop0[ee::COP0_Status] == 0u && !actual_delay_slot;
+}
+
+static_assert(test_memory_fault_commit(), "precise Level 1 memory fault commitment");
+static_assert(test_memory_fault_commit_guards(), "memory fault commitment guards");
+
 // Separate page sizes keep each constant-evaluation budget bounded.
 static_assert(test_tlb_page_mask(0u), "4 KiB TLB page regression");
 static_assert(test_tlb_page_mask(0x6000u), "16 KiB TLB page regression");
@@ -917,6 +1085,11 @@ int main()
         return 1;
     }
     if (!check(test_data_bus_spans(), "strict physical span and cache policy regression"))
+    {
+        return 1;
+    }
+    if (!check(test_memory_fault_commit() && test_memory_fault_commit_guards(),
+               "precise Level 1 memory fault commitment"))
     {
         return 1;
     }
