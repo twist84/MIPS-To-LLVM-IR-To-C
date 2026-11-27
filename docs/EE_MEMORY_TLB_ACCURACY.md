@@ -597,3 +597,28 @@ existing single instruction, sequence and equality-branch tests
 remain. No default lowering or production ABI change. CI pending;
 conditional link branches, general CFG, device/cache/ROM handling,
 clock accounting and actual BIOS dispatch remain open.
+
+## Strict memory follow-up M6E1: immutable EE ROM0 backing and authentic fetch probe
+
+Existing OpenPS2BIOS CI executes IOP R3000A firmware, not EE reset
+code; its EE rendezvous uses synthetic code with authentic IOP
+firmware. Keep original assertions and HLE-first retail unchanged.
+
+Add an explicit immutable 4 MiB EE ROM0 view for translated,
+uncached instruction fetch only. Strict interpreter and native
+preparation consume it; no ROM pointer is exposed as mutable data.
+ROM data access, cache/device state and ERL execution remain
+unmodeled. Existing callers default to no ROM backing.
+
+Run the existing three guest TLB repair/ERET handler scenarios
+also with synthetic BEV1 ROM vectors. Check native preparation
+from ROM code with RAM data, ROM store refusal, exact image size,
+aperture edge, privilege and cached fetch refusal.
+
+After the existing SHA256 verification, pinned OpenPS2BIOS v0.6
+CI runs ee_rom0_fetch_probe on authentic reset/refill/common vector
+bytes and archives the observed words/decode classifications.
+It retires zero instructions: fetch validation, not firmware boot.
+Next: examine observed reset words and introduce bounded reset
+execution with verified COP0 initialization. No retail replay
+required. CI pending.

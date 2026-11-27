@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_state.h"
+#include "ee_strict_rom0.h"
 #include <cstdint>
 
 namespace ee
@@ -51,6 +52,7 @@ struct s_ee_strict_ram_evidence
     bool m_ordinary_boundary = false;
     bool m_isolated_ram = false;
     bool m_guest_handler_execution = false;
+    s_ee_strict_rom0_view m_rom0{};
 };
 
 enum class e_ee_strict_ram_step_result : uint8_t
@@ -64,7 +66,7 @@ enum class e_ee_strict_ram_step_result : uint8_t
 
 // No HLE alias fallback, clock updates or automatic handler dispatch.
 // With explicit handler evidence, a committed memory exception can enter
-// its RAM-backed guest vector and execute restricted COP0 instructions.
+// its RAM- or ROM0-backed guest vector and execute restricted COP0 instructions.
 // Success advances PC by four or returns through EPC on ERET. A modeled
 // fault enters Level 1 before any data write. All rejected outcomes leave
 // CPU, RAM, TLB and diagnostic unchanged.

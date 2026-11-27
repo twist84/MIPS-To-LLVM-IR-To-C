@@ -6,6 +6,8 @@
 #include "ee_memory_fault_commit.h"
 #include "ee_exceptions.h"
 #include "ee_runtime.h"
+#include "ee_strict_native_word.h"
+#include <vector>
 
 #include <cstdint>
 #include <cstdio>
@@ -1198,7 +1200,7 @@ bool test_strict_ram_wide_execution()
            actual_delay_slot;
 }
 
-bool test_strict_ram_handler_execution()
+bool test_strict_ram_handler_execution(bool rom_backed)
 {
     using result = ee::e_ee_strict_ram_step_result;
     constexpr uint32_t pc = 0x00400000u;
@@ -1210,7 +1212,9 @@ bool test_strict_ram_handler_execution()
     constexpr uint64_t marker = 0x1234567887654321ull;
     constexpr uint32_t original = 0x80ff8180u;
     const ee::s_ee_strict_ram_evidence plain{true, true};
-    const ee::s_ee_strict_ram_evidence handler{true, true, true};
+    std::vector<uint8_t> rom(rom_backed ? ee::s_ee_strict_rom0_view::k_size : 0u);
+    const ee::s_ee_strict_ram_evidence handler{true, true, true, {rom.data(), rom.size()}};
+    const uint32_t user_status = 0x10u | (rom_backed ? ee::STATUS_BEV : 0u);
     const auto mfc = [](uint32_t rt, uint32_t rd)
     {
         return 0x40000000u | (rt << 16u) | (rd << 11u);
@@ -1233,8 +1237,25 @@ bool test_strict_ram_handler_execution()
             return false;
         }
         const bool write = scenario == 2u;
-        const uint32_t vector = scenario == 0u ? ee::VEC_TLB_REFILL_BEV0 : ee::VEC_COMMON_BEV0;
+        const uint32_t vector = rom_backed
+            ? (scenario == 0u ? ee::VEC_TLB_REFILL_BEV1 : ee::VEC_COMMON_BEV1)
+            : (scenario == 0u ? ee::VEC_TLB_REFILL_BEV0 : ee::VEC_COMMON_BEV0);
         const uint32_t vector_physical = vector & 0x1fffffffu;
+        const auto put = [&](uint32_t address, uint32_t word)
+        {
+            if (rom_backed)
+            {
+                const uint32_t offset = address - ee::s_ee_strict_rom0_view::k_base;
+                for (uint32_t i = 0u; i < 4u; ++i)
+                {
+                    rom[offset + i] = static_cast<uint8_t>(word >> (i * 8u));
+                }
+            }
+            else
+            {
+                memory.write32(address, word);
+            }
+        };
         memory.write32(0x1000u, ((write ? 0x2bu : 0x23u) << 26u) |
             (4u << 21u) | (2u << 16u));
         memory.write32(0x2000u, original);
@@ -1254,12 +1275,12 @@ bool test_strict_ram_handler_execution()
         };
         for (uint32_t i = 0u; i < sizeof(instructions) / sizeof(instructions[0]); ++i)
         {
-            memory.write32(vector_physical + i * 4u, instructions[i]);
+            put(vector_physical + i * 4u, instructions[i]);
         }
         ee::s_ee_cpu_state cpu{};
         cpu.m_pc = pc;
         cpu.m_exit_reason = dispatch;
-        cpu.m_cop0[ee::COP0_Status] = 0x10u;
+        cpu.m_cop0[ee::COP0_Status] = user_status;
         cpu.m_cop0[ee::COP0_Config] = 2u; // uncached KSEG0
         cpu.m_cop0[ee::COP0_EntryHi] = 0xabu;
         cpu.m_gpr[4].m_lo = data;
@@ -1270,7 +1291,7 @@ bool test_strict_ram_handler_execution()
             cpu.m_pc != vector || cpu.m_exit_reason != exception ||
             cpu.m_cop0[ee::COP0_EPC] != pc ||
             cpu.m_cop0[ee::COP0_Cause] != ((write ? ee::EX_Mod : ee::EX_TLBL) << 2u) ||
-            cpu.m_cop0[ee::COP0_Status] != (0x10u | ee::STATUS_EXL) ||
+            cpu.m_cop0[ee::COP0_Status] != (user_status | ee::STATUS_EXL) ||
             cpu.m_gpr[2].m_lo != marker || memory.read32(0x2000u) != original ||
             actual_delay_slot)
         {
@@ -1283,7 +1304,7 @@ bool test_strict_ram_handler_execution()
             return false;
         }
         // A rejected first instruction must preserve the pending exception.
-        memory.write32(vector_physical, 0x42000006u); // unsupported TLBWR
+        put(vector_physical, 0x42000006u); // unsupported TLBWR
         if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, handler) !=
                 result::UNSUPPORTED_INSTRUCTION ||
             cpu.m_pc != vector || cpu.m_exit_reason != exception ||
@@ -1291,7 +1312,7 @@ bool test_strict_ram_handler_execution()
         {
             return false;
         }
-        memory.write32(vector_physical, instructions[0]);
+        put(vector_physical, instructions[0]);
         for (uint32_t i = 0u; i < sizeof(instructions) / sizeof(instructions[0]); ++i)
         {
             if (cpu.m_pc != vector + i * 4u ||
@@ -1301,7 +1322,7 @@ bool test_strict_ram_handler_execution()
                 return false;
             }
         }
-        if (cpu.m_pc != pc || cpu.m_cop0[ee::COP0_Status] != 0x10u ||
+        if (cpu.m_pc != pc || cpu.m_cop0[ee::COP0_Status] != user_status ||
             cpu.m_gpr[26].m_lo != data ||
             cpu.m_gpr[27].m_lo != ((data & ~0x1fffu) | 0xabu) ||
             memory.tlb().lookup(data, 0xabu, true).m_status != ee::e_ee_tlb_lookup_status::TRANSLATED ||
@@ -1318,12 +1339,54 @@ bool test_strict_ram_handler_execution()
         memory.write32(0x1004u, 0x42000018u);
         if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, handler) !=
                 result::UNSUPPORTED_INSTRUCTION ||
-            cpu.m_pc != pc + 4u || cpu.m_cop0[ee::COP0_Status] != 0x10u)
+            cpu.m_pc != pc + 4u || cpu.m_cop0[ee::COP0_Status] != user_status)
         {
             return false;
         }
     }
     return true;
+}
+
+bool test_strict_rom0_native_fetch()
+{
+    using result = ee::e_ee_strict_ram_step_result;
+    std::vector<uint8_t> rom(ee::s_ee_strict_rom0_view::k_size, 0u);
+    const ee::s_ee_strict_rom0_view view{rom.data(), rom.size()};
+    ee::ee_memory memory(0x3000u);
+    ee::s_ee_cpu_state cpu{};
+    cpu.m_exit_reason = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    cpu.m_pc = 0xbfc00000u;
+    cpu.m_gpr[4].m_lo = 0xa0002000u;
+    rom[2] = 0x82u;
+    rom[3] = 0x8cu; // lw r2,0(r4)
+    bool delay = true;
+    const ee::s_ee_strict_ram_evidence evidence{true, true, false, view};
+    ee::s_ee_strict_native_word_context context{&memory, &delay, evidence};
+    uint8_t* bytes = nullptr;
+    uint32_t lane = 0u;
+    if (ee::ee_strict_native_prepare_transfer(&cpu, &context, cpu.m_pc,
+            0x8c820000u, &bytes, &lane) != static_cast<uint32_t>(result::COMMITTED) ||
+        bytes != memory.physical_ram_span(0x2000u, 4u))
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xbfc00000u;
+    rom[3] = 0xacu; // sw r2,0(r4), ROM data access must refuse
+    if (ee::ee_strict_native_prepare_transfer(&cpu, &context, cpu.m_pc,
+            0xac820000u, &bytes, &lane) != static_cast<uint32_t>(result::UNMODELED_ACCESS) ||
+        bytes != nullptr || cpu.m_pc != 0xbfc00000u ||
+        ee::ee_execute_strict_ram_step(cpu, memory, delay, evidence) != result::UNMODELED_ACCESS ||
+        ee::ee_read_instruction_word(rom.data()) != 0xac820000u)
+    {
+        return false;
+    }
+    const auto last = ee::ee_plan_instruction_fetch(memory.tlb(), 0xbffffffcu, 0u, 0u, 0u, 0u);
+    const auto user = ee::ee_plan_instruction_fetch(memory.tlb(), 0xbfc00000u, 0x10u, 0u, 0u, 0u);
+    const auto cached = ee::ee_plan_instruction_fetch(memory.tlb(), 0x9fc00000u, 0u, 3u, 0u, 0u);
+    const ee::s_ee_strict_rom0_view short_view{rom.data(), rom.size() - 1u};
+    return view.fetch_span(last) == rom.data() + rom.size() - 4u &&
+           short_view.fetch_span(last) == nullptr &&
+           view.fetch_span(user) == nullptr && view.fetch_span(cached) == nullptr;
 }
 
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
@@ -1532,7 +1595,11 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_ram_handler_execution(), "strict guest TLB handler and ERET regression"))
+    if (!check((test_strict_ram_handler_execution(false) && test_strict_ram_handler_execution(true)), "strict guest TLB handler and ERET regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_rom0_native_fetch(), "strict ROM0 native fetch regression"))
     {
         return 1;
     }

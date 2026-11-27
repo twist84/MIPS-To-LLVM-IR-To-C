@@ -560,6 +560,8 @@ target_link_libraries(ee_ram_interpreter_test PRIVATE ee_core)
 add_executable(ee_scalar_constant_test tests/smoke/ee_scalar_constant_test.cpp)
 target_link_libraries(ee_scalar_constant_test PRIVATE ee_core)
 target_include_directories(ee_scalar_constant_test PRIVATE ${CMAKE_SOURCE_DIR}/src/architecture)
+add_executable(ee_rom0_fetch_probe src/tools/ee_rom0_fetch_probe_main.cpp)
+target_link_libraries(ee_rom0_fetch_probe PRIVATE ee_core)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
 target_link_libraries(ee_ram_tlb_test PRIVATE ee_core)
 

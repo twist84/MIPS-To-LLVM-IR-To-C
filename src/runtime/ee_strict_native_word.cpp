@@ -95,12 +95,13 @@ uint32_t strict_native_prepare(
         ee_plan_data_bus_span(fetch.m_access, 4u, config, retail_ram_end));
     if (code == nullptr)
     {
+        code = context->m_evidence.m_rom0.fetch_span(fetch);
+    }
+    if (code == nullptr)
+    {
         return static_cast<uint32_t>(result::UNMODELED_ACCESS);
     }
-    const uint32_t live = static_cast<uint32_t>(code[0]) |
-        (static_cast<uint32_t>(code[1]) << 8u) |
-        (static_cast<uint32_t>(code[2]) << 16u) |
-        (static_cast<uint32_t>(code[3]) << 24u);
+    const uint32_t live = ee_read_instruction_word(code);
     // A stale compiled instruction must never execute. This is not a
     // code cache invalidation/recompilation mechanism.
     if (live != expected_opcode)

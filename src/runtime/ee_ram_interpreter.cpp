@@ -761,8 +761,8 @@ e_ee_strict_ram_step_result strict_ram_step_impl(
     {
         return commit_fault();
     }
-    // Only ordinary uncached physical RAM, not cached/disabled-cache,
-    // accelerated, scratchpad, ROM, device or unmodeled access.
+    // Data remains uncached physical RAM only. Optional immutable
+    // ROM0 backing is used exclusively for instruction fetch.
     constexpr uint32_t retail_ram_end = 0x02000000u;
     const auto backed_span = [&](const s_ee_bus_span_plan& bus) -> uint8_t*
     {
@@ -782,12 +782,13 @@ e_ee_strict_ram_step_result strict_ram_step_impl(
         ee_plan_data_bus_span(fetch.m_access, 4u, config, retail_ram_end));
     if (code == nullptr)
     {
+        code = evidence.m_rom0.fetch_span(fetch);
+    }
+    if (code == nullptr)
+    {
         return result::UNMODELED_ACCESS;
     }
-    const uint32_t instruction = static_cast<uint32_t>(code[0]) |
-        (static_cast<uint32_t>(code[1]) << 8u) |
-        (static_cast<uint32_t>(code[2]) << 16u) |
-        (static_cast<uint32_t>(code[3]) << 24u);
+    const uint32_t instruction = ee_read_instruction_word(code);
     const uint32_t primary = instruction >> 26u;
     const uint32_t rs = (instruction >> 21u) & 31u;
     const uint32_t rt = (instruction >> 16u) & 31u;
