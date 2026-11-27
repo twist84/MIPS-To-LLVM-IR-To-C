@@ -1365,3 +1365,26 @@ and masks, IP3, BEV1 entry, acknowledgement and ERET. Negative
 tests verify disabled/misaligned/unsupported starts are read-only.
 SIF/VIF DMA and dual processor coordination remain future work;
 isolated firmware and retail execution remain unchanged. Pending CI.
+
+## M6E3H3C1: live SIF mailbox and bounded VIF device integration
+
+H3B passed both firmware versions at d48646f8:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46058238123
+
+Connect existing SIF MSCOM/SMCOM/MSFLAG/SMFLAG MMIO, preserving
+EE/IOP ownership, OR and W1C semantics. No IOP flags, readiness,
+RPC server or packet completion are fabricated.
+Own separate production VIF0 and VIF1 controllers; VIF0 references
+the pilot-owned VU0 state. Bind existing hardware INTC callbacks.
+Allow explicit register subset, FBRST reset/ack and direct FIFO SQ.
+Admit normal forward DMA channels 0/1 only for fully prevalidated
+single-word NOP/STCYCL/ITOP/STMOD/MARK commands, including MARK.I
+(nonstalling IRQ), with no partial commands or VU/GIF launches.
+Use production parsing and DMA completion, not hand-authored
+register values. Reject unsupported command packets before DMA
+start/retirement. Shared RAM is the real guest source.
+Directed ROM tests cover mailbox ownership, both VIF channels,
+guest MARK interrupt and D_STAT source, reset and refusal,
+plus direct FIFO NOP. No SIF FIFO endpoint yet; genuine paired
+SIF DMA is H3C2, with IOP ownership and progress explicit.
+No production retail path changes. Pending CI.

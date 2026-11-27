@@ -83,6 +83,11 @@ public:
         }
         m_hardware.bind_cpu(&m_cpu);
         m_hardware.bind_memory(&m_memory);
+        m_runtime.m_vu0_state = &m_vu0;
+        m_vif0.bind_vu0(&m_vu0);
+        m_hardware.bind_vif0(&m_vif0);
+        m_hardware.bind_vif1(&m_vif1);
+        m_hardware.bind_device_transfer(this, &vif_dma);
     }
 
     c_ee_strict_firmware_pilot(const c_ee_strict_firmware_pilot&) = delete;
@@ -166,7 +171,7 @@ public:
             m_cpu.m_exit_reason = static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH);
         }
         m_branch_transaction = slots == 2u;
-        const s_ee_reset_mmio mmio{this, &write, &read, true, true};
+        const s_ee_reset_mmio mmio{this, &write, &read, true, true, true};
         s_ee_reset_prefix_step action{};
         if (m_retired == 0u)
         {
@@ -207,7 +212,7 @@ public:
 
         // Effects of the instruction/slot are committed first; then service
         // due timers (production timer model uses ascending channel order).
-        // A prevalidated normal SPR DMA start is a synchronous reference
+        // A prevalidated normal SPR/VIF DMA start is a synchronous reference
         // transaction at the retired store boundary, before IRQ sampling.
         // No asynchronous latency/arbitration or fake completion is used.
         const bool dma_completed = m_dma_start_address != 0u;
@@ -316,7 +321,7 @@ private:
     }
 
     static constexpr uint32_t k_d_ctrl = 0x1000e000u;
-    static constexpr uint32_t k_spr_channel_mask = (1u << 8u) | (1u << 9u);
+    static constexpr uint32_t k_dma_channel_mask = 3u | (1u << 8u) | (1u << 9u);
 
     static constexpr bool spr_register(uint32_t address)
     {
@@ -326,13 +331,88 @@ private:
             (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
     }
 
-    bool prepare_spr_start(uint32_t address, uint32_t word)
+    static constexpr bool vif_dma_register(uint32_t address)
+    {
+        const uint32_t base = address & ~0xffu;
+        const uint32_t offset = address & 0xffu;
+        return (base == c_ee_dmac::k_vif0_base || base == c_ee_dmac::k_vif1_base) &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u);
+    }
+
+    static constexpr bool vif_command_supported(uint32_t word)
+    {
+        // Only complete, single-word commands, no VU starts, path
+        // traffic, partial commands or interrupt stalls. MARK.I alone
+        // is the production parser's explicitly non-stalling IRQ.
+        const uint32_t op = (word >> 24u) & 0x7fu;
+        return (word & 0x00ff0000u) == 0u &&
+            ((op == 7u) || ((word & 0x80000000u) == 0u &&
+             (op == 0u || op == 1u || op == 4u || op == 5u)));
+    }
+
+    static bool vif_packet_supported(const uint8_t* data, uint32_t qwc)
+    {
+        if (data == nullptr || qwc == 0u || qwc > 1024u)
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < qwc * 4u; ++i)
+        {
+            if (!vif_command_supported(ee_read_instruction_word(data + i * 4u)))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool vif_dma(void* user, uint32_t channel, const uint8_t* data, uint32_t qwc)
+    {
+        auto& self = *static_cast<c_ee_strict_firmware_pilot*>(user);
+        if (channel > 1u || !vif_packet_supported(data, qwc))
+        {
+            return false;
+        }
+        return (channel == 0u ? self.m_vif0 : self.m_vif1).consume(data, qwc);
+    }
+
+    static constexpr bool sif_register(uint32_t address)
+    {
+        return address >= c_ee_sif::k_mscom_address && address <= c_ee_sif::k_smflag_address &&
+            (address & 15u) == 0u;
+    }
+
+    c_ee_vif1* vif_register(uint32_t address)
+    {
+        const uint32_t offset = address & 0x3ffu;
+        switch (offset)
+        {
+        case 0u: case 0x10u: case 0x20u: case 0x30u:
+        case 0x40u: case 0x50u: case 0x80u: case 0x90u:
+            break;
+        default: return nullptr;
+        }
+        const uint32_t base = address & ~0x3ffu;
+        if (base == c_ee_vif1::k_vif0_register_base)
+        {
+            return &m_vif0;
+        }
+        if (base == c_ee_vif1::k_register_base)
+        {
+            return &m_vif1;
+        }
+        return nullptr;
+    }
+
+    bool prepare_dma_start(uint32_t address, uint32_t word)
     {
         // Normal-mode STR only. Dedicated scratchpad channels have
         // fixed direction; accept the reference DIR bit without inventing
         // chain/interleave/tag behavior. Reject disabled DMAE instead of
         // pretending to model queued starts while the controller is off.
+        const bool vif = vif_dma_register(address);
         if (m_dmac_control != 1u || (word & ~0x101u) != 0u ||
+            (vif && word != 0x101u) ||
             m_hardware.dmac().started_channels() != 0u)
         {
             return false;
@@ -350,6 +430,12 @@ private:
         if (qwc.m_lo == 0u || qwc.m_lo > 1024u || (madr.m_lo & 15u) != 0u ||
             madr.m_lo >= k_ram_size || bytes > k_ram_size - madr.m_lo ||
             !m_memory.contains(static_cast<uint32_t>(madr.m_lo), static_cast<size_t>(bytes)))
+        {
+            return false;
+        }
+        if (vif && !vif_packet_supported(m_memory.read_span(
+                static_cast<uint32_t>(madr.m_lo), static_cast<size_t>(bytes)),
+                static_cast<uint32_t>(qwc.m_lo)))
         {
             return false;
         }
@@ -387,9 +473,19 @@ private:
             *value = {self.m_dmac_control, 0u};
             return true;
         }
-        if (address == c_ee_dmac::k_stat_address || spr_register(address))
+        if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address))
         {
             return c_ee_dmac::mmio_read(&self.m_hardware.dmac(), address, width, value);
+        }
+        if (sif_register(address))
+        {
+            return c_ee_sif::mmio_read(&self.m_hardware.sif(), address, width, value);
+        }
+        if (auto* vif = self.vif_register(address))
+        {
+            // FBRST is a write-only command; do not synthesize readback.
+            return (address & 0x3ffu) != 0x10u &&
+                c_ee_vif1::mmio_read(vif, address, width, value);
         }
         uint32_t index = 0u;
         uint32_t offset = 0u;
@@ -404,7 +500,27 @@ private:
     static bool write(void* user, uint32_t address, uint32_t width, const s_ee_u128* value)
     {
         auto& self = *static_cast<c_ee_strict_firmware_pilot*>(user);
-        if (self.m_branch_transaction || width != 4u || value == nullptr)
+        if (self.m_branch_transaction || value == nullptr)
+        {
+            return false;
+        }
+        if (width == 16u && (address == c_ee_vif1::k_vif0_fifo_base ||
+                            address == c_ee_vif1::k_fifo_base))
+        {
+            const uint32_t words[] = {static_cast<uint32_t>(value->m_lo),
+                static_cast<uint32_t>(value->m_lo >> 32u), static_cast<uint32_t>(value->m_hi),
+                static_cast<uint32_t>(value->m_hi >> 32u)};
+            for (const uint32_t word : words)
+            {
+                if (!vif_command_supported(word))
+                {
+                    return false;
+                }
+            }
+            auto& vif = address == c_ee_vif1::k_vif0_fifo_base ? self.m_vif0 : self.m_vif1;
+            return c_ee_vif1::mmio_write(&vif, address, width, value);
+        }
+        if (width != 4u)
         {
             return false;
         }
@@ -424,7 +540,7 @@ private:
         }
         if (address == c_ee_dmac::k_stat_address)
         {
-            constexpr uint32_t supported = k_spr_channel_mask | (k_spr_channel_mask << 16u);
+            constexpr uint32_t supported = k_dma_channel_mask | (k_dma_channel_mask << 16u);
             // Other channel sources and bus error state are not connected.
             if ((dmac_word & ~supported) != 0u)
             {
@@ -432,13 +548,13 @@ private:
             }
             return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
         }
-        if (spr_register(address))
+        if (spr_register(address) || vif_dma_register(address))
         {
             if ((address & 0xffu) == 0u)
             {
                 if ((dmac_word & c_ee_dmac::k_chcr_str) != 0u)
                 {
-                    return self.prepare_spr_start(address, dmac_word);
+                    return self.prepare_dma_start(address, dmac_word);
                 }
                 if ((dmac_word & ~1u) != 0u)
                 {
@@ -446,6 +562,23 @@ private:
                 }
             }
             return c_ee_dmac::mmio_write(&self.m_hardware.dmac(), address, width, value);
+        }
+        if (sif_register(address))
+        {
+            // IOP-owned SMCOM is read-only, SMFLAG W1C. No IOP
+            // producer or readiness is manufactured by this path.
+            return c_ee_sif::mmio_write(&self.m_hardware.sif(), address, width, value);
+        }
+        if (auto* vif = self.vif_register(address))
+        {
+            const uint32_t offset = address & 0x3ffu;
+            if ((offset == 0x10u && (dmac_word & ~9u) == 0u) ||
+                (offset == 0x20u && (dmac_word & ~7u) == 0u) ||
+                (offset == 0x30u && (dmac_word & ~0xffffu) == 0u))
+            {
+                return c_ee_vif1::mmio_write(vif, address, width, value);
+            }
+            return false;
         }
         uint32_t index = 0u;
         uint32_t offset = 0u;
@@ -476,6 +609,9 @@ private:
     ee_memory m_memory;
     c_ee_reset_cold_cache m_cold_cache{};
     s_ee_runtime m_runtime{};
+    s_ee_vu0_state m_vu0{};
+    c_ee_vif1 m_vif0{};
+    c_ee_vif1 m_vif1{};
     c_ee_hw_bus m_hardware{};
     c_ee_host_timers m_timers{&m_runtime, &m_hardware};
     uint64_t m_retired = 0u;

@@ -521,4 +521,114 @@ bool test_strict_firmware_spr_dma()
     }
     return true;
 }
+
+bool test_strict_firmware_sif_vif()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    using result = ee::e_ee_reset_prefix_result;
+    // SIF mailbox ownership: EE publishes MSCOM and ORs MSFLAG,
+    // reads zero IOP-owned fields, acknowledges no nonexistent flags.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x3c04b000u, 0x3484f200u,
+            0x34021234u, 0xac820000u, 0x34020001u, 0xac820020u,
+            0x34020004u, 0xac820020u, 0x8c830000u, 0x8c850020u,
+            0x8c860010u, 0xac820030u, 0x8c870030u, 0xac820010u}));
+        for (uint32_t i = 0u; i < 14u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        const auto refused = pilot.step(1u);
+        if (pilot.cpu().m_gpr[3].m_lo != 0x1234u || pilot.cpu().m_gpr[5].m_lo != 5u ||
+            pilot.cpu().m_gpr[6].m_lo != 0u || pilot.cpu().m_gpr[7].m_lo != 0u ||
+            pilot.intc_status() != 0u || pilot.dmac_status() != 0u ||
+            refused.m_boundary != boundary::HOST_REFUSAL ||
+            refused.m_instruction.m_result != result::DATA_UNAVAILABLE || pilot.cycle() != 14u)
+        {
+            return false;
+        }
+    }
+    // Guest RAM packet: STCYCL 0x0101, MARK.I 0x1234, NOP, NOP.
+    // Run both VIF channels and verify real VIF/DMAC source latches.
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        for (uint32_t bad = 0u; bad < 2u; ++bad)
+        {
+            const uint32_t vif_base = channel == 0u ? 0x3800u : 0x3c00u;
+            const uint32_t dma_base = channel == 0u ? 0x8000u : 0x9000u;
+            ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+                0x40806000u, 0x3c04a000u,
+                bad != 0u ? 0x3c021400u : 0x3c020100u,
+                0x34420101u, 0xac820000u, 0x3c028700u, 0x34421234u,
+                0xac820004u, 0x3c05b000u, 0x34a6e000u,
+                0x34020001u, 0xacc20000u,
+                0x3c020000u | (1u << channel), 0xacc20010u,
+                0x34a7f010u, 0x34020000u | (1u << (4u + channel)), 0xace20000u,
+                0x34a70000u | dma_base, 0xace00010u,
+                0x34020001u, 0xace20020u, 0x34020101u, 0xace20000u,
+                0x34a70000u | vif_base, 0x8ce80040u, 0x8ce90030u,
+                0x8cea0000u, 0x34020008u, 0xace20010u,
+                0x34020001u, 0xace20010u, 0x8ceb0040u, 0x8cec0030u}));
+            for (uint32_t i = 0u; i < 22u; ++i)
+            {
+                if (pilot.step(1u).m_boundary != boundary::RETIRED)
+                {
+                    return false;
+                }
+            }
+            const auto step = pilot.step(1u);
+            const uint32_t mask = (1u << channel) << 16u;
+            if (bad != 0u)
+            {
+                if (step.m_boundary != boundary::HOST_REFUSAL || pilot.cycle() != 22u ||
+                    pilot.dmac_started() != 0u || pilot.dmac_status() != mask ||
+                    pilot.intc_status() != 0u || step.m_dma_completed)
+                {
+                    return false;
+                }
+                continue;
+            }
+            if (step.m_boundary != boundary::RETIRED || !step.m_dma_completed ||
+                pilot.dmac_status() != (mask | (1u << channel)) ||
+                pilot.intc_status() != (1u << (4u + channel)) ||
+                (pilot.cpu().m_cop0[ee::COP0_Cause] & 0xc00u) != 0xc00u)
+            {
+                return false;
+            }
+            for (uint32_t i = 23u; i < 33u; ++i)
+            {
+                if (pilot.step(1u).m_boundary != boundary::RETIRED)
+                {
+                    return false;
+                }
+            }
+            if (pilot.cpu().m_gpr[8].m_lo != 0x101u || pilot.cpu().m_gpr[9].m_lo != 0x1234u ||
+                (pilot.cpu().m_gpr[10].m_lo & 0x840u) != 0x840u ||
+                pilot.cpu().m_gpr[11].m_lo != 0u || pilot.cpu().m_gpr[12].m_lo != 0u)
+            {
+                return false;
+            }
+        }
+    }
+    // SQ directly to VIF1 FIFO with a complete all-NOP quadword.
+    {
+        ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+            0x40806000u, 0x3c04b000u, 0x34845000u, 0x7c800000u}));
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            if (pilot.step(1u).m_boundary != boundary::RETIRED)
+            {
+                return false;
+            }
+        }
+        if (pilot.intc_status() != 0u || pilot.dmac_status() != 0u)
+        {
+            return false;
+        }
+    }
+    return true;
+}
 } // namespace

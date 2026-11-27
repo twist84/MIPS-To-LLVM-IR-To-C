@@ -3760,7 +3760,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_spr_dma(), "scheduler-owned synchronous SPR DMA") ||
+    if (!check(test_strict_firmware_sif_vif(), "scheduler-owned SIF mailbox and VIF DMA") ||
+        !check(test_strict_firmware_spr_dma(), "scheduler-owned synchronous SPR DMA") ||
         !check(test_strict_firmware_cop0_clock(), "scheduler-owned COP0 Count/Compare deadlines") ||
         !check(test_strict_firmware_interrupts(), "scheduler-owned firmware interrupt entry and ERET") ||
         !check(test_strict_firmware_pilot(), "scheduler-owned strict firmware pilot"))

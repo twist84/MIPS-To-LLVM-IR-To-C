@@ -202,6 +202,7 @@ struct s_ee_reset_mmio
     // diagnostic keeps its existing narrow register whitelist.
     bool m_scheduled_timers = false;
     bool m_scheduled_dmac = false;
+    bool m_scheduled_sif_vif = false;
 
     constexpr bool scheduled_timer_address(uint32_t address) const
     {
@@ -223,8 +224,30 @@ struct s_ee_reset_mmio
         }
         const uint32_t base = address & ~0xffu;
         const uint32_t offset = address & 0xffu;
+        if (m_scheduled_sif_vif && (base == 0xb0008000u || base == 0xb0009000u))
+        {
+            return offset == 0u || offset == 0x10u || offset == 0x20u;
+        }
         return (base == 0xb000d000u || base == 0xb000d400u) &&
             (offset == 0u || offset == 0x10u || offset == 0x20u || offset == 0x80u);
+    }
+
+    constexpr bool scheduled_sif_vif_address(uint32_t address) const
+    {
+        if (!m_scheduled_sif_vif)
+        {
+            return false;
+        }
+        if (address >= 0xb000f200u && address <= 0xb000f230u && (address & 15u) == 0u)
+        {
+            return true;
+        }
+        const uint32_t base = address & ~0x3ffu;
+        const uint32_t offset = address & 0x3ffu;
+        return (base == 0xb0003800u || base == 0xb0003c00u) &&
+            (offset == 0u || offset == 0x10u || offset == 0x20u ||
+             offset == 0x30u || offset == 0x40u || offset == 0x50u ||
+             offset == 0x80u || offset == 0x90u);
     }
 
     constexpr bool read(const s_ee_bus_span_plan& bus, uint32_t address,
@@ -235,6 +258,7 @@ struct s_ee_reset_mmio
             bus.m_width == 4u &&
             (address == 0xb000f010u || address == 0xb000e000u || address == 0xb000f220u ||
              scheduled_timer_address(address) || scheduled_dmac_address(address) ||
+             scheduled_sif_vif_address(address) ||
              (m_scheduled_timers && address == 0xb000f000u)) &&
             bus.m_address == address - 0xa0000000u &&
             m_read(m_user, bus.m_address, bus.m_width, &value);
@@ -255,7 +279,8 @@ struct s_ee_reset_mmio
         const bool dmac = bus.m_width == 4u &&
             ((address == 0xb000e000u && (static_cast<uint32_t>(value.m_lo) & ~1u) == 0u) ||
              scheduled_dmac_address(address));
-        const bool sif = bus.m_width == 4u && address == 0xb000f220u;
+        const bool sif = bus.m_width == 4u &&
+            (address == 0xb000f220u || scheduled_sif_vif_address(address));
         const bool gs = bus.m_width == 4u &&
             ((address == 0xb2001000u && static_cast<uint32_t>(value.m_lo) == 0x200u) ||
              (address == 0xb2001004u && static_cast<uint32_t>(value.m_lo) == 0u));
