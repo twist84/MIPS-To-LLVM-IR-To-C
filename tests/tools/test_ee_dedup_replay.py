@@ -343,9 +343,44 @@ def test_graphics_ee_comparison(root):
             raise AssertionError("incorrect IOP AOT inventory accepted")
 
 
+def test_iop_exit_profile(root):
+    from replay_ee_graphics_profile import iop_exit_profile
+    path = root / "iop-exit-profile.log"
+    header = "IOP EXIT PROFILE: keys=2 dropped=0\n"
+    first = ("IOP EXIT ROW: base=00010000 hash=0000000000000001 "
+             "entry=00010004 resume=00010008 reason=0 delay=0 "
+             "entries=4 retired=12 budget=2 horizon=3 zero=0\n")
+    second = ("IOP EXIT ROW: base=00010000 hash=0000000000000001 "
+              "entry=00010008 resume=00010008 reason=1 delay=0 "
+              "entries=2 retired=0 budget=0 horizon=0 zero=2\n")
+    observation = {"entries": 6, "instructions": 12}
+    path.write_text("noise\n" + header + first + second)
+    result = iop_exit_profile(path, observation)
+    assert result["keys"] == 2 and result["retired"] == 12
+    assert result["rows"][0]["entry"] == 0x10004
+    for bad, expected in (
+        (header + first, observation),
+        (header + first + first, observation),
+        (header.replace("dropped=0", "dropped=1") + first + second, observation),
+        (header + first.replace("budget=2", "budget=5") + second, observation),
+        (header + first + second, dict(observation, entries=7)),
+        (header + first + second, None),
+    ):
+        path.write_text(bad)
+        try:
+            iop_exit_profile(path, expected)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("invalid IOP exit profile accepted")
+    path.write_text("noise\n")
+    assert iop_exit_profile(path, None) is None
+
+
 def run():
     with TemporaryDirectory() as tmp:
         root = Path(tmp)
+        test_iop_exit_profile(root)
         test_vu1_inventory(root)
         test_graphics_profile(root)
         ee_root = root / "ee-comparison"
