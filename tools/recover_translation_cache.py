@@ -494,17 +494,19 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                 work = new_recovery_work(base_work)
             else:
                 print("Migrating verified guest IR without retranslation", flush=True)
+        hashes = {}
         if comparison is None:
             comparison = run_known_replays.reconstruct(
                 manifest, entries, elf, build, config, work, jobs, allow_ir_changes,
-                ir_only=True)
+                ir_only=True, verified_hashes=hashes)
+        else:
+            # stage_verified_ir authenticated the copied bytes in order.
+            hashes = {name: manifest["ir_hashes"][name] for name in
+                      manifest.get("known_entries", list(manifest["ir_hashes"]))}
         if comparison["missing"] or comparison["extra"] or (
                 comparison["mismatched_sha256"] and not allow_ir_changes):
             raise ValueError("reconstructed IR did not meet the recovery policy")
         metadata_path = work / "ir" / "ee_functions.json"
-        metadata = shared_ir.read_json(metadata_path)
-        hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
-                                          require_owned_directory=True)
         if list(hashes) != manifest.get("known_entries", list(manifest["ir_hashes"])):
             raise ValueError("recovered ordered IR inventory changed")
         if not allow_ir_changes and hashes != manifest["ir_hashes"]:
@@ -609,13 +611,11 @@ def benchmark_reconstruction(elf, build, config, base_work, output, jobs,
         # Retain the exact ordered input inventory for controlled repetitions.
         output.mkdir(parents=True, exist_ok=False)
         shared_ir.write_json(output / "benchmark-input.json", manifest)
+    hashes = {}
     comparison = run_known_replays.reconstruct(
         manifest, entries, elf, build, config, output, jobs,
-        allow_ir_changes, ir_only=True)
+        allow_ir_changes, ir_only=True, verified_hashes=hashes)
     metadata_path = output / "ir" / "ee_functions.json"
-    metadata = shared_ir.read_json(metadata_path)
-    hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
-                                      require_owned_directory=True)
     if (list(hashes) != manifest.get("known_entries", list(manifest["ir_hashes"])) or
             comparison["missing"] or comparison["extra"] or
             (not allow_ir_changes and hashes != manifest["ir_hashes"])):

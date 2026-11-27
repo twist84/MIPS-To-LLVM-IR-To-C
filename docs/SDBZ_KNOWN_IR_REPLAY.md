@@ -355,3 +355,16 @@ continues to publish each batch normally. Strict reconstruction attempts
 explicit entry restoration before evaluating byte parity; changed IR still
 requires explicit acceptance. The original 128-entry batch boundaries are
 retained. No speedup claimed before measured comparison.
+
+R6.1 Windows acceptance: 160.672 s vs 191.000 s (30.328 s saved,
+15.88% lower wall time), strict 16,252/16,252 identical IR hashes and
+byte-identical reconstructed metadata to the relaxed serial baseline.
+Metadata publication 141 -> 4 calls, 27.787 -> 0.703 s; parsing 8.766 ->
+2.176 s. Discovery and emission boundaries unchanged.
+
+R6.2 carries the ordered hashes from one exact owned-directory scan across
+the immediate reconstruction/benchmark/recovery/overwrite call boundary.
+The final metadata is published only after inventory and hash checks.
+Independent validation before native cache activation is retained; no
+persisted hash list substitutes for an actual read of the IR. A verified
+migration already checked the copied bytes and need not repeat that scan.

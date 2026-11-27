@@ -91,6 +91,10 @@ def compare_ir(work_dir, hashes):
     ir_dir = Path(work_dir) / "ir"
     observed = {path.name: run_game.sha256_path(path)
                 for path in ir_dir.glob("*.ll")}
+    return compare_hashes(hashes, observed)
+
+
+def compare_hashes(hashes, observed):
     missing = sorted(set(hashes) - set(observed))
     extra = sorted(set(observed) - set(hashes))
     changed = sorted(name for name in set(observed) & set(hashes)
@@ -170,7 +174,7 @@ def restore_missing_entries(recomp, elf, work, metadata_path, entries,
 
 @metrics.measure("known_reconstruction_total")
 def reconstruct(manifest, entries, elf, build, config, work, jobs,
-                allow_mismatches, *, ir_only=False):
+                allow_mismatches, *, ir_only=False, verified_hashes=None):
     """Build known guest entries without any intermediate game execution."""
     ir_dir = work / "ir"
     for candidate in (ir_dir, work / "objects", work / "translation-cache.json",
@@ -206,7 +210,14 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
 
     restore_missing_entries(recomp, elf, work, metadata_path, entries,
                             staged_metadata=staged_metadata)
-    comparison = compare_ir(work, manifest["ir_hashes"])
+    # Authenticate the exact owned module set in metadata order, once.
+    # The caller can carry these hashes into the next staging operation;
+    # no on-disk receipt is accepted as proof of this scan.
+    observed = run_game.hash_ir_modules(
+        ir_dir, staged_metadata["functions"], require_owned_directory=True)
+    if list(observed) != manifest.get("known_entries", list(manifest["ir_hashes"])):
+        raise ValueError("reconstructed ordered IR inventory changed")
+    comparison = compare_hashes(manifest["ir_hashes"], observed)
     metrics.details("ir_comparison", comparison)
     print("Known IR SHA-256 verification: "
           f"{comparison['matching']}/{comparison['expected']} identical; "
@@ -226,6 +237,9 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
     # The staging directory is not an executable cache on failure.
     run_game.shared_ir.write_json(metadata_path, staged_metadata)
     run_game.shared_ir.normalize_metadata(metadata_path, elf)
+    if verified_hashes is not None:
+        verified_hashes.clear()
+        verified_hashes.update(observed)
     if ir_only:
         return comparison
     # Emit all guest objects once, then link one library. Never run a guest

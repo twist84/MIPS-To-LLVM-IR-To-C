@@ -155,8 +155,14 @@ def test_reconstruction_is_batched_and_linked_once():
              patch.object(known.run_game, "write_translation_cache", side_effect=fake_cache), \
              patch.object(known.run_game, "translation_inputs", return_value={}), \
              patch.object(known.run_game, "ir_generation_inputs", return_value={}):
-            compare = known.reconstruct(manifest, entries, elf, root, "Release",
-                                        work, 8, False)
+            verified = {}
+            with patch.object(known.run_game, "hash_ir_modules",
+                              wraps=known.run_game.hash_ir_modules) as scan:
+                compare = known.reconstruct(manifest, entries, elf, root, "Release",
+                                            work, 8, False, verified_hashes=verified)
+                scan.assert_called_once()
+            assert verified == manifest["ir_hashes"]
+            assert list(verified) == list(manifest["ir_hashes"])
             assert compare["matching"] == 260
             assert calls["seed"] == 1
             assert [len(batch) for batch in calls["batches"]] == [128, 128, 3]
@@ -258,7 +264,8 @@ def test_reconstruction_hash_mismatch_fails_closed():
         def fake_seed(command):
             (work / "ir" / "sub_0x100008_0x100008.ll").write_bytes(b"; different IR")
             (work / "ir" / "ee_functions.json").write_text(json.dumps({
-                "functions": [{"vaddr": "0x100008"}], "function_count": 1,
+                "functions": [{"vaddr": "0x100008",
+                               "ir_path": "sub_0x100008_0x100008.ll"}], "function_count": 1,
             }))
         with patch.object(known.run_game, "native_executable", return_value=root / "ee_recomp"), \
              patch.object(known.run_game, "run", side_effect=fake_seed), \

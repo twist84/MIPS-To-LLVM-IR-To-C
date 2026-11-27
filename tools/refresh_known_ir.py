@@ -110,17 +110,16 @@ def refresh(elf, build, config, base, opt, jobs):
             shared_ir.write_json(inventory, manifest)
             manifest, entries = known.read_manifest(inventory)
             print(f"Overwrite EE IR: {len(entries)} known entries; selected O{opt}", flush=True)
+            hashes = {}
             comparison = known.reconstruct(
                 manifest, entries, elf, build, config, stage, jobs, True,
-                ir_only=True)
+                ir_only=True, verified_hashes=hashes)
             metrics.details("known_modules", len(entries))
             metrics.details("ir_comparison", comparison)
             if comparison["missing"] or comparison["extra"]:
                 raise ValueError("re-emitted module inventory changed")
             staged_meta = staged_ir / "ee_functions.json"
             metadata = shared_ir.read_json(staged_meta)
-            hashes = run_game.hash_ir_modules(staged_ir, metadata["functions"],
-                                              require_owned_directory=True)
             if list(hashes) != manifest["known_entries"]:
                 raise ValueError("re-emitted ordered EE inventory changed")
             # Rebase the external ELF reference BEFORE publishing the new

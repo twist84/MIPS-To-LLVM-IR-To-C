@@ -160,7 +160,7 @@ def test_link_or_validation_failure_does_not_activate():
         builds = []
 
         def fake_reconstruct(manifest, entries, elf_path, build_dir, config,
-                             work, jobs, allow_mismatches, *, ir_only=False):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None):
             assert ir_only
             assert entries == [0x100008, 0x100010]
             assert not allow_mismatches
@@ -177,6 +177,7 @@ def test_link_or_validation_failure_does_not_activate():
                                             "functions": functions,
                                             "function_count": len(functions)})
             builds.append(work)
+            verified_hashes.update(manifest["ir_hashes"])
             return comparison
 
         def fake_build(source, work, metadata, objects, library, opt, **kwargs):
@@ -278,7 +279,7 @@ def test_cold_ir_benchmark_isolated():
         output = root / "ir-baseline"
 
         def fake_reconstruct(saved, requested, elf_arg, build, config, work, jobs,
-                             allow_mismatches, *, ir_only=False):
+                             allow_mismatches, *, ir_only=False, verified_hashes=None):
             assert requested == entries and ir_only and not allow_mismatches
             assert marker.read_bytes() == b"untouched"
             ir = work / "ir"
@@ -291,6 +292,8 @@ def test_cold_ir_benchmark_isolated():
                 "elf": shared_ir.relative_path(elf, ir),
                 "path_format": "manifest-relative-v1",
                 "function_count": len(functions), "functions": functions})
+            verified_hashes.update({name: saved["ir_hashes"][name]
+                                    for name in saved["known_entries"]})
             return {"missing": [], "extra": [], "mismatched_sha256": []}
 
         with patch.object(run_game, "ir_generation_inputs", return_value=sources), \
@@ -876,11 +879,11 @@ def test_overwrite_ir_uses_active_inventory_and_selected_profile():
         calls = []
 
         def fake_reconstruct(manifest, known_entries, elf_arg, build, config,
-                             work, jobs, allow_mismatches, *, ir_only=False):
+                             work, jobs, allow_mismatches, *, ir_only=False, verified_hashes=None):
             assert known_entries == entries
             assert manifest["ir_hashes"] == old_hashes
             assert allow_mismatches and ir_only and elf_arg == elf
-            write_ir(work / "ir", b"new")
+            verified_hashes.update(write_ir(work / "ir", b"new"))
             return {"missing": [], "extra": [], "mismatched_sha256": names}
 
         def fake_build(source, work, metadata, objects, library, opt, **kwargs):
