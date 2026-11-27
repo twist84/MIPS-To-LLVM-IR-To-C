@@ -754,3 +754,49 @@ and the same schema-2 cache; unchanged function IR should hit
 without having to compile it again. The 2,048-PC build is a cache
 experiment only, not a new accepted retail library. No retail replay
 is needed for raw-identical I16c artifacts.
+
+## I16d acceptance
+
+Archive `iop-i16d-validation.zip` SHA-256
+`97cea6e7a95aeb6a028d64ee0abf9bc7e546e88aaae2a0a76477a988470dce63`.
+The three-module seed run reused 703/703 objects, compiled in 1.891 s,
+linked in 0.609 s and produced all three DLLs byte-identical to the
+accepted I16c archive. All four uploaded DLLs match their receipts and
+have zero COFF timestamps. All five CI workflows passed at 61c6ea8.
+No new retail replay is needed for the seed run.
+
+The MCMAN 2,048-PC cross-plan experiment reused 214/218 objects:
+213 discovered function objects and the module table. Only residual
+regions 213, 214, 215 and the dispatcher missed. Compile wall time
+3.891 s, link 0.156 s; DLL size 1,783,296 B versus 1,743,872 B with
+the 1,024-PC plan. Keep the accepted I16c configuration; the 2,048-PC
+library is not accepted for retail execution.
+
+## I17a — Compact module dispatcher pilot
+
+The original router emits a switch case for every dispatch PC, even
+when thousands of cases share the same region. The opt-in
+`--split-compact-router` transforms only the generated module router
+IR after the C++ lifter validates the ownership plan. It verifies
+the complete original PC switch against the plan, then uses a private
+dense i16 region-ID map indexed by the aligned module-relative PC.
+The lookup checks unsigned offset range and alignment before accessing
+the map; unowned entries use a sentinel and retain the original
+fallback. The final switch has one case per region rather than one
+per PC. The budget check, region call bodies, context writes and
+fallback return reasons remain unchanged. No guest target speculation,
+runtime changes, chaining or region ownership changes.
+
+Regression fixtures check plan mismatch, duplicates, misalignment,
+holes, unchanged fallback and high unsigned PCs. A Linux/Clang
+fixture compiles the original and compact router and compares return
+codes and all context bytes across valid, invalid and zero-budget
+entries. CI pending at time of writing.
+
+Pilot on CRI_ADXI, MCMAN and PADMAN with the accepted 1,024-PC plans,
+`--region-cache-ir-key` and `--split-compact-router`. Expect 700/703
+cache hits with only three router objects rebuilt; actual sizes and
+retail performance must be measured. Reuse the four unaffected I16c
+libraries and run the pinned retail replay. Do not accept the new
+router on static size alone. I16c remains the accepted correctness
+baseline until validation.
