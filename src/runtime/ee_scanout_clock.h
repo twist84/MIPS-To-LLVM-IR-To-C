@@ -96,7 +96,8 @@ private:
 
     uint64_t m_last_ee_cycle = 0u;
     uint64_t m_next_field_cycle = 0u;
-    uint64_t m_field_numerator = 0u;
+    uint32_t m_field_whole = 0u;
+    uint32_t m_field_remainder = 0u;
     uint32_t m_field_denominator = 1u;
     uint32_t m_fraction = 0u;
     uint64_t m_csr = 0u;
