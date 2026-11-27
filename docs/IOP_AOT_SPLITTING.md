@@ -929,3 +929,62 @@ If a performance regression appears, retain rollback and isolate
 modules with repeated matched runs before adopting the new lowering.
 Cross-region execution attribution and budget-aware chaining remain
 subsequent checkpoints; no runtime rebuild is required for this rollout.
+
+## I17c2 acceptance
+
+Archive `ee-iop-i17c2.zip` SHA-256
+`15c8916a289355921b7d1a6f97e1314fb70fcd759825bf231fd49dbc003b5b05`.
+Accept `build/iop-native-split-i17c2-candidate/modules` for correctness
+and linked size. All six new DLL hashes independently match their
+per-module compilation and replay receipts, MCMAN hash matches I17c,
+and all six new COFF timestamps are zero. Pinned input hashes, VU1
+inventory and environment match I17c. Report and framebuffer
+independently match byte-for-byte and match recorded hashes.
+40M dispatches, 184,700 matching traces, zero divergent/unpaired,
+3,127/3,127 polls, seven active native modules, 67,846,006 native
+retired instructions, 12,611,093 native entries. Control 41.657 s,
+candidate 40.531 s, translated 587.7 ms, refresh 1.7 ms. Single
+matched pair, performance acceptance false.
+
+Partitioned build 103/485 hits, 8.047 s compile, 0.327 s link;
+remaining build 168/406 hits, 5.015 s compile, 0.452 s link.
+New linked bytes: ARKD_DVD 775,680; CRI_ADXI 991,744; LIBSD 335,360;
+MCSERV 96,256; PADMAN 619,008; SIO2MAN 72,192. MCMAN stays
+1,308,160 B. Total 4,198,400 B, down 859,136 B from I17c and
+1,241,088 B (22.82%) from I17b. All seven use shared memory helpers.
+Keep I17c and I17b as rollback inventories.
+
+## I17d — Native exit attribution (diagnostic only)
+
+The I17c2 baseline averages 5.38 native instructions per entry.
+Before changing chaining, collect native entry/resume pairs with
+the module base/hash, raw entry and resume PC, return reason and
+delay-slot state. Aggregate entries, retired words, exhausted native
+budgets, reduced device-horizon budgets and zero-progress calls.
+The horizon-limited count is a subset of calls, not an exclusive
+exit category. The 262,144-key cap drops additional distinct-key
+observations rather than allowing unbounded growth. The replay
+rejects any dropped or missing observations and reconciles entries
+and retired instructions against existing terminal native counters.
+Counters are outside translated execution timing; no context ABI,
+hardware advancement, control flow or generated library changes.
+Logging occurs at AOT object destruction. Collection is opt-in
+via `SDBZ_IOP_AOT_EXIT_PROFILE`, and replay
+`--profile-iop-exits` enables it on the native candidate only.
+The replay archives `candidate-1/iop-exit-profile.json` with complete
+rows after checking totals, key uniqueness and counter invariants.
+Tests cover valid rows, truncation, duplicates, invalid counts and
+unexpected interpreter-arm output.
+
+This diagnostic requires a fresh runner build (preserve the old
+g8d2 executable). Pin its actual SHA-256 as the control runner and
+use it for both interpreter and I17c2-native arms; compare both arms
+to the existing pinned retail reference. Reuse the accepted EE,
+VU1 and IOP libraries unchanged. Require exact architectural
+report/trace/framebuffer, no dropped profile rows, and matching
+native totals. Do not use diagnostic wall time as performance
+evidence. Map observed entry/resume PCs to the accepted ownership
+plans offline; only positive-progress, ordinary, non-interpreter
+exits with remaining budget are potential chaining candidates.
+This is a candidate attribution pass, not a chaining implementation.
+Latest CI pending.
