@@ -26,6 +26,7 @@ rem Without either switch, retain explicitly configured pad variables.
 set "REQUESTED_SESSION_MODE="
 set "REQUESTED_PAD_PROFILE="
 set "ACCEPT_NEW_IR="
+set "FULL_NATIVE_BACKUP="
 set "OVERWRITE_IR="
 set "CACHE_MISS_ARGS="
 set "LIVE_RELINK_ARG="
@@ -126,6 +127,11 @@ if /I "%~1"=="--overwrite-ir" (
     shift
     goto :parse_launcher_options
 )
+if /I "%~1"=="--full-native-backup" (
+    set "FULL_NATIVE_BACKUP=--full-native-backup"
+    shift
+    goto :parse_launcher_options
+)
 if /I "%~1"=="--accept-new-ir" (
     set "ACCEPT_NEW_IR=--allow-ir-changes"
     shift
@@ -152,7 +158,7 @@ if /I "%~1"=="--neutral" (
     goto :parse_launcher_options
 )
 echo ERROR: Unknown launcher option "%~1".
-echo Usage: scripts\run_ps2_game.bat [--p40 or --p40-listen] [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
+echo Usage: scripts\run_ps2_game.bat [--p40 or --p40-listen] [--full or --quick or --matched or --recover-cache] [--cross or --neutral] [--accept-new-ir] [--full-native-backup] [--overwrite-ir] [--replay-after-expand] [--live-full-relink]
 exit /b 2
 
 :launcher_options_ready
@@ -172,6 +178,10 @@ if not "%SDBZ_EE_OPT%"=="0" if /I not "%REQUESTED_SESSION_MODE%"=="full" (
 )
 if defined OVERWRITE_IR if /I not "%REQUESTED_SESSION_MODE%"=="full" (
     echo ERROR: --overwrite-ir requires --full and an existing canonical cache.
+    exit /b 2
+)
+if defined FULL_NATIVE_BACKUP if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
+    echo ERROR: --full-native-backup requires --recover-cache.
     exit /b 2
 )
 if defined ACCEPT_NEW_IR if /I not "%REQUESTED_SESSION_MODE%"=="recover" (
@@ -435,7 +445,7 @@ if /I "%REQUESTED_SESSION_MODE%"=="recover" (
     python tools\recover_translation_cache.py --elf "%GAME_ELF%" ^
         --build-dir build --config Release ^
         --base-work-dir "%CD%\%BASE_WORK_DIR%" ^
-        --emit-jobs=%EMIT_JOBS% %ACCEPT_NEW_IR%
+        --emit-jobs=%EMIT_JOBS% %ACCEPT_NEW_IR% %FULL_NATIVE_BACKUP%
     exit /b
 )
 

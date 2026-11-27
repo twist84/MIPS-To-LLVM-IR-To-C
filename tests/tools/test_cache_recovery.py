@@ -201,7 +201,11 @@ def test_link_or_validation_failure_does_not_activate():
         assert not saved.exists()
         backups = list(base.glob("backup-*"))
         assert len(backups) == 1
-        assert (backups[0] / "sentinel.ll").read_bytes() == b"original guest code"
+        assert backups[0].name.endswith("-ir")
+        cache_backup.verify_ir_backup(backups[0])
+        retained = list(base.glob("retained-*"))
+        assert len(retained) == 1
+        assert (retained[0] / "sentinel.ll").read_bytes() == b"original guest code"
         assert (promoted / "ir-comparison.json").is_file()
         assert len(builds) == 2
 
@@ -409,6 +413,59 @@ def test_launcher_recovers_before_automatic_rebuild():
     assert "choice /C YN" not in batch
 
 
+def test_ir_only_backup_partition_preserves_native_and_authenticates():
+    with tempfile.TemporaryDirectory() as temp:
+        root = Path(temp).resolve()
+        base = root / "ps2-game-hle"
+        stage = base / "recovery-123"
+        ir = base / "ir"
+        ir.mkdir(parents=True)
+        (ir / "example.ll").write_bytes(b"old IR")
+        (ir / "ee_functions.json").write_bytes(b"old metadata")
+        (ir / shared_ir.PROVENANCE).write_bytes(b"old provenance")
+        (base / "translation-cache.json").write_bytes(b"old receipt")
+        (base / "game-translated.dll").write_bytes(b"old DLL")
+        profile = base / "O2-native"
+        objects = profile / "objects"
+        objects.mkdir(parents=True)
+        (objects / "example.o").write_bytes(b"native")
+        (objects / "objects.json").write_bytes(b"object receipt")
+        (profile / "translation-cache.json").write_bytes(b"profile receipt")
+        shared_ir.attach(profile, ir)
+        (base / "report.json").write_bytes(b"old report")
+        (stage / "ir").mkdir(parents=True)
+        (stage / "ir" / "example.ll").write_bytes(b"new IR")
+        (stage / "ir" / shared_ir.PROVENANCE).write_bytes(b"new provenance")
+        existing_backup = base / "backup-existing"
+        existing_backup.mkdir()
+        (existing_backup / "sentinel").write_bytes(b"existing backup")
+        profiles = recovery.canonical_shared_profiles(base, stage)
+        assert profiles == [profile]
+        backup = recovery.promote_canonical(base, stage, lambda _: None,
+                                           preserved_profiles=profiles)
+        result = cache_backup.partition_backup(backup, profiles)
+        assert result.name == "backup-123-ir"
+        inventory = cache_backup.verify_ir_backup(result)
+        assert set(inventory["files"]) == {
+            "ir/example.ll", "ir/ee_functions.json", "ir/.shared-ir-provenance.json",
+            "translation-cache.json", "O2-native/translation-cache.json",
+            "O2-native/shared-ir.json", "O2-native/objects/objects.json",
+        }
+        assert (result / "ir/example.ll").read_bytes() == b"old IR"
+        assert (base / "ir/example.ll").read_bytes() == b"new IR"
+        assert (objects / "example.o").read_bytes() == b"native"
+        assert (base / "retained-123/game-translated.dll").read_bytes() == b"old DLL"
+        assert (base / "retained-123/report.json").read_bytes() == b"old report"
+        assert (existing_backup / "sentinel").read_bytes() == b"existing backup"
+        (result / "ir/example.ll").write_bytes(b"tampered")
+        try:
+            cache_backup.verify_ir_backup(result)
+        except ValueError as error:
+            assert "inventory/hash mismatch" in str(error)
+        else:
+            raise AssertionError("modified backup accepted")
+
+
 def test_verified_maximum_compression_backup():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -589,6 +646,7 @@ def test_overwrite_launcher_routes_before_preflight():
 def main():
     test_overwrite_ir_uses_active_inventory_and_selected_profile()
     test_overwrite_launcher_routes_before_preflight()
+    test_ir_only_backup_partition_preserves_native_and_authenticates()
     test_verified_maximum_compression_backup()
     test_real_7z_backup_if_available()
     test_snapshots_are_content_addressed_and_reusable()

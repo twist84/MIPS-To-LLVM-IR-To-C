@@ -184,18 +184,35 @@ validation. The old IR SHA-256 comparison is recorded in
 semantically equivalent. New guest-function discovery remains disabled in
 the reconstruction step.
 
-Every attempt builds into a uniquely named sibling directory:
+Every attempt builds into a uniquely named child staging directory:
 
-    build/ps2-game-hle-recovery-YYYYMMDD-HHMMSS-ffffff/
+    build/ps2-game-hle/recovery-YYYYMMDD-HHMMSS-ffffff/
 
-Only after successful reconstruction, linking and validation is
-`build/ps2-game-hle.active.txt` atomically replaced with that directory's
-full path. On subsequent launcher runs, `--print-active` checks that the
-pointer names an existing sibling recovery directory. The original
-`build/ps2-game-hle` directory, existing objects and any earlier recoveries
-are left untouched, including on failure. **Rollback** is simply to delete
-`build/ps2-game-hle.active.txt` and rerun the launcher; this selects the
-original cache. No eager promotion into its guest IR directory occurs.
+Only after successful reconstruction, linking and validation does recovery
+move the staged contents into the canonical cache. It retains the old
+contents until post-promotion validation succeeds; exceptions restore the
+original names. Legacy sibling caches and active pointers are still
+recognised but no new active pointer is written.
+
+By default, the old IR, metadata, shared provenance and translation/object
+inventory receipts are retained in a SHA-256 inventoried
+`backup-<stamp>-ir.7z` (or an uncompressed directory if 7-Zip is missing
+or fails). Native profiles already attached to the canonical IR remain in
+place as candidates for subsequent authenticated reuse. Displaced native
+files and reports are retained uncompressed in `retained-<stamp>/`.
+They are not part of the IR archive. Existing backups are never removed.
+An IR-only backup requires native validation/rebuild before execution; it
+is not an immediate native DLL rollback. To retain the older complete
+native backup behavior, opt in:
+
+    scripts\run_ps2_game.bat --recover-cache --full-native-backup
+
+Compression remains synchronous at level 9 pending controlled timing
+measurements; the console reports input/archive size and compression/test
+elapsed time. The temporary archive is tested before the old directory is
+removed. If partitioning fails, the full displaced tree is retained
+uncompressed. Legacy full backups remain readable by the existing
+object-seeding path.
 
 Both the normal launcher's strict fallback and explicit recovery path reuse
 the same batched emitter/linker in `run_known_replays.reconstruct` but **do

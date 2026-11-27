@@ -263,7 +263,8 @@ def stage_verified_ir(elf, source, work, manifest, ir_sources):
             "expected": len(hashes), "observed": len(hashes), "matching": len(hashes)}
 
 
-def promote_canonical(base_work, work, validate, *, elf=None):
+def promote_canonical(base_work, work, validate, *, elf=None,
+                      preserved_profiles=()):
     """Promote a child staging cache, retaining old contents and legacy profiles.
 
     Locks remain in place. The only path that changes with nesting depth is
@@ -280,7 +281,8 @@ def promote_canonical(base_work, work, validate, *, elf=None):
     previous = []
     for source in sorted(base_work.iterdir()):
         if (source == work or source == backup or
-                source.name.startswith(("recovery-", "backup-")) or
+                source.name.startswith(("recovery-", "backup-", "retained-")) or
+                source in preserved_profiles or
                 source.name.endswith(".ee-ir.lock")):
             continue
         previous.append((source, backup / source.name))
@@ -392,7 +394,24 @@ def validate_portable_cache(directory, elf, inputs, ir_sources, library_name):
         raise ValueError("recovered native objects do not match guest IR")
 
 
-def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
+def canonical_shared_profiles(base_work, work):
+    """Only retain attached native profiles that own no independent IR."""
+    profiles = []
+    for suffix in PROFILE_SUFFIXES:
+        profile = base_work / suffix[1:]
+        if (not profile.is_dir() or profile.is_symlink() or
+                (profile / "ir").exists() or (work / profile.name).exists()):
+            continue
+        try:
+            if shared_ir.ir_directory(profile) == base_work / "ir":
+                profiles.append(profile)
+        except (OSError, ValueError):
+            continue
+    return profiles
+
+
+def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
+            *, full_native_backup=False):
     """Reconstruct, link, validate, then switch active cache without guest runs."""
     source_root = Path(__file__).resolve().parents[1]
     recomp = run_game.native_executable(build, "ee_recomp", config)
@@ -466,15 +485,33 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False):
         if comparison["missing"] or comparison["extra"] or (
                 comparison["mismatched_sha256"] and not allow_ir_changes):
             raise ValueError("reconstructed IR did not meet the recovery policy")
-        backup = promote_canonical(base_work, work, validate, elf=elf)
+        preserved_profiles = ([] if full_native_backup else
+                              canonical_shared_profiles(base_work, work))
+        backup = promote_canonical(base_work, work, validate, elf=elf,
+                                   preserved_profiles=preserved_profiles)
         if backup is not None:
-            backup = cache_backup.compress_backup(backup)
+            if not full_native_backup:
+                try:
+                    backup = cache_backup.partition_backup(backup, preserved_profiles)
+                except (OSError, ValueError) as error:
+                    # Promotion already succeeded. Retain all old files
+                    # uncompressed rather than silently archiving native data.
+                    print(f"WARNING: IR-only backup partition failed ({error}); "
+                          f"uncompressed backup retained: {backup}", flush=True)
+                else:
+                    backup = cache_backup.compress_backup(backup)
+            else:
+                backup = cache_backup.compress_backup(backup)
+        if preserved_profiles:
+            print("Preserved shared native profiles in place: " +
+                  ", ".join(profile.name for profile in preserved_profiles), flush=True)
 
     print(f"Cache recovery validated and activated: {base_work}", flush=True)
     if backup is not None:
-        print(f"Previous canonical cache/profile names retained under: {backup}", flush=True)
+        print(f"Previous cache recovery artifacts retained under: {backup}", flush=True)
     if previous_cache != base_work and backup is not None:
-        print(f"Previous legacy active cache retained inside: {backup}", flush=True)
+        print("Previous legacy active cache artifacts retained in backup/retention directories",
+              flush=True)
     return base_work
 
 
@@ -495,6 +532,8 @@ def main(argv=None):
     parser.add_argument("--base-work-dir", type=Path,
                         default=Path("build/ps2-game-hle"))
     parser.add_argument("--emit-jobs", type=int, default=8)
+    parser.add_argument("--full-native-backup", action="store_true",
+                        help="also archive displaced native objects, libraries and reports")
     parser.add_argument("--allow-ir-changes", action="store_true",
                         help="explicitly allow changed lowering/IR hashes")
     args = parser.parse_args(argv)
@@ -526,7 +565,7 @@ def main(argv=None):
                   "current lowering and metadata match", flush=True)
         else:
             recover(elf, build, args.config, base_work, args.emit_jobs,
-                    args.allow_ir_changes)
+                    args.allow_ir_changes, full_native_backup=args.full_native_backup)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         prefix = ("EE fingerprint migration refused" if args.migrate_source_fingerprints
                   else "EE source preflight refused" if args.check_active_source
