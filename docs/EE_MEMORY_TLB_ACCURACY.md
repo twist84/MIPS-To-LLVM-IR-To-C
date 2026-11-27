@@ -1858,3 +1858,10 @@ exec-entry serial and progress through the ten context restore
 instructions beyond the EPC stop. The upcoming FPU restore and
 actual OSDSYS execution are separate checkpoints. No fabricated
 frame, HLE interception, retail changes or replay. Pending CI.
+
+H3E9B6A ROM0 workflow 46069794804 at f530f3d8 failed compilation
+in ee_ram_tlb_test.cpp:4420 because the new EPC test was inserted
+before rather than inside the initial if expression. Correct the
+registration and preserve all test predicates and CI thresholds.
+No runtime changes. Real-ROM execution remains pending CI.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46069794804

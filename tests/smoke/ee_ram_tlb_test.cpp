@@ -4416,8 +4416,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-        !check(test_strict_firmware_epc_restore(), "scheduler-owned EPC restore and ERET") ||
-    if (!check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
+    if (!check(test_strict_firmware_epc_restore(), "scheduler-owned EPC restore and ERET") ||
+        !check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
         !check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
         !check(test_strict_firmware_gs_timing(), "scheduler-owned GS timing transition") ||
