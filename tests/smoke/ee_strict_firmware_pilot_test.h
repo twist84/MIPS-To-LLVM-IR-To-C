@@ -864,6 +864,46 @@ bool test_strict_firmware_iop_clock()
         return false;
     }
 
+    // The IOP guest, not the test harness, publishes an ordinary marker to
+    // its live RAM. The synchronized EE firmware observes it through the
+    // uncached 0xBC aperture after the IOP's fifth instruction retires.
+    constexpr uint32_t marker = 0x13572468u;
+    const auto aperture_iop_rom = make_firmware_pilot_rom({
+        0x3c08a004u, 0x35082f10u, 0x3c091357u, 0x35292468u,
+        0xad090000u, 0x1000ffffu, 0u});
+    auto aperture_ee_rom = make_firmware_pilot_rom({0x40806000u});
+    const auto put_aperture_word = [&aperture_ee_rom](uint32_t index, uint32_t word)
+    {
+        for (uint32_t lane = 0u; lane < 4u; ++lane)
+        {
+            aperture_ee_rom[index * 4u + lane] =
+                static_cast<uint8_t>(word >> (lane * 8u));
+        }
+    };
+    put_aperture_word(1u, 0x3c01bc04u); // LUI at,0xbc04
+    put_aperture_word(2u, 0x34212f10u); // ORI at,at,0x2f10
+    put_aperture_word(40u, 0x8c220000u); // LW v0,0(at)
+    ee::c_ee_strict_firmware_pilot aperture(std::move(aperture_ee_rom));
+    if (!aperture.attach_iop(aperture_iop_rom, true))
+    {
+        return false;
+    }
+    for (uint32_t cycle = 1u; cycle <= 41u; ++cycle)
+    {
+        const auto step = aperture.step(1u);
+        const uint32_t expected_iop = cycle % 8u == 0u ? 1u : 0u;
+        if (step.m_boundary != boundary::RETIRED || step.m_iop_executed != expected_iop ||
+            aperture.iop_cycles() != cycle / 8u || aperture.iop_debt() != 0u)
+        {
+            return false;
+        }
+    }
+    if (aperture.cpu().m_gpr[2].m_lo != marker || aperture.iop_cycles() != 5u ||
+        aperture.iop_debt() != 0u || aperture.sif_faulted())
+    {
+        return false;
+    }
+
     // Branch from cycle 7 to 9 crosses the IOP deadline at 8.
     // Retire branch, service IOP, then retire exactly one slot.
     auto branch_rom = make_firmware_pilot_rom({0x40806000u, 0u, 0u, 0u, 0u, 0u, 0u,
