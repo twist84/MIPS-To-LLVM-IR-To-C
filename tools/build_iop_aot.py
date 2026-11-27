@@ -349,6 +349,71 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def compact_split_router(router, plan):
+    """Replace the generated PC switch with a checked dense i16 region map.
+
+    Verify the old switch against the already validated ownership plan.
+    Keep all region calls, context writes and budget/fallback paths intact.
+    The map is dispatch ownership, not a guest jump-target prediction.
+    """
+    rows = plan.splitlines()
+    header = rows[0].split() if rows else []
+    if len(header) != 5 or header[0] != "IOPREG1":
+        raise ValueError("invalid compact router plan header")
+    base, size, _, count = map(int, header[1:])
+    if (not 0 <= base <= 0xffffffff or base % 4 or size <= 0 or size % 4 or
+            base + size > 0xffffffff or not 1 <= count <= 65535 or
+            count > size // 4 or len(rows) != count + 1):
+        raise ValueError("invalid compact router plan dimensions")
+    ids = [-1] * (size // 4)
+    cases = []
+    for region, row in enumerate(rows[1:]):
+        values = list(map(int, row.split()))
+        if (not values or values[0] < 1 or values[0] != len(values) - 1 or
+                values[1:] != sorted(values[1:])):
+            raise ValueError("invalid compact router region")
+        for pc in values[1:]:
+            if not base <= pc < base + size or pc % 4:
+                raise ValueError("invalid compact router PC")
+            index = (pc - base) // 4
+            if ids[index] != -1:
+                raise ValueError("duplicate compact router PC")
+            ids[index] = region
+            signed_pc = pc if pc < 0x80000000 else pc - 0x100000000
+            cases.append(f"    i32 {signed_pc}, label %region_{region}\n")
+    old = ("dispatch:\n  switch i32 %start, label %fallback [\n"
+           + "".join(cases) + "  ]\n")
+    if router.count(old) != 1 or "@iop_region_ids" in router:
+        raise ValueError("generated router does not match validated ownership plan")
+
+    width = len(ids)
+    table_type = f"[{width} x i16]"
+    table = (f"@iop_region_ids = private unnamed_addr constant {table_type} [\n"
+             + ",\n".join("  " + ", ".join(f"i16 {value}" for value in ids[i:i + 16])
+                            for i in range(0, width, 16))
+             + "\n], align 2\n\n")
+    signed_base = base if base < 0x80000000 else base - 0x100000000
+    replacement = (
+        "dispatch:\n"
+        f"  %map_offset = sub i32 %start, {signed_base}\n"
+        f"  %map_in_range = icmp ult i32 %map_offset, {size}\n"
+        "  %map_low = and i32 %map_offset, 3\n"
+        "  %map_aligned = icmp eq i32 %map_low, 0\n"
+        "  %map_valid = and i1 %map_in_range, %map_aligned\n"
+        "  br i1 %map_valid, label %map_lookup, label %fallback\n"
+        "map_lookup:\n"
+        "  %map_word = lshr i32 %map_offset, 2\n"
+        "  %map_index = zext i32 %map_word to i64\n"
+        f"  %map_ptr = getelementptr inbounds {table_type}, ptr @iop_region_ids, "
+        "i64 0, i64 %map_index\n"
+        "  %map_id = load i16, ptr %map_ptr, align 2\n"
+        "  switch i16 %map_id, label %fallback [\n"
+        + "".join(f"    i16 {region}, label %region_{region}\n"
+                  for region in range(count))
+        + "  ]\n")
+    return table + router.replace(old, replacement, 1)
+
+
 def split_cache_key(source, provenance, reuse_ir=False):
     payload = {"schema": 1, "ir_sha256": sha256_file(source),
                "provenance": provenance}
@@ -526,6 +591,7 @@ def compile_split_modules(args, clang, ir_dir, obj_dir, lib_dir, stems, suffix,
                   + (" (cached)" if row["cached"] else ""))
         receipt = {
             "schema": 1, "module": stem, "opt": args.opt, "jobs": args.jobs,
+            "router": "compact" if getattr(args, "split_compact_router", False) else "switch",
             "compile_seconds": compile_seconds, "link_seconds": linked - link_started,
             "cache_hits": hits, "object_bytes": object_bytes,
             "library_bytes": library_bytes, "objects": observations,
@@ -581,6 +647,8 @@ def main():
                            help="Compile an exact staged IRX stem in regions (repeatable)")
     selection.add_argument("--split-all", action="store_true",
                            help="Compile all staged IRXs in regions")
+    parser.add_argument("--split-compact-router", action="store_true",
+                        help="Experimental: checked dense region-ID map for split dispatch")
     parser.add_argument("--split-residual-max-pcs", type=int,
                         help="Experimental: bound residual dispatch partitions, not function regions")
     parser.add_argument("--split-residual", action="store_true",
@@ -599,6 +667,8 @@ def main():
                         help="Opt-in content-addressed split object cache outside inputs/output")
     args = parser.parse_args()
     split_mode = args.split_all or bool(args.split_module)
+    if args.split_compact_router and not split_mode:
+        parser.error("--split-compact-router requires --split-module or --split-all")
     if args.split_cross_block_tables and args.split_table_disc_root is None:
         parser.error("--split-cross-block-tables requires --split-table-disc-root")
     if args.split_table_disc_root is not None and args.split_relocation_receipt is None:
@@ -705,6 +775,13 @@ def build(args, out):
                                            cross_block_tables=args.split_cross_block_tables,
                                            residual_max_pcs=args.split_residual_max_pcs)
                 subprocess.run([str(recomp), str(pilot), str(ir_dir), str(plan)], check=True)
+                if args.split_compact_router:
+                    router_path = ir_dir / f"{stem}.ll"
+                    router = router_path.read_text(encoding="utf-8")
+                    compact = compact_split_router(router, plan.read_text(encoding="ascii"))
+                    router_path.write_text(compact, encoding="utf-8")
+                    print(f"{stem}: compact router {len(router.encode('utf-8'))} -> "
+                          f"{len(compact.encode('utf-8'))} IR bytes")
                 provenance_by_stem[stem] = (
                     {**common_provenance,
                      "plan_sha256": sha256_file(plan),
