@@ -468,35 +468,47 @@ def recover(elf, build, config, base_work, jobs, allow_ir_changes=False,
                 print(f"Verified migration unavailable: {error}", flush=True)
                 work = new_recovery_work(base_work)
             else:
-                metadata_path = work / "ir" / "ee_functions.json"
                 print("Migrating verified guest IR without retranslation", flush=True)
-                # Reuse exact matching O0 objects from any extant source,
-                # not just the selected known-function inventory.
-                from build_optimized_cache import seed_candidate_objects
-                from verify_ir import llvm, native_target_identity, ir_pipeline_id
-                candidates = [candidate.parent, previous_cache, base_work,
-                              *legacy_recovery_directories(base_work)]
-                candidates.extend(sorted(base_work.glob("retained-*"), reverse=True))
-                with metrics.stage("native_object_seeding"):
-                    seed_candidate_objects(
-                        candidates, work, metadata_path, manifest["ir_hashes"], 0,
-                        llvm, native_target_identity, ir_pipeline_id)
-                run_game.build_linked_library(
-                    source_root, work, metadata_path, work / "objects",
-                    work / library_name, 0, emit_jobs=jobs)
-                run_game.write_translation_cache(
-                    work / "translation-cache.json", inputs, 0, metadata_path,
-                    work / library_name, ir_sources)
         if comparison is None:
             comparison = run_known_replays.reconstruct(
-                manifest, entries, elf, build, config, work, jobs, allow_ir_changes)
+                manifest, entries, elf, build, config, work, jobs, allow_ir_changes,
+                ir_only=True)
+        if comparison["missing"] or comparison["extra"] or (
+                comparison["mismatched_sha256"] and not allow_ir_changes):
+            raise ValueError("reconstructed IR did not meet the recovery policy")
+        metadata_path = work / "ir" / "ee_functions.json"
+        metadata = shared_ir.read_json(metadata_path)
+        hashes = run_game.hash_ir_modules(metadata_path.parent, metadata["functions"],
+                                          require_owned_directory=True)
+        if list(hashes) != manifest.get("known_entries", list(manifest["ir_hashes"])):
+            raise ValueError("recovered ordered IR inventory changed")
+        if not allow_ir_changes and hashes != manifest["ir_hashes"]:
+            raise ValueError("recovered IR hash mismatch")
+        # Both copied and reconstructed IR use the same native seeding path.
+        # Use current hashes rather than the historical manifest: changed
+        # lowering can still leave a large fraction of modules byte-identical.
+        from build_optimized_cache import seed_candidate_objects
+        from verify_ir import llvm, native_target_identity, ir_pipeline_id
+        candidates = [candidate.parent, previous_cache, base_work,
+                      *legacy_recovery_directories(base_work)]
+        candidates.extend(sorted(base_work.glob("retained-*"), reverse=True))
+        candidates.extend(path for path in sorted(base_work.glob("backup-*"), reverse=True)
+                          if path.is_dir() and not path.is_symlink()
+                          and not path.name.endswith("-ir"))
+        with metrics.stage("native_object_seeding"):
+            seed_candidate_objects(
+                candidates, work, metadata_path, hashes, 0,
+                llvm, native_target_identity, ir_pipeline_id)
+        run_game.build_linked_library(
+            source_root, work, metadata_path, work / "objects",
+            work / library_name, 0, emit_jobs=jobs)
+        run_game.write_translation_cache(
+            work / "translation-cache.json", inputs, 0, metadata_path,
+            work / library_name, ir_sources)
         metrics.details("ir_comparison", comparison)
         (work / "ir-comparison.json").write_text(
             json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
         validate(work)
-        if comparison["missing"] or comparison["extra"] or (
-                comparison["mismatched_sha256"] and not allow_ir_changes):
-            raise ValueError("reconstructed IR did not meet the recovery policy")
         preserved_profiles = ([] if full_native_backup else
                               canonical_shared_profiles(base_work, work))
         def validate_promoted(directory):

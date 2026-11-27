@@ -298,3 +298,9 @@ Overwrite-IR can skip native compilation and linking only when the existing
 DLL receipt, current shared metadata and hashes, source/native inputs, and
 complete native object inventory all validate. Any mismatch follows the
 ordinary incremental build path. This does not skip requested IR generation.
+
+Recovery now reconstructs IR separately from native emission. Even with
+explicitly changed lowering, the current verified IR hashes are used to
+seed native objects from extant canonical, legacy and retained inventories.
+Only identical modules with compatible native identity can be reused.
+Strict recovery still refuses any change to module bytes or ordered entries.

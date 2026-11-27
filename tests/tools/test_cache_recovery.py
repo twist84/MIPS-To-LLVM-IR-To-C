@@ -160,24 +160,34 @@ def test_link_or_validation_failure_does_not_activate():
         builds = []
 
         def fake_reconstruct(manifest, entries, elf_path, build_dir, config,
-                             work, jobs, allow_mismatches):
+                             work, jobs, allow_mismatches, *, ir_only=False):
+            assert ir_only
             assert entries == [0x100008, 0x100010]
             assert not allow_mismatches
             assert saved.read_bytes() == b"original guest code"
             assert not recovery.pointer_path(base).exists()
             (work / "ir").mkdir(parents=True)
             metadata = work / "ir" / "ee_functions.json"
+            functions = []
+            for pc, name in zip(entries, manifest["ir_hashes"]):
+                (metadata.parent / name).write_bytes(str(pc).encode())
+                functions.append({"ir_path": name, "vaddr": hex(pc), "block_pcs": [hex(pc)]})
             shared_ir.write_json(metadata, {"elf": shared_ir.relative_path(elf, metadata.parent),
-                                            "path_format": "manifest-relative-v1"})
-            shared_ir.write_json(work / "translation-cache.json",
-                                 {"metadata_sha256": run_game.sha256_path(metadata)})
+                                            "path_format": "manifest-relative-v1",
+                                            "functions": functions,
+                                            "function_count": len(functions)})
             builds.append(work)
             return comparison
+
+        def fake_build(source, work, metadata, objects, library, opt, **kwargs):
+            assert opt == 0
+            library.write_bytes(b"native")
 
         with patch.object(recovery.run_game, "native_executable", return_value=build / "ee_recomp"), \
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
-             patch.object(recovery.run_game, "translation_inputs", return_value={}), \
+             patch.object(recovery.run_game, "build_linked_library", side_effect=fake_build), \
+             patch.object(recovery.run_game, "translation_inputs", return_value={"ELF": sources["ELF"]}), \
              patch.object(recovery, "validate_portable_cache", side_effect=ValueError("bad linked library")):
             try:
                 recovery.recover(elf, build, "Release", base, 8)
@@ -193,7 +203,8 @@ def test_link_or_validation_failure_does_not_activate():
         with patch.object(recovery.run_game, "native_executable", return_value=build / "ee_recomp"), \
              patch.object(recovery.run_game, "ir_generation_inputs", return_value=sources), \
              patch.object(recovery.run_known_replays, "reconstruct", side_effect=fake_reconstruct), \
-             patch.object(recovery.run_game, "translation_inputs", return_value={}), \
+             patch.object(recovery.run_game, "build_linked_library", side_effect=fake_build), \
+             patch.object(recovery.run_game, "translation_inputs", return_value={"ELF": sources["ELF"]}), \
              patch.object(recovery, "validate_portable_cache"), \
              patch.object(cache_backup, "seven_zip", return_value=None):
             promoted = recovery.recover(elf, build, "Release", base, 8)
