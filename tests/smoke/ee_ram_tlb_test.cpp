@@ -2550,6 +2550,116 @@ bool test_strict_reset_wired()
         cpu.m_pc == pc + 12u && cpu.m_cop0[ee::COP0_Random] == 47u;
 }
 
+bool test_strict_reset_indexed_tlb()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[64u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    ee::c_ee_tlb tlb{};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[4].m_lo = 0u;
+    cpu.m_gpr[5].m_lo = 0u;
+    cpu.m_gpr[6].m_lo = 0x70000000u;
+    cpu.m_gpr[7].m_lo = 0xffffffff80000007ull;
+    cpu.m_gpr[8].m_lo = 7u;
+    constexpr uint32_t words[] = {
+        0x40840000u, 0x40852800u, 0x40865000u, 0x40871000u, 0x40881800u,
+        0x0000040fu, 0x42000002u, 0x0000040fu, 0x42000001u, 0x40021000u
+    };
+    for (uint32_t i = 0u; i < sizeof(words) / sizeof(words[0]); ++i)
+    {
+        put(i * 4u, words[i]);
+    }
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram, nullptr, &tlb);
+    };
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::UNSUPPORTED_OPCODE ||
+        cpu.m_pc != pc)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        if (step(1u).m_retired != 1u)
+        {
+            return false;
+        }
+    }
+    ee::s_ee_tlb_entry entry{};
+    if (tlb.read(0u, &entry) || step(0u).m_result != result::BUDGET_EXHAUSTED ||
+        tlb.read(0u, &entry) || step(1u).m_retired != 1u || !tlb.read(0u, &entry) ||
+        entry.m_page_mask != 0u || entry.m_entry_hi != 0x70000000u ||
+        entry.m_entry_lo0 != 0x80000007u || entry.m_entry_lo1 != 7u)
+    {
+        return false;
+    }
+    const auto scratch = tlb.lookup(0x70001234u, 0u, true);
+    if (scratch.m_status != ee::e_ee_tlb_lookup_status::SCRATCHPAD_MAPPED ||
+        scratch.m_scratchpad_offset != 0x1234u || step(1u).m_retired != 1u)
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_EntryLo0] = 0u;
+    cpu.m_cop0[ee::COP0_EntryLo1] = 0u;
+    cpu.m_cop0[ee::COP0_PageMask] = 0x6000u;
+    cpu.m_cop0[ee::COP0_EntryHi] = 0u;
+    cpu.m_gpr[2].m_hi = 0xabcdefu;
+    if (step(1u).m_retired != 1u || cpu.m_cop0[ee::COP0_EntryHi] != 0x70000000u ||
+        cpu.m_cop0[ee::COP0_EntryLo0] != 0x80000007u ||
+        cpu.m_cop0[ee::COP0_EntryLo1] != 7u || cpu.m_cop0[ee::COP0_PageMask] != 0u ||
+        step(1u).m_retired != 1u || cpu.m_gpr[2].m_lo != 0xffffffff80000007ull ||
+        cpu.m_gpr[2].m_hi != 0xabcdefu)
+    {
+        return false;
+    }
+    // Invalid mask/index refuse without changing the table or PC.
+    cpu.m_pc = pc + 24u;
+    cpu.m_cop0[ee::COP0_PageMask] = 0x2000u;
+    cpu.m_cop0[ee::COP0_EntryLo0] = 0u;
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 24u ||
+        !tlb.read(0u, &entry) || entry.m_entry_lo0 != 0x80000007u)
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_PageMask] = 0u;
+    cpu.m_cop0[ee::COP0_Index] = 48u;
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 24u)
+    {
+        return false;
+    }
+    cpu.m_pc = pc + 32u;
+    cpu.m_cop0[ee::COP0_Index] = 1u;
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 32u ||
+        cpu.m_cop0[ee::COP0_EntryLo0] != 0u)
+    {
+        return false;
+    }
+    put(40u, 0x42000006u); // TLBWR needs real Random evolution
+    cpu.m_pc = pc + 40u;
+    if (step(1u).m_result != result::UNSUPPORTED_OPCODE || cpu.m_pc != pc + 40u)
+    {
+        return false;
+    }
+    // A programmed scratchpad entry does not authorize a backing
+    // access in this reset-only executor.
+    put(44u, 0x8cc20000u); // lw v0,0(a2)
+    cpu.m_pc = pc + 44u;
+    return step(1u).m_result == result::DATA_UNAVAILABLE &&
+        cpu.m_pc == pc + 44u && tlb.read(0u, &entry) &&
+        entry.m_entry_lo0 == 0x80000007u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2777,6 +2887,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_indexed_tlb(), "strict reset persistent indexed TLB regression"))
     {
         return 1;
     }

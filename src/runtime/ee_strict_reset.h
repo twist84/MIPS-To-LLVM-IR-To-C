@@ -214,7 +214,8 @@ static_assert(!status_supported(0x70000001u));
 static_assert(!status_supported(0x80000000u));
 
 // No memory, branches, clocks or general COP0 side effects.
-inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode)
+inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode,
+    c_ee_tlb* persistent_tlb)
 {
     const uint32_t primary = opcode >> 26u;
     const uint32_t rs = (opcode >> 21u) & 31u;
@@ -286,6 +287,49 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         break;
     }
     case 0x10u:
+        if (persistent_tlb != nullptr)
+        {
+            // Reuse the bounded TLB register array and its index/mask
+            // validation. No translated access or Random evolution is
+            // implied by programming an entry.
+            if (opcode == 0x42000002u) // TLBWI
+            {
+                return persistent_tlb->write(cpu.m_cop0[COP0_Index],
+                    cpu.m_cop0[COP0_PageMask], cpu.m_cop0[COP0_EntryHi],
+                    cpu.m_cop0[COP0_EntryLo0], cpu.m_cop0[COP0_EntryLo1]);
+            }
+            if (opcode == 0x42000001u) // TLBR
+            {
+                s_ee_tlb_entry entry{};
+                if (!persistent_tlb->read(cpu.m_cop0[COP0_Index], &entry))
+                {
+                    return false;
+                }
+                cpu.m_cop0[COP0_PageMask] = entry.m_page_mask;
+                cpu.m_cop0[COP0_EntryHi] = entry.m_entry_hi;
+                cpu.m_cop0[COP0_EntryLo0] = entry.m_entry_lo0;
+                cpu.m_cop0[COP0_EntryLo1] = entry.m_entry_lo1;
+                return true;
+            }
+            const uint32_t reg = (opcode >> 11u) & 31u;
+            const uint32_t form = opcode & 0xffe007ffu;
+            if ((form == 0x40800000u || form == 0x40000000u) &&
+                (reg == COP0_Index || reg == COP0_PageMask || reg == COP0_EntryHi ||
+                 reg == COP0_EntryLo0 || reg == COP0_EntryLo1))
+            {
+                // Match the existing bounded RAM interpreter's staging
+                // register storage policy; TLBWI validates index/mask.
+                if (form == 0x40800000u)
+                {
+                    cpu.m_cop0[reg] = static_cast<uint32_t>(read_gpr(cpu, rt));
+                }
+                else if (rt != 0u)
+                {
+                    cpu.m_gpr[rt].m_lo = sign_extend_word(cpu.m_cop0[reg]);
+                }
+                return true;
+            }
+        }
         if ((opcode & 0xffe0ffffu) == 0x40806000u) // canonical MTC0 rt,Status
         {
             const uint32_t status = static_cast<uint32_t>(read_gpr(cpu, rt));
@@ -369,14 +413,15 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
 inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
     const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode,
-    const s_ee_reset_ram_view& ram, s_ee_reset_sio_tx* sio)
+    const s_ee_reset_ram_view& ram, s_ee_reset_sio_tx* sio,
+    c_ee_tlb* persistent_tlb)
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
     const bool store = primary == 0x28u || primary == 0x2bu;
     if (primary != 0x24u && primary != 0x23u && !store)
     {
-        return {execute_register_word(cpu, opcode) ? result::COMMITTED :
+        return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
     }
     const uint32_t rs = (opcode >> 21u) & 31u;
@@ -447,7 +492,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
-    const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr)
+    const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr,
+    c_ee_tlb* persistent_tlb = nullptr)
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -459,7 +505,8 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     {
         return {result::BUDGET_EXHAUSTED};
     }
-    const c_ee_tlb tlb{};
+    const c_ee_tlb empty_tlb{};
+    const c_ee_tlb& tlb = persistent_tlb != nullptr ? *persistent_tlb : empty_tlb;
     const auto fetch = [&](uint32_t pc)
     {
         return ee_fetch_strict_reset_word(ee_plan_instruction_fetch(tlb, pc,
@@ -507,7 +554,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
             cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-            pc + 4u, ee_read_instruction_word(slot), ram, sio);
+            pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb);
         if (action.m_result != result::COMMITTED)
         {
             if (link)
@@ -520,7 +567,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-        cpu.m_pc, opcode, ram, sio);
+        cpu.m_pc, opcode, ram, sio, persistent_tlb);
     if (action.m_result != result::COMMITTED)
     {
         return action;

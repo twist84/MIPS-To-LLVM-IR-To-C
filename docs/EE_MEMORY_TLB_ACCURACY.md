@@ -1018,3 +1018,27 @@ criteria or extending its SIF/RPC integration. v0.6 remains the
 strict end-to-end regression target in parallel. No production
 runtime changes or retail replay required for this diagnostic batch.
 https://github.com/TamaribaEmu/OpenPS2BIOS/releases/tag/v0.7
+
+## M6E3D1: persistent indexed firmware TLB state
+
+Both versioned jobs passed on d8e3a115:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46050170638
+v0.6 stopped at 653650 / a0019730 and v0.7 at 653842 /
+a0019750, same MTC0 Index opcode 40840000 and arguments:
+Index=0, PageMask=0, EntryHi=70000000, EntryLo0=80000007,
+EntryLo1=7. v0.7 official SHA-256 confirmed twice and now pinned.
+
+Add caller-owned persistent c_ee_tlb to the isolated executor,
+canonical MFC0/MTC0 for five indexed TLB staging registers,
+TLBWI and TLBR using the existing table validation. Staging
+registers retain the bounded RAM interpreter's raw storage
+policy; invalid indices/masks and unwritten TLBR refuse.
+The existing table's lookup still rejects unsupported entries.
+No TLBWR, Random progression, translated memory execution,
+or live cache/exception delivery is enabled by this change.
+
+Require actual v0.6 first TLBWI at 653657 / a001974c,
+check all entry fields and scratchpad classification, then
+return at 653660 / a0016388. v0.7 independently must emit the
+same first TLBWI entry at 653849 / a001976c. These predicted
+checkpoints require CI. No production runtime or retail changes.

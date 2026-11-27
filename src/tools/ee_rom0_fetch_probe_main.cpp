@@ -36,13 +36,14 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     }
     uint32_t retired = first.m_retired;
     ee::s_ee_reset_prefix_step stop{ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
-    const ee::c_ee_tlb tlb{};
+    ee::c_ee_tlb tlb{};
     bool entered_ram = false;
+    bool first_tlb_write = false;
     for (; retired < budget;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            budget - retired, ram, &sio);
+            budget - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -56,6 +57,20 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!first_tlb_write && action.m_opcode == 0x42000002u)
+        {
+            ee::s_ee_tlb_entry entry{};
+            const uint32_t index = cpu.m_cop0[ee::COP0_Index];
+            if (!tlb.read(index, &entry))
+            {
+                std::fprintf(stderr, "EE exploration committed TLBWI without entry\n");
+                return 7;
+            }
+            first_tlb_write = true;
+            std::printf("EE exploration first TLBWI: retired=%u pc=%08x index=%u mask=%08x hi=%08x lo0=%08x lo1=%08x\n",
+                retired, cpu.m_pc, index, entry.m_page_mask, entry.m_entry_hi,
+                entry.m_entry_lo0, entry.m_entry_lo1);
+        }
         if (!entered_ram && cpu.m_pc >= 0xa0000000u && cpu.m_pc < 0xa2000000u)
         {
             entered_ram = true;
@@ -134,7 +149,7 @@ int main(int argc, char** argv)
         return 2;
     }
     const ee::s_ee_strict_rom0_view rom{bytes.data(), bytes.size()};
-    const ee::c_ee_tlb tlb{};
+    ee::c_ee_tlb tlb{};
     // Classification only: no full reset initialization or retirement.
     constexpr uint32_t status = ee::STATUS_BEV | ee::STATUS_ERL;
     constexpr uint32_t pcs[] = {0xbfc00000u, ee::VEC_TLB_REFILL_BEV1, ee::VEC_COMMON_BEV1};
@@ -696,7 +711,7 @@ int main(int argc, char** argv)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            console_checkpoint - retired, ram, &sio);
+            console_checkpoint - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > console_checkpoint - retired)
         {
@@ -749,7 +764,7 @@ int main(int argc, char** argv)
     for (; retired < config_checkpoint;)
     {
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            config_checkpoint - retired, ram, &sio);
+            config_checkpoint - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > config_checkpoint - retired)
         {
@@ -802,7 +817,7 @@ int main(int argc, char** argv)
     for (; retired < vector_checkpoint;)
     {
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            vector_checkpoint - retired, ram, &sio);
+            vector_checkpoint - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > vector_checkpoint - retired)
         {
@@ -868,7 +883,7 @@ int main(int argc, char** argv)
     for (; retired < vectors_done;)
     {
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            vectors_done - retired, ram, &sio);
+            vectors_done - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > vectors_done - retired)
         {
@@ -919,7 +934,7 @@ int main(int argc, char** argv)
     for (; retired < wired_entry;)
     {
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            wired_entry - retired, ram, &sio);
+            wired_entry - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > wired_entry - retired)
         {
@@ -935,7 +950,7 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "EELOAD Wired call entry mismatch\n");
         return 54;
     }
-    const auto wired = ee::ee_execute_strict_rom_register_step(cpu, rom, 1u, ram, &sio);
+    const auto wired = ee::ee_execute_strict_rom_register_step(cpu, rom, 1u, ram, &sio, &tlb);
     if (wired.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
         wired.m_opcode != 0x40843000u || wired.m_retired != 1u ||
         cpu.m_cop0[ee::COP0_Wired] != 0u || cpu.m_cop0[ee::COP0_Random] != 47u ||
@@ -948,7 +963,7 @@ int main(int argc, char** argv)
     for (; retired < wired_done;)
     {
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            wired_done - retired, ram, &sio);
+            wired_done - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
             action.m_retired == 0u || action.m_retired > wired_done - retired)
         {
@@ -967,13 +982,101 @@ int main(int argc, char** argv)
     std::printf("EELOAD Wired: retired=%u pc=%08x wired=%u random=%u\n",
         retired, cpu.m_pc, cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
 
-    const uint32_t exploration_limit = wired_done + 4096u;
+    // Both firmware releases call the indexed TLB programming helper
+    // with a scratchpad mapping first. This pinned v0.6 checkpoint
+    // verifies the guest writes, including absence before TLBWI.
+    const uint32_t tlb_entry = wired_done + 12u;
+    const uint32_t tlb_write_done = tlb_entry + 7u;
+    const uint32_t tlb_return_done = tlb_write_done + 3u;
+    for (; retired < tlb_entry;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            tlb_entry - retired, ram, &sio, &tlb);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > tlb_entry - retired)
+        {
+            std::fprintf(stderr, "EELOAD TLB setup refused: pc=%08x opcode=%08x\n",
+                cpu.m_pc, action.m_opcode);
+            return 58;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0019730u || cpu.m_gpr[4].m_lo != 0u ||
+        cpu.m_gpr[5].m_lo != 0u || cpu.m_gpr[6].m_lo != 0x70000000u ||
+        cpu.m_gpr[7].m_lo != 0xffffffff80000007ull || cpu.m_gpr[8].m_lo != 7u)
+    {
+        std::fprintf(stderr, "EELOAD TLB call arguments mismatch\n");
+        return 59;
+    }
+    for (; retired < tlb_write_done - 1u;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            tlb_write_done - 1u - retired, ram, &sio, &tlb);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > tlb_write_done - 1u - retired)
+        {
+            std::fprintf(stderr, "EELOAD TLB staging refused: pc=%08x opcode=%08x\n",
+                cpu.m_pc, action.m_opcode);
+            return 60;
+        }
+        retired += action.m_retired;
+    }
+    ee::s_ee_tlb_entry entry{};
+    if (cpu.m_pc != 0xa0019748u || cpu.m_cop0[ee::COP0_Index] != 0u ||
+        cpu.m_cop0[ee::COP0_PageMask] != 0u ||
+        cpu.m_cop0[ee::COP0_EntryHi] != 0x70000000u ||
+        cpu.m_cop0[ee::COP0_EntryLo0] != 0x80000007u ||
+        cpu.m_cop0[ee::COP0_EntryLo1] != 7u || tlb.read(0u, &entry))
+    {
+        std::fprintf(stderr, "EELOAD TLB staging mismatch\n");
+        return 61;
+    }
+    const auto tlb_write = ee::ee_execute_strict_rom_register_step(cpu, rom, 1u, ram, &sio, &tlb);
+    if (tlb_write.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+        tlb_write.m_opcode != 0x42000002u || tlb_write.m_retired != 1u ||
+        cpu.m_pc != 0xa001974cu || !tlb.read(0u, &entry) ||
+        entry.m_page_mask != 0u || entry.m_entry_hi != 0x70000000u ||
+        entry.m_entry_lo0 != 0x80000007u || entry.m_entry_lo1 != 7u)
+    {
+        std::fprintf(stderr, "EELOAD first TLBWI mismatch\n");
+        return 62;
+    }
+    retired += tlb_write.m_retired;
+    const auto scratch = tlb.lookup(0x70003fffu, 0u, true);
+    if (scratch.m_status != ee::e_ee_tlb_lookup_status::SCRATCHPAD_MAPPED ||
+        scratch.m_entry_index != 0u || scratch.m_scratchpad_offset != 0x3fffu)
+    {
+        std::fprintf(stderr, "EELOAD scratchpad TLB classification mismatch\n");
+        return 63;
+    }
+    std::printf("EELOAD first TLBWI: retired=%u pc=%08x index=0 mask=%08x hi=%08x lo0=%08x lo1=%08x\n",
+        retired, cpu.m_pc, entry.m_page_mask, entry.m_entry_hi, entry.m_entry_lo0, entry.m_entry_lo1);
+    for (; retired < tlb_return_done;)
+    {
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
+            tlb_return_done - retired, ram, &sio, &tlb);
+        if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+            action.m_retired == 0u || action.m_retired > tlb_return_done - retired)
+        {
+            return 64;
+        }
+        retired += action.m_retired;
+    }
+    if (cpu.m_pc != 0xa0016388u || cpu.m_gpr[29].m_lo != 0xffffffffa007ff60ull ||
+        !tlb.read(0u, &entry) || entry.m_entry_lo0 != 0x80000007u)
+    {
+        std::fprintf(stderr, "EELOAD first TLBWI return mismatch\n");
+        return 65;
+    }
+    std::printf("EELOAD first TLBWI return: retired=%u pc=%08x\n", retired, cpu.m_pc);
+
+    const uint32_t exploration_limit = tlb_return_done + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_limit - retired, ram, &sio);
+            exploration_limit - retired, ram, &sio, &tlb);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
