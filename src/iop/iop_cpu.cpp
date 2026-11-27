@@ -922,6 +922,13 @@ s_run_result c_cpu::run(uint32_t instruction_budget)
                     context.m_in_delay != 0u ? context.m_branch_pc : 0u;
                 m_state.m_gpr[0] = 0u;
                 m_aot->record(context.m_executed);
+                static const bool exit_profile =
+                    std::getenv("SDBZ_IOP_AOT_EXIT_PROFILE") != nullptr;
+                if (exit_profile)
+                {
+                    m_aot->record_exit(*module, entry_pc, context, reason,
+                                       instruction_budget - index);
+                }
                 if (context.m_executed != 0u)
                 {
                     m_cycles += context.m_executed;
