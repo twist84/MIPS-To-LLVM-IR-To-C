@@ -1038,6 +1038,166 @@ bool test_strict_ram_execution()
            memory.read64(0x2000u) == original && actual_delay_slot;
 }
 
+bool test_strict_ram_wide_execution()
+{
+    using result = ee::e_ee_strict_ram_step_result;
+    constexpr uint32_t pc = 0x00400000u;
+    constexpr uint32_t data = pc + 0x1000u;
+    constexpr uint32_t dispatch = static_cast<uint32_t>(ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
+    constexpr uint32_t code_lo = (1u << 6u) | 0x12u;
+    constexpr uint32_t data_lo = (2u << 6u) | 0x16u;
+    constexpr ee::s_ee_u128 original{0x8877665580ff8180ull, 0xffeeddccbbaa9988ull};
+    constexpr ee::s_ee_u128 marker{0x1122334455667788ull, 0x123456789abcdef0ull};
+    ee::ee_memory memory(0x3000u);
+    if (!memory.tlb().write(0u, 0u, pc | 0xabu, code_lo, data_lo))
+    {
+        return false;
+    }
+    ee::s_ee_cpu_state cpu{};
+    bool actual_delay_slot = true;
+    const ee::s_ee_strict_ram_evidence evidence{true, true};
+    const auto reset = [&](uint32_t primary, uint32_t address, uint32_t rt = 2u)
+    {
+        cpu = {};
+        cpu.m_pc = pc;
+        cpu.m_exit_reason = dispatch;
+        cpu.m_cop0[ee::COP0_Status] = 0x10u;
+        cpu.m_cop0[ee::COP0_EntryHi] = 0xabu;
+        cpu.m_gpr[4].m_lo = address;
+        cpu.m_gpr[2] = marker;
+        actual_delay_slot = true;
+        memory.write32(0x1000u, (primary << 26u) | (4u << 21u) | (rt << 16u));
+        memory.write128(0x2000u, &original);
+    };
+    const auto same_memory = [&](const ee::s_ee_u128& expected)
+    {
+        ee::s_ee_u128 actual{};
+        memory.read128(0x2000u, &actual);
+        return actual.m_lo == expected.m_lo && actual.m_hi == expected.m_hi;
+    };
+    for (uint32_t offset = 0u; offset < 16u; ++offset)
+    {
+        reset(0x1eu, data + offset);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::COMMITTED || cpu.m_pc != pc + 4u ||
+            cpu.m_gpr[2].m_lo != original.m_lo || cpu.m_gpr[2].m_hi != original.m_hi ||
+            !same_memory(original))
+        {
+            return false;
+        }
+        reset(0x1fu, data + offset);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::COMMITTED || cpu.m_pc != pc + 4u || !same_memory(marker) ||
+            cpu.m_gpr[2].m_lo != marker.m_lo || cpu.m_gpr[2].m_hi != marker.m_hi)
+        {
+            return false;
+        }
+    }
+
+    // Independent expected words, using the pinned PCSX2 left/right
+    // shift-and-mask equations rather than the strict lane planner.
+    constexpr uint32_t load_op[] = {0x22u, 0x26u, 0x1au, 0x1bu};
+    constexpr uint32_t store_op[] = {0x2au, 0x2eu, 0x2cu, 0x2du};
+    for (uint32_t family = 0u; family < 4u; ++family)
+    {
+        const uint32_t width = family < 2u ? 4u : 8u;
+        const bool left = (family & 1u) == 0u;
+        const uint64_t full = width == 4u ? 0xffffffffull : ~uint64_t{0};
+        for (uint32_t offset = 0u; offset < width; ++offset)
+        {
+            const uint32_t shift = (left ? width - 1u - offset : offset) * 8u;
+            const uint64_t load_mask = left ? (full << shift) & full : full >> shift;
+            const uint64_t raw = original.m_lo & full;
+            const uint64_t shifted = left ? raw << shift : raw >> shift;
+            uint64_t expected = (marker.m_lo & ~load_mask) | (shifted & load_mask);
+            if (width == 4u && (left || offset == 0u))
+            {
+                expected &= full;
+                if ((expected & 0x80000000ull) != 0u)
+                {
+                    expected |= ~full;
+                }
+            }
+            reset(load_op[family], data + offset);
+            if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                    result::COMMITTED || cpu.m_pc != pc + 4u ||
+                cpu.m_gpr[2].m_lo != expected || cpu.m_gpr[2].m_hi != marker.m_hi ||
+                !same_memory(original))
+            {
+                return false;
+            }
+            const uint64_t store_mask = left ? full >> shift : (full << shift) & full;
+            const uint64_t source = marker.m_lo & full;
+            const uint64_t store_value = left ? source >> shift : source << shift;
+            const ee::s_ee_u128 merged
+            {
+                (original.m_lo & ~store_mask) | (store_value & store_mask), original.m_hi
+            };
+            reset(store_op[family], data + offset);
+            if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                    result::COMMITTED || cpu.m_pc != pc + 4u || !same_memory(merged) ||
+                cpu.m_gpr[2].m_lo != marker.m_lo || cpu.m_gpr[2].m_hi != marker.m_hi)
+            {
+                return false;
+            }
+        }
+    }
+    reset(0x1eu, data + 15u, 0u);
+    cpu.m_gpr[0] = marker; // Host corruption must not leak into architectural zero.
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::COMMITTED || cpu.m_gpr[0].m_lo != marker.m_lo ||
+        cpu.m_gpr[0].m_hi != marker.m_hi || !same_memory(original))
+    {
+        return false;
+    }
+    reset(0x1fu, data + 15u, 0u);
+    cpu.m_gpr[0] = marker;
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::COMMITTED || !same_memory({0u, 0u}))
+    {
+        return false;
+    }
+    if (!memory.tlb().write(0u, 0u, pc | 0xabu, code_lo, data_lo & ~4u))
+    {
+        return false;
+    }
+    for (const uint32_t op : {0x1fu, 0x2au, 0x2eu, 0x2cu, 0x2du})
+    {
+        reset(op, data + 7u);
+        if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+                result::FAULT_COMMITTED || cpu.m_pc != ee::VEC_COMMON_BEV0 ||
+            cpu.m_cop0[ee::COP0_Cause] != (ee::EX_Mod << 2u) ||
+            cpu.m_cop0[ee::COP0_BadVAddr] != (op == 0x1fu ? data : data + 7u) ||
+            !same_memory(original) || cpu.m_gpr[2].m_lo != marker.m_lo ||
+            cpu.m_gpr[2].m_hi != marker.m_hi)
+        {
+            return false;
+        }
+    }
+    reset(0x26u, 0x00600003u, 0u);
+    if (ee::ee_execute_strict_ram_step(cpu, memory, actual_delay_slot, evidence) !=
+            result::FAULT_COMMITTED || cpu.m_pc != ee::VEC_TLB_REFILL_BEV0 ||
+        cpu.m_cop0[ee::COP0_BadVAddr] != 0x00600003u || !same_memory(original))
+    {
+        return false;
+    }
+    // A backing truncated inside a 16-byte transfer must not commit either half.
+    ee::ee_memory short_memory(0x2008u);
+    if (!short_memory.tlb().write(0u, 0u, pc | 0xabu, code_lo, data_lo))
+    {
+        return false;
+    }
+    reset(0x1fu, data + 3u);
+    short_memory.write32(0x1000u, (0x1fu << 26u) | (4u << 21u) | (2u << 16u));
+    short_memory.write64(0x2000u, original.m_lo);
+    return ee::ee_execute_strict_ram_step(cpu, short_memory, actual_delay_slot, evidence) ==
+               result::UNMODELED_ACCESS &&
+           cpu.m_pc == pc && cpu.m_exit_reason == dispatch &&
+           short_memory.read64(0x2000u) == original.m_lo &&
+           cpu.m_gpr[2].m_lo == marker.m_lo && cpu.m_gpr[2].m_hi == marker.m_hi &&
+           actual_delay_slot;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -1237,6 +1397,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_ram_execution(), "isolated strict RAM execution regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_ram_wide_execution(), "isolated strict RAM wide execution regression"))
     {
         return 1;
     }

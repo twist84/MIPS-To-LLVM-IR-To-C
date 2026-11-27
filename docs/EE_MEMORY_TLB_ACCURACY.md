@@ -402,3 +402,29 @@ physical RAM and HLE-only physical aliases. M1-M5 constexpr/static_assert
 fixtures remain. CI pending. Next M6B: quadword and partial transfers
 through this isolated executor, then bounded handler/ERET integration
 and native strict lowering strategy without changing the default path.
+
+## Strict memory follow-up M6B: isolated wide and partial transfers
+
+Extend ee_execute_strict_ram_step with LQ/SQ and all eight left/right
+load/store forms. Quadwords align the effective address before
+translation and validate all sixteen bytes before either half commits.
+Partial transfers use the M2 original-EA fault plan and M4 enabled-lane
+span; a store writes only selected bytes, never an extra guest load.
+Loads preserve unaffected register lanes and implement LWL/LWR word
+sign extension; quadword zero-register stores source both halves as
+zero. Pure byte-mask and merge helpers have static_assert coverage,
+including the full-width (no shift by 64) case.
+
+Runtime tests execute 32 quadword and 48 partial offset/direction
+combinations, comparing partial results to independently expressed
+shift/mask equations from pinned PCSX2 R5900OpcodeImpl.cpp. They also
+cover GPR zero, modified-page faults (aligned SQ versus original
+partial EA), partial load to zero with a refill, and a truncated
+quadword backing that must not commit either half.
+https://github.com/PCSX2/pcsx2/blob/34670c6151d28dee8284e90f7957e470fc03f9d3/pcsx2/R5900OpcodeImpl.cpp
+
+The opt-in executor still requires isolated ordinary uncached RAM and
+caller-owned dispatch/clock evidence. No delay slots, handler dispatch,
+cache contents, scratchpad or MMIO transactions, native lowering or
+default execution changes. CI pending; no retail replay needed.
+Next: bounded guest exception handler and ERET execution.

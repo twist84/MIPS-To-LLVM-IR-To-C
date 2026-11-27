@@ -40,7 +40,7 @@ s_ee_ram_execution ee_execute_ram_callback(
     s_ee_runtime* runtime = nullptr
 );
 
-// Opt-in, single ordinary scalar memory instruction. Caller owns the
+// Opt-in, single ordinary scalar, quadword or partial memory instruction. Caller owns the
 // execution thread and must establish an ordinary (not delay-slot)
 // dispatch boundary and isolated RAM: no pending cache/write-buffer,
 // DMA/device effects, native code coherence or clock/interrupt work.

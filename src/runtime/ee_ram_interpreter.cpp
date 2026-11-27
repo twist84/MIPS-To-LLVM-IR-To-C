@@ -563,6 +563,58 @@ s_ee_ram_execution ee_execute_ram_callback(
     return result;
 }
 
+namespace
+{
+// All callers supply a validated lane range within one 64-bit half.
+constexpr uint64_t strict_low_byte_mask(uint32_t count)
+{
+    return count == 8u ? ~uint64_t{0} : (uint64_t{1} << (count * 8u)) - 1u;
+}
+
+constexpr uint64_t strict_merge_load(uint64_t original, uint64_t incoming,
+    uint32_t first_lane, uint32_t count, bool sign_extend_word)
+{
+    const uint32_t shift = first_lane * 8u;
+    const uint64_t mask = strict_low_byte_mask(count);
+    uint64_t value = (original & ~(mask << shift)) | ((incoming & mask) << shift);
+    if (sign_extend_word)
+    {
+        value &= 0xffffffffull;
+        if ((value & 0x80000000ull) != 0u)
+        {
+            value |= 0xffffffff00000000ull;
+        }
+    }
+    return value;
+}
+
+static_assert(strict_low_byte_mask(8u) == 0xffffffffffffffffull);
+static_assert(strict_merge_load(0x1122334455667788ull, 0x80u, 3u, 1u, true) ==
+              0xffffffff80667788ull);
+static_assert(strict_merge_load(0x1122334455667788ull, 0xffu, 0u, 1u, false) ==
+              0x11223344556677ffull);
+static_assert(strict_merge_load(0u, 0x8877665544332211ull, 0u, 8u, false) ==
+              0x8877665544332211ull);
+
+uint64_t strict_read_bytes(const uint8_t* bytes, uint32_t count)
+{
+    uint64_t value = 0u;
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        value |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+    }
+    return value;
+}
+
+void strict_write_bytes(uint8_t* bytes, uint32_t count, uint64_t value)
+{
+    for (uint32_t i = 0u; i < count; ++i)
+    {
+        bytes[i] = static_cast<uint8_t>(value >> (i * 8u));
+    }
+}
+} // namespace
+
 e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     s_ee_cpu_state& cpu, ee_memory& memory, bool& actual_delay_slot,
     const s_ee_strict_ram_evidence& evidence)
@@ -602,10 +654,8 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     // Only ordinary uncached physical RAM, not cached/disabled-cache,
     // accelerated, scratchpad, ROM, device or unmodeled access.
     constexpr uint32_t retail_ram_end = 0x02000000u;
-    const auto ram_span = [&](const s_ee_access_decision& access, uint32_t width)
-        -> uint8_t*
+    const auto backed_span = [&](const s_ee_bus_span_plan& bus) -> uint8_t*
     {
-        const auto bus = ee_plan_data_bus_span(access, width, config, retail_ram_end);
         if (bus.m_region != e_ee_bus_region::RAM ||
             bus.m_cache_policy != e_ee_data_cache_policy::UNCACHED)
         {
@@ -618,7 +668,8 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     {
         return result::UNMODELED_ACCESS;
     }
-    const uint8_t* code = ram_span(fetch.m_access, 4u);
+    const uint8_t* code = backed_span(
+        ee_plan_data_bus_span(fetch.m_access, 4u, config, retail_ram_end));
     if (code == nullptr)
     {
         return result::UNMODELED_ACCESS;
@@ -636,6 +687,9 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
     bool store = false;
     bool sign_extend = false;
     data_kind kind = data_kind::BYTE;
+    using partial_kind = e_ee_partial_access_kind;
+    partial_kind merge_kind = partial_kind::WORD_LEFT;
+    bool partial = false;
     switch (primary)
     {
     case 0x20u: // LB
@@ -675,41 +729,113 @@ e_ee_strict_ram_step_result ee_execute_strict_ram_step(
         store = true;
         kind = data_kind::DOUBLEWORD;
         break;
+    case 0x1eu: // LQ
+        kind = data_kind::GPR_QUADWORD;
+        break;
+    case 0x1fu: // SQ
+        store = true;
+        kind = data_kind::GPR_QUADWORD;
+        break;
+    case 0x22u: // LWL
+    case 0x2au: // SWL
+        partial = true;
+        store = primary == 0x2au;
+        merge_kind = partial_kind::WORD_LEFT;
+        break;
+    case 0x26u: // LWR
+    case 0x2eu: // SWR
+        partial = true;
+        store = primary == 0x2eu;
+        merge_kind = partial_kind::WORD_RIGHT;
+        break;
+    case 0x1au: // LDL
+    case 0x2cu: // SDL
+        partial = true;
+        store = primary == 0x2cu;
+        merge_kind = partial_kind::DOUBLEWORD_LEFT;
+        break;
+    case 0x1bu: // LDR
+    case 0x2du: // SDR
+        partial = true;
+        store = primary == 0x2du;
+        merge_kind = partial_kind::DOUBLEWORD_RIGHT;
+        break;
     default:
         return result::UNSUPPORTED_INSTRUCTION;
     }
-    request.m_kind = e_ee_memory_request_kind::DATA;
     request.m_address = address;
-    request.m_data_kind = kind;
     request.m_write_access = store;
+    if (partial)
+    {
+        request.m_kind = e_ee_memory_request_kind::PARTIAL;
+        request.m_partial_kind = merge_kind;
+        const auto plan = ee_plan_partial_access(tlb, merge_kind, store,
+            address, status, config, context, entry_hi);
+        if (plan.m_fault.m_valid)
+        {
+            return commit_fault();
+        }
+        const auto bus = ee_plan_partial_bus_span(plan, config, retail_ram_end);
+        uint8_t* bytes = backed_span(bus);
+        if (bytes == nullptr)
+        {
+            return result::UNMODELED_ACCESS;
+        }
+        if (store)
+        {
+            strict_write_bytes(bytes, plan.m_lane_count,
+                read_reg(cpu, rt) >> (plan.m_register_first_lane * 8u));
+        }
+        else
+        {
+            const uint64_t incoming = strict_read_bytes(bytes, plan.m_lane_count);
+            write_dword(cpu, rt, strict_merge_load(read_reg(cpu, rt), incoming,
+                plan.m_register_first_lane, plan.m_lane_count,
+                plan.m_sign_extend_word_load));
+        }
+        cpu.m_pc = pc + 4u;
+        return result::COMMITTED;
+    }
+    request.m_kind = e_ee_memory_request_kind::DATA;
+    request.m_data_kind = kind;
     const auto access = ee_plan_data_access(tlb, kind, store, address,
                                            status, config, context, entry_hi);
     if (access.m_fault.m_valid)
     {
         return commit_fault();
     }
-    uint8_t* bytes = ram_span(access.m_access, access.m_width);
+    uint8_t* bytes = backed_span(ee_plan_data_bus_span(access.m_access,
+        access.m_width, config, retail_ram_end));
     if (bytes == nullptr)
     {
         return result::UNMODELED_ACCESS;
     }
     // All potentially failing checks precede the first architectural
     // write. Explicit byte order avoids host alignment/endian assumptions.
-    if (store)
+    if (kind == data_kind::GPR_QUADWORD)
     {
-        const uint64_t value = read_reg(cpu, rt);
-        for (uint32_t i = 0u; i < access.m_width; ++i)
+        if (store)
         {
-            bytes[i] = static_cast<uint8_t>(value >> (i * 8u));
+            strict_write_bytes(bytes, 8u, read_reg(cpu, rt));
+            strict_write_bytes(bytes + 8u, 8u, rt == 0u ? 0u : cpu.m_gpr[rt].m_hi);
         }
+        else
+        {
+            const s_ee_u128 value{strict_read_bytes(bytes, 8u),
+                                strict_read_bytes(bytes + 8u, 8u)};
+            if (rt != 0u)
+            {
+                cpu.m_gpr[rt] = value;
+            }
+        }
+    }
+    else if (store)
+    {
+        strict_write_bytes(bytes, access.m_width, read_reg(cpu, rt));
     }
     else
     {
-        uint64_t value = 0u;
-        for (uint32_t i = 0u; i < access.m_width; ++i)
-        {
-            value |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
-        }
+        uint64_t value = strict_read_bytes(bytes, access.m_width);
         if (sign_extend)
         {
             const uint32_t bits = access.m_width * 8u;
