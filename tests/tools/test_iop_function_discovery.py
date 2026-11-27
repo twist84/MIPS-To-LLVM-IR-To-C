@@ -5,13 +5,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 from pathlib import Path
 
 TOOLS = Path(__file__).resolve().parents[2] / "tools"
 sys.path.insert(0, str(TOOLS))
 from audit_iop_function_discovery import fnv1a, inventory
 from build_iop_aot import (prepare_split_pilot, cached_split_object, split_cache_key,
-                           relocation_receipt_roots)
+                           relocation_receipt_roots, select_split_stems,
+                           split_compile_schedule, compile_split_modules)
 from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatches,
                                     discover_relocation_roots)
 
@@ -399,6 +402,80 @@ class DiscoveryTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cached_split_object(source, obj, cache, context, compile_object)
             self.assertEqual(len(calls), 3)
+
+    def test_multi_split_selection_and_global_schedule(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("Alpha", "Beta"):
+                (root / f"{name}.json").touch()
+            self.assertEqual(select_split_stems(root, ["beta", "ALPHA"]),
+                             ["Alpha", "Beta"])
+            self.assertEqual(select_split_stems(root, None, True), ["Alpha", "Beta"])
+            for selection in (["Alpha", "alpha"], ["missing"]):
+                with self.assertRaises(ValueError):
+                    select_split_stems(root, selection)
+            a, b, c = (root / name for name in ("a.ll", "b.ll", "c.ll"))
+            for source, size in ((a, 2), (b, 9), (c, 2)):
+                source.write_bytes(b"x" * size)
+            self.assertEqual(split_compile_schedule({"Alpha": [a, b], "Beta": [c]}),
+                             [("Alpha", b), ("Alpha", a), ("Beta", c)])
+
+    def test_multi_split_global_queue_link_order_and_warm_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ir = root / "ir"
+            cache = root / "cache"
+            ir.mkdir()
+            cache.mkdir()
+            stems = ["Alpha", "Beta"]
+            sizes = {"Alpha.region.0.ll": 2, "Alpha.region.1.ll": 9,
+                     "Alpha.ll": 3, "Alpha.table.ll": 1,
+                     "Beta.region.0.ll": 12, "Beta.ll": 4, "Beta.table.ll": 1}
+            for name, size in sizes.items():
+                (ir / name).write_bytes(b"x" * size)
+            args = SimpleNamespace(opt="3", jobs=1, region_cache=cache)
+            provenance = {stem: {"module": stem} for stem in stems}
+            compiled, linked = [], []
+
+            def fake_run(command, check):
+                self.assertTrue(check)
+                output = Path(command[command.index("-o") + 1])
+                if "-c" in command:
+                    source = Path(command[command.index("-o") - 1])
+                    compiled.append(source.name)
+                    output.write_bytes(b"object:" + source.name.encode())
+                else:
+                    objects = [Path(arg) for arg in command if arg.endswith(".o")]
+                    linked.append([obj.name for obj in objects])
+                    output.write_bytes(b"".join(obj.read_bytes() for obj in objects))
+
+            def build(name):
+                out = root / name
+                obj, lib = out / "obj", out / "modules"
+                obj.mkdir(parents=True)
+                lib.mkdir()
+                with patch("build_iop_aot.subprocess.run", side_effect=fake_run):
+                    libraries = compile_split_modules(
+                        args, "clang", ir, obj, lib, stems, ".so", provenance)
+                aggregate = json.loads((out / "split-build-receipt.json").read_text())
+                return aggregate, [path.read_bytes() for path in libraries]
+
+            cold, cold_bytes = build("cold")
+            self.assertEqual(compiled[:2], ["Beta.region.0.ll", "Alpha.region.1.ll"])
+            self.assertEqual(len(compiled), len(sizes))
+            self.assertEqual(linked, [
+                ["Alpha.region.0.o", "Alpha.region.1.o", "Alpha.o", "Alpha.table.o"],
+                ["Beta.region.0.o", "Beta.o", "Beta.table.o"]])
+            self.assertEqual(cold["object_count"], len(sizes))
+            self.assertEqual(cold["cache_hits"], 0)
+            for row in cold["modules"]:
+                receipt = json.loads((root / "cold" / row["receipt"]).read_text())
+                self.assertEqual(receipt["library_sha256"], row["library_sha256"])
+            compiled.clear()
+            warm, warm_bytes = build("warm")
+            self.assertEqual(compiled, [])
+            self.assertEqual(warm["cache_hits"], len(sizes))
+            self.assertEqual(cold_bytes, warm_bytes)
 
     def test_capture_identity_and_exclusive_receipt(self):
         meta, data = capture([0x03e00008, 0])
