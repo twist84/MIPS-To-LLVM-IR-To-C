@@ -108,6 +108,10 @@ by these modes. `run_sdbz_p40.bat` is replaced by the first-position
 
 ## Build and test
 
+Requirements: CMake 4.5.1 or newer, Ninja, a C++23-capable host compiler and standard library (Windows MSVC or LLVM/Clang, Linux GCC or Clang), and C11 for the C sources. CI pins CMake 4.5.1; the native dispatcher/runtime linker uses C++23 as well. Check `cmake --version` before configuring. On Windows, use a current Visual Studio developer command prompt.
+
+If upgrading an existing checkout, reconfigure and rebuild the host targets with the new CMake. The native runtime object cache includes compiler flags, so changing the language mode invalidates those cached objects. Keep generated guest IR and AOT inventories unless their existing provenance checks require a refresh. The C++ language mode does not change the guest ISA or LLVM IR format.
+
 ~~~sh
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --parallel 2
