@@ -479,3 +479,47 @@ Real compiler/cache validation and comparison against accepted I11
 library hashes are still required. No ownership, lifter, runtime, EE or
 VU1 semantics changed. A retail replay is unnecessary only when all
 candidate library artifacts are byte-identical to accepted artifacts.
+
+### I16a local build results
+
+The uploaded cold/warm receipts report all seven libraries, 1,095 objects,
+9,126,099 object bytes and 5,820,928 DLL bytes. The global compilation
+wall time was 34.172 s cold and 1.265 s warm (all 1,095 objects reused);
+linking took 0.953 s and 0.938 s respectively. Per-object IR and object
+sizes and per-module DLL sizes matched. All seven DLL SHA-256 values
+differ between cold and warm and from I11. PE timestamps are a possible
+explanation, not established. Full byte-level comparison is required
+before inheriting retail acceptance on artifact identity grounds.
+
+## I13b/I13c — Table-backed ownership
+
+I13b reached 678 additional aligned words (243 ARKD_DVD, 435 LIBSD),
+raising static coverage from 48,737/56,668 to 49,415/56,668 (87.20%).
+The function candidate count remains 1,074; no shared ordinary ownership,
+ordinary/delay overlaps or rejected seeds. Eligible ordinary ownership
+increases from 40,352 to 40,868; residual dispatch PCs fall from 16,316
+to 15,800 (ARKD_DVD 1,814 -> 1,655, LIBSD 1,465 -> 1,108).
+Six non-exhaustive tables supply candidate edges only; four address
+expressions remain unsupported. Dynamic jump targets and bounds are
+not established.
+
+I13c adds opt-in `--split-table-disc-root PS2_GAME` to the existing
+relocation-backed residual splitting path. For every selected module it
+matches a unique capture identity, checks the original ELF path is inside
+the disc root and verifies its SHA-256 against the relocation receipt.
+It checks original ELF metadata, independently reconstructs relocated
+call roots, reruns the indirect producer and table analysis, and recomputes
+the CFG. Saved shadow ownership is never used as input. Ambiguous
+ownership is rejected; all remaining aligned words retain residual
+dispatch coverage. No dynamic jump lowering, bound assumptions, or
+runtime changes are introduced.
+
+For an isolated I13c build, select ARKD_DVD and LIBSD using repeated
+`--split-module` flags, `--split-residual --split-extended`,
+`--split-relocation-receipt iop-i10-discovery.json`,
+`--split-table-disc-root PS2_GAME`, `--opt 3 --jobs 8` and a fresh output
+directory. Use the existing region cache if desired. Compose the candidate
+with unchanged I11 libraries for the other five modules and run a matched
+retail replay before accepting the ownership change. Regression coverage
+includes canonical staged naming, original ELF hash rejection and exact
+residual partition preservation. CI and real retail validation pending.
