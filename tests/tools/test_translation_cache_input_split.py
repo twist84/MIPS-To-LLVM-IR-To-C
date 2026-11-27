@@ -41,6 +41,12 @@ def verify_real_probe_location():
         assert guest[shared_fmac_key] == host[shared_fmac_key]
         assert "src/llvm/ee_vu_fmac4_ir.h" not in guest
         assert "src/architecture/ee_scalar_constant.h" in guest
+        # Shared constexpr implementations are guest lowering inputs,
+        # not just host-only diagnostic headers.
+        for key in ("include/ee/ee_decoder_detail.h",
+                    "include/ee/instruction_lifter_detail.h"):
+            assert key in guest, f"missing guest lowering fingerprint: {key}"
+            assert guest[key] == host[key]
 
 
 def verify_preservation_when_host_only_inputs_change():
