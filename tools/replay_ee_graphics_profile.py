@@ -11,7 +11,7 @@ import sys
 
 from replay_ee_dedup_experiment import (
     read_json, record_count, replay_environment, run_one, sha,
-    terminal_budget, validate_source_libraries,
+    terminal_budget, validate_source_libraries, replay_summary, trace_comparison,
 )
 from replay_ee_graphics_sweep import aot_identity, validate_aot_pair, validate_run
 
@@ -342,6 +342,22 @@ def main():
                     run["directory"] = directory.name
                     run["profile_enabled"] = enabled
                     if args.capture_iop or iop_inventory is not None:
+                        # Partial observations remain useful even when a strict
+                        # PAD replay stop prevents terminal AOT statistics.
+                        if run["returncode"] != 4:
+                            stderr = directory / "stderr.log"
+                            if stderr.is_file():
+                                run["pad"] = replay_summary(stderr)
+                                with stderr.open(encoding="utf-8", errors="replace") as stream:
+                                    run["iop_aot_partial_log"] = [
+                                        line.strip() for line in stream
+                                        if line.startswith("IOP AOT:")]
+                            stdout = directory / "stdout.log"
+                            if stdout.is_file():
+                                run["partial_trace"] = trace_comparison(
+                                    args.reference / "stdout.log", stdout)
+                            raise ValueError(
+                                f"{name} exited {run['returncode']} before terminal budget")
                         run["iop_aot"] = iop_aot_observation(directory / "stderr.log",
                             len(iop_inventory) if iop_inventory and name == "candidate" else 0)
                     run.update(validate_run(args, directory, args.reference, args.recording, polls, run))
