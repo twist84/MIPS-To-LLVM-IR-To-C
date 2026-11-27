@@ -1066,3 +1066,77 @@ Keep fixed G6A/V30, PAD/RTC, quiet/coalescing off. Final CI and
 retail validation pending. If neutral again, move away from
 deadline micro-optimizations and measure active guest execution
 (AOT/interpreter coverage and dispatch cost) before structural work.
+
+## G8C.2 — retained, small positive matched result
+
+All five CI workflows passed at 8afa3e2bfe7867b7b113a8ddf2e343f52095425a.
+Archive ee-iop-g8c2.zip SHA-256
+20c056f6a9bf48b3fce68a88335bc8d35fd5fb865052041b4e54cb3357d732cd.
+Pinned G8B runner
+a02d72ff2844dd6c86059e3deb9629b57b88dc6f63b1306211c29c06964016c8;
+G8C.2 runner
+b0aa1735875a2ee4104cd3facb1fcc28683c896be07cd44500e151ba1fc7dd25.
+Receipt reports unchanged input hashes, fixed G6A/V30, synchronous
+workers, RTC/PAD, profiling and quiet/coalescing off. No IOP AOT
+configuration or AOT load/terminal statistics in the archive.
+Actual binaries not supplied. Independently verified all eight
+terminal report and PPM SHA-256 hashes against the pinned reference,
+all 184719 trace lines per arm (184700 unique sampled dispatches),
+and 3127/3127 valid PAD footers. Every arm reached 40M dispatches,
+21910026110 EE attempts, 22115080673 cycles, 4494 fields, 84 VU1
+programs, 394881 native runs, 445669423 native pairs, zero
+IOP fault/fallback/observer failure, 42578752 logical/physical IOP
+turns, zero quiet advances and zero debt.
+
+| Pair | G8B s | G8C.2 s |
+|---|---:|---:|
+| 1 | 42.625 | 41.968 |
+| 2 | 42.094 | 41.750 |
+| 3 | 42.047 | 41.797 |
+| 4 | 41.781 | 41.656 |
+
+Median 42.0705 -> 41.7735s, 297ms saved, nominal throughput
++0.711%. All four pairs positive (125..657ms saved). Four pairs
+and within-arm variation limit confidence, but low-complexity
+inlining has no extra state and passes all checks. Retain G8C.2,
+do not claim statistically conclusive or general speedup.
+Use pinned G8C.2 runner as control for G8D; no more idle deadline
+micro-optimizations without new evidence.
+
+## G8D.0 — establish interpreter versus IOP AOT baseline
+
+The matched G8C.2 archive contains no IOP AOT activation; active
+guest execution is interpreted. G8A observed 80966947 scheduled
+guest instructions, not the complete session retirement denominator.
+Existing IOP AOT loader activates relocated, import-linked module
+text by exact base and FNV-1a hash, dispatches one entry per IRX,
+and batches device advancement after translated retirement.
+The latter can change device/MMIO visibility compared with the
+interpreter. Do not assume identical behavior or promote AOT
+without the replay gate. Do not enable SDBZ_IOP_AOT_VERIFY:
+its legacy interpreter replay repeats MMIO side effects.
+
+Add a single unprofiled --capture-iop mode to the graphics replay
+harness. Require pinned runner, fresh separate capture directory,
+one replay and no other comparison component. Use existing module
+load callback; validate every captured binary/metadata pair for
+size and FNV-1a identity. Record metadata plus SHA-256 in receipt,
+keep guest bytes outside the diagnostic ZIP. No EE/VU1 changes.
+Build existing iop_recomp and tools/build_iop_aot.py at O3 into a
+fresh directory, preserving all prior captures and libraries.
+Then --candidate-iop-aot compares interpreter and one directory
+of AOT libraries with same pinned runner, same EE and VU1 images,
+both profiles off. Hash every library and recheck inventory at
+completion; strip inherited IOP AOT, capture and verify settings
+from both modes, enable AOT only in candidate arms. Require
+terminal module/active/entry/instruction counts, nonzero native
+retirement and one loaded descriptor per supplied library (current
+builder contract); not proof of full coverage or each module
+executing. Apply existing report, PAD, transition and screenshot
+gates; preserve diagnostic ZIP on failure. Four matched pairs
+only if earlier arms pass. No auto-promotion. Do not infer exact
+AOT coverage percentage by dividing by G8A's scheduled-only
+instruction count. If mismatch, isolate first divergent boundary
+before optimizing dispatch, timing or function discovery.
+Mock tests exercise capture pairing, environment isolation, runner
+pinning, inventory and terminal stats. Final CI/local tests pending.
