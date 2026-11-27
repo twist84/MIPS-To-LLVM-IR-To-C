@@ -1,4 +1,4 @@
-#include "ee_strict_reset.h"
+#include "ee_strict_reset_vif.h"
 #include "ee_decoder.h"
 #include "ee_exceptions.h"
 #include <cstdio>
@@ -37,6 +37,8 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     uint32_t retired = first.m_retired;
     ee::s_ee_reset_prefix_step stop{ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     ee::c_ee_tlb tlb{};
+    ee::c_ee_reset_vif_devices vif_devices;
+    const auto vif = vif_devices.transport();
     bool entered_ram = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
@@ -44,7 +46,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            budget - retired, ram, &sio, &tlb);
+            budget - retired, ram, &sio, &tlb, &vif);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -97,6 +99,8 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     std::printf("EE exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x entered_ram=%u\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address, static_cast<unsigned>(entered_ram));
+    std::printf("EE exploration VIF resets: vif0=%u vif1=%u\n",
+        vif_devices.reset_count(0u), vif_devices.reset_count(1u));
     std::printf("EE exploration COP0: status=%08x config=%08x wired=%u random=%u\n",
         cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
         cpu.m_cop0[ee::COP0_Wired], cpu.m_cop0[ee::COP0_Random]);
@@ -1161,13 +1165,18 @@ int main(int argc, char** argv)
     }
     std::printf("EELOAD TLB mapping comparison: retired=%u pc=%08x argument=0000301f\n", retired, cpu.m_pc);
 
-    const uint32_t exploration_limit = compare_done + 4096u;
+    // v0.7 reached the VIF reset routine after roughly 18k further
+    // retirements. Use a bounded window for v0.6 as well, logging
+    // only the tail and explicitly counting real device reset writes.
+    ee::c_ee_reset_vif_devices vif_devices;
+    const auto vif = vif_devices.transport();
+    const uint32_t exploration_limit = compare_done + 32768u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_limit - retired, ram, &sio, &tlb);
+            exploration_limit - retired, ram, &sio, &tlb, &vif);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -1178,8 +1187,20 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
-        std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
-            pc, action.m_opcode, action.m_retired, cpu.m_pc, retired);
+        if (retired >= compare_done + 17000u)
+        {
+            std::printf("EELOAD step: pc=%08x opcode=%08x count=%u next=%08x total=%u\n",
+                pc, action.m_opcode, action.m_retired, cpu.m_pc, retired);
+        }
+    }
+    std::printf("EELOAD VIF resets: vif0=%u vif1=%u wired=%u\n",
+        vif_devices.reset_count(0u), vif_devices.reset_count(1u), cpu.m_cop0[ee::COP0_Wired]);
+    if (vif_devices.reset_count(0u) != 1u || vif_devices.reset_count(1u) != 1u ||
+        cpu.m_cop0[ee::COP0_Wired] != 31u)
+    {
+        std::fprintf(stderr, "EELOAD VIF reset checkpoint not reached: retired=%u pc=%08x opcode=%08x address=%08x\n",
+            retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
+        return 72;
     }
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,

@@ -1061,3 +1061,25 @@ architectural zero. Directed tests cover negative immediates,
 mapping argument construction at 653943 / a00164a4, stack
 physical 7ff40 contains 301f; then bounded exploration.
 Predicted new checkpoints require CI. No retail replay.
+
+## M6E3E1: actual VIF0/VIF1 FBRST device boundary
+
+M6E3D2 passed on 7c0559bb; all 13 initial v0.6 TLB entries
+matched ROM and the v0.7 count checkpoint passed:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46051012544
+v0.6 exhausted its 4096-instruction exploration window at
+658039; v0.7 advanced to 671772 / a00166a8, SW a0,0(at)
+with a0=1, address b0003810, Wired=31. Subsequent observed
+words target b0003c10 and VIF FIFOs.
+
+Add explicit reset-only VIF write transport, canonical KSEG1,
+DEVICE and UNCACHED word span, FBRST addresses 10003810 and
+10003c10, value 1 only. Route to actual existing c_ee_vif1
+instances (VIF0 bound to isolated VU0), with no DMA/IRQ hooks.
+Do not accept arbitrary MMIO or fabricate readiness. Tests
+seed ERR/ROW and verify reset behavior, independent devices,
+refused addresses/widths/values/reads and branch-slot budget.
+Extend v0.6 exploration to 32768 retirements and require both
+real reset writes and Wired=31; v0.7 requires both resets.
+LQ/SQ FIFO upload and later device dependencies remain blocked.
+New checkpoints and compilation pending CI. No retail replay.

@@ -186,6 +186,26 @@ struct s_ee_reset_sio_tx
     }
 };
 
+// Opt-in device write transport for the isolated reset probe.
+// Only the observed canonical uncached VIF reset stores are admitted.
+// The device callback must commit a real reset or refuse without effects.
+struct s_ee_reset_vif_write
+{
+    using t_write = bool (*)(void*, uint32_t, uint32_t);
+    void* m_user = nullptr;
+    t_write m_write = nullptr;
+
+    constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address, uint32_t value) const
+    {
+        return m_write != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
+            bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
+            bus.m_width == 4u && value == 1u &&
+            (address == 0xb0003810u || address == 0xb0003c10u) &&
+            bus.m_address == address - 0xa0000000u &&
+            m_write(m_user, bus.m_address, value);
+    }
+};
+
 namespace strict_reset_detail
 {
 inline constexpr uint64_t read_gpr(const s_ee_cpu_state& cpu, uint32_t reg)
@@ -418,7 +438,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
     const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode,
     const s_ee_reset_ram_view& ram, s_ee_reset_sio_tx* sio,
-    c_ee_tlb* persistent_tlb)
+    c_ee_tlb* persistent_tlb, const s_ee_reset_vif_write* vif)
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
@@ -448,6 +468,11 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     {
         if (!plan.m_fault.m_valid && sio != nullptr &&
             sio->write(bus, address, static_cast<uint8_t>(read_gpr(cpu, rt))))
+        {
+            return {result::COMMITTED, opcode, 0u, pc};
+        }
+        if (!plan.m_fault.m_valid && vif != nullptr &&
+            vif->write(bus, address, static_cast<uint32_t>(read_gpr(cpu, rt))))
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
@@ -497,7 +522,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
     const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr,
-    c_ee_tlb* persistent_tlb = nullptr)
+    c_ee_tlb* persistent_tlb = nullptr, const s_ee_reset_vif_write* vif = nullptr)
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -558,7 +583,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
             cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-            pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb);
+            pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb, vif);
         if (action.m_result != result::COMMITTED)
         {
             if (link)
@@ -571,7 +596,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-        cpu.m_pc, opcode, ram, sio, persistent_tlb);
+        cpu.m_pc, opcode, ram, sio, persistent_tlb, vif);
     if (action.m_result != result::COMMITTED)
     {
         return action;

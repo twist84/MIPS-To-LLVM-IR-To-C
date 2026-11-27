@@ -1,3 +1,4 @@
+#include "ee_strict_reset_vif.h"
 #include "ee_ram_interpreter.h"
 #include "ee_memory.h"
 #include "ee_address_route.h"
@@ -2737,6 +2738,92 @@ bool test_strict_reset_sltiu()
         cpu.m_gpr[1].m_hi == 0xabcdefu;
 }
 
+bool test_strict_reset_vif_devices()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t code[8u]{};
+    const ee::s_ee_reset_ram_view ram{code, sizeof(code)};
+    ee::c_ee_reset_vif_devices devices;
+    const auto vif = devices.transport();
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_pc = pc;
+    cpu.m_gpr[2].m_lo = 1u;
+    cpu.m_gpr[4].m_lo = 0xffffffffb0003810ull;
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            code[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram,
+            nullptr, nullptr, &vif);
+    };
+    // Seed real VIF command state and ROW; FBRST clears ERR but
+    // preserves ROW independently for each device.
+    for (uint32_t channel = 0u; channel < 2u; ++channel)
+    {
+        if (!devices.device(channel).write_register(0x20u, 0x1234u) ||
+            !devices.device(channel).write_register(0x100u, 0x5678u))
+        {
+            return false;
+        }
+    }
+    put(0u, 0xac820000u);
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_pc != pc || devices.reset_count(0u) != 0u ||
+        devices.device(0u).read_register(0x20u) != 0x1234u ||
+        step(1u).m_retired != 1u || devices.reset_count(0u) != 1u ||
+        devices.device(0u).read_register(0x20u) != 0u ||
+        devices.device(0u).read_register(0x100u) != 0x5678u ||
+        devices.device(1u).read_register(0x20u) != 0x1234u)
+    {
+        return false;
+    }
+    for (const uint32_t address : {0xb0003814u, 0xb0003820u, 0x90003810u, 0xb0003811u})
+    {
+        cpu.m_pc = pc;
+        cpu.m_gpr[4].m_lo = address;
+        if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+            devices.reset_count(0u) != 1u || devices.reset_count(1u) != 0u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[4].m_lo = 0xb0003c10u;
+    cpu.m_gpr[2].m_lo = 2u;
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    cpu.m_gpr[2].m_lo = 1u;
+    put(0u, 0xa0820000u); // wrong width
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    put(0u, 0x8c820000u); // no read stub
+    if (step(1u).m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    put(0u, 0x10000001u);
+    put(4u, 0xac820000u);
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+        devices.reset_count(1u) != 0u || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    return step(2u).m_retired == 2u && cpu.m_pc == pc + 8u &&
+        devices.reset_count(0u) == 1u && devices.reset_count(1u) == 1u &&
+        devices.device(1u).read_register(0x20u) == 0u &&
+        devices.device(1u).read_register(0x100u) == 0x5678u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2964,6 +3051,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_vif_devices(), "strict reset real VIF FBRST regression"))
     {
         return 1;
     }
