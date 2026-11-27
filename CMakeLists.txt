@@ -790,6 +790,9 @@ if(EE_ENABLE_WEBGPU)
 endif()
 
 if(Python3_Interpreter_FOUND)
+    add_test(NAME ee_issue_microbench_comparison
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_issue_counter_comparison.py)
     add_test(NAME ee_issue_microbench_generation
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_issue_microbench.py

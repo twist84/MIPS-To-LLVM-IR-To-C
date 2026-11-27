@@ -33,3 +33,20 @@ The first set distinguishes independent and dependent integer pairs, cache-hit
 load/use, repeated MAC and MFLO dependencies, and both COP1 operation/move
 orders. Compare size-dependent slopes instead of subtracting an assumed
 counter-read cost. Broader cases and direct cycle traces are still required.
+
+## Counter capture comparison
+
+    python3 tools/compare_ee_issue_bench.py --log console.log \\
+        --candidate build/ee_issue_trace_candidate \\
+        --console SCPH-model --bios version --toolchain sdk-revision --loader loader-version
+
+The importer requires all 297 positive counter deltas exactly once in one
+complete capture. It reports raw min/median/max for each of the three body
+sizes and exact adjacent size slopes in cycles per two-instruction block.
+Candidate issue and result-completion slopes remain separate. Fixed counter
+and fence overhead is not assigned to an instruction. Optional
+`--ordered-waw-overlap` compares the existing counterfactual WAW model.
+The report records the capture hash and caller-declared provenance (not
+independently authenticated). No automatic calibration or clock activation
+is permitted, even if slopes match. Synthetic importer tests are not console
+evidence.
