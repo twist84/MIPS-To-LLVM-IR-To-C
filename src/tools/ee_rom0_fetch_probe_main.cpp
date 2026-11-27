@@ -39,6 +39,7 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     ee::c_ee_tlb tlb{};
     ee::c_ee_reset_vif_devices vif_devices;
     const auto vif = vif_devices.transport();
+    ee::c_ee_reset_cold_cache cold_cache;
     bool entered_ram = false;
     bool first_intc_write = false;
     uint32_t timer_logged = 0u;
@@ -48,13 +49,15 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
     bool gs_upper_logged = false;
     bool rom_bounds_logged = false;
     bool rom_word_logged = false;
+    bool data_cache_logged = false;
+    bool instruction_cache_logged = false;
     bool first_tlb_write = false;
     uint32_t tlb_write_count = 0u;
     for (; retired < budget;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            budget - retired, ram, &sio, &tlb, &vif);
+            budget - retired, ram, &sio, &tlb, &vif, &cold_cache);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -68,6 +71,18 @@ static int explore_rom0(const ee::s_ee_strict_rom0_view& rom)
         retired += action.m_retired;
         tail[trace_count % tail_size] = {pc, action.m_opcode, cpu.m_pc, retired};
         ++trace_count;
+        if (!data_cache_logged && cold_cache.data_count() == ee::c_ee_reset_cold_cache::k_data_lines)
+        {
+            data_cache_logged = true;
+            std::printf("EE exploration DXWBIN: retired=%u pc=%08x lines=%u\n",
+                retired, cpu.m_pc, cold_cache.data_count());
+        }
+        if (!instruction_cache_logged && cold_cache.instruction_count() == ee::c_ee_reset_cold_cache::k_instruction_lines)
+        {
+            instruction_cache_logged = true;
+            std::printf("EE exploration IXIN: retired=%u pc=%08x lines=%u\n",
+                retired, cpu.m_pc, cold_cache.instruction_count());
+        }
         if (!rom_word_logged && pc == 0xa001008cu && cpu.m_pc == 0xa00102f0u)
         {
             rom_word_logged = true;
@@ -1251,6 +1266,7 @@ int main(int argc, char** argv)
     // only the tail and explicitly counting real device reset writes.
     ee::c_ee_reset_vif_devices vif_devices;
     const auto vif = vif_devices.transport();
+    ee::c_ee_reset_cold_cache cold_cache;
     const uint32_t exploration_limit = compare_done + 65536u;
     uint32_t first_intc_retired = 0u;
     uint32_t first_intc_pc = 0u;
@@ -1271,12 +1287,14 @@ int main(int argc, char** argv)
     uint64_t rom_bounds_result = 0u;
     uint32_t rom_word_retired = 0u;
     uint64_t rom_word_result = 0u;
+    uint32_t data_cache_retired = 0u;
+    uint32_t instruction_cache_retired = 0u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
         const uint32_t pc = cpu.m_pc;
         const auto action = ee::ee_execute_strict_rom_register_step(cpu, rom,
-            exploration_limit - retired, ram, &sio, &tlb, &vif);
+            exploration_limit - retired, ram, &sio, &tlb, &vif, &cold_cache);
         if (action.m_result != ee::e_ee_reset_prefix_result::COMMITTED)
         {
             stop = action;
@@ -1287,6 +1305,18 @@ int main(int argc, char** argv)
             return 29;
         }
         retired += action.m_retired;
+        if (data_cache_retired == 0u && cold_cache.data_count() == ee::c_ee_reset_cold_cache::k_data_lines)
+        {
+            data_cache_retired = retired;
+            std::printf("EELOAD DXWBIN: retired=%u pc=%08x lines=%u\n",
+                retired, cpu.m_pc, cold_cache.data_count());
+        }
+        if (instruction_cache_retired == 0u && cold_cache.instruction_count() == ee::c_ee_reset_cold_cache::k_instruction_lines)
+        {
+            instruction_cache_retired = retired;
+            std::printf("EELOAD IXIN: retired=%u pc=%08x lines=%u\n",
+                retired, cpu.m_pc, cold_cache.instruction_count());
+        }
         if (rom_word_retired == 0u && pc == 0xa001008cu && cpu.m_pc == 0xa00102f0u)
         {
             rom_word_retired = retired;
@@ -1462,6 +1492,12 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "EELOAD GS reset checkpoint mismatch: retired=%u pc=%08x opcode=%08x address=%08x\n",
             retired, cpu.m_pc, stop.m_opcode, stop.m_data_address);
         return 80;
+    }
+    if (data_cache_retired != 695317u || instruction_cache_retired != 696217u)
+    {
+        std::fprintf(stderr, "EELOAD cold cache sweep mismatch: retired=%u pc=%08x data=%u instruction=%u\n",
+            retired, cpu.m_pc, cold_cache.data_count(), cold_cache.instruction_count());
+        return 83;
     }
     const uint32_t expected_rom_word = ee::ee_read_instruction_word(bytes.data() + 0x100cu);
     const uint64_t extended_rom_word = (expected_rom_word & 0x80000000u) != 0u

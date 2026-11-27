@@ -302,6 +302,8 @@ jobs:
           grep -Fx 'EE exploration GS CSR upper: retired=691014 pc=a0016274 count=1' ee-rom0-v07.log
           grep -Fx 'EE exploration ROM bounds: retired=691104 pc=a00102c4 result=0000000000000001' ee-rom0-v07.log
           grep -E '^EE exploration ROM word: retired=691172 pc=a00102f0 value=[0-9a-f]{8} matched=1$' ee-rom0-v07.log
+          grep -Fx 'EE exploration DXWBIN: retired=695509 pc=a0019104 lines=128' ee-rom0-v07.log
+          grep -Fx 'EE exploration IXIN: retired=696409 pc=a0019130 lines=256' ee-rom0-v07.log
           echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
 
       - name: Explore authentic v0.7 IOP reset execution

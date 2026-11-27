@@ -1216,3 +1216,23 @@ all four lanes independently in ROM/RAM, store lane preservation,
 cross-word pairs and delay-slot refusal. Require original ROM
 word at a00102f0 at 690980/691172, compared against actual image.
 No host parser substitution or retail replay. Pending CI.
+
+## M6E3G1: bounded cold-cache indexed maintenance
+
+M6E3F2 passed both releases on 068a333b:
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46055160703
+ROM word 1000 matched, both reached CACHE 14 (DXWBIN)
+at 694874/a00190dc and 695066/a00190fc. Then CACHE 07
+(IXIN) loop. EE Core Instruction Set Manual v6.0 pp306,309:
+DXWBIN indexes VA[11:6], IXIN VA[12:6], way VA[0].
+Both operations are valid regardless of DCE/ICE.
+Explicit cold domain only: all backing accesses bypass cache
+and there is no cache fill or dirty data. Require opt-in state,
+pure bounded index/way addresses, track unique guest invalidations
+(128 D lines and 256 I lines). No claim of physical reset tag
+contents, writeback for live cache, or translated-code coherency.
+Other CACHE operations including IFL refuse. Test both ways and
+all indices, repeats, absent state, invalid op/address, slot budget.
+Require complete actual sweeps at predicted retirement
+695317/696217 and 695509/696409. No runtime cache changes.
+Pending CI; no retail replay.

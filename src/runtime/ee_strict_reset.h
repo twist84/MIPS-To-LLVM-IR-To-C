@@ -232,6 +232,50 @@ struct s_ee_reset_mmio
     }
 };
 
+// Explicit opt-in for an isolated cold cache domain. All accepted
+// instruction/data backing paths bypass caches; no line can become
+// valid, dirty or locked. Track which actual indexed invalidations
+// the guest has performed. This is NOT a live cache/writeback model.
+class c_ee_reset_cold_cache
+{
+public:
+    static constexpr uint32_t k_data_lines = 64u * 2u;
+    static constexpr uint32_t k_instruction_lines = 128u * 2u;
+
+    constexpr bool invalidate(uint32_t op, uint32_t address)
+    {
+        // The firmware uses pure index/way addresses. Admit that
+        // bounded subset only, not arbitrary translated addresses.
+        const bool data = op == 0x14u;
+        if ((!data && op != 0x07u) || (address & 0x3eu) != 0u ||
+            address >= (data ? 0x1000u : 0x2000u))
+        {
+            return false;
+        }
+        const uint32_t line = ((address >> 6u) * 2u) + (address & 1u);
+        bool& visited = data ? m_data_invalidated[line] : m_instruction_invalidated[line];
+        uint32_t& count = data ? m_data_count : m_instruction_count;
+        if (!visited)
+        {
+            visited = true;
+            ++count;
+        }
+        return true;
+    }
+
+    constexpr uint32_t data_count() const { return m_data_count; }
+    constexpr uint32_t instruction_count() const { return m_instruction_count; }
+
+private:
+    bool m_data_invalidated[k_data_lines]{};
+    bool m_instruction_invalidated[k_instruction_lines]{};
+    uint32_t m_data_count = 0u;
+    uint32_t m_instruction_count = 0u;
+};
+
+static_assert(c_ee_reset_cold_cache::k_data_lines * 64u == 8192u);
+static_assert(c_ee_reset_cold_cache::k_instruction_lines * 64u == 16384u);
+
 namespace strict_reset_detail
 {
 inline constexpr uint64_t read_gpr(const s_ee_cpu_state& cpu, uint32_t reg)
@@ -471,10 +515,25 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom,
     const c_ee_tlb& tlb, uint32_t pc, uint32_t opcode,
     const s_ee_reset_ram_view& ram, s_ee_reset_sio_tx* sio,
-    c_ee_tlb* persistent_tlb, const s_ee_reset_mmio* mmio)
+    c_ee_tlb* persistent_tlb, const s_ee_reset_mmio* mmio,
+    c_ee_reset_cold_cache* cold_cache)
 {
     using result = e_ee_reset_prefix_result;
     const uint32_t primary = opcode >> 26u;
+    if (primary == 0x2fu)
+    {
+        const uint32_t imm = opcode & 0xffffu;
+        const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, (opcode >> 21u) & 31u)) +
+            (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
+        const uint32_t op = (opcode >> 16u) & 31u;
+        if (cold_cache == nullptr || !cold_cache->invalidate(op, address))
+        {
+            return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc, address};
+        }
+        // DXWBIN has no dirty bytes to write back in this explicitly
+        // uncached domain. IXIN likewise has no live cached code.
+        return {result::COMMITTED, opcode, 0u, pc};
+    }
     const bool quad = primary == 0x1eu || primary == 0x1fu;
     const bool half = primary == 0x29u; // SH
     const bool partial = primary == 0x22u || primary == 0x26u ||
@@ -639,7 +698,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     s_ee_cpu_state& cpu, const s_ee_strict_rom0_view& rom, uint32_t budget,
     const s_ee_reset_ram_view& ram = {}, s_ee_reset_sio_tx* sio = nullptr,
-    c_ee_tlb* persistent_tlb = nullptr, const s_ee_reset_mmio* mmio = nullptr)
+    c_ee_tlb* persistent_tlb = nullptr, const s_ee_reset_mmio* mmio = nullptr,
+    c_ee_reset_cold_cache* cold_cache = nullptr)
 {
     using result = e_ee_reset_prefix_result;
     if (cpu.m_exit_reason != static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_DISPATCH) ||
@@ -700,7 +760,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
             cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
         }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-            pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb, mmio);
+            pc + 4u, ee_read_instruction_word(slot), ram, sio, persistent_tlb, mmio, cold_cache);
         if (action.m_result != result::COMMITTED)
         {
             if (link)
@@ -713,7 +773,7 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         return {result::COMMITTED, opcode, 2u};
     }
     const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
-        cpu.m_pc, opcode, ram, sio, persistent_tlb, mmio);
+        cpu.m_pc, opcode, ram, sio, persistent_tlb, mmio, cold_cache);
     if (action.m_result != result::COMMITTED)
     {
         return action;
