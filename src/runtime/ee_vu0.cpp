@@ -2,7 +2,8 @@
 #include "ee_vu_scalar_fp.h"
 #include "ee_vu_fmac_fp.h"
 #include <cmath>
-#include <cstring>
+#include <bit>
+#include <limits>
 
 namespace ee
 {
@@ -923,7 +924,7 @@ void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags);
 
 uint32_t vu0_fmac_lane(const s_ee_u128& vector, uint32_t lane);
 
-uint32_t vu0_macro_bits(float value);
+constexpr uint32_t vu0_macro_bits(float value);
 uint32_t vu0_macro_order_key(uint32_t bits);
 uint32_t vu0_macro_ftoi(uint32_t bits, double scale);
 
@@ -2821,7 +2822,7 @@ uint32_t vu0_fmac_read_vf(const s_ee_cpu_state* cpu, uint32_t index, uint32_t la
         vu0_fmac_lane(cpu->m_vu0[index], lane);
 }
 
-float vu0_fmac_operand(uint32_t bits)
+constexpr float vu0_fmac_operand(uint32_t bits)
 {
     // VU arithmetic flushes subnormal operands and interprets exponent
     // 255 as a finite, signed maximum rather than host IEEE infinity/NaN.
@@ -2834,9 +2835,7 @@ float vu0_fmac_operand(uint32_t bits)
     {
         bits = (bits & 0x80000000u) | 0x7f7fffffu;
     }
-    float value = 0.0f;
-    std::memcpy(&value, &bits, sizeof(value));
-    return value;
+    return std::bit_cast<float>(bits);
 }
 
 void vu0_fmac_integer_flags(uint32_t bits, bool overflow, bool underflow,
@@ -2964,10 +2963,16 @@ void vu0_macro_update_status(s_ee_vu0_state* vu0, uint32_t mac_flags)
 
 uint32_t vu0_macro_bits(float value)
 {
-    uint32_t bits = 0u;
-    std::memcpy(&bits, &value, sizeof(bits));
-    return bits;
+    return std::bit_cast<uint32_t>(value);
 }
+
+static_assert(sizeof(float) == sizeof(uint32_t) &&
+              std::numeric_limits<float>::is_iec559);
+static_assert(vu0_macro_bits(vu0_fmac_operand(0x00000001u)) == 0x00000000u);
+static_assert(vu0_macro_bits(vu0_fmac_operand(0x80000001u)) == 0x80000000u);
+static_assert(vu0_macro_bits(vu0_fmac_operand(0x7f800001u)) == 0x7f7fffffu);
+static_assert(vu0_macro_bits(vu0_fmac_operand(0xff800001u)) == 0xff7fffffu);
+static_assert(vu0_macro_bits(vu0_fmac_operand(0x3f800000u)) == 0x3f800000u);
 
 // MAX/MINI compare the original VU words, not normalized host floats.
 // The sign-magnitude ordering distinguishes signed zeros, denormals and
