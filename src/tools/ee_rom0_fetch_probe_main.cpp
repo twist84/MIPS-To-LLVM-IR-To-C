@@ -452,7 +452,50 @@ int main(int argc, char** argv)
         std::printf("EELOAD next lookahead: pc=%08x opcode=%08x decoded=%s\n",
             pc, opcode, ee::decode(pc, opcode).mnemonic);
     }
-    constexpr uint32_t exploration_limit = clear_checkpoint + 4096u;
+    // Retire the real JAL and its NOP before fetching the callee.
+    constexpr uint32_t call_checkpoint = clear_checkpoint + 2u;
+    const auto call = ee::ee_execute_strict_rom_register_step(cpu, rom, 2u, ram);
+    if (call.m_result != ee::e_ee_reset_prefix_result::COMMITTED ||
+        call.m_opcode != 0x0c005877u || call.m_retired != 2u ||
+        cpu.m_pc != 0xa00161dcu || cpu.m_gpr[31].m_lo != 0x00000000a0010044ull ||
+        cpu.m_gpr[29].m_lo != 0xffffffffa007ffe0ull)
+    {
+        std::fprintf(stderr, "EELOAD call refused or mismatched: pc=%08x opcode=%08x result=%u count=%u ra=%016llx\n",
+            cpu.m_pc, call.m_opcode, static_cast<unsigned>(call.m_result), call.m_retired,
+            static_cast<unsigned long long>(cpu.m_gpr[31].m_lo));
+        return 30;
+    }
+    retired += call.m_retired;
+    const auto callee = ee::ee_plan_instruction_fetch(tlb, cpu.m_pc,
+        cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+        cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+    if (retired != call_checkpoint || callee.m_access.m_physical_address != 0x000161dcu ||
+        ee::ee_fetch_strict_reset_word(callee, rom, ram) != ram_bytes.data() + 0x161dcu)
+    {
+        std::fprintf(stderr, "EELOAD callee fetch regression\n");
+        return 31;
+    }
+    std::printf("EELOAD call: retired=%u pc=%08x physical=%08x ra=%016llx\n",
+        retired, cpu.m_pc, callee.m_access.m_physical_address,
+        static_cast<unsigned long long>(cpu.m_gpr[31].m_lo));
+
+    // Capture the actual callee entry before continuing execution.
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        const uint32_t pc = cpu.m_pc + i * 4u;
+        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+            cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+        const uint8_t* look = ee::ee_fetch_strict_reset_word(plan, rom, ram);
+        if (look == nullptr)
+        {
+            break;
+        }
+        const uint32_t opcode = ee::ee_read_instruction_word(look);
+        std::printf("EELOAD callee lookahead: pc=%08x opcode=%08x decoded=%s\n",
+            pc, opcode, ee::decode(pc, opcode).mnemonic);
+    }
+    constexpr uint32_t exploration_limit = call_checkpoint + 4096u;
     stop = {ee::e_ee_reset_prefix_result::BUDGET_EXHAUSTED};
     for (; retired < exploration_limit;)
     {
@@ -475,6 +518,21 @@ int main(int argc, char** argv)
     std::printf("EELOAD exploration stop: retired=%u pc=%08x result=%u detail_pc=%08x opcode=%08x data_address=%08x\n",
         retired, cpu.m_pc, static_cast<unsigned>(stop.m_result), stop.m_detail_pc,
         stop.m_opcode, stop.m_data_address);
+    for (uint32_t i = 0u; i < 16u; ++i)
+    {
+        const uint32_t pc = cpu.m_pc + i * 4u;
+        const auto plan = ee::ee_plan_instruction_fetch(tlb, pc,
+            cpu.m_cop0[ee::COP0_Status], cpu.m_cop0[ee::COP0_Config],
+            cpu.m_cop0[ee::COP0_Context], cpu.m_cop0[ee::COP0_EntryHi]);
+        const uint8_t* look = ee::ee_fetch_strict_reset_word(plan, rom, ram);
+        if (look == nullptr)
+        {
+            break;
+        }
+        const uint32_t opcode = ee::ee_read_instruction_word(look);
+        std::printf("EELOAD stop lookahead: pc=%08x opcode=%08x decoded=%s\n",
+            pc, opcode, ee::decode(pc, opcode).mnemonic);
+    }
     for (uint32_t i = 0u; i < 32u; ++i)
     {
         std::printf("EELOAD stop GPR: r%02u=%016llx\n", i,

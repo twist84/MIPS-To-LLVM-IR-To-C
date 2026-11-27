@@ -2023,6 +2023,100 @@ bool test_strict_reset_status()
         cpu.m_pc == pc + 12u;
 }
 
+bool test_strict_reset_direct_jumps()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[32u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_pc = pc;
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_gpr[31] = {0xfedcba9876543210ull, 0x1234u};
+    constexpr uint64_t old_link = 0xfedcba9876543210ull;
+    constexpr uint64_t link = 0x00000000a0000008ull;
+    put(0u, 0x0c000004u); // jal a0000010
+    put(4u, 0x03e01025u); // unsupported OR r2,ra,zero
+    const auto step = [&](uint32_t budget)
+    {
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, budget, ram);
+    };
+    if (step(1u).m_result != result::BUDGET_EXHAUSTED ||
+        cpu.m_pc != pc || cpu.m_gpr[31].m_lo != old_link)
+    {
+        return false;
+    }
+    const auto bad_slot = step(2u);
+    if (bad_slot.m_result != result::UNSUPPORTED_OPCODE || bad_slot.m_retired != 0u ||
+        bad_slot.m_detail_pc != pc + 4u || cpu.m_pc != pc ||
+        cpu.m_gpr[31].m_lo != old_link || cpu.m_gpr[31].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    put(4u, 0xa09f0000u); // sb ra,0(r4)
+    cpu.m_gpr[4].m_lo = pc + sizeof(bytes);
+    const auto bad_store = step(2u);
+    if (bad_store.m_result != result::DATA_UNAVAILABLE || cpu.m_pc != pc ||
+        cpu.m_gpr[31].m_lo != old_link)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = pc + 31u;
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
+        cpu.m_gpr[31].m_lo != link || cpu.m_gpr[31].m_hi != 0x1234u ||
+        bytes[31] != 8u)
+    {
+        return false;
+    }
+    // The callee returns through the link, with an actual delay slot.
+    put(16u, 0x03e00008u);
+    put(20u, 0x24020001u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 8u ||
+        cpu.m_gpr[2].m_lo != 1u || cpu.m_gpr[31].m_lo != link)
+    {
+        return false;
+    }
+    // A successful delay slot may overwrite the link.
+    cpu.m_pc = pc;
+    put(4u, 0x241f0007u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 16u ||
+        cpu.m_gpr[31].m_lo != 7u || cpu.m_gpr[31].m_hi != 0x1234u)
+    {
+        return false;
+    }
+    // J must not write a link; neither direct jump fetches its target
+    // until the next architectural step.
+    cpu.m_pc = pc;
+    put(0u, 0x08000008u); // j a0000020 (unbacked)
+    put(4u, 0u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 32u ||
+        cpu.m_gpr[31].m_lo != 7u || step(1u).m_result != result::FETCH_UNAVAILABLE)
+    {
+        return false;
+    }
+    cpu.m_pc = pc;
+    put(0u, 0x0c000008u);
+    if (step(2u).m_retired != 2u || cpu.m_pc != pc + 32u ||
+        cpu.m_gpr[31].m_lo != link || step(1u).m_result != result::FETCH_UNAVAILABLE)
+    {
+        return false;
+    }
+    // Missing slot at end of backing must leave the link unchanged.
+    cpu.m_pc = pc + 28u;
+    put(28u, 0x0c000004u);
+    const auto missing = step(2u);
+    return missing.m_result == result::FETCH_UNAVAILABLE && missing.m_retired == 0u &&
+        missing.m_detail_pc == pc + 32u && cpu.m_pc == pc + 28u &&
+        cpu.m_gpr[31].m_lo == link && cpu.m_gpr[31].m_hi == 0x1234u;
+}
+
 void store(ee::ee_memory& memory, uint32_t offset, uint32_t instruction)
 {
     memory.write32(k_entry + offset, instruction);
@@ -2250,6 +2344,10 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_rom_word_and_logic(), "strict reset ROM word/directory scan regression"))
+    {
+        return 1;
+    }
+    if (!check(test_strict_reset_direct_jumps(), "strict reset J/JAL link and slot regression"))
     {
         return 1;
     }

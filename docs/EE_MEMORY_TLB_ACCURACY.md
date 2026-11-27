@@ -843,3 +843,27 @@ count, loop size, stack expectation and all integrity checks
 remain unchanged; the interpreter itself is not modified.
 The corrected regression still requires authentic CI validation.
 https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46045990404/job/140665290554
+
+## Strict memory follow-up M6E2G2: first EELOAD subroutine call
+
+Corrected M6E2G1 passed CI run 46046418708/job 140666705245.
+653348 retirements at a001003c, Status 70000000, 80352/80352
+zero bytes, both guards a5, stack ffffffffa007ffe0, copied image
+unchanged. Next blocker: 0c005877 (JAL a00161dc), slot NOP.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46046418708/job/140666705245
+
+Share direct jump target and zero-extended link address helpers
+between isolated reset execution and native LLVM lowering (EE
+Core Instruction Set Manual v6.0, J/JAL). The target takes its
+upper nibble from PC+4. JAL updates the low 64-bit link before
+the slot, leaves the high half unchanged, and restores the old
+link on host-only refusal. No premature target fetch or invented
+guest exception. J never modifies the link. Directed tests cover
+budget, missing and unsupported slots, rejected stores, link
+visibility, slot link overwrite, return and unbacked targets.
+
+Require 653350 retirements, pc a00161dc, physical 000161dc,
+ra 00000000a0010044 and unchanged stack. Fetch and decode the
+live RAM callee, then explore a bounded 4096 further instructions
+and report the actual next stop and lookahead. Pending CI; no
+retail replay or production dispatch changes.

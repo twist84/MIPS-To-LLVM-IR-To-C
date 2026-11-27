@@ -294,7 +294,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
 
 // Isolated post-Status-clear ROM and uncached RAM execution. The caller
 // owns all backing/state and excludes pending clock/device effects.
-// BEQ/BNE/JR and their supported register/ROM-read/RAM-store slots are
+// BEQ/BNE/J/JAL/JR and supported register/ROM-read/RAM-store slots are
 // a single bounded transaction. A refused slot changes no state.
 // No guest fault is invented by refusal.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
@@ -326,7 +326,9 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     const uint32_t opcode = ee_read_instruction_word(code);
     const uint32_t primary = opcode >> 26u;
     const bool jr = ee_strict_jr_supported(opcode);
-    if (primary == 4u || primary == 5u || jr)
+    const bool direct_jump = primary == 2u || primary == 3u;
+    const bool link = primary == 3u;
+    if (primary == 4u || primary == 5u || jr || direct_jump)
     {
         if (budget < 2u)
         {
@@ -342,16 +344,28 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
         // alignment and backing are checked only on the next fetch.
         const uint32_t next = jr
             ? static_cast<uint32_t>(strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u))
+            : direct_jump ? ee_strict_direct_jump_target(pc, opcode)
             : taken ? pc + 4u + disp : pc + 8u;
         const uint8_t* slot = fetch(pc + 4u);
         if (slot == nullptr)
         {
             return {result::FETCH_UNAVAILABLE, 0u, 0u, pc + 4u};
         }
+        // The link must be visible to the delay slot. This isolated
+        // executor has only host refusals, so restore it on rejection.
+        const uint64_t old_link = cpu.m_gpr[31].m_lo;
+        if (link)
+        {
+            cpu.m_gpr[31].m_lo = ee_strict_link_address(pc);
+        }
         const auto action = strict_reset_detail::execute_rom_word(cpu, rom, tlb,
             pc + 4u, ee_read_instruction_word(slot), ram);
         if (action.m_result != result::COMMITTED)
         {
+            if (link)
+            {
+                cpu.m_gpr[31].m_lo = old_link;
+            }
             return action;
         }
         cpu.m_pc = next;

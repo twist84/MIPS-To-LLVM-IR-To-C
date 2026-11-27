@@ -296,8 +296,7 @@ inline bool emit_strict_memory_branch(llvm_context& ctx,
     }
     else if (jump)
     {
-        next = std::to_string(((branch.pc + 4u) & 0xf0000000u) |
-            ((branch.opcode_word & 0x03ffffffu) << 2u));
+        next = std::to_string(ee::ee_strict_direct_jump_target(branch.pc, branch.opcode_word));
     }
     else
     {
@@ -313,7 +312,7 @@ inline bool emit_strict_memory_branch(llvm_context& ctx,
             link_reg * sizeof(ee::s_ee_u128) + offsetof(ee::s_ee_u128, m_lo);
         out << "  %link_ptr = getelementptr i8, ptr %cpu, i64 " << offset << "\n"
             << "  %old_link = load i64, ptr %link_ptr, align 8\n"
-            << "  store i64 " << fallthrough << ", ptr %link_ptr, align 8\n";
+            << "  store i64 " << ee::ee_strict_link_address(branch.pc) << ", ptr %link_ptr, align 8\n";
     }
     if (likely)
     {
