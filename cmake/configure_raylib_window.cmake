@@ -36,7 +36,6 @@ function(ee_configure_raylib_window source binary)
         SUPPORT_FILEFORMAT_PVR
         SUPPORT_IMAGE_EXPORT
         SUPPORT_IMAGE_GENERATION
-        SUPPORT_IMAGE_MANIPULATION
         SUPPORT_DEFAULT_FONT
         SUPPORT_FILEFORMAT_TTF
         SUPPORT_FILEFORMAT_FNT
@@ -63,9 +62,10 @@ function(ee_configure_raylib_window source binary)
 
     # rcore's ScanDirectoryFiles calls TextFindIndex unconditionally in
     # this pinned version. rtext itself has unguarded texture dependencies.
+    # LoadTextureCubemap also references ImageMipmaps unconditionally.
     # Keep the supporting modules without fonts, codecs or default assets.
     foreach(feature IN ITEMS SUPPORT_MODULE_RTEXT SUPPORT_MODULE_RTEXTURES
-                             SUPPORT_TEXT_MANIPULATION)
+                             SUPPORT_TEXT_MANIPULATION SUPPORT_IMAGE_MANIPULATION)
         set(${feature} ON CACHE BOOL "Required by pinned raylib core" FORCE)
     endforeach()
 
