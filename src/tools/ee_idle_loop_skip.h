@@ -45,15 +45,15 @@ namespace idle_loop_detail
 {
 constexpr uint32_t k_max_words = 32u;
 
-inline uint32_t op(uint32_t w) { return w >> 26; }
-inline uint32_t rs(uint32_t w) { return (w >> 21) & 31u; }
-inline uint32_t rt(uint32_t w) { return (w >> 16) & 31u; }
-inline uint32_t rd(uint32_t w) { return (w >> 11) & 31u; }
-inline uint32_t sa(uint32_t w) { return (w >> 6) & 31u; }
-inline uint32_t funct(uint32_t w) { return w & 63u; }
-inline int64_t simm(uint32_t w) { return static_cast<int16_t>(w & 0xffffu); }
-inline uint64_t zimm(uint32_t w) { return w & 0xffffu; }
-inline uint64_t sext32(uint64_t v)
+inline constexpr uint32_t op(uint32_t w) { return w >> 26; }
+inline constexpr uint32_t rs(uint32_t w) { return (w >> 21) & 31u; }
+inline constexpr uint32_t rt(uint32_t w) { return (w >> 16) & 31u; }
+inline constexpr uint32_t rd(uint32_t w) { return (w >> 11) & 31u; }
+inline constexpr uint32_t sa(uint32_t w) { return (w >> 6) & 31u; }
+inline constexpr uint32_t funct(uint32_t w) { return w & 63u; }
+inline constexpr int64_t simm(uint32_t w) { return static_cast<int16_t>(w & 0xffffu); }
+inline constexpr uint64_t zimm(uint32_t w) { return w & 0xffffu; }
+inline constexpr uint64_t sext32(uint64_t v)
 {
     return static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(v)));
 }
@@ -75,7 +75,7 @@ struct s_decoded
     uint32_t width = 0u;        // load width in bytes
 };
 
-inline s_decoded decode(uint32_t w)
+inline constexpr s_decoded decode(uint32_t w)
 {
     s_decoded d{};
     auto set = [&](e_kind kind, uint32_t dest,
@@ -132,12 +132,12 @@ inline s_decoded decode(uint32_t w)
     return d;
 }
 
-inline uint32_t branch_target(uint32_t pc, uint32_t w)
+inline constexpr uint32_t branch_target(uint32_t pc, uint32_t w)
 {
     return pc + 4u + static_cast<uint32_t>(simm(w) * 4);
 }
 
-inline bool branch_taken(uint32_t w, const uint64_t* gpr)
+inline constexpr bool branch_taken(uint32_t w, const uint64_t* gpr)
 {
     const uint64_t a = gpr[rs(w)];
     const uint64_t b = gpr[rt(w)];
@@ -153,7 +153,7 @@ inline bool branch_taken(uint32_t w, const uint64_t* gpr)
     }
 }
 
-inline uint64_t alu(uint32_t w, const uint64_t* gpr)
+inline constexpr uint64_t alu(uint32_t w, const uint64_t* gpr)
 {
     const uint64_t s = gpr[rs(w)];
     const uint64_t t = gpr[rt(w)];
@@ -195,7 +195,7 @@ inline uint64_t alu(uint32_t w, const uint64_t* gpr)
     }
 }
 
-inline uint64_t extend_load(uint32_t w, uint64_t raw)
+inline constexpr uint64_t extend_load(uint32_t w, uint64_t raw)
 {
     switch (op(w))
     {
