@@ -238,6 +238,125 @@ private:
     uint32_t m_count = 0u;
 };
 
+// Bounded cold D-cache. One staged line per instruction or branch
+// slot; no replacement, writeback, locking or live maintenance.
+class c_ee_reset_data_cache
+{
+public:
+    static constexpr uint32_t k_line_size = 64u;
+    static constexpr uint32_t k_sets = 64u;
+    static constexpr uint32_t k_ways = 2u;
+    static_assert(k_line_size * k_sets * k_ways == 8192u);
+
+    struct s_line
+    {
+        uint32_t m_tag = 0u;
+        bool m_valid = false;
+        bool m_dirty = false;
+        uint8_t m_bytes[k_line_size]{};
+    };
+
+    class c_transaction
+    {
+    public:
+        constexpr explicit c_transaction(c_ee_reset_data_cache* cache)
+            : m_cache(cache)
+        {
+        }
+
+        constexpr bool has_resident() const
+        {
+            return m_cache != nullptr && (m_cache->m_count != 0u || m_pending);
+        }
+
+        constexpr uint8_t* access(uint32_t address, const s_ee_bus_span_plan& bus,
+            const uint8_t* ram, size_t size, bool store)
+        {
+            const uint32_t physical = bus.m_address;
+            const uint32_t width = bus.m_width;
+            const uint32_t base = physical & ~(k_line_size - 1u);
+            const uint32_t offset = physical & (k_line_size - 1u);
+            const uint32_t set = (address / k_line_size) & (k_sets - 1u);
+            if (m_cache == nullptr || ram == nullptr || m_pending ||
+                bus.m_region != e_ee_bus_region::RAM ||
+                bus.m_cache_policy != e_ee_data_cache_policy::CACHED_WRITEBACK_ALLOCATE ||
+                width == 0u || width > 16u || offset + width > k_line_size ||
+                (address & 0xfffu) != (physical & 0xfffu) ||
+                ee_classify_physical_span(base, 16u, size) != e_ee_bus_region::RAM ||
+                ee_classify_physical_span(base + 48u, 16u, size) != e_ee_bus_region::RAM)
+            {
+                return nullptr;
+            }
+            uint32_t free_way = k_ways;
+            for (uint32_t way = 0u; way < k_ways; ++way)
+            {
+                const auto& line = m_cache->m_lines[set][way];
+                if (line.m_valid && line.m_tag == base)
+                {
+                    m_line = line;
+                    m_set = set;
+                    m_way = way;
+                    m_pending = true;
+                    m_line.m_dirty = m_line.m_dirty || store;
+                    return m_line.m_bytes + offset;
+                }
+                if (!line.m_valid && free_way == k_ways)
+                {
+                    free_way = way;
+                }
+            }
+            if (free_way == k_ways)
+            {
+                return nullptr;
+            }
+            m_line.m_tag = base;
+            m_line.m_valid = true;
+            m_line.m_dirty = store;
+            for (uint32_t i = 0u; i < k_line_size; ++i)
+            {
+                m_line.m_bytes[i] = ram[base + i];
+            }
+            m_set = set;
+            m_way = free_way;
+            m_pending = true;
+            return m_line.m_bytes + offset;
+        }
+
+        constexpr void commit()
+        {
+            if (m_pending)
+            {
+                auto& old = m_cache->m_lines[m_set][m_way];
+                if (!old.m_valid)
+                {
+                    ++m_cache->m_count;
+                }
+                if (!old.m_dirty && m_line.m_dirty)
+                {
+                    ++m_cache->m_dirty_count;
+                }
+                old = m_line;
+                m_pending = false;
+            }
+        }
+
+    private:
+        c_ee_reset_data_cache* m_cache = nullptr;
+        s_line m_line{};
+        uint32_t m_set = 0u;
+        uint32_t m_way = 0u;
+        bool m_pending = false;
+    };
+
+    constexpr uint32_t resident_count() const { return m_count; }
+    constexpr uint32_t dirty_count() const { return m_dirty_count; }
+
+private:
+    s_line m_lines[k_sets][k_ways]{};
+    uint32_t m_count = 0u;
+    uint32_t m_dirty_count = 0u;
+};
+
 // Explicit caller-owned, isolated main RAM backing for the reset copy.
 // The physical bus planner excludes aliases, ROM and device windows;
 // The isolated default permits only canonical uncached RAM fetch.
@@ -248,6 +367,17 @@ struct s_ee_reset_ram_view
     size_t m_size = 0u;
     bool m_mapped_fetch = false;
     c_ee_reset_instruction_cache::c_transaction* m_instruction_cache = nullptr;
+    c_ee_reset_data_cache::c_transaction* m_data_cache = nullptr;
+
+    constexpr uint8_t* cached_span(uint32_t address, const s_ee_bus_span_plan& bus,
+        bool store) const
+    {
+        const bool mapped = address < 0x80000000u;
+        const bool kernel = address >= 0x80000000u && address < 0x82000000u &&
+            bus.m_address == address - 0x80000000u;
+        return m_mapped_fetch && m_data_cache != nullptr && (mapped || kernel)
+            ? m_data_cache->access(address, bus, m_bytes, m_size, store) : nullptr;
+    }
 
     constexpr const uint8_t* fetch_span(const s_ee_fetch_plan& fetch) const
     {
@@ -1041,6 +1171,13 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     {
         return {result::INTERRUPT_SCHEDULER_REQUIRED, opcode, 0u, pc};
     }
+    if ((opcode & 0xffe0ffffu) == 0x40808000u &&
+        ram.m_data_cache != nullptr && ram.m_data_cache->has_resident() &&
+        ee_strict_reset_config_value(static_cast<uint32_t>(read_gpr(cpu, (opcode >> 16u) & 31u))) !=
+            cpu.m_cop0[COP0_Config])
+    {
+        return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+    }
     if (primary == 0x2fu)
     {
         const uint32_t imm = opcode & 0xffffu;
@@ -1048,6 +1185,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
             (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
         const uint32_t op = (opcode >> 16u) & 31u;
         if ((ram.m_instruction_cache != nullptr && ram.m_instruction_cache->has_resident()) ||
+            (ram.m_data_cache != nullptr && ram.m_data_cache->has_resident()) ||
             cold_cache == nullptr || !cold_cache->invalidate(op, address))
         {
             return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc, address};
@@ -1098,7 +1236,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         // Never route a partial transfer to an MMIO callback.
         if (store)
         {
-            uint8_t* target = canonical_ram ? ram.write_span(bus) : nullptr;
+            uint8_t* target = canonical_ram ? ram.write_span(bus) :
+                ram.cached_span(first, bus, true);
             if (target == nullptr)
             {
                 return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
@@ -1113,7 +1252,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         {
             const uint8_t* bytes = canonical_ram ? ram.read_span(bus) :
                 (first >= 0xbfc00000u && first < 0xc0000000u &&
-                 bus.m_address == first - 0xa0000000u ? rom.read_span(bus) : nullptr);
+                 bus.m_address == first - 0xa0000000u ? rom.read_span(bus) :
+                 ram.cached_span(first, bus, false));
             if (bytes == nullptr)
             {
                 return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
@@ -1160,7 +1300,8 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
-        uint8_t* target = plan.m_fault.m_valid || !ram_address ? nullptr : ram.write_span(bus);
+        uint8_t* target = plan.m_fault.m_valid ? nullptr :
+            ram_address ? ram.write_span(bus) : ram.cached_span(access_address, bus, true);
         if (target == nullptr)
         {
             return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
@@ -1192,6 +1333,10 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         else if (access_address >= 0xbfc00000u && access_address < 0xc0000000u)
         {
             bytes = rom.read_span(bus);
+        }
+        else
+        {
+            bytes = ram.cached_span(access_address, bus, false);
         }
     }
     if (bytes == nullptr)

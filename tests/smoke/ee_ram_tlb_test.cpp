@@ -2275,6 +2275,123 @@ bool test_strict_reset_jalr()
 
 
 
+bool test_strict_reset_data_cache()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    using cache = ee::c_ee_reset_data_cache;
+    constexpr uint32_t pc = 0xa0000000u;
+    constexpr uint32_t va = 0x82000u;
+    uint8_t bytes[0x4080u]{};
+    bytes[0x1000u] = 0x11u;
+    bytes[0x1004u] = 0x22u;
+    cache lines;
+    ee::c_ee_tlb tlb;
+    if (!tlb.write(0u, 0u, va, 0x40u | 0x1fu, 0x80u | 0x1fu))
+    {
+        return false;
+    }
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_cop0[ee::COP0_Config] = 0x30443u;
+    cpu.m_gpr[4].m_lo = va;
+    cpu.m_gpr[2] = {0x1234567889abcdefull, 0x9876u};
+    const auto put = [&](uint32_t offset, uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[offset + i] = static_cast<uint8_t>(word >> (i * 8u));
+        }
+    };
+    const auto step = [&](uint32_t word, bool commit = true)
+    {
+        cpu.m_pc = pc;
+        put(0u, word);
+        cache::c_transaction tx(&lines);
+        const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, nullptr, &tx};
+        const auto action = ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram, nullptr, &tlb);
+        if (commit && action.m_result == result::COMMITTED)
+        {
+            tx.commit();
+        }
+        return action;
+    };
+    if (step(0xac820000u, false).m_retired != 1u ||
+        lines.resident_count() != 0u || bytes[0x1000u] != 0x11u ||
+        step(0xac820000u).m_retired != 1u ||
+        lines.resident_count() != 1u || lines.dirty_count() != 1u ||
+        bytes[0x1000u] != 0x11u || bytes[0x1004u] != 0x22u)
+    {
+        return false;
+    }
+    cpu.m_gpr[3].m_hi = 0x1234u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        cpu.m_gpr[3].m_lo != 0xffffffff89abcdefull ||
+        cpu.m_gpr[3].m_hi != 0x1234u ||
+        step(0x8c830004u).m_retired != 1u || cpu.m_gpr[3].m_lo != 0x22u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0xa0001000u;
+    if (step(0x8c830000u).m_retired != 1u || cpu.m_gpr[3].m_lo != 0x11u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80001000u;
+    if (step(0x8c830000u).m_retired != 1u ||
+        cpu.m_gpr[3].m_lo != 0xffffffff89abcdefull)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80002000u;
+    if (step(0x8c830000u).m_retired != 1u || lines.resident_count() != 2u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = 0x80003000u;
+    if (step(0xac820000u).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_pc != pc || lines.dirty_count() != 1u || bytes[0x3000u] != 0u)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = va + 1u;
+    if (step(0xac820000u).m_result != result::DATA_UNAVAILABLE)
+    {
+        return false;
+    }
+    cpu.m_gpr[4].m_lo = va;
+    if (!tlb.write(0u, 0u, va, 0x40u | 0x1bu, 0x80u | 0x1fu) ||
+        step(0xac820000u).m_result != result::DATA_UNAVAILABLE ||
+        !tlb.write(0u, 0u, va, 0x40u | 0x19u, 0x80u | 0x1fu) ||
+        step(0x8c830000u).m_result != result::DATA_UNAVAILABLE ||
+        !tlb.write(0u, 0u, va, 0x40u | 0x1fu, 0x80u | 0x1fu))
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_Config] &= ~(1u << 16u);
+    if (step(0x8c830000u).m_result != result::DATA_UNAVAILABLE)
+    {
+        return false;
+    }
+    cpu.m_cop0[ee::COP0_Config] |= 1u << 16u;
+    cpu.m_gpr[4].m_lo = va + 64u;
+    cpu.m_pc = pc;
+    put(0u, 0x0c000004u);
+    put(4u, 0xac9f0000u);
+    cache::c_transaction tx(&lines);
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes), true, nullptr, &tx};
+    if (ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram, nullptr, &tlb).m_result !=
+            result::BUDGET_EXHAUSTED ||
+        lines.resident_count() != 2u ||
+        ee::ee_execute_strict_rom_register_step(cpu, {}, 2u, ram, nullptr, &tlb).m_retired != 2u)
+    {
+        return false;
+    }
+    tx.commit();
+    return lines.resident_count() == 3u && lines.dirty_count() == 2u &&
+        bytes[0x1040u] == 0u && step(0x8c830000u).m_retired == 1u &&
+        cpu.m_gpr[3].m_lo == 0xffffffffa0000008ull;
+}
+
 bool test_strict_reset_instruction_cache()
 {
     using cache = ee::c_ee_reset_instruction_cache;
@@ -4790,6 +4907,7 @@ int main()
         return 1;
     }
     if (!check(test_strict_reset_cached_kernel_fetch(), "strict reset cached KSEG0 fetch") ||
+        !check(test_strict_reset_data_cache(), "strict reset transactional D-cache fills and dirty writes") ||
         !check(test_strict_reset_instruction_cache(), "strict reset transactional I-cache fills") ||
         !check(test_strict_reset_mapped_fetch(), "strict reset mapped cache-bypass fetch") ||
         !check(test_strict_reset_signed_branches(), "strict reset signed conditional branches") ||

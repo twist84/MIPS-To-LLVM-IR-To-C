@@ -87,6 +87,7 @@ int main(int argc, char** argv)
     uint64_t count = 0u;
     uint64_t interrupts = 0u;
     uint64_t syscalls = 0u;
+    bool osdsys_entry_retired = false;
     for (; pilot.retired() < budget;)
     {
         const uint32_t pc = pilot.cpu().m_pc;
@@ -133,6 +134,13 @@ int main(int argc, char** argv)
             std::fprintf(stderr, "invalid synchronized retirement accounting\n");
             return 2;
         }
+        // Observation only, never a control-flow shortcut.
+        if (!osdsys_entry_retired && pc == 0x00100000u)
+        {
+            osdsys_entry_retired = true;
+            std::printf("Dual ROM0 OSDSYS entry: pc=%08x opcode=%08x retired=%llu\n",
+                pc, step.m_instruction.m_opcode, static_cast<unsigned long long>(pilot.retired()));
+        }
         tail[count % tail.size()] = {pc, step.m_instruction.m_opcode,
             pilot.cpu().m_pc, pilot.cycle(), pilot.iop_cycles(), pilot.delay_slot_pending()};
         ++count;
@@ -172,6 +180,8 @@ int main(int argc, char** argv)
             fetch.m_access.m_physical_address, word, ee::decode(cpu.m_pc, word).mnemonic);
     }
     std::printf("Dual ROM0 I-cache: resident=%u\n", pilot.instruction_cache_lines());
+    std::printf("Dual ROM0 D-cache: resident=%u dirty=%u\n",
+        pilot.data_cache_lines(), pilot.data_cache_dirty_lines());
     // Version-pinned workflow checks the guest-installed EELOAD layout.
     // These are passive RAM reads, never a host installation.
     constexpr uint32_t eeload = 0x82000u;

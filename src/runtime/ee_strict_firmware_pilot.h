@@ -228,6 +228,8 @@ public:
         return {m_sio_bytes.data(), m_sio.m_count};
     }
     uint32_t instruction_cache_lines() const { return m_instruction_cache.resident_count(); }
+    uint32_t data_cache_lines() const { return m_data_cache.resident_count(); }
+    uint32_t data_cache_dirty_lines() const { return m_data_cache.dirty_count(); }
     s_ee_fetch_plan current_fetch_plan() const
     {
         return ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
@@ -280,8 +282,12 @@ public:
             m_cold_cache.instruction_count() == c_ee_reset_cold_cache::k_instruction_lines
                 ? &m_instruction_cache : nullptr;
         c_ee_reset_instruction_cache::c_transaction cache_transaction(active_cache);
+        auto* active_data_cache = m_iop_synchronized &&
+            m_cold_cache.data_count() == c_ee_reset_cold_cache::k_data_lines
+                ? &m_data_cache : nullptr;
+        c_ee_reset_data_cache::c_transaction data_transaction(active_data_cache);
         const s_ee_reset_ram_view ram{m_memory.physical_ram_span(0u, k_ram_size),
-            k_ram_size, m_iop_synchronized, &cache_transaction};
+            k_ram_size, m_iop_synchronized, &cache_transaction, &data_transaction};
         const auto fetch = ee_plan_instruction_fetch(m_memory.tlb(), m_cpu.m_pc,
             m_cpu.m_cop0[COP0_Status], m_cpu.m_cop0[COP0_Config],
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
@@ -414,6 +420,7 @@ public:
             std::abort();
         }
         cache_transaction.commit();
+        data_transaction.commit();
         m_retired += action.m_retired;
         m_runtime.m_reference_instruction_slots += slots;
         uint64_t timestamp = 0u;
@@ -1105,6 +1112,7 @@ private:
     ee_memory m_memory;
     c_ee_reset_cold_cache m_cold_cache{};
     c_ee_reset_instruction_cache m_instruction_cache{};
+    c_ee_reset_data_cache m_data_cache{};
     // The bounded serial sink records only committed guest SB accesses.
     // Capacity exhaustion is a refusal, never a silently discarded byte.
     std::vector<uint8_t> m_sio_bytes = std::vector<uint8_t>(65536u, 0u);

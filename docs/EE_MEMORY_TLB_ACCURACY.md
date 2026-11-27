@@ -1887,3 +1887,28 @@ and full register round-trip tests and real synthetic guest exception
 save/restore/ERET regression with synchronized IOP. Require 33 further
 retirements (CTC1 + 32 LWC1) in both actual ROMs. No arithmetic or
 production LLVM changes, no retail replay. Pending CI.
+
+## M6E3H3E9B7A: cold D-cache write allocation
+
+H3E9B6B passed both pinned ROMs at 9a02799f, workflow 46070407877.
+Both genuinely returned from the exception handler and executed
+OSDSYS, stopping at PC 00100064, SW ra,01a4(sp) afbf01a4, EA
+00106cbc; 818594 / 818786 EE retirements, 102324 / 102348 IOP,
+zero debt, nine I-cache lines. Fetch maps through TLB entry 14,
+cache 3, 256 KiB page. Status 70030c01, EPC 00100000.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46070407877
+
+Add a bounded physically tagged 8 KiB, 64-byte, two-way D-cache
+(existing data bus planner and cold index sweep). Opt in only after
+the guest cold data sweep and synchronized ownership. Only translated
+cache-3 writeback-allocate RAM spans; no direct RAM writes on cached
+stores. Stage one full data line per instruction or branch-slot,
+commit fills/dirty data only on retirement. Refuse a third same-set
+line; no eviction, writeback, replacement policy, locking, live CACHE,
+Config changes with resident data, or calibrated cache latency.
+Uncached accesses observe physical backing, not coherent dirty lines.
+Apply to ordinary and partial scalar, quadword and raw COP1 data.
+Add nonidentity TLB, hit/dirty, uncached alias, refusal, conflict,
+and branch-slot tests. Require dirty D-cache, actual OSDSYS entry
+retirement, and advancement past the stack SW in CI. No HLE or
+production LLVM changes, no retail replay. Pending CI.
