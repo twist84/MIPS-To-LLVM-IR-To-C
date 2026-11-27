@@ -243,6 +243,79 @@ def test_graphics_ee_comparison(root):
     assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
     assert not receipt["performance_accepted"] and receipt["relative_throughput"] == 2.0
 
+    import os
+    library_dir = root / "iop-libraries"
+    library_dir.mkdir()
+    iop_library = library_dir / ("test.dll" if os.name == "nt" else "test.so")
+    iop_library.write_bytes(b"native")
+    capture_dir = root / "capture"
+    calls.clear()
+
+    def replay_iop(args, image, directory, env):
+        assert args.runner == root / "runner" and image == root / "control.dll"
+        assert env["SDBZ_RUNTIME_PROFILE"] == "0"
+        assert "SDBZ_IOP_AOT_VERIFY" not in env
+        calls.append(directory.name)
+        directory.mkdir()
+        stderr = directory / "stderr.log"
+        stderr.write_text("")
+        if directory.name == "capture-1":
+            assert env["SDBZ_IOP_AOT_CAPTURE"] == str(capture_dir)
+            assert "SDBZ_IOP_AOT" not in env
+            (capture_dir / "test.bin").write_bytes(b"a")
+            (capture_dir / "test.json").write_text(json.dumps(
+                {"text_size": 1, "hash": "af63dc4c8601ec8c"}))
+        elif directory.name.startswith("candidate"):
+            assert env["SDBZ_IOP_AOT"] == str(library_dir)
+            assert "SDBZ_IOP_AOT_CAPTURE" not in env
+            stderr.write_text("IOP AOT: modules=1 active=1 entries=3 "
+                              "instructions=42 translated_ms=0.1 refresh_ms=0.2\n")
+        else:
+            assert "SDBZ_IOP_AOT" not in env
+            assert "SDBZ_IOP_AOT_CAPTURE" not in env
+        return {"wall_seconds": 1.0}
+
+    iop_args = args[:args.index("--candidate-source")]
+    iop_args[iop_args.index("--repeats") + 1] = "1"
+    iop_args += ["--control-runner-sha256", sha(root / "runner")]
+    iop_args[iop_args.index("--output") + 1] = str(root / "capture-replay")
+    with patch.multiple(
+            harness, validate_source_libraries=validate,
+            aot_identity=lambda path: inventory,
+            terminal_budget=lambda path, budget: True,
+            read_json=lambda path: (json.loads(path.read_text())
+                                    if path.parent == capture_dir else report),
+            record_count=lambda path: 1,
+            replay_environment=lambda path: {"SDBZ_IOP_AOT": "stale",
+                                             "SDBZ_IOP_AOT_VERIFY": "1"},
+            run_one=replay_iop, validate_run=lambda *args: {},
+            require_match=lambda *args: None, extract_profile=lambda *args: None):
+        with patch.object(sys, "argv", iop_args + ["--capture-iop", str(capture_dir)]):
+            assert harness.main() == 0
+        assert calls == ["capture-1"]
+        capture_receipt = json.loads((root / "capture-replay" /
+                                      "profiling-receipt.json").read_text())
+        assert capture_receipt["correctness_accepted"]
+        assert capture_receipt["captures"]["test"]["binary_sha256"] == sha(capture_dir / "test.bin")
+        iop_args[iop_args.index("--output") + 1] = str(root / "iop-replay")
+        with patch.object(sys, "argv", iop_args + ["--candidate-iop-aot", str(library_dir)]):
+            assert harness.main() == 0
+    assert calls == ["capture-1", "control-1", "candidate-1"]
+    receipt = json.loads((root / "iop-replay" / "profiling-receipt.json").read_text())
+    assert receipt["schema"] == "ee-graphics-iop-aot-comparison-v1"
+    assert receipt["candidate_iop_inventory"] == {iop_library.name: sha(iop_library)}
+    assert receipt["correctness_accepted"] and receipt["inputs_unchanged"]
+    assert receipt["runs"]["control"][0]["iop_aot"] is None
+    assert receipt["runs"]["candidate"][0]["iop_aot"]["instructions"] == 42
+    stderr = root / "iop-replay" / "candidate-1" / "stderr.log"
+    for count in (0, 2):
+        try:
+            harness.iop_aot_observation(stderr, count)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incorrect IOP AOT inventory accepted")
+
 
 def run():
     with TemporaryDirectory() as tmp:
