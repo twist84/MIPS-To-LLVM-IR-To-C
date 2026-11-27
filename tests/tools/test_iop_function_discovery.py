@@ -16,6 +16,9 @@ from audit_iop_irx_metadata import (parse_irx, compare_capture, capture_mismatch
                                     discover_relocation_roots)
 
 
+from audit_iop_indirect_targets import constant_indirect_targets
+
+
 BASE = 0x10000
 
 
@@ -251,6 +254,36 @@ class DiscoveryTest(unittest.TestCase):
                                                    baseline)["new_roots"], [])
         with self.assertRaises(ValueError):
             inventory(meta, linked, relocated_call_entries=[BASE + 16])
+
+    def test_indirect_target_shadow_and_delay_slot(self):
+        # LUI/ADDIU builds t9; JALR captures it before the delay overwrites t9.
+        meta, data = capture([0x3c190001, 0x27390018, 0x0320f809,
+                              0x24190000, 0x03e00008, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        result = constant_indirect_targets(meta, data, report)
+        self.assertEqual(result["new_call_candidates"], [BASE + 24])
+        self.assertEqual(result["observations"][0]["producer_pcs"], [BASE, BASE + 4])
+        self.assertEqual(result["unresolved"], [])
+        # An alternative entry invalidates the unique predecessor chain.
+        meta["exports"] = [BASE + 4]
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True))
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(len(result["unresolved"]), 1)
+
+    def test_indirect_target_shadow_does_not_assume_load_values(self):
+        meta, data = capture([0x3c190001, 0x37390018, 0x8f390000,
+                              0x0320f809, 0, 0x03e00008, 0])
+        report = inventory(meta, data, extended=True)
+        result = constant_indirect_targets(meta, data, report)
+        self.assertEqual(result["observations"], [])
+        self.assertEqual(len(result["unresolved"]), 1)
+
+    def test_indirect_jump_is_not_function_root(self):
+        meta, data = capture([0x3c080001, 0x35080010, 0x01000008, 0,
+                              0x03e00008, 0])
+        result = constant_indirect_targets(meta, data, inventory(meta, data, extended=True))
+        self.assertEqual(result["new_jump_targets"], [BASE + 16])
+        self.assertEqual(result["new_call_candidates"], [])
 
     def test_region_cache_hits_invalidation_and_corruption(self):
         with tempfile.TemporaryDirectory() as tmp:

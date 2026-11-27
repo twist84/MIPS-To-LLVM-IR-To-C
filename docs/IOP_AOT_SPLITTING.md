@@ -348,3 +348,29 @@ consume saved ownership lists as authoritative. Existing full dispatch
 partition, C++ fallback, cache plan hash and runner remain unchanged.
 The receipt is candidate evidence rather than a cryptographic proof of
 original ELF provenance. No default build changes or I7 artifact changes.
+
+## I11 retail acceptance / I12a indirect target shadow
+
+I11 archive SHA256 a25632b7da96bf829d1d576f5f6ea8d12428a5ce613d900d42ac06ddfced50fc.
+Seven active relocation-backed split libraries; 40M dispatches, 3,127
+polls, 184,700 exact trace samples, unchanged inputs, independently checked
+byte-identical report/PPM matching the pinned reference. Native retirement
+67,846,006 matches monolithic and I7. Native entries 12,611,629 versus
+11,767,550 I7; 596.6ms translated / 1.9ms refresh. 40.921s interpreter vs
+40.375s native, one matched pair (performance acceptance false). All five
+CI workflows passed at 20cd4c0. Preserve I11 as correctness baseline.
+
+I12a `audit_iop_indirect_targets.py --capture DIR --relocation-receipt FILE
+--out FILE` reconstructs the I10 candidate CFG from validated relocation
+roots. For each unresolved indirect JR/JALR, it walks at most 32 unique
+known sequential predecessor words, stopping at other entry roots,
+delay words, alternate predecessor edges or non-simple instructions.
+Tracks LUI, ADDIU, ORI, ADDU and OR constants, clears tracked values on
+unmodeled instructions, and reads the jump register before the delay
+slot. No GP, memory contents, unknown incoming indirect edges or return
+addresses are assumed. Reports possible constant targets, producer PCs,
+unresolved sites and distinct unvisited call/jump targets. JR targets
+are not treated as new function roots. This is shadow-only: existing
+CFG may omit indirect incoming edges, and no runtime or lowering uses
+these observations. Tests cover delay ordering, alternate entry,
+unknown loads and jump/call separation.
