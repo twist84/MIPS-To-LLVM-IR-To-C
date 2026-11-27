@@ -12,6 +12,7 @@
 #include "ee_hw_bus.h"
 #include "ee_host_timers.h"
 #include "ee_iop_clock.h"
+#include "ee_iop_service_attribution.h"
 #include "ee_execution_horizon.h"
 #include "ee_hot_expand_protocol.h"
 #include "ee_kernel_thread_status.h"
@@ -3958,6 +3959,10 @@ int main(int argc, char** argv)
     // and a backlog after bounded native-dispatch safepoints.
     ee::c_ee_iop_clock iop_clock;
     uint64_t iop_clock_turns = 0u;
+    ee::c_iop_service_attribution iop_attribution;
+    std::string iop_attribution_environment;
+    const char* iop_attribution_value = read_host_environment(
+        "SDBZ_PROFILE_IOP_SERVICE", &iop_attribution_environment);
     // Opt-in: coalesce only provably idle IOP turns within the existing
     // EE checkpoint. Do not defer IOP time across native EE execution.
     std::string iop_coalesce_environment;
@@ -4813,11 +4818,22 @@ int main(int argc, char** argv)
                         : "IOP clock refused accumulated cycle overflow");
                 return 1;
             }
+            const bool attribute_iop = ee::g_runtime_profile.m_enabled &&
+                iop_attribution_value != nullptr &&
+                std::strcmp(iop_attribution_value, "1") == 0;
+            if (attribute_iop)
+            {
+                iop_attribution.checkpoint(iop_clock.due() != 0u);
+            }
             uint32_t turns = 0u;
             // Never drop guest cycles to make a host checkpoint fast.
             // A large translated function may leave a bounded backlog.
             while (iop_clock.due() != 0u && turns < 64u)
             {
+                const bool sample_iop = attribute_iop && iop_attribution.begin_batch();
+                using t_iop_clock = std::chrono::steady_clock;
+                const auto planner_start = sample_iop ? t_iop_clock::now() :
+                    t_iop_clock::time_point{};
                 ee::s_ee_iop_service_batch batch{
                     static_cast<uint32_t>(std::min<uint64_t>(iop_clock.due(), 256u)),
                     1u};
@@ -4858,6 +4874,8 @@ int main(int argc, char** argv)
                 uint32_t prior_smflag = 0u;
                 const bool trace_smflag = trace &&
                     hardware.sif().get_reg(4u, &prior_smflag) && prior_smflag == 0u;
+                const auto kernel_start = sample_iop ? t_iop_clock::now() :
+                    t_iop_clock::time_point{};
                 bool quiet_advanced = false;
                 if (iop_fast_quiet && may_optimize_idle)
                 {
@@ -4873,6 +4891,8 @@ int main(int argc, char** argv)
                 // service outcomes. The fast path has no guest execution.
                 const iop::s_kernel_run_result progressed = quiet_advanced
                     ? iop::s_kernel_run_result{} : iop_kernel->run(cycles, 128u);
+                const auto kernel_end = sample_iop ? t_iop_clock::now() :
+                    t_iop_clock::time_point{};
                 if (pad_poll.failed())
                 {
                     pad_poll.summary(stderr);
@@ -4901,9 +4921,26 @@ int main(int argc, char** argv)
                     std::printf("IOP guest published SMFLAG: value=0x%08x instructions=%llu\n",
                         current_smflag, static_cast<unsigned long long>(progressed.m_executed));
                 }
+                const auto rpc_start = sample_iop && iop_rpc != nullptr ?
+                    t_iop_clock::now() : t_iop_clock::time_point{};
                 if (iop_rpc != nullptr)
                 {
                     (void)iop_rpc->pump();
+                }
+                if (attribute_iop)
+                {
+                    const auto rpc_end = sample_iop && iop_rpc != nullptr ?
+                        t_iop_clock::now() : t_iop_clock::time_point{};
+                    const auto elapsed_ns = [](auto start, auto end) -> uint64_t
+                    {
+                        return static_cast<uint64_t>(std::chrono::duration_cast<
+                            std::chrono::nanoseconds>(end - start).count());
+                    };
+                    iop_attribution.finish_batch(cycles, progressed.m_executed,
+                        quiet_advanced, iop_rpc != nullptr, sample_iop,
+                        elapsed_ns(planner_start, kernel_start),
+                        elapsed_ns(kernel_start, kernel_end),
+                        elapsed_ns(rpc_start, rpc_end));
                 }
                 if (!iop_clock.consume(cycles))
                 {
@@ -9619,6 +9656,35 @@ int main(int argc, char** argv)
             static_cast<unsigned long long>(batches - iop_quiet_advances),
             static_cast<unsigned long long>(iop_quiet_advances),
             static_cast<unsigned long long>(iop_clock.due()));
+    }
+    if (ee::g_runtime_profile.m_enabled && iop_attribution_value != nullptr &&
+        std::strcmp(iop_attribution_value, "1") == 0)
+    {
+        std::fprintf(stderr, "IOP service profile: checkpoints=%llu no_debt=%llu "
+            "batches=%llu sample_group=%u\n",
+            static_cast<unsigned long long>(iop_attribution.checkpoints()),
+            static_cast<unsigned long long>(iop_attribution.no_debt()),
+            static_cast<unsigned long long>(iop_attribution.batches()),
+            ee::c_iop_service_attribution::k_sample_group);
+        const char* names[] = {"no_guest", "guest", "quiet"};
+        for (uint32_t kind = 0u; kind < static_cast<uint32_t>(
+                ee::e_iop_service_kind::count); ++kind)
+        {
+            const auto& b = iop_attribution.bucket(static_cast<ee::e_iop_service_kind>(kind));
+            std::fprintf(stderr, "IOP service profile: kind=%s batches=%llu "
+                "requested_cycles=%llu guest_instructions=%llu samples=%llu "
+                "sampled_planner_ns=%llu sampled_kernel_ns=%llu rpc_calls=%llu "
+                "rpc_samples=%llu sampled_rpc_ns=%llu\n", names[kind],
+                static_cast<unsigned long long>(b.m_batches),
+                static_cast<unsigned long long>(b.m_requested_cycles),
+                static_cast<unsigned long long>(b.m_guest_instructions),
+                static_cast<unsigned long long>(b.m_samples),
+                static_cast<unsigned long long>(b.m_sampled_planner_ns),
+                static_cast<unsigned long long>(b.m_sampled_kernel_ns),
+                static_cast<unsigned long long>(b.m_rpc_calls),
+                static_cast<unsigned long long>(b.m_rpc_samples),
+                static_cast<unsigned long long>(b.m_sampled_rpc_ns));
+        }
     }
     if (iop_fast_quiet)
     {
