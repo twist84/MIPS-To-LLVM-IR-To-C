@@ -1683,3 +1683,26 @@ register saves before MFHI/MFLO/SD and COP0 frame reads. Further
 coverage follows actual stop evidence, not a host syscall shim.
 Require actual guest syscall 6 entry with correct Cause/EPC/EXL
 and subsequent guest retirement. Pending real-ROM CI; no retail replay.
+
+## M6E3H3E9B2: guest exception context register saves
+
+H3E9B1 passed both releases at 9f9cb90f, workflow 46064876239.
+Actual syscall 6 entry matched both asserted COP0 states and the
+cached KSEG0 vector, followed by 45 guest retirements and seven
+resident I-cache lines. The first refused word is MFHI k1
+0000d810 at a0019204 / a0019224, 696503 / 696695 retirements.
+https://github.com/twist84/MIPS-To-LLVM-IR-To-C/actions/runs/46064876239
+
+Implement MFHI/MFLO/MFHI1/MFLO1/MFSA with reserved-field checks,
+low-half writes and zero suppression; SA uses the existing internal
+bit-unit representation (guest value is bits 6:3). Reference:
+ps2-web-recomp opcode tables, PCSX2 R5900OpcodeImpl.cpp and MMI.cpp,
+and the existing native lowering. Add LD/SD using the existing
+naturally aligned uncached physical span planner and little-endian
+64-bit transfer; cached data remains refused. Existing scheduler
+EPC/Status/Cause reads already suffice. Add constexpr checks,
+register transfer and doubleword execution regressions and a guest
+BEV1 handler COP0 read test. Require at least 13 more retirements
+through the authentic context-save sequence, retaining the exact
+syscall entry and backing assertions. Pending real-ROM CI.
+No retail replay required; no host frame or fabricated syscall result.

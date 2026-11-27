@@ -2345,6 +2345,94 @@ bool test_strict_reset_mapped_fetch()
     return true;
 }
 
+bool test_strict_reset_exception_context()
+{
+    using result = ee::e_ee_reset_prefix_result;
+    constexpr uint32_t pc = 0xa0000000u;
+    uint8_t bytes[64u]{};
+    const ee::s_ee_reset_ram_view ram{bytes, sizeof(bytes)};
+    const auto put = [&](uint32_t word)
+    {
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            bytes[i] = static_cast<uint8_t>(word >> (8u * i));
+        }
+    };
+    auto cpu = ee::ee_make_strict_reset_prefix_state();
+    cpu.m_cop0[ee::COP0_Status] = 0x70000000u;
+    cpu.m_hi = 0x0123456789abcdefull;
+    cpu.m_lo = 0xfedcba9876543210ull;
+    cpu.m_hi1 = 0x8000000000000000ull;
+    cpu.m_lo1 = 0x7fffffffffffffffull;
+    cpu.m_sa = 11u << 3u;
+    cpu.m_gpr[27].m_hi = 0x12345678u;
+    cpu.m_gpr[26].m_lo = pc + 32u;
+    const auto step = [&](uint32_t opcode)
+    {
+        cpu.m_pc = pc;
+        put(opcode);
+        return ee::ee_execute_strict_rom_register_step(cpu, {}, 1u, ram);
+    };
+    const uint32_t words[] = {0x0000d810u, 0x0000d812u, 0x7000d810u,
+        0x7000d812u, 0x0000d828u};
+    const uint64_t expected[] = {cpu.m_hi, cpu.m_lo, cpu.m_hi1, cpu.m_lo1, 11u};
+    for (uint32_t i = 0u; i < 5u; ++i)
+    {
+        if (step(words[i]).m_retired != 1u || cpu.m_pc != pc + 4u ||
+            cpu.m_gpr[27].m_lo != expected[i] || cpu.m_gpr[27].m_hi != 0x12345678u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[0] = {0x55u, 0x66u};
+    for (const uint32_t opcode : words)
+    {
+        if (step(opcode & ~0xf800u).m_retired != 1u ||
+            cpu.m_gpr[0].m_lo != 0x55u || cpu.m_gpr[0].m_hi != 0x66u ||
+            step(opcode | (1u << 21u)).m_result != result::UNSUPPORTED_OPCODE ||
+            cpu.m_pc != pc)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[27].m_lo = cpu.m_lo;
+    if (step(0xff5b0000u).m_retired != 1u) // SD k1,0(k0)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        if (bytes[32u + i] != static_cast<uint8_t>(cpu.m_lo >> (8u * i)))
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[27].m_lo = 0u;
+    if (step(0xdf5b0000u).m_retired != 1u || cpu.m_gpr[27].m_lo != cpu.m_lo ||
+        cpu.m_gpr[27].m_hi != 0x12345678u ||
+        step(0xff5b0001u).m_result != result::DATA_UNAVAILABLE ||
+        step(0xdf5b0001u).m_result != result::DATA_UNAVAILABLE ||
+        cpu.m_gpr[27].m_lo != cpu.m_lo || cpu.m_pc != pc)
+    {
+        return false;
+    }
+    if (step(0xff400008u).m_retired != 1u || step(0xdf400000u).m_retired != 1u ||
+        cpu.m_gpr[0].m_lo != 0x55u || cpu.m_gpr[0].m_hi != 0x66u)
+    {
+        return false;
+    }
+    for (uint32_t i = 40u; i < 48u; ++i)
+    {
+        if (bytes[i] != 0u)
+        {
+            return false;
+        }
+    }
+    cpu.m_gpr[26].m_lo = 0x80000020u; // never bypass cached data
+    return step(0xff5b0000u).m_result == result::DATA_UNAVAILABLE &&
+        step(0xdf5b0000u).m_result == result::DATA_UNAVAILABLE && cpu.m_pc == pc;
+}
+
 bool test_strict_reset_ram_scalar()
 {
     using result = ee::e_ee_reset_prefix_result;
@@ -4125,7 +4213,8 @@ ee::s_ee_ram_execution execute(ee::ee_memory& memory,
 
 int main()
 {
-    if (!check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
+    if (!check(test_strict_firmware_exception_registers(), "scheduler-owned exception COP0 reads") ||
+        !check(test_strict_firmware_syscall(), "scheduler-owned architectural SYSCALL") ||
         !check(test_strict_firmware_jalr(), "scheduler-owned JALR") ||
         !check(test_strict_firmware_gs_reset(), "scheduler-owned cold GS reset") ||
         !check(test_strict_firmware_hblank_timer(), "scheduler-owned HBlank reference timer") ||
@@ -4394,7 +4483,8 @@ int main()
     {
         return 1;
     }
-    if (!check(test_strict_reset_ram_scalar(), "strict reset RAM scalar transfer regression"))
+    if (!check(test_strict_reset_exception_context(), "strict reset exception context transfers") ||
+        !check(test_strict_reset_ram_scalar(), "strict reset RAM scalar transfer regression"))
     {
         return 1;
     }

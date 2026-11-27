@@ -596,6 +596,18 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             value = sign_extend_word(shifted);
             break;
         }
+        // SPECIAL register transfers require all unused fields zero.
+        if (function == 0x10u || function == 0x12u || function == 0x28u)
+        {
+            if ((opcode & 0x03ff07c0u) != 0u)
+            {
+                return false;
+            }
+            // SA is stored in bit units in the shared CPU state.
+            value = function == 0x10u ? cpu.m_hi : function == 0x12u ? cpu.m_lo :
+                (cpu.m_sa >> 3u) & 15u;
+            break;
+        }
         switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
         case 0x21u: // ADDU: low 32-bit wrapping sum
@@ -623,6 +635,15 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         break;
     }
+    case 0x1cu: // MMI: MFHI1/MFLO1 only
+        if ((opcode & 0x03ff07ffu) != 0x10u &&
+            (opcode & 0x03ff07ffu) != 0x12u)
+        {
+            return false;
+        }
+        dest = (opcode >> 11u) & 31u;
+        value = (opcode & 0x3fu) == 0x10u ? cpu.m_hi1 : cpu.m_lo1;
+        break;
     case 0x10u:
         if (persistent_tlb != nullptr)
         {
@@ -771,7 +792,23 @@ static_assert([]()
         cpu.m_gpr[8].m_lo == 0u && cpu.m_gpr[8].m_hi == 0xabcdefu;
 }());
 
-// LBU/LW/LQ read ROM or explicitly backed uncached RAM; SB/SW/SQ write RAM.
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_hi = 0xfedcba9876543210ull;
+    cpu.m_lo1 = 0x8765432112345678ull;
+    cpu.m_sa = 15u << 3u;
+    cpu.m_gpr[27].m_hi = 0xabcdefu;
+    return execute_register_word(cpu, 0x0000d810u, nullptr) &&
+        cpu.m_gpr[27].m_lo == cpu.m_hi &&
+        execute_register_word(cpu, 0x7000d812u, nullptr) &&
+        cpu.m_gpr[27].m_lo == cpu.m_lo1 &&
+        execute_register_word(cpu, 0x0000d828u, nullptr) &&
+        cpu.m_gpr[27].m_lo == 15u && cpu.m_gpr[27].m_hi == 0xabcdefu &&
+        !execute_register_word(cpu, 0x0020d810u, nullptr);
+}());
+
+// LBU/LW/LD/LQ read ROM or explicitly backed uncached RAM; SB/SW/SD/SQ write RAM.
 // SB to the exact SIO TX register additionally requires an explicit sink.
 // Validate even with register zero. A refusal is diagnostic only;
 // this reset probe does not deliver architectural guest faults.
@@ -806,12 +843,14 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         return {result::COMMITTED, opcode, 0u, pc};
     }
     const bool quad = primary == 0x1eu || primary == 0x1fu;
+    const bool doubleword = primary == 0x37u || primary == 0x3fu;
     const bool half = primary == 0x29u; // SH
     const bool partial = primary == 0x22u || primary == 0x26u ||
         primary == 0x2au || primary == 0x2eu;
     const bool store = primary == 0x28u || half || primary == 0x2bu || primary == 0x1fu ||
-        primary == 0x2au || primary == 0x2eu;
-    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu && !partial && !store)
+        primary == 0x2au || primary == 0x2eu || primary == 0x3fu;
+    if (primary != 0x24u && primary != 0x23u && primary != 0x1eu &&
+        !doubleword && !partial && !store)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -875,6 +914,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     }
     const bool word = primary == 0x23u || primary == 0x2bu;
     const auto kind = quad ? e_ee_data_access_kind::GPR_QUADWORD :
+        doubleword ? e_ee_data_access_kind::DOUBLEWORD :
         word ? e_ee_data_access_kind::WORD :
         half ? e_ee_data_access_kind::HALFWORD : e_ee_data_access_kind::BYTE;
     const auto plan = ee_plan_data_access(tlb, kind,
@@ -949,6 +989,15 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
                 value.m_hi |= static_cast<uint64_t>(bytes[i + 8u]) << (i * 8u);
             }
             cpu.m_gpr[rt] = value;
+        }
+        else if (doubleword)
+        {
+            uint64_t value = 0u;
+            for (uint32_t i = 0u; i < 8u; ++i)
+            {
+                value |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
+            }
+            cpu.m_gpr[rt].m_lo = value;
         }
         else
         {

@@ -1250,6 +1250,44 @@ bool test_strict_firmware_syscall()
     return true;
 }
 
+bool test_strict_firmware_exception_registers()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    auto rom = make_firmware_pilot_rom({
+        0x40806000u, 0x3c020040u, 0x40826000u, 0x0000000cu});
+    // Guest BEV1 handler reads EPC, Status and Cause; no host frame.
+    const uint32_t handler[] = {0x40047000u, 0x40056000u, 0x40066800u};
+    for (uint32_t i = 0u; i < 3u; ++i)
+    {
+        for (uint32_t j = 0u; j < 4u; ++j)
+        {
+            rom[0x380u + i * 4u + j] = static_cast<uint8_t>(handler[i] >> (j * 8u));
+        }
+    }
+    ee::c_ee_strict_firmware_pilot pilot(std::move(rom));
+    for (uint32_t i = 0u; i < 3u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    if (pilot.step(1u).m_boundary != boundary::SYSCALL_ENTRY)
+    {
+        return false;
+    }
+    for (uint32_t i = 0u; i < 3u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    return pilot.retired() == 6u && pilot.cpu().m_gpr[4].m_lo == 0xffffffffbfc0000cull &&
+        pilot.cpu().m_gpr[5].m_lo == (ee::STATUS_BEV | ee::STATUS_EXL) &&
+        pilot.cpu().m_gpr[6].m_lo == (ee::EX_Sys << 2u);
+}
+
 bool test_strict_firmware_jalr()
 {
     using boundary = ee::e_ee_firmware_boundary;
