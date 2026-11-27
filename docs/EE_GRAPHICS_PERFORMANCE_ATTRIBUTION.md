@@ -900,3 +900,30 @@ or repeat their implementation. Next attribute inside the kernel
 and select improvements to necessary work. G8A retail correctness
 accepted; CI at 225f663 had four passed, Build and test running
 at first review; no new performance gain claimed.
+
+## G8B — sampled internal IOP kernel attribution
+
+Add SDBZ_PROFILE_IOP_KERNEL=1, requiring SDBZ_PROFILE_IOP_SERVICE=1
+and runtime profiling. Reuse the G8A sample decision; do not sample
+extra kernel calls. Optional host sample record passed to the
+scheduled HLE kernel run; no change to cycle budgets, wake ordering,
+IRQ acknowledgment, thread selection, device advancement or guest
+execution. ROM0 and separate HLE wait-path runs not instrumented.
+Record separate disjoint sampled phases: wake/IRQ checks, ready
+selection, idle deadline discovery, idle hardware advancement,
+guest context setup, and guest CPU run. The last includes attached
+device retirement. Guest post-run bookkeeping and syscall handling
+are residual, not measured in these phases. Classify by final
+service outcome, so a guest batch can contain idle phases.
+No quiet-fast-path internal sample. Emit phase calls, sampled batch
+counts and elapsed nanoseconds in stderr only. Timing overhead can
+dominate short phases: do not scale into exact CPU time or add to
+outer kernel time. Compare counts and coarse distribution, then
+target redundant work with independent evidence. Test sampled and
+ordinary idle/guest execution for identical clock and stop results;
+full retail validation still required. No guest IR or AOT regeneration.
+Preserve G8A runner, build ee_game_runner and iop_scheduler_cache_test
+(and existing attribution/kernel/profile tests), then run the same
+G8A on/off matched replay with SDBZ_PROFILE_IOP_KERNEL=1 added,
+new output ee-iop-g8b, both quiet/coalescing disabled. Two repeats;
+retain G6A/V30, fixed RTC and PAD stream. Final CI pending.
