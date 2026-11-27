@@ -1129,13 +1129,24 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
         raise ValueError("batched expansion yielded no dispatchable entries")
 
     # Stage all new modules before writing the authoritative function map.
-    # A partial error cannot make metadata point at missing/misnamed IR.
+    # Fresh reconstruction owns both directories on the same volume.
+    # Move its temporary IR instead of storing a second copy; live append
+    # retains its existing diagnostic files and copy-based transaction.
     staged = []
     committed = []
+    moved = []
     try:
         for source, destination, _ in pending:
             temporary = destination.with_name(destination.name + ".tmp")
-            shutil.copyfile(source, temporary)
+            if staged_metadata is not None:
+                if (source.parent != output_dir.resolve() or
+                        source.suffix != ".ll" or temporary.exists() or
+                        temporary.is_symlink()):
+                    raise ValueError("unexpected staged reconstruction IR path")
+                source.rename(temporary)
+                moved.append((source, temporary, destination))
+            else:
+                shutil.copyfile(source, temporary)
             staged.append((temporary, destination))
         for temporary, destination in staged:
             temporary.replace(destination)
@@ -1152,11 +1163,19 @@ def batch_append_functions(recomp, elf, work, metadata_path, addresses,
                 tmp_meta.replace(metadata_path)
         else:
             metrics.count("deferred_metadata_batches")
+            metrics.count("moved_staged_ir_modules", len(moved))
     except (OSError, ValueError):
-        for temporary, _ in staged:
-            temporary.unlink(missing_ok=True)
-        for destination in committed:
-            destination.unlink(missing_ok=True)
+        if staged_metadata is not None:
+            # Restore diagnostic inputs if a batch cannot be committed.
+            # Never delete the only copy of a newly emitted module.
+            for source, temporary, destination in reversed(moved):
+                location = destination if destination in committed else temporary
+                location.rename(source)
+        else:
+            for temporary, _ in staged:
+                temporary.unlink(missing_ok=True)
+            for destination in committed:
+                destination.unlink(missing_ok=True)
         raise
 
     if shared_state is not None:

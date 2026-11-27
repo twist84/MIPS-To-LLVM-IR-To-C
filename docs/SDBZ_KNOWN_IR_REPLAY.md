@@ -368,3 +368,9 @@ The final metadata is published only after inventory and hash checks.
 Independent validation before native cache activation is retained; no
 persisted hash list substitutes for an actual read of the IR. A verified
 migration already checked the copied bytes and need not repeat that scan.
+
+Fresh reconstruction also moves temporary batch IR into the owned IR directory
+instead of copying each file, while retaining per-batch diagnostic metadata.
+Failed batch moves are reversed; live append retains copy-based publication.
+Final portable metadata uses the already authenticated ordered paths and is
+serialized once. No changes to CFG/discovery boundaries or emitted IR.

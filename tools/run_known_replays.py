@@ -235,8 +235,13 @@ def reconstruct(manifest, entries, elf, build, config, work, jobs,
         )
     # Do not publish the complete function map before final IR parity.
     # The staging directory is not an executable cache on failure.
+    # hash_ir_modules has already resolved every owned path in order.
+    # Normalize in memory instead of reopening each path and writing JSON twice.
+    for function, name in zip(staged_metadata["functions"], observed):
+        function["ir_path"] = name
+    staged_metadata["elf"] = run_game.shared_ir.relative_path(elf, ir_dir)
+    staged_metadata["path_format"] = "manifest-relative-v1"
     run_game.shared_ir.write_json(metadata_path, staged_metadata)
-    run_game.shared_ir.normalize_metadata(metadata_path, elf)
     if verified_hashes is not None:
         verified_hashes.clear()
         verified_hashes.update(observed)
