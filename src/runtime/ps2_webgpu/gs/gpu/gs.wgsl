@@ -15,6 +15,7 @@ struct Params {
 override SCALE: u32 = 1u;
 override RASTER_WORKGROUP: u32 = 16u;
 override RASTER_TILE: u32 = 16u;
+override RASTER_LAZY_SETUP: u32 = 0u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -1151,6 +1152,12 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     scratch[i] = atomicLoad(&vram[i * SCALE * SCALE]);
 }
 
+fn outside_primitive(p: u32, x: i32, y: i32) -> bool {
+    let lo = data[p + 2u];
+    let hi = data[p + 3u];
+    return x < i32(lo & 0xFFFFu) || y < i32(lo >> 16u) || x > i32(hi & 0xFFFFu) || y > i32(hi >> 16u);
+}
+
 @compute @workgroup_size(RASTER_WORKGROUP, RASTER_WORKGROUP)
 fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
     let linear = wid.x + wid.y * 1024u;
@@ -1183,15 +1190,22 @@ fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) l
     for (var i = 0u; i < count; i = i + 1u) {
         let h = first + i;
         let p = prims + ((data[lists + (h >> 1u)] >> ((h & 1u) * 16u)) & 0xFFFFu) * PRIM_WORDS;
+        // Pipeline-specialized: skip the read-only Setup record for rejected
+        // pixels. last_setup always describes the Setup actually held in s.
+        if (RASTER_LAZY_SETUP != 0u) {
+            if (outside_primitive(p, x, y)) {
+                continue;
+            }
+        }
         let si = data[p];
         if (si != last_setup) {
             s = load_setup(setups + si * SETUP_WORDS);
             last_setup = si;
         }
-        let lo = data[p + 2u];
-        let hi = data[p + 3u];
-        if (x < i32(lo & 0xFFFFu) || y < i32(lo >> 16u) || x > i32(hi & 0xFFFFu) || y > i32(hi >> 16u)) {
-            continue;
+        if (RASTER_LAZY_SETUP == 0u) {
+            if (outside_primitive(p, x, y)) {
+                continue;
+            }
         }
         shade_at(p, s, x, y, k, px, py);
     }

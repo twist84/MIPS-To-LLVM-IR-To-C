@@ -113,6 +113,7 @@ bool g_last_interlaced = false, g_last_halved = false;
 // must contain an integral number of workgroups along either axis.
 std::uint32_t g_raster_tile = 16u;
 std::uint32_t g_raster_workgroup = 16u;
+bool g_raster_lazy_setup = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -1034,15 +1035,18 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constants[3] = {
-            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+        WGPUConstantEntry constants[4] = {
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
         constants[0].key = view("SCALE");
         constants[0].value = static_cast<double>(scale);
         constants[1].key = view("RASTER_WORKGROUP");
         constants[1].value = static_cast<double>(g_raster_workgroup);
         constants[2].key = view("RASTER_TILE");
         constants[2].value = static_cast<double>(g_raster_tile);
-        cd.compute.constantCount = i == kRaster ? 3u : 1u;
+        constants[3].key = view("RASTER_LAZY_SETUP");
+        constants[3].value = g_raster_lazy_setup ? 1.0 : 0.0;
+        cd.compute.constantCount = i == kRaster ? 4u : 1u;
         cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
@@ -1710,6 +1714,20 @@ bool init(Mode m) {
             return false;
         }
     }
+    g_raster_lazy_setup = false;
+    if (const char* lazy = std::getenv("PS2_RASTER_LAZY_SETUP"))
+    {
+        if (std::strcmp(lazy, "1") == 0)
+        {
+            g_raster_lazy_setup = true;
+        }
+        else if (std::strcmp(lazy, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_LAZY_SETUP (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster lazy_setup=%u\n", g_raster_lazy_setup ? 1u : 0u);
     g_raster_tile = 16u;
     if (const char* size = std::getenv("PS2_RASTER_TILE"))
     {
