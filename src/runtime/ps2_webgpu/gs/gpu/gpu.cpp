@@ -1028,7 +1028,7 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
     return true;
 }
 
-void profile_submit() {
+void profile_submit(WGPUTextureView present_view) {
     constexpr std::uint32_t kMax = 2048;
     if (!g_profile_queries) {
         WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
@@ -1062,6 +1062,24 @@ void profile_submit() {
     if (n) {
         wgpuCommandEncoderResolveQuerySet(enc, g_profile_queries, 0, n * 2, g_profile_resolve, 0);
         wgpuCommandEncoderCopyBufferToBuffer(enc, g_profile_resolve, 0, g_profile_read, 0, n * 16);
+    }
+    if (present_view) {
+        WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+        color.view = present_view;
+        color.loadOp = WGPULoadOp_Clear;
+        color.storeOp = WGPULoadOp_Store;
+        color.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
+        WGPURenderPassDescriptor rd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+        rd.colorAttachmentCount = 1;
+        rd.colorAttachments = &color;
+        WGPURenderPassEncoder rp = wgpuCommandEncoderBeginRenderPass(enc, &rd);
+        wgpuRenderPassEncoderSetViewport(rp, static_cast<float>(g_present_viewport.x), static_cast<float>(g_present_viewport.y),
+            static_cast<float>(g_present_viewport.width), static_cast<float>(g_present_viewport.height), 0.0f, 1.0f);
+        wgpuRenderPassEncoderSetPipeline(rp, g_blit);
+        wgpuRenderPassEncoderSetBindGroup(rp, 0, g_blit_group, 0, nullptr);
+        wgpuRenderPassEncoderDraw(rp, 3, 1, 0, 0);
+        wgpuRenderPassEncoderEnd(rp);
+        wgpuRenderPassEncoderRelease(rp);
     }
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuQueueSubmit(g_queue, 1, &cmd);
@@ -1123,9 +1141,9 @@ void submit(WGPUTextureView present_view = nullptr) {
         g_profile_to = 0u;
     }
     if (g_commands.empty() && !present_view) return;
-    if (g_profile_out && !present_view && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
+    if (g_profile_out && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
         g_detail_passes += g_commands.size();
-        profile_submit();
+        profile_submit(present_view);
         collect_ready_timestamp();
         publish_timestamps();
         return;
@@ -2512,11 +2530,4 @@ bool change_render_scale(std::uint32_t scale)
     }
     wgpuBufferRelease(old_vram);
     wgpuBufferRelease(old_scratch);
-    wgpuBufferRelease(old_readback);
-    g_have_previous = false;
-    g_field = 0;
-    std::fprintf(stderr, "[gpu] internal render resolution %ux\n", scale);
-    return true;
-}
-
-}
+    wgpuBuffer
