@@ -4,6 +4,12 @@ project(ps2_recompiler LANGUAGES C CXX)
 option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
 option(EE_CLANG_WARNINGS_AS_ERRORS "Treat project Clang compiler warnings as errors" ON)
 
+option(EE_ENABLE_OPENPS2BIOS_SOURCE "Enable the patched OpenPS2BIOS source build target" OFF)
+
+if(EE_ENABLE_OPENPS2BIOS_SOURCE)
+    include(cmake/OpenPS2BIOS.cmake)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)

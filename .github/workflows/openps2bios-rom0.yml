@@ -14,6 +14,43 @@ permissions:
   contents: read
 
 jobs:
+
+  build-patched-v07:
+    name: Build patched OpenPS2BIOS v0.7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
+
+      - name: Install the LLVM cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-19 lld-19 llvm-19
+
+      - name: Build and checksum the patched ROM
+        run: |
+          cmake -S . -B build-rom0-source -G Ninja \
+            -DEE_ENABLE_OPENPS2BIOS_SOURCE=ON \
+            -DOPENPS2BIOS_CLANG=/usr/bin/clang-19 \
+            -DOPENPS2BIOS_LLD=/usr/bin/ld.lld-19 \
+            -DOPENPS2BIOS_OBJCOPY=/usr/bin/llvm-objcopy-19
+          cmake --build build-rom0-source --target openps2bios_rom
+          cd build-rom0-source/_deps/openps2bios-build
+          test "$(wc -c < OpenPS2BIOS.bin)" -eq 4194304
+          sha256sum OpenPS2BIOS.bin > OpenPS2BIOS.bin.sha256
+
+      - name: Upload the patched ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: openps2bios-v07-patched-rom
+          path: build-rom0-source/_deps/openps2bios-build/OpenPS2BIOS.bin*
+          if-no-files-found: error
+          retention-days: 7
   diagnose-v06:
     name: OpenPS2BIOS v0.6 firmware regression
     runs-on: ubuntu-latest

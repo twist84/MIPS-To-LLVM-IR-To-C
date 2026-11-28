@@ -1,0 +1,37 @@
+diff --git a/osd/osd.c b/osd/osd.c
+index d97fa5f..4f55994 100644
+--- a/osd/osd.c
++++ b/osd/osd.c
+@@ -140,7 +140,9 @@ static int read_boot_path(void) {
+ }
+ static void start_disc(void) {
+     static char eeload_name[] = "EELOAD";
+-    static uint32_t argv[2];
++    static uint32_t argv_storage[2];
++    volatile uint32_t *argv = (volatile uint32_t *)(uintptr_t)
++        (((uint32_t)(uintptr_t)argv_storage & 0x1fffffffu) | 0xa0000000u);
+     argv[0] = (uint32_t)(uintptr_t)eeload_name;
+     argv[1] = (uint32_t)(uintptr_t)boot_path;
+     /* EELOAD with "EELOAD <program>" runs the program (LoadExecPS2). */
+diff --git a/src/ee/kernel.c b/src/ee/kernel.c
+index 2e63f55..82dedfa 100644
+--- a/src/ee/kernel.c
++++ b/src/ee/kernel.c
+@@ -734,6 +734,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+                 ob_ee_set_exec_args(count, list);
+             }
+         }
++        /* Write back outgoing cached data before the uncached ELF loader runs. */
++        flush_cache(0);
+         ob_puts("[openbios:ee] LoadExecPS2 "); ob_puts(path); ob_puts("\n");
+         if (path[0] == 'r' && path[1] == 'o' && path[2] == 'm' && path[3] == '0' && path[4] == ':') {
+             if (ob_ee_rom_load(path + 5, &entry)) {
+@@ -744,6 +746,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+             ob_puts("[openbios:ee] LoadExecPS2 failed\n");
+             set_result(f, OB_ENOTFOUND); break;
+         }
++        /* The new ELF may overlap cached code from the outgoing program. */
++        flush_cache(2);
+         exec_program(f, entry, 0);
+         goto scheduled;
+     }

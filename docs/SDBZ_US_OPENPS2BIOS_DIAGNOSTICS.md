@@ -84,3 +84,19 @@ synthetic instructions, not Sony ROM or OpenPS2BIOS binary content:
 - Invalid firmware sizes and options fail without a successful exit.
 
 OpenPS2BIOS reference: https://github.com/TamaribaEmu/OpenPS2BIOS
+
+## Build the patched OpenPS2BIOS v0.7 ROM
+
+With GNU Make, Python, and MIPS-capable Clang, LLD and LLVM objcopy installed:
+
+```sh
+cmake -S . -B build -DEE_ENABLE_OPENPS2BIOS_SOURCE=ON
+cmake --build build --target openps2bios_rom
+```
+
+The target fetches the pinned v0.7 source into `build/_deps/openps2bios-src`
+and applies our disc launch patch. It writes the ROM to
+`build/_deps/openps2bios-build/OpenPS2BIOS.bin`. Override the LLVM tool paths
+with `OPENPS2BIOS_CLANG`, `OPENPS2BIOS_LLD`, and `OPENPS2BIOS_OBJCOPY`
+when using versioned executables. The ROM0 workflow publishes the patched ROM
+and its SHA-256 checksum as the `openps2bios-v07-patched-rom` artifact.
