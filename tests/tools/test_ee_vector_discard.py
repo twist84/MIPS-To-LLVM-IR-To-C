@@ -22,6 +22,7 @@ def arithmetic():
     text = (template("src/runtime/ee_vu_fmac4_ir.h") +
             template("src/llvm/ee_cop1_mul_ir.h"))
     names = ("vu_mul4", "vu_add4", "vu_clz26_4", "vu_mul_correct4",
+             "vu_mul_booth_row4", "vu_mul_csa4",
              "ee_cop1_mul_correct", "ee_cop1_booth_row", "ee_cop1_mul_csa")
     return "\n".join([line for line in text.splitlines() if line.startswith("declare ")] +
                      [helper(text, name) for name in names])

@@ -1,7 +1,7 @@
 #pragma once
 
-// Four-lane integer FMAC. Mirrors the scalar EE/VU arithmetic; only
-// potentially observable Booth corrections enter the scalar cold path.
+// Four-lane integer FMAC. Mirrors the scalar EE/VU arithmetic; potentially
+// observable Booth corrections use an exact vector cold path.
 namespace llvm
 {
 inline constexpr char k_vu_fmac4_ir[] = R"IR(
@@ -97,53 +97,121 @@ entry:
   ret { <4 x i32>, <4 x i1>, <4 x i1> } %out2
 }
 
+define internal { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %a, <4 x i32> %code, i32 %shift) alwaysinline {
+entry:
+  %shift_seed = insertelement <4 x i32> poison, i32 %shift, i32 0
+  %shift_vector = shufflevector <4 x i32> %shift_seed, <4 x i32> poison, <4 x i32> zeroinitializer
+  %position_scalar = shl i32 1, %shift
+  %position_seed = insertelement <4 x i32> poison, i32 %position_scalar, i32 0
+  %position = shufflevector <4 x i32> %position_seed, <4 x i32> poison, <4 x i32> zeroinitializer
+  %base = shl <4 x i32> %a, %shift_vector
+  %twice = shl <4 x i32> %base, <i32 1, i32 1, i32 1, i32 1>
+  %double_pos = icmp eq <4 x i32> %code, <i32 3, i32 3, i32 3, i32 3>
+  %double_neg = icmp eq <4 x i32> %code, <i32 4, i32 4, i32 4, i32 4>
+  %double = or <4 x i1> %double_pos, %double_neg
+  %magnitude = select <4 x i1> %double, <4 x i32> %twice, <4 x i32> %base
+  %at_least_four = icmp uge <4 x i32> %code, <i32 4, i32 4, i32 4, i32 4>
+  %at_most_six = icmp ule <4 x i32> %code, <i32 6, i32 6, i32 6, i32 6>
+  %negative = and <4 x i1> %at_least_four, %at_most_six
+  %mask = sub <4 x i32> zeroinitializer, %position
+  %inverted = xor <4 x i32> %magnitude, %mask
+  %signed = select <4 x i1> %negative, <4 x i32> %inverted, <4 x i32> %magnitude
+  %nonzero = icmp ne <4 x i32> %code, zeroinitializer
+  %active = and <4 x i1> %nonzero, %at_most_six
+  %row = select <4 x i1> %active, <4 x i32> %signed, <4 x i32> zeroinitializer
+  %carry = select <4 x i1> %negative, <4 x i32> %position, <4 x i32> zeroinitializer
+  %out0 = insertvalue { <4 x i32>, <4 x i32> } poison, <4 x i32> %row, 0
+  %out1 = insertvalue { <4 x i32>, <4 x i32> } %out0, <4 x i32> %carry, 1
+  ret { <4 x i32>, <4 x i32> } %out1
+}
+
+define internal { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %a, <4 x i32> %b, <4 x i32> %c) alwaysinline {
+entry:
+  %parity = xor <4 x i32> %a, %b
+  %sum = xor <4 x i32> %parity, %c
+  %ab = and <4 x i32> %a, %b
+  %pc = and <4 x i32> %parity, %c
+  %majority = or <4 x i32> %ab, %pc
+  %carry = shl <4 x i32> %majority, <i32 1, i32 1, i32 1, i32 1>
+  %out0 = insertvalue { <4 x i32>, <4 x i32> } poison, <4 x i32> %sum, 0
+  %out1 = insertvalue { <4 x i32>, <4 x i32> } %out0, <4 x i32> %carry, 1
+  ret { <4 x i32>, <4 x i32> } %out1
+}
+
 define internal <4 x i64> @vu_mul_correct4(<4 x i32> %ma, <4 x i32> %mb, <4 x i64> %full, <4 x i1> %needs) noinline {
 entry:
-  %needs0 = extractelement <4 x i1> %needs, i32 0
-  br i1 %needs0, label %correct0, label %merge0
-correct0:
-  %a0 = extractelement <4 x i32> %ma, i32 0
-  %b0 = extractelement <4 x i32> %mb, i32 0
-  %p0 = extractelement <4 x i64> %full, i32 0
-  %c0 = call i64 @ee_cop1_mul_correct(i32 %a0, i32 %b0, i64 %p0)
-  %i0 = insertelement <4 x i64> %full, i64 %c0, i32 0
-  br label %merge0
-merge0:
-  %v0 = phi <4 x i64> [ %full, %entry ], [ %i0, %correct0 ]
-  %needs1 = extractelement <4 x i1> %needs, i32 1
-  br i1 %needs1, label %correct1, label %merge1
-correct1:
-  %a1 = extractelement <4 x i32> %ma, i32 1
-  %b1 = extractelement <4 x i32> %mb, i32 1
-  %p1 = extractelement <4 x i64> %full, i32 1
-  %c1 = call i64 @ee_cop1_mul_correct(i32 %a1, i32 %b1, i64 %p1)
-  %i1 = insertelement <4 x i64> %v0, i64 %c1, i32 1
-  br label %merge1
-merge1:
-  %v1 = phi <4 x i64> [ %v0, %merge0 ], [ %i1, %correct1 ]
-  %needs2 = extractelement <4 x i1> %needs, i32 2
-  br i1 %needs2, label %correct2, label %merge2
-correct2:
-  %a2 = extractelement <4 x i32> %ma, i32 2
-  %b2 = extractelement <4 x i32> %mb, i32 2
-  %p2 = extractelement <4 x i64> %full, i32 2
-  %c2 = call i64 @ee_cop1_mul_correct(i32 %a2, i32 %b2, i64 %p2)
-  %i2 = insertelement <4 x i64> %v1, i64 %c2, i32 2
-  br label %merge2
-merge2:
-  %v2 = phi <4 x i64> [ %v1, %merge1 ], [ %i2, %correct2 ]
-  %needs3 = extractelement <4 x i1> %needs, i32 3
-  br i1 %needs3, label %correct3, label %merge3
-correct3:
-  %a3 = extractelement <4 x i32> %ma, i32 3
-  %b3 = extractelement <4 x i32> %mb, i32 3
-  %p3 = extractelement <4 x i64> %full, i32 3
-  %c3 = call i64 @ee_cop1_mul_correct(i32 %a3, i32 %b3, i64 %p3)
-  %i3 = insertelement <4 x i64> %v2, i64 %c3, i32 3
-  br label %merge3
-merge3:
-  %v3 = phi <4 x i64> [ %v2, %merge2 ], [ %i3, %correct3 ]
-  ret <4 x i64> %v3
+  %code_shift0 = shl <4 x i32> %mb, <i32 1, i32 1, i32 1, i32 1>
+  %code0 = and <4 x i32> %code_shift0, <i32 7, i32 7, i32 7, i32 7>
+  %booth0 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code0, i32 0)
+  %row0 = extractvalue { <4 x i32>, <4 x i32> } %booth0, 0
+  %code_shift1 = lshr <4 x i32> %mb, <i32 1, i32 1, i32 1, i32 1>
+  %code1 = and <4 x i32> %code_shift1, <i32 7, i32 7, i32 7, i32 7>
+  %booth1 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code1, i32 2)
+  %row1 = extractvalue { <4 x i32>, <4 x i32> } %booth1, 0
+  %code_shift2 = lshr <4 x i32> %mb, <i32 3, i32 3, i32 3, i32 3>
+  %code2 = and <4 x i32> %code_shift2, <i32 7, i32 7, i32 7, i32 7>
+  %booth2 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code2, i32 4)
+  %row2 = extractvalue { <4 x i32>, <4 x i32> } %booth2, 0
+  %code_shift3 = lshr <4 x i32> %mb, <i32 5, i32 5, i32 5, i32 5>
+  %code3 = and <4 x i32> %code_shift3, <i32 7, i32 7, i32 7, i32 7>
+  %booth3 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code3, i32 6)
+  %row3 = extractvalue { <4 x i32>, <4 x i32> } %booth3, 0
+  %code_shift4 = lshr <4 x i32> %mb, <i32 7, i32 7, i32 7, i32 7>
+  %code4 = and <4 x i32> %code_shift4, <i32 7, i32 7, i32 7, i32 7>
+  %booth4 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code4, i32 8)
+  %row4 = extractvalue { <4 x i32>, <4 x i32> } %booth4, 0
+  %code_shift5 = lshr <4 x i32> %mb, <i32 9, i32 9, i32 9, i32 9>
+  %code5 = and <4 x i32> %code_shift5, <i32 7, i32 7, i32 7, i32 7>
+  %booth5 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code5, i32 10)
+  %row5 = extractvalue { <4 x i32>, <4 x i32> } %booth5, 0
+  %correction5 = extractvalue { <4 x i32>, <4 x i32> } %booth5, 1
+  %code_shift6 = lshr <4 x i32> %mb, <i32 11, i32 11, i32 11, i32 11>
+  %code6 = and <4 x i32> %code_shift6, <i32 7, i32 7, i32 7, i32 7>
+  %booth6 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code6, i32 12)
+  %row6 = extractvalue { <4 x i32>, <4 x i32> } %booth6, 0
+  %correction6 = extractvalue { <4 x i32>, <4 x i32> } %booth6, 1
+  %code_shift7 = lshr <4 x i32> %mb, <i32 13, i32 13, i32 13, i32 13>
+  %code7 = and <4 x i32> %code_shift7, <i32 7, i32 7, i32 7, i32 7>
+  %booth7 = call { <4 x i32>, <4 x i32> } @vu_mul_booth_row4(<4 x i32> %ma, <4 x i32> %code7, i32 14)
+  %row7 = extractvalue { <4 x i32>, <4 x i32> } %booth7, 0
+  %correction7 = extractvalue { <4 x i32>, <4 x i32> } %booth7, 1
+  %compress0 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %row1, <4 x i32> %row2, <4 x i32> %row3)
+  %sum0 = extractvalue { <4 x i32>, <4 x i32> } %compress0, 0
+  %carry0 = extractvalue { <4 x i32>, <4 x i32> } %compress0, 1
+  %masked4 = and <4 x i32> %row4, <i32 -2048, i32 -2048, i32 -2048, i32 -2048>
+  %masked5 = and <4 x i32> %row5, <i32 -4096, i32 -4096, i32 -4096, i32 -4096>
+  %compress1 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %masked4, <4 x i32> %masked5, <4 x i32> %row6)
+  %sum1 = extractvalue { <4 x i32>, <4 x i32> } %compress1, 0
+  %carry1 = extractvalue { <4 x i32>, <4 x i32> } %compress1, 1
+  %bit11 = and <4 x i32> %row5, <i32 2048, i32 2048, i32 2048, i32 2048>
+  %carry_fix = or <4 x i32> %correction6, %bit11
+  %corrected_carry1 = or <4 x i32> %carry1, %carry_fix
+  %bit10 = and <4 x i32> %row5, <i32 1024, i32 1024, i32 1024, i32 1024>
+  %row_fix = add <4 x i32> %bit10, %correction5
+  %corrected_row7 = or <4 x i32> %row7, %row_fix
+  %compress2 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %row0, <4 x i32> %sum0, <4 x i32> %carry0)
+  %sum2 = extractvalue { <4 x i32>, <4 x i32> } %compress2, 0
+  %carry2 = extractvalue { <4 x i32>, <4 x i32> } %compress2, 1
+  %compress3 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %corrected_row7, <4 x i32> %sum1, <4 x i32> %corrected_carry1)
+  %sum3 = extractvalue { <4 x i32>, <4 x i32> } %compress3, 0
+  %carry3 = extractvalue { <4 x i32>, <4 x i32> } %compress3, 1
+  %compress4 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %carry2, <4 x i32> %sum3, <4 x i32> %carry3)
+  %sum4 = extractvalue { <4 x i32>, <4 x i32> } %compress4, 0
+  %carry4 = extractvalue { <4 x i32>, <4 x i32> } %compress4, 1
+  %compress5 = call { <4 x i32>, <4 x i32> } @vu_mul_csa4(<4 x i32> %sum2, <4 x i32> %sum4, <4 x i32> %carry4)
+  %sum5 = extractvalue { <4 x i32>, <4 x i32> } %compress5, 0
+  %carry5 = extractvalue { <4 x i32>, <4 x i32> } %compress5, 1
+  %corrected_carry5 = add <4 x i32> %carry5, %correction7
+  %truncated_sum = and <4 x i32> %sum5, <i32 -32768, i32 -32768, i32 -32768, i32 -32768>
+  %truncated_carry = and <4 x i32> %corrected_carry5, <i32 -32768, i32 -32768, i32 -32768, i32 -32768>
+  %low = add <4 x i32> %truncated_sum, %truncated_carry
+  %full_low = trunc <4 x i64> %full to <4 x i32>
+  %different = xor <4 x i32> %low, %full_low
+  %lost = and <4 x i32> %different, <i32 32768, i32 32768, i32 32768, i32 32768>
+  %lost64 = zext <4 x i32> %lost to <4 x i64>
+  %product = sub <4 x i64> %full, %lost64
+  %result = select <4 x i1> %needs, <4 x i64> %product, <4 x i64> %full
+  ret <4 x i64> %result
 }
 
 define internal { <4 x i32>, <4 x i1>, <4 x i1> } @vu_mul4(<4 x i32> %lhs, <4 x i32> %rhs) alwaysinline {
