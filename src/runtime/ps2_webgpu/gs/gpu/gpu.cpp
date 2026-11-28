@@ -109,6 +109,9 @@ std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
 std::uint64_t g_last_guest_field = 0u;
 bool g_last_interlaced = false, g_last_halved = false;
+// CPU binning stays at 16x16; the experimental raster pipeline can
+// distribute each existing tile across four 8x8 workgroups.
+std::uint32_t g_raster_workgroup = 16u;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -782,7 +785,9 @@ void flush_batch() {
     const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run);
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run});
     note_raster(prims, tiles, total, snapshot);
-    g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
+    const std::uint32_t subtiles = 16u / g_raster_workgroup;
+    const std::uint32_t groups = tiles * subtiles * subtiles;
+    g_commands.push_back({kRaster, std::min(groups, 1024u), (groups + 1023u) / 1024u, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
     if (b.zwrite) mark_rendered(pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy));
     b.prims.clear();
@@ -1027,11 +1032,14 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constant = WGPU_CONSTANT_ENTRY_INIT;
-        constant.key = view("SCALE");
-        constant.value = static_cast<double>(scale);
-        cd.compute.constantCount = 1;
-        cd.compute.constants = &constant;
+        WGPUConstantEntry constants[2] = {
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+        constants[0].key = view("SCALE");
+        constants[0].value = static_cast<double>(scale);
+        constants[1].key = view("RASTER_WORKGROUP");
+        constants[1].value = static_cast<double>(g_raster_workgroup);
+        cd.compute.constantCount = i == kRaster ? 2u : 1u;
+        cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
         {
@@ -1685,6 +1693,21 @@ bool init(Mode m) {
             if (g_profile_out != nullptr) g_live_profile_allowed = false;
         }
     }
+    g_raster_workgroup = 16u;
+    if (const char* size = std::getenv("PS2_RASTER_WORKGROUP"))
+    {
+        if (std::strcmp(size, "8") == 0)
+        {
+            g_raster_workgroup = 8u;
+        }
+        else if (std::strcmp(size, "16") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_WORKGROUP (expected 8 or 16)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster workgroup=%ux%u (16x16 CPU tiles)\n",
+        g_raster_workgroup, g_raster_workgroup);
     g_scale = 1u;
     if (const char *scale = std::getenv("PS2_SCALE")) g_scale = static_cast<std::uint32_t>(std::clamp(std::atoi(scale), 1, 4));
     while (g_scale > 1 && (8ull << 20) * g_scale * g_scale > std::min(supported.maxBufferSize, supported.maxStorageBufferBindingSize)) --g_scale;

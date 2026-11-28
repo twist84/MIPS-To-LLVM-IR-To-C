@@ -13,6 +13,7 @@ struct Params {
 @group(0) @binding(8) var<storage, read> native_atlases: array<u32>;
 
 override SCALE: u32 = 1u;
+override RASTER_WORKGROUP: u32 = 16u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -1149,16 +1150,19 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     scratch[i] = atomicLoad(&vram[i * SCALE * SCALE]);
 }
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(RASTER_WORKGROUP, RASTER_WORKGROUP)
 fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-    let index = wid.x + wid.y * 1024u;
+    let linear = wid.x + wid.y * 1024u;
+    let subtiles = 16u / RASTER_WORKGROUP;
+    let index = linear / (subtiles * subtiles);
+    let subtile = linear % (subtiles * subtiles);
     if (index >= prm(3u)) {
         return;
     }
     let tile = prm(0u) + index * 2u;
     let origin = data[tile];
-    let sx = (origin & 0xFFFFu) * 16u + lid.x;
-    let sy = (origin >> 16u) * 16u + lid.y;
+    let sx = (origin & 0xFFFFu) * 16u + (subtile % subtiles) * RASTER_WORKGROUP + lid.x;
+    let sy = (origin >> 16u) * 16u + (subtile / subtiles) * RASTER_WORKGROUP + lid.y;
     let x = i32(sx / SCALE);
     let y = i32(sy / SCALE);
     let k = (sy % SCALE) * SCALE + sx % SCALE;

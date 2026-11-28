@@ -1366,3 +1366,41 @@ VU1 interval measurements separately; do not add overlapping worker
 and GPU times to EE wall time. Use the same native cache, resolution,
 speed mode, character/stage and input progression for comparison.
 No retail performance improvement claimed until measured.
+
+### P1 capture — 20261128-070242763, fe649940
+
+Replay provenance: clean tracked tree, O5, unlocked, async VU1 and GS,
+CPU profiling on, EE per-PC off, no host audio. GTX 1660 SUPER.
+40M dispatches, 2430 guest fields/presentations; overall 58.03 fields/s
+is not combat throughput. Detailed capture: serials 2745–3086, 342
+submissions, 32470 contiguous dispatch rows; zero failed mappings and
+zero pressure waits. GPU compute 3606.808 ms: raster 2688.538 (74.54%),
+decode 311.234, upload 303.658, CLUT 224.196, display 79.182.
+Mean 10.546 ms/submission, median 10.039, P95 14.024, max 15.000.
+Raster mean 7.861 ms/submission. During capture full two-second
+intervals show 22–26.5 fields/s, EE native exclusive 625–631 ms,
+IOP 178–184 ms, GPU submit CPU 104–129 ms. GPU compute alone cannot
+explain field time; do not sum overlapping EE, VU1 and GPU timings.
+VU1 entire replay: 84 programs, 392056 native runs, 440249063 pairs,
+zero fallbacks. Worker execution 13.112 s, compiled exclusive 12.802 s.
+Top PCs 0x730 7.221 s, 0x620 2.161 s, 0x420 1.123 s, 0x130 1.080 s,
+0x5a0 0.748 s (96.34% combined). These are whole-replay VU1 timings.
+SC1 PARTIAL, SC10 PARTIAL (valid live GPU capture; overhead/worker
+toggle still outstanding); SC2/4 not met in captured unlocked combat.
+Final acceptance still pending.
+
+### P4A — raster workgroup experiment
+
+Example submission 2746: raster dispatch 34 has 451 primitives,
+6 tiles, 509 list entries, 1.325 ms; dispatch 29 has 2030 primitives,
+79 tiles, 3901 entries, 1.059 ms. Few active groups and long ordered
+primitive loops motivate testing smaller workgroups. Opt-in
+PS2_RASTER_WORKGROUP=8 divides each existing 16x16 CPU tile into
+four 8x8 GPU groups. Default 16 preserves current group layout.
+Same ordered tile list, sample coordinates, render scale, shading,
+and dispatch submission order. No change to binning or guest code.
+This is a hypothesis, not a measured speedup; smaller groups may
+increase redundant list traversal or alter behavior for aliased
+targets. Require matched deterministic visual/VRAM correctness and
+comparable combat A/B capture with 16 versus 8. Record effective
+setting in log and replay provenance. No default switch until proven.
