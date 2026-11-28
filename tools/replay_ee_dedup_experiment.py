@@ -86,6 +86,29 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=Fal
     return results
 
 
+LEAN_DIAGNOSTICS = {
+    "hotspots": "SDBZ_REPORT_HOTSPOTS",
+    "boundary": "SDBZ_REPORT_BOUNDARY_TIMING",
+    "overlap": "SDBZ_VU1_NATIVE_OVERLAP_PROFILE",
+}
+
+
+def lean_overrides(component):
+    return {key: "0" for name, key in LEAN_DIAGNOSTICS.items()
+            if component == "all" or component == name}
+
+
+def report_options(path):
+    # The runner prints this startup marker before guest execution.
+    pattern = re.compile(rb"^EE report options: hotspots=([01]) boundary_timing=([01]) ")
+    with path.open("rb") as stream:
+        for line in stream:
+            match = pattern.match(line)
+            if match:
+                return {"hotspots": match[1] == b"1", "boundary": match[2] == b"1"}
+    raise ValueError("missing report options marker: " + str(path))
+
+
 GRAPHICS_WORKLOAD_KEYS = (
     "gs_fields_started", "m2_gif_gs", "m2_gif_paths", "m2_vif1_producer",
     "m2_gs_presentation", "m2_iop_sio2",
@@ -380,6 +403,8 @@ def main():
                         help="replay an existing complete PAD0 record for every arm")
     parser.add_argument("--async-raster", action="store_true",
                         help="diagnostic tile8 comparison using asynchronous GS and VU1")
+    parser.add_argument("--lean-component", choices=("all", "hotspots", "boundary", "overlap"),
+                        help="with --async-lean, disable only this collector (default: all)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
@@ -404,6 +429,9 @@ def main():
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
         raster_mode = args.raster_lazy_setup or args.raster_tile8 or args.async_lean
         async_mode = args.async_raster or args.async_lean
+        if args.lean_component is not None and not args.async_lean:
+            raise ValueError("--lean-component requires --async-lean")
+        lean_component = args.lean_component or "all"
         if args.async_lean and (args.sync or args.async_raster or not args.recording):
             raise ValueError("--async-lean requires --recording and no other async/sync mode")
         if args.async_raster and (not args.raster_tile8 or args.sync or not args.recording):
@@ -471,8 +499,7 @@ def main():
         elif args.raster_tile8:
             candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
         elif args.async_lean:
-            candidate_env.update(SDBZ_REPORT_HOTSPOTS="0", SDBZ_REPORT_BOUNDARY_TIMING="0",
-                                 SDBZ_VU1_NATIVE_OVERLAP_PROFILE="0")
+            candidate_env.update(lean_overrides(lean_component))
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
@@ -498,6 +525,8 @@ def main():
             receipt["experiment_mode"] = ("async_lean" if args.async_lean else
                                           "raster_tile8" if args.raster_tile8 else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
+            if args.async_lean:
+                receipt["lean_component"] = lean_component
             receipt["candidate_environment_overrides"] = {
                 key: value for key, value in candidate_env.items() if env.get(key) != value}
         if args.recording:
@@ -560,8 +589,13 @@ def main():
                 receipt["async_workload"] = async_workload_evidence(args.output)
                 if args.async_lean:
                     for arm, info in receipt["async_workload"]["arms"].items():
-                        expected = arm != "dedup"
-                        if info["hotspots_enabled"] is not expected or info["overlap_enabled"] is not expected:
+                        expected_env = candidate_env if arm == "dedup" else env
+                        expected = {name: expected_env[key] == "1"
+                                    for name, key in LEAN_DIAGNOSTICS.items()}
+                        observed = report_options(args.output / arm / "stdout.log")
+                        observed["overlap"] = info["overlap_enabled"]
+                        info["diagnostic_options"] = observed
+                        if observed != expected or info["hotspots_enabled"] is not expected["hotspots"]:
                             raise ValueError("host diagnostic settings not confirmed: " + arm)
             if args.control:
                 control = receipt["control_pad_replay"]

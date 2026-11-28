@@ -1870,3 +1870,39 @@ fails; explicitly not architectural equivalence. Verify reported
 hotspots and overlap modes, and hash VU1 library inventory before
 and after all async comparisons. Keep strict trace/report gates.
 No production defaults change. SC4 remains unmet.
+
+### P6A result — ee-async-lean-comparison.zip
+
+Same authenticated O5 DLL, runner, 88-program VU1 inventory,
+recording unchanged. All three runs 40M dispatches, 2478/2478 PAD,
+2541 fields/presentations, 4345821 GPU committed draws, zero VU1
+interpreter fallbacks. Independently verified identical final PPM
+SHA-256 81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a.
+Actual stdout startup markers confirm hotspots/boundary 1/1,
+1/1, 0/0; report confirms native overlap true/true/false.
+Hotspot observations 40M/40M/0. Worker overlap intervals
+15219452/15358832/0. Wall 42.735/43.000/37.329 seconds:
+candidate +15.19% throughput vs control, A/A spread 0.62%.
+Late dispatch 24002560..39993344: same 332 fields in
+12.4863/12.2483/9.9754 s (26.59/27.11/33.28 fields/s),
+candidate +22.79% throughput. Candidate late rate ~55.5% of
+59.94 Hz. Native attempts and VIF1 producer counters differ
+slightly; VU1 pairs 415851899/415891585/415745774, difference
+candidate vs control -0.035%. Other selected graphics report
+sections equal. A/A first different 11560411, A/B 11560534;
+strict trace and architectural equivalence NOT established.
+Performance signal materially exceeds A/A spread but remains
+diagnostic, not a production acceptance or a claim of exact
+guest timing. Do not promote defaults yet.
+
+### P6B — isolate three independent diagnostic switches
+
+Extend --async-lean with --lean-component hotspots, boundary,
+overlap or all (default all). A/A keeps all three enabled;
+candidate disables exactly the named collector. Validate each
+startup report-options marker and worker overlap flag, not just
+the requested environment. Preserve the strict gates and save
+diagnostic evidence before checking trace equality. Reuse the
+same recording and binaries. No C++ or production cache changes.
+The single-switch effect need not add linearly due to thread
+overlap. Compare late matched field windows and A/A variance.

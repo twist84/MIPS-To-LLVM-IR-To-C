@@ -230,4 +230,12 @@ if __name__ == "__main__":
     staging()
     raster_validation()
     async_workload_validation()
+    from replay_ee_dedup_experiment import lean_overrides, report_options, LEAN_DIAGNOSTICS
+    assert lean_overrides("all") == {key: "0" for key in LEAN_DIAGNOSTICS.values()}
+    for name, key in LEAN_DIAGNOSTICS.items():
+        assert lean_overrides(name) == {key: "0"}
+    with TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "stdout.log"
+        marker.write_text("startup\nEE report options: hotspots=1 boundary_timing=0 (history retained)\n")
+        assert report_options(marker) == {"hotspots": True, "boundary": False}
     print("PASS: isolated EE dedup route selection and exact dispatch inventory")
