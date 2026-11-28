@@ -1541,3 +1541,57 @@ No guest lowering changes; CI pending.
 | P3A V30 | -12.46% VU1 ns/pair, gameplay +1.14% nominal | Experimental control |
 | P4B 8/8 binning | -11.04% comparable raster, gameplay +3.18% nominal | Keep opt-in pending deterministic validation |
 | P5A complete EE PC export | Pending combat capture | Attribute EE hotspots |
+
+### P5A result — 20261128-072445332
+
+Clean b59cb37, 40M dispatches, 2515 fields in 41.37548 s,
+84 V30 libraries, native pairs 444387833, no fallback or worker
+host failures; 3165/3165 normal GPU queries complete, no detailed
+passes. Not a matched unprofiled comparison (F8 enabled during
+combat; manual input). Last six full combat intervals 52–53
+fields per ~2.003 s; approximately 26 fields/s, still short of
+59.94 target. Whole-run rate 60.78 is misleading.
+
+Full CSV has 2698 distinct entry PCs, 16729220 calls,
+16728790 dispatches, 1840583763 attempted guest instructions,
+1456025193 idle-charged, 384558570 non-skipped. Inclusive
+4823355000 ns, nested 322060900, exclusive 4501294100 ns.
+Rank by inclusive minus measured nested scopes, not attempted
+guest instruction count or inclusive wall. 0x172e48 has
+155.116 ms inclusive but 154.227 ms nested. 0x175210 alone
+accounts for all idle-charged instructions; do not treat
+those as executed host work.
+
+| PC | Calls | Exclusive ms |
+|---|---:|---:|
+| 0x108220 | 193125 | 236.0655 |
+| 0x1068e0 | 347623 | 150.0907 |
+| 0x106a20 | 191249 | 125.1181 |
+| 0x185cb0 | 592441 | 79.4239 |
+| 0x110304 | 5766 | 75.2837 |
+| 0x1a9a40 | 185250 | 74.3718 |
+| 0x1a0c80 | 85500 | 69.169 |
+| 0x1a2a10 | 277875 | 67.8228 |
+| 0x186038 | 172899 | 64.9509 |
+| 0x106950 | 78572 | 61.4202 |
+
+Top 10 cover 22.30%, 25 cover 34.67%, 100 cover 57.67%.
+Entry PCs averaging <=10 non-skipped instructions/call account
+for 9390158 calls (56.13%) and 1.3170597 s (29.26% exclusive).
+<=20 account for 12399838 calls (74.12%) and 1.9840394 s
+(44.08%). Broad native boundary costs justify investigating
+direct transfers, register residency and interprocedural
+optimization, not merely one math routine. Exclusive time
+still includes host boundary overhead; no causal attribution.
+
+### P5B — profile-ranked read-only IR collection
+
+Select union of top 25 PCs by exclusive boundary and call count.
+Map exact entries and possible resume owners using current
+ee_functions.json, validate metadata and selected IR SHA-256
+against the captured translation-cache.json before writing a
+fresh ZIP. Keep unresolved PCs explicit. No cache writes or new
+lowering. Inspect original IR for the dominant native regions,
+then design a bounded hot-module interprocedural or direct-call
+experiment with correctness gates. Entry counts alone are not
+instrumented PGO edge profiles. No speedup claimed.
