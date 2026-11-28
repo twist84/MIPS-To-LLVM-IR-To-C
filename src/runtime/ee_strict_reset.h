@@ -1729,16 +1729,22 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     {
         return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
     }
-    const bool quad = primary == 0x1eu || primary == 0x1fu;
+    const bool vector = primary == 0x36u || primary == 0x3eu;
+    if (vector && (cpu.m_cop0[COP0_Status] & 0x40000000u) == 0u)
+    {
+        return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
+    }
+    const bool quad = primary == 0x1eu || primary == 0x1fu || vector;
     const bool doubleword = primary == 0x37u || primary == 0x3fu;
     const bool half = primary == 0x21u || primary == 0x25u || primary == 0x29u;
     const bool partial = primary == 0x22u || primary == 0x26u ||
         primary == 0x2au || primary == 0x2eu;
     const bool store = primary == 0x28u || primary == 0x29u || primary == 0x2bu || primary == 0x1fu ||
-        primary == 0x2au || primary == 0x2eu || primary == 0x3fu || primary == 0x39u;
+        primary == 0x2au || primary == 0x2eu || primary == 0x3fu || primary == 0x39u ||
+        primary == 0x3eu;
     if (primary != 0x20u && primary != 0x21u && primary != 0x24u && primary != 0x25u &&
         primary != 0x23u && primary != 0x1eu &&
-        !doubleword && !partial && !store && !fp)
+        !doubleword && !partial && !store && !fp && !vector)
     {
         return {execute_register_word(cpu, opcode, persistent_tlb) ? result::COMMITTED :
             result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
@@ -1748,6 +1754,10 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
     const uint32_t imm = opcode & 0xffffu;
     const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, rs)) +
         (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
+    if (vector && (address & 15u) != 0u)
+    {
+        return {result::DATA_UNAVAILABLE, opcode, 0u, pc, address};
+    }
     if (partial)
     {
         const auto kind = primary == 0x22u || primary == 0x2au
@@ -1820,14 +1830,16 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         bus.m_address == access_address - 0xa0000000u;
     if (store)
     {
-        if (!fp && !plan.m_fault.m_valid && sio != nullptr &&
+        if (!fp && !vector && !plan.m_fault.m_valid && sio != nullptr &&
             sio->write(bus, address, static_cast<uint8_t>(read_gpr(cpu, rt))))
         {
             return {result::COMMITTED, opcode, 0u, pc};
         }
-        const s_ee_u128 value{fp ? static_cast<uint32_t>(cpu.m_fpr[rt]) : read_gpr(cpu, rt),
-            fp || rt == 0u ? 0u : cpu.m_gpr[rt].m_hi};
-        if (!fp && !plan.m_fault.m_valid && mmio != nullptr &&
+        const s_ee_u128 value = vector
+            ? (rt == 0u ? s_ee_u128{0u, 0x3f80000000000000ull} : cpu.m_vu0[rt])
+            : s_ee_u128{fp ? static_cast<uint32_t>(cpu.m_fpr[rt]) : read_gpr(cpu, rt),
+                fp || rt == 0u ? 0u : cpu.m_gpr[rt].m_hi};
+        if (!fp && !vector && !plan.m_fault.m_valid && mmio != nullptr &&
             mmio->write(bus, access_address, value))
         {
             return {result::COMMITTED, opcode, 0u, pc};
@@ -1848,7 +1860,7 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         return {result::COMMITTED, opcode, 0u, pc};
     }
     s_ee_u128 device_value{};
-    if (!fp && !plan.m_fault.m_valid && mmio != nullptr &&
+    if (!fp && !vector && !plan.m_fault.m_valid && mmio != nullptr &&
         mmio->read(bus, access_address, device_value))
     {
         if (rt != 0u)
@@ -1897,7 +1909,14 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
                 value.m_lo |= static_cast<uint64_t>(bytes[i]) << (i * 8u);
                 value.m_hi |= static_cast<uint64_t>(bytes[i + 8u]) << (i * 8u);
             }
-            cpu.m_gpr[rt] = value;
+            if (vector)
+            {
+                cpu.m_vu0[rt] = value;
+            }
+            else
+            {
+                cpu.m_gpr[rt] = value;
+            }
         }
         else if (doubleword)
         {
