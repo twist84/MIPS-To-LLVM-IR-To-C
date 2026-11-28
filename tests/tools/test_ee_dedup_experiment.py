@@ -255,6 +255,35 @@ def bilinear_coords_validation():
                 raise AssertionError("incorrect bilinear pipeline accepted")
 
 
+def plot_address_cache_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            value = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n"
+                f"[gpu] raster plot_address_cache={value}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, plot_address_cache=True)["dedup"]["plot_address_cache"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for marker in ("plot_address_cache=1", "early_depth=0", "bilinear_coords=0"):
+            path.write_text(original.replace(marker, marker[:-1] + str(1 - int(marker[-1]))))
+            try:
+                validate_raster_outputs(root, plot_address_cache=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect address cache pipeline accepted")
+
+
 def sync_lean_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -316,6 +345,7 @@ if __name__ == "__main__":
     raster_validation()
     early_depth_validation()
     bilinear_coords_validation()
+    plot_address_cache_validation()
     sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory

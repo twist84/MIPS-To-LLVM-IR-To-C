@@ -116,6 +116,7 @@ std::uint32_t g_raster_workgroup = 16u;
 bool g_raster_lazy_setup = false;
 bool g_raster_early_depth = false;
 bool g_raster_bilinear_coords = false;
+bool g_raster_plot_address_cache = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -1037,10 +1038,11 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constants[6] = {
+        WGPUConstantEntry constants[7] = {
             WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
             WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
-            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT};
         constants[0].key = view("SCALE");
         constants[0].value = static_cast<double>(scale);
         constants[1].key = view("RASTER_WORKGROUP");
@@ -1053,7 +1055,9 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         constants[4].value = g_raster_early_depth ? 1.0 : 0.0;
         constants[5].key = view("RASTER_BILINEAR_COORDS");
         constants[5].value = g_raster_bilinear_coords ? 1.0 : 0.0;
-        cd.compute.constantCount = i == kRaster ? 6u : 1u;
+        constants[6].key = view("RASTER_PLOT_ADDRESS_CACHE");
+        constants[6].value = g_raster_plot_address_cache ? 1.0 : 0.0;
+        cd.compute.constantCount = i == kRaster ? 7u : 1u;
         cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
@@ -1763,6 +1767,20 @@ bool init(Mode m) {
         }
     }
     std::fprintf(stderr, "[gpu] raster bilinear_coords=%u\n", g_raster_bilinear_coords ? 1u : 0u);
+    g_raster_plot_address_cache = false;
+    if (const char* cache = std::getenv("PS2_RASTER_PLOT_ADDRESS_CACHE"))
+    {
+        if (std::strcmp(cache, "1") == 0)
+        {
+            g_raster_plot_address_cache = true;
+        }
+        else if (std::strcmp(cache, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_PLOT_ADDRESS_CACHE (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster plot_address_cache=%u\n", g_raster_plot_address_cache ? 1u : 0u);
     g_raster_tile = 16u;
     if (const char* size = std::getenv("PS2_RASTER_TILE"))
     {

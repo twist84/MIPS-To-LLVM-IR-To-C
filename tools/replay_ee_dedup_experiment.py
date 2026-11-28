@@ -36,13 +36,13 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False, bilinear_coords=False):
+def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False, bilinear_coords=False, plot_address_cache=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
     for arm in arms:
         folder = directory / arm
-        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth and not bilinear_coords else "0"
+        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth and not bilinear_coords and not plot_address_cache else "0"
         log = (folder / "stderr.log").read_bytes()
         markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
         if not markers or any(value.decode("ascii") != expected for value in markers):
@@ -60,16 +60,25 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=Fal
             depths = re.findall(rb"(?m)^\[gpu\] raster early_depth=([01])\r?$", log)
             if not depths or any(value != b"0" for value in depths):
                 raise ValueError("early-depth must be disabled: " + arm)
-        if tile8 or early_depth or bilinear_coords:
+        if plot_address_cache:
+            cache = b"1" if arm == "dedup" else b"0"
+            for marker, value in ((b"plot_address_cache", cache),
+                                  (b"early_depth", b"0"),
+                                  (b"bilinear_coords", b"0")):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(item != value for item in values):
+                    raise ValueError("missing or inconsistent raster " + marker.decode("ascii") + " marker: " + arm)
+        if tile8 or early_depth or bilinear_coords or plot_address_cache:
             size = b"8" if tile8 and arm == "dedup" else b"16"
             sizes = re.findall(rb"(?m)^\[gpu\] raster workgroup=(\d+)x(\d+) \((\d+)x(\d+) CPU tiles\)\r?$", log)
             if not sizes or any(entry != (size,) * 4 for entry in sizes):
                 raise ValueError("missing or inconsistent raster tile marker: " + arm)
         results[arm] = {
             "lazy_setup": expected,
-            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth or bilinear_coords else {}),
+            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth or bilinear_coords or plot_address_cache else {}),
             **({"early_depth": int(depth)} if early_depth else {}),
             **({"bilinear_coords": int(coords)} if bilinear_coords else {}),
+            **({"plot_address_cache": int(cache)} if plot_address_cache else {}),
             "report_sha256": sha(folder / "report.json"),
             "image_sha256": sha(folder / "gs-webgpu.ppm"),
         }
@@ -427,6 +436,8 @@ def main():
                          help="compare early triangle depth rejection on lean synchronous runs")
     variant.add_argument("--raster-bilinear-coords", action="store_true",
                          help="compare shared wrapped coordinates for bilinear sampling")
+    variant.add_argument("--raster-plot-address-cache", action="store_true",
+                         help="compare per-invocation framebuffer/depth address reuse")
     variant.add_argument("--async-lean", action="store_true",
                          help="screen cost of optional EE report and VU1 overlap diagnostics")
     variant.add_argument("--sync-lean", action="store_true",
@@ -460,7 +471,7 @@ def main():
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
         lean_mode = args.async_lean or args.sync_lean
-        strict_raster = args.raster_early_depth or args.raster_bilinear_coords
+        strict_raster = args.raster_early_depth or args.raster_bilinear_coords or args.raster_plot_address_cache
         raster_mode = args.raster_lazy_setup or args.raster_tile8 or strict_raster or lean_mode
         async_mode = args.async_raster or args.async_lean
         verify_inventory = async_mode or args.sync_lean or strict_raster
@@ -527,7 +538,8 @@ def main():
             env.update(SDBZ_VU1_ASYNC="1", SDBZ_GS_ASYNC="1")
         if raster_mode:
             env.update(PS2_RASTER_LAZY_SETUP="0", PS2_RASTER_EARLY_DEPTH="0",
-                       PS2_RASTER_BILINEAR_COORDS="0", SDBZ_RUNTIME_PROFILE="0",
+                       PS2_RASTER_BILINEAR_COORDS="0", PS2_RASTER_PLOT_ADDRESS_CACHE="0",
+                       SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
         if args.raster_tile8 or strict_raster or lean_mode:
@@ -550,6 +562,8 @@ def main():
             candidate_env["PS2_RASTER_EARLY_DEPTH"] = "1"
         elif args.raster_bilinear_coords:
             candidate_env["PS2_RASTER_BILINEAR_COORDS"] = "1"
+        elif args.raster_plot_address_cache:
+            candidate_env["PS2_RASTER_PLOT_ADDRESS_CACHE"] = "1"
         elif args.async_lean:
             candidate_env.update(lean_overrides(lean_component))
         elif args.sync_lean:
@@ -574,7 +588,7 @@ def main():
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
-            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS")},
+            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS", "PS2_RASTER_PLOT_ADDRESS_CACHE")},
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
@@ -583,7 +597,8 @@ def main():
                                           "async_lean" if args.async_lean else
                                           "raster_tile8" if args.raster_tile8 else
                                           "raster_early_depth" if args.raster_early_depth else
-                                          "raster_bilinear_coords" if args.raster_bilinear_coords else "raster_lazy_setup")
+                                          "raster_bilinear_coords" if args.raster_bilinear_coords else
+                                          "raster_plot_address_cache" if args.raster_plot_address_cache else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
             if lean_mode:
                 receipt["lean_component"] = "ee-report" if args.sync_lean else lean_component
@@ -699,7 +714,8 @@ def main():
                 receipt["raster_outputs"] = validate_raster_outputs(
                     args.output, tile8=args.raster_tile8, async_raster=async_mode,
                     lean=lean_mode, early_depth=args.raster_early_depth,
-                    bilinear_coords=args.raster_bilinear_coords)
+                    bilinear_coords=args.raster_bilinear_coords,
+                    plot_address_cache=args.raster_plot_address_cache)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:

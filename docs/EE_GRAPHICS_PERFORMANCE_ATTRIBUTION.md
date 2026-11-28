@@ -2038,3 +2038,27 @@ reads, format conversion, snapshot selection, and interpolation math.
 Point sampling is unchanged. No guest IR change. No performance gain
 claimed before a matched --raster-bilinear-coords --control --sync
 --recording replay. Shader compilation and retail validation required.
+
+
+### P4G result — ee-raster-bilinear-comparison.zip
+
+Strict sync A/A/B passed; 40M dispatches, all 2478 PAD polls,
+1935262 trace samples identical, no unpaired transitions, raw JSON
+and final PPM byte-identical, 2541 presentations, 88 native VU1
+programs, 415895434 pairs, zero fallbacks. All input identities
+unchanged. Wall 46.297/46.109/46.156 s. At 24002560..40000000,
+332 fields in 16.0989/16.1439/16.0734 s; candidate +0.44% throughput
+versus control, no meaningful gain. Keep opt-in. SC4 still unmet.
+
+### P4H — per-invocation plot address cache
+
+PS2_RASTER_PLOT_ADDRESS_CACHE=1 (default 0) lazily caches framebuffer
+and depth Loc values for the current pixel and setup index. Invalidate
+both when the loaded setup changes. Cache no VRAM contents, retain
+scissor, scanmask, alpha/depth tests, read/store order and primitive
+order. A rejected primitive does not precompute an unused depth address.
+Potential benefit: avoid repeated swizzle-table reads for overlapping
+primitives sharing a setup. Register pressure and shader compiler
+codegen may offset savings. Strict --raster-plot-address-cache --control
+--sync --recording comparison, other raster variants off. No EE IR
+changes. Native shader build, replay, and performance proof pending.

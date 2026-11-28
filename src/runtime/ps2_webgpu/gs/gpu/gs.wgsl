@@ -18,6 +18,7 @@ override RASTER_TILE: u32 = 16u;
 override RASTER_LAZY_SETUP: u32 = 0u;
 override RASTER_EARLY_DEPTH: u32 = 0u;
 override RASTER_BILINEAR_COORDS: u32 = 0u;
+override RASTER_PLOT_ADDRESS_CACHE: u32 = 0u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -785,6 +786,35 @@ struct PlotState {
     zte: bool,
 }
 
+// Per-invocation, read-only address cache. Never cache mutable VRAM
+// contents; each primitive still observes all previous stores.
+var<private> plot_frame_valid: bool = false;
+var<private> plot_depth_valid: bool = false;
+var<private> plot_frame_loc: Loc;
+var<private> plot_depth_loc: Loc;
+
+fn plot_frame_address(s: Setup, x: u32, y: u32) -> Loc {
+    if (RASTER_PLOT_ADDRESS_CACHE == 0u) {
+        return addr(s.ff, x, y);
+    }
+    if (!plot_frame_valid) {
+        plot_frame_loc = addr(s.ff, x, y);
+        plot_frame_valid = true;
+    }
+    return plot_frame_loc;
+}
+
+fn plot_depth_address(s: Setup, x: u32, y: u32) -> Loc {
+    if (RASTER_PLOT_ADDRESS_CACHE == 0u) {
+        return addr(s.zf, x, y);
+    }
+    if (!plot_depth_valid) {
+        plot_depth_loc = addr(s.zf, x, y);
+        plot_depth_valid = true;
+    }
+    return plot_depth_loc;
+}
+
 fn prepare_plot(s: Setup, x: i32, y: i32, k: u32, depth: u32) -> PlotState {
     var result: PlotState;
     if (x < s.scax0 || x > s.scax1 || y < s.scay0 || y > s.scay1) {
@@ -800,7 +830,7 @@ fn prepare_plot(s: Setup, x: i32, y: i32, k: u32, depth: u32) -> PlotState {
     let ux = u32(x);
     let uy = u32(y);
     let z = min(depth, s.zmax);
-    let fl = addr(s.ff, ux, uy);
+    let fl = plot_frame_address(s, ux, uy);
     var zl = Loc(0u, 0u, 0u);
 
     var dst = 0u;
@@ -819,7 +849,7 @@ fn prepare_plot(s: Setup, x: i32, y: i32, k: u32, depth: u32) -> PlotState {
         if (ztst == 0u) {
             return result;
         }
-        zl = addr(s.zf, ux, uy);
+        zl = plot_depth_address(s, ux, uy);
         if (ztst != 1u) {
             let old = load_at(zl, k) & s.zmax;
             if ((ztst == 2u && z < old) || (ztst == 3u && z <= old)) {
@@ -1273,6 +1303,10 @@ fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) l
         if (si != last_setup) {
             s = load_setup(setups + si * SETUP_WORDS);
             last_setup = si;
+            if (RASTER_PLOT_ADDRESS_CACHE != 0u) {
+                plot_frame_valid = false;
+                plot_depth_valid = false;
+            }
         }
         if (RASTER_LAZY_SETUP == 0u) {
             if (outside_primitive(p, x, y)) {
