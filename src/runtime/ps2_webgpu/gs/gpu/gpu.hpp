@@ -64,6 +64,7 @@ void set_performance_overlay(const ee::s_ee_overlay_text* text);
 // Collection touches the device and is owner-only, after draining work.
 ee::s_gpu_timestamp_profile timestamp_profile();
 void collect_timestamp_profile();
+bool set_command_profile_enabled(bool enabled);
 double busy_ms();
 double vram_mb();
 void stats();

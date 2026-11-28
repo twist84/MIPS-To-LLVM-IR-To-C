@@ -278,6 +278,19 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         ee::runtime_profile_set_enabled(!ee::g_runtime_profile.m_enabled);
     }
+    if (IsKeyPressed(KEY_F7))
+    {
+        m_gpu_profile_enabled = !m_gpu_profile_enabled;
+        if (!ps2::gs::gpu::set_command_profile_enabled(m_gpu_profile_enabled))
+        {
+            m_gpu_profile_enabled = false;
+            std::fprintf(stderr, "GPU profiling unavailable or could not open gpu-profile-live.txt\n");
+        }
+    }
+    if (IsKeyPressed(KEY_F8))
+    {
+        m_pc_profile_toggle_requested = true;
+    }
     if (WindowShouldClose())
     {
         if (iop_hardware != nullptr)
@@ -339,5 +352,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         }
     }
     // Never call BeginDrawing/EndDrawing: these swap raylib's GL buffers.
+}
+
+bool c_ee_raylib_window::consume_pc_profile_toggle()
+{
+    const bool requested = m_pc_profile_toggle_requested;
+    m_pc_profile_toggle_requested = false;
+    return requested;
 }
 }
