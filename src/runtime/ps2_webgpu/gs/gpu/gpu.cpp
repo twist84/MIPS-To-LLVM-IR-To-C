@@ -222,8 +222,23 @@ std::FILE *g_profile_out = nullptr;
 std::uint64_t g_profile_from = 0, g_profile_to = 0;
 std::atomic<int> g_command_profile_request{0};
 bool g_live_profile_allowed = true;
-WGPUQuerySet g_profile_queries = nullptr;
-WGPUBuffer g_profile_resolve = nullptr, g_profile_read = nullptr;
+// Each in-flight detailed submission owns its query and readback storage.
+constexpr std::uint32_t k_profile_chunk = 1024u;
+constexpr std::size_t k_profile_slots = 8u;
+struct s_detail_profile_slot
+{
+    std::vector<WGPUQuerySet> m_queries;
+    WGPUBuffer m_resolve = nullptr;
+    WGPUBuffer m_read = nullptr;
+    std::uint64_t m_capacity = 0;
+    std::uint64_t m_serial = 0;
+    std::vector<Command> m_commands;
+    std::vector<CommandInfo> m_info;
+    std::atomic<e_timestamp_state> m_state{e_timestamp_state::free};
+};
+std::array<s_detail_profile_slot, k_profile_slots> g_detail_slots{};
+std::deque<std::size_t> g_detail_pending;
+std::uint64_t g_detail_rows = 0, g_detail_errors = 0, g_detail_pressure_waits = 0;
 
 std::vector<Command> g_commands;
 std::vector<std::array<std::uint32_t, kParamStride / 4>> g_param_records;
@@ -1028,40 +1043,194 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
     return true;
 }
 
-void profile_submit(WGPUTextureView present_view) {
-    constexpr std::uint32_t kMax = 2048;
-    if (!g_profile_queries) {
+void collect_detail_profile()
+{
+    // Retire in submission order even if map callbacks complete out of order.
+    for (; !g_detail_pending.empty(); g_detail_pending.pop_front())
+    {
+        auto& slot = g_detail_slots[g_detail_pending.front()];
+        const auto state = slot.m_state.load(std::memory_order_acquire);
+        if (state == e_timestamp_state::pending)
+        {
+            break;
+        }
+        const auto count = slot.m_commands.size();
+        if (state == e_timestamp_state::ready)
+        {
+            const auto* t = static_cast<const std::uint64_t*>(
+                wgpuBufferGetConstMappedRange(slot.m_read, 0, count * 16u));
+            std::size_t info = 0;
+            for (std::size_t i = 0; t && i < count; ++i)
+            {
+                if (t[i * 2u + 1u] < t[i * 2u])
+                {
+                    ++g_detail_errors;
+                    continue;
+                }
+                const auto& c = slot.m_commands[i];
+                for (; info < slot.m_info.size() && slot.m_info[info].index < i; ++info) {}
+                std::fprintf(g_profile_out, "%llu %zu %s %llu %u %u",
+                    static_cast<unsigned long long>(slot.m_serial), i,
+                    kEntryPoints[c.pipeline],
+                    static_cast<unsigned long long>(t[i * 2u + 1u] - t[i * 2u]),
+                    c.x, c.y);
+                if (info < slot.m_info.size() && slot.m_info[info].index == i)
+                {
+                    for (std::uint32_t v : slot.m_info[info].values)
+                    {
+                        std::fprintf(g_profile_out, " %u", v);
+                    }
+                }
+                std::fputc('\n', g_profile_out);
+                ++g_detail_rows;
+            }
+            if (!t)
+            {
+                g_detail_errors += count;
+            }
+            wgpuBufferUnmap(slot.m_read);
+        }
+        else
+        {
+            g_detail_errors += count;
+        }
+        slot.m_commands.clear();
+        slot.m_info.clear();
+        slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
+    }
+}
+
+void poll_detail_profile()
+{
+#ifdef __EMSCRIPTEN__
+    wgpuInstanceProcessEvents(g_instance);
+#else
+    wgpuDevicePoll(g_device, false, nullptr);
+#endif
+    collect_detail_profile();
+}
+
+void finish_detail_profile()
+{
+    if (!g_profile_out)
+    {
+        return;
+    }
+    // Wait only at a capture boundary or if the bounded ring is full.
+    for (; !g_detail_pending.empty();)
+    {
+        pump();
+        collect_detail_profile();
+    }
+    std::fflush(g_profile_out);
+    std::fclose(g_profile_out);
+    g_profile_out = nullptr;
+    g_profile_from = 0;
+    g_profile_to = 0;
+    std::fprintf(stderr, "[gpu] detailed capture: rows=%llu failed=%llu pressure_waits=%llu\n",
+        static_cast<unsigned long long>(g_detail_rows),
+        static_cast<unsigned long long>(g_detail_errors),
+        static_cast<unsigned long long>(g_detail_pressure_waits));
+}
+
+bool prepare_detail_slot(s_detail_profile_slot& slot, std::size_t count)
+{
+    const std::size_t chunks = (count + k_profile_chunk - 1u) / k_profile_chunk;
+    for (; slot.m_queries.size() < chunks;)
+    {
         WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
         qd.type = WGPUQueryType_Timestamp;
-        qd.count = kMax * 2;
-        g_profile_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
-        g_profile_resolve = make_buffer(kMax * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
-        g_profile_read = make_buffer(kMax * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        qd.count = k_profile_chunk * 2u;
+        const auto queries = wgpuDeviceCreateQuerySet(g_device, &qd);
+        if (!queries)
+        {
+            return false;
+        }
+        slot.m_queries.push_back(queries);
     }
+    if (!slot.m_resolve)
+    {
+        slot.m_resolve = make_buffer(k_profile_chunk * 16u,
+            WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(count) * 16u;
+    if (slot.m_capacity < bytes)
+    {
+        if (slot.m_read)
+        {
+            wgpuBufferRelease(slot.m_read);
+        }
+        slot.m_read = make_buffer(bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        slot.m_capacity = slot.m_read ? bytes : 0u;
+    }
+    return slot.m_resolve && slot.m_read;
+}
+
+bool profile_submit(WGPUTextureView present_view)
+{
+    if (g_commands.empty())
+    {
+        return false;
+    }
+    poll_detail_profile();
+    if (g_detail_pending.size() == k_profile_slots)
+    {
+        ++g_detail_pressure_waits;
+        for (; g_detail_pending.size() == k_profile_slots;)
+        {
+            pump();
+            collect_detail_profile();
+        }
+    }
+    std::size_t slot_index = 0;
+    for (; slot_index < k_profile_slots; ++slot_index)
+    {
+        if (g_detail_slots[slot_index].m_state.load(std::memory_order_acquire) ==
+            e_timestamp_state::free)
+        {
+            break;
+        }
+    }
+    if (slot_index == k_profile_slots ||
+        !prepare_detail_slot(g_detail_slots[slot_index], g_commands.size()))
+    {
+        g_detail_errors += g_commands.size();
+        std::fprintf(stderr, "[gpu] detailed timestamp storage unavailable; rendering normally\n");
+        return false;
+    }
+    auto& slot = g_detail_slots[slot_index];
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
-    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(g_commands.size(), kMax));
-    for (std::uint32_t i = 0; i < g_commands.size(); ++i) {
-        const Command &c = g_commands[i];
-        WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
-        writes.querySet = g_profile_queries;
-        writes.beginningOfPassWriteIndex = i * 2;
-        writes.endOfPassWriteIndex = i * 2 + 1;
-        WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
-        if (i < n) cd.timestampWrites = &writes;
-        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
-        wgpuComputePassEncoderSetPipeline(pass, g_pipelines[c.pipeline]);
-        const std::uint32_t offset = c.param * kParamStride;
-        wgpuComputePassEncoderSetBindGroup(pass, 0, g_group, 1, &offset);
-        wgpuComputePassEncoderDispatchWorkgroups(pass, c.x, c.y, 1);
-        wgpuComputePassEncoderEnd(pass);
-        wgpuComputePassEncoderRelease(pass);
-    }
-    if (n) {
-        wgpuCommandEncoderResolveQuerySet(enc, g_profile_queries, 0, n * 2, g_profile_resolve, 0);
-        wgpuCommandEncoderCopyBufferToBuffer(enc, g_profile_resolve, 0, g_profile_read, 0, n * 16);
+    // Resolve each chunk before reusing the resolve buffer. Distinct query
+    // sets avoid reusing a timestamp index inside a single command encoder.
+    for (std::size_t begin = 0; begin < g_commands.size(); begin += k_profile_chunk)
+    {
+        const auto count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(k_profile_chunk, g_commands.size() - begin));
+        const auto queries = slot.m_queries[begin / k_profile_chunk];
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const Command& c = g_commands[begin + i];
+            WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
+            writes.querySet = queries;
+            writes.beginningOfPassWriteIndex = i * 2u;
+            writes.endOfPassWriteIndex = i * 2u + 1u;
+            WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+            cd.timestampWrites = &writes;
+            WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
+            wgpuComputePassEncoderSetPipeline(pass, g_pipelines[c.pipeline]);
+            const std::uint32_t offset = c.param * kParamStride;
+            wgpuComputePassEncoderSetBindGroup(pass, 0, g_group, 1, &offset);
+            wgpuComputePassEncoderDispatchWorkgroups(pass, c.x, c.y, 1);
+            wgpuComputePassEncoderEnd(pass);
+            wgpuComputePassEncoderRelease(pass);
+            ++g_dispatches[c.pipeline];
+        }
+        wgpuCommandEncoderResolveQuerySet(enc, queries, 0, count * 2u, slot.m_resolve, 0);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, slot.m_resolve, 0,
+            slot.m_read, begin * 16u, count * 16u);
     }
     if (present_view) {
         WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
@@ -1085,33 +1254,32 @@ void profile_submit(WGPUTextureView present_view) {
     wgpuQueueSubmit(g_queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
-    if (n) {
-        bool done = false;
-        WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
-        cb.mode = WGPUCallbackMode_AllowProcessEvents;
-        cb.callback = [](WGPUMapAsyncStatus, WGPUStringView, void *flag, void *) { *static_cast<bool *>(flag) = true; };
-        cb.userdata1 = &done;
-        wgpuBufferMapAsync(g_profile_read, WGPUMapMode_Read, 0, n * 16, cb);
-        wait_until(done);
-        const auto *t = static_cast<const std::uint64_t *>(wgpuBufferGetConstMappedRange(g_profile_read, 0, n * 16));
-        std::size_t info = 0;
-        for (std::uint32_t i = 0; t && i < n; ++i) {
-            while (info < g_command_info.size() && g_command_info[info].index < i) ++info;
-            std::fprintf(g_profile_out, "%llu %u %s %llu %u %u", static_cast<unsigned long long>(g_serial), i, kEntryPoints[g_commands[i].pipeline],
-                         static_cast<unsigned long long>(t[i * 2 + 1] > t[i * 2] ? t[i * 2 + 1] - t[i * 2] : 0), g_commands[i].x, g_commands[i].y);
-            if (info < g_command_info.size() && g_command_info[info].index == i)
-                for (std::uint32_t v : g_command_info[info].values) std::fprintf(g_profile_out, " %u", v);
-            std::fprintf(g_profile_out, "\n");
-        }
-        wgpuBufferUnmap(g_profile_read);
-    }
-    g_commands.clear();
-    g_command_info.clear();
+    ++g_submits;
+    g_detail_passes += g_commands.size();
+    slot.m_serial = g_serial;
+    slot.m_commands.swap(g_commands);
+    slot.m_info.swap(g_command_info);
+    slot.m_state.store(e_timestamp_state::pending, std::memory_order_release);
+    g_detail_pending.push_back(slot_index);
+    WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+    cb.mode = WGPUCallbackMode_AllowProcessEvents;
+    cb.userdata1 = &slot;
+    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* user, void*)
+    {
+        auto& completed = *static_cast<s_detail_profile_slot*>(user);
+        completed.m_state.store(status == WGPUMapAsyncStatus_Success ?
+            e_timestamp_state::ready : e_timestamp_state::failed,
+            std::memory_order_release);
+    };
+    wgpuBufferMapAsync(slot.m_read, WGPUMapMode_Read, 0,
+        slot.m_commands.size() * 16u, cb);
+    poll_detail_profile();
     ++g_serial;
     g_param_records.clear();
     g_arena.clear();
     g_decoded_used = 0;
     g_clut_loads = 0;
+    return true;
 }
 
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
@@ -1123,20 +1291,23 @@ void submit(WGPUTextureView present_view = nullptr) {
         if (g_profile_out != nullptr) {
             g_profile_from = g_serial;
             g_profile_to = UINT64_MAX;
+            g_detail_rows = 0;
+            g_detail_errors = 0;
+            g_detail_pressure_waits = 0;
+            std::fprintf(stderr, "[gpu] detailed capture started at submission %llu\n",
+                static_cast<unsigned long long>(g_serial));
         } else {
             std::fprintf(stderr, "GPU profiling could not open gpu-profile-live.txt\n");
         }
-    } else if (profile_request == 2 && g_profile_out != nullptr) {
-        std::fflush(g_profile_out);
-        std::fclose(g_profile_out);
-        g_profile_out = nullptr;
-        g_profile_from = 0u;
-        g_profile_to = 0u;
+    }
+    else if (profile_request == 2 || (g_profile_out && g_serial >= g_profile_to))
+    {
+        finish_detail_profile();
     }
     if (g_commands.empty() && !present_view) return;
-    if (g_profile_out && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
-        g_detail_passes += g_commands.size();
-        profile_submit(present_view);
+    if (g_profile_out && g_timestamps && g_serial >= g_profile_from &&
+        g_serial < g_profile_to && profile_submit(present_view))
+    {
         collect_ready_timestamp();
         publish_timestamps();
         return;
@@ -2326,6 +2497,8 @@ void collect_timestamp_profile()
 {
     if (g_device != nullptr && g_timestamps)
     {
+        // Final runner collection follows the committed GS drain.
+        finish_detail_profile();
 #ifdef __EMSCRIPTEN__
         wgpuInstanceProcessEvents(g_instance);
 #else
