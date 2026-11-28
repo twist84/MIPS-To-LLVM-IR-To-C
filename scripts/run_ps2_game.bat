@@ -625,7 +625,7 @@ rem Clear only presentation outputs before a full replay, so that a
 rem cancelled run cannot accidentally archive old GS images as new ones.
 rem NEVER remove the guest IR, translated DLL, or object cache here.
 if /I "%REPORT_NAME%"=="first-boot.json" (
-    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json) do (
+    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json first-boot.json.pc-profile.csv) do (
         if exist "%WORK_DIR%\%%F" del /q "%WORK_DIR%\%%F"
     )
 )
@@ -695,7 +695,7 @@ exit /b %EXIT_CODE%
 rem Match the files formerly selected by the manual PowerShell command.
 rem Never include guest .ll/.o files in these small diagnostic archives.
 rem Distinct neutral/Cross names prevent overwriting experiment evidence.
-powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','replay-provenance.json','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
+powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','replay-provenance.json','first-boot.json.pc-profile.csv','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
 if errorlevel 1 (
     echo WARNING: Diagnostic archive failed; original logs remain in "%WORK_DIR%".
     exit /b 1

@@ -414,7 +414,7 @@ def test_windows_launcher_preserves_guest_cache():
     archive = launcher.split("\n:archive_full_run\n", 1)[1]
     assert "Get-ChildItem -LiteralPath '%WORK_DIR%' -File" in archive
     for diagnostic in (
-        "boot.log", "expansion.log", "first-boot.json",
+        "boot.log", "expansion.log", "first-boot.json", "first-boot.json.pc-profile.csv",
         "translation-cache.json", "iop-disc-catalog.json",
         "gs-display.ppm", "gs-webgpu.ppm", "gs-upload.ppm",
     ):
@@ -473,6 +473,8 @@ def test_clean_ctrl_c_cancellation():
             work.mkdir()
             report = work / ("quick-probe.json" if quick_probe else "first-boot.json")
             report.write_text('{"stale":true}', encoding="utf-8")
+            pc_profile = report.with_name(report.name + ".pc-profile.csv")
+            pc_profile.write_text("stale profile", encoding="utf-8")
             elf = Path(temp) / "synthetic.elf"
             elf.write_bytes(b"synthetic")
             argv = [
@@ -491,6 +493,7 @@ def test_clean_ctrl_c_cancellation():
             assert code == 130
             assert subprocess_call.call_count == 1, "must not start another guest pass"
             assert not report.exists(), "stale previous guest report must be removed"
+            assert not pc_profile.exists(), "stale previous EE PC profile must be removed"
             output = (work / ("quick-probe.log" if quick_probe else "boot.log")
                       ).read_text(encoding="utf-8")
             assert "cancelled by user (Ctrl+C)" in output

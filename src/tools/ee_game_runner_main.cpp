@@ -10256,6 +10256,31 @@ int main(int argc, char** argv)
             ee::g_runtime_profile.m_enabled ? 1u : 0u,
             static_cast<unsigned long long>(total_nested_ns),
             static_cast<unsigned long long>(total_wall_ns));
+        // Preserve the full combat-selected hot set for offline analysis.
+        // Export only at shutdown; no extra work in the dispatch loop.
+        if (report_path != nullptr)
+        {
+            const std::string profile_path = std::string(report_path) + ".pc-profile.csv";
+            std::ofstream profile(profile_path, std::ios::out | std::ios::trunc);
+            profile << "pc,calls,dispatches,instructions,idle_charged,native_boundary_ns,nested_ns\n";
+            for (const auto& [pc, item] : ranked)
+            {
+                profile << "0x" << std::hex << pc << std::dec << ','
+                        << item.m_calls << ',' << item.m_dispatches << ','
+                        << item.m_instructions << ',' << item.m_idle_instructions << ','
+                        << item.m_wall_ns << ',' << item.m_nested_ns << '\n';
+            }
+            profile.close();
+            if (!profile)
+            {
+                std::fprintf(stderr, "EE profile export failed: %s\n", profile_path.c_str());
+            }
+            else
+            {
+                std::fprintf(stderr, "EE profile export: %zu PCs to %s\n",
+                    ranked.size(), profile_path.c_str());
+            }
+        }
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
             const ee::s_pc_profile& item = ranked[i].second;

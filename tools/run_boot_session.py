@@ -523,6 +523,7 @@ def main(argv=None):
         # A jump-table relink can compile many functions in one replay.
         prior_count = read_function_count(metadata_path) if reuse else None
         report.unlink(missing_ok=True)
+        report.with_name(report.name + ".pc-profile.csv").unlink(missing_ok=True)
         code, output, elapsed = run_session(
             command, expansion_log, append=True, **progress_kwargs
         )
@@ -639,6 +640,7 @@ def main(argv=None):
     if args.gs_webgpu_window:
         final_command.append("--gs-webgpu-window")
     report.unlink(missing_ok=True)
+    report.with_name(report.name + ".pc-profile.csv").unlink(missing_ok=True)
     code, final_output, elapsed = run_session(
         final_command, boot_log, **progress_kwargs
     )

@@ -1492,3 +1492,52 @@ Compare V30 at 16/16 vs 8/8, with detailed GPU capture in both arms.
 Compare tile entries times tile area (upper-bound pixel iterations),
 raster time, CPU batch scope, and combat rate; require deterministic
 VRAM/visual equivalence before promotion. No new EE/VU1 lowering.
+
+### P4B result — 20261128-072021087
+
+Candidate a1f3b1b clean tree; same V30 inventory SHA-256 as
+071322464 control; both O5 and 40M dispatches. 8x8 CPU tile
+and workgroup confirmed. Candidate 32880 detailed rows/412
+submissions, contiguous indices, no failed maps or pressure waits.
+Control 35141 rows/407 submissions. Mean compute 9.8304 -> 8.7070
+ms (-11.43%), mean raster 7.2975 -> 6.2627 ms (-14.18%).
+Exact 80-operation sequence (39 control, 409 candidate submissions,
+excluding first missing-metadata batch) mean compute 9.4787 ->
+8.7291 ms, raster 7.0579 -> 6.2788 ms (-11.04%). Mean summed
+tile-list entries 15361.87 -> 29853.61; entries times tile area
+3932639 -> 1910631 estimated pixel iterations (-51.4%).
+Median dense raster #29 0.9953 -> 0.7990 ms; #34 1.3279 ->
+1.1063; #48 0.9559 -> 0.6901. #21 regressed 0.7905 -> 0.8365.
+Seven full detailed-capture intervals: 346 fields/14.027s vs
+357 fields/14.028s, 24.6648 -> 25.4490 fields/s (+3.18%).
+EE boundary exclusive per field 12.440 -> 12.019 ms; IOP
+4.190 -> 3.880; submit CPU 2.249 -> 2.030. Batch scope
+0.003 -> 0.005 ms/field does not cover all GS worker binning
+cost; do not infer full CPU binning overhead from it.
+Candidate 84 native programs, 461349807 native pairs, zero fallback
+or worker host failures. Manual inputs differ, no deterministic
+visual equivalence established. Keep opt-in, use 8/8 V30 as
+next experimental configuration; default remains 16/16.
+SC4 FAIL; SC1/SC10 PARTIAL.
+
+### P5A — capture complete combat EE hot-PC set
+
+F8 existing per-PC accounting ranks by measured native boundary
+duration with nested scope totals, prints top 25. Preserve all
+ranked rows at normal shutdown in <report>.pc-profile.csv, with
+raw calls, dispatches, attempted instructions, idle-charged
+instructions, native boundary and nested ns. No added hot-loop
+cost; do not treat this as LLVM instrumentation PGO data or
+infer CFG edge frequencies from entry counts. Archive the CSV
+with the regular full run, remove stale sidecar before replay.
+Test stale cleanup and archive allowlist. Use V30, 8/8, F6 on,
+F7 off and F8 on only in expensive combat, turn F8 off and
+close normally or reach dispatch limit. Next select hot modules,
+inspect generated IR and assess targeted optimization/PGO design.
+No guest lowering changes; CI pending.
+
+| Experiment | Result | Decision |
+|---|---|---|
+| P3A V30 | -12.46% VU1 ns/pair, gameplay +1.14% nominal | Experimental control |
+| P4B 8/8 binning | -11.04% comparable raster, gameplay +3.18% nominal | Keep opt-in pending deterministic validation |
+| P5A complete EE PC export | Pending combat capture | Attribute EE hotspots |
