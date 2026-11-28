@@ -73,7 +73,7 @@ def validate_libraries(profile, experiment, elf):
         raise ValueError("boot ELF differs from baseline translation provenance")
     if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
         raise ValueError("baseline must have native ALU certificates disabled")
-    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory", "experimental_shared_scalar_memory", "experimental_residual_shared_scalar", "experimental_selective_alignment_merge", "experimental_expanded_alignment_merge", "experimental_selective_entry_rotation", "experimental_expanded_entry_rotation", "experimental_single_use_fmac_inline", "experimental_vector_discard") or
+    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory", "experimental_shared_scalar_memory", "experimental_residual_shared_scalar", "experimental_selective_alignment_merge", "experimental_expanded_alignment_merge", "experimental_selective_entry_rotation", "experimental_expanded_entry_rotation", "experimental_single_use_fmac_inline", "experimental_vector_discard", "experimental_hot_o3") or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
         raise ValueError("experiment and normal translation metadata do not match")
@@ -82,9 +82,9 @@ def validate_libraries(profile, experiment, elf):
             hashes["dedup"] != plan.get("linked_library_sha256") or
             candidate.stat().st_size != plan.get("linked_library_bytes")):
         raise ValueError("library identity differs from recorded manifest")
-    if (plan.get("mode") in ("experimental_single_use_fmac_inline", "experimental_vector_discard") and
+    if (plan.get("mode") in ("experimental_single_use_fmac_inline", "experimental_vector_discard", "experimental_hot_o3") and
             plan.get("baseline_library_sha256") != hashes["baseline"]):
-        raise ValueError("FMAC pilot baseline library differs")
+        raise ValueError("EE optimization pilot baseline library differs")
     if baseline.resolve() == candidate.resolve() or hashes["baseline"] == hashes["dedup"]:
         raise ValueError("two distinct verified native libraries required")
     return baseline, candidate, hashes

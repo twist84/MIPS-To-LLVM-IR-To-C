@@ -1720,3 +1720,38 @@ hashes; no production cache writes. User must rebuild runner only.
 F5/F6/F7/F8 toggles should not be used during this correctness
 comparison. This is a bounded GPU speed hypothesis, not an achieved
 speedup. SC4 remains unmet; SC1 and SC10 partial.
+
+### P4C result — ee-raster-lazy-setup-comparison.zip
+
+Matched A/A/B using identical authenticated O5 DLL and runner.
+8/8 raster tile and group, V30 directory, synchronous GS and VU1.
+Confirmed lazy_setup 0/0/1. All reached 40M dispatches; 2603/2603
+recorded PAD polls consumed, 2044579 common trace samples, zero
+differences/unpaired. Independently confirmed byte-identical JSON
+and PPM hashes across all arms. 2666 fields and successful
+presentations; 388310365 native VU1 pairs, no interpreter fallbacks.
+Wall 50.797/50.875/50.953 seconds; candidate -0.153% throughput vs
+control, within same magnitude A/A variation. Correctness accepted
+for this replay; keep lazy setup opt-in, not a demonstrated speedup.
+No detailed GPU timing or matched async speed result.
+
+### P5E — broad profile-selected native O3 pilot
+
+Original O5 pipeline uses full LLVM O2 only for modules containing
+specialized VU0 FMAC calls; other modules use the native O2 backend
+without the full middle-end pipeline. Test a wider hot selection
+from the P5A full CSV (top 250 entry PCs each by exclusive time and
+call count, including metadata resume-owner candidates). For each
+selected module require byte-identical O5 re-emission, then run
+full O3 middle-end and native O3 backend with identical host CPU
+and feature string. Do not change source IR, public function
+inventory, guest ownership or portable cache keys. Parallel
+bounded worker pools; retain replacements only if bytes change
+and each object/executable section total is <=150% of original.
+This is a deliberately permissive pilot size gate, not production
+acceptance. Cold objects reused, isolated overlay marked nonproduction.
+Record profile and cache hashes. Matched synchronous A/A/B required;
+no PGO instrumentation or ThinLTO claimed: this is hotness-based
+selection of optimization intensity, not edge-profile feedback.
+Full production CI and repeated async combat benchmarks remain
+required for any promotion. No measured speedup yet.

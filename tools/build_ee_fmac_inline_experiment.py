@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Bounded VU0 FMAC pilots over an authenticated O5 cache."""
+"""Bounded profile-guided EE optimization pilots over an authenticated O5 cache."""
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import json
 import os
@@ -38,7 +39,60 @@ def inline_single_use(raw):
     return result, names
 
 
-def stage(selection, ir, profile, output, mode="inline"):
+def emit_hot_o3(raw, triple, symbol, object_output=None):
+    """Use full O3 middle-end and native O3 backend, without altering source IR."""
+    import time
+    import llvmlite.binding as llvm
+    from verify_ir import native_target_identity
+    from ee_ownership_binary import native_executable_sections
+    start = time.monotonic()
+    llvm.initialize_native_target()
+    llvm.initialize_native_asmprinter()
+    target = native_target_identity(5)
+    if target["triple"] != triple:
+        raise ValueError("O3 target differs from native host")
+    machine = llvm.Target.from_triple(triple).create_target_machine(
+        cpu=target["cpu"], features=target["features"],
+        opt=3, reloc="pic", codemodel="default")
+    with llvm.create_context() as context, llvm.parse_assembly(
+            raw.decode("utf-8"), context=context) as module:
+        module.triple = triple
+        module.data_layout = str(machine.target_data)
+        module.verify()
+        def public():
+            return sorted(fn.name for fn in module.functions
+                          if not fn.is_declaration and fn.linkage == llvm.Linkage.external)
+        before = public()
+        if symbol not in before:
+            raise ValueError("guest entry missing before O3")
+        with llvm.create_pipeline_tuning_options(3) as tuning:
+            with llvm.create_pass_builder(machine, tuning) as passes:
+                with passes.getModulePassManager() as pipeline:
+                    pipeline.run(module, passes)
+        module.verify()
+        if public() != before:
+            raise ValueError("O3 changed external definition inventory")
+        data = machine.emit_object(module)
+    executable, _ = native_executable_sections(data)
+    if object_output is not None:
+        with object_output.open("xb") as stream:
+            stream.write(data)
+    return {"object_bytes": len(data), "executable_bytes": executable,
+            "sha256": sha(data), "seconds": time.monotonic() - start,
+            "middle_end_opt": 3, "backend_opt": 3}
+
+
+def hot_o3_trial(task):
+    from benchmark_ee_native_size import emit_native
+    name, raw, triple, symbol, expected, destination = task
+    control = emit_native(raw, triple, symbol, "O5")
+    if control["sha256"] != expected:
+        raise ValueError("O5 control did not reproduce original: " + name)
+    candidate = emit_hot_o3(raw, triple, symbol, destination)
+    return name, control, candidate
+
+
+def stage(selection, ir, profile, output, mode="inline", jobs=8):
     from benchmark_ee_native_size import emit_native
     from link_native_objects import load_inputs
     from verify_ir import native_target_identity, ir_pipeline_id
@@ -86,9 +140,14 @@ def stage(selection, ir, profile, output, mode="inline"):
     paths = {Path(fn["ir_path"]).name: path for fn, path in zip(functions, linked)}
     trials = {}
     replacements = {}
-    pilot = DISCARD_PILOT if mode == "vector-discard" else PILOT
-    for pc in pilot:
-        fn = by_pc[pc]
+    if mode == "hot-o3":
+        if not 1 <= len(selected) <= 1000 or not 1 <= jobs <= 16:
+            raise ValueError("hot O3 pilot requires 1–1000 selected modules and 1–16 jobs")
+        by_name = {Path(fn["ir_path"]).name: fn for fn in functions}
+        pilot = [by_name[name] for name in sorted(selected)]
+    else:
+        pilot = [by_pc[pc] for pc in (DISCARD_PILOT if mode == "vector-discard" else PILOT)]
+    for fn in pilot:
         name = Path(fn["ir_path"]).name
         raw = (ir / name).read_bytes()
         record = records[name]
@@ -96,25 +155,42 @@ def stage(selection, ir, profile, output, mode="inline"):
         if (raw != selected.get(name) or sha(raw) != record["ir_sha256"]
                 or sha(original) != record["sha256"]):
             raise ValueError("hot source/object mismatch: " + name)
-        changed, helpers = (vector_discard(raw) if mode == "vector-discard"
-                            else inline_single_use(raw))
-        if not helpers:
-            raise ValueError("no eligible helpers: " + name)
-        control = emit_native(raw, manifest["target_triple"], fn["host_symbol"], "O5")
-        if control["sha256"] != record["sha256"]:
-            raise ValueError("O5 control did not reproduce original: " + name)
-        trials[name] = (changed, helpers, control, fn["host_symbol"])
+        if mode == "hot-o3":
+            trials[name] = (raw, [], None, fn["host_symbol"])
+        else:
+            changed, helpers = (vector_discard(raw) if mode == "vector-discard"
+                                else inline_single_use(raw))
+            if not helpers:
+                raise ValueError("no eligible helpers: " + name)
+            control = emit_native(raw, manifest["target_triple"], fn["host_symbol"], "O5")
+            if control["sha256"] != record["sha256"]:
+                raise ValueError("O5 control did not reproduce original: " + name)
+            trials[name] = (changed, helpers, control, fn["host_symbol"])
     output.mkdir(parents=True, exist_ok=False)
     staged = output / "objects"
     staged.mkdir()
     rows = []
+    compiled = {}
+    if mode == "hot-o3":
+        tasks = [(name, raw, manifest["target_triple"], symbol, records[name]["sha256"],
+                  staged / (Path(name).stem + "." + mode + ".o"))
+                 for name, (raw, _, _, symbol) in trials.items()]
+        # Bounded worker lifetimes, as LLVM can retain substantial per-process memory.
+        for first in range(0, len(tasks), 64 * jobs):
+            with ProcessPoolExecutor(max_workers=jobs) as pool:
+                for name, control, candidate in pool.map(hot_o3_trial, tasks[first:first + 64 * jobs]):
+                    compiled[name] = (control, candidate)
+                    print(f"[{len(compiled)}/{len(tasks)}] O3 {name}", flush=True)
     for name, (changed, helpers, control, symbol) in trials.items():
         destination = staged / (Path(name).stem + "." + mode + ".o")
-        candidate = emit_native(changed, manifest["target_triple"], symbol,
-                                "O5", object_output=destination)
+        if mode == "hot-o3":
+            control, candidate = compiled[name]
+        else:
+            candidate = emit_native(changed, manifest["target_triple"], symbol,
+                                    "O5", object_output=destination)
         # A speed-oriented discard branch can cost some static bytes.
         # Bound growth per module; keep the original stricter inline gate.
-        size_percent = 110 if mode == "vector-discard" else 100
+        size_percent = {"inline": 100, "vector-discard": 110, "hot-o3": 150}[mode]
         accepted = (candidate["sha256"] != control["sha256"]
                     and candidate["object_bytes"] * 100 <= control["object_bytes"] * size_percent
                     and candidate["executable_bytes"] * 100 <= control["executable_bytes"] * size_percent)
@@ -127,7 +203,8 @@ def stage(selection, ir, profile, output, mode="inline"):
                                       sha256=candidate["sha256"],
                                       transformed_ir_sha256=sha(changed),
                                       experimental_fmac_inline=(mode == "inline"),
-                                      experimental_vector_discard=(mode == "vector-discard"))
+                                      experimental_vector_discard=(mode == "vector-discard"),
+                                      experimental_hot_o3=(mode == "hot-o3"))
         else:
             destination.unlink()
         print(f"{name}: {control['executable_bytes']} -> "
@@ -139,8 +216,9 @@ def stage(selection, ir, profile, output, mode="inline"):
                for name, record in records.items()]
     overlay = dict(manifest, objects=entries,
                    object_bytes=sum(item["size_bytes"] for item in entries),
-                   experimental_mixed_pipeline=("O5-vector-discard" if mode == "vector-discard"
-                                                else "O5-single-use-fmac-inline"),
+                   experimental_mixed_pipeline={"inline": "O5-single-use-fmac-inline",
+                                                "vector-discard": "O5-vector-discard",
+                                                "hot-o3": "O5-profile-selected-O3"}[mode],
                    production_cache_compatible=False)
     (staged / "objects.json").write_text(json.dumps(overlay, indent=2) + "\n", encoding="utf-8")
     (output / "ee_functions.json").write_bytes(meta_bytes)
@@ -151,8 +229,13 @@ def stage(selection, ir, profile, output, mode="inline"):
     if sha(baseline_library.read_bytes()) != translation["library_sha256"]:
         raise ValueError("baseline library changed during pilot")
     plan = {
-        "mode": ("experimental_vector_discard" if mode == "vector-discard"
-                 else "experimental_single_use_fmac_inline"),
+        "mode": {"inline": "experimental_single_use_fmac_inline",
+                 "vector-discard": "experimental_vector_discard",
+                 "hot-o3": "experimental_hot_o3"}[mode],
+        "selection_profile_sha256": receipt["profile_sha256"],
+        "selection_exclusive_ns": receipt["selected_exclusive_ns"],
+        "profile_exclusive_ns": receipt["total_exclusive_ns"],
+        "jobs": jobs if mode == "hot-o3" else 1,
         "size_gate_percent": size_percent,
         "metadata_sha256": sha(meta_bytes),
         "source_manifest_sha256": sha((objects / "objects.json").read_bytes()),
@@ -177,13 +260,14 @@ def main():
     parser.add_argument("--ir", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
-    parser.add_argument("--mode", choices=("inline", "vector-discard"), default="inline")
+    parser.add_argument("--mode", choices=("inline", "vector-discard", "hot-o3"), default="inline")
+    parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     try:
-        stage(args.selection, args.ir, args.profile, args.out, args.mode)
+        stage(args.selection, args.ir, args.profile, args.out, args.mode, args.jobs)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             zipfile.BadZipFile, subprocess.CalledProcessError) as error:
-        print(f"FMAC inline pilot refused: {error}", file=sys.stderr)
+        print(f"EE optimization pilot refused: {error}", file=sys.stderr)
         return 1
     return 0
 
