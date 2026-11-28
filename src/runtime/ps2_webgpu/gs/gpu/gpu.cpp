@@ -1067,7 +1067,7 @@ void profile_submit(WGPUTextureView present_view) {
         WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
         color.view = present_view;
         color.loadOp = WGPULoadOp_Clear;
-        color.storeOp = WGPULoadOp_Store;
+        color.storeOp = WGPUStoreOp_Store;
         color.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
         WGPURenderPassDescriptor rd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
         rd.colorAttachmentCount = 1;
@@ -1117,23 +1117,16 @@ void profile_submit(WGPUTextureView present_view) {
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
 void submit(WGPUTextureView present_view = nullptr) {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_submit_cpu);
-    const int profile_request = g_command_profile_request.exchange(0,
-        std::memory_order_acq_rel);
-    if (profile_request == 1 && g_profile_out == nullptr)
-    {
+    const int profile_request = g_command_profile_request.exchange(0, std::memory_order_acq_rel);
+    if (profile_request == 1 && g_profile_out == nullptr) {
         g_profile_out = std::fopen("gpu-profile-live.txt", "w");
-        if (g_profile_out != nullptr)
-        {
+        if (g_profile_out != nullptr) {
             g_profile_from = g_serial;
             g_profile_to = UINT64_MAX;
-        }
-        else
-        {
+        } else {
             std::fprintf(stderr, "GPU profiling could not open gpu-profile-live.txt\n");
         }
-    }
-    else if (profile_request == 2 && g_profile_out != nullptr)
-    {
+    } else if (profile_request == 2 && g_profile_out != nullptr) {
         std::fflush(g_profile_out);
         std::fclose(g_profile_out);
         g_profile_out = nullptr;
@@ -1518,7 +1511,7 @@ bool init(Mode m) {
             g_profile_out = std::fopen(path, "w");
             g_profile_from = a;
             g_profile_to = z;
-            g_live_profile_allowed = false;
+            if (g_profile_out != nullptr) g_live_profile_allowed = false;
         }
     }
     g_scale = 1u;
@@ -2530,4 +2523,11 @@ bool change_render_scale(std::uint32_t scale)
     }
     wgpuBufferRelease(old_vram);
     wgpuBufferRelease(old_scratch);
-    wgpuBuffer
+    wgpuBufferRelease(old_readback);
+    g_have_previous = false;
+    g_field = 0;
+    std::fprintf(stderr, "[gpu] internal render resolution %ux\n", scale);
+    return true;
+}
+
+}
