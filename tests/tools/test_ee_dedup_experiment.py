@@ -178,6 +178,27 @@ def raster_validation():
             pass
         else:
             raise AssertionError("tile8 accepted wrong CPU tile size")
+        wrong.write_bytes(b"[gpu] raster lazy_setup=0\n[gpu] raster workgroup=8x8 (8x8 CPU tiles)\n")
+        from replay_ee_graphics_profile import WORKER_TIMING_FIELDS
+        import json
+        for index, arm in enumerate(("baseline", "control", "dedup")):
+            report = {"runtime_profile": {"schema": "ee-runtime-profile-v1", "wall_ns": index},
+                      "vu1_aot": {"program_profiles": []},
+                      "vu1_worker": {key: index for key in WORKER_TIMING_FIELDS},
+                      "gs_fields_started": 10}
+            (root / arm / "report.json").write_text(json.dumps(report))
+        result = validate_raster_outputs(root, tile8=True, async_raster=True)
+        assert result["dedup"]["normalized_report_sha256"] == result["baseline"]["normalized_report_sha256"]
+        candidate = root / "dedup" / "report.json"
+        report = json.loads(candidate.read_text())
+        report["gs_fields_started"] += 1
+        candidate.write_text(json.dumps(report))
+        try:
+            validate_raster_outputs(root, tile8=True, async_raster=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("async raster accepted changed guest field count")
 
 
 if __name__ == "__main__":

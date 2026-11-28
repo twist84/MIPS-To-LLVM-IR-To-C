@@ -1794,3 +1794,39 @@ validates baseline consumption as well and hashes the input before
 and after. No new C++ changes or cache rebuild. Reuse P5E recording
 for a comparable combat workload. Promotion still requires matched
 image checks and representative normal async performance evidence.
+
+### P4D result — ee-raster-tile8-comparison.zip
+
+All three 40M dispatch replays complete, PAD 2478/2478 each,
+1935262 sampled transitions common, zero differences/unpaired.
+Actual GPU markers confirm 16/16, 16/16, 8/8; lazy setup disabled.
+Identical raw report SHA-256
+7d6ac0d1a09eee53c6cfc42708e090ae0ef497c424fe26628067454d4b104770
+and PPM SHA-256
+81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a
+independently verified. Identical runner/library and recording
+hashes before/after. 2541 fields, 88 VU1 programs, 378121 native
+runs, 415895434 native pairs, zero interpreter fallbacks.
+Wall 51.032/51.672/52.156 s; candidate -0.928% throughput vs
+control, below A/A variation. From dispatch 24002560 to 39993344:
+332 fields each in 18.1495/18.0981/18.1693 s. Synchronous
+correctness accepted; no measurable speed improvement. Keep opt-in.
+Prior independently captured GPU timestamp improvements remain
+diagnostic evidence, not proof of normal async speed benefit.
+
+### P4E — diagnostic matched async raster comparison
+
+Permit explicit --async-raster with --raster-tile8 --control
+and an existing --recording; cannot combine with --sync.
+Run same library and runner with asynchronous VU1 and GS,
+no detailed GPU or CPU/PC profiling. Require PAD consumption
+for each arm, same sampled dispatch transitions and exact PPM
+hash. Terminal report comparison uses the existing graphics
+replay normalization of host timing/profile fields only;
+record raw and normalized report hashes. Preserve guest and
+worker counters, report failure rather than relaxing other
+gates. Existing sync replay retains byte-identical report check.
+A synchronous recording may diverge on async execution; if so,
+the archive is diagnostic only. No production changes, no
+cache rebuild. One A/A/B is a screening measurement; repeat
+and sustained combat acceptance gates still required.

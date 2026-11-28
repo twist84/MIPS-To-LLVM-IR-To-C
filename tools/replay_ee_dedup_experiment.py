@@ -36,7 +36,7 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory, tile8=False):
+def validate_raster_outputs(directory, tile8=False, async_raster=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
@@ -58,8 +58,21 @@ def validate_raster_outputs(directory, tile8=False):
             "report_sha256": sha(folder / "report.json"),
             "image_sha256": sha(folder / "gs-webgpu.ppm"),
         }
+    if async_raster:
+        # Reuse the established graphics replay normalization. Remove only
+        # host profiling data, never guest or worker execution counts.
+        from replay_ee_graphics_profile import normalize
+        for arm in arms:
+            report = read_json(directory / arm / "report.json")
+            normalized = normalize(report)
+            results[arm]["normalized_report_sha256"] = hashlib.sha256(
+                json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        report_key = "normalized_report_sha256"
+    else:
+        report_key = "report_sha256"
     if any(results[arm][key] != results["baseline"][key]
-           for arm in arms for key in ("report_sha256", "image_sha256")):
+           for arm in arms for key in (report_key, "image_sha256")):
         raise ValueError("raster replay terminal report or image differs")
     return results
 
@@ -320,6 +333,8 @@ def main():
                          help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
     parser.add_argument("--recording", type=Path,
                         help="replay an existing complete PAD0 record for every arm")
+    parser.add_argument("--async-raster", action="store_true",
+                        help="diagnostic tile8 comparison using asynchronous GS and VU1")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
@@ -343,10 +358,12 @@ def main():
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
         raster_mode = args.raster_lazy_setup or args.raster_tile8
-        if raster_mode and (not args.control or not args.sync or prior_dir is not None or
-                args.source_comparison is not None or args.prior_source_comparison is not None or
-                args.reference_sha256):
-            raise ValueError("raster comparison requires --control --sync and no other candidate")
+        if args.async_raster and (not args.raster_tile8 or args.sync or not args.recording):
+            raise ValueError("--async-raster requires --raster-tile8 and --recording, without --sync")
+        if raster_mode and (not args.control or not (args.sync or args.async_raster) or
+                prior_dir is not None or args.source_comparison is not None or
+                args.prior_source_comparison is not None or args.reference_sha256):
+            raise ValueError("raster comparison requires --control and --sync or --async-raster; no other candidate")
         if prior_dir is not None and (not args.control or not args.sync):
             raise ValueError("prior experiment comparison requires --control --sync")
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
@@ -389,6 +406,8 @@ def main():
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
+        elif args.async_raster:
+            env.update(SDBZ_VU1_ASYNC="1", SDBZ_GS_ASYNC="1")
         if raster_mode:
             env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
@@ -419,6 +438,7 @@ def main():
             "error": None, "libraries_unchanged": False}
         if raster_mode:
             receipt["experiment_mode"] = "raster_tile8" if args.raster_tile8 else "raster_lazy_setup"
+            receipt["async_raster"] = args.async_raster
             receipt["candidate_environment_overrides"] = {
                 key: value for key, value in candidate_env.items() if env.get(key) != value}
         if args.recording:
@@ -507,7 +527,8 @@ def main():
                     receipt["dedup_trace"]["unpaired_samples"]):
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
             if raster_mode:
-                receipt["raster_outputs"] = validate_raster_outputs(args.output, tile8=args.raster_tile8)
+                receipt["raster_outputs"] = validate_raster_outputs(
+                    args.output, tile8=args.raster_tile8, async_raster=args.async_raster)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
