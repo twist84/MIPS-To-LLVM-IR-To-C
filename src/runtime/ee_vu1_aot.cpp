@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 5066)
-Total output lines: 572
-
 #include "ee_vu1_aot.h"
 #include "ee_vu1_ir.h"
 #include "ee_runtime_profile.h"
@@ -342,7 +339,12 @@ void c_ee_vu1_aot::capture(const t_vu1_code& code, uint32_t pc)
         return;
     }
     char name[64];
-    std::snprintf(name, sizeof(…66 tokens truncated…d::to_string(collision) + ".bin");
+    std::snprintf(name, sizeof(name), "%04x-%016llx", pc,
+        static_cast<unsigned long long>(m_capture_hash));
+    for (uint32_t collision = 0u; collision < 16u; ++collision)
+    {
+        const auto path = std::filesystem::path(m_capture_path) /
+            (std::string(name) + "-" + std::to_string(collision) + ".bin");
         std::error_code ec;
         const bool exists = std::filesystem::exists(path, ec);
         if (ec)
