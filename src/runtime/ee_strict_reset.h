@@ -34,7 +34,7 @@ static_assert(!ee_strict_reset_config_write_supported(1u));
 static_assert(!ee_strict_reset_config_write_supported(0x80000000u));
 
 // Minimal isolated reset-prefix experiment. These are only the COP0
-// reset values relevant to the supported initial instruction (EE Core
+// reset values relevant to the supported initial instructions (EE Core
 // User's Manual v6.0, 4.2.1). Unspecified state is initialized to zero
 // for reproducibility, not asserted as hardware power-on contents.
 // No cache, device, counter clock or live runtime reset is implied.
@@ -75,9 +75,9 @@ struct s_ee_reset_prefix_step
     uint32_t m_data_address = 0u;
 };
 
-// Only the reset-entry MTC0 zero,Status is supported. Its source is
-// architectural zero, so no undefined power-on GPR is consumed.
-// Other ERL instructions remain rejected by the ordinary executors.
+// Reset-entry MFC0 PRId and MTC0 zero,Status are supported. MFC0 writes
+// only the selected GPR, and MTC0 reads architectural zero. Other ERL
+// instructions remain rejected by the ordinary executors.
 // Rejection leaves the CPU unchanged. The caller owns isolated state;
 // this function does not emulate COP0 pipeline hazards or elapsed cycles.
 inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
@@ -103,6 +103,17 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_reset_prefix(
         return {result::FETCH_UNAVAILABLE};
     }
     const uint32_t opcode = ee_read_instruction_word(code);
+    if ((opcode & 0xffe0ffffu) == 0x40007800u) // MFC0 rt,PRId
+    {
+        const uint32_t rt = (opcode >> 16u) & 31u;
+        if (rt != 0u)
+        {
+            cpu.m_gpr[rt].m_lo = static_cast<uint64_t>(static_cast<int64_t>(
+                static_cast<int32_t>(cpu.m_cop0[COP0_PRId])));
+        }
+        cpu.m_pc += 4u;
+        return {result::COMMITTED, opcode, 1u};
+    }
     if (opcode != 0x40806000u)
     {
         return {result::UNSUPPORTED_OPCODE, opcode};

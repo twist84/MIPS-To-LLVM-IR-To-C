@@ -1533,13 +1533,30 @@ bool test_strict_reset_prefix()
         return false;
     }
     const auto step = ee::ee_execute_strict_reset_prefix(cpu, view);
-    return step.m_result == result::COMMITTED && step.m_opcode == 0x40806000u &&
-           cpu.m_pc == 0xbfc00004u && cpu.m_cop0[ee::COP0_Status] == 0u &&
-           cpu.m_cop0[ee::COP0_Random] == 47u &&
-           cpu.m_gpr[0].m_lo == 0xdeadbeefull &&
-           cpu.m_gpr[3].m_lo == 0x76543210ull && cpu.m_gpr[3].m_hi == 0x11223344ull &&
-           ee::ee_execute_strict_reset_prefix(cpu, view).m_result == result::UNSAFE_BOUNDARY &&
-           cpu.m_pc == 0xbfc00004u;
+    if (step.m_result != result::COMMITTED || step.m_opcode != 0x40806000u ||
+        cpu.m_pc != 0xbfc00004u || cpu.m_cop0[ee::COP0_Status] != 0u ||
+        cpu.m_cop0[ee::COP0_Random] != 47u || cpu.m_gpr[0].m_lo != 0xdeadbeefull ||
+        cpu.m_gpr[3].m_lo != 0x76543210ull || cpu.m_gpr[3].m_hi != 0x11223344ull ||
+        ee::ee_execute_strict_reset_prefix(cpu, view).m_result != result::UNSAFE_BOUNDARY ||
+        cpu.m_pc != 0xbfc00004u)
+    {
+        return false;
+    }
+
+    rom[0] = 0x00u;
+    rom[1] = 0x78u;
+    rom[2] = 0x1au;
+    rom[3] = 0x40u; // mfc0 k0,PRId
+    auto retail_cpu = ee::ee_make_strict_reset_prefix_state();
+    retail_cpu.m_gpr[26] = {0x1122334455667788ull, 0xaabbccddeeff0011ull};
+    const auto retail_step = ee::ee_execute_strict_reset_prefix(retail_cpu, view);
+    return retail_step.m_result == result::COMMITTED &&
+           retail_step.m_opcode == 0x401a7800u && retail_step.m_retired == 1u &&
+           retail_cpu.m_pc == 0xbfc00004u &&
+           retail_cpu.m_gpr[26].m_lo == 0x2e20u &&
+           retail_cpu.m_gpr[26].m_hi == 0xaabbccddeeff0011ull &&
+           retail_cpu.m_cop0[ee::COP0_Status] == reset_status &&
+           retail_cpu.m_cop0[ee::COP0_PRId] == 0x2e20u;
 }
 
 bool test_strict_reset_register_execution()
