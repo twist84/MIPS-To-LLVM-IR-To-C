@@ -234,7 +234,13 @@ consteval bool test_horizon_event_priority()
             due.m_cycle == 100u && due.m_source == e_source::timer &&
             blocked.m_cycle == 100u && blocked.m_source == e_source::barrier &&
             empty.m_cycle == none && empty.m_source == e_source::none &&
-            tied.m_cycle == 110u && tied.m_source == e_source::timer,
+            tied.m_cycle == 110u && tied.m_source == e_source::timer &&
+            ee::ee_reference_slice_budget(100u, 150u) == 50u &&
+            ee::ee_reference_slice_budget(100u, 50000u) ==
+                ee::k_ee_reference_max_slice &&
+            ee::ee_reference_slice_budget(100u, 99u) == 0u &&
+            ee::ee_reference_slice_budget(100u, none) ==
+                ee::k_ee_reference_max_slice,
             "unified horizon chooses earliest known event or barrier"))
     {
         return false;

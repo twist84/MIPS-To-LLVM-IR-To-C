@@ -1155,6 +1155,7 @@ const char* exit_name(uint32_t reason)
     case ee::e_ee_exit_reason::EE_EXIT_LOOP_BUDGET: return "LOOP_BUDGET";
     case ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD: return "HOST_YIELD";
     case ee::e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION: return "LEVEL2_EXCEPTION";
+    case ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD: return "EVENT_YIELD";
     default: return "UNKNOWN";
     }
 }
@@ -5819,6 +5820,55 @@ int main(int argc, char** argv)
             }
             const uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
 
+            // Give translated EE loops a ps2-web-recomp-style bounded
+            // compatibility-clock slice, shortened to the next known EE
+            // timer, scanout or COP0 event. The loop-header check is cheap
+            // when disabled and does not call back per guest instruction.
+            runtime.m_event_budget_yield_enabled = 0u;
+            if (runtime.m_ee_cycle_scheduler.source() ==
+                ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+            {
+                const uint64_t now =
+                    runtime.m_ee_cycle_scheduler.current_cycle();
+                uint64_t live = 0u;
+                if (!ee::ee_reference_compatibility_cycle(runtime, live) ||
+                    live != now)
+                {
+                    std::fprintf(stderr,
+                        "EE event budget refused stale compatibility clock\n");
+                    return 1;
+                }
+                uint64_t next_event = std::min({
+                    host_timers.next_event(),
+                    hardware.scanout().next_event_cycle(),
+                    ee::ee_cop0_compare_deadline(runtime, now)});
+                if (hle_startup && iop_kernel != nullptr &&
+                    iop_rom0_path == nullptr && iop_clock.due() == 0u)
+                {
+                    const uint64_t interval =
+                        iop_kernel->idle_event_cycles_remaining();
+                    const uint64_t iop_event =
+                        iop_clock.cycle_after_iop(interval);
+                    if (interval != 0u &&
+                        iop_event != ee::k_ee_no_deadline)
+                    {
+                        next_event = std::min(next_event, iop_event);
+                    }
+                }
+                const uint64_t slice_cycles =
+                    ee::ee_reference_slice_budget(now, next_event);
+                if (runtime.m_reference_instruction_slots >
+                    UINT64_MAX - slice_cycles)
+                {
+                    std::fprintf(stderr,
+                        "EE event budget instruction-slot deadline overflow\n");
+                    return 1;
+                }
+                runtime.m_event_budget_slot_deadline =
+                    runtime.m_reference_instruction_slots + slice_cycles;
+                runtime.m_event_budget_yield_enabled = 1u;
+            }
+
             // One translated function invocation per native guest boundary.
             runtime.m_loop_safepoint_remaining = safepoint_budget;
             ee::c_runtime_profile_scope native_profile_scope(
@@ -6490,6 +6540,17 @@ int main(int argc, char** argv)
                     refresh_idle_probe_slots();
                 }
             }
+            continue;
+        }
+
+        // Event-budget yields are ordinary scheduler boundaries. Device and
+        // IOP service already ran above; resume immediately without applying
+        // the separate no-progress watchdog used for diagnostic host yields.
+        if (reason == static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD))
+        {
+            cpu.m_exit_reason = static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             continue;
         }
 
