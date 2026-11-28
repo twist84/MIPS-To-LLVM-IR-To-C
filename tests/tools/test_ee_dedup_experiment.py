@@ -284,6 +284,43 @@ def plot_address_cache_validation():
                 raise AssertionError("incorrect address cache pipeline accepted")
 
 
+def gpu_regular_timestamps_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            enabled = int(arm != "dedup")
+            queries = enabled * 9
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n[gpu] raster plot_address_cache=0\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n"
+                f"[gpu] regular_timestamps={enabled} supported=1\n"
+                f"[gpu] regular timestamp summary: passes=10 submitted={queries} completed={queries} failures=0 detail_passes=0\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        result = validate_raster_outputs(root, gpu_regular_timestamps_off=True)
+        assert result["dedup"]["timestamp_submitted"] == 0
+        assert result["baseline"]["timestamp_completed"] == 9
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for before, after in (("regular_timestamps=0", "regular_timestamps=1"),
+                              ("supported=1", "supported=0"),
+                              ("submitted=0", "submitted=1"),
+                              ("detail_passes=0", "detail_passes=1"),
+                              ("plot_address_cache=0", "plot_address_cache=1")):
+            path.write_text(original.replace(before, after))
+            try:
+                validate_raster_outputs(root, gpu_regular_timestamps_off=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unexpected GPU timestamp mode accepted")
+
+
 def sync_lean_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -346,6 +383,7 @@ if __name__ == "__main__":
     early_depth_validation()
     bilinear_coords_validation()
     plot_address_cache_validation()
+    gpu_regular_timestamps_validation()
     sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory

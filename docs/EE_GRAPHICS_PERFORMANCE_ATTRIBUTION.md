@@ -2062,3 +2062,35 @@ primitives sharing a setup. Register pressure and shader compiler
 codegen may offset savings. Strict --raster-plot-address-cache --control
 --sync --recording comparison, other raster variants off. No EE IR
 changes. Native shader build, replay, and performance proof pending.
+
+
+### P4H result — ee-raster-address-cache-comparison.zip
+
+Strict synchronous A/A/B passed. All three 40M dispatches,
+2478 PAD polls, 1935262 common trace samples with zero mismatch or
+unpaired samples. Raw JSON and PPM independently SHA-256 verified
+identical; 2541 fields/presentations, 88 VU1 programs, 415895434
+native pairs, zero fallbacks; binaries and recording unchanged.
+Wall 47.437/47.266/47.453 s. Late dispatch 24002560..39993344:
+332 fields in 16.1537/16.2905/16.1219 s (20.55/20.38/20.59 fields/s).
+Candidate +1.05% vs control, +0.20% vs baseline. No reliable gain.
+Leave disabled. P4F/G/H all show negligible gameplay gains; stop
+incremental raster arithmetic optimization for now.
+
+### P4I — isolate normal GPU pass timestamp submission overhead
+
+Regular compute submission acquires timestamp slots, writes beginning
+and ending timestamps, resolves to a buffer, copies and maps readback
+for each available slot even with EE runtime profiling disabled. Add
+PS2_GPU_REGULAR_TIMESTAMPS=0 (default 1) to bypass regular query-slot
+acquisition only. Retain device timestamp feature, F7 detailed
+capture, normal compute dispatch order, queue submit, event polling,
+and readback for guest-visible operations. The regular GPU-busy
+estimate has no samples while disabled. Emit effective mode at init
+and cumulative pass/query/detail counters at final collection.
+--gpu-regular-timestamps-off --control --sync --recording confirms
+supported timestamps and nonzero completed queries in controls,
+zero in candidate, no detail capture or query failures in any arm,
+all prior raster switches off, and exact terminal report/PPM and
+trace checks. No guest IR changes. Diagnostic cost screen, not a
+claim that GPU timestamp collection is the main combat bottleneck.

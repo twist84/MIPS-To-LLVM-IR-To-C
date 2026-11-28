@@ -122,6 +122,7 @@ std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
 
 bool g_timestamps = false;
+bool g_regular_timestamps = true;
 WGPUQuerySet g_queries = nullptr;
 // The query set is shared, but each in-flight pair has independent
 // resolve/readback storage. No mapped buffer can be reused until retired.
@@ -187,7 +188,7 @@ void collect_ready_timestamp()
 
 uint32_t acquire_timestamp_slot()
 {
-    if (g_timestamps)
+    if (g_timestamps && g_regular_timestamps)
     {
         for (uint32_t offset = 0u; offset < k_timestamp_slots; ++offset)
         {
@@ -1712,6 +1713,19 @@ bool init(Mode m) {
             if (g_profile_out != nullptr) g_live_profile_allowed = false;
         }
     }
+    g_regular_timestamps = true;
+    if (const char* regular = std::getenv("PS2_GPU_REGULAR_TIMESTAMPS"))
+    {
+        if (std::strcmp(regular, "0") == 0)
+        {
+            g_regular_timestamps = false;
+        }
+        else if (std::strcmp(regular, "1") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_GPU_REGULAR_TIMESTAMPS (expected 0 or 1)\n");
+            return false;
+        }
+    }
     g_raster_workgroup = 16u;
     if (const char* size = std::getenv("PS2_RASTER_WORKGROUP"))
     {
@@ -1865,6 +1879,8 @@ bool init(Mode m) {
         }
     }
     publish_timestamps();
+    std::fprintf(stderr, "[gpu] regular_timestamps=%u supported=%u\n",
+        g_regular_timestamps && g_timestamps ? 1u : 0u, g_timestamps ? 1u : 0u);
 
     WGPUBindGroupLayoutEntry le[9] = {};
     const WGPUBufferBindingType types[9] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
@@ -2623,6 +2639,12 @@ void collect_timestamp_profile()
 #endif
         collect_ready_timestamp();
         publish_timestamps();
+        std::fprintf(stderr, "[gpu] regular timestamp summary: passes=%llu submitted=%llu completed=%llu failures=%llu detail_passes=%llu\n",
+            static_cast<unsigned long long>(g_total_passes),
+            static_cast<unsigned long long>(g_query_submissions),
+            static_cast<unsigned long long>(g_measured),
+            static_cast<unsigned long long>(g_query_failures),
+            static_cast<unsigned long long>(g_detail_passes));
     }
 }
 
