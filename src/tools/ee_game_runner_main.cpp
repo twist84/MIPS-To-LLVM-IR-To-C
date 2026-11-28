@@ -1155,6 +1155,7 @@ const char* exit_name(uint32_t reason)
     case ee::e_ee_exit_reason::EE_EXIT_LOOP_BUDGET: return "LOOP_BUDGET";
     case ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD: return "HOST_YIELD";
     case ee::e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION: return "LEVEL2_EXCEPTION";
+    case ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD: return "EVENT_YIELD";
     default: return "UNKNOWN";
     }
 }
@@ -3937,6 +3938,7 @@ int main(int argc, char** argv)
 
     uint32_t remaining = budget;
     uint64_t dispatched = 0;
+    uint64_t event_yield_count = 0u;
     uint32_t hot_expand_sequence = 0u;
     // Live cache-miss overlays hold only newly translated functions. They are
     // consulted after the base module reports an unowned PC, so a miss links
@@ -4171,10 +4173,44 @@ int main(int argc, char** argv)
     }
     const bool vu1_native_overlap_profile = vu1_overlap_value == nullptr ||
         std::strcmp(vu1_overlap_value, "0") != 0;
+    // Opt-in worker-only attribution, independent of the EE main-thread
+    // profiler. Preserve the historical default when no override is set.
+    std::string vu1_worker_profile_environment;
+    const char* vu1_worker_profile_value = read_host_environment(
+        "SDBZ_VU1_WORKER_PROFILE", &vu1_worker_profile_environment);
+    if (vu1_worker_profile_value != nullptr && *vu1_worker_profile_value != '\0' &&
+        std::strcmp(vu1_worker_profile_value, "0") != 0 &&
+        std::strcmp(vu1_worker_profile_value, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_VU1_WORKER_PROFILE (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool vu1_worker_profile = vu1_worker_profile_value == nullptr ||
+        *vu1_worker_profile_value == '\0' ? ee::g_runtime_profile.m_enabled :
+        std::strcmp(vu1_worker_profile_value, "1") == 0;
+    std::string vu1_profile_window_environment;
+    const char* vu1_profile_window = read_host_environment(
+        "SDBZ_VU1_WORKER_PROFILE_WINDOW", &vu1_profile_window_environment);
+    unsigned long long vu1_profile_begin = 0u, vu1_profile_end = 0u;
+    unsigned vu1_profile_snapshots = 0u;
+    if (vu1_profile_window != nullptr && *vu1_profile_window != '\0')
+    {
+        char trailing = 0;
+        if (!async_vu1 || !vu1_worker_profile ||
+            std::sscanf(vu1_profile_window, "%llu,%llu%c", &vu1_profile_begin,
+                &vu1_profile_end, &trailing) != 2 ||
+            vu1_profile_begin == 0u || vu1_profile_end <= vu1_profile_begin ||
+            vu1_profile_end > 0xffffffffull)
+        {
+            std::fprintf(stderr, "invalid SDBZ_VU1_WORKER_PROFILE_WINDOW (requires async VU1, profiling, and begin,end dispatches)\n");
+            return 2;
+        }
+    }
     if (async_vu1)
     {
+        std::fprintf(stderr, "[vu1] worker_profile=%u\n", vu1_worker_profile ? 1u : 0u);
         if (!vif1.enable_deferred(std::move(vu1_aot),
-                ee::g_runtime_profile.m_enabled, vu1_native_overlap_profile))
+                vu1_worker_profile, vu1_native_overlap_profile))
         {
             std::fprintf(stderr, "failed to enable deferred VU1 worker\n");
             return 1;
@@ -4195,7 +4231,7 @@ int main(int argc, char** argv)
     std::string profile_pcs_environment;
     const char* profile_pcs_value = read_host_environment(
         "SDBZ_PROFILE_PCS", &profile_pcs_environment);
-    const bool profile_pcs = profile_pcs_value != nullptr &&
+    bool profile_pcs = profile_pcs_value != nullptr &&
         std::strcmp(profile_pcs_value, "0") != 0;
     uint64_t profile_pcs_first = 1u;
     uint64_t profile_pcs_last = UINT32_MAX;
@@ -4304,7 +4340,8 @@ int main(int argc, char** argv)
     uint64_t horizon_mmio_free_direct_touched = 0u;
     uint64_t horizon_mmio_free_direct_quiet = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
-    // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
+    // poll loops at host or scheduler yield boundaries (see
+    // ee_idle_loop_skip.h).
     std::string idle_skip_environment;
     const char* idle_skip_value = read_host_environment(
         "SDBZ_IDLE_SKIP", &idle_skip_environment);
@@ -4318,9 +4355,10 @@ int main(int argc, char** argv)
     const bool idle_forward_branches = idle_forward_value != nullptr &&
         std::strcmp(idle_forward_value, "1") == 0;
     std::unordered_map<uint32_t, ee::s_idle_loop_shape> idle_loop_shapes;
-    // Guarded loop headers observed at HOST_YIELD. Any later native entry
-    // at one of them may probe; the one-iteration probe validates itself.
-    std::unordered_set<uint32_t> idle_yield_headers;
+    // Guarded loop headers observed at scheduler or host yields. Any later
+    // native entry at one of them may probe; the one-iteration probe validates
+    // itself before the runner skips repeated guest iterations.
+    std::unordered_set<uint32_t> idle_analyzed_headers;
     std::vector<uint32_t> idle_probe_headers;  // at most four armed headers
     uint32_t idle_probe_slots[4]{};
     const auto refresh_idle_probe_slots = [&]()
@@ -4328,6 +4366,30 @@ int main(int argc, char** argv)
         std::fill(std::begin(idle_probe_slots), std::end(idle_probe_slots), 0u);
         std::copy(idle_probe_headers.begin(), idle_probe_headers.end(),
                   std::begin(idle_probe_slots));
+    };
+    const auto analyze_idle_loop_header = [&](uint32_t header)
+    {
+        if (!idle_skip || !idle_analyzed_headers.insert(header).second)
+        {
+            return;
+        }
+        const auto shape = idle_loop_shapes.emplace(header, ee::analyze_idle_loop(
+            header,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (!image.is_executable_address(pc) ||
+                    !memory->contains(pc, 4u))
+                {
+                    return false;
+                }
+                *word = memory->read32(pc);
+                return true;
+            }, idle_forward_branches)).first;
+        if (shape->second.eligible && idle_probe_headers.size() < 4u)
+        {
+            idle_probe_headers.push_back(header);
+            refresh_idle_probe_slots();
+        }
     };
     uint64_t idle_skip_slices = 0u;
     uint64_t idle_skip_instructions = 0u;
@@ -4616,6 +4678,11 @@ int main(int argc, char** argv)
                     hardware.scanout().fields_started(), &graphics_probe,
                     iop_kernel != nullptr ? &iop_kernel->hardware() : nullptr,
                     counters);
+                if (raylib_window.consume_pc_profile_toggle())
+                {
+                    profile_pcs = !profile_pcs;
+                    pc_profile.set_enabled(profile_pcs);
+                }
             }
             if (raylib_window.closed())
             {
@@ -5800,8 +5867,15 @@ int main(int argc, char** argv)
             // Arm the translated loop-header idle probe with known pure,
             // idempotent poll loops (see ee_idle_loop_skip.h).
             bool idle_armed = false;
+            const bool event_timed_entry =
+                runtime.m_ee_cycle_scheduler.source() ==
+                    ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY;
+            const bool idle_candidate_entry = std::find(
+                idle_probe_headers.begin(), idle_probe_headers.end(), from_pc) !=
+                idle_probe_headers.end();
             if (idle_skip && !hardware.dmac().deferred_vif1_pending() &&
                 !idle_probe_headers.empty() && slice == 1u &&
+                (!event_timed_entry || idle_candidate_entry) &&
                 runtime.m_loop_safepoint_limit > 1u &&
                 runtime.m_loop_safepoint_yield_enabled != 0u &&
                 runtime.m_instruction_trace == nullptr &&
@@ -5817,7 +5891,80 @@ int main(int argc, char** argv)
                 runtime.m_idle_probe_remaining = 0u;
                 idle_armed = true;
             }
-            const uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
+            uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
+
+            // Give translated EE loops a ps2-web-recomp-style bounded
+            // compatibility-clock slice, shortened to the next known EE
+            // timer, scanout or COP0 event. The loop-header check is cheap
+            // when disabled: UINT64_MAX is the no-deadline sentinel, so it
+            // avoids a per-header enable load and branch.
+            runtime.m_event_budget_yield_enabled = 0u;
+            runtime.m_event_budget_slot_deadline = UINT64_MAX;
+            if (runtime.m_ee_cycle_scheduler.source() ==
+                ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
+            {
+                const uint64_t now =
+                    runtime.m_ee_cycle_scheduler.current_cycle();
+                uint64_t live = 0u;
+                if (!ee::ee_reference_compatibility_cycle(runtime, live) ||
+                    live != now)
+                {
+                    std::fprintf(stderr,
+                        "EE event budget refused stale compatibility clock\n");
+                    return 1;
+                }
+                uint64_t next_event = std::min({
+                    host_timers.next_event(),
+                    hardware.scanout().next_event_cycle(),
+                    ee::ee_cop0_compare_deadline(runtime, now)});
+                if (hle_startup && iop_kernel != nullptr &&
+                    iop_rom0_path == nullptr && iop_clock.due() == 0u)
+                {
+                    const uint64_t interval =
+                        iop_kernel->idle_event_cycles_remaining();
+                    const uint64_t iop_event =
+                        iop_clock.cycle_after_iop(interval);
+                    if (interval != 0u &&
+                        iop_event != ee::k_ee_no_deadline)
+                    {
+                        next_event = std::min(next_event, iop_event);
+                    }
+                }
+                const uint64_t slice_cycles =
+                    ee::ee_reference_slice_budget(now, next_event);
+                if (runtime.m_reference_instruction_slots >
+                    UINT64_MAX - slice_cycles)
+                {
+                    std::fprintf(stderr,
+                        "EE event budget instruction-slot deadline overflow\n");
+                    return 1;
+                }
+                runtime.m_event_budget_slot_deadline =
+                    runtime.m_reference_instruction_slots + slice_cycles;
+                runtime.m_event_budget_yield_enabled = 1u;
+                if (idle_armed && idle_candidate_entry && from_pc == cpu.m_pc)
+                {
+                    const auto shape = idle_loop_shapes.find(from_pc);
+                    uint32_t slots_per_iteration = 0u;
+                    if (shape != idle_loop_shapes.end() &&
+                        idle_iteration_loops(shape->second, slots_per_iteration) &&
+                        slots_per_iteration != 0u)
+                    {
+                        const uint64_t slots_to_deadline =
+                            runtime.m_event_budget_slot_deadline -
+                            runtime.m_reference_instruction_slots;
+                        const uint32_t event_budget = ee::idle_loop_iteration_budget(
+                            slots_to_deadline, slots_per_iteration,
+                            runtime.m_loop_safepoint_limit);
+                        if (event_budget != 0u)
+                        {
+                            // A verified loop can be accelerated only to the
+                            // first header at or after this slice deadline.
+                            safepoint_budget = event_budget;
+                        }
+                    }
+                }
+            }
 
             // One translated function invocation per native guest boundary.
             runtime.m_loop_safepoint_remaining = safepoint_budget;
@@ -6404,6 +6551,19 @@ int main(int argc, char** argv)
                 static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms,
                 static_cast<unsigned long long>(hardware.scanout().fields_started())
             );
+            // Only the two requested checkpoints serialize the worker
+            // AOT counters. No extra polling or guest completion.
+            if (vu1_profile_begin != 0u && vu1_profile_snapshots < 2u &&
+                dispatched >= (vu1_profile_snapshots == 0u ?
+                    vu1_profile_begin : vu1_profile_end))
+            {
+                std::fprintf(stderr, "[vu1] worker profile snapshot dispatch=%llu fields=%llu aot=",
+                    static_cast<unsigned long long>(dispatched),
+                    static_cast<unsigned long long>(hardware.scanout().fields_started()));
+                vif1.write_aot_json(stderr);
+                std::fputc('\n', stderr);
+                ++vu1_profile_snapshots;
+            }
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
         }
@@ -6416,10 +6576,20 @@ int main(int argc, char** argv)
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
             reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_RETURN);
-        if (trace && (dispatch_trace_every == 1u ||
-            dispatched <= 64u ||
-            dispatched % dispatch_trace_every == 0u ||
-            !ordinary_transition || status != 1u))
+        const bool routine_event_yield = reason == static_cast<uint32_t>(
+            ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD);
+        if (routine_event_yield)
+        {
+            ++event_yield_count;
+        }
+        const bool trace_stride_hit = routine_event_yield
+            ? dispatch_trace_every == 1u || event_yield_count <= 64u ||
+                event_yield_count % dispatch_trace_every == 0u
+            : dispatch_trace_every == 1u || dispatched <= 64u ||
+                dispatched % dispatch_trace_every == 0u;
+        if (trace && (trace_stride_hit ||
+            (!ordinary_transition && !routine_event_yield) ||
+            (status != 1u && !routine_event_yield)))
         {
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_trace_log);
             std::printf("dispatch=%llu pc=0x%08x -> 0x%08x reason=%s(%u) status=%u\n",
@@ -6436,12 +6606,15 @@ int main(int argc, char** argv)
         if (reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD))
         {
+            const bool idle_event_fast_forwarded =
+                idle_skip_instructions != idle_before_dispatch &&
+                runtime.m_event_budget_yield_enabled != 0u;
             if (count == 0u || status == 2u ||
-                !loop_yield_budget.try_resume(
+                (!idle_event_fast_forwarded && !loop_yield_budget.try_resume(
                     loop_yield_resumes,
                     hardware.scanout().fields_started(),
                     last_iop_rpc_sequence,
-                    hardware.dmac().gif_trace_count()))
+                    hardware.dmac().gif_trace_count())))
             {
                 break;
             }
@@ -6468,28 +6641,23 @@ int main(int argc, char** argv)
             }
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
-            // A guarded loop header: analyze it once; arm pure poll loops.
-            if (idle_skip && idle_yield_headers.insert(cpu.m_pc).second)
-            {
-                const uint32_t header = cpu.m_pc;
-                const auto shape = idle_loop_shapes.emplace(header, ee::analyze_idle_loop(
-                    header,
-                    [&](uint32_t pc, uint32_t* word)
-                    {
-                        if (!image.is_executable_address(pc) ||
-                            !memory->contains(pc, 4u))
-                        {
-                            return false;
-                        }
-                        *word = memory->read32(pc);
-                        return true;
-                    }, idle_forward_branches)).first;
-                if (shape->second.eligible && idle_probe_headers.size() < 4u)
-                {
-                    idle_probe_headers.push_back(header);
-                    refresh_idle_probe_slots();
-                }
-            }
+            analyze_idle_loop_header(cpu.m_pc);
+            continue;
+        }
+
+        // Event-budget yields are ordinary scheduler boundaries. Device and
+        // IOP service already ran above; resume immediately without applying
+        // the separate no-progress watchdog used for diagnostic host yields.
+        if (reason == static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD))
+        {
+            // Event-bounded loop yields bypass the legacy HOST_YIELD path
+            // that originally discovered poll loops. Analyze this exact
+            // committed loop header so a later slice can safely skip to its
+            // next scheduler deadline.
+            analyze_idle_loop_header(cpu.m_pc);
+            cpu.m_exit_reason = static_cast<uint32_t>(
+                ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             continue;
         }
 
@@ -10101,7 +10269,7 @@ int main(int argc, char** argv)
                 static_cast<unsigned long long>(horizon_reached[i]));
         }
     }
-    if (profile_pcs && !pc_profile.entries().empty())
+    if (!pc_profile.entries().empty())
     {
         const auto& entries = pc_profile.entries();
         std::vector<std::pair<uint32_t, ee::s_pc_profile>> ranked(
@@ -10135,6 +10303,31 @@ int main(int argc, char** argv)
             ee::g_runtime_profile.m_enabled ? 1u : 0u,
             static_cast<unsigned long long>(total_nested_ns),
             static_cast<unsigned long long>(total_wall_ns));
+        // Preserve the full combat-selected hot set for offline analysis.
+        // Export only at shutdown; no extra work in the dispatch loop.
+        if (report_path != nullptr)
+        {
+            const std::string profile_path = std::string(report_path) + ".pc-profile.csv";
+            std::ofstream profile(profile_path, std::ios::out | std::ios::trunc);
+            profile << "pc,calls,dispatches,instructions,idle_charged,native_boundary_ns,nested_ns\n";
+            for (const auto& [pc, item] : ranked)
+            {
+                profile << "0x" << std::hex << pc << std::dec << ','
+                        << item.m_calls << ',' << item.m_dispatches << ','
+                        << item.m_instructions << ',' << item.m_idle_instructions << ','
+                        << item.m_wall_ns << ',' << item.m_nested_ns << '\n';
+            }
+            profile.close();
+            if (!profile)
+            {
+                std::fprintf(stderr, "EE profile export failed: %s\n", profile_path.c_str());
+            }
+            else
+            {
+                std::fprintf(stderr, "EE profile export: %zu PCs to %s\n",
+                    ranked.size(), profile_path.c_str());
+            }
+        }
         for (size_t i = 0; i < ranked.size() && i < 25u; ++i)
         {
             const ee::s_pc_profile& item = ranked[i].second;

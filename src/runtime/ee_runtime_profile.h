@@ -207,6 +207,22 @@ inline void runtime_profile_begin(bool enabled)
     }
 }
 
+inline void runtime_profile_set_enabled(bool enabled)
+{
+    auto& state = g_runtime_profile;
+    if (state.m_enabled == enabled)
+    {
+        return;
+    }
+    state.m_enabled = enabled;
+    if (enabled)
+    {
+        const auto now = t_runtime_profile_clock::now();
+        state.m_start = now;
+        state.m_interval.m_start = now;
+    }
+}
+
 class c_runtime_profile_scope
 {
 public:

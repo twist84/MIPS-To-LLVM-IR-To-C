@@ -15,6 +15,23 @@ namespace ee
 // A deadline is a guest timestamp, not a host time estimate. UINT64_MAX
 // is reserved for the absence of a representable future event.
 constexpr uint64_t k_ee_no_deadline = std::numeric_limits<uint64_t>::max();
+constexpr uint64_t k_ee_reference_max_slice = 20000u;
+
+// Match ps2-web-recomp's bounded EE run slice while stopping at the nearest
+// known event. A due event returns a zero-length budget so the host services
+// it before another guest instruction can run.
+inline constexpr uint64_t ee_reference_slice_budget(
+    uint64_t now, uint64_t next_event,
+    uint64_t max_slice = k_ee_reference_max_slice)
+{
+    if (max_slice == 0u || next_event <= now)
+    {
+        return 0u;
+    }
+    const uint64_t until_event = next_event == k_ee_no_deadline
+        ? max_slice : next_event - now;
+    return until_event < max_slice ? until_event : max_slice;
+}
 
 enum class e_ee_horizon_source : uint8_t
 {

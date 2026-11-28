@@ -88,6 +88,7 @@ private:
     void vertex(uint32_t x, uint32_t y, uint32_t z, uint8_t f, bool draw);
     void kick(bool draw);
     bool m_ready = false;
+    bool m_packed_direct = false;
     uint64_t m_draw_count = 0u;
     std::atomic<uint64_t> m_published_draw_count{0u};
     bool m_host_failed = false;

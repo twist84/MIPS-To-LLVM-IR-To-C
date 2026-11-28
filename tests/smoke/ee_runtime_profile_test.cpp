@@ -9,6 +9,24 @@ int main()
 {
     using ee::e_runtime_profile_id;
     {
+        ee::c_ee_pc_profile<> pc_profile(false);
+        pc_profile.record(0x1000u, 1u, 4u, 0u, 100u);
+        if (!pc_profile.entries().empty())
+        {
+            return 10;
+        }
+        pc_profile.set_enabled(true);
+        pc_profile.record(0x1000u, 1u, 4u, 0u, 100u);
+        pc_profile.set_enabled(false);
+        pc_profile.record(0x1000u, 1u, 4u, 0u, 100u);
+        const auto found = pc_profile.entries().find(0x1000u);
+        if (found == pc_profile.entries().end() ||
+            found->second.m_calls != 1u || found->second.m_wall_ns != 100u)
+        {
+            return 11;
+        }
+    }
+    {
         ee::c_ee_performance_overlay overlay;
         ee::s_ee_performance_counters counters{};
         if (overlay.visible() || overlay.sample(0.0, counters))
@@ -34,7 +52,7 @@ int main()
             return 13;
         }
         ee::s_ee_overlay_text expected{};
-        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(0u, "PERFORMANCE F5 CPU F6 GPU F7 PC F8");
         expected.set_line(1u, "SPEED       100.0% / UNLIMITED");
         expected.set_line(2u, "PRESENT      60.0 / 59.94 FPS");
         expected.set_line(3u, "GUEST        60.0 / 59.94 F/S");
@@ -75,7 +93,7 @@ int main()
             return 15;
         }
         expected = {};
-        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(0u, "PERFORMANCE F5 CPU F6 GPU F7 PC F8");
         expected.set_line(1u, "SAMPLING...");
         if (overlay.text().m_words != expected.m_words)
         {

@@ -142,6 +142,8 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     const auto info = reinterpret_cast<t_vu1_aot_info>(symbol("ee_vu1_aot_info"));
     const auto bytes = reinterpret_cast<t_vu1_aot_code>(symbol("ee_vu1_aot_code"));
     const auto entry = reinterpret_cast<t_vu1_aot_entry>(symbol("ee_vu1_program"));
+    const auto mul_profile = reinterpret_cast<t_vu1_aot_mul_profile>(
+        symbol("ee_vu1_mul_profile"));
     if (info == nullptr || bytes == nullptr || entry == nullptr)
     {
         return reject("missing VU1 AOT exports");
@@ -180,6 +182,7 @@ bool c_ee_vu1_aot::open(const std::string& path, std::string* error)
     program.m_next_pc = next_pc;
     program.m_code.assign(code_bytes, code_bytes + size);
     program.m_entry = entry;
+    program.m_mul_profile = mul_profile;
     const auto lifted = vu1_lift_program_ir(image, start);
     if (lifted.m_ir.empty() || lifted.m_steps != steps ||
         lifted.m_cycles != cycles || lifted.m_next_pc != next_pc ||
@@ -532,11 +535,16 @@ void c_ee_vu1_aot::write_json(FILE* output) const
     {
         for (const auto& program : m_programs[index])
         {
+            uint64_t mul_profile[3]{};
+            if (program.m_mul_profile != nullptr)
+            {
+                program.m_mul_profile(mul_profile);
+            }
             std::fprintf(output,
                 "%s{\"pc\":%zu,\"library_index\":%zu,\"code_fnv1a64\":\"%016llx\","
                 "\"attempts\":%llu,\"attempted_pairs\":%llu,\"native_runs\":%llu,"
                 "\"native_pairs\":%llu,\"profiled_attempts\":%llu,\"profiled_pairs\":%llu,"
-                "\"compiled_exclusive_ns\":%llu}",
+                "\"compiled_exclusive_ns\":%llu",
                 first ? "" : ",", index * 8u, program.m_library_index,
                 static_cast<unsigned long long>(program.m_code_hash),
                 static_cast<unsigned long long>(program.m_attempts),
@@ -546,6 +554,16 @@ void c_ee_vu1_aot::write_json(FILE* output) const
                 static_cast<unsigned long long>(program.m_profiled_attempts),
                 static_cast<unsigned long long>(program.m_profiled_pairs),
                 static_cast<unsigned long long>(program.m_compiled_exclusive_ns));
+            if (program.m_mul_profile != nullptr)
+            {
+                std::fprintf(output,
+                    ",\"vu_mul_profile\":{\"mul4_calls\":%llu,"
+                    "\"correction_calls\":%llu,\"correction_lanes\":%llu}",
+                    static_cast<unsigned long long>(mul_profile[0]),
+                    static_cast<unsigned long long>(mul_profile[1]),
+                    static_cast<unsigned long long>(mul_profile[2]));
+            }
+            std::fputc('}', output);
             first = false;
         }
     }

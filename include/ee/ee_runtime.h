@@ -404,6 +404,13 @@ struct s_ee_runtime
     uint64_t m_pcsx2_shadow_eighth_cycles = 0u;
     uint64_t m_pcsx2_shadow_attempts = 0u;
     uint32_t m_pcsx2_shadow_failed = 0u;
+
+    // Optional host scheduler budget checked at translated guest loop
+    // headers. The deadline is expressed in reference-compatible instruction
+    // slots, not hardware R5900 cycles. UINT64_MAX disables the check. The
+    // legacy enable field remains reserved for native ABI stability.
+    uint32_t m_event_budget_yield_enabled = 0u;
+    uint64_t m_event_budget_slot_deadline = UINT64_MAX;
 };
 
 // ps2-web-recomp SDBZ 985c0ac: control transfers reserve two slots,

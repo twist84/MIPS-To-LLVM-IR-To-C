@@ -414,7 +414,7 @@ def test_windows_launcher_preserves_guest_cache():
     archive = launcher.split("\n:archive_full_run\n", 1)[1]
     assert "Get-ChildItem -LiteralPath '%WORK_DIR%' -File" in archive
     for diagnostic in (
-        "boot.log", "expansion.log", "first-boot.json",
+        "boot.log", "expansion.log", "first-boot.json", "first-boot.json.pc-profile.csv",
         "translation-cache.json", "iop-disc-catalog.json",
         "gs-display.ppm", "gs-webgpu.ppm", "gs-upload.ppm",
     ):
@@ -473,6 +473,8 @@ def test_clean_ctrl_c_cancellation():
             work.mkdir()
             report = work / ("quick-probe.json" if quick_probe else "first-boot.json")
             report.write_text('{"stale":true}', encoding="utf-8")
+            pc_profile = report.with_name(report.name + ".pc-profile.csv")
+            pc_profile.write_text("stale profile", encoding="utf-8")
             elf = Path(temp) / "synthetic.elf"
             elf.write_bytes(b"synthetic")
             argv = [
@@ -491,6 +493,7 @@ def test_clean_ctrl_c_cancellation():
             assert code == 130
             assert subprocess_call.call_count == 1, "must not start another guest pass"
             assert not report.exists(), "stale previous guest report must be removed"
+            assert not pc_profile.exists(), "stale previous EE PC profile must be removed"
             output = (work / ("quick-probe.log" if quick_probe else "boot.log")
                       ).read_text(encoding="utf-8")
             assert "cancelled by user (Ctrl+C)" in output
@@ -587,6 +590,25 @@ def test_replay_provenance():
     assert clean["tracked_tree_dirty"] is False
     assert not clean["pad0_replay_configured"]
     assert clean["pad0_replay_source_sha256"] is None
+    assert clean["vu1_aot_inventory"] is None
+    with tempfile.TemporaryDirectory(prefix="vu1-inventory-provenance-") as folder:
+        directory = Path(folder)
+        suffix = ".dll" if os.name == "nt" else ".so"
+        library = directory / ("0730-fixture" + suffix)
+        library.write_bytes(b"native-code")
+        (directory / "vu1-build-target.txt").write_text("native\n", encoding="utf-8")
+        first = SESSION.fingerprint_vu1_inventory(ROOT, str(directory))
+        assert first["directory"] == directory.name
+        assert first["target"] == "native"
+        assert first["libraries"] == 1
+        assert first["inventory_sha256"] is not None
+        assert str(directory) not in json.dumps(first)
+        assert first == SESSION.fingerprint_vu1_inventory(ROOT, str(directory))
+        library.write_bytes(b"changed-native-code")
+        assert first["inventory_sha256"] != SESSION.fingerprint_vu1_inventory(
+            ROOT, str(directory))["inventory_sha256"]
+        library.unlink()
+        assert SESSION.fingerprint_vu1_inventory(ROOT, str(directory))["inventory_sha256"] is None
     with tempfile.TemporaryDirectory(prefix="pad-replay-provenance-") as folder:
         source = Path(folder) / "recorded.log"
         source.write_bytes(b"abc")
@@ -888,7 +910,11 @@ def main():
         assert f'if defined SDBZ_P40_MAX_DISPATCHES set "{budget}=%SDBZ_P40_MAX_DISPATCHES%"' in preset
     assert 'if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"' in preset
     assert 'if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"' in preset
-    assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
+    assert 'if defined SDBZ_P40_VU1_AOT set "SDBZ_VU1_AOT=%SDBZ_P40_VU1_AOT%"' in preset
+    diagnostic_flags = ("SDBZ_RUNTIME_PROFILE", "SDBZ_REPORT_HOTSPOTS",
+                        "SDBZ_REPORT_BOUNDARY_TIMING", "SDBZ_VU1_NATIVE_OVERLAP_PROFILE")
+    for flag in diagnostic_flags:
+        assert f'if not defined {flag} set "{flag}=0"' in preset
     assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
             '    set "SDBZ_SPEED_PERCENT=100"\n'
             '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
@@ -924,6 +950,9 @@ def main():
                 preset_env.pop("SDBZ_P40_LISTEN", None)
                 preset_env.pop("SDBZ_HOST_AUDIO", None)
                 preset_env.pop("SDBZ_P40_MAX_DISPATCHES", None)
+                preset_env.pop("SDBZ_P40_VU1_AOT", None)
+                for flag in diagnostic_flags:
+                    preset_env.pop(flag, None)
                 result = subprocess.run(
                     ["cmd.exe", "/d", "/c", fr"call scripts\run_ps2_game.bat {option} --overwrite-ir"],
                     cwd=ROOT, env=preset_env, capture_output=True, text=True, timeout=30,
@@ -931,7 +960,16 @@ def main():
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
-            short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000")
+                assert "P40 diagnostics: runtime=0 hotspots=0 boundary=0 overlap=0" in result.stdout
+            diagnostic_env = dict(preset_env, **{flag: "1" for flag in diagnostic_flags})
+            diagnostic = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
+                cwd=ROOT, env=diagnostic_env, capture_output=True, text=True, timeout=30,
+            )
+            assert diagnostic.returncode == 0, diagnostic.stdout + diagnostic.stderr
+            assert "P40 diagnostics: runtime=1 hotspots=1 boundary=1 overlap=1" in diagnostic.stdout
+            short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000",
+                             SDBZ_P40_VU1_AOT="build\\vu1-test-inventory")
             short_env.pop("SDBZ_P40_LISTEN", None)
             short = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
@@ -939,6 +977,7 @@ def main():
             )
             assert short.returncode == 0, short.stdout + short.stderr
             assert "opt=5 dispatches=7505000" in short.stdout, short.stdout
+            assert 'P40 VU1 AOT: "build\\vu1-test-inventory"' in short.stdout, short.stdout
             help_result = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,

@@ -547,12 +547,14 @@ int main(int argc, char** argv)
     {
         // The Python JIT fixture allocates the full C++ runtime from these
         // authoritative compile-time offsets, never guessed host padding.
-        std::printf("LOOP_RUNTIME_OFFSETS %zu %zu %zu %zu %zu\n",
+        std::printf("LOOP_RUNTIME_OFFSETS %zu %zu %zu %zu %zu %zu %zu\n",
                     offsetof(ee::s_ee_runtime, m_loop_safepoint_limit),
                     offsetof(ee::s_ee_runtime, m_loop_safepoint_remaining),
                     offsetof(ee::s_ee_runtime, m_guest_instruction_attempts),
                     offsetof(ee::s_ee_runtime, m_loop_safepoint_yield_enabled),
-                    offsetof(ee::s_ee_runtime, m_reference_instruction_slots));
+                    offsetof(ee::s_ee_runtime, m_reference_instruction_slots),
+                    offsetof(ee::s_ee_runtime, m_event_budget_yield_enabled),
+                    offsetof(ee::s_ee_runtime, m_event_budget_slot_deadline));
     }
 
     if (!context.write_ir_to_file(argv[2]))

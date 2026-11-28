@@ -4,6 +4,7 @@
 
 #include "ee_webgpu_bridge.h"
 #include "ee_gs_presentation_probe.h"
+#include "ee_runtime_profile.h"
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 
 #include <raylib.h>
@@ -267,11 +268,28 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         ToggleBorderlessWindowed();
     }
-    if (IsKeyPressed(KEY_F9))
+    if (IsKeyPressed(KEY_F5))
     {
         m_performance_overlay.toggle();
         ps2::gs::gpu::set_performance_overlay(m_performance_overlay.visible()
             ? &m_performance_overlay.text() : nullptr);
+    }
+    if (IsKeyPressed(KEY_F6))
+    {
+        ee::runtime_profile_set_enabled(!ee::g_runtime_profile.m_enabled);
+    }
+    if (IsKeyPressed(KEY_F7))
+    {
+        m_gpu_profile_enabled = !m_gpu_profile_enabled;
+        if (!ps2::gs::gpu::set_command_profile_enabled(m_gpu_profile_enabled))
+        {
+            m_gpu_profile_enabled = false;
+            std::fprintf(stderr, "GPU profiling unavailable or could not open gpu-profile-live.txt\n");
+        }
+    }
+    if (IsKeyPressed(KEY_F8))
+    {
+        m_pc_profile_toggle_requested = true;
     }
     if (WindowShouldClose())
     {
@@ -334,5 +352,12 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
         }
     }
     // Never call BeginDrawing/EndDrawing: these swap raylib's GL buffers.
+}
+
+bool c_ee_raylib_window::consume_pc_profile_toggle()
+{
+    const bool requested = m_pc_profile_toggle_requested;
+    m_pc_profile_toggle_requested = false;
+    return requested;
 }
 }

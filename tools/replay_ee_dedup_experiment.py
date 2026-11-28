@@ -21,6 +21,214 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_raster_library(profile, elf):
+    name = ("game-translated.dll" if os.name == "nt" else
+            "libgame-translated.dylib" if sys.platform == "darwin" else
+            "libgame-translated.so")
+    library = profile / name
+    translation = read_json(profile / "translation-cache.json")
+    inputs = translation.get("inputs", {})
+    digest = sha(library)
+    if (inputs.get("ELF") != sha(elf) or
+            inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest() or
+            translation.get("emit_opt") != 5 or translation.get("library_sha256") != digest):
+        raise ValueError("raster comparison requires authenticated production O5 library")
+    return library, library, {"baseline": digest, "dedup": digest}
+
+
+def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False, bilinear_coords=False, plot_address_cache=False, gpu_regular_timestamps_off=False, raster_dense_workgroup=False, gs_packed_direct=False):
+    """Require actual pipeline selection and identical terminal outputs."""
+    arms = ("baseline", "control", "dedup")
+    results = {}
+    for arm in arms:
+        folder = directory / arm
+        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth and not bilinear_coords and not plot_address_cache and not gpu_regular_timestamps_off and not raster_dense_workgroup and not gs_packed_direct else "0"
+        log = (folder / "stderr.log").read_bytes()
+        markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
+        if not markers or any(value.decode("ascii") != expected for value in markers):
+            raise ValueError("missing or inconsistent raster lazy_setup marker: " + arm)
+        if early_depth:
+            depth = b"1" if arm == "dedup" else b"0"
+            depths = re.findall(rb"(?m)^\[gpu\] raster early_depth=([01])\r?$", log)
+            if not depths or any(value != depth for value in depths):
+                raise ValueError("missing or inconsistent raster early_depth marker: " + arm)
+        if bilinear_coords:
+            coords = b"1" if arm == "dedup" else b"0"
+            markers = re.findall(rb"(?m)^\[gpu\] raster bilinear_coords=([01])\r?$", log)
+            if not markers or any(value != coords for value in markers):
+                raise ValueError("missing or inconsistent raster bilinear_coords marker: " + arm)
+            depths = re.findall(rb"(?m)^\[gpu\] raster early_depth=([01])\r?$", log)
+            if not depths or any(value != b"0" for value in depths):
+                raise ValueError("early-depth must be disabled: " + arm)
+        if plot_address_cache:
+            cache = b"1" if arm == "dedup" else b"0"
+            for marker, value in ((b"plot_address_cache", cache),
+                                  (b"early_depth", b"0"),
+                                  (b"bilinear_coords", b"0")):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(item != value for item in values):
+                    raise ValueError("missing or inconsistent raster " + marker.decode("ascii") + " marker: " + arm)
+        if gpu_regular_timestamps_off:
+            expected_regular = b"0" if arm == "dedup" else b"1"
+            settings = re.findall(rb"(?m)^\[gpu\] regular_timestamps=([01]) supported=([01])\r?$", log)
+            if not settings or any(item != (expected_regular, b"1") for item in settings):
+                raise ValueError("regular timestamp mode not confirmed: " + arm)
+            for marker in (b"early_depth", b"bilinear_coords", b"plot_address_cache"):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(item != b"0" for item in values):
+                    raise ValueError("other raster optimization active: " + arm)
+            summaries = re.findall(
+                rb"(?m)^\[gpu\] regular timestamp summary: passes=(\d+) submitted=(\d+) completed=(\d+) failures=(\d+) detail_passes=(\d+)\r?$", log)
+            if not summaries:
+                raise ValueError("missing regular timestamp summary: " + arm)
+            passes, submitted, completed, failures, detail_passes = map(int, summaries[-1])
+            if (passes == 0 or detail_passes != 0 or failures != 0 or
+                    (arm == "dedup" and (submitted != 0 or completed != 0)) or
+                    (arm != "dedup" and not (0 < completed <= submitted <= passes))):
+                raise ValueError("unexpected regular timestamp counters: " + arm)
+        if raster_dense_workgroup:
+            dense_mode = b"1" if arm == "dedup" else b"0"
+            for marker, value in ((b"dense_workgroup", dense_mode), (b"early_depth", b"0"),
+                                  (b"bilinear_coords", b"0"), (b"plot_address_cache", b"0")):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(item != value for item in values):
+                    raise ValueError("missing or inconsistent raster " + marker.decode("ascii") + " marker: " + arm)
+            summaries = re.findall(rb"(?m)^\[gpu\] raster dense summary: regular=(\d+) dense=(\d+)\r?$", log)
+            if not summaries:
+                raise ValueError("missing dense raster summary: " + arm)
+            regular_count, dense_count = map(int, summaries[-1])
+            if regular_count == 0 or ((dense_count > 0) != (arm == "dedup")):
+                raise ValueError("unexpected dense raster dispatch count: " + arm)
+        if gs_packed_direct:
+            direct = b"1" if arm == "dedup" else b"0"
+            modes = re.findall(rb"(?m)^\[gpu\] gs packed_direct=([01])\r?$", log)
+            if not modes or any(value != direct for value in modes):
+                raise ValueError("missing or inconsistent GS packed-direct marker: " + arm)
+            for marker in (b"early_depth", b"bilinear_coords", b"plot_address_cache", b"dense_workgroup"):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(value != b"0" for value in values):
+                    raise ValueError("other raster optimization active: " + arm)
+        if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off or raster_dense_workgroup or gs_packed_direct:
+            size = b"8" if tile8 and arm == "dedup" else b"16"
+            sizes = re.findall(rb"(?m)^\[gpu\] raster workgroup=(\d+)x(\d+) \((\d+)x(\d+) CPU tiles\)\r?$", log)
+            if not sizes or any(entry != (size,) * 4 for entry in sizes):
+                raise ValueError("missing or inconsistent raster tile marker: " + arm)
+        results[arm] = {
+            "lazy_setup": expected,
+            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off or raster_dense_workgroup or gs_packed_direct else {}),
+            **({"early_depth": int(depth)} if early_depth else {}),
+            **({"bilinear_coords": int(coords)} if bilinear_coords else {}),
+            **({"plot_address_cache": int(cache)} if plot_address_cache else {}),
+            **({"regular_timestamps": int(expected_regular), "timestamp_passes": passes,
+                "timestamp_submitted": submitted, "timestamp_completed": completed,
+                "timestamp_failures": failures} if gpu_regular_timestamps_off else {}),
+            **({"dense_workgroup": int(dense_mode), "regular_raster_dispatches": regular_count,
+                "dense_raster_dispatches": dense_count} if raster_dense_workgroup else {}),
+            **({"gs_packed_direct": int(direct)} if gs_packed_direct else {}),
+            "report_sha256": sha(folder / "report.json"),
+            "image_sha256": sha(folder / "gs-webgpu.ppm"),
+        }
+    if raster_dense_workgroup:
+        totals = {item["regular_raster_dispatches"] + item["dense_raster_dispatches"]
+                  for item in results.values()}
+        if len(totals) != 1:
+            raise ValueError("raster dispatch totals differ")
+    if async_raster:
+        # Reuse the established graphics replay normalization. Remove only
+        # host profiling data, never guest or worker execution counts.
+        from replay_ee_graphics_profile import normalize
+        for arm in arms:
+            report = read_json(directory / arm / "report.json")
+            normalized = normalize(report)
+            if lean:
+                # These host-only collectors are the deliberate difference
+                # in this experiment. Keep all other state/counters intact.
+                normalized.pop("m2_runtime")
+                worker = normalized["vu1_worker"]
+                for key in ("native_overlap_profile", "ee_native_overlap_intervals",
+                            "ee_native_pending_boundaries", "ee_native_completed_at_entry",
+                            "ee_native_completed_at_exit"):
+                    worker.pop(key)
+            results[arm]["normalized_report_sha256"] = hashlib.sha256(
+                json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        report_key = "normalized_report_sha256"
+    elif lean:
+        # Synchronous lean mode changes only the optional EE hotspot
+        # collector and host timing. Require all remaining report fields,
+        # including worker and architectural counters, to match exactly.
+        for arm in arms:
+            report = read_json(directory / arm / "report.json")
+            report.pop("m2_runtime")
+            results[arm]["normalized_report_sha256"] = hashlib.sha256(
+                json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        report_key = "normalized_report_sha256"
+    else:
+        report_key = "report_sha256"
+    if any(results[arm][key] != results["baseline"][key]
+           for arm in arms for key in (report_key, "image_sha256")):
+        raise ValueError("raster replay terminal report or image differs")
+    return results
+
+
+LEAN_DIAGNOSTICS = {
+    "hotspots": "SDBZ_REPORT_HOTSPOTS",
+    "boundary": "SDBZ_REPORT_BOUNDARY_TIMING",
+    "overlap": "SDBZ_VU1_NATIVE_OVERLAP_PROFILE",
+}
+
+
+def lean_overrides(component):
+    return {key: "0" for name, key in LEAN_DIAGNOSTICS.items()
+            if component == "all" or component == name}
+
+
+def report_options(path):
+    # The runner prints this startup marker before guest execution.
+    pattern = re.compile(rb"^EE report options: hotspots=([01]) boundary_timing=([01]) ")
+    with path.open("rb") as stream:
+        for line in stream:
+            match = pattern.match(line)
+            if match:
+                return {"hotspots": match[1] == b"1", "boundary": match[2] == b"1"}
+    raise ValueError("missing report options marker: " + str(path))
+
+
+GRAPHICS_WORKLOAD_KEYS = (
+    "gs_fields_started", "m2_gif_gs", "m2_gif_paths", "m2_vif1_producer",
+    "m2_gs_presentation", "m2_iop_sio2",
+)
+VU1_WORKLOAD_KEYS = ("enabled", "programs", "native_runs", "native_pairs", "interpreter_fallbacks")
+
+
+def async_workload_evidence(directory):
+    """Diagnostic graphics workload comparison, not architectural equality."""
+    arms = ("baseline", "control", "dedup")
+    reports = {arm: read_json(directory / arm / "report.json") for arm in arms}
+    evidence = {}
+    for arm, report in reports.items():
+        payload = {key: report[key] for key in GRAPHICS_WORKLOAD_KEYS}
+        payload["vu1_aot"] = {key: report["vu1_aot"][key] for key in VU1_WORKLOAD_KEYS}
+        evidence[arm] = {
+            "graphics_workload_sha256": hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "image_sha256": sha(directory / arm / "gs-webgpu.ppm"),
+            "guest_fields": report["gs_fields_started"],
+            "dispatches": report["dispatches"],
+            "guest_instruction_attempts": report["guest_instruction_attempts"],
+            "vu1": payload["vu1_aot"],
+            "hotspots_enabled": report["m2_runtime"]["enabled"],
+            "overlap_enabled": report["vu1_worker"]["native_overlap_profile"],
+        }
+    keys = ("graphics_workload_sha256", "image_sha256")
+    return {"arms": evidence, "graphics_workload_and_final_image_match": all(
+        evidence[arm][key] == evidence["baseline"][key]
+        for arm in arms for key in keys),
+        "architectural_equivalence_proven": False}
+
+
 def validate_libraries(profile, experiment, elf):
     name = ("game-translated.dll" if os.name == "nt" else
             "libgame-translated.dylib" if sys.platform == "darwin" else
@@ -36,7 +244,7 @@ def validate_libraries(profile, experiment, elf):
         raise ValueError("boot ELF differs from baseline translation provenance")
     if inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest():
         raise ValueError("baseline must have native ALU certificates disabled")
-    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory", "experimental_shared_scalar_memory", "experimental_residual_shared_scalar", "experimental_selective_alignment_merge", "experimental_expanded_alignment_merge", "experimental_selective_entry_rotation", "experimental_expanded_entry_rotation") or
+    if (plan.get("mode") not in ("experimental_owner_coalescing", "experimental_selective_native_size", "experimental_shared_observation", "experimental_shared_counter", "experimental_shared_quadword", "experimental_shared_cop1_mul", "experimental_shared_cop1_add", "experimental_selective_scalar_memory", "experimental_expanded_scalar_memory", "experimental_shared_scalar_memory", "experimental_residual_shared_scalar", "experimental_selective_alignment_merge", "experimental_expanded_alignment_merge", "experimental_selective_entry_rotation", "experimental_expanded_entry_rotation", "experimental_single_use_fmac_inline", "experimental_vector_discard", "experimental_hot_o3") or
             not plan.get("runtime_validation_required") or
             plan.get("metadata_sha256") != translation.get("metadata_sha256")):
         raise ValueError("experiment and normal translation metadata do not match")
@@ -45,6 +253,9 @@ def validate_libraries(profile, experiment, elf):
             hashes["dedup"] != plan.get("linked_library_sha256") or
             candidate.stat().st_size != plan.get("linked_library_bytes")):
         raise ValueError("library identity differs from recorded manifest")
+    if (plan.get("mode") in ("experimental_single_use_fmac_inline", "experimental_vector_discard", "experimental_hot_o3") and
+            plan.get("baseline_library_sha256") != hashes["baseline"]):
+        raise ValueError("EE optimization pilot baseline library differs")
     if baseline.resolve() == candidate.resolve() or hashes["baseline"] == hashes["dedup"]:
         raise ValueError("two distinct verified native libraries required")
     return baseline, candidate, hashes
@@ -266,7 +477,34 @@ def main():
     parser.add_argument("--elf", type=Path, required=True)
     parser.add_argument("--disc", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--experiment", type=Path, required=True)
+    variant = parser.add_mutually_exclusive_group(required=True)
+    variant.add_argument("--experiment", type=Path)
+    variant.add_argument("--raster-lazy-setup", action="store_true",
+                         help="compare 0/1 on the same verified O5 DLL and runner")
+    variant.add_argument("--raster-tile8", action="store_true",
+                         help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
+    variant.add_argument("--raster-early-depth", action="store_true",
+                         help="compare early triangle depth rejection on lean synchronous runs")
+    variant.add_argument("--raster-bilinear-coords", action="store_true",
+                         help="compare shared wrapped coordinates for bilinear sampling")
+    variant.add_argument("--raster-plot-address-cache", action="store_true",
+                         help="compare per-invocation framebuffer/depth address reuse")
+    variant.add_argument("--gpu-regular-timestamps-off", action="store_true",
+                         help="compare disabling normal GPU pass timestamp queries; retain F7 support")
+    variant.add_argument("--raster-dense-workgroup", action="store_true",
+                         help="use 4x4 GPU groups only for dense, low-tile-count 16x16 batches")
+    variant.add_argument("--gs-packed-direct", action="store_true",
+                         help="compare direct packed GS vertex/color/texture dispatch")
+    variant.add_argument("--async-lean", action="store_true",
+                         help="screen cost of optional EE report and VU1 overlap diagnostics")
+    variant.add_argument("--sync-lean", action="store_true",
+                         help="strict matched validation of EE report diagnostics off")
+    parser.add_argument("--recording", type=Path,
+                        help="replay an existing complete PAD0 record for every arm")
+    parser.add_argument("--async-raster", action="store_true",
+                        help="diagnostic tile8 comparison using asynchronous GS and VU1")
+    parser.add_argument("--lean-component", choices=("all", "hotspots", "boundary", "overlap"),
+                        help="with --async-lean, disable only this collector (default: all)")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
@@ -283,22 +521,51 @@ def main():
     parser.add_argument("--max-dispatches", type=int, default=40000000)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
-    for key in ("runner", "elf", "disc", "profile", "experiment", "output"):
-        setattr(args, key, getattr(args, key).resolve())
+    for key in ("runner", "elf", "disc", "profile", "experiment", "output", "recording"):
+        value = getattr(args, key)
+        if value is not None:
+            setattr(args, key, value.resolve())
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
+        lean_mode = args.async_lean or args.sync_lean
+        strict_raster = (args.raster_early_depth or args.raster_bilinear_coords or
+                         args.raster_plot_address_cache or args.gpu_regular_timestamps_off or
+                         args.raster_dense_workgroup or args.gs_packed_direct)
+        raster_mode = args.raster_lazy_setup or args.raster_tile8 or strict_raster or lean_mode
+        async_mode = args.async_raster or args.async_lean
+        verify_inventory = async_mode or args.sync_lean or strict_raster
+        if strict_raster and (not args.sync or not args.recording):
+            raise ValueError("strict raster experiments require --sync and --recording")
+        if args.sync_lean:
+            if args.async_raster or not args.recording:
+                raise ValueError("--sync-lean requires --recording and no asynchronous mode")
+            args.sync = True
+        if args.lean_component is not None and not args.async_lean:
+            raise ValueError("--lean-component requires --async-lean")
+        lean_component = args.lean_component or "all"
+        if args.async_lean and (args.sync or args.async_raster or not args.recording):
+            raise ValueError("--async-lean requires --recording and no other async/sync mode")
+        if args.async_raster and (not args.raster_tile8 or args.sync or not args.recording):
+            raise ValueError("--async-raster requires --raster-tile8 and --recording, without --sync")
+        if raster_mode and (not args.control or not (args.sync or async_mode) or
+                prior_dir is not None or args.source_comparison is not None or
+                args.prior_source_comparison is not None or args.reference_sha256):
+            raise ValueError("raster comparison requires --control and --sync or --async-raster; no other candidate")
         if prior_dir is not None and (not args.control or not args.sync):
             raise ValueError("prior experiment comparison requires --control --sync")
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
                 any(args.output.is_relative_to(path) for path in
-                    (args.profile, args.experiment, args.disc)) or
+                    (args.profile, args.experiment, args.disc) if path is not None) or
                 (prior_dir is not None and args.output.is_relative_to(prior_dir))):
             raise ValueError("use a fresh output directory outside the cache and disc")
         if not args.runner.is_file() or not args.elf.is_file() or not args.disc.is_dir():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
-        if args.source_comparison is not None:
+        if raster_mode:
+            baseline, candidate, hashes = validate_raster_library(args.profile, args.elf)
+            prior_library = None
+        elif args.source_comparison is not None:
             if prior_dir is None or not args.reference_sha256:
                 raise ValueError("source comparison requires a pinned accepted reference and --control --sync")
             baseline, candidate, hashes = validate_source_libraries(
@@ -326,31 +593,112 @@ def main():
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
+        elif async_mode:
+            env.update(SDBZ_VU1_ASYNC="1", SDBZ_GS_ASYNC="1")
+        if raster_mode:
+            env.update(PS2_RASTER_LAZY_SETUP="0", PS2_RASTER_EARLY_DEPTH="0",
+                       PS2_RASTER_BILINEAR_COORDS="0", PS2_RASTER_PLOT_ADDRESS_CACHE="0",
+                       PS2_GPU_REGULAR_TIMESTAMPS="1", PS2_RASTER_DENSE_WORKGROUP="0",
+                       PS2_GS_PACKED_DIRECT="0",
+                       SDBZ_RUNTIME_PROFILE="0",
+                       SDBZ_PROFILE_PCS="0")
+            env.pop("PS2_GPU_PROFILE", None)
+        if args.raster_tile8 or strict_raster or lean_mode:
+            env.update(PS2_RASTER_TILE="16", PS2_RASTER_WORKGROUP="16")
+        if strict_raster:
+            env.update(lean_overrides("hotspots"))
+            env.update(lean_overrides("boundary"))
+            # No deferred worker exists in synchronous runs. Its report
+            # retains the default true flag, but collects no overlap data.
+            env["SDBZ_VU1_NATIVE_OVERLAP_PROFILE"] = "1"
+        if lean_mode:
+            env.update(SDBZ_REPORT_HOTSPOTS="1", SDBZ_REPORT_BOUNDARY_TIMING="1",
+                       SDBZ_VU1_NATIVE_OVERLAP_PROFILE="1")
+        candidate_env = dict(env)
+        if args.raster_lazy_setup:
+            candidate_env["PS2_RASTER_LAZY_SETUP"] = "1"
+        elif args.raster_tile8:
+            candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
+        elif args.raster_early_depth:
+            candidate_env["PS2_RASTER_EARLY_DEPTH"] = "1"
+        elif args.raster_bilinear_coords:
+            candidate_env["PS2_RASTER_BILINEAR_COORDS"] = "1"
+        elif args.raster_plot_address_cache:
+            candidate_env["PS2_RASTER_PLOT_ADDRESS_CACHE"] = "1"
+        elif args.gpu_regular_timestamps_off:
+            candidate_env["PS2_GPU_REGULAR_TIMESTAMPS"] = "0"
+        elif args.raster_dense_workgroup:
+            candidate_env["PS2_RASTER_DENSE_WORKGROUP"] = "1"
+        elif args.gs_packed_direct:
+            candidate_env["PS2_GS_PACKED_DIRECT"] = "1"
+        elif args.async_lean:
+            candidate_env.update(lean_overrides(lean_component))
+        elif args.sync_lean:
+            # The overlap collector is already inactive with no worker.
+            # Leave its configured flag alone for exact report equality.
+            candidate_env.update(lean_overrides("hotspots"))
+            candidate_env.update(lean_overrides("boundary"))
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
             inputs["source_comparison_sha256"] = sha(args.source_comparison)
         if args.prior_source_comparison is not None:
             inputs["prior_source_comparison_sha256"] = sha(args.prior_source_comparison)
+        if verify_inventory:
+            from replay_ee_graphics_sweep import aot_identity
+            vu1_directory = Path(env["SDBZ_VU1_AOT"]).resolve()
+            inputs["vu1_inventory"] = aot_identity(vu1_directory)
+        if args.recording:
+            inputs["recording_sha256"] = sha(args.recording)
+            external_polls = record_count(args.recording)
         card = env.get("SDBZ_MEMCARD")
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
-            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k == "PS2_SCALE"},
+            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS", "PS2_RASTER_PLOT_ADDRESS_CACHE", "PS2_GPU_REGULAR_TIMESTAMPS", "PS2_RASTER_DENSE_WORKGROUP", "PS2_GS_PACKED_DIRECT")},
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
+        if raster_mode:
+            receipt["experiment_mode"] = ("sync_lean" if args.sync_lean else
+                                          "async_lean" if args.async_lean else
+                                          "raster_tile8" if args.raster_tile8 else
+                                          "raster_early_depth" if args.raster_early_depth else
+                                          "raster_bilinear_coords" if args.raster_bilinear_coords else
+                                          "raster_plot_address_cache" if args.raster_plot_address_cache else
+                                          "gpu_regular_timestamps_off" if args.gpu_regular_timestamps_off else
+                                          "raster_dense_workgroup" if args.raster_dense_workgroup else
+                                          "gs_packed_direct" if args.gs_packed_direct else "raster_lazy_setup")
+            receipt["async_raster"] = args.async_raster
+            if lean_mode:
+                receipt["lean_component"] = "ee-report" if args.sync_lean else lean_component
+            receipt["candidate_environment_overrides"] = {
+                key: value for key, value in candidate_env.items() if env.get(key) != value}
+        if args.recording:
+            receipt["external_recording"] = str(args.recording)
         if prior_library is not None:
             receipt.update(prior=None, prior_pad_replay=None, prior_trace=None)
         args.output.mkdir(parents=True)
         try:
-            print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
-            receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
-                                          dict(env, SDBZ_PAD0_RECORD="1"))
+            if args.recording:
+                recording = args.recording
+                receipt["recorded_polls"] = external_polls
+                print("Baseline: replaying the existing PAD0 recording.", flush=True)
+                receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
+                                              dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                summary = replay_summary(args.output / "baseline" / "stderr.log")
+                receipt["baseline_pad_replay"] = summary
+                if (not summary or not summary["valid"] or
+                        summary["consumed"] != external_polls or summary["total"] != external_polls):
+                    raise ValueError("baseline did not consume the existing recording")
+            else:
+                print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
+                receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
+                                              dict(env, SDBZ_PAD0_RECORD="1"))
+                recording = args.output / "baseline" / "stderr.log"
+                receipt["recorded_polls"] = record_count(recording)
             if receipt["baseline"]["returncode"] != 4 or not terminal_budget(args.output / "baseline", args.max_dispatches):
                 raise ValueError("baseline failed to produce a terminal report")
-            recording = args.output / "baseline" / "stderr.log"
-            receipt["recorded_polls"] = record_count(recording)
             if args.control:
                 print("Control: replaying the recording on the original DLL.", flush=True)
                 receipt["control"] = run_one(args, baseline, args.output / "control",
@@ -373,12 +721,33 @@ def main():
                     args.output / "prior", args.max_dispatches)
             print("Candidate: replaying the recorded PAD0 polls.", flush=True)
             receipt["dedup"] = run_one(args, candidate, args.output / "dedup",
-                                       dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                                       dict(candidate_env, SDBZ_PAD0_REPLAY=str(recording)))
             receipt["pad_replay"] = replay_summary(args.output / "dedup" / "stderr.log")
             receipt["dedup_trace"] = trace_comparison(
                 args.output / "baseline" / "stdout.log", args.output / "dedup" / "stdout.log")
             receipt["dedup"]["terminal_budget_reached"] = terminal_budget(
                 args.output / "dedup", args.max_dispatches)
+            if verify_inventory and all(terminal_budget(args.output / arm, args.max_dispatches)
+                                        for arm in ("baseline", "control", "dedup")):
+                # Save workload evidence even if A/A trace matching fails.
+                # It is deliberately not a substitute for the strict gate.
+                workload_key = "sync_workload" if args.sync else "async_workload"
+                receipt[workload_key] = async_workload_evidence(args.output)
+                if lean_mode or strict_raster:
+                    for arm, info in receipt[workload_key]["arms"].items():
+                        expected_env = candidate_env if arm == "dedup" else env
+                        expected = {name: expected_env[key] == "1"
+                                    for name, key in LEAN_DIAGNOSTICS.items()}
+                        if strict_raster:
+                            worker = read_json(args.output / arm / "report.json")["vu1_worker"]
+                            if (worker["enabled"] is not False or worker["pending"] is not False or
+                                    worker["submitted_jobs"] != 0 or worker["ee_native_overlap_intervals"] != 0):
+                                raise ValueError("synchronous VU1 worker unexpectedly active: " + arm)
+                        observed = report_options(args.output / arm / "stdout.log")
+                        observed["overlap"] = info["overlap_enabled"]
+                        info["diagnostic_options"] = observed
+                        if observed != expected or info["hotspots_enabled"] is not expected["hotspots"]:
+                            raise ValueError("host diagnostic settings not confirmed: " + arm)
             if args.control:
                 control = receipt["control_pad_replay"]
                 if (not control or not control["valid"] or
@@ -411,9 +780,27 @@ def main():
                     receipt["dedup_trace"]["different_common_samples"] or
                     receipt["dedup_trace"]["unpaired_samples"]):
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
+            if raster_mode:
+                receipt["raster_outputs"] = validate_raster_outputs(
+                    args.output, tile8=args.raster_tile8, async_raster=async_mode,
+                    lean=lean_mode, early_depth=args.raster_early_depth,
+                    bilinear_coords=args.raster_bilinear_coords,
+                    plot_address_cache=args.raster_plot_address_cache,
+                    gpu_regular_timestamps_off=args.gpu_regular_timestamps_off,
+                    raster_dense_workgroup=args.raster_dense_workgroup,
+                    gs_packed_direct=args.gs_packed_direct)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
+            receipt["runner_unchanged"] = sha(args.runner) == inputs["runner_sha256"]
+            if verify_inventory:
+                try:
+                    receipt["vu1_inventory_unchanged"] = (
+                        aot_identity(vu1_directory) == inputs["vu1_inventory"])
+                except (OSError, ValueError):
+                    receipt["vu1_inventory_unchanged"] = False
+            if args.recording:
+                receipt["recording_unchanged"] = sha(args.recording) == inputs["recording_sha256"]
             receipt["libraries_unchanged"] = (
                 sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"] and
                 (prior_library is None or sha(prior_library) == hashes["prior"]))
@@ -429,8 +816,10 @@ def main():
                 json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
             archive = shutil.make_archive(str(args.output), "zip", args.output)
             print("Comparison archive:", archive, flush=True)
-        if (receipt["error"] or not receipt["libraries_unchanged"] or
+        if (receipt["error"] or not receipt["libraries_unchanged"] or not receipt["runner_unchanged"] or
                 not receipt.get("memcard_unchanged", True) or
+                not receipt.get("recording_unchanged", True) or
+                not receipt.get("vu1_inventory_unchanged", True) or
                 not receipt.get("source_comparison_unchanged", True) or
                 not receipt.get("prior_source_comparison_unchanged", True)):
             print("Replay requires investigation:", receipt["error"], file=sys.stderr)

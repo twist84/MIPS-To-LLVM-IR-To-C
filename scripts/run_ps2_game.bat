@@ -72,8 +72,14 @@ if defined SDBZ_P40_MAX_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%SDBZ_P40_MAX_D
 if defined SDBZ_P40_MAX_DISPATCHES set "MAX_REPLAY_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
 set "BOOT_TIMEOUT_SECONDS=600"
 
-rem Preserve full profiling by default, but allow a profiler-off control.
-if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"
+rem Lean gameplay defaults; explicit caller overrides retain diagnostics.
+rem F6/F7/F8 remain available for on-demand main-thread/GPU/PC profiles.
+rem Set collectors to 1 before launching to restore whole-session diagnostics.
+if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=0"
+if not defined SDBZ_REPORT_HOTSPOTS set "SDBZ_REPORT_HOTSPOTS=0"
+if not defined SDBZ_REPORT_BOUNDARY_TIMING set "SDBZ_REPORT_BOUNDARY_TIMING=0"
+if not defined SDBZ_VU1_NATIVE_OVERLAP_PROFILE set "SDBZ_VU1_NATIVE_OVERLAP_PROFILE=0"
+echo P40 diagnostics: runtime=%SDBZ_RUNTIME_PROFILE% hotspots=%SDBZ_REPORT_HOTSPOTS% boundary=%SDBZ_REPORT_BOUNDARY_TIMING% overlap=%SDBZ_VU1_NATIVE_OVERLAP_PROFILE%
 set "SDBZ_TRACE_BUFFERED=1"
 set "SDBZ_REPORT_SNAPSHOT_MS=2000"
 rem Progress text only; retain exact dispatch counters and periodic snapshots.
@@ -94,6 +100,9 @@ rem Disable byte-wise image hashing, retain committed event/QWC counters.
 set "SDBZ_GIF_IMAGE_DIGEST=0"
 
 set "SDBZ_VU1_AOT=%CD%\build\vu1-native-v20"
+rem Compare already-built native inventories without changing other P40 settings.
+if defined SDBZ_P40_VU1_AOT set "SDBZ_VU1_AOT=%SDBZ_P40_VU1_AOT%"
+echo P40 VU1 AOT: "%SDBZ_VU1_AOT%"
 set "SDBZ_VU1_AOT_CAPTURE="
 set "SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\build\vu1-misses"
 
@@ -622,7 +631,7 @@ rem Clear only presentation outputs before a full replay, so that a
 rem cancelled run cannot accidentally archive old GS images as new ones.
 rem NEVER remove the guest IR, translated DLL, or object cache here.
 if /I "%REPORT_NAME%"=="first-boot.json" (
-    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json) do (
+    for %%F in (gs-display.ppm gs-upload.ppm gs-webgpu.ppm replay-provenance.json first-boot.json.pc-profile.csv) do (
         if exist "%WORK_DIR%\%%F" del /q "%WORK_DIR%\%%F"
     )
 )
@@ -692,7 +701,7 @@ exit /b %EXIT_CODE%
 rem Match the files formerly selected by the manual PowerShell command.
 rem Never include guest .ll/.o files in these small diagnostic archives.
 rem Distinct neutral/Cross names prevent overwriting experiment evidence.
-powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','replay-provenance.json','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
+powershell -NoProfile -Command "$files = @(Get-ChildItem -LiteralPath '%WORK_DIR%' -File | Where-Object { $_.Name -in @('boot.log','expansion.log','first-boot.json','replay-provenance.json','first-boot.json.pc-profile.csv','translation-cache.json','iop-disc-catalog.json','gs-display.ppm','gs-webgpu.ppm','gs-upload.ppm') }); if ($files.Count -gt 0) { $archive = 'sdbz-graphics-pr148-%CAPTURE_PROFILE%-' + (Get-Date -Format 'yyyyMMdd-HHmmssfff') + '.zip'; Compress-Archive -LiteralPath $files.FullName -DestinationPath $archive -ErrorAction Stop; Write-Output ('Diagnostic archive: ' + $archive) } else { Write-Output 'No diagnostic files to archive.' }"
 if errorlevel 1 (
     echo WARNING: Diagnostic archive failed; original logs remain in "%WORK_DIR%".
     exit /b 1

@@ -58,13 +58,16 @@ public:
         ++m_calls;
         m_requested_ns += ns(deadline - start);
         bool waited = false;
+        constexpr auto k_spin_window = std::chrono::microseconds(500);
+        const auto sleep_deadline = deadline - k_spin_window;
 #if defined(_WIN32)
         if (m_timer != nullptr)
         {
             using t_ticks = std::chrono::duration<int64_t, std::ratio<1, 10000000>>;
             // Negative values are relative 100 ns units; round up, not down.
             LARGE_INTEGER due{};
-            due.QuadPart = -std::chrono::ceil<t_ticks>(deadline - start).count();
+            const auto timer_deadline = std::max(start, sleep_deadline);
+            due.QuadPart = -std::chrono::ceil<t_ticks>(timer_deadline - start).count();
             if (SetWaitableTimer(m_timer, &due, 0, nullptr, nullptr, FALSE) &&
                 WaitForSingleObject(m_timer, INFINITE) == WAIT_OBJECT_0)
             {
@@ -80,10 +83,21 @@ public:
             }
         }
 #endif
-        if (!waited || t_clock::now() < deadline)
+        if (!waited || t_clock::now() < sleep_deadline)
         {
             ++m_fallback_calls;
-            std::this_thread::sleep_until(deadline);
+            if (sleep_deadline > t_clock::now())
+            {
+                std::this_thread::sleep_until(sleep_deadline);
+            }
+        }
+        // General-purpose OS sleeps can overshoot a video deadline by a
+        // scheduling quantum. Sleep most of the interval, then use a short
+        // final spin to keep locked presentation close to the guest field
+        // cadence (60 or 60000/1001 Hz). The caller skips this wait when
+        // presentation is unlocked.
+        while (t_clock::now() < deadline)
+        {
         }
         const auto end = t_clock::now();
         m_waited_ns += ns(end - start);

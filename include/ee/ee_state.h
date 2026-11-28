@@ -177,7 +177,11 @@ enum class e_ee_exit_reason : uint32_t
     EE_EXIT_HOST_YIELD = 6,
     // A committed Level 2 architectural exception, not a Level 1
     // ExcCode/EPC event. Do not route through the Level 1 HLE bridge.
-    EE_EXIT_LEVEL2_EXCEPTION = 7
+    EE_EXIT_LEVEL2_EXCEPTION = 7,
+    // Host scheduler yield after a translated EE loop reaches its cycle
+    // budget. The guest resumes at the committed loop header after devices
+    // are serviced; this is not an architectural exception.
+    EE_EXIT_EVENT_YIELD = 8
 };
 
 static_assert(static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_RETURN) == 0u &&
@@ -187,7 +191,8 @@ static_assert(static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_RETURN) == 0u &&
               static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_UNSUPPORTED) == 4u &&
               static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_LOOP_BUDGET) == 5u &&
               static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_HOST_YIELD) == 6u &&
-              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION) == 7u);
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_LEVEL2_EXCEPTION) == 7u &&
+              static_cast<uint32_t>(e_ee_exit_reason::EE_EXIT_EVENT_YIELD) == 8u);
 
 inline constexpr bool ee_is_level2_exception_exit(uint32_t reason)
 {

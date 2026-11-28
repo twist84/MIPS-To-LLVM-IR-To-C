@@ -1305,3 +1305,1024 @@ Preserve runner, captures and G8D.1 libraries. Further IOP AOT execution micro-o
 Function splitting and parallel compilation are active in #174; see
 IOP_AOT_SPLITTING.md. Next objective practical timing compatibility with
 PCSX2 and ps2-web-recomp, not cycle-exact physical hardware.
+
+## PR #180 — 3D gameplay performance acceptance (2026-11-28)
+
+Firmware accuracy work is deferred; investigate measured EE, VU1, GPU
+compute, batching and synchronization costs during actual combat.
+Do not infer the bottleneck from whole-replay averages.
+
+The presentation-submission timestamp fix (36d6bb4e) truncated gpu.cpp.
+0c488efe restored the missing function/namespace ending and corrected
+the render-pass store operation. 5c294994 adds eight asynchronous
+detailed readback slots, 1024-dispatch query chunks, ordered retirement,
+map failure accounting and a capture-stop drain. Detailed submissions
+now update dispatch and submission counts. Normal batched submission
+code remains byte-identical; detailed timing still separates compute
+passes, so enabled-versus-disabled overhead must be measured. The
+detailed ring can wait at saturation or capture stop; the normal path
+does not acquire these slots. No EE/VU1 lowering changes.
+
+Remote verification: gpu.cpp 2706 lines, blob
+db4ae20b579183c2c401d4e88afc0303d659fd11, complete ending;
+ee_game_runner_main.cpp unchanged blob
+580340e6edc9008eb9c4685e7a94550732684cc7.
+F5 overlay, F6 EE-thread scope profiling, F7 detailed GPU capture,
+F8 EE per-PC timing; no F9 binding in the inspected window code.
+F6 does not currently reconfigure the VU1 worker's startup-selected
+detailed scope timing. Use interval deltas of worker totals and a
+separate CPU-profile-enabled run when detailed VU1 attribution is
+needed. The first GPU capture submission can lack raster metadata
+for batches constructed before activation.
+
+### Acceptance scorecard
+
+| Criterion | Target | Latest result | Status |
+|---|---|---|---|
+| SC1 | Measured critical path, CPU/GPU overlap | Detailed GPU capture not yet validated | PENDING |
+| SC2 | >=99% configured NTSC field rate, 3 x 120s active combat | No comparable current measurements | PENDING |
+| SC3 | Mean <=101%, P95 <=110%, P99 <=150% of reference period; >=95% of 1s windows at >=95% speed; no recurring >100ms stalls | No current field-time distribution | PENDING |
+| SC4 | >=110% unlocked reference speed (preferred 125%, stretch 150%) | No current comparable active-combat result | PENDING |
+| SC5 | Normalized, attributable efficiency improvement | Diagnostic infrastructure only | PENDING |
+| SC6 | Architectural correctness and native coverage retained | No lowering changes; build and retail validation pending | PENDING |
+| SC7 | Visual correctness | Presentation pass retained; deterministic comparison pending | PENDING |
+| SC8 | Menu, normal combat, expensive combat, effects/overdraw, transition | Pending comparable scene captures | PENDING |
+| SC9 | All applicable CI; no unexplained >3% regression | New-head CI pending | PENDING |
+| SC10 | Usable live CPU/EE/GPU capture, no silent losses; overhead quantified | GPU async implementation committed; live validation and worker toggle work outstanding | PARTIAL |
+| SC11 | All criteria met; locked full speed and >=10% unlocked headroom | Not accepted | PENDING |
+
+### Optimization ledger
+
+| Commit | Change | Baseline | Result | Improvement | Correctness | Decision |
+|---|---|---|---|---|---|---|
+| 0c488efe | Source repair and presentation store operation | Truncated source | Complete remote source | Not a performance claim | Static remote check | Retain |
+| 5c294994 | Detailed GPU asynchronous readback and query chunking | Per-submit blocking map; cutoff at 2048 dispatches | Eight reusable slots; all dispatches attempted; failure/pressure counts | Not measured | Static diff and remote file verification; CI and retail pending | Validate |
+
+Next gate: live F7 capture in the expensive 3D scene. Confirm raster
+(and other compute) rows, contiguous submission-local indexes, no map
+failures and report retention after deactivation. Record ring pressure
+waits and compare with detailed profiling disabled. Collect CPU and
+VU1 interval measurements separately; do not add overlapping worker
+and GPU times to EE wall time. Use the same native cache, resolution,
+speed mode, character/stage and input progression for comparison.
+No retail performance improvement claimed until measured.
+
+### P1 capture — 20261128-070242763, fe649940
+
+Replay provenance: clean tracked tree, O5, unlocked, async VU1 and GS,
+CPU profiling on, EE per-PC off, no host audio. GTX 1660 SUPER.
+40M dispatches, 2430 guest fields/presentations; overall 58.03 fields/s
+is not combat throughput. Detailed capture: serials 2745–3086, 342
+submissions, 32470 contiguous dispatch rows; zero failed mappings and
+zero pressure waits. GPU compute 3606.808 ms: raster 2688.538 (74.54%),
+decode 311.234, upload 303.658, CLUT 224.196, display 79.182.
+Mean 10.546 ms/submission, median 10.039, P95 14.024, max 15.000.
+Raster mean 7.861 ms/submission. During capture full two-second
+intervals show 22–26.5 fields/s, EE native exclusive 625–631 ms,
+IOP 178–184 ms, GPU submit CPU 104–129 ms. GPU compute alone cannot
+explain field time; do not sum overlapping EE, VU1 and GPU timings.
+VU1 entire replay: 84 programs, 392056 native runs, 440249063 pairs,
+zero fallbacks. Worker execution 13.112 s, compiled exclusive 12.802 s.
+Top PCs 0x730 7.221 s, 0x620 2.161 s, 0x420 1.123 s, 0x130 1.080 s,
+0x5a0 0.748 s (96.34% combined). These are whole-replay VU1 timings.
+SC1 PARTIAL, SC10 PARTIAL (valid live GPU capture; overhead/worker
+toggle still outstanding); SC2/4 not met in captured unlocked combat.
+Final acceptance still pending.
+
+### P4A — raster workgroup experiment
+
+Example submission 2746: raster dispatch 34 has 451 primitives,
+6 tiles, 509 list entries, 1.325 ms; dispatch 29 has 2030 primitives,
+79 tiles, 3901 entries, 1.059 ms. Few active groups and long ordered
+primitive loops motivate testing smaller workgroups. Opt-in
+PS2_RASTER_WORKGROUP=8 divides each existing 16x16 CPU tile into
+four 8x8 GPU groups. Default 16 preserves current group layout.
+Same ordered tile list, sample coordinates, render scale, shading,
+and dispatch submission order. No change to binning or guest code.
+This is a hypothesis, not a measured speedup; smaller groups may
+increase redundant list traversal or alter behavior for aliased
+targets. Require matched deterministic visual/VRAM correctness and
+comparable combat A/B capture with 16 versus 8. Record effective
+setting in log and replay provenance. No default switch until proven.
+
+### P4A result — 20261128-070738141
+
+Candidate d768a2ac, clean tree, PS2_RASTER_WORKGROUP=8 verified in
+provenance and console. 35467 rows across serials 2705–3081 (377
+submissions), no missing/duplicated indices, failed maps or pressure
+waits. Baseline 32470 rows/342 submissions. Total mean compute
+10.5462 -> 10.2927 ms (-2.40%), median 10.0390 -> 9.7007 ms,
+P95 14.0243 -> 13.8244 ms. Raster mean 7.8612 -> 7.6160 ms (-3.12%).
+Capture windows are different and manual PAD is not deterministic.
+Matching exact 80-operation pipeline sequence: 38 baseline and 26
+candidate submissions, total mean 9.5485 -> 9.4702 ms (-0.82%),
+raster 7.1377 -> 7.0659 ms (-1.01%); dense raster index 34 median
+1.3352 -> 1.3280 ms (-0.54%). Not a meaningful improvement. Whole
+replay 2430 fields/41.8714 s versus 2425/41.9079 s (58.03 -> 57.86
+fields/s). Fully captured combat intervals remain ~21–26.5 fields/s.
+No equivalent deterministic screenshot comparison; do not accept
+visual correctness merely from successful rendering. Retain 16x16
+default and 8x8 opt-in only. SC4 FAIL for captured unlocked combat;
+SC1/SC10 PARTIAL.
+
+### P3A — verify the native VU1 inventory before new lowering work
+
+Both live P40 captures used a launcher that hard-codes
+build/vu1-native-v20. Prior G2A proved a synchronous V22/V23 speedup;
+V30 was subsequently correctness-validated (see G3B). The selected
+live DLL hashes were not recorded, so do not infer that the directory
+name proves an exact historical version. New SDBZ_P40_VU1_AOT
+override leaves all other P40 settings unchanged and logs the
+selected directory. Provenance records directory basename, target
+marker, library count and SHA-256 over ordered filename/content
+digests (pre-run selection, not a loaded-binary attestation).
+Tests exercise the override and fingerprint stability/change.
+Compare existing V20 and V30 inventories at 16x16, same O5 EE
+cache, CPU scope profiling enabled, F7/F8 disabled. No new lowering
+or IR rebuild. Candidate report must retain 84 loaded programs and
+zero fallback. Use comparable active combat field intervals and
+VU1 ns/pair by PC; deterministic replay needed for acceptance.
+Candidate whole-replay 0x730: 200803030 pairs, 7.212 s; baseline
+199480795 pairs, 7.221 s. Do not mistake these for a measured effect
+of the GPU experiment. Prioritize this inventory control before
+further VU1 micro-optimizations, and separately acquire live F8
+hot-PC attribution. No final performance acceptance.
+
+| Commit | Experiment | Result | Decision |
+|---|---|---|---|
+| d768a2ac | 8x8 raster workgroups | Comparable raster mean -1.01%, no gameplay improvement | Retain opt-in only |
+| P3A | Select and fingerprint existing VU1 inventory | Pending matched measurement | Validate V20 vs V30 |
+
+### P3A result — 20261128-071148244 / 071322464
+
+Both at 2ad71292 with clean tree, O5, native target, 84 libraries,
+distinct inventory fingerprints (V20 72ad01e1..., V30 9a2f81a3...),
+16x16 tiles/workgroups and async workers. 40M dispatches each;
+manual input, F7 enabled during expensive combat in both runs.
+No VU1 interpreter fallback or worker failure. V20/V30 compiled
+exclusive 13.1246562/11.457634 s over 451915502/450664905 collected
+pairs, 29.0423/25.4238 ns/pair (-12.46%, +14.23% throughput).
+0x730 (same code hash) 35.8989 -> 31.1032 ns/pair; 0x620
+28.5937 -> 25.0566; 0x420 18.6744 -> 16.5189; 0x130
+15.8108 -> 15.6338; 0x5a0 30.2573 -> 25.8354.
+EE overlap 4.437 -> 3.782 s. Runner wall 41.8893 -> 41.3662 s,
+fields 2397 -> 2332; 57.2223 -> 56.3746 whole-run fields/s.
+Seven full capture intervals (indices 13 through 19) average
+24.3857 -> 24.6648 fields/s (+1.14%). No demonstrated gameplay
+speedup. GPU rows 35644/35141, submissions 396/407, no failed maps
+or pressure waits. Mean compute 10.3654 -> 9.8304 ms; workload
+differs. EE native boundary remains ~614.5/614.9 ms per 2s interval.
+Use V30 as experimental control (not an unconditional default).
+SC4 FAIL, SC1/SC10 PARTIAL. Deterministic visual validation and
+uninstrumented combat acceptance remain outstanding.
+
+### P4B — finer raster primitive lists
+
+P4A only subdivided workgroups; every subtile still traversed the
+16x16 primitive list. Add independent PS2_RASTER_TILE=8 alongside
+PS2_RASTER_WORKGROUP=8. Binning and triangle span clipping use the
+selected tile size, as do tile grid allocation, shader origin and
+dispatch mapping. Existing clipping margin and ordered primitive
+insertion are retained. Default 16x16 and prior 16/8 mode preserved.
+Finer lists should reduce redundant per-pixel traversal for small
+triangles, but increase CPU binning and list memory traffic. No
+speedup asserted. Native WebGPU smoke runs a second time with
+8x8 tiles/workgroups, using the same correctness checks; CI pending.
+Compare V30 at 16/16 vs 8/8, with detailed GPU capture in both arms.
+Compare tile entries times tile area (upper-bound pixel iterations),
+raster time, CPU batch scope, and combat rate; require deterministic
+VRAM/visual equivalence before promotion. No new EE/VU1 lowering.
+
+### P4B result — 20261128-072021087
+
+Candidate a1f3b1b clean tree; same V30 inventory SHA-256 as
+071322464 control; both O5 and 40M dispatches. 8x8 CPU tile
+and workgroup confirmed. Candidate 32880 detailed rows/412
+submissions, contiguous indices, no failed maps or pressure waits.
+Control 35141 rows/407 submissions. Mean compute 9.8304 -> 8.7070
+ms (-11.43%), mean raster 7.2975 -> 6.2627 ms (-14.18%).
+Exact 80-operation sequence (39 control, 409 candidate submissions,
+excluding first missing-metadata batch) mean compute 9.4787 ->
+8.7291 ms, raster 7.0579 -> 6.2788 ms (-11.04%). Mean summed
+tile-list entries 15361.87 -> 29853.61; entries times tile area
+3932639 -> 1910631 estimated pixel iterations (-51.4%).
+Median dense raster #29 0.9953 -> 0.7990 ms; #34 1.3279 ->
+1.1063; #48 0.9559 -> 0.6901. #21 regressed 0.7905 -> 0.8365.
+Seven full detailed-capture intervals: 346 fields/14.027s vs
+357 fields/14.028s, 24.6648 -> 25.4490 fields/s (+3.18%).
+EE boundary exclusive per field 12.440 -> 12.019 ms; IOP
+4.190 -> 3.880; submit CPU 2.249 -> 2.030. Batch scope
+0.003 -> 0.005 ms/field does not cover all GS worker binning
+cost; do not infer full CPU binning overhead from it.
+Candidate 84 native programs, 461349807 native pairs, zero fallback
+or worker host failures. Manual inputs differ, no deterministic
+visual equivalence established. Keep opt-in, use 8/8 V30 as
+next experimental configuration; default remains 16/16.
+SC4 FAIL; SC1/SC10 PARTIAL.
+
+### P5A — capture complete combat EE hot-PC set
+
+F8 existing per-PC accounting ranks by measured native boundary
+duration with nested scope totals, prints top 25. Preserve all
+ranked rows at normal shutdown in <report>.pc-profile.csv, with
+raw calls, dispatches, attempted instructions, idle-charged
+instructions, native boundary and nested ns. No added hot-loop
+cost; do not treat this as LLVM instrumentation PGO data or
+infer CFG edge frequencies from entry counts. Archive the CSV
+with the regular full run, remove stale sidecar before replay.
+Test stale cleanup and archive allowlist. Use V30, 8/8, F6 on,
+F7 off and F8 on only in expensive combat, turn F8 off and
+close normally or reach dispatch limit. Next select hot modules,
+inspect generated IR and assess targeted optimization/PGO design.
+No guest lowering changes; CI pending.
+
+| Experiment | Result | Decision |
+|---|---|---|
+| P3A V30 | -12.46% VU1 ns/pair, gameplay +1.14% nominal | Experimental control |
+| P4B 8/8 binning | -11.04% comparable raster, gameplay +3.18% nominal | Keep opt-in pending deterministic validation |
+| P5A complete EE PC export | Pending combat capture | Attribute EE hotspots |
+
+### P5A result — 20261128-072445332
+
+Clean b59cb37, 40M dispatches, 2515 fields in 41.37548 s,
+84 V30 libraries, native pairs 444387833, no fallback or worker
+host failures; 3165/3165 normal GPU queries complete, no detailed
+passes. Not a matched unprofiled comparison (F8 enabled during
+combat; manual input). Last six full combat intervals 52–53
+fields per ~2.003 s; approximately 26 fields/s, still short of
+59.94 target. Whole-run rate 60.78 is misleading.
+
+Full CSV has 2698 distinct entry PCs, 16729220 calls,
+16728790 dispatches, 1840583763 attempted guest instructions,
+1456025193 idle-charged, 384558570 non-skipped. Inclusive
+4823355000 ns, nested 322060900, exclusive 4501294100 ns.
+Rank by inclusive minus measured nested scopes, not attempted
+guest instruction count or inclusive wall. 0x172e48 has
+155.116 ms inclusive but 154.227 ms nested. 0x175210 alone
+accounts for all idle-charged instructions; do not treat
+those as executed host work.
+
+| PC | Calls | Exclusive ms |
+|---|---:|---:|
+| 0x108220 | 193125 | 236.0655 |
+| 0x1068e0 | 347623 | 150.0907 |
+| 0x106a20 | 191249 | 125.1181 |
+| 0x185cb0 | 592441 | 79.4239 |
+| 0x110304 | 5766 | 75.2837 |
+| 0x1a9a40 | 185250 | 74.3718 |
+| 0x1a0c80 | 85500 | 69.169 |
+| 0x1a2a10 | 277875 | 67.8228 |
+| 0x186038 | 172899 | 64.9509 |
+| 0x106950 | 78572 | 61.4202 |
+
+Top 10 cover 22.30%, 25 cover 34.67%, 100 cover 57.67%.
+Entry PCs averaging <=10 non-skipped instructions/call account
+for 9390158 calls (56.13%) and 1.3170597 s (29.26% exclusive).
+<=20 account for 12399838 calls (74.12%) and 1.9840394 s
+(44.08%). Broad native boundary costs justify investigating
+direct transfers, register residency and interprocedural
+optimization, not merely one math routine. Exclusive time
+still includes host boundary overhead; no causal attribution.
+
+### P5B — profile-ranked read-only IR collection
+
+Select union of top 25 PCs by exclusive boundary and call count.
+Map exact entries and possible resume owners using current
+ee_functions.json, validate metadata and selected IR SHA-256
+against the captured translation-cache.json before writing a
+fresh ZIP. Keep unresolved PCs explicit. No cache writes or new
+lowering. Inspect original IR for the dominant native regions,
+then design a bounded hot-module interprocedural or direct-call
+experiment with correctness gates. Entry counts alone are not
+instrumented PGO edge profiles. No speedup claimed.
+
+### P5B/P5C — hot VU0 inline pilot
+
+ee-hot-combat-ir.zip selection receipt matches all 27 IR hashes;
+36 PCs cover 1.7482219 / 4.5012941 s (38.84% exclusive).
+0x108220 has eight LQC2, sixteen full-mask broadcast FMAC
+operations (four each VMULAX/VMADDAY/VMADDAZ/VMADDW), four SQC2,
+JR and delay; 193125 calls imply 3090000 FMAC operations.
+0x1068e0 dot product, 0x106a20 vector transform, 0x106950
+reciprocal-square-root path. The current generated helpers
+already implement exact packed VU arithmetic and synchronization.
+No host float substitutions, callback elision or flag changes.
+
+Local static pilot: LLVM 20.1.8, x86_64-pc-windows-msvc,
+znver2, O2 middle-end/backend, default target feature set,
+not exact LLVM 22.1.0 host target. Object sizes:
+
+| PC | Base | Single-use FMAC inline | All FMAC inline |
+|---|---:|---:|---:|
+| 108220 | 19300 | 19300 | 32219 |
+| 1068e0 | 11827 | 11526 | 11526 |
+| 106a20 | 19245 | 17900 | 17900 |
+| 106950 | 15725 | 14729 | 14729 |
+| 106aa0 | 33753 | 27669 | 32600 |
+
+Forcing sync inline did not change object sizes or static
+instruction counts. Reject blanket FMAC inlining. Single-use
+annotation reduces static instructions/calls/branches in these
+four modules, not proof of wall-time speedup. 108220 unchanged.
+P5C tool stages only four captured modules, authenticates
+production metadata/IR/object/library, requires byte-identical
+control re-emission, retains replacements only when object and
+executable bytes do not grow. Unchanged objects are reused;
+no production IR edits or promotion. The existing matched
+replay harness accepts this plan with an additional baseline
+library identity gate. CI and retail correctness/performance
+pending. Next: if size gate passes, compare isolated DLL with
+deterministic PAD replay, then investigate matrix FMAC arithmetic
+and register residency. SC1 PARTIAL, SC4 FAIL.
+
+### P5C result — ee-fmac-inline-comparison.zip
+
+All five workflows at a5bebbc passed. Synchronous O5 control
+and inline overlay, 40M dispatches, 2560/2560 PAD polls,
+2003975 matched dispatch trace samples, zero differences or
+unpaired samples. Final parsed reports and rendered image
+match across baseline/control/candidate. Wall 51.204/51.500/
+51.469 s, 2623 fields each. Candidate +0.06% throughput versus
+control, less than A/A variation. Correctness accepted for this
+replay; no demonstrated speedup, do not promote.
+
+### P5D — exact packed discard fast paths
+
+Isolated O5 overlay from original production objects, not the
+P5C image. For multiply, return XOR-signed zero with both flags
+clear only if every lane has an exponent-zero operand. For
+add/sub, return the surviving operand (or intersection-signed
+zero) only if every lane has at least one exponent-zero or
+distance >=25 operand. Preserve the original full path,
+including Booth correction, cancellation underflow, architectural
+flags, ACC and synchronization. No approximate host floating
+arithmetic or FMA replacement.
+
+Local actual captured-IR test: LLVM 20.1.8 native O0/O3,
+600000 result/overflow/underflow lane comparisons matched;
+random raw operands, flush-to-zero, alternating lanes and
+large exponent differences. Windows x86_64 znver2 static
+O2 sizes (not production LLVM 22.1.0): 108220 19300->19942,
+1068e0 11827->12031, 106a20 19245->19893, 106950 15725->16023,
+106aa0 33753->33436 bytes. Actual branch hit rate and runtime
+benefit unknown. New CTest uses production arithmetic template
+and equivalent differential cases; CI pending.
+
+Reuse the authenticated overlay builder with --mode vector-discard;
+only these five hot modules, same byte-identical O5 control
+re-emission, per-module object and executable growth at most 10%.
+Original library identity and isolated cache enforced, deterministic
+PAD replay required. Receipt now includes raster tile/workgroup.
+Keep baseline unchanged.
+
+Platform/vendor-specific optimization explicitly permitted:
+use if constexpr for C++ compile-time target selection where
+appropriate, and recorded LLVM target CPU/features for emitted
+guest IR; not compiler-host inference. Portable exact arithmetic
+remains the reference/fallback. ISA availability must be proven
+before using intrinsics, and CPU features in artifact provenance.
+No vendor-specific instructions forced in this checkpoint.
+
+### P5D result — ee-vector-discard-comparison.zip
+
+Synchronous O5 A/A/B, same V30 inventory directory, 8/8 tile/workgroup,
+40M dispatches each. 2359/2359 PAD polls consumed, 1837171 sampled
+transitions identical with zero missing samples. Raw terminal JSON
+and PPM byte-identical across all three arms (report SHA-256
+6bca8abc8587740e1ed136aa354b7e285665c99ea5ae5457466bb6b916b10086,
+image 08eab311b1a620f325d9b72d2713c720f342273286b6cea7be15714840902d7a).
+2422 fields and presentations, 441964423 VU1 native pairs,
+zero fallback. Wall 51.281/51.359/51.407 s. Candidate -0.093%
+throughput vs A/A control, less than A/A spread. Correctness
+accepted for this workload only; do not promote for performance.
+No controlled async speed result. CI at 05726db: four workflows
+passed, Build and test pending at inspection.
+
+### P4C — reject out-of-bounds pixels before loading GS setup
+
+Raster loop currently reads the primitive setup ID and loads the
+26-word immutable setup record, including three format calculations,
+before the per-pixel bounding-box rejection. Move the rejection
+ahead of setup loads via opt-in pipeline override RASTER_LAZY_SETUP
+(81d3033). No CPU binning changes, same list traversal and shade
+order, no VRAM/flag changes intended; last_setup always describes
+actually loaded state. Setup loading reads immutable data only;
+rejected primitives perform no shading. This may save repeated loads
+and computations, but divergent lanes or compiler scheduling could
+offset gains. Default 0 preserves baseline path; 1 enables candidate.
+PS2_RASTER_LAZY_SETUP recorded in boot provenance and stderr.
+New native WebGPU 8/8 lazy-setup smoke variant. Matched runner
+replay --raster-lazy-setup uses the same authenticated O5
+library and runner for baseline, A/A and B, forces sync and disables
+runtime/PC/GPU profiling, requires confirmed per-arm pipeline markers,
+PAD consumption, sampled trace agreement, exact final report and PPM
+hashes; no production cache writes. User must rebuild runner only.
+F5/F6/F7/F8 toggles should not be used during this correctness
+comparison. This is a bounded GPU speed hypothesis, not an achieved
+speedup. SC4 remains unmet; SC1 and SC10 partial.
+
+### P4C result — ee-raster-lazy-setup-comparison.zip
+
+Matched A/A/B using identical authenticated O5 DLL and runner.
+8/8 raster tile and group, V30 directory, synchronous GS and VU1.
+Confirmed lazy_setup 0/0/1. All reached 40M dispatches; 2603/2603
+recorded PAD polls consumed, 2044579 common trace samples, zero
+differences/unpaired. Independently confirmed byte-identical JSON
+and PPM hashes across all arms. 2666 fields and successful
+presentations; 388310365 native VU1 pairs, no interpreter fallbacks.
+Wall 50.797/50.875/50.953 seconds; candidate -0.153% throughput vs
+control, within same magnitude A/A variation. Correctness accepted
+for this replay; keep lazy setup opt-in, not a demonstrated speedup.
+No detailed GPU timing or matched async speed result.
+
+### P5E — broad profile-selected native O3 pilot
+
+Original O5 pipeline uses full LLVM O2 only for modules containing
+specialized VU0 FMAC calls; other modules use the native O2 backend
+without the full middle-end pipeline. Test a wider hot selection
+from the P5A full CSV (top 250 entry PCs each by exclusive time and
+call count, including metadata resume-owner candidates). For each
+selected module require byte-identical O5 re-emission, then run
+full O3 middle-end and native O3 backend with identical host CPU
+and feature string. Do not change source IR, public function
+inventory, guest ownership or portable cache keys. Parallel
+bounded worker pools; retain replacements only if bytes change
+and each object/executable section total is <=150% of original.
+This is a deliberately permissive pilot size gate, not production
+acceptance. Cold objects reused, isolated overlay marked nonproduction.
+Record profile and cache hashes. Matched synchronous A/A/B required;
+no PGO instrumentation or ThinLTO claimed: this is hotness-based
+selection of optimization intensity, not edge-profile feedback.
+Full production CI and repeated async combat benchmarks remain
+required for any promotion. No measured speedup yet.
+
+### P5E result — ee-hot-o3-comparison.zip
+
+Build recovery succeeded. helper-plan(9).json: 161 selected modules,
+91 accepted and 70 rejected by the per-module 150% size gate;
+all 16252 functions retained, original O5 controls byte-identical.
+Selected owner candidates represent 77.65% of the original profile's
+exclusive boundary time; this is selection coverage, not proof that
+accepted objects account for that entire percentage. Accepted object
+bytes 1642697 -> 1934826 (+17.78%); executable bytes 1139290 ->
+1458799 (+28.04%). Candidate DLL 112148992 bytes. Host znver2,
+LLVM 22.1.0, x86_64-pc-windows-msvc.
+Receipt baseline and candidate DLL hashes match plan. All three
+arms 40M dispatches, 2541 fields/presentations, 12281599700 guest
+attempts, 415895434 native VU1 pairs, zero interpreter fallbacks.
+Recovered inventory 88 native programs, exceeding previous 84
+count but not proof of inventory superset. 2478 PAD polls, 1935262
+common trace samples, zero differences/unpaired. Independently
+verified byte-identical raw JSON and PPM across arms.
+Wall 50.797/50.579/50.766 s; candidate -0.368% throughput vs A/A
+control, within A/A spread. Matched late dispatch range 24002560
+to 39993344: 332 fields each, 17.839/17.859/17.798 s, 18.61/18.59/
+18.65 fields/s; native elapsed 11.604/11.568/11.527 s (inclusive).
+No measurable speedup. Do not promote O3 overlay. Synchronous
+results are not representative of normal asynchronous play.
+
+### P4D — matched validation of finer raster binning
+
+Earlier P4B GPU profile showed meaningful raster time reduction,
+but independent interactive runs cannot establish pixel equivalence.
+Add same-library --raster-tile8 comparison to existing replay harness:
+16/16 control and 8/8 candidate, lazy setup off, same O5 DLL/runner,
+synchronous, no profiling. Require confirmed tile and workgroup
+markers, matched PAD, trace and exact final report/PPM. Optional
+--recording accepts a complete prior PAD0 recording for every arm,
+validates baseline consumption as well and hashes the input before
+and after. No new C++ changes or cache rebuild. Reuse P5E recording
+for a comparable combat workload. Promotion still requires matched
+image checks and representative normal async performance evidence.
+
+### P4D result — ee-raster-tile8-comparison.zip
+
+All three 40M dispatch replays complete, PAD 2478/2478 each,
+1935262 sampled transitions common, zero differences/unpaired.
+Actual GPU markers confirm 16/16, 16/16, 8/8; lazy setup disabled.
+Identical raw report SHA-256
+7d6ac0d1a09eee53c6cfc42708e090ae0ef497c424fe26628067454d4b104770
+and PPM SHA-256
+81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a
+independently verified. Identical runner/library and recording
+hashes before/after. 2541 fields, 88 VU1 programs, 378121 native
+runs, 415895434 native pairs, zero interpreter fallbacks.
+Wall 51.032/51.672/52.156 s; candidate -0.928% throughput vs
+control, below A/A variation. From dispatch 24002560 to 39993344:
+332 fields each in 18.1495/18.0981/18.1693 s. Synchronous
+correctness accepted; no measurable speed improvement. Keep opt-in.
+Prior independently captured GPU timestamp improvements remain
+diagnostic evidence, not proof of normal async speed benefit.
+
+### P4E — diagnostic matched async raster comparison
+
+Permit explicit --async-raster with --raster-tile8 --control
+and an existing --recording; cannot combine with --sync.
+Run same library and runner with asynchronous VU1 and GS,
+no detailed GPU or CPU/PC profiling. Require PAD consumption
+for each arm, same sampled dispatch transitions and exact PPM
+hash. Terminal report comparison uses the existing graphics
+replay normalization of host timing/profile fields only;
+record raw and normalized report hashes. Preserve guest and
+worker counters, report failure rather than relaxing other
+gates. Existing sync replay retains byte-identical report check.
+A synchronous recording may diverge on async execution; if so,
+the archive is diagnostic only. No production changes, no
+cache rebuild. One A/A/B is a screening measurement; repeat
+and sustained combat acceptance gates still required.
+
+### P4E result — ee-raster-tile8-async.zip
+
+Actual 16/16, 16/16, 8/8 markers, lazy setup off. All completed
+40M dispatches, PAD 2478/2478, 2541 fields/presentations, 88 native
+VU1 programs, 378121 native runs, 415895434 pairs, no fallback.
+Same final PPM SHA-256 81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a.
+Complete GIF/GS, path, VIF1 producer, presentation and SIO2
+report sections identical. However A/A first differs at dispatch
+11574272: 30107 different common samples and 207323 unpaired.
+A/B first differs at 11560336: 30070 different common samples,
+252236 unpaired. Final registers, PC and instruction counts differ.
+A/A/B wall 41.734/42.422/41.969 s; candidate +1.08% throughput
+vs A/A, within A/A variation. Late dispatch interval 24002560
+to 39993344: 332 fields each, 12.0188/12.4157/12.1557 s.
+Keep 16/16 default. Async scheduling variance is a blocker for
+strict dispatch matching; do not label equal graphics workloads
+as architectural equivalence. No cycle-accuracy detour.
+
+### P6A — bound optional host diagnostic overhead once
+
+The "profiling off" P4E arms still performed ~37M empty controller
+polls and ~14.6M EE/VU1 overlap intervals. Polling is already a
+single acquire check and changing it changes completion timing;
+do not reduce guest-visible polling cadence. The native overlap
+collector performs host clock reads at pending native boundaries.
+Existing report_hotspots and boundary_timing also default on.
+New --async-lean uses the same recorded workload, 16/16 GPU,
+same authenticated O5 DLL and runner, async VU1/GS, no detailed
+profiling. A/A force existing three host diagnostic options on,
+B sets SDBZ_REPORT_HOTSPOTS, SDBZ_REPORT_BOUNDARY_TIMING and
+SDBZ_VU1_NATIVE_OVERLAP_PROFILE to 0. Preserve dispatch tracing,
+history and scheduler cadence; no C++ changes. This is a single
+diagnostic overhead screening, not an assumption that tracing
+explains slow 3D. Save exact graphics workload and final-image
+hash comparison before strict trace checks, including when A/A
+fails; explicitly not architectural equivalence. Verify reported
+hotspots and overlap modes, and hash VU1 library inventory before
+and after all async comparisons. Keep strict trace/report gates.
+No production defaults change. SC4 remains unmet.
+
+### P6A result — ee-async-lean-comparison.zip
+
+Same authenticated O5 DLL, runner, 88-program VU1 inventory,
+recording unchanged. All three runs 40M dispatches, 2478/2478 PAD,
+2541 fields/presentations, 4345821 GPU committed draws, zero VU1
+interpreter fallbacks. Independently verified identical final PPM
+SHA-256 81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a.
+Actual stdout startup markers confirm hotspots/boundary 1/1,
+1/1, 0/0; report confirms native overlap true/true/false.
+Hotspot observations 40M/40M/0. Worker overlap intervals
+15219452/15358832/0. Wall 42.735/43.000/37.329 seconds:
+candidate +15.19% throughput vs control, A/A spread 0.62%.
+Late dispatch 24002560..39993344: same 332 fields in
+12.4863/12.2483/9.9754 s (26.59/27.11/33.28 fields/s),
+candidate +22.79% throughput. Candidate late rate ~55.5% of
+59.94 Hz. Native attempts and VIF1 producer counters differ
+slightly; VU1 pairs 415851899/415891585/415745774, difference
+candidate vs control -0.035%. Other selected graphics report
+sections equal. A/A first different 11560411, A/B 11560534;
+strict trace and architectural equivalence NOT established.
+Performance signal materially exceeds A/A spread but remains
+diagnostic, not a production acceptance or a claim of exact
+guest timing. Do not promote defaults yet.
+
+### P6B — isolate three independent diagnostic switches
+
+Extend --async-lean with --lean-component hotspots, boundary,
+overlap or all (default all). A/A keeps all three enabled;
+candidate disables exactly the named collector. Validate each
+startup report-options marker and worker overlap flag, not just
+the requested environment. Preserve the strict gates and save
+diagnostic evidence before checking trace equality. Reuse the
+same recording and binaries. No C++ or production cache changes.
+The single-switch effect need not add linearly due to thread
+overlap. Compare late matched field windows and A/A variance.
+
+### P6B result — single-switch diagnostics
+
+Three A/A/B archives, all same authenticated O5 DLL, runner,
+recording and 88-program VU1 inventory. All nine reached 40M
+dispatches, 2541 fields, 2478/2478 PAD polls, zero VU1 fallbacks;
+all nine PPM hashes independently verified identical
+(81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a).
+Startup markers confirm exactly the requested switch disabled.
+Each A/A pair uses identical graphics workloads; candidate draws
+4345821 vs 4353515 control (-0.177%). Native pairs control
+415895434 each; candidates hotspots 415892863, boundary 415825238,
+overlap 415839620. No exact architectural match (A/A also diverges).
+Late dispatch window 24002560..39993344, 332 fields per arm:
+
+| Collector disabled | A/A/B wall s | Late A/A/B s | Whole speed gain vs A/A | Late gain vs A/A |
+| --- | --- | --- | --- | --- |
+| hotspots | 39.906/39.813/38.891 | 11.7061/11.6564/11.2657 | 2.37% | 3.47% |
+| boundary | 39.797/40.047/37.500 | 11.6718/11.7120/10.6000 | 6.79% | 10.49% |
+| overlap | 39.938/39.797/39.094 | 11.6930/11.7278/11.1668 | 1.80% | 5.02% |
+
+Each whole-run A/A spread <0.63%. Boundary timing is the largest
+individual signal, followed in late combat by overlap and hotspots.
+Do not sum speedups or claim matched async correctness. Control
+speeds are higher than P6A; compare only within each paired run.
+
+### P6C — strict synchronous validation of lean EE report mode
+
+Add --sync-lean to validate hotspots and boundary timing disabled
+together with the same recorded input. Force synchronous GS and
+VU1, same 16/16 renderer and O5 DLL, lazy setup off. Keep native
+overlap flag unchanged (inactive without worker). Confirm startup
+options, unchanged VU1 inventory and input hashes, exact PAD and
+sampled dispatch match. Compare every terminal report field except
+m2_runtime (host-only hotspot collector deliberately disabled),
+and exact final PPM. No other normalization in this sync mode.
+No production defaults changed; prior async performance evidence
+remains diagnostic. This separates correctness validation from
+async scheduling variation without altering guest clocks.
+
+### P6C result — ee-sync-lean-comparison.zip
+
+All three 40M dispatch runs completed with identical 2541 fields,
+12281599700 instruction attempts, 378121 native VU1 runs,
+415895434 native pairs, no fallback, 2478/2478 PAD polls. Both
+A/A and A/B matched 1935262 dispatch samples without mismatch
+or unpaired samples. Independently verified raw JSON differences
+limited to m2_runtime, exactly the intended hotspot collector;
+final PPM SHA-256 identical (81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a).
+Runner, O5 library, VU1 inventory and recording unchanged.
+Wall 51.125/50.937/46.235 s (+10.17% throughput vs A/A).
+Late dispatch window 24002560..39993344: 332 fields each in
+17.9498/17.8287/16.1396 s (+10.47% late throughput vs A/A).
+Correctness accepted for EE report switches in matched sync mode.
+Prior asynchronous speedup remains diagnostic, not a claim of
+architectural equivalence under asynchronous scheduling.
+
+### P6D — lean P40 gameplay defaults
+
+P40 and P40-listen now default SDBZ_RUNTIME_PROFILE,
+SDBZ_REPORT_HOTSPOTS, SDBZ_REPORT_BOUNDARY_TIMING and
+SDBZ_VU1_NATIVE_OVERLAP_PROFILE to 0 if not already defined.
+Explicit environment overrides remain authoritative, and the
+launcher prints the actual choices. Existing provenance allowlist
+already records all four. This changes only the P40 launcher;
+non-P40 runner defaults and guest IR/cache inputs are unchanged.
+Keep F5 overlay, F6 main-thread scope toggle, F7 GPU detail and
+F8 PC profile. F6 does not dynamically enable startup-only worker
+profiling/overlap or hotspot collection; opt in before launch
+when those diagnostics are needed. Do not infer zero timings
+are zero cost. Restore legacy whole-session profiling by setting
+all four variables to 1. Raster default remains 16/16.
+Validate ordinary uncapped combat with lean defaults, 88-program
+inventory override, no profiling hotkeys active. SC4 still unmet;
+repeat async and locked sustained combat acceptance remain open.
+
+### P6D retail result — sdbz-graphics-pr148-neutral-20261128-085406603.zip
+
+Clean da717f6, O5, native 88-program recovered inventory
+b50458b3f63ba9b571ccaab94d8c275d81c5bc99506588eefeb13445de852f4c.
+Runtime/PC profiling off, hotspots/boundary/overlap off;
+16/16 raster, lazy setup off, async GS/VU1, unlimited speed.
+40M dispatches, 2495 fields and successful presentations,
+4409041 committed draws, 420393655 native VU1 pairs, no fallback
+or worker host failure. Last progress at dispatch 39993344:
+32.572s, 2495 fields (76.60 fields/s whole run, not combat).
+Dispatch 24002560..39993344: 339 fields in 9.9594s
+(34.04 fields/s, 56.79% of 59.94 Hz). Worker cumulative
+execution 11.029s; 384249 collected jobs, one pending at
+snapshot. Interactive input not matched to prior recordings;
+compare only indicative performance. SC4 still fails.
+
+### P4F — early triangle rejection before color/texture interpolation
+
+Raster remains the largest measured GPU scope. Split plot into
+prepare_plot and plot_prepared; preserve scissor, scanmask,
+destination-alpha and depth tests, addresses, read order,
+blending, alpha test, writes and primitive ordering. Pass the
+already-read destination/depth values forward rather than
+re-read VRAM. With PS2_RASTER_EARLY_DEPTH=1, triangles run the
+existing tests after coverage and depth interpolation but
+before computing vertex color and texture attributes.
+Other primitive paths keep their existing interpolation order.
+Default 0; shared plot refactor can also affect default codegen,
+so check default output and timing against earlier lean sync
+replay. Native smoke test and provenance added. No guest IR
+changes intended; rebuild runner only. Potential GPU register
+pressure or shader compiler scheduling effects remain unmeasured.
+Harness --raster-early-depth requires --control --sync
+--recording, forces 16/16, lazy setup off, lean diagnostics
+in every arm, validates exact pipeline marker, inventory,
+PAD, trace, raw terminal JSON and final PPM. No performance
+benefit claimed until measured.
+
+
+### P4G — shared bilinear texture coordinates
+
+P4F replay: 46.812/46.485/46.687 seconds; identical raw terminal
+reports, screenshots and sampled dispatch traces. No demonstrated gain;
+leave early depth off. The synchronous worker is disabled and retains its
+default overlap flag; configure the flag consistently and require zero
+submitted jobs, no pending worker, and zero overlap intervals. Do not
+normalize away architectural differences.
+
+P4G adds PS2_RASTER_BILINEAR_COORDS=1 (default 0). Reuse the two wrapped
+X and two wrapped Y coordinates for all four taps instead of wrapping
+both axes separately for each tap. Applies to native atlases, decoded
+textures and direct VRAM sampling; preserves tap order, per-tap VRAM
+reads, format conversion, snapshot selection, and interpolation math.
+Point sampling is unchanged. No guest IR change. No performance gain
+claimed before a matched --raster-bilinear-coords --control --sync
+--recording replay. Shader compilation and retail validation required.
+
+
+### P4G result — ee-raster-bilinear-comparison.zip
+
+Strict sync A/A/B passed; 40M dispatches, all 2478 PAD polls,
+1935262 trace samples identical, no unpaired transitions, raw JSON
+and final PPM byte-identical, 2541 presentations, 88 native VU1
+programs, 415895434 pairs, zero fallbacks. All input identities
+unchanged. Wall 46.297/46.109/46.156 s. At 24002560..40000000,
+332 fields in 16.0989/16.1439/16.0734 s; candidate +0.44% throughput
+versus control, no meaningful gain. Keep opt-in. SC4 still unmet.
+
+### P4H — per-invocation plot address cache
+
+PS2_RASTER_PLOT_ADDRESS_CACHE=1 (default 0) lazily caches framebuffer
+and depth Loc values for the current pixel and setup index. Invalidate
+both when the loaded setup changes. Cache no VRAM contents, retain
+scissor, scanmask, alpha/depth tests, read/store order and primitive
+order. A rejected primitive does not precompute an unused depth address.
+Potential benefit: avoid repeated swizzle-table reads for overlapping
+primitives sharing a setup. Register pressure and shader compiler
+codegen may offset savings. Strict --raster-plot-address-cache --control
+--sync --recording comparison, other raster variants off. No EE IR
+changes. Native shader build, replay, and performance proof pending.
+
+
+### P4H result — ee-raster-address-cache-comparison.zip
+
+Strict synchronous A/A/B passed. All three 40M dispatches,
+2478 PAD polls, 1935262 common trace samples with zero mismatch or
+unpaired samples. Raw JSON and PPM independently SHA-256 verified
+identical; 2541 fields/presentations, 88 VU1 programs, 415895434
+native pairs, zero fallbacks; binaries and recording unchanged.
+Wall 47.437/47.266/47.453 s. Late dispatch 24002560..39993344:
+332 fields in 16.1537/16.2905/16.1219 s (20.55/20.38/20.59 fields/s).
+Candidate +1.05% vs control, +0.20% vs baseline. No reliable gain.
+Leave disabled. P4F/G/H all show negligible gameplay gains; stop
+incremental raster arithmetic optimization for now.
+
+### P4I — isolate normal GPU pass timestamp submission overhead
+
+Regular compute submission acquires timestamp slots, writes beginning
+and ending timestamps, resolves to a buffer, copies and maps readback
+for each available slot even with EE runtime profiling disabled. Add
+PS2_GPU_REGULAR_TIMESTAMPS=0 (default 1) to bypass regular query-slot
+acquisition only. Retain device timestamp feature, F7 detailed
+capture, normal compute dispatch order, queue submit, event polling,
+and readback for guest-visible operations. The regular GPU-busy
+estimate has no samples while disabled. Emit effective mode at init
+and cumulative pass/query/detail counters at final collection.
+--gpu-regular-timestamps-off --control --sync --recording confirms
+supported timestamps and nonzero completed queries in controls,
+zero in candidate, no detail capture or query failures in any arm,
+all prior raster switches off, and exact terminal report/PPM and
+trace checks. No guest IR changes. Diagnostic cost screen, not a
+claim that GPU timestamp collection is the main combat bottleneck.
+
+
+### P4I result — ee-gpu-timestamps-comparison.zip
+
+Strict sync A/A/B passed. 40M dispatches, 2478/2478 PAD polls,
+1935262 matching sampled transitions, identical raw reports and PPM,
+88 native VU1 programs, 415895434 native pairs, zero fallbacks.
+All 3202 regular compute passes identical in count; 3202 submitted
+and completed queries in controls versus zero in candidate, no query
+failures. Wall 47.984/46.109/46.282 s, candidate -0.37% throughput
+versus control. Dispatch 24002560..39993344: 332 fields in
+16.3170/16.1131/16.1377 s. No meaningful performance gain. Retain
+regular timestamps by default. SC4 still unmet.
+
+### P4J — selective dense raster workgroup subdivision
+
+PS2_RASTER_DENSE_WORKGROUP=1 (default 0) creates a second raster
+pipeline with 4x4 GPU workgroups. Use it only for 16x16 CPU tiles
+with normal 16x16 groups, 1..32 occupied tiles and average list
+length at least 64. Thresholds are a pilot, motivated by previous
+profile batches with 6 tiles and 509 entries. Each chosen dispatch
+has 16 times as many workgroups, same pixels and ordered tile lists;
+other batches retain the original layout. No guest IR or shader
+arithmetic changes. Scale changes recreate both pipelines. Detailed
+capture retains the raster label; final summary distinguishes dense
+and ordinary dispatch counts. More redundant list loads, partial
+waves, and aliased VRAM access order are risks. Strict sync replay
+requires actual dense dispatches, equal total raster dispatch counts,
+matched sampled transitions, exact raw report and final image. No
+speedup or general rendering equivalence claimed before validation.
+
+
+### P4J result — ee-raster-dense-comparison.zip
+
+Strict sync A/A/B passed; 40M dispatches, all 2478 PAD polls,
+1935262 trace samples identical, raw JSON and final PPM independently
+SHA-256 verified identical. 2541 fields/presentations, 88 native VU1
+programs, 415895434 pairs, zero fallback; all input identities
+unchanged. 16833 raster dispatches per arm, candidate 907 dense
+and 15926 standard. Wall 47.468/47.203/47.938 s; dispatch interval
+24002560..39993344: 332 fields in 16.4299/16.5435/16.5128 s.
+No meaningful gain. Keep disabled. Stop raster micro-experiments.
+
+### P4K — direct common packed GIF register writes in the GPU mirror
+
+The P4J workload reports 48175336 packed events, including 17504664
+RGBAQ, 12265725 ST and 17504664 XYZF2 events, and 4353515 GPU draws.
+PS2_GS_PACKED_DIRECT=1 (default 0) bypasses the second register
+switch and intermediate vertex register packing for common PACKED
+RGBAQ, ST, UV, XYZF2/3, XYZ2/3 and FOG. These register writes already
+preserve setup generation; preserve exact Q bits, masks, ADC draw
+suppression, fog, vertex queue, ordering and draw path. All other
+registers continue through the original path. No change to guest GIF
+transaction parsing, GS counters, GPU shader, scheduling or guest IR.
+--gs-packed-direct --control --sync --recording requires matching
+raw terminal JSON, PPM, trace, input identity and actual option marker.
+This is a CPU-side cost screen; no speedup claimed before validation.
+
+
+### P4K result — ee-gs-packed-direct-comparison.zip
+
+Strict sync A/A/B passed: 40M dispatches, 2478 PAD polls,
+1935262 matched trace samples, raw JSON and PPM independently identical,
+2541 guest fields, 88 native VU1 programs, 415895434 pairs, zero fallbacks.
+Wall 47.266/47.360/47.719 s. Combat dispatch 24002560..39993344:
+332 fields in 16.5708/16.2303/16.3738 s (20.04/20.46/20.28 fields/s).
+No meaningful gain. Keep packed direct off. SC4 remains unmet.
+
+### P4L — worker isolation, not another arithmetic pilot
+
+Use replay_ee_worker_isolation.py on the unchanged authenticated O5
+runner/DLL and 88-program inventory. Five lean runs: both async,
+VU1 only, GS only, synchronous, both async again. Keep exact recorded
+PAD, dispatch budget, 16/16 raster, original shader and regular GPU
+timestamps. Capture worker fences, execution, copy and backpressure,
+VU1 worker stats, presentation, per-section graphics hashes and a
+fixed sampled combat interval. Verify input hashes, actual worker
+mode, PAD consumption, terminal budget, presentation and native VU1
+coverage; report mismatched workloads and field endpoints explicitly.
+Do not imply architectural equivalence or add overlapping thread times.
+This diagnostic isolates concurrency contributions before attempting
+any further runtime modifications. No C++ or guest IR changes.
+
+
+### P4L result — ee-worker-isolation.zip
+
+All five arms completed 40M dispatches, 2478 PAD polls, 2541 fields
+and successful presentations, 88 native VU1 libraries, zero fallback.
+All final PPMs independently SHA-256 verified identical. Inputs unchanged.
+Combat 24002560..39993344, fields 2209..2541 in all five arms:
+
+| Mode | Wall s | Combat s | Combat fields/s |
+| --- | ---: | ---: | ---: |
+| Both before | 37.532 | 10.0790 | 32.940 |
+| VU1 only | 37.407 | 10.3939 | 31.942 |
+| GS only | 46.531 | 16.1266 | 20.587 |
+| Sync | 48.078 | 16.4857 | 20.139 |
+| Both after | 38.203 | 10.2226 | 32.477 |
+
+VU1 async gives +58.6% over sync; dual async average +62.4%.
+GS-only and sync workloads identical; async VU1 changes VIF/GS work
+slightly, even between repeat controls, so no architectural match claimed.
+Both-async worker VU1 execution 11.175/11.250 s, queue .454/.394 s;
+47.30/46.88M empty polls, no explicit waits or host failures. GS worker
+execution 1.518/1.495 s, copy .461/.502 s, fence .201/.147 s; zero
+backpressure waits. Worker times are whole-run, overlap and cannot be
+summed into a critical path. One VU1 job still pending at each async
+snapshot. Stop ungrounded GPU micro-optimizations; focus on VU1 and EE.
+
+### P4M — isolate VU1 worker native profiling in the combat window
+
+SDBZ_VU1_WORKER_PROFILE overrides only the worker's existing detailed
+scope collection; unspecified retains main-thread profiler default.
+SDBZ_VU1_WORKER_PROFILE_WINDOW=begin,end logs two AOT snapshots at
+existing progress checkpoints, without changing poll cadence or
+publishing a job. Serialization locks the backend, so the profiled arm
+is diagnostic and may perturb scheduling. --profile-vu1 runs both
+async lean, worker-only profile, both async lean again. It verifies
+actual mode, disabled EE main-thread profiler, endpoint equality, stable
+program identities, nondecreasing counters and complete per-program
+native timing coverage, ranking combat-only compiled exclusive ns and
+ns/pair. Worker AOT may include an in-flight result not yet published;
+no guest architectural equality claim. No lowering/cache changes.
+
+
+### P4M result — ee-vu1-combat-profile.zip
+
+All three runs stopped with return code 1 after exhausting the 2478
+recorded PAD polls before 40M dispatches. No terminal report or PPM.
+Do not accept architectural equivalence or a full performance comparison.
+Input identities unchanged. Worker profile markers confirmed 0/1/0.
+The profiled arm has one snapshot at dispatch 24002560, field 2210,
+and a periodic report at dispatch 37984811, field 2500. Subtraction
+of matching program identities yields 213416666 native pairs and
+5783556100 exclusive compiled ns. Top programs:
+
+| Entry | Code FNV | Pairs | Exclusive ns |
+| --- | --- | ---: | ---: |
+| 0x730 | 80e18246ed4922d9 | 96754096 | 3221800600 |
+| 0x620 | fdffdb7fcbf68252 | 37186584 | 984428800 |
+| 0x420 | 31d7741f1bfa69cf | 30360781 | 500554300 |
+| 0x130 | 2cf115e2c19ba013 | 28525046 | 464545200 |
+| 0x5a0 | cfae43a4ec036735 | 12117696 | 332875100 |
+
+0x730 and 0x620 account for 72.73% of recovered compiled time.
+The recovered interval is diagnostic, not a matched terminal replay.
+
+### P4N.0 — inspect hot IR before further lowering changes
+
+export_hot_vu1_ir.py reads the existing profile ZIP, subtracts matched
+program counters, resolves the exact loaded library indices and validates
+the retained inventory SHA-256, native target and full 16 KiB capture
+FNV against the original capture filename. Export the top two captures,
+current generated IR, O3 optimized IR and native assembly with compiler
+version and provenance. These are regenerated artifacts, not proof of
+the original DLL machine code. No retail replay or cache rewrite.
+Prioritize 0730-13b05ccb361a4d95-0 and 0620-7c2a8125eeca102a-0.
+No further speculative arithmetic change until inspected.
+
+### P4N.1 — hot native code inspection
+
+`ee-vu1-hot-ir.zip` matches the P4M capture identities and contains the
+expected 16 KiB microcode images, generated IR, O3 IR, and regenerated
+native assembly. The profile is only the recovered interval from dispatch
+24002560/field 2210 through dispatch 37984811/field 2500; its replay failed
+workload validation. It is useful for ranking code, not for claiming a
+matched full-run result. Regenerated assembly is not the deployed DLL's
+machine code.
+
+| Entry | Pairs | Exclusive compiled ns | ns/pair | Generated `ee_vu1_program` instructions | Stack frame | Stack references |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 0x730 | 96754096 | 3221800600 | 33.30 | 21701 | 9208 bytes | 4710 |
+| 0x620 | 37186584 | 984428800 | 26.47 | 11259 | 5336 bytes | 2650 |
+
+Native assembly text is 858169 bytes for 0x730 and 494054 bytes for
+0x620. Those are textual assembly sizes, not machine-code sizes. The
+functions contain 80 and 47 call instructions and 629 and 318 branch
+instructions, respectively. Their optimized IR contains 905 and 460 branch
+instructions, with four remaining allocas in each. Stack-reference counts
+include all references through `%rsp`/`%rbp`, so they are not a direct
+measure of executed spill traffic.
+
+The hot arithmetic is lowered primarily to AVX2 integer SIMD, including
+`vpmuldq`; VU floating-point operations are implemented with integer bit
+arithmetic. The exact Booth correction remains a guarded scalar cold path:
+the vector helper checks four lane predicates and may call
+`ee_cop1_mul_correct` for each marked lane. The export gives static call
+sites, but neither the fraction of multiplications taking that correction
+path nor its share of elapsed time. V25–V30 already tested nearby exact
+multiply/add SIMD rewrites and did not establish a repeatable speedup.
+
+The strongest new lead is live-range and register-pressure reduction in
+the large `ee_vu1_program` functions, especially 0x730. However, the
+assembly alone does not show which stack references are hot, and outlining
+blocks could trade spills for call/dispatch overhead or code growth. Do
+not promote an arithmetic or block-splitting rewrite from these static
+counts. The next candidate should first measure dynamic hot-block and
+multiply-correction frequency on the same combat interval, then compare
+candidate code size and execution time against a paired control. This
+inspection adds no full-run correctness claim and makes no optimization
+change.
+
+### P4N.2 — opt-in vector multiply correction counters
+
+`build_vu1_aot.py --profile-mul-corrections` instruments a separate native
+VU1 inventory with per-library counters for `vu_mul4` invocations, entries
+to the exact Booth correction path, and corrected lanes. The AOT runtime
+reads these counters only when the optional diagnostic export is present;
+unmodified libraries and normal builds keep the existing path and report
+schema. Snapshot serialization holds the VU1 backend lock, so the ordinary
+counter loads do not race with worker execution. The instrumented inventory
+is for frequency attribution only: counter updates perturb execution and
+its timings must not be used to accept a performance change.
+
+Build into a fresh directory matched to the recovered 88-program inventory;
+leave the existing `vu1-native-recovered` directory untouched:
+
+```bat
+git pull --ff-only
+cmake --build build --config Release --target vu1_recomp ee_game_runner --parallel 8
+python tools\build_vu1_aot.py --build-dir build --capture build\vu1-capture --out build\vu1-native-mul-profile --match-inventory build\vu1-native-recovered --opt 3 --march native --jobs 8 --profile-mul-corrections
+```
+
+Run the existing P4M `replay_ee_worker_isolation.py --profile-vu1`
+diagnostic with `SDBZ_VU1_AOT=build\vu1-native-mul-profile`, the same
+runner, ELF, disc, recording, profile input and combat window. Keep its
+three arms and original recording. The earlier recording may again end
+before the dispatch budget; preserve the generated archive and do not
+claim terminal equivalence. `export_hot_vu1_ir.py` subtracts the two
+snapshots and includes the multiply/correction/lane deltas in `export.json`.
+Only after inspecting those counts should a production lowering candidate
+be chosen and compared in an uninstrumented paired replay.

@@ -13,6 +13,12 @@ struct Params {
 @group(0) @binding(8) var<storage, read> native_atlases: array<u32>;
 
 override SCALE: u32 = 1u;
+override RASTER_WORKGROUP: u32 = 16u;
+override RASTER_TILE: u32 = 16u;
+override RASTER_LAZY_SETUP: u32 = 0u;
+override RASTER_EARLY_DEPTH: u32 = 0u;
+override RASTER_BILINEAR_COORDS: u32 = 0u;
+override RASTER_PLOT_ADDRESS_CACHE: u32 = 0u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -567,6 +573,10 @@ fn load_texel(l: Loc, k: u32) -> u32 {
 fn fetch(s: Setup, xi: i32, yi: i32, k: u32) -> u32 {
     let x = texel_x(s, xi);
     let y = texel_y(s, yi);
+    return fetch_wrapped(s, x, y, k);
+}
+
+fn fetch_wrapped(s: Setup, x: u32, y: u32, k: u32) -> u32 {
     if (s.dec != 0xFFFFFFFFu) {
         return decoded[s.dec + (y << s.tw) + x];
     }
@@ -643,6 +653,21 @@ fn sample(s: Setup, uin: f32, vin: f32, k: u32) -> u32 {
         let v = sv - 0.5;
         let x0 = i32(floor(u));
         let y0 = i32(floor(v));
+        if (RASTER_BILINEAR_COORDS != 0u) {
+            let ns = s.native >> 16u;
+            let atlas = (s.native & 0xffffu) * 1048576u;
+            let mx = mode(s, 24u, 2u);
+            let my = mode(s, 26u, 2u);
+            let width = (1u << s.tw) * ns;
+            let height = (1u << s.th) * ns;
+            let ax = native_wrap(x0, width, mx, s.minu, s.maxu, ns);
+            let bx = native_wrap(x0 + 1, width, mx, s.minu, s.maxu, ns);
+            let ay = atlas + native_wrap(y0, height, my, s.minv, s.maxv, ns) * 1024u;
+            let by = atlas + native_wrap(y0 + 1, height, my, s.minv, s.maxv, ns) * 1024u;
+            return blend4(native_atlases[ay + ax], native_atlases[ay + bx],
+                native_atlases[by + ax], native_atlases[by + bx],
+                u - f32(x0), v - f32(y0));
+        }
         return blend4(native_fetch(s, x0, y0),
             native_fetch(s, x0 + 1, y0),
             native_fetch(s, x0, y0 + 1),
@@ -656,6 +681,15 @@ fn sample(s: Setup, uin: f32, vin: f32, k: u32) -> u32 {
     let v = vin - 0.5;
     let x0 = i32(floor(u));
     let y0 = i32(floor(v));
+    if (RASTER_BILINEAR_COORDS != 0u) {
+        let ax = texel_x(s, x0);
+        let bx = texel_x(s, x0 + 1);
+        let ay = texel_y(s, y0);
+        let by = texel_y(s, y0 + 1);
+        return blend4(fetch_wrapped(s, ax, ay, k), fetch_wrapped(s, bx, ay, k),
+            fetch_wrapped(s, ax, by, k), fetch_wrapped(s, bx, by, k),
+            u - f32(x0), v - f32(y0));
+    }
     return blend4(fetch(s, x0, y0, k), fetch(s, x0 + 1, y0, k), fetch(s, x0, y0 + 1, k), fetch(s, x0 + 1, y0 + 1, k), u - f32(x0), v - f32(y0));
 }
 
@@ -739,21 +773,64 @@ struct Attr {
     z: u32,
 }
 
-fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
+// Read each destination/depth value at most once. Attribute interpolation
+// is pure, so moving it after the existing rejection tests cannot change
+// their order or the values used by subsequent blending and stores.
+struct PlotState {
+    accepted: bool,
+    z: u32,
+    fl: Loc,
+    zl: Loc,
+    dst: u32,
+    have_dst: bool,
+    zte: bool,
+}
+
+// Per-invocation, read-only address cache. Never cache mutable VRAM
+// contents; each primitive still observes all previous stores.
+var<private> plot_frame_valid: bool = false;
+var<private> plot_depth_valid: bool = false;
+var<private> plot_frame_loc: Loc;
+var<private> plot_depth_loc: Loc;
+
+fn plot_frame_address(s: Setup, x: u32, y: u32) -> Loc {
+    if (RASTER_PLOT_ADDRESS_CACHE == 0u) {
+        return addr(s.ff, x, y);
+    }
+    if (!plot_frame_valid) {
+        plot_frame_loc = addr(s.ff, x, y);
+        plot_frame_valid = true;
+    }
+    return plot_frame_loc;
+}
+
+fn plot_depth_address(s: Setup, x: u32, y: u32) -> Loc {
+    if (RASTER_PLOT_ADDRESS_CACHE == 0u) {
+        return addr(s.zf, x, y);
+    }
+    if (!plot_depth_valid) {
+        plot_depth_loc = addr(s.zf, x, y);
+        plot_depth_valid = true;
+    }
+    return plot_depth_loc;
+}
+
+fn prepare_plot(s: Setup, x: i32, y: i32, k: u32, depth: u32) -> PlotState {
+    var result: PlotState;
     if (x < s.scax0 || x > s.scax1 || y < s.scay0 || y > s.scay1) {
-        return;
+        return result;
     }
     let scanmsk = mode(s, 28u, 2u);
     if (scanmsk == 2u && (y & 1) == 0) {
-        return;
+        return result;
     }
     if (scanmsk == 3u && (y & 1) != 0) {
-        return;
+        return result;
     }
     let ux = u32(x);
     let uy = u32(y);
-    let z = min(at.z, s.zmax);
-    let fl = addr(s.ff, ux, uy);
+    let z = min(depth, s.zmax);
+    let fl = plot_frame_address(s, ux, uy);
     var zl = Loc(0u, 0u, 0u);
 
     var dst = 0u;
@@ -762,7 +839,7 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         dst = read_frame(s, fl, k);
         have_dst = true;
         if (((dst & 0x80000000u) != 0u) != has(s, F_DATM)) {
-            return;
+            return result;
         }
     }
 
@@ -770,17 +847,27 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
     if (zte) {
         let ztst = mode(s, 8u, 2u);
         if (ztst == 0u) {
-            return;
+            return result;
         }
-        zl = addr(s.zf, ux, uy);
+        zl = plot_depth_address(s, ux, uy);
         if (ztst != 1u) {
             let old = load_at(zl, k) & s.zmax;
             if ((ztst == 2u && z < old) || (ztst == 3u && z <= old)) {
-                return;
+                return result;
             }
         }
     }
 
+    return PlotState(true, z, fl, zl, dst, have_dst, zte);
+}
+
+fn plot_prepared(s: Setup, k: u32, at: Attr, prepared: PlotState) {
+    let z = prepared.z;
+    let fl = prepared.fl;
+    let zl = prepared.zl;
+    var dst = prepared.dst;
+    let have_dst = prepared.have_dst;
+    let zte = prepared.zte;
     var r = i32(at.r);
     var g = i32(at.g);
     var b = i32(at.b);
@@ -966,6 +1053,13 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         store(zl, k, z);
     }
 }
+fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
+    let prepared = prepare_plot(s, x, y, k, at.z);
+    if (prepared.accepted) {
+        plot_prepared(s, k, at, prepared);
+    }
+}
+
 
 const PRIM_WORDS: u32 = 28u;
 const SETUP_WORDS: u32 = 26u;
@@ -1016,6 +1110,17 @@ fn shade_at(p: u32, s: Setup, x: i32, y: i32, k: u32, px: f32, py: f32) {
                 return;
             }
             let w2 = 1.0 - w0 - w1;
+            if (RASTER_EARLY_DEPTH != 0u) {
+                let depth = z_at(p, fat(p + 25u) * w1 + fat(p + 26u) * w2);
+                let prepared = prepare_plot(s, x, y, k, depth);
+                if (!prepared.accepted) {
+                    return;
+                }
+                let c = vertex_attr(p, 0u) * w0 + vertex_attr(p, 1u) * w1 + vertex_attr(p, 2u) * w2;
+                let t = vertex_tex(p, 0u) * w0 + vertex_tex(p, 1u) * w1 + vertex_tex(p, 2u) * w2;
+                plot_prepared(s, k, Attr(c.x, c.y, c.z, c.w, t.x, t.y, t.z, t.w, depth), prepared);
+                return;
+            }
             let c = vertex_attr(p, 0u) * w0 + vertex_attr(p, 1u) * w1 + vertex_attr(p, 2u) * w2;
             let t = vertex_tex(p, 0u) * w0 + vertex_tex(p, 1u) * w1 + vertex_tex(p, 2u) * w2;
             at = Attr(c.x, c.y, c.z, c.w, t.x, t.y, t.z, t.w, z_at(p, fat(p + 25u) * w1 + fat(p + 26u) * w2));
@@ -1149,16 +1254,25 @@ fn resolve(@builtin(global_invocation_id) gid: vec3<u32>) {
     scratch[i] = atomicLoad(&vram[i * SCALE * SCALE]);
 }
 
-@compute @workgroup_size(16, 16)
+fn outside_primitive(p: u32, x: i32, y: i32) -> bool {
+    let lo = data[p + 2u];
+    let hi = data[p + 3u];
+    return x < i32(lo & 0xFFFFu) || y < i32(lo >> 16u) || x > i32(hi & 0xFFFFu) || y > i32(hi >> 16u);
+}
+
+@compute @workgroup_size(RASTER_WORKGROUP, RASTER_WORKGROUP)
 fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid: vec3<u32>) {
-    let index = wid.x + wid.y * 1024u;
+    let linear = wid.x + wid.y * 1024u;
+    let subtiles = RASTER_TILE / RASTER_WORKGROUP;
+    let index = linear / (subtiles * subtiles);
+    let subtile = linear % (subtiles * subtiles);
     if (index >= prm(3u)) {
         return;
     }
     let tile = prm(0u) + index * 2u;
     let origin = data[tile];
-    let sx = (origin & 0xFFFFu) * 16u + lid.x;
-    let sy = (origin >> 16u) * 16u + lid.y;
+    let sx = (origin & 0xFFFFu) * RASTER_TILE + (subtile % subtiles) * RASTER_WORKGROUP + lid.x;
+    let sy = (origin >> 16u) * RASTER_TILE + (subtile / subtiles) * RASTER_WORKGROUP + lid.y;
     let x = i32(sx / SCALE);
     let y = i32(sy / SCALE);
     let k = (sy % SCALE) * SCALE + sx % SCALE;
@@ -1178,15 +1292,26 @@ fn raster(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) l
     for (var i = 0u; i < count; i = i + 1u) {
         let h = first + i;
         let p = prims + ((data[lists + (h >> 1u)] >> ((h & 1u) * 16u)) & 0xFFFFu) * PRIM_WORDS;
+        // Pipeline-specialized: skip the read-only Setup record for rejected
+        // pixels. last_setup always describes the Setup actually held in s.
+        if (RASTER_LAZY_SETUP != 0u) {
+            if (outside_primitive(p, x, y)) {
+                continue;
+            }
+        }
         let si = data[p];
         if (si != last_setup) {
             s = load_setup(setups + si * SETUP_WORDS);
             last_setup = si;
+            if (RASTER_PLOT_ADDRESS_CACHE != 0u) {
+                plot_frame_valid = false;
+                plot_depth_valid = false;
+            }
         }
-        let lo = data[p + 2u];
-        let hi = data[p + 3u];
-        if (x < i32(lo & 0xFFFFu) || y < i32(lo >> 16u) || x > i32(hi & 0xFFFFu) || y > i32(hi >> 16u)) {
-            continue;
+        if (RASTER_LAZY_SETUP == 0u) {
+            if (outside_primitive(p, x, y)) {
+                continue;
+            }
         }
         shade_at(p, s, x, y, k, px, py);
     }

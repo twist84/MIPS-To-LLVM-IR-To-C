@@ -195,6 +195,14 @@ int main()
 {
     using ee::e_idle_iteration;
 
+    check(ee::idle_loop_iteration_budget(20u, 7u, 100u) == 3u,
+          "event-bounded skip reaches the first loop header past the deadline");
+    check(ee::idle_loop_iteration_budget(20u, 7u, 2u) == 2u,
+          "event-bounded skip respects the configured safepoint limit");
+    check(ee::idle_loop_iteration_budget(0u, 7u, 100u) == 0u &&
+              ee::idle_loop_iteration_budget(20u, 0u, 100u) == 0u,
+          "event-bounded skip refuses empty or invalid iteration budgets");
+
     const ee::s_idle_loop_shape vsync = ee::analyze_idle_loop(0x00175210u, k_vsync);
     check(vsync.eligible && vsync.words.size() == 7u &&
               vsync.backedge_pc == 0x00175224u,

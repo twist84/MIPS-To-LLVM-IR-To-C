@@ -140,7 +140,325 @@ def staging():
         assert not (root / "stale").exists()
 
 
+def raster_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm, value in (("baseline", "0"), ("control", "0"), ("dedup", "1")):
+            folder = root / arm
+            folder.mkdir()
+            (folder / "stderr.log").write_bytes(("[gpu] raster lazy_setup=" + value + "\r\n").encode())
+            (folder / "report.json").write_bytes(b'{}')
+            (folder / "gs-webgpu.ppm").write_bytes(b'image')
+        assert validate_raster_outputs(root)["dedup"]["lazy_setup"] == "1"
+        for name, wrong in (("stderr.log", b"[gpu] raster lazy_setup=0\n"),
+                            ("report.json", b'{"different":true}'),
+                            ("gs-webgpu.ppm", b'changed')):
+            path = root / "dedup" / name
+            original = path.read_bytes()
+            path.write_bytes(wrong)
+            try:
+                validate_raster_outputs(root)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect raster replay accepted: " + name)
+            path.write_bytes(original)
+        for arm in ("baseline", "control", "dedup"):
+            size = 8 if arm == "dedup" else 16
+            (root / arm / "stderr.log").write_bytes(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster workgroup={size}x{size} ({size}x{size} CPU tiles)\n".encode())
+        assert validate_raster_outputs(root, tile8=True)["dedup"]["tile"] == 8
+        wrong = root / "dedup" / "stderr.log"
+        wrong.write_bytes(b"[gpu] raster lazy_setup=0\n[gpu] raster workgroup=8x8 (16x16 CPU tiles)\n")
+        try:
+            validate_raster_outputs(root, tile8=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("tile8 accepted wrong CPU tile size")
+        wrong.write_bytes(b"[gpu] raster lazy_setup=0\n[gpu] raster workgroup=8x8 (8x8 CPU tiles)\n")
+        from replay_ee_graphics_profile import WORKER_TIMING_FIELDS
+        import json
+        for index, arm in enumerate(("baseline", "control", "dedup")):
+            report = {"runtime_profile": {"schema": "ee-runtime-profile-v1", "wall_ns": index},
+                      "vu1_aot": {"program_profiles": []},
+                      "vu1_worker": {key: index for key in WORKER_TIMING_FIELDS},
+                      "gs_fields_started": 10}
+            (root / arm / "report.json").write_text(json.dumps(report))
+        result = validate_raster_outputs(root, tile8=True, async_raster=True)
+        assert result["dedup"]["normalized_report_sha256"] == result["baseline"]["normalized_report_sha256"]
+        candidate = root / "dedup" / "report.json"
+        report = json.loads(candidate.read_text())
+        report["gs_fields_started"] += 1
+        candidate.write_text(json.dumps(report))
+        try:
+            validate_raster_outputs(root, tile8=True, async_raster=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("async raster accepted changed guest field count")
+
+
+def early_depth_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            depth = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster early_depth={depth}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, early_depth=True)["dedup"]["early_depth"] == 1
+        candidate = root / "dedup" / "stderr.log"
+        candidate.write_text(candidate.read_text().replace("early_depth=1", "early_depth=0"))
+        try:
+            validate_raster_outputs(root, early_depth=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incorrect early-depth pipeline accepted")
+
+
+def bilinear_coords_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            value = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                f"[gpu] raster bilinear_coords={value}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, bilinear_coords=True)["dedup"]["bilinear_coords"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for wrong in (original.replace("bilinear_coords=1", "bilinear_coords=0"),
+                      original.replace("early_depth=0", "early_depth=1")):
+            path.write_text(wrong)
+            try:
+                validate_raster_outputs(root, bilinear_coords=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect bilinear pipeline accepted")
+
+
+def plot_address_cache_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            value = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n"
+                f"[gpu] raster plot_address_cache={value}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, plot_address_cache=True)["dedup"]["plot_address_cache"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for marker in ("plot_address_cache=1", "early_depth=0", "bilinear_coords=0"):
+            path.write_text(original.replace(marker, marker[:-1] + str(1 - int(marker[-1]))))
+            try:
+                validate_raster_outputs(root, plot_address_cache=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect address cache pipeline accepted")
+
+
+def gpu_regular_timestamps_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            enabled = int(arm != "dedup")
+            queries = enabled * 9
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n[gpu] raster plot_address_cache=0\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n"
+                f"[gpu] regular_timestamps={enabled} supported=1\n"
+                f"[gpu] regular timestamp summary: passes=10 submitted={queries} completed={queries} failures=0 detail_passes=0\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        result = validate_raster_outputs(root, gpu_regular_timestamps_off=True)
+        assert result["dedup"]["timestamp_submitted"] == 0
+        assert result["baseline"]["timestamp_completed"] == 9
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for before, after in (("regular_timestamps=0", "regular_timestamps=1"),
+                              ("supported=1", "supported=0"),
+                              ("submitted=0", "submitted=1"),
+                              ("detail_passes=0", "detail_passes=1"),
+                              ("plot_address_cache=0", "plot_address_cache=1")):
+            path.write_text(original.replace(before, after))
+            try:
+                validate_raster_outputs(root, gpu_regular_timestamps_off=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unexpected GPU timestamp mode accepted")
+
+
+def dense_workgroup_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            enabled = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n[gpu] raster plot_address_cache=0\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n"
+                f"[gpu] raster dense_workgroup={enabled}\n"
+                f"[gpu] raster dense summary: regular={10 - enabled * 2} dense={enabled * 2}\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        result = validate_raster_outputs(root, raster_dense_workgroup=True)
+        assert result["dedup"]["dense_raster_dispatches"] == 2
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for before, after in (("dense_workgroup=1", "dense_workgroup=0"),
+                              ("dense=2", "dense=0"), ("regular=8", "regular=9")):
+            path.write_text(original.replace(before, after))
+            try:
+                validate_raster_outputs(root, raster_dense_workgroup=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unexpected dense raster mode accepted")
+
+
+def gs_packed_direct_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            enabled = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n[gpu] raster plot_address_cache=0\n"
+                "[gpu] raster dense_workgroup=0\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n"
+                f"[gpu] gs packed_direct={enabled}\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        result = validate_raster_outputs(root, gs_packed_direct=True)
+        assert result["dedup"]["gs_packed_direct"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for before, after in (("packed_direct=1", "packed_direct=0"),
+                              ("dense_workgroup=0", "dense_workgroup=1")):
+            path.write_text(original.replace(before, after))
+            try:
+                validate_raster_outputs(root, gs_packed_direct=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unexpected GS packed mode accepted")
+
+
+def sync_lean_validation():
+    import json
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            (folder / "stderr.log").write_bytes(b"[gpu] raster lazy_setup=0\n")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+            report = {"m2_runtime": {"enabled": arm != "dedup"},
+                      "vu1_worker": {"enabled": False, "native_overlap_profile": True},
+                      "guest_instruction_attempts": 100}
+            (folder / "report.json").write_text(json.dumps(report))
+        result = validate_raster_outputs(root, lean=True)
+        assert result["dedup"]["report_sha256"] != result["baseline"]["report_sha256"]
+        assert result["dedup"]["normalized_report_sha256"] == result["baseline"]["normalized_report_sha256"]
+        path = root / "dedup" / "report.json"
+        report = json.loads(path.read_text())
+        for key, value in (("guest_instruction_attempts", 101),
+                           ("vu1_worker", {"enabled": True, "native_overlap_profile": True})):
+            path.write_text(json.dumps(dict(report, **{key: value})))
+            try:
+                validate_raster_outputs(root, lean=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("sync lean accepted changed " + key)
+
+
+def async_workload_validation():
+    import json
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import (async_workload_evidence,
+                                           GRAPHICS_WORKLOAD_KEYS, VU1_WORKLOAD_KEYS)
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for index, arm in enumerate(("baseline", "control", "dedup")):
+            folder = root / arm
+            folder.mkdir()
+            report = {key: 10 for key in GRAPHICS_WORKLOAD_KEYS}
+            report.update(vu1_aot={key: 1 for key in VU1_WORKLOAD_KEYS},
+                          dispatches=40, guest_instruction_attempts=100 + index,
+                          m2_runtime={"enabled": index != 2},
+                          vu1_worker={"native_overlap_profile": index != 2})
+            (folder / "report.json").write_text(json.dumps(report))
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        evidence = async_workload_evidence(root)
+        assert evidence["graphics_workload_and_final_image_match"]
+        assert not evidence["architectural_equivalence_proven"]
+        (root / "dedup" / "gs-webgpu.ppm").write_bytes(b"changed")
+        assert not async_workload_evidence(root)["graphics_workload_and_final_image_match"]
+
+
 if __name__ == "__main__":
     run()
     staging()
+    raster_validation()
+    early_depth_validation()
+    bilinear_coords_validation()
+    plot_address_cache_validation()
+    gpu_regular_timestamps_validation()
+    dense_workgroup_validation()
+    gs_packed_direct_validation()
+    sync_lean_validation()
+    async_workload_validation()
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import lean_overrides, report_options, LEAN_DIAGNOSTICS
+    assert lean_overrides("all") == {key: "0" for key in LEAN_DIAGNOSTICS.values()}
+    for name, key in LEAN_DIAGNOSTICS.items():
+        assert lean_overrides(name) == {key: "0"}
+    with TemporaryDirectory() as tmp:
+        marker = Path(tmp) / "stdout.log"
+        marker.write_text("startup\nEE report options: hotspots=1 boundary_timing=0 (history retained)\n")
+        assert report_options(marker) == {"hotspots": True, "boundary": False}
     print("PASS: isolated EE dedup route selection and exact dispatch inventory")

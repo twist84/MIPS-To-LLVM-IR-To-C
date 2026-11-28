@@ -71,8 +71,8 @@ namespace {
 
 s_native_viewport g_present_viewport;
 
-enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kDecode, kPipelines };
-const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot", "decode"};
+enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kDecode, kRasterDense, kPipelines };
+const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot", "decode", "raster"};
 
 constexpr std::uint32_t kParamStride = 256;
 constexpr std::uint32_t kClutSlots = 2048;
@@ -109,11 +109,21 @@ std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
 std::uint64_t g_last_guest_field = 0u;
 bool g_last_interlaced = false, g_last_halved = false;
+// CPU tiles and GPU workgroups are independently selectable; a tile
+// must contain an integral number of workgroups along either axis.
+std::uint32_t g_raster_tile = 16u;
+std::uint32_t g_raster_workgroup = 16u;
+bool g_raster_lazy_setup = false;
+bool g_raster_early_depth = false;
+bool g_raster_bilinear_coords = false;
+bool g_raster_plot_address_cache = false;
+bool g_raster_dense_workgroup = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
 
 bool g_timestamps = false;
+bool g_regular_timestamps = true;
 WGPUQuerySet g_queries = nullptr;
 // The query set is shared, but each in-flight pair has independent
 // resolve/readback storage. No mapped buffer can be reused until retired.
@@ -179,7 +189,7 @@ void collect_ready_timestamp()
 
 uint32_t acquire_timestamp_slot()
 {
-    if (g_timestamps)
+    if (g_timestamps && g_regular_timestamps)
     {
         for (uint32_t offset = 0u; offset < k_timestamp_slots; ++offset)
         {
@@ -220,8 +230,25 @@ struct CommandInfo {
 std::vector<CommandInfo> g_command_info;
 std::FILE *g_profile_out = nullptr;
 std::uint64_t g_profile_from = 0, g_profile_to = 0;
-WGPUQuerySet g_profile_queries = nullptr;
-WGPUBuffer g_profile_resolve = nullptr, g_profile_read = nullptr;
+std::atomic<int> g_command_profile_request{0};
+bool g_live_profile_allowed = true;
+// Each in-flight detailed submission owns its query and readback storage.
+constexpr std::uint32_t k_profile_chunk = 1024u;
+constexpr std::size_t k_profile_slots = 8u;
+struct s_detail_profile_slot
+{
+    std::vector<WGPUQuerySet> m_queries;
+    WGPUBuffer m_resolve = nullptr;
+    WGPUBuffer m_read = nullptr;
+    std::uint64_t m_capacity = 0;
+    std::uint64_t m_serial = 0;
+    std::vector<Command> m_commands;
+    std::vector<CommandInfo> m_info;
+    std::atomic<e_timestamp_state> m_state{e_timestamp_state::free};
+};
+std::array<s_detail_profile_slot, k_profile_slots> g_detail_slots{};
+std::deque<std::size_t> g_detail_pending;
+std::uint64_t g_detail_rows = 0, g_detail_errors = 0, g_detail_pressure_waits = 0;
 
 std::vector<Command> g_commands;
 std::vector<std::array<std::uint32_t, kParamStride / 4>> g_param_records;
@@ -477,8 +504,9 @@ std::vector<std::uint32_t> g_span_start;
 
 void add_spans(const std::uint32_t *rec, std::uint32_t lo, std::uint32_t hi) {
     const int sc = static_cast<int>(g_scale);
-    const int tx0 = static_cast<int>(lo & 0xFFFFu) * sc / 16, ty0 = static_cast<int>(lo >> 16) * sc / 16;
-    const int tx1 = (static_cast<int>(hi & 0xFFFFu) * sc + sc - 1) / 16, ty1 = (static_cast<int>(hi >> 16) * sc + sc - 1) / 16;
+    const int tile = static_cast<int>(g_raster_tile);
+    const int tx0 = static_cast<int>(lo & 0xFFFFu) * sc / tile, ty0 = static_cast<int>(lo >> 16) * sc / tile;
+    const int tx1 = (static_cast<int>(hi & 0xFFFFu) * sc + sc - 1) / tile, ty1 = (static_cast<int>(hi >> 16) * sc + sc - 1) / tile;
     const auto whole = [&] {
         for (int ty = ty0; ty <= ty1; ++ty) g_spans.push_back({static_cast<std::int16_t>(ty), static_cast<std::int16_t>(tx0), static_cast<std::int16_t>(tx1)});
     };
@@ -502,7 +530,7 @@ void add_spans(const std::uint32_t *rec, std::uint32_t lo, std::uint32_t hi) {
         m[e] = kind[e] ? -cb / ca : cb;
         q[e] = kind[e] ? -cc / ca : cc;
     }
-    const double span = 16.0 / static_cast<double>(sc);
+    const double span = static_cast<double>(tile) / static_cast<double>(sc);
     for (int ty = ty0; ty <= ty1; ++ty) {
         const double y0 = ty * span - 1.0, y1 = (ty + 1) * span + 1.0;
         double left = -1e30, right = 1e30;
@@ -765,7 +793,16 @@ void flush_batch() {
     const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run);
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run});
     note_raster(prims, tiles, total, snapshot);
-    g_commands.push_back({kRaster, std::min(tiles, 1024u), (tiles + 1023) / 1024, param});
+    // Dense lists with few tiles expose too few workgroups to the GPU.
+    // Keep the ordered lists and pixel ownership unchanged; only subdivide
+    // selected dispatches. Restrict the pilot to the original 16/16 path.
+    const bool dense = g_raster_dense_workgroup && g_raster_tile == 16u &&
+        g_raster_workgroup == 16u && tiles != 0u && tiles <= 32u &&
+        total >= tiles * 64u;
+    const std::uint32_t workgroup = dense ? 4u : g_raster_workgroup;
+    const std::uint32_t subtiles = g_raster_tile / workgroup;
+    const std::uint32_t groups = tiles * subtiles * subtiles;
+    g_commands.push_back({dense ? kRasterDense : kRaster, std::min(groups, 1024u), (groups + 1023u) / 1024u, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
     if (b.zwrite) mark_rendered(pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy));
     b.prims.clear();
@@ -1006,15 +1043,35 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
     md.nextInChain = &source.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &md);
     for (int i = 0; i < kPipelines; ++i) {
+        if (i == kRasterDense && !g_raster_dense_workgroup)
+        {
+            continue;
+        }
         WGPUComputePipelineDescriptor cd = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constant = WGPU_CONSTANT_ENTRY_INIT;
-        constant.key = view("SCALE");
-        constant.value = static_cast<double>(scale);
-        cd.compute.constantCount = 1;
-        cd.compute.constants = &constant;
+        WGPUConstantEntry constants[7] = {
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT};
+        constants[0].key = view("SCALE");
+        constants[0].value = static_cast<double>(scale);
+        constants[1].key = view("RASTER_WORKGROUP");
+        constants[1].value = static_cast<double>(i == kRasterDense ? 4u : g_raster_workgroup);
+        constants[2].key = view("RASTER_TILE");
+        constants[2].value = static_cast<double>(g_raster_tile);
+        constants[3].key = view("RASTER_LAZY_SETUP");
+        constants[3].value = g_raster_lazy_setup ? 1.0 : 0.0;
+        constants[4].key = view("RASTER_EARLY_DEPTH");
+        constants[4].value = g_raster_early_depth ? 1.0 : 0.0;
+        constants[5].key = view("RASTER_BILINEAR_COORDS");
+        constants[5].value = g_raster_bilinear_coords ? 1.0 : 0.0;
+        constants[6].key = view("RASTER_PLOT_ADDRESS_CACHE");
+        constants[6].value = g_raster_plot_address_cache ? 1.0 : 0.0;
+        cd.compute.constantCount = (i == kRaster || i == kRasterDense) ? 7u : 1u;
+        cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
         {
@@ -1026,81 +1083,271 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
     return true;
 }
 
-void profile_submit() {
-    constexpr std::uint32_t kMax = 2048;
-    if (!g_profile_queries) {
+void collect_detail_profile()
+{
+    // Retire in submission order even if map callbacks complete out of order.
+    for (; !g_detail_pending.empty(); g_detail_pending.pop_front())
+    {
+        auto& slot = g_detail_slots[g_detail_pending.front()];
+        const auto state = slot.m_state.load(std::memory_order_acquire);
+        if (state == e_timestamp_state::pending)
+        {
+            break;
+        }
+        const auto count = slot.m_commands.size();
+        if (state == e_timestamp_state::ready)
+        {
+            const auto* t = static_cast<const std::uint64_t*>(
+                wgpuBufferGetConstMappedRange(slot.m_read, 0, count * 16u));
+            std::size_t info = 0;
+            for (std::size_t i = 0; t && i < count; ++i)
+            {
+                if (t[i * 2u + 1u] < t[i * 2u])
+                {
+                    ++g_detail_errors;
+                    continue;
+                }
+                const auto& c = slot.m_commands[i];
+                for (; info < slot.m_info.size() && slot.m_info[info].index < i; ++info) {}
+                std::fprintf(g_profile_out, "%llu %zu %s %llu %u %u",
+                    static_cast<unsigned long long>(slot.m_serial), i,
+                    kEntryPoints[c.pipeline],
+                    static_cast<unsigned long long>(t[i * 2u + 1u] - t[i * 2u]),
+                    c.x, c.y);
+                if (info < slot.m_info.size() && slot.m_info[info].index == i)
+                {
+                    for (std::uint32_t v : slot.m_info[info].values)
+                    {
+                        std::fprintf(g_profile_out, " %u", v);
+                    }
+                }
+                std::fputc('\n', g_profile_out);
+                ++g_detail_rows;
+            }
+            if (!t)
+            {
+                g_detail_errors += count;
+            }
+            wgpuBufferUnmap(slot.m_read);
+        }
+        else
+        {
+            g_detail_errors += count;
+        }
+        slot.m_commands.clear();
+        slot.m_info.clear();
+        slot.m_state.store(e_timestamp_state::free, std::memory_order_release);
+    }
+}
+
+void poll_detail_profile()
+{
+#ifdef __EMSCRIPTEN__
+    wgpuInstanceProcessEvents(g_instance);
+#else
+    wgpuDevicePoll(g_device, false, nullptr);
+#endif
+    collect_detail_profile();
+}
+
+void finish_detail_profile()
+{
+    if (!g_profile_out)
+    {
+        return;
+    }
+    // Wait only at a capture boundary or if the bounded ring is full.
+    for (; !g_detail_pending.empty();)
+    {
+        pump();
+        collect_detail_profile();
+    }
+    std::fflush(g_profile_out);
+    std::fclose(g_profile_out);
+    g_profile_out = nullptr;
+    g_profile_from = 0;
+    g_profile_to = 0;
+    std::fprintf(stderr, "[gpu] detailed capture: rows=%llu failed=%llu pressure_waits=%llu\n",
+        static_cast<unsigned long long>(g_detail_rows),
+        static_cast<unsigned long long>(g_detail_errors),
+        static_cast<unsigned long long>(g_detail_pressure_waits));
+}
+
+bool prepare_detail_slot(s_detail_profile_slot& slot, std::size_t count)
+{
+    const std::size_t chunks = (count + k_profile_chunk - 1u) / k_profile_chunk;
+    for (; slot.m_queries.size() < chunks;)
+    {
         WGPUQuerySetDescriptor qd = WGPU_QUERY_SET_DESCRIPTOR_INIT;
         qd.type = WGPUQueryType_Timestamp;
-        qd.count = kMax * 2;
-        g_profile_queries = wgpuDeviceCreateQuerySet(g_device, &qd);
-        g_profile_resolve = make_buffer(kMax * 16, WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
-        g_profile_read = make_buffer(kMax * 16, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        qd.count = k_profile_chunk * 2u;
+        const auto queries = wgpuDeviceCreateQuerySet(g_device, &qd);
+        if (!queries)
+        {
+            return false;
+        }
+        slot.m_queries.push_back(queries);
     }
+    if (!slot.m_resolve)
+    {
+        slot.m_resolve = make_buffer(k_profile_chunk * 16u,
+            WGPUBufferUsage_QueryResolve | WGPUBufferUsage_CopySrc);
+    }
+    const std::uint64_t bytes = static_cast<std::uint64_t>(count) * 16u;
+    if (slot.m_capacity < bytes)
+    {
+        if (slot.m_read)
+        {
+            wgpuBufferRelease(slot.m_read);
+        }
+        slot.m_read = make_buffer(bytes, WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst);
+        slot.m_capacity = slot.m_read ? bytes : 0u;
+    }
+    return slot.m_resolve && slot.m_read;
+}
+
+bool profile_submit(WGPUTextureView present_view)
+{
+    if (g_commands.empty())
+    {
+        return false;
+    }
+    poll_detail_profile();
+    if (g_detail_pending.size() == k_profile_slots)
+    {
+        ++g_detail_pressure_waits;
+        for (; g_detail_pending.size() == k_profile_slots;)
+        {
+            pump();
+            collect_detail_profile();
+        }
+    }
+    std::size_t slot_index = 0;
+    for (; slot_index < k_profile_slots; ++slot_index)
+    {
+        if (g_detail_slots[slot_index].m_state.load(std::memory_order_acquire) ==
+            e_timestamp_state::free)
+        {
+            break;
+        }
+    }
+    if (slot_index == k_profile_slots ||
+        !prepare_detail_slot(g_detail_slots[slot_index], g_commands.size()))
+    {
+        g_detail_errors += g_commands.size();
+        std::fprintf(stderr, "[gpu] detailed timestamp storage unavailable; rendering normally\n");
+        return false;
+    }
+    auto& slot = g_detail_slots[slot_index];
     ensure_capacity();
     wgpuQueueWriteBuffer(g_queue, g_data, 0, g_arena.data(), g_arena.size() * 4);
     wgpuQueueWriteBuffer(g_queue, g_params, 0, g_param_records.data(), g_param_records.size() * kParamStride);
     WGPUCommandEncoder enc = wgpuDeviceCreateCommandEncoder(g_device, nullptr);
-    const std::uint32_t n = static_cast<std::uint32_t>(std::min<std::size_t>(g_commands.size(), kMax));
-    for (std::uint32_t i = 0; i < g_commands.size(); ++i) {
-        const Command &c = g_commands[i];
-        WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
-        writes.querySet = g_profile_queries;
-        writes.beginningOfPassWriteIndex = i * 2;
-        writes.endOfPassWriteIndex = i * 2 + 1;
-        WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
-        if (i < n) cd.timestampWrites = &writes;
-        WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
-        wgpuComputePassEncoderSetPipeline(pass, g_pipelines[c.pipeline]);
-        const std::uint32_t offset = c.param * kParamStride;
-        wgpuComputePassEncoderSetBindGroup(pass, 0, g_group, 1, &offset);
-        wgpuComputePassEncoderDispatchWorkgroups(pass, c.x, c.y, 1);
-        wgpuComputePassEncoderEnd(pass);
-        wgpuComputePassEncoderRelease(pass);
+    // Resolve each chunk before reusing the resolve buffer. Distinct query
+    // sets avoid reusing a timestamp index inside a single command encoder.
+    for (std::size_t begin = 0; begin < g_commands.size(); begin += k_profile_chunk)
+    {
+        const auto count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(k_profile_chunk, g_commands.size() - begin));
+        const auto queries = slot.m_queries[begin / k_profile_chunk];
+        for (std::uint32_t i = 0; i < count; ++i)
+        {
+            const Command& c = g_commands[begin + i];
+            WGPUPassTimestampWrites writes = WGPU_PASS_TIMESTAMP_WRITES_INIT;
+            writes.querySet = queries;
+            writes.beginningOfPassWriteIndex = i * 2u;
+            writes.endOfPassWriteIndex = i * 2u + 1u;
+            WGPUComputePassDescriptor cd = WGPU_COMPUTE_PASS_DESCRIPTOR_INIT;
+            cd.timestampWrites = &writes;
+            WGPUComputePassEncoder pass = wgpuCommandEncoderBeginComputePass(enc, &cd);
+            wgpuComputePassEncoderSetPipeline(pass, g_pipelines[c.pipeline]);
+            const std::uint32_t offset = c.param * kParamStride;
+            wgpuComputePassEncoderSetBindGroup(pass, 0, g_group, 1, &offset);
+            wgpuComputePassEncoderDispatchWorkgroups(pass, c.x, c.y, 1);
+            wgpuComputePassEncoderEnd(pass);
+            wgpuComputePassEncoderRelease(pass);
+            ++g_dispatches[c.pipeline];
+        }
+        wgpuCommandEncoderResolveQuerySet(enc, queries, 0, count * 2u, slot.m_resolve, 0);
+        wgpuCommandEncoderCopyBufferToBuffer(enc, slot.m_resolve, 0,
+            slot.m_read, begin * 16u, count * 16u);
     }
-    if (n) {
-        wgpuCommandEncoderResolveQuerySet(enc, g_profile_queries, 0, n * 2, g_profile_resolve, 0);
-        wgpuCommandEncoderCopyBufferToBuffer(enc, g_profile_resolve, 0, g_profile_read, 0, n * 16);
+    if (present_view) {
+        WGPURenderPassColorAttachment color = WGPU_RENDER_PASS_COLOR_ATTACHMENT_INIT;
+        color.view = present_view;
+        color.loadOp = WGPULoadOp_Clear;
+        color.storeOp = WGPUStoreOp_Store;
+        color.clearValue = WGPUColor{0.0, 0.0, 0.0, 1.0};
+        WGPURenderPassDescriptor rd = WGPU_RENDER_PASS_DESCRIPTOR_INIT;
+        rd.colorAttachmentCount = 1;
+        rd.colorAttachments = &color;
+        WGPURenderPassEncoder rp = wgpuCommandEncoderBeginRenderPass(enc, &rd);
+        wgpuRenderPassEncoderSetViewport(rp, static_cast<float>(g_present_viewport.x), static_cast<float>(g_present_viewport.y),
+            static_cast<float>(g_present_viewport.width), static_cast<float>(g_present_viewport.height), 0.0f, 1.0f);
+        wgpuRenderPassEncoderSetPipeline(rp, g_blit);
+        wgpuRenderPassEncoderSetBindGroup(rp, 0, g_blit_group, 0, nullptr);
+        wgpuRenderPassEncoderDraw(rp, 3, 1, 0, 0);
+        wgpuRenderPassEncoderEnd(rp);
+        wgpuRenderPassEncoderRelease(rp);
     }
     WGPUCommandBuffer cmd = wgpuCommandEncoderFinish(enc, nullptr);
     wgpuQueueSubmit(g_queue, 1, &cmd);
     wgpuCommandBufferRelease(cmd);
     wgpuCommandEncoderRelease(enc);
-    if (n) {
-        bool done = false;
-        WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
-        cb.mode = WGPUCallbackMode_AllowProcessEvents;
-        cb.callback = [](WGPUMapAsyncStatus, WGPUStringView, void *flag, void *) { *static_cast<bool *>(flag) = true; };
-        cb.userdata1 = &done;
-        wgpuBufferMapAsync(g_profile_read, WGPUMapMode_Read, 0, n * 16, cb);
-        wait_until(done);
-        const auto *t = static_cast<const std::uint64_t *>(wgpuBufferGetConstMappedRange(g_profile_read, 0, n * 16));
-        std::size_t info = 0;
-        for (std::uint32_t i = 0; t && i < n; ++i) {
-            while (info < g_command_info.size() && g_command_info[info].index < i) ++info;
-            std::fprintf(g_profile_out, "%llu %u %s %llu %u %u", static_cast<unsigned long long>(g_serial), i, kEntryPoints[g_commands[i].pipeline],
-                         static_cast<unsigned long long>(t[i * 2 + 1] > t[i * 2] ? t[i * 2 + 1] - t[i * 2] : 0), g_commands[i].x, g_commands[i].y);
-            if (info < g_command_info.size() && g_command_info[info].index == i)
-                for (std::uint32_t v : g_command_info[info].values) std::fprintf(g_profile_out, " %u", v);
-            std::fprintf(g_profile_out, "\n");
-        }
-        wgpuBufferUnmap(g_profile_read);
-    }
-    g_commands.clear();
-    g_command_info.clear();
+    ++g_submits;
+    g_detail_passes += g_commands.size();
+    slot.m_serial = g_serial;
+    slot.m_commands.swap(g_commands);
+    slot.m_info.swap(g_command_info);
+    slot.m_state.store(e_timestamp_state::pending, std::memory_order_release);
+    g_detail_pending.push_back(slot_index);
+    WGPUBufferMapCallbackInfo cb = WGPU_BUFFER_MAP_CALLBACK_INFO_INIT;
+    cb.mode = WGPUCallbackMode_AllowProcessEvents;
+    cb.userdata1 = &slot;
+    cb.callback = [](WGPUMapAsyncStatus status, WGPUStringView, void* user, void*)
+    {
+        auto& completed = *static_cast<s_detail_profile_slot*>(user);
+        completed.m_state.store(status == WGPUMapAsyncStatus_Success ?
+            e_timestamp_state::ready : e_timestamp_state::failed,
+            std::memory_order_release);
+    };
+    wgpuBufferMapAsync(slot.m_read, WGPUMapMode_Read, 0,
+        slot.m_commands.size() * 16u, cb);
+    poll_detail_profile();
     ++g_serial;
     g_param_records.clear();
     g_arena.clear();
     g_decoded_used = 0;
     g_clut_loads = 0;
+    return true;
 }
 
 // Browsers copy writes above about 1 MiB through a slower path, so large uploads go in pieces.
 void submit(WGPUTextureView present_view = nullptr) {
     ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::webgpu_submit_cpu);
+    const int profile_request = g_command_profile_request.exchange(0, std::memory_order_acq_rel);
+    if (profile_request == 1 && g_profile_out == nullptr) {
+        g_profile_out = std::fopen("gpu-profile-live.txt", "w");
+        if (g_profile_out != nullptr) {
+            g_profile_from = g_serial;
+            g_profile_to = UINT64_MAX;
+            g_detail_rows = 0;
+            g_detail_errors = 0;
+            g_detail_pressure_waits = 0;
+            std::fprintf(stderr, "[gpu] detailed capture started at submission %llu\n",
+                static_cast<unsigned long long>(g_serial));
+        } else {
+            std::fprintf(stderr, "GPU profiling could not open gpu-profile-live.txt\n");
+        }
+    }
+    else if (profile_request == 2 || (g_profile_out && g_serial >= g_profile_to))
+    {
+        finish_detail_profile();
+    }
     if (g_commands.empty() && !present_view) return;
-    if (g_profile_out && !present_view && g_timestamps && g_serial >= g_profile_from && g_serial < g_profile_to) {
-        g_detail_passes += g_commands.size();
-        profile_submit();
+    if (g_profile_out && g_timestamps && g_serial >= g_profile_from &&
+        g_serial < g_profile_to && profile_submit(present_view))
+    {
         collect_ready_timestamp();
         publish_timestamps();
         return;
@@ -1475,13 +1722,131 @@ bool init(Mode m) {
             g_profile_out = std::fopen(path, "w");
             g_profile_from = a;
             g_profile_to = z;
+            if (g_profile_out != nullptr) g_live_profile_allowed = false;
         }
     }
+    g_raster_dense_workgroup = false;
+    if (const char* dense = std::getenv("PS2_RASTER_DENSE_WORKGROUP"))
+    {
+        if (std::strcmp(dense, "1") == 0)
+        {
+            g_raster_dense_workgroup = true;
+        }
+        else if (std::strcmp(dense, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_DENSE_WORKGROUP (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster dense_workgroup=%u\n", g_raster_dense_workgroup ? 1u : 0u);
+    g_regular_timestamps = true;
+    if (const char* regular = std::getenv("PS2_GPU_REGULAR_TIMESTAMPS"))
+    {
+        if (std::strcmp(regular, "0") == 0)
+        {
+            g_regular_timestamps = false;
+        }
+        else if (std::strcmp(regular, "1") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_GPU_REGULAR_TIMESTAMPS (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    g_raster_workgroup = 16u;
+    if (const char* size = std::getenv("PS2_RASTER_WORKGROUP"))
+    {
+        if (std::strcmp(size, "8") == 0)
+        {
+            g_raster_workgroup = 8u;
+        }
+        else if (std::strcmp(size, "16") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_WORKGROUP (expected 8 or 16)\n");
+            return false;
+        }
+    }
+    g_raster_lazy_setup = false;
+    if (const char* lazy = std::getenv("PS2_RASTER_LAZY_SETUP"))
+    {
+        if (std::strcmp(lazy, "1") == 0)
+        {
+            g_raster_lazy_setup = true;
+        }
+        else if (std::strcmp(lazy, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_LAZY_SETUP (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster lazy_setup=%u\n", g_raster_lazy_setup ? 1u : 0u);
+    g_raster_early_depth = false;
+    if (const char* early = std::getenv("PS2_RASTER_EARLY_DEPTH"))
+    {
+        if (std::strcmp(early, "1") == 0)
+        {
+            g_raster_early_depth = true;
+        }
+        else if (std::strcmp(early, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_EARLY_DEPTH (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster early_depth=%u\n", g_raster_early_depth ? 1u : 0u);
+    g_raster_bilinear_coords = false;
+    if (const char* coords = std::getenv("PS2_RASTER_BILINEAR_COORDS"))
+    {
+        if (std::strcmp(coords, "1") == 0)
+        {
+            g_raster_bilinear_coords = true;
+        }
+        else if (std::strcmp(coords, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_BILINEAR_COORDS (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster bilinear_coords=%u\n", g_raster_bilinear_coords ? 1u : 0u);
+    g_raster_plot_address_cache = false;
+    if (const char* cache = std::getenv("PS2_RASTER_PLOT_ADDRESS_CACHE"))
+    {
+        if (std::strcmp(cache, "1") == 0)
+        {
+            g_raster_plot_address_cache = true;
+        }
+        else if (std::strcmp(cache, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_PLOT_ADDRESS_CACHE (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster plot_address_cache=%u\n", g_raster_plot_address_cache ? 1u : 0u);
+    g_raster_tile = 16u;
+    if (const char* size = std::getenv("PS2_RASTER_TILE"))
+    {
+        if (std::strcmp(size, "8") == 0)
+        {
+            g_raster_tile = 8u;
+        }
+        else if (std::strcmp(size, "16") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_TILE (expected 8 or 16)\n");
+            return false;
+        }
+    }
+    if (g_raster_tile < g_raster_workgroup)
+    {
+        std::fprintf(stderr, "[gpu] raster tile must not be smaller than its workgroup\n");
+        return false;
+    }
+    std::fprintf(stderr, "[gpu] raster workgroup=%ux%u (%ux%u CPU tiles)\n",
+        g_raster_workgroup, g_raster_workgroup, g_raster_tile, g_raster_tile);
     g_scale = 1u;
     if (const char *scale = std::getenv("PS2_SCALE")) g_scale = static_cast<std::uint32_t>(std::clamp(std::atoi(scale), 1, 4));
     while (g_scale > 1 && (8ull << 20) * g_scale * g_scale > std::min(supported.maxBufferSize, supported.maxStorageBufferBindingSize)) --g_scale;
     g_copy_words = (1u << 20) * g_scale * g_scale;
-    g_tiles_per_row = (2048 * static_cast<int>(g_scale) + 15) / 16;
+    g_tiles_per_row = (2048 * static_cast<int>(g_scale) + static_cast<int>(g_raster_tile) - 1) /
+        static_cast<int>(g_raster_tile);
     g_tile_count.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_tile_fill.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_field_words = (1u << 19) * g_scale * g_scale;
@@ -1540,6 +1905,8 @@ bool init(Mode m) {
         }
     }
     publish_timestamps();
+    std::fprintf(stderr, "[gpu] regular_timestamps=%u supported=%u\n",
+        g_regular_timestamps && g_timestamps ? 1u : 0u, g_timestamps ? 1u : 0u);
 
     WGPUBindGroupLayoutEntry le[9] = {};
     const WGPUBufferBindingType types[9] = {WGPUBufferBindingType_Storage, WGPUBufferBindingType_ReadOnlyStorage, WGPUBufferBindingType_Uniform,
@@ -2020,7 +2387,14 @@ void write_state(const std::vector<std::uint32_t> &vram, std::uint32_t scale, co
 void stats() {
     if (g_mode == Mode::off) return;
     std::fprintf(stderr, "[gpu] %llu submits, dispatches:", static_cast<unsigned long long>(g_submits));
-    for (int i = 0; i < kPipelines; ++i) std::fprintf(stderr, " %s %llu", kEntryPoints[i], static_cast<unsigned long long>(g_dispatches[i]));
+    for (int i = 0; i < kPipelines; ++i)
+    {
+        if (i != kRasterDense)
+        {
+            const auto count = g_dispatches[i] + (i == kRaster ? g_dispatches[kRasterDense] : 0u);
+            std::fprintf(stderr, " %s %llu", kEntryPoints[i], static_cast<unsigned long long>(count));
+        }
+    }
     std::fprintf(stderr, "\n");
 }
 
@@ -2287,8 +2661,13 @@ ee::s_gpu_timestamp_profile timestamp_profile()
 
 void collect_timestamp_profile()
 {
+    std::fprintf(stderr, "[gpu] raster dense summary: regular=%llu dense=%llu\n",
+        static_cast<unsigned long long>(g_dispatches[kRaster]),
+        static_cast<unsigned long long>(g_dispatches[kRasterDense]));
     if (g_device != nullptr && g_timestamps)
     {
+        // Final runner collection follows the committed GS drain.
+        finish_detail_profile();
 #ifdef __EMSCRIPTEN__
         wgpuInstanceProcessEvents(g_instance);
 #else
@@ -2296,7 +2675,23 @@ void collect_timestamp_profile()
 #endif
         collect_ready_timestamp();
         publish_timestamps();
+        std::fprintf(stderr, "[gpu] regular timestamp summary: passes=%llu submitted=%llu completed=%llu failures=%llu detail_passes=%llu\n",
+            static_cast<unsigned long long>(g_total_passes),
+            static_cast<unsigned long long>(g_query_submissions),
+            static_cast<unsigned long long>(g_measured),
+            static_cast<unsigned long long>(g_query_failures),
+            static_cast<unsigned long long>(g_detail_passes));
     }
+}
+
+bool set_command_profile_enabled(bool enabled)
+{
+    if (!g_timestamps || !g_live_profile_allowed)
+    {
+        return false;
+    }
+    g_command_profile_request.store(enabled ? 1 : 2, std::memory_order_release);
+    return true;
 }
 
 double busy_ms() {
@@ -2443,13 +2838,17 @@ bool change_render_scale(std::uint32_t scale)
     g_scale = scale;
     g_copy_words = (1u << 20) * scale * scale;
     g_field_words = (1u << 19) * scale * scale;
-    g_tiles_per_row = (2048 * static_cast<int>(scale) + 15) / 16;
+    g_tiles_per_row = (2048 * static_cast<int>(scale) + static_cast<int>(g_raster_tile) - 1) /
+        static_cast<int>(g_raster_tile);
     g_tile_count.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_tile_fill.assign(g_tile_count.size(), 0);
     g_touched.clear();
     for (int i = 0; i < kPipelines; ++i)
     {
-        wgpuComputePipelineRelease(g_pipelines[i]);
+        if (g_pipelines[i])
+        {
+            wgpuComputePipelineRelease(g_pipelines[i]);
+        }
         g_pipelines[i] = pipelines[i];
     }
     rebuild_group();

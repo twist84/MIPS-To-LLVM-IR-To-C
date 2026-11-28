@@ -28,7 +28,7 @@ public:
         "profile cache size must be a nonzero power of two");
 
     explicit c_ee_pc_profile(bool enabled)
-        : m_slots(enabled ? k_slots : 0u)
+        : m_enabled(enabled), m_slots(enabled ? k_slots : 0u)
     {
     }
 
@@ -39,7 +39,7 @@ public:
                 uint64_t idle_instructions, uint64_t wall_ns,
                 uint64_t nested_ns = 0u)
     {
-        if (!m_slots.empty())
+        if (m_enabled)
         {
             const uint32_t word = pc >> 2u;
             auto& slot = m_slots[(word ^ (word >> 12u)) & (k_slots - 1u)];
@@ -57,6 +57,17 @@ public:
         }
     }
 
+    void set_enabled(bool enabled)
+    {
+        m_enabled = enabled;
+        if (enabled && m_slots.empty())
+        {
+            m_slots.resize(k_slots);
+        }
+    }
+
+    bool enabled() const { return m_enabled; }
+
     const std::unordered_map<uint32_t, s_pc_profile>& entries() const
     {
         return m_entries;
@@ -71,6 +82,7 @@ private:
 
     // No erasure or replacement of map entries is exposed.
     std::unordered_map<uint32_t, s_pc_profile> m_entries;
+    bool m_enabled = false;
     std::vector<s_slot> m_slots;
 };
 } // namespace ee

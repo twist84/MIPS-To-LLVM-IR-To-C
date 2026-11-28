@@ -56,9 +56,10 @@ PROVENANCE_ENV = (
     "SDBZ_PROFILE_PCS_FIRST", "SDBZ_PROFILE_PCS_LAST", "SDBZ_NATIVE_ALU_CERTIFICATES",
     "SDBZ_IOP_COALESCE_IDLE_TURNS", "SDBZ_IOP_FAST_QUIET_TURNS",
     "SDBZ_IOP_CHECKPOINT_TRACE", "SDBZ_IDLE_SKIP", "SDBZ_IDLE_SKIP_FORWARD_BRANCHES",
-    "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", "SDBZ_VU1_ASYNC", "SDBZ_GS_ASYNC",
+    "SDBZ_VU1_NATIVE_OVERLAP_PROFILE", "SDBZ_VU1_WORKER_PROFILE",
+    "SDBZ_VU1_WORKER_PROFILE_WINDOW", "SDBZ_VU1_ASYNC", "SDBZ_GS_ASYNC",
     "SDBZ_EE_DIRECT_DISPATCH", "SDBZ_GS_GPU_VRAM", "SDBZ_GIF_IMAGE_DIGEST",
-    "SDBZ_EE_FASTMEM_WORD", "SDBZ_EE_FASTMEM_SCALAR", "SDBZ_EE_FASTMEM_QUAD", "PS2_SCALE",
+    "SDBZ_EE_FASTMEM_WORD", "SDBZ_EE_FASTMEM_SCALAR", "SDBZ_EE_FASTMEM_QUAD", "PS2_SCALE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_TILE", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS", "PS2_RASTER_PLOT_ADDRESS_CACHE", "PS2_GPU_REGULAR_TIMESTAMPS", "PS2_RASTER_DENSE_WORKGROUP", "PS2_GS_PACKED_DIRECT",
     "SDBZ_HOST_AUDIO", "SDBZ_PAD0_CROSS_FIRST_POLL", "SDBZ_PAD0_CROSS_POLL_COUNT",
     "SDBZ_PAD0_SCRIPT", "SDBZ_PAD0_RECORD", "SDBZ_TRACE_BUFFERED", "SDBZ_DISPATCH_TRACE_EVERY",
     "SDBZ_REPORT_PROGRESS_EVERY", "SDBZ_REPORT_SNAPSHOT_MS",
@@ -69,6 +70,36 @@ PROVENANCE_ENV = (
     "SDBZ_REPORT_HOTSPOTS", "SDBZ_REPORT_BOUNDARY_TIMING",
     "SDBZ_WINDOW_PUMP_STRIDE", "EE_WEBGPU_WINDOW", "EE_WEBGPU_SNAPSHOT",
 )
+
+
+def fingerprint_vu1_inventory(repo, value):
+    """Hash the selected native inventory, without exposing its absolute path."""
+    if not value:
+        return None
+    directory = Path(value)
+    if not directory.is_absolute():
+        directory = repo / directory
+    result = {"directory": directory.name, "target": None, "libraries": 0,
+              "inventory_sha256": None}
+    try:
+        marker = directory / "vu1-build-target.txt"
+        if marker.is_file():
+            result["target"] = marker.read_text(encoding="utf-8").strip()
+        suffix = ".dll" if os.name == "nt" else ".so"
+        libraries = sorted(directory.glob("*" + suffix), key=lambda path: path.name)
+        result["libraries"] = len(libraries)
+        if libraries:
+            inventory = hashlib.sha256()
+            for path in libraries:
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                inventory.update(path.name.encode("utf-8") + b"\0" + digest.digest())
+            result["inventory_sha256"] = inventory.hexdigest()
+    except (OSError, UnicodeError):
+        pass
+    return result
 
 
 def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
@@ -99,6 +130,7 @@ def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
         "schema": "ee-retail-replay-provenance-v1",
         "pad0_replay_configured": bool(replay_input),
         "pad0_replay_source_sha256": replay_sha256,
+        "vu1_aot_inventory": fingerprint_vu1_inventory(repo, env.get("SDBZ_VU1_AOT")),
         "git_head": head,
         "tracked_tree_dirty": None if dirty is None else bool(dirty),
         "max_expansion_dispatches": expansion_limit,
@@ -492,6 +524,7 @@ def main(argv=None):
         # A jump-table relink can compile many functions in one replay.
         prior_count = read_function_count(metadata_path) if reuse else None
         report.unlink(missing_ok=True)
+        report.with_name(report.name + ".pc-profile.csv").unlink(missing_ok=True)
         code, output, elapsed = run_session(
             command, expansion_log, append=True, **progress_kwargs
         )
@@ -608,6 +641,7 @@ def main(argv=None):
     if args.gs_webgpu_window:
         final_command.append("--gs-webgpu-window")
     report.unlink(missing_ok=True)
+    report.with_name(report.name + ".pc-profile.csv").unlink(missing_ok=True)
     code, final_output, elapsed = run_session(
         final_command, boot_log, **progress_kwargs
     )

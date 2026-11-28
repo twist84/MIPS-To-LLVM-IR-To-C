@@ -796,6 +796,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME ee_wgpu_native_sdk_bootstrap
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ensure_wgpu_native.py)
+    add_test(NAME vu1_mul_profile_instrumentation
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_build_vu1_aot_profile.py)
 endif()
 
 # Real wgpu-native compute execution, independent of browser or window.
@@ -806,6 +809,18 @@ if(EE_ENABLE_WEBGPU)
     add_test(NAME ee_webgpu_native_smoke COMMAND ee_webgpu_native_smoke)
     set_tests_properties(ee_webgpu_native_smoke
         PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(NAME ee_webgpu_native_smoke_tile8 COMMAND ee_webgpu_native_smoke)
+    set_tests_properties(ee_webgpu_native_smoke_tile8
+        PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "PS2_RASTER_TILE=8;PS2_RASTER_WORKGROUP=8")
+    add_test(NAME ee_webgpu_native_smoke_lazy_setup COMMAND ee_webgpu_native_smoke)
+    set_tests_properties(ee_webgpu_native_smoke_lazy_setup
+        PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "PS2_RASTER_TILE=8;PS2_RASTER_WORKGROUP=8;PS2_RASTER_LAZY_SETUP=1")
+    add_test(NAME ee_webgpu_native_smoke_early_depth COMMAND ee_webgpu_native_smoke)
+    set_tests_properties(ee_webgpu_native_smoke_early_depth
+        PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "PS2_RASTER_EARLY_DEPTH=1")
 endif()
 
 if(Python3_Interpreter_FOUND)
@@ -887,6 +902,9 @@ if(Python3_Interpreter_FOUND)
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_entry_shadow.py
                 $<TARGET_FILE:ee_recomp>)
+    add_test(NAME ee_worker_isolation
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_worker_isolation.py)
     add_test(NAME ee_dedup_experiment
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_dedup_experiment.py)
@@ -924,6 +942,9 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME ee_native_size_pilot
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_pilot.py)
+        add_test(NAME ee_vector_discard
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_vector_discard.py)
         add_test(NAME verify_ir_incremental
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_verify_ir_incremental.py)

@@ -4024,23 +4024,60 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
 
     if (guarded_loop_header)
     {
+        // The host may bind a slice to the next scheduled guest event.
+        // Check cumulative compatibility slots at loop headers instead of
+        // adding a callback to every translated instruction.
+        const uint32_t pc = block[0].pc;
+        const std::string event_suffix = std::to_string(pc);
+        const std::string suffix = std::to_string(pc);
+        const std::string continue_label = "loop_continue_" + suffix;
+        const std::string is_null = newtemp();
+        const std::string event_check = "event_budget_check_" + event_suffix;
+        const std::string event_yield = "event_budget_yield_" + event_suffix;
+        const std::string event_continue = "event_budget_continue_" + event_suffix;
+        // Both the event deadline and legacy loop safepoint require a live
+        // runtime. Share this null guard so hot guest loop headers pay for it
+        // once instead of once per independent guard.
+        m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
+        m_out += "  br i1 " + is_null + ", label %" + continue_label +
+                 ", label %" + event_check + "\n";
+        m_out += event_check + ":\n";
+        const std::string event_slot_ptr = newtemp();
+        const std::string event_slot = newtemp();
+        const std::string event_deadline_ptr = newtemp();
+        const std::string event_deadline = newtemp();
+        const std::string event_due = newtemp();
+        m_out += "  " + event_slot_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime,
+                     m_reference_instruction_slots)) + "\n";
+        m_out += "  " + event_slot + " = load i64, ptr " + event_slot_ptr + "\n";
+        m_out += "  " + event_deadline_ptr + " = getelementptr i8, ptr %rt, i64 " +
+                 std::to_string(offsetof(ee::s_ee_runtime,
+                     m_event_budget_slot_deadline)) + "\n";
+        m_out += "  " + event_deadline + " = load i64, ptr " +
+                 event_deadline_ptr + "\n";
+        m_out += "  " + event_due + " = icmp uge i64 " + event_slot + ", " +
+                 event_deadline + "\n";
+        m_out += "  br i1 " + event_due + ", label %" + event_yield +
+                 ", label %" + event_continue + "\n";
+        m_out += event_yield + ":\n";
+        m_out += "  store i32 " + std::to_string(pc) + ", ptr " +
+                 state_field(6) + "\n";
+        m_out += "  store i32 8, ptr " + state_field(7) + "\n";
+        m_out += "  ret i32 8\n";
+        m_out += event_continue + ":\n";
+
         // This guard executes before the first instruction in an
         // intra-function loop header. It is *not* an EE exception: the
         // host receives the exact resume PC and a distinct reason.
         // Null runtime and a zero limit keep older JIT clients working.
         // Incoming predecessors must flush their architectural GPR
         // changes; emit_function_cfg seeds all GPRs live at this header.
-        const uint32_t pc = block[0].pc;
-        const std::string suffix = std::to_string(pc);
         const std::string enabled_label = "loop_enabled_" + suffix;
         const std::string tick_label = "loop_tick_" + suffix;
         const std::string decrement_label = "loop_decrement_" + suffix;
         const std::string exhausted_label = "loop_exhausted_" + suffix;
-        const std::string continue_label = "loop_continue_" + suffix;
-        const std::string is_null = newtemp();
-        m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
-        m_out += "  br i1 " + is_null + ", label %" + continue_label +
-                 ", label %" + enabled_label + "\n";
+        m_out += "  br label %" + enabled_label + "\n";
         m_out += enabled_label + ":\n";
         const std::string limit_ptr = newtemp();
         const std::string limit = newtemp();

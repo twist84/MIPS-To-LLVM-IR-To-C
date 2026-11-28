@@ -8,9 +8,67 @@ import argparse
 import concurrent.futures
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
+
+
+def instrument_mul_corrections(ir):
+    counts = (
+        "@vu_mul_profile_counts = internal global [3 x i64] zeroinitializer, align 8\n"
+        "declare i4 @llvm.ctpop.i4(i4)\n")
+    ir = ir.replace("define internal ", counts + "define internal ", 1)
+    start = re.search(
+        r"(?m)^define internal [^\n]* @vu_mul4\([^\n]*\) alwaysinline \{\nentry:\n",
+        ir)
+    if start is None:
+        raise ValueError("generated VU1 IR is missing the expected vu_mul4 entry")
+    call_counter = """  %vu_mul_profile_call_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 0
+  %vu_mul_profile_call_old = load i64, ptr %vu_mul_profile_call_ptr, align 8
+  %vu_mul_profile_call_new = add i64 %vu_mul_profile_call_old, 1
+  store i64 %vu_mul_profile_call_new, ptr %vu_mul_profile_call_ptr, align 8
+"""
+    ir = ir[:start.end()] + call_counter + ir[start.end():]
+    correct = re.search(r"(?m)^correct:\n", ir[start.start():])
+    if correct is None:
+        raise ValueError("generated VU1 IR is missing the vu_mul4 correction path")
+    correct_offset = start.start() + correct.end()
+    correction_counter = """  %vu_mul_profile_correct_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 1
+  %vu_mul_profile_correct_old = load i64, ptr %vu_mul_profile_correct_ptr, align 8
+  %vu_mul_profile_correct_new = add i64 %vu_mul_profile_correct_old, 1
+  store i64 %vu_mul_profile_correct_new, ptr %vu_mul_profile_correct_ptr, align 8
+  %vu_mul_profile_lane_count = call i4 @llvm.ctpop.i4(i4 %mask)
+  %vu_mul_profile_lane_wide = zext i4 %vu_mul_profile_lane_count to i64
+  %vu_mul_profile_lanes_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 2
+  %vu_mul_profile_lanes_old = load i64, ptr %vu_mul_profile_lanes_ptr, align 8
+  %vu_mul_profile_lanes_new = add i64 %vu_mul_profile_lanes_old, %vu_mul_profile_lane_wide
+  store i64 %vu_mul_profile_lanes_new, ptr %vu_mul_profile_lanes_ptr, align 8
+"""
+    ir = ir[:correct_offset] + correction_counter + ir[correct_offset:]
+    accessor = """
+define dso_local dllexport void @ee_vu1_mul_profile(ptr %out) nounwind {
+entry:
+  %count_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 0
+  %count = load i64, ptr %count_ptr, align 8
+  store i64 %count, ptr %out, align 8
+  %correction_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 1
+  %corrections = load i64, ptr %correction_ptr, align 8
+  %correction_out = getelementptr inbounds i64, ptr %out, i64 1
+  store i64 %corrections, ptr %correction_out, align 8
+  %lanes_ptr = getelementptr inbounds [3 x i64], ptr @vu_mul_profile_counts, i64 0, i64 2
+  %lanes = load i64, ptr %lanes_ptr, align 8
+  %lanes_out = getelementptr inbounds i64, ptr %out, i64 2
+  store i64 %lanes, ptr %lanes_out, align 8
+  ret void
+}
+"""
+    info_export = re.search(r"(?m)^define dso_local dllexport ptr @ee_vu1_aot_info\(", ir)
+    if info_export is None:
+        ir += accessor
+    else:
+        ir = ir[:info_export.start()] + accessor + ir[info_export.start():]
+    return ir
 
 
 def build_library(clang, ir, library, opt, march):
@@ -53,6 +111,8 @@ def main():
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 4)
     parser.add_argument("--match-inventory", type=Path,
                         help="rebuild exactly the captures represented in the baseline library directory; requires fresh output")
+    parser.add_argument("--profile-mul-corrections", action="store_true",
+                        help="instrument vector FMAC multiply and exact-correction counts in this separate diagnostic inventory")
     args = parser.parse_args()
     suffix = ".dll" if os.name == "nt" else ".so"
     executable = "vu1_recomp.exe" if os.name == "nt" else "vu1_recomp"
@@ -93,6 +153,14 @@ def main():
     elif args.march == "native" and any(out.glob("*" + suffix)):
         parser.error("unidentified existing libraries; use a fresh native output directory")
     target_marker.write_text(args.march + "\n", encoding="utf-8")
+    profile_marker = out / "vu1-profile-mode.txt"
+    profile_mode = "mul-corrections" if args.profile_mul_corrections else "off"
+    if (args.profile_mul_corrections and not profile_marker.exists() and
+            any(out.glob("*" + suffix))):
+        parser.error("profiled VU1 libraries require a fresh output directory")
+    if profile_marker.exists() and profile_marker.read_text(encoding="utf-8").strip() != profile_mode:
+        parser.error("VU1 profile mode changed; use a separate output directory")
+    profile_marker.write_text(profile_mode + "\n", encoding="utf-8")
     print(f"VU1 AOT target: {args.march}", flush=True)
 
     def build_one(capture):
@@ -105,6 +173,9 @@ def main():
             if result.returncode == 3:
                 return False
             result.check_returncode()
+            if args.profile_mul_corrections:
+                ir.write_text(instrument_mul_corrections(ir.read_text(encoding="utf-8")),
+                              encoding="utf-8")
             library = Path(directory) / ("program" + suffix)
             build_library(clang, ir, library, args.opt, args.march)
             library.replace(out / (capture.stem + suffix))

@@ -48,6 +48,17 @@ entry:
         assert len(result["sha256"]) == 64
         result["executable_delta_vs_reemitted_o5"] = (
             result["executable_bytes"] - results["O5"]["executable_bytes"])
+    from build_ee_fmac_inline_experiment import emit_hot_o3
+    optimized = emit_hot_o3(raw, llvm.get_default_triple(), "ee_fn_00001000")
+    assert optimized["object_bytes"] >= optimized["executable_bytes"] > 0
+    assert optimized["middle_end_opt"] == optimized["backend_opt"] == 3
+    assert len(optimized["sha256"]) == 64
+    try:
+        emit_hot_o3(raw, llvm.get_default_triple(), "missing_guest_symbol")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("O3 accepted missing guest entry")
     assert results["O5"]["middle_end_size_level"] is None
     assert results["Oz"]["middle_end_size_level"] == 2
     assert results["Oz"]["size_optimization_method"] == (
