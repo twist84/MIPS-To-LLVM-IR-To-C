@@ -353,7 +353,12 @@ public:
             m_cpu.m_cop0[COP0_Context], m_cpu.m_cop0[COP0_EntryHi]);
         const uint8_t* code = ee_fetch_strict_reset_word(fetch, rom, ram);
         const uint32_t opcode = code != nullptr ? ee_read_instruction_word(code) : 0u;
-        const uint32_t natural_slots = m_delay_slot_pending ? 1u : ee_firmware_reference_slots(opcode);
+        const bool annul_slot = ee_strict_conditional_branch_likely(opcode) &&
+            !ee_strict_conditional_branch_taken(opcode,
+                strict_reset_detail::read_gpr(m_cpu, (opcode >> 21u) & 31u),
+                strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u));
+        const uint32_t natural_slots = m_delay_slot_pending || annul_slot
+            ? 1u : ee_firmware_reference_slots(opcode);
         const auto deadline = [this](uint64_t end)
         {
             return m_timers.next_event() < end || next_compare_event() < end ||

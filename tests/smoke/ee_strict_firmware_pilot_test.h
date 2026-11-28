@@ -997,17 +997,21 @@ bool test_strict_firmware_signed_branches()
     using boundary = ee::e_ee_firmware_boundary;
     constexpr uint32_t base = 0xbfc00000u;
     const auto iop_rom = make_firmware_pilot_rom({0x1000ffffu, 0u});
-    constexpr uint32_t branches[] = {0x18800003u, 0x1c800003u, 0x04800003u, 0x04810003u};
+    constexpr uint32_t branches[] = {0x18800003u, 0x1c800003u, 0x04800003u, 0x04810003u,
+        0x58800003u, 0x5c800003u, 0x04820003u, 0x04830003u, 0x50800003u, 0x54800003u};
     // At cycle 7 the next IOP slot is due at 8, forcing a split.
     // Test the same branch using a caller split at cycle 3 as well.
-    for (uint32_t branch = 0u; branch < 4u; ++branch)
+    for (uint32_t branch = 0u; branch < 10u; ++branch)
     {
         for (uint32_t sign = 0u; sign < 2u; ++sign)
         {
             for (uint32_t mode = 0u; mode < 3u; ++mode)
             {
-                const uint32_t init = sign == 0u ? 0x24040001u : 0x2404ffffu;
-                const bool taken = (branch == 0u || branch == 2u) ? sign != 0u : sign == 0u;
+                const uint32_t init = branch >= 8u && sign == 0u
+                    ? 0x24040000u : sign == 0u ? 0x24040001u : 0x2404ffffu;
+                const uint64_t operand = sign != 0u ? ~0ull : branch >= 8u ? 0u : 1u;
+                const bool taken = branch >= 8u ? sign == (branch & 1u) : sign != (branch & 1u);
+                const bool annul = branch >= 4u && !taken;
                 const auto rom = mode == 2u
                     ? make_firmware_pilot_rom({0x40806000u, init, 0u, 0u, 0u, 0u, 0u,
                         branches[branch], 0x24040000u, 0u, 0u, 0u})
@@ -1029,23 +1033,24 @@ bool test_strict_firmware_signed_branches()
                 const uint32_t pc = base + before * 4u;
                 const auto first = pilot.step(mode == 1u ? 1u : 2u);
                 if (first.m_boundary != boundary::RETIRED ||
-                    first.m_instruction.m_retired != (mode == 0u ? 2u : 1u))
+                    first.m_instruction.m_retired != (mode == 0u && !annul ? 2u : 1u))
                 {
                     return false;
                 }
-                if (mode != 0u)
+                if (mode != 0u && !annul)
                 {
                     if (!pilot.delay_slot_pending() || pilot.cpu().m_pc != pc + 4u ||
-                        pilot.cpu().m_gpr[4].m_lo != (sign == 0u ? 1u : ~0ull) ||
+                        pilot.cpu().m_gpr[4].m_lo != operand ||
                         pilot.step(0u).m_boundary != boundary::BUDGET ||
                         pilot.step(1u).m_boundary != boundary::RETIRED)
                     {
                         return false;
                     }
                 }
+                const uint32_t end = before + (annul ? 1u : 2u);
                 if (pilot.delay_slot_pending() || pilot.cpu().m_pc != pc + (taken ? 16u : 8u) ||
-                    pilot.cpu().m_gpr[4].m_lo != 0u || pilot.retired() != before + 2u ||
-                    pilot.cycle() != before + 2u ||
+                    pilot.cpu().m_gpr[4].m_lo != (annul ? operand : 0u) ||
+                    pilot.retired() != end || pilot.cycle() != end ||
                     pilot.iop_cycles() != (mode == 2u ? 1u : 0u))
                 {
                     return false;

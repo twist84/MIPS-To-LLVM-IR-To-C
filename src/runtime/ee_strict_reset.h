@@ -1060,6 +1060,14 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
+        case 0x0au: // MOVZ
+        case 0x0bu: // MOVN
+            if ((read_gpr(cpu, rt) == 0u) != (function == 0x0au))
+            {
+                return true;
+            }
+            value = read_gpr(cpu, rs);
+            break;
         case 0x21u: // ADDU: low 32-bit wrapping sum
             value = sign_extend_word(static_cast<uint32_t>(read_gpr(cpu, rs)) +
                                      static_cast<uint32_t>(read_gpr(cpu, rt)));
@@ -1800,13 +1808,19 @@ inline constexpr s_ee_reset_prefix_step ee_execute_strict_rom_register_step(
     const uint32_t link_reg = primary == 3u ? 31u : jalr ? (opcode >> 11u) & 31u : 0u;
     if (ee_strict_conditional_branch_supported(opcode) || indirect || direct_jump)
     {
+        const uint32_t pc = cpu.m_pc;
+        const uint64_t lhs = strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u);
+        const uint64_t rhs = strict_reset_detail::read_gpr(cpu, (opcode >> 16u) & 31u);
+        if (ee_strict_conditional_branch_likely(opcode) &&
+            !ee_strict_conditional_branch_taken(opcode, lhs, rhs))
+        {
+            cpu.m_pc = pc + 8u;
+            return {result::COMMITTED, opcode, 1u, pc};
+        }
         if (budget < 2u)
         {
             return {result::BUDGET_EXHAUSTED, opcode};
         }
-        const uint32_t pc = cpu.m_pc;
-        const uint64_t lhs = strict_reset_detail::read_gpr(cpu, (opcode >> 21u) & 31u);
-        const uint64_t rhs = strict_reset_detail::read_gpr(cpu, (opcode >> 16u) & 31u);
         // Sample the indirect target before the delay slot. Its
         // alignment and backing are checked only on the next fetch.
         const uint32_t next = indirect

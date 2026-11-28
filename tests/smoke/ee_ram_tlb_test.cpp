@@ -2351,7 +2351,7 @@ bool test_strict_reset_signed_branches()
             }
         }
     }
-    for (uint32_t word : {0x18810003u, 0x1c810003u, 0x04820003u, 0x04900003u})
+    for (uint32_t word : {0x18810003u, 0x1c810003u, 0x58810003u, 0x04900003u})
     {
         cpu.m_pc = pc;
         put(0u, word);

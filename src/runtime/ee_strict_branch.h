@@ -26,15 +26,23 @@ static_assert(!ee_strict_jalr_supported(0x0321f809u));
 static_assert(!ee_strict_jalr_supported(0x0320f849u));
 static_assert(!ee_strict_jalr_supported(0x0720f809u));
 
-// Ordinary conditional branches always execute one delay slot. Keep
-// likely/annul and REGIMM link forms out of this bounded contract.
+inline constexpr bool ee_strict_conditional_branch_likely(uint32_t opcode)
+{
+    const uint32_t primary = opcode >> 26u;
+    const uint32_t rt = (opcode >> 16u) & 31u;
+    return primary == 0x14u || primary == 0x15u ||
+        ((primary == 0x16u || primary == 0x17u) && rt == 0u) ||
+        (primary == 1u && (rt == 2u || rt == 3u));
+}
+
+// REGIMM link forms are outside this bounded contract.
 inline constexpr bool ee_strict_conditional_branch_supported(uint32_t opcode)
 {
     const uint32_t primary = opcode >> 26u;
     const uint32_t rt = (opcode >> 16u) & 31u;
     return primary == 4u || primary == 5u ||
         ((primary == 6u || primary == 7u) && rt == 0u) ||
-        (primary == 1u && rt <= 1u);
+        (primary == 1u && rt <= 1u) || ee_strict_conditional_branch_likely(opcode);
 }
 
 // Only called for the validated encodings above. Operands are the
@@ -45,11 +53,11 @@ inline constexpr bool ee_strict_conditional_branch_taken(uint32_t opcode,
     const bool negative = (lhs >> 63u) != 0u;
     switch (opcode >> 26u)
     {
-    case 4u: return lhs == rhs;
-    case 5u: return lhs != rhs;
-    case 6u: return negative || lhs == 0u;
-    case 7u: return !negative && lhs != 0u;
-    case 1u: return ((opcode >> 16u) & 31u) == 0u ? negative : !negative;
+    case 4u: case 0x14u: return lhs == rhs;
+    case 5u: case 0x15u: return lhs != rhs;
+    case 6u: case 0x16u: return negative || lhs == 0u;
+    case 7u: case 0x17u: return !negative && lhs != 0u;
+    case 1u: return (opcode & 0x10000u) == 0u ? negative : !negative;
     default: return false;
     }
 }
@@ -66,7 +74,7 @@ inline constexpr uint32_t ee_strict_conditional_branch_target(uint32_t pc,
 static_assert(ee_strict_conditional_branch_supported(0x1bc00063u));
 static_assert(ee_strict_conditional_branch_supported(0x04810002u));
 static_assert(!ee_strict_conditional_branch_supported(0x1bc10063u));
-static_assert(!ee_strict_conditional_branch_supported(0x04820002u));
+static_assert(ee_strict_conditional_branch_likely(0x04820002u));
 static_assert(!ee_strict_conditional_branch_supported(0x04900002u));
 static_assert(ee_strict_conditional_branch_taken(0x18800002u, 0x8000000000000000ull, 0u));
 static_assert(!ee_strict_conditional_branch_taken(0x18800002u, 0x80000000u, 0u));
