@@ -2094,3 +2094,33 @@ zero in candidate, no detail capture or query failures in any arm,
 all prior raster switches off, and exact terminal report/PPM and
 trace checks. No guest IR changes. Diagnostic cost screen, not a
 claim that GPU timestamp collection is the main combat bottleneck.
+
+
+### P4I result — ee-gpu-timestamps-comparison.zip
+
+Strict sync A/A/B passed. 40M dispatches, 2478/2478 PAD polls,
+1935262 matching sampled transitions, identical raw reports and PPM,
+88 native VU1 programs, 415895434 native pairs, zero fallbacks.
+All 3202 regular compute passes identical in count; 3202 submitted
+and completed queries in controls versus zero in candidate, no query
+failures. Wall 47.984/46.109/46.282 s, candidate -0.37% throughput
+versus control. Dispatch 24002560..39993344: 332 fields in
+16.3170/16.1131/16.1377 s. No meaningful performance gain. Retain
+regular timestamps by default. SC4 still unmet.
+
+### P4J — selective dense raster workgroup subdivision
+
+PS2_RASTER_DENSE_WORKGROUP=1 (default 0) creates a second raster
+pipeline with 4x4 GPU workgroups. Use it only for 16x16 CPU tiles
+with normal 16x16 groups, 1..32 occupied tiles and average list
+length at least 64. Thresholds are a pilot, motivated by previous
+profile batches with 6 tiles and 509 entries. Each chosen dispatch
+has 16 times as many workgroups, same pixels and ordered tile lists;
+other batches retain the original layout. No guest IR or shader
+arithmetic changes. Scale changes recreate both pipelines. Detailed
+capture retains the raster label; final summary distinguishes dense
+and ordinary dispatch counts. More redundant list loads, partial
+waves, and aliased VRAM access order are risks. Strict sync replay
+requires actual dense dispatches, equal total raster dispatch counts,
+matched sampled transitions, exact raw report and final image. No
+speedup or general rendering equivalence claimed before validation.

@@ -71,8 +71,8 @@ namespace {
 
 s_native_viewport g_present_viewport;
 
-enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kDecode, kPipelines };
-const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot", "decode"};
+enum Pipeline { kUpload, kCopyRead, kCopyWrite, kLoadClut, kDisplay, kRaster, kResolve, kSnapshot, kDecode, kRasterDense, kPipelines };
+const char *const kEntryPoints[kPipelines] = {"upload", "copy_read", "copy_write", "load_clut", "display", "raster", "resolve", "snapshot", "decode", "raster"};
 
 constexpr std::uint32_t kParamStride = 256;
 constexpr std::uint32_t kClutSlots = 2048;
@@ -117,6 +117,7 @@ bool g_raster_lazy_setup = false;
 bool g_raster_early_depth = false;
 bool g_raster_bilinear_coords = false;
 bool g_raster_plot_address_cache = false;
+bool g_raster_dense_workgroup = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -792,9 +793,16 @@ void flush_batch() {
     const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run);
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run});
     note_raster(prims, tiles, total, snapshot);
-    const std::uint32_t subtiles = g_raster_tile / g_raster_workgroup;
+    // Dense lists with few tiles expose too few workgroups to the GPU.
+    // Keep the ordered lists and pixel ownership unchanged; only subdivide
+    // selected dispatches. Restrict the pilot to the original 16/16 path.
+    const bool dense = g_raster_dense_workgroup && g_raster_tile == 16u &&
+        g_raster_workgroup == 16u && tiles != 0u && tiles <= 32u &&
+        total >= tiles * 64u;
+    const std::uint32_t workgroup = dense ? 4u : g_raster_workgroup;
+    const std::uint32_t subtiles = g_raster_tile / workgroup;
     const std::uint32_t groups = tiles * subtiles * subtiles;
-    g_commands.push_back({kRaster, std::min(groups, 1024u), (groups + 1023u) / 1024u, param});
+    g_commands.push_back({dense ? kRasterDense : kRaster, std::min(groups, 1024u), (groups + 1023u) / 1024u, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
     if (b.zwrite) mark_rendered(pages(b.zbp, b.fbw, b.zpsm, b.minx, b.miny, b.maxx, b.maxy));
     b.prims.clear();
@@ -1035,6 +1043,10 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
     md.nextInChain = &source.chain;
     WGPUShaderModule module = wgpuDeviceCreateShaderModule(g_device, &md);
     for (int i = 0; i < kPipelines; ++i) {
+        if (i == kRasterDense && !g_raster_dense_workgroup)
+        {
+            continue;
+        }
         WGPUComputePipelineDescriptor cd = WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
@@ -1047,7 +1059,7 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         constants[0].key = view("SCALE");
         constants[0].value = static_cast<double>(scale);
         constants[1].key = view("RASTER_WORKGROUP");
-        constants[1].value = static_cast<double>(g_raster_workgroup);
+        constants[1].value = static_cast<double>(i == kRasterDense ? 4u : g_raster_workgroup);
         constants[2].key = view("RASTER_TILE");
         constants[2].value = static_cast<double>(g_raster_tile);
         constants[3].key = view("RASTER_LAZY_SETUP");
@@ -1058,7 +1070,7 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         constants[5].value = g_raster_bilinear_coords ? 1.0 : 0.0;
         constants[6].key = view("RASTER_PLOT_ADDRESS_CACHE");
         constants[6].value = g_raster_plot_address_cache ? 1.0 : 0.0;
-        cd.compute.constantCount = i == kRaster ? 7u : 1u;
+        cd.compute.constantCount = (i == kRaster || i == kRasterDense) ? 7u : 1u;
         cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
@@ -1713,6 +1725,20 @@ bool init(Mode m) {
             if (g_profile_out != nullptr) g_live_profile_allowed = false;
         }
     }
+    g_raster_dense_workgroup = false;
+    if (const char* dense = std::getenv("PS2_RASTER_DENSE_WORKGROUP"))
+    {
+        if (std::strcmp(dense, "1") == 0)
+        {
+            g_raster_dense_workgroup = true;
+        }
+        else if (std::strcmp(dense, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_DENSE_WORKGROUP (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster dense_workgroup=%u\n", g_raster_dense_workgroup ? 1u : 0u);
     g_regular_timestamps = true;
     if (const char* regular = std::getenv("PS2_GPU_REGULAR_TIMESTAMPS"))
     {
@@ -2361,7 +2387,14 @@ void write_state(const std::vector<std::uint32_t> &vram, std::uint32_t scale, co
 void stats() {
     if (g_mode == Mode::off) return;
     std::fprintf(stderr, "[gpu] %llu submits, dispatches:", static_cast<unsigned long long>(g_submits));
-    for (int i = 0; i < kPipelines; ++i) std::fprintf(stderr, " %s %llu", kEntryPoints[i], static_cast<unsigned long long>(g_dispatches[i]));
+    for (int i = 0; i < kPipelines; ++i)
+    {
+        if (i != kRasterDense)
+        {
+            const auto count = g_dispatches[i] + (i == kRaster ? g_dispatches[kRasterDense] : 0u);
+            std::fprintf(stderr, " %s %llu", kEntryPoints[i], static_cast<unsigned long long>(count));
+        }
+    }
     std::fprintf(stderr, "\n");
 }
 
@@ -2628,6 +2661,9 @@ ee::s_gpu_timestamp_profile timestamp_profile()
 
 void collect_timestamp_profile()
 {
+    std::fprintf(stderr, "[gpu] raster dense summary: regular=%llu dense=%llu\n",
+        static_cast<unsigned long long>(g_dispatches[kRaster]),
+        static_cast<unsigned long long>(g_dispatches[kRasterDense]));
     if (g_device != nullptr && g_timestamps)
     {
         // Final runner collection follows the committed GS drain.
@@ -2809,7 +2845,10 @@ bool change_render_scale(std::uint32_t scale)
     g_touched.clear();
     for (int i = 0; i < kPipelines; ++i)
     {
-        wgpuComputePipelineRelease(g_pipelines[i]);
+        if (g_pipelines[i])
+        {
+            wgpuComputePipelineRelease(g_pipelines[i]);
+        }
         g_pipelines[i] = pipelines[i];
     }
     rebuild_group();

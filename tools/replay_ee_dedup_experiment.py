@@ -36,13 +36,13 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False, bilinear_coords=False, plot_address_cache=False, gpu_regular_timestamps_off=False):
+def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False, bilinear_coords=False, plot_address_cache=False, gpu_regular_timestamps_off=False, raster_dense_workgroup=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
     for arm in arms:
         folder = directory / arm
-        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth and not bilinear_coords and not plot_address_cache and not gpu_regular_timestamps_off else "0"
+        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth and not bilinear_coords and not plot_address_cache and not gpu_regular_timestamps_off and not raster_dense_workgroup else "0"
         log = (folder / "stderr.log").read_bytes()
         markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
         if not markers or any(value.decode("ascii") != expected for value in markers):
@@ -86,23 +86,43 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=Fal
                     (arm == "dedup" and (submitted != 0 or completed != 0)) or
                     (arm != "dedup" and not (0 < completed <= submitted <= passes))):
                 raise ValueError("unexpected regular timestamp counters: " + arm)
-        if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off:
+        if raster_dense_workgroup:
+            dense_mode = b"1" if arm == "dedup" else b"0"
+            for marker, value in ((b"dense_workgroup", dense_mode), (b"early_depth", b"0"),
+                                  (b"bilinear_coords", b"0"), (b"plot_address_cache", b"0")):
+                values = re.findall(rb"(?m)^\[gpu\] raster " + marker + rb"=([01])\r?$", log)
+                if not values or any(item != value for item in values):
+                    raise ValueError("missing or inconsistent raster " + marker.decode("ascii") + " marker: " + arm)
+            summaries = re.findall(rb"(?m)^\[gpu\] raster dense summary: regular=(\d+) dense=(\d+)\r?$", log)
+            if not summaries:
+                raise ValueError("missing dense raster summary: " + arm)
+            regular_count, dense_count = map(int, summaries[-1])
+            if regular_count == 0 or ((dense_count > 0) != (arm == "dedup")):
+                raise ValueError("unexpected dense raster dispatch count: " + arm)
+        if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off or raster_dense_workgroup:
             size = b"8" if tile8 and arm == "dedup" else b"16"
             sizes = re.findall(rb"(?m)^\[gpu\] raster workgroup=(\d+)x(\d+) \((\d+)x(\d+) CPU tiles\)\r?$", log)
             if not sizes or any(entry != (size,) * 4 for entry in sizes):
                 raise ValueError("missing or inconsistent raster tile marker: " + arm)
         results[arm] = {
             "lazy_setup": expected,
-            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off else {}),
+            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth or bilinear_coords or plot_address_cache or gpu_regular_timestamps_off or raster_dense_workgroup else {}),
             **({"early_depth": int(depth)} if early_depth else {}),
             **({"bilinear_coords": int(coords)} if bilinear_coords else {}),
             **({"plot_address_cache": int(cache)} if plot_address_cache else {}),
             **({"regular_timestamps": int(expected_regular), "timestamp_passes": passes,
                 "timestamp_submitted": submitted, "timestamp_completed": completed,
                 "timestamp_failures": failures} if gpu_regular_timestamps_off else {}),
+            **({"dense_workgroup": int(dense_mode), "regular_raster_dispatches": regular_count,
+                "dense_raster_dispatches": dense_count} if raster_dense_workgroup else {}),
             "report_sha256": sha(folder / "report.json"),
             "image_sha256": sha(folder / "gs-webgpu.ppm"),
         }
+    if raster_dense_workgroup:
+        totals = {item["regular_raster_dispatches"] + item["dense_raster_dispatches"]
+                  for item in results.values()}
+        if len(totals) != 1:
+            raise ValueError("raster dispatch totals differ")
     if async_raster:
         # Reuse the established graphics replay normalization. Remove only
         # host profiling data, never guest or worker execution counts.
@@ -461,6 +481,8 @@ def main():
                          help="compare per-invocation framebuffer/depth address reuse")
     variant.add_argument("--gpu-regular-timestamps-off", action="store_true",
                          help="compare disabling normal GPU pass timestamp queries; retain F7 support")
+    variant.add_argument("--raster-dense-workgroup", action="store_true",
+                         help="use 4x4 GPU groups only for dense, low-tile-count 16x16 batches")
     variant.add_argument("--async-lean", action="store_true",
                          help="screen cost of optional EE report and VU1 overlap diagnostics")
     variant.add_argument("--sync-lean", action="store_true",
@@ -495,7 +517,8 @@ def main():
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
         lean_mode = args.async_lean or args.sync_lean
         strict_raster = (args.raster_early_depth or args.raster_bilinear_coords or
-                         args.raster_plot_address_cache or args.gpu_regular_timestamps_off)
+                         args.raster_plot_address_cache or args.gpu_regular_timestamps_off or
+                         args.raster_dense_workgroup)
         raster_mode = args.raster_lazy_setup or args.raster_tile8 or strict_raster or lean_mode
         async_mode = args.async_raster or args.async_lean
         verify_inventory = async_mode or args.sync_lean or strict_raster
@@ -563,7 +586,8 @@ def main():
         if raster_mode:
             env.update(PS2_RASTER_LAZY_SETUP="0", PS2_RASTER_EARLY_DEPTH="0",
                        PS2_RASTER_BILINEAR_COORDS="0", PS2_RASTER_PLOT_ADDRESS_CACHE="0",
-                       PS2_GPU_REGULAR_TIMESTAMPS="1", SDBZ_RUNTIME_PROFILE="0",
+                       PS2_GPU_REGULAR_TIMESTAMPS="1", PS2_RASTER_DENSE_WORKGROUP="0",
+                       SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
         if args.raster_tile8 or strict_raster or lean_mode:
@@ -590,6 +614,8 @@ def main():
             candidate_env["PS2_RASTER_PLOT_ADDRESS_CACHE"] = "1"
         elif args.gpu_regular_timestamps_off:
             candidate_env["PS2_GPU_REGULAR_TIMESTAMPS"] = "0"
+        elif args.raster_dense_workgroup:
+            candidate_env["PS2_RASTER_DENSE_WORKGROUP"] = "1"
         elif args.async_lean:
             candidate_env.update(lean_overrides(lean_component))
         elif args.sync_lean:
@@ -614,7 +640,7 @@ def main():
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
-            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS", "PS2_RASTER_PLOT_ADDRESS_CACHE", "PS2_GPU_REGULAR_TIMESTAMPS")},
+            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH", "PS2_RASTER_BILINEAR_COORDS", "PS2_RASTER_PLOT_ADDRESS_CACHE", "PS2_GPU_REGULAR_TIMESTAMPS", "PS2_RASTER_DENSE_WORKGROUP")},
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
@@ -625,7 +651,8 @@ def main():
                                           "raster_early_depth" if args.raster_early_depth else
                                           "raster_bilinear_coords" if args.raster_bilinear_coords else
                                           "raster_plot_address_cache" if args.raster_plot_address_cache else
-                                          "gpu_regular_timestamps_off" if args.gpu_regular_timestamps_off else "raster_lazy_setup")
+                                          "gpu_regular_timestamps_off" if args.gpu_regular_timestamps_off else
+                                          "raster_dense_workgroup" if args.raster_dense_workgroup else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
             if lean_mode:
                 receipt["lean_component"] = "ee-report" if args.sync_lean else lean_component
@@ -743,7 +770,8 @@ def main():
                     lean=lean_mode, early_depth=args.raster_early_depth,
                     bilinear_coords=args.raster_bilinear_coords,
                     plot_address_cache=args.raster_plot_address_cache,
-                    gpu_regular_timestamps_off=args.gpu_regular_timestamps_off)
+                    gpu_regular_timestamps_off=args.gpu_regular_timestamps_off,
+                    raster_dense_workgroup=args.raster_dense_workgroup)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
