@@ -1981,3 +1981,41 @@ all four variables to 1. Raster default remains 16/16.
 Validate ordinary uncapped combat with lean defaults, 88-program
 inventory override, no profiling hotkeys active. SC4 still unmet;
 repeat async and locked sustained combat acceptance remain open.
+
+### P6D retail result — sdbz-graphics-pr148-neutral-20261128-085406603.zip
+
+Clean da717f6, O5, native 88-program recovered inventory
+b50458b3f63ba9b571ccaab94d8c275d81c5bc99506588eefeb13445de852f4c.
+Runtime/PC profiling off, hotspots/boundary/overlap off;
+16/16 raster, lazy setup off, async GS/VU1, unlimited speed.
+40M dispatches, 2495 fields and successful presentations,
+4409041 committed draws, 420393655 native VU1 pairs, no fallback
+or worker host failure. Last progress at dispatch 39993344:
+32.572s, 2495 fields (76.60 fields/s whole run, not combat).
+Dispatch 24002560..39993344: 339 fields in 9.9594s
+(34.04 fields/s, 56.79% of 59.94 Hz). Worker cumulative
+execution 11.029s; 384249 collected jobs, one pending at
+snapshot. Interactive input not matched to prior recordings;
+compare only indicative performance. SC4 still fails.
+
+### P4F — early triangle rejection before color/texture interpolation
+
+Raster remains the largest measured GPU scope. Split plot into
+prepare_plot and plot_prepared; preserve scissor, scanmask,
+destination-alpha and depth tests, addresses, read order,
+blending, alpha test, writes and primitive ordering. Pass the
+already-read destination/depth values forward rather than
+re-read VRAM. With PS2_RASTER_EARLY_DEPTH=1, triangles run the
+existing tests after coverage and depth interpolation but
+before computing vertex color and texture attributes.
+Other primitive paths keep their existing interpolation order.
+Default 0; shared plot refactor can also affect default codegen,
+so check default output and timing against earlier lean sync
+replay. Native smoke test and provenance added. No guest IR
+changes intended; rebuild runner only. Potential GPU register
+pressure or shader compiler scheduling effects remain unmeasured.
+Harness --raster-early-depth requires --control --sync
+--recording, forces 16/16, lazy setup off, lean diagnostics
+in every arm, validates exact pipeline marker, inventory,
+PAD, trace, raw terminal JSON and final PPM. No performance
+benefit claimed until measured.

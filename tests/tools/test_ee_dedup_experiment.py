@@ -201,6 +201,31 @@ def raster_validation():
             raise AssertionError("async raster accepted changed guest field count")
 
 
+def early_depth_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            depth = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster early_depth={depth}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, early_depth=True)["dedup"]["early_depth"] == 1
+        candidate = root / "dedup" / "stderr.log"
+        candidate.write_text(candidate.read_text().replace("early_depth=1", "early_depth=0"))
+        try:
+            validate_raster_outputs(root, early_depth=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("incorrect early-depth pipeline accepted")
+
+
 def sync_lean_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -260,6 +285,7 @@ if __name__ == "__main__":
     run()
     staging()
     raster_validation()
+    early_depth_validation()
     sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory

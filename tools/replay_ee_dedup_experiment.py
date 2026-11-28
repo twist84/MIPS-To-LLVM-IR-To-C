@@ -36,25 +36,31 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False):
+def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False, early_depth=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
     for arm in arms:
         folder = directory / arm
-        expected = "1" if arm == "dedup" and not tile8 and not lean else "0"
+        expected = "1" if arm == "dedup" and not tile8 and not lean and not early_depth else "0"
         log = (folder / "stderr.log").read_bytes()
         markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
         if not markers or any(value.decode("ascii") != expected for value in markers):
             raise ValueError("missing or inconsistent raster lazy_setup marker: " + arm)
-        if tile8:
-            size = b"8" if arm == "dedup" else b"16"
+        if early_depth:
+            depth = b"1" if arm == "dedup" else b"0"
+            depths = re.findall(rb"(?m)^\[gpu\] raster early_depth=([01])\r?$", log)
+            if not depths or any(value != depth for value in depths):
+                raise ValueError("missing or inconsistent raster early_depth marker: " + arm)
+        if tile8 or early_depth:
+            size = b"8" if tile8 and arm == "dedup" else b"16"
             sizes = re.findall(rb"(?m)^\[gpu\] raster workgroup=(\d+)x(\d+) \((\d+)x(\d+) CPU tiles\)\r?$", log)
             if not sizes or any(entry != (size,) * 4 for entry in sizes):
                 raise ValueError("missing or inconsistent raster tile marker: " + arm)
         results[arm] = {
             "lazy_setup": expected,
-            **({"tile": int(size), "workgroup": int(size)} if tile8 else {}),
+            **({"tile": int(size), "workgroup": int(size)} if tile8 or early_depth else {}),
+            **({"early_depth": int(depth)} if early_depth else {}),
             "report_sha256": sha(folder / "report.json"),
             "image_sha256": sha(folder / "gs-webgpu.ppm"),
         }
@@ -408,6 +414,8 @@ def main():
                          help="compare 0/1 on the same verified O5 DLL and runner")
     variant.add_argument("--raster-tile8", action="store_true",
                          help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
+    variant.add_argument("--raster-early-depth", action="store_true",
+                         help="compare early triangle depth rejection on lean synchronous runs")
     variant.add_argument("--async-lean", action="store_true",
                          help="screen cost of optional EE report and VU1 overlap diagnostics")
     variant.add_argument("--sync-lean", action="store_true",
@@ -441,9 +449,11 @@ def main():
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
         lean_mode = args.async_lean or args.sync_lean
-        raster_mode = args.raster_lazy_setup or args.raster_tile8 or lean_mode
+        raster_mode = args.raster_lazy_setup or args.raster_tile8 or args.raster_early_depth or lean_mode
         async_mode = args.async_raster or args.async_lean
-        verify_inventory = async_mode or args.sync_lean
+        verify_inventory = async_mode or args.sync_lean or args.raster_early_depth
+        if args.raster_early_depth and (not args.sync or not args.recording):
+            raise ValueError("--raster-early-depth requires --sync and --recording")
         if args.sync_lean:
             if args.async_raster or not args.recording:
                 raise ValueError("--sync-lean requires --recording and no asynchronous mode")
@@ -504,11 +514,13 @@ def main():
         elif async_mode:
             env.update(SDBZ_VU1_ASYNC="1", SDBZ_GS_ASYNC="1")
         if raster_mode:
-            env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
+            env.update(PS2_RASTER_LAZY_SETUP="0", PS2_RASTER_EARLY_DEPTH="0", SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
-        if args.raster_tile8 or lean_mode:
+        if args.raster_tile8 or args.raster_early_depth or lean_mode:
             env.update(PS2_RASTER_TILE="16", PS2_RASTER_WORKGROUP="16")
+        if args.raster_early_depth:
+            env.update(lean_overrides("all"))
         if lean_mode:
             env.update(SDBZ_REPORT_HOTSPOTS="1", SDBZ_REPORT_BOUNDARY_TIMING="1",
                        SDBZ_VU1_NATIVE_OVERLAP_PROFILE="1")
@@ -517,6 +529,8 @@ def main():
             candidate_env["PS2_RASTER_LAZY_SETUP"] = "1"
         elif args.raster_tile8:
             candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
+        elif args.raster_early_depth:
+            candidate_env["PS2_RASTER_EARLY_DEPTH"] = "1"
         elif args.async_lean:
             candidate_env.update(lean_overrides(lean_component))
         elif args.sync_lean:
@@ -541,14 +555,15 @@ def main():
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
-            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP")},
+            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP", "PS2_RASTER_EARLY_DEPTH")},
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
         if raster_mode:
             receipt["experiment_mode"] = ("sync_lean" if args.sync_lean else
                                           "async_lean" if args.async_lean else
-                                          "raster_tile8" if args.raster_tile8 else "raster_lazy_setup")
+                                          "raster_tile8" if args.raster_tile8 else
+                                          "raster_early_depth" if args.raster_early_depth else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
             if lean_mode:
                 receipt["lean_component"] = "ee-report" if args.sync_lean else lean_component
@@ -611,9 +626,9 @@ def main():
                                         for arm in ("baseline", "control", "dedup")):
                 # Save workload evidence even if A/A trace matching fails.
                 # It is deliberately not a substitute for the strict gate.
-                workload_key = "sync_workload" if args.sync_lean else "async_workload"
+                workload_key = "sync_workload" if args.sync else "async_workload"
                 receipt[workload_key] = async_workload_evidence(args.output)
-                if lean_mode:
+                if lean_mode or args.raster_early_depth:
                     for arm, info in receipt[workload_key]["arms"].items():
                         expected_env = candidate_env if arm == "dedup" else env
                         expected = {name: expected_env[key] == "1"
@@ -657,7 +672,8 @@ def main():
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
             if raster_mode:
                 receipt["raster_outputs"] = validate_raster_outputs(
-                    args.output, tile8=args.raster_tile8, async_raster=async_mode, lean=lean_mode)
+                    args.output, tile8=args.raster_tile8, async_raster=async_mode,
+                    lean=lean_mode, early_depth=args.raster_early_depth)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
