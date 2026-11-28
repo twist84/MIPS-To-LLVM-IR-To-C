@@ -114,7 +114,7 @@ public:
         m_text = {};
         if (m_visible)
         {
-            m_text.set_line(0u, "PERFORMANCE  F9");
+            m_text.set_line(0u, "PERFORMANCE  F5  CPU PROFILE F6");
             m_text.set_line(1u, "SAMPLING...");
         }
     }
@@ -141,7 +141,7 @@ public:
             m_time = now;
             m_have_baseline = true;
             m_text = {};
-            m_text.set_line(0u, "PERFORMANCE  F9");
+            m_text.set_line(0u, "PERFORMANCE  F5  CPU PROFILE F6");
             m_text.set_line(1u, "SAMPLING...");
             return true;
         }

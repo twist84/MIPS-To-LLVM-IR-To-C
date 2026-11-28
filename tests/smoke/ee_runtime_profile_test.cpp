@@ -34,7 +34,7 @@ int main()
             return 13;
         }
         ee::s_ee_overlay_text expected{};
-        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(0u, "PERFORMANCE  F5  CPU PROFILE F6");
         expected.set_line(1u, "SPEED       100.0% / UNLIMITED");
         expected.set_line(2u, "PRESENT      60.0 / 59.94 FPS");
         expected.set_line(3u, "GUEST        60.0 / 59.94 F/S");
@@ -75,7 +75,7 @@ int main()
             return 15;
         }
         expected = {};
-        expected.set_line(0u, "PERFORMANCE  F9");
+        expected.set_line(0u, "PERFORMANCE  F5  CPU PROFILE F6");
         expected.set_line(1u, "SAMPLING...");
         if (overlay.text().m_words != expected.m_words)
         {

@@ -4,6 +4,7 @@
 
 #include "ee_webgpu_bridge.h"
 #include "ee_gs_presentation_probe.h"
+#include "ee_runtime_profile.h"
 #include "ps2_webgpu/gs/gpu/gpu.hpp"
 
 #include <raylib.h>
@@ -267,11 +268,15 @@ void c_ee_raylib_window::pump(c_ee_webgpu_bridge& bridge,
     {
         ToggleBorderlessWindowed();
     }
-    if (IsKeyPressed(KEY_F9))
+    if (IsKeyPressed(KEY_F5))
     {
         m_performance_overlay.toggle();
         ps2::gs::gpu::set_performance_overlay(m_performance_overlay.visible()
             ? &m_performance_overlay.text() : nullptr);
+    }
+    if (IsKeyPressed(KEY_F6))
+    {
+        ee::runtime_profile_set_enabled(!ee::g_runtime_profile.m_enabled);
     }
     if (WindowShouldClose())
     {
