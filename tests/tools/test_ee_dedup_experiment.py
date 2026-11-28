@@ -226,6 +226,35 @@ def early_depth_validation():
             raise AssertionError("incorrect early-depth pipeline accepted")
 
 
+def bilinear_coords_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            value = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                f"[gpu] raster bilinear_coords={value}\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        assert validate_raster_outputs(root, bilinear_coords=True)["dedup"]["bilinear_coords"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for wrong in (original.replace("bilinear_coords=1", "bilinear_coords=0"),
+                      original.replace("early_depth=0", "early_depth=1")):
+            path.write_text(wrong)
+            try:
+                validate_raster_outputs(root, bilinear_coords=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect bilinear pipeline accepted")
+
+
 def sync_lean_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -286,6 +315,7 @@ if __name__ == "__main__":
     staging()
     raster_validation()
     early_depth_validation()
+    bilinear_coords_validation()
     sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory

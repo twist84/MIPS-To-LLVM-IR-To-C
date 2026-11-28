@@ -17,6 +17,7 @@ override RASTER_WORKGROUP: u32 = 16u;
 override RASTER_TILE: u32 = 16u;
 override RASTER_LAZY_SETUP: u32 = 0u;
 override RASTER_EARLY_DEPTH: u32 = 0u;
+override RASTER_BILINEAR_COORDS: u32 = 0u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -571,6 +572,10 @@ fn load_texel(l: Loc, k: u32) -> u32 {
 fn fetch(s: Setup, xi: i32, yi: i32, k: u32) -> u32 {
     let x = texel_x(s, xi);
     let y = texel_y(s, yi);
+    return fetch_wrapped(s, x, y, k);
+}
+
+fn fetch_wrapped(s: Setup, x: u32, y: u32, k: u32) -> u32 {
     if (s.dec != 0xFFFFFFFFu) {
         return decoded[s.dec + (y << s.tw) + x];
     }
@@ -647,6 +652,21 @@ fn sample(s: Setup, uin: f32, vin: f32, k: u32) -> u32 {
         let v = sv - 0.5;
         let x0 = i32(floor(u));
         let y0 = i32(floor(v));
+        if (RASTER_BILINEAR_COORDS != 0u) {
+            let ns = s.native >> 16u;
+            let atlas = (s.native & 0xffffu) * 1048576u;
+            let mx = mode(s, 24u, 2u);
+            let my = mode(s, 26u, 2u);
+            let width = (1u << s.tw) * ns;
+            let height = (1u << s.th) * ns;
+            let ax = native_wrap(x0, width, mx, s.minu, s.maxu, ns);
+            let bx = native_wrap(x0 + 1, width, mx, s.minu, s.maxu, ns);
+            let ay = atlas + native_wrap(y0, height, my, s.minv, s.maxv, ns) * 1024u;
+            let by = atlas + native_wrap(y0 + 1, height, my, s.minv, s.maxv, ns) * 1024u;
+            return blend4(native_atlases[ay + ax], native_atlases[ay + bx],
+                native_atlases[by + ax], native_atlases[by + bx],
+                u - f32(x0), v - f32(y0));
+        }
         return blend4(native_fetch(s, x0, y0),
             native_fetch(s, x0 + 1, y0),
             native_fetch(s, x0, y0 + 1),
@@ -660,6 +680,15 @@ fn sample(s: Setup, uin: f32, vin: f32, k: u32) -> u32 {
     let v = vin - 0.5;
     let x0 = i32(floor(u));
     let y0 = i32(floor(v));
+    if (RASTER_BILINEAR_COORDS != 0u) {
+        let ax = texel_x(s, x0);
+        let bx = texel_x(s, x0 + 1);
+        let ay = texel_y(s, y0);
+        let by = texel_y(s, y0 + 1);
+        return blend4(fetch_wrapped(s, ax, ay, k), fetch_wrapped(s, bx, ay, k),
+            fetch_wrapped(s, ax, by, k), fetch_wrapped(s, bx, by, k),
+            u - f32(x0), v - f32(y0));
+    }
     return blend4(fetch(s, x0, y0, k), fetch(s, x0 + 1, y0, k), fetch(s, x0, y0 + 1, k), fetch(s, x0 + 1, y0 + 1, k), u - f32(x0), v - f32(y0));
 }
 

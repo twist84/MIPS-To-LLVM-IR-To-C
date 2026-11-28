@@ -2019,3 +2019,22 @@ Harness --raster-early-depth requires --control --sync
 in every arm, validates exact pipeline marker, inventory,
 PAD, trace, raw terminal JSON and final PPM. No performance
 benefit claimed until measured.
+
+
+### P4G — shared bilinear texture coordinates
+
+P4F replay: 46.812/46.485/46.687 seconds; identical raw terminal
+reports, screenshots and sampled dispatch traces. No demonstrated gain;
+leave early depth off. The synchronous worker is disabled and retains its
+default overlap flag; configure the flag consistently and require zero
+submitted jobs, no pending worker, and zero overlap intervals. Do not
+normalize away architectural differences.
+
+P4G adds PS2_RASTER_BILINEAR_COORDS=1 (default 0). Reuse the two wrapped
+X and two wrapped Y coordinates for all four taps instead of wrapping
+both axes separately for each tap. Applies to native atlases, decoded
+textures and direct VRAM sampling; preserves tap order, per-tap VRAM
+reads, format conversion, snapshot selection, and interpolation math.
+Point sampling is unchanged. No guest IR change. No performance gain
+claimed before a matched --raster-bilinear-coords --control --sync
+--recording replay. Shader compilation and retail validation required.
