@@ -882,19 +882,19 @@ static_assert(!status_supported(0x80000000u));
 // cannot retire in this executor: it has neither an authoritative
 // clock nor the real pending-source/exception scheduling contract.
 // Bounded scheduler-owned kernel-mode Status subset. BEV and EXL are
-// needed for architectural Level 1 handler execution. No ERL, KSU,
-// cache configuration, level 2 or reserved interrupt mask bits, except
-// for the exact reset-entry ERL|BEV state with interrupts disabled.
+// needed for architectural Level 1 handler execution. ERL is also
+// used by guest kernel code to access the direct uncached address window.
+// KSU, cache configuration and reserved interrupt mask bits stay excluded.
 inline constexpr bool scheduled_status_supported(uint32_t status)
 {
     constexpr uint32_t mask = 0x70000000u | STATUS_IE | STATUS_EIE |
-        STATUS_EXL | STATUS_BEV | (1u << 17u) | 0x8c00u;
-    return (status & ~mask) == 0u || status == (STATUS_ERL | STATUS_BEV);
+        STATUS_EXL | STATUS_ERL | STATUS_BEV | (1u << 17u) | 0x8c00u;
+    return (status & ~mask) == 0u;
 }
 static_assert(scheduled_status_supported(0x70030c01u));
 static_assert(scheduled_status_supported(STATUS_BEV | STATUS_EXL));
 static_assert(scheduled_status_supported(STATUS_ERL | STATUS_BEV));
-static_assert(!scheduled_status_supported(STATUS_ERL));
+static_assert(scheduled_status_supported(0x70020c05u));
 static_assert(!scheduled_status_supported(0x10u));
 
 inline constexpr bool status_requires_interrupt_scheduler(uint32_t status)

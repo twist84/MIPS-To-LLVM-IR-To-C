@@ -428,6 +428,7 @@ public:
         // not calibrated. A successfully fetched trapping word is real
         // cache activity, unlike an unsupported host refusal.
         if (m_retired != 0u && code != nullptr && syscall_word(opcode) &&
+            (m_cpu.m_cop0[COP0_Status] & STATUS_ERL) == 0u &&
             strict_reset_detail::scheduled_status_supported(m_cpu.m_cop0[COP0_Status]))
         {
             const uint32_t pc = m_cpu.m_pc;
@@ -682,7 +683,8 @@ private:
 
     static constexpr bool epc_write(uint32_t opcode)
     {
-        return (opcode & 0xffe0ffffu) == 0x40807000u;
+        const uint32_t canonical = opcode & 0xffe0ffffu;
+        return canonical == 0x40807000u || canonical == 0x4080f000u;
     }
 
     static constexpr bool clock_read(uint32_t opcode)
@@ -717,7 +719,7 @@ private:
         }
         if (opcode == k_eret)
         {
-            if ((status & STATUS_EXL) == 0u)
+            if ((status & (STATUS_EXL | STATUS_ERL)) == 0u)
             {
                 return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
             }
@@ -742,9 +744,9 @@ private:
         }
         else if (epc_write(opcode))
         {
-            // EPC is a full 32-bit guest register. Target validity is
-            // checked on subsequent instruction fetch, not at MTC0.
-            ee_cop0_write(&m_cpu, COP0_EPC, static_cast<uint32_t>(
+            // Validate the target on fetch after ERET, not on MTC0.
+            const uint32_t reg = (opcode >> 11u) & 31u;
+            ee_cop0_write(&m_cpu, reg, static_cast<uint32_t>(
                 strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u)));
             m_cpu.m_pc += 4u;
         }
@@ -758,7 +760,7 @@ private:
             }
             m_cpu.m_pc += 4u;
         }
-        else
+        else if (status_write(opcode))
         {
             const uint32_t requested = static_cast<uint32_t>(
                 strict_reset_detail::read_gpr(m_cpu, (opcode >> 16u) & 31u));
@@ -770,6 +772,10 @@ private:
             // boundary. The common COP0 write owns the register update.
             ee_cop0_write(&m_cpu, COP0_Status, requested);
             m_cpu.m_pc += 4u;
+        }
+        else
+        {
+            return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
         }
         return {result::COMMITTED, opcode, 1u, pc};
     }
