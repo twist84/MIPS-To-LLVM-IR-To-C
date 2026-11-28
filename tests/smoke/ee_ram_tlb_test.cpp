@@ -4939,6 +4939,7 @@ int main()
         !check(test_strict_firmware_spr_dma(), "scheduler-owned synchronous SPR DMA") ||
         !check(test_strict_firmware_cop0_clock(), "scheduler-owned COP0 Count/Compare deadlines") ||
         !check(test_strict_firmware_interrupts(), "scheduler-owned firmware interrupt entry and ERET") ||
+        !check(test_strict_firmware_dmac_extension_word(), "firmware DMAC extension backing word") ||
         !check(test_strict_firmware_pilot(), "scheduler-owned strict firmware pilot"))
     {
         return 1;

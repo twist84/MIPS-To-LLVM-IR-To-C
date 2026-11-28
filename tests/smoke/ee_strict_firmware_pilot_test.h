@@ -21,6 +21,29 @@ std::vector<uint8_t> make_firmware_pilot_rom(std::initializer_list<uint32_t> wor
     return rom;
 }
 
+bool test_strict_firmware_dmac_extension_word()
+{
+    using boundary = ee::e_ee_firmware_boundary;
+    ee::c_ee_strict_firmware_pilot pilot(make_firmware_pilot_rom({
+        0x40806000u, // mtc0 zero,Status
+        0x3c03b001u, // lui v1,0xb001
+        0x2463f500u, // addiu v1,v1,-0xb00 -> 0xb000f500
+        0x24020001u, // addiu v0,zero,1
+        0xac620000u, // sw v0,0(v1)
+        0x8c640000u  // lw a0,0(v1)
+    }));
+    for (uint32_t i = 0u; i < 6u; ++i)
+    {
+        if (pilot.step(1u).m_boundary != boundary::RETIRED)
+        {
+            return false;
+        }
+    }
+    return pilot.retired() == 6u && pilot.cycle() == 6u &&
+        pilot.cpu().m_gpr[3].m_lo == 0xffffffffb000f500ull &&
+        pilot.cpu().m_gpr[4].m_lo == 1u;
+}
+
 bool test_strict_firmware_pilot()
 {
     using boundary = ee::e_ee_firmware_boundary;

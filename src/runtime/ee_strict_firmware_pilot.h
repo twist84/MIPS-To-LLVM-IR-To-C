@@ -983,6 +983,11 @@ private:
             *value = {self.m_dmac_control, 0u};
             return true;
         }
+        if (address == 0x1000f500u)
+        {
+            *value = {self.m_dmac_ext_word_500, 0u};
+            return true;
+        }
         if (address == c_ee_dmac::k_stat_address || spr_register(address) || vif_dma_register(address) || gif_dma_register(address) ||
             (self.m_iop != nullptr && sif_dma_register(address)))
         {
@@ -1145,6 +1150,13 @@ private:
             self.m_dmac_control = dmac_word;
             return true;
         }
+        if (address == 0x1000f500u)
+        {
+            // PCSX2's DMAC extension backing retains this otherwise
+            // undocumented word. Do not infer channel or enable behavior.
+            self.m_dmac_ext_word_500 = dmac_word;
+            return true;
+        }
         if (address == c_ee_dmac::k_stat_address)
         {
             const uint32_t channels = k_dma_channel_mask | (self.m_iop != nullptr ? 0x60u : 0u);
@@ -1248,6 +1260,7 @@ private:
     c_ee_host_timers m_timers{&m_runtime, &m_hardware};
     uint64_t m_retired = 0u;
     uint32_t m_dmac_control = 0u;
+    uint32_t m_dmac_ext_word_500 = 0u;
     uint32_t m_dma_start_address = 0u;
     uint32_t m_dma_start_value = 0u;
     bool m_branch_transaction = false;
