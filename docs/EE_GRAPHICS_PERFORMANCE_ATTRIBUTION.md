@@ -1305,3 +1305,64 @@ Preserve runner, captures and G8D.1 libraries. Further IOP AOT execution micro-o
 Function splitting and parallel compilation are active in #174; see
 IOP_AOT_SPLITTING.md. Next objective practical timing compatibility with
 PCSX2 and ps2-web-recomp, not cycle-exact physical hardware.
+
+## PR #180 — 3D gameplay performance acceptance (2026-11-28)
+
+Firmware accuracy work is deferred; investigate measured EE, VU1, GPU
+compute, batching and synchronization costs during actual combat.
+Do not infer the bottleneck from whole-replay averages.
+
+The presentation-submission timestamp fix (36d6bb4e) truncated gpu.cpp.
+0c488efe restored the missing function/namespace ending and corrected
+the render-pass store operation. 5c294994 adds eight asynchronous
+detailed readback slots, 1024-dispatch query chunks, ordered retirement,
+map failure accounting and a capture-stop drain. Detailed submissions
+now update dispatch and submission counts. Normal batched submission
+code remains byte-identical; detailed timing still separates compute
+passes, so enabled-versus-disabled overhead must be measured. The
+detailed ring can wait at saturation or capture stop; the normal path
+does not acquire these slots. No EE/VU1 lowering changes.
+
+Remote verification: gpu.cpp 2706 lines, blob
+db4ae20b579183c2c401d4e88afc0303d659fd11, complete ending;
+ee_game_runner_main.cpp unchanged blob
+580340e6edc9008eb9c4685e7a94550732684cc7.
+F5 overlay, F6 EE-thread scope profiling, F7 detailed GPU capture,
+F8 EE per-PC timing; no F9 binding in the inspected window code.
+F6 does not currently reconfigure the VU1 worker's startup-selected
+detailed scope timing. Use interval deltas of worker totals and a
+separate CPU-profile-enabled run when detailed VU1 attribution is
+needed. The first GPU capture submission can lack raster metadata
+for batches constructed before activation.
+
+### Acceptance scorecard
+
+| Criterion | Target | Latest result | Status |
+|---|---|---|---|
+| SC1 | Measured critical path, CPU/GPU overlap | Detailed GPU capture not yet validated | PENDING |
+| SC2 | >=99% configured NTSC field rate, 3 x 120s active combat | No comparable current measurements | PENDING |
+| SC3 | Mean <=101%, P95 <=110%, P99 <=150% of reference period; >=95% of 1s windows at >=95% speed; no recurring >100ms stalls | No current field-time distribution | PENDING |
+| SC4 | >=110% unlocked reference speed (preferred 125%, stretch 150%) | No current comparable active-combat result | PENDING |
+| SC5 | Normalized, attributable efficiency improvement | Diagnostic infrastructure only | PENDING |
+| SC6 | Architectural correctness and native coverage retained | No lowering changes; build and retail validation pending | PENDING |
+| SC7 | Visual correctness | Presentation pass retained; deterministic comparison pending | PENDING |
+| SC8 | Menu, normal combat, expensive combat, effects/overdraw, transition | Pending comparable scene captures | PENDING |
+| SC9 | All applicable CI; no unexplained >3% regression | New-head CI pending | PENDING |
+| SC10 | Usable live CPU/EE/GPU capture, no silent losses; overhead quantified | GPU async implementation committed; live validation and worker toggle work outstanding | PARTIAL |
+| SC11 | All criteria met; locked full speed and >=10% unlocked headroom | Not accepted | PENDING |
+
+### Optimization ledger
+
+| Commit | Change | Baseline | Result | Improvement | Correctness | Decision |
+|---|---|---|---|---|---|---|
+| 0c488efe | Source repair and presentation store operation | Truncated source | Complete remote source | Not a performance claim | Static remote check | Retain |
+| 5c294994 | Detailed GPU asynchronous readback and query chunking | Per-submit blocking map; cutoff at 2048 dispatches | Eight reusable slots; all dispatches attempted; failure/pressure counts | Not measured | Static diff and remote file verification; CI and retail pending | Validate |
+
+Next gate: live F7 capture in the expensive 3D scene. Confirm raster
+(and other compute) rows, contiguous submission-local indexes, no map
+failures and report retention after deactivation. Record ring pressure
+waits and compare with detailed profiling disabled. Collect CPU and
+VU1 interval measurements separately; do not add overlapping worker
+and GPU times to EE wall time. Use the same native cache, resolution,
+speed mode, character/stage and input progression for comparison.
+No retail performance improvement claimed until measured.
