@@ -78,6 +78,17 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=Fal
                 json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
         report_key = "normalized_report_sha256"
+    elif lean:
+        # Synchronous lean mode changes only the optional EE hotspot
+        # collector and host timing. Require all remaining report fields,
+        # including worker and architectural counters, to match exactly.
+        for arm in arms:
+            report = read_json(directory / arm / "report.json")
+            report.pop("m2_runtime")
+            results[arm]["normalized_report_sha256"] = hashlib.sha256(
+                json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+        report_key = "normalized_report_sha256"
     else:
         report_key = "report_sha256"
     if any(results[arm][key] != results["baseline"][key]
@@ -399,6 +410,8 @@ def main():
                          help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
     variant.add_argument("--async-lean", action="store_true",
                          help="screen cost of optional EE report and VU1 overlap diagnostics")
+    variant.add_argument("--sync-lean", action="store_true",
+                         help="strict matched validation of EE report diagnostics off")
     parser.add_argument("--recording", type=Path,
                         help="replay an existing complete PAD0 record for every arm")
     parser.add_argument("--async-raster", action="store_true",
@@ -427,8 +440,14 @@ def main():
             setattr(args, key, value.resolve())
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
-        raster_mode = args.raster_lazy_setup or args.raster_tile8 or args.async_lean
+        lean_mode = args.async_lean or args.sync_lean
+        raster_mode = args.raster_lazy_setup or args.raster_tile8 or lean_mode
         async_mode = args.async_raster or args.async_lean
+        verify_inventory = async_mode or args.sync_lean
+        if args.sync_lean:
+            if args.async_raster or not args.recording:
+                raise ValueError("--sync-lean requires --recording and no asynchronous mode")
+            args.sync = True
         if args.lean_component is not None and not args.async_lean:
             raise ValueError("--lean-component requires --async-lean")
         lean_component = args.lean_component or "all"
@@ -488,9 +507,9 @@ def main():
             env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
-        if args.raster_tile8 or args.async_lean:
+        if args.raster_tile8 or lean_mode:
             env.update(PS2_RASTER_TILE="16", PS2_RASTER_WORKGROUP="16")
-        if args.async_lean:
+        if lean_mode:
             env.update(SDBZ_REPORT_HOTSPOTS="1", SDBZ_REPORT_BOUNDARY_TIMING="1",
                        SDBZ_VU1_NATIVE_OVERLAP_PROFILE="1")
         candidate_env = dict(env)
@@ -500,13 +519,18 @@ def main():
             candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
         elif args.async_lean:
             candidate_env.update(lean_overrides(lean_component))
+        elif args.sync_lean:
+            # The overlap collector is already inactive with no worker.
+            # Leave its configured flag alone for exact report equality.
+            candidate_env.update(lean_overrides("hotspots"))
+            candidate_env.update(lean_overrides("boundary"))
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
             inputs["source_comparison_sha256"] = sha(args.source_comparison)
         if args.prior_source_comparison is not None:
             inputs["prior_source_comparison_sha256"] = sha(args.prior_source_comparison)
-        if async_mode:
+        if verify_inventory:
             from replay_ee_graphics_sweep import aot_identity
             vu1_directory = Path(env["SDBZ_VU1_AOT"]).resolve()
             inputs["vu1_inventory"] = aot_identity(vu1_directory)
@@ -522,11 +546,12 @@ def main():
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
         if raster_mode:
-            receipt["experiment_mode"] = ("async_lean" if args.async_lean else
+            receipt["experiment_mode"] = ("sync_lean" if args.sync_lean else
+                                          "async_lean" if args.async_lean else
                                           "raster_tile8" if args.raster_tile8 else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
-            if args.async_lean:
-                receipt["lean_component"] = lean_component
+            if lean_mode:
+                receipt["lean_component"] = "ee-report" if args.sync_lean else lean_component
             receipt["candidate_environment_overrides"] = {
                 key: value for key, value in candidate_env.items() if env.get(key) != value}
         if args.recording:
@@ -582,13 +607,14 @@ def main():
                 args.output / "baseline" / "stdout.log", args.output / "dedup" / "stdout.log")
             receipt["dedup"]["terminal_budget_reached"] = terminal_budget(
                 args.output / "dedup", args.max_dispatches)
-            if async_mode and all(terminal_budget(args.output / arm, args.max_dispatches)
-                                  for arm in ("baseline", "control", "dedup")):
+            if verify_inventory and all(terminal_budget(args.output / arm, args.max_dispatches)
+                                        for arm in ("baseline", "control", "dedup")):
                 # Save workload evidence even if A/A trace matching fails.
                 # It is deliberately not a substitute for the strict gate.
-                receipt["async_workload"] = async_workload_evidence(args.output)
-                if args.async_lean:
-                    for arm, info in receipt["async_workload"]["arms"].items():
+                workload_key = "sync_workload" if args.sync_lean else "async_workload"
+                receipt[workload_key] = async_workload_evidence(args.output)
+                if lean_mode:
+                    for arm, info in receipt[workload_key]["arms"].items():
                         expected_env = candidate_env if arm == "dedup" else env
                         expected = {name: expected_env[key] == "1"
                                     for name, key in LEAN_DIAGNOSTICS.items()}
@@ -631,12 +657,12 @@ def main():
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
             if raster_mode:
                 receipt["raster_outputs"] = validate_raster_outputs(
-                    args.output, tile8=args.raster_tile8, async_raster=async_mode, lean=args.async_lean)
+                    args.output, tile8=args.raster_tile8, async_raster=async_mode, lean=lean_mode)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
             receipt["runner_unchanged"] = sha(args.runner) == inputs["runner_sha256"]
-            if async_mode:
+            if verify_inventory:
                 try:
                     receipt["vu1_inventory_unchanged"] = (
                         aot_identity(vu1_directory) == inputs["vu1_inventory"])

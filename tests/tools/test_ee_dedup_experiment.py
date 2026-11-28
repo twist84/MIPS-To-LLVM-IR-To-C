@@ -201,6 +201,37 @@ def raster_validation():
             raise AssertionError("async raster accepted changed guest field count")
 
 
+def sync_lean_validation():
+    import json
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            (folder / "stderr.log").write_bytes(b"[gpu] raster lazy_setup=0\n")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+            report = {"m2_runtime": {"enabled": arm != "dedup"},
+                      "vu1_worker": {"enabled": False, "native_overlap_profile": True},
+                      "guest_instruction_attempts": 100}
+            (folder / "report.json").write_text(json.dumps(report))
+        result = validate_raster_outputs(root, lean=True)
+        assert result["dedup"]["report_sha256"] != result["baseline"]["report_sha256"]
+        assert result["dedup"]["normalized_report_sha256"] == result["baseline"]["normalized_report_sha256"]
+        path = root / "dedup" / "report.json"
+        report = json.loads(path.read_text())
+        for key, value in (("guest_instruction_attempts", 101),
+                           ("vu1_worker", {"enabled": True, "native_overlap_profile": True})):
+            path.write_text(json.dumps(dict(report, **{key: value})))
+            try:
+                validate_raster_outputs(root, lean=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("sync lean accepted changed " + key)
+
+
 def async_workload_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -229,6 +260,7 @@ if __name__ == "__main__":
     run()
     staging()
     raster_validation()
+    sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory
     from replay_ee_dedup_experiment import lean_overrides, report_options, LEAN_DIAGNOSTICS

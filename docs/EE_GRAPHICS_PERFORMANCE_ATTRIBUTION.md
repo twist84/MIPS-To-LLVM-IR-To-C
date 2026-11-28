@@ -1906,3 +1906,42 @@ diagnostic evidence before checking trace equality. Reuse the
 same recording and binaries. No C++ or production cache changes.
 The single-switch effect need not add linearly due to thread
 overlap. Compare late matched field windows and A/A variance.
+
+### P6B result — single-switch diagnostics
+
+Three A/A/B archives, all same authenticated O5 DLL, runner,
+recording and 88-program VU1 inventory. All nine reached 40M
+dispatches, 2541 fields, 2478/2478 PAD polls, zero VU1 fallbacks;
+all nine PPM hashes independently verified identical
+(81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a).
+Startup markers confirm exactly the requested switch disabled.
+Each A/A pair uses identical graphics workloads; candidate draws
+4345821 vs 4353515 control (-0.177%). Native pairs control
+415895434 each; candidates hotspots 415892863, boundary 415825238,
+overlap 415839620. No exact architectural match (A/A also diverges).
+Late dispatch window 24002560..39993344, 332 fields per arm:
+
+| Collector disabled | A/A/B wall s | Late A/A/B s | Whole speed gain vs A/A | Late gain vs A/A |
+| --- | --- | --- | --- | --- |
+| hotspots | 39.906/39.813/38.891 | 11.7061/11.6564/11.2657 | 2.37% | 3.47% |
+| boundary | 39.797/40.047/37.500 | 11.6718/11.7120/10.6000 | 6.79% | 10.49% |
+| overlap | 39.938/39.797/39.094 | 11.6930/11.7278/11.1668 | 1.80% | 5.02% |
+
+Each whole-run A/A spread <0.63%. Boundary timing is the largest
+individual signal, followed in late combat by overlap and hotspots.
+Do not sum speedups or claim matched async correctness. Control
+speeds are higher than P6A; compare only within each paired run.
+
+### P6C — strict synchronous validation of lean EE report mode
+
+Add --sync-lean to validate hotspots and boundary timing disabled
+together with the same recorded input. Force synchronous GS and
+VU1, same 16/16 renderer and O5 DLL, lazy setup off. Keep native
+overlap flag unchanged (inactive without worker). Confirm startup
+options, unchanged VU1 inventory and input hashes, exact PAD and
+sampled dispatch match. Compare every terminal report field except
+m2_runtime (host-only hotspot collector deliberately disabled),
+and exact final PPM. No other normalization in this sync mode.
+No production defaults changed; prior async performance evidence
+remains diagnostic. This separates correctness validation from
+async scheduling variation without altering guest clocks.
