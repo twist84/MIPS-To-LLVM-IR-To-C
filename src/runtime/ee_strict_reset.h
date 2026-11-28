@@ -1221,6 +1221,31 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         break;
     }
     case 0x1cu: // MMI
+        if ((opcode & 0x7ffu) == 0x6e9u && rs == 0u) // PCPYH
+        {
+            dest = (opcode >> 11u) & 31u;
+            if (dest != 0u)
+            {
+                const s_ee_u128 rhs = rt == 0u ? s_ee_u128{} : cpu.m_gpr[rt];
+                constexpr uint64_t broadcast_halfword = 0x0001000100010001ull;
+                cpu.m_gpr[dest] = {(rhs.m_lo & 0xffffu) * broadcast_halfword,
+                    (rhs.m_hi & 0xffffu) * broadcast_halfword};
+            }
+            return true;
+        }
+        if ((opcode & 0x7ffu) == 0x389u || (opcode & 0x7ffu) == 0x3a9u) // PCPYLD / PCPYUD
+        {
+            dest = (opcode >> 11u) & 31u;
+            if (dest != 0u)
+            {
+                const s_ee_u128 lhs = rs == 0u ? s_ee_u128{} : cpu.m_gpr[rs];
+                const s_ee_u128 rhs = rt == 0u ? s_ee_u128{} : cpu.m_gpr[rt];
+                cpu.m_gpr[dest] = (opcode & 0x20u) == 0u
+                    ? s_ee_u128{rhs.m_lo, lhs.m_lo}
+                    : s_ee_u128{lhs.m_hi, rhs.m_hi};
+            }
+            return true;
+        }
         if ((opcode & 0x7ffu) == 0x428u) // PADDUW
         {
             dest = (opcode >> 11u) & 31u;
@@ -1398,6 +1423,19 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
 
 // Exercise the actual register executor at compile time, including
 // signed 64-bit ordering, negative immediates and the upper GPR half.
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[1] = {0xffff000000001234ull, 0x999900000000abcdull};
+    return execute_register_word(cpu, 0x70010ee9u, nullptr) &&
+        cpu.m_gpr[1].m_lo == 0x1234123412341234ull &&
+        cpu.m_gpr[1].m_hi == 0xabcdabcdabcdabcdull &&
+        execute_register_word(cpu, 0x70201389u, nullptr) &&
+        cpu.m_gpr[2].m_lo == 0u && cpu.m_gpr[2].m_hi == 0x1234123412341234ull &&
+        execute_register_word(cpu, 0x702013a9u, nullptr) &&
+        cpu.m_gpr[2].m_lo == 0xabcdabcdabcdabcdull && cpu.m_gpr[2].m_hi == 0u;
+}());
+
 static_assert([]()
 {
     s_ee_cpu_state cpu{};
