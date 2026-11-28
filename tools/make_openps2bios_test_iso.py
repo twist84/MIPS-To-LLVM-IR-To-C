@@ -58,13 +58,28 @@ def create_iso(path: Path) -> None:
     terminator[6] = 1
 
     system_cnf = b"BOOT2 = cdrom0:\\TEST.ELF;1\r\nVER = 1.00\r\n"
-    elf = bytearray(52)
+    elf = bytearray(0x1008)
     elf[:4] = b"\x7fELF"
     elf[4:7] = bytes((1, 1, 1))
     elf[16:18] = (2).to_bytes(2, "little")
     elf[18:20] = (8).to_bytes(2, "little")
     elf[20:24] = (1).to_bytes(4, "little")
     elf[24:28] = (0x00100000).to_bytes(4, "little")
+    elf[28:32] = (52).to_bytes(4, "little")
+    elf[40:42] = (52).to_bytes(2, "little")
+    elf[42:44] = (32).to_bytes(2, "little")
+    elf[44:46] = (1).to_bytes(2, "little")
+    elf[46:48] = (40).to_bytes(2, "little")
+    elf[52:56] = (1).to_bytes(4, "little")
+    elf[56:60] = (0x1000).to_bytes(4, "little")
+    elf[60:64] = (0x00100000).to_bytes(4, "little")
+    elf[64:68] = (0x00100000).to_bytes(4, "little")
+    elf[68:72] = (8).to_bytes(4, "little")
+    elf[72:76] = (8).to_bytes(4, "little")
+    elf[76:80] = (5).to_bytes(4, "little")
+    elf[80:84] = (0x1000).to_bytes(4, "little")
+    elf[0x1000:0x1004] = (0x1000ffff).to_bytes(4, "little")
+    elf[0x1004:0x1008] = (0).to_bytes(4, "little")
     root = memoryview(image)[ROOT_LBA * SECTOR_SIZE:(ROOT_LBA + 1) * SECTOR_SIZE]
     records = (
         directory_record(ROOT_LBA, SECTOR_SIZE, 2, b"\x00") +
