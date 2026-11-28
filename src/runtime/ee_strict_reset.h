@@ -1073,6 +1073,35 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             }
             return true;
         }
+        if ((opcode & 0x0000ffffu) == 0x001au ||
+            (opcode & 0x0000ffffu) == 0x001bu) // DIV / DIVU
+        {
+            const uint32_t lhs = static_cast<uint32_t>(read_gpr(cpu, rs));
+            const uint32_t rhs = static_cast<uint32_t>(read_gpr(cpu, rt));
+            const bool signed_divide = function == 0x1au;
+            uint32_t quotient = 0u;
+            uint32_t remainder = lhs;
+            if (rhs == 0u)
+            {
+                quotient = signed_divide && (lhs & 0x80000000u) != 0u ? 1u : 0xffffffffu;
+            }
+            else if (signed_divide)
+            {
+                // Widen before division so INT32_MIN / -1 can wrap to LO.
+                const int64_t dividend = std::bit_cast<int32_t>(lhs);
+                const int64_t divisor = std::bit_cast<int32_t>(rhs);
+                quotient = static_cast<uint32_t>(dividend / divisor);
+                remainder = static_cast<uint32_t>(dividend % divisor);
+            }
+            else
+            {
+                quotient = lhs / rhs;
+                remainder = lhs % rhs;
+            }
+            cpu.m_lo = sign_extend_word(quotient);
+            cpu.m_hi = sign_extend_word(remainder);
+            return true;
+        }
         switch (opcode & 0x7ffu) // includes shamt: reject reserved encodings
         {
         case 0x0au: // MOVZ
@@ -1136,14 +1165,98 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return false;
         }
         const uint32_t fs = (opcode >> 11u) & 31u;
-        if (rs == 0x10u && (opcode & 0x7ffu) == 0x18u) // ADDA.S
+        const uint32_t fd = (opcode >> 6u) & 31u;
+        const uint32_t function = opcode & 0x3fu;
+        if (rs == 0x10u && rt == 0u && function >= 5u && function <= 7u)
+        {
+            const uint32_t bits = cpu.m_fpr[fs];
+            cpu.m_fpr[fd] = function == 5u ? bits & 0x7fffffffu :
+                function == 7u ? bits ^ 0x80000000u : bits;
+            if (function != 6u)
+            {
+                cpu.m_fcsr &= ~0xc000u;
+            }
+            return true;
+        }
+        if (rs == 0x10u && function == 3u) // DIV.S
+        {
+            const uint32_t numerator = cpu.m_fpr[fs];
+            const uint32_t denominator = cpu.m_fpr[rt];
+            const int num_exp = (numerator >> 23u) & 255u;
+            const int den_exp = (denominator >> 23u) & 255u;
+            const uint32_t sign = (numerator ^ denominator) & 0x80000000u;
+            uint32_t result = sign;
+            cpu.m_fcsr &= ~0x30000u;
+            if (den_exp == 0)
+            {
+                result |= 0x7fffffffu;
+                cpu.m_fcsr |= num_exp == 0 ? 0x20040u : 0x10020u;
+            }
+            else if (num_exp != 0)
+            {
+                // Same carry-save signed-digit recurrence as ee_cop1_radix_quotient.
+                uint32_t sum = ((numerator & 0x007fffffu) | 0x00800000u) << 2u;
+                const uint32_t divisor = ((denominator & 0x007fffffu) | 0x00800000u) << 2u;
+                uint32_t carry = 0u;
+                uint32_t quotient = 0u;
+                int digit = 1;
+                for (uint32_t i = 0u; i < 25u; ++i)
+                {
+                    quotient = (quotient << 1u) + static_cast<uint32_t>(digit);
+                    const uint32_t term = digit > 0 ? ~divisor : digit < 0 ? divisor : 0u;
+                    const uint32_t adjusted_carry = carry + (digit > 0 ? 1u : 0u);
+                    const uint32_t parity = sum ^ adjusted_carry;
+                    const uint32_t new_sum = parity ^ term;
+                    const uint32_t new_carry = ((sum & adjusted_carry) | (parity & term)) << 1u;
+                    const uint32_t test_sum = digit == 0 ? sum : new_sum;
+                    const uint32_t test_carry = digit == 0 ? carry : new_carry;
+                    const int32_t estimate = std::bit_cast<int32_t>(
+                        ((test_sum & 0xff000000u) + test_carry) | (test_sum & 0x00ffffffu));
+                    digit = estimate >= 8388608 ? 1 : estimate < -16777216 ? -1 : 0;
+                    sum = new_sum << 1u;
+                    carry = new_carry << 1u;
+                }
+                const int shift = quotient >= 0x01000000u ? 1 : 0;
+                const int exponent = num_exp - den_exp + 126 + shift;
+                if (exponent > 255)
+                {
+                    result |= 0x7fffffffu;
+                }
+                else if (exponent > 0)
+                {
+                    result |= (static_cast<uint32_t>(exponent) << 23u) |
+                        ((quotient >> shift) & 0x007fffffu);
+                }
+            }
+            cpu.m_fpr[fd] = result;
+            return true;
+        }
+        if (rs == 0x14u && rt == 0u && function == 0x20u) // CVT.S.W
+        {
+            const uint32_t bits = cpu.m_fpr[fs];
+            const uint32_t sign = bits & 0x80000000u;
+            const uint32_t magnitude = sign != 0u ? 0u - bits : bits;
+            uint32_t result = 0u;
+            if (magnitude != 0u)
+            {
+                const uint32_t exponent = 31u - std::countl_zero(magnitude);
+                const uint32_t significand = exponent > 23u
+                    ? magnitude >> (exponent - 23u) : magnitude << (23u - exponent);
+                result = sign | ((exponent + 127u) << 23u) | (significand & 0x007fffffu);
+            }
+            cpu.m_fpr[fd] = result;
+            return true;
+        }
+        const bool accumulator = fd == 0u && (function == 0x18u || function == 0x19u);
+        if (rs == 0x10u && (function <= 1u || accumulator)) // ADD/SUB/ADDA/SUBA.S
         {
             // Mirror ee_cop1_add_bits: keep one guard bit, truncate, and
             // treat exponent 255 as finite.
             constexpr uint32_t sign_bit = 0x80000000u;
             constexpr uint32_t fraction_mask = 0x007fffffu;
             const uint32_t lhs = cpu.m_fpr[fs];
-            const uint32_t rhs = cpu.m_fpr[rt];
+            const uint32_t rhs = static_cast<uint32_t>(cpu.m_fpr[rt]) ^
+                ((function & 1u) != 0u ? sign_bit : 0u);
             const int lhs_exp = (lhs >> 23u) & 255u;
             const int rhs_exp = (rhs >> 23u) & 255u;
             const int exponent = lhs_exp > rhs_exp ? lhs_exp : rhs_exp;
@@ -1184,8 +1297,15 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
                     result |= sum < 0 ? sign_bit : 0u;
                 }
             }
-            cpu.m_fpu_acc = result;
-            cpu.m_fpu_acc_overflow = overflow;
+            if (accumulator)
+            {
+                cpu.m_fpu_acc = result;
+                cpu.m_fpu_acc_overflow = overflow;
+            }
+            else
+            {
+                cpu.m_fpr[fd] = result;
+            }
             cpu.m_fcsr = (cpu.m_fcsr & ~0xc000u) | (overflow ? 0x8010u : 0u) |
                 (underflow ? 0x4008u : 0u);
             return true;
