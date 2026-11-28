@@ -114,6 +114,7 @@ bool g_last_interlaced = false, g_last_halved = false;
 std::uint32_t g_raster_tile = 16u;
 std::uint32_t g_raster_workgroup = 16u;
 bool g_raster_lazy_setup = false;
+bool g_raster_early_depth = false;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
 std::uint32_t field_base(std::uint32_t field) { return g_copy_words + (field & 1u) * g_field_words; }
@@ -1035,9 +1036,10 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constants[4] = {
+        WGPUConstantEntry constants[5] = {
             WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
-            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT,
+            WGPU_CONSTANT_ENTRY_INIT};
         constants[0].key = view("SCALE");
         constants[0].value = static_cast<double>(scale);
         constants[1].key = view("RASTER_WORKGROUP");
@@ -1046,7 +1048,9 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         constants[2].value = static_cast<double>(g_raster_tile);
         constants[3].key = view("RASTER_LAZY_SETUP");
         constants[3].value = g_raster_lazy_setup ? 1.0 : 0.0;
-        cd.compute.constantCount = i == kRaster ? 4u : 1u;
+        constants[4].key = view("RASTER_EARLY_DEPTH");
+        constants[4].value = g_raster_early_depth ? 1.0 : 0.0;
+        cd.compute.constantCount = i == kRaster ? 5u : 1u;
         cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
@@ -1728,6 +1732,20 @@ bool init(Mode m) {
         }
     }
     std::fprintf(stderr, "[gpu] raster lazy_setup=%u\n", g_raster_lazy_setup ? 1u : 0u);
+    g_raster_early_depth = false;
+    if (const char* early = std::getenv("PS2_RASTER_EARLY_DEPTH"))
+    {
+        if (std::strcmp(early, "1") == 0)
+        {
+            g_raster_early_depth = true;
+        }
+        else if (std::strcmp(early, "0") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_EARLY_DEPTH (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] raster early_depth=%u\n", g_raster_early_depth ? 1u : 0u);
     g_raster_tile = 16u;
     if (const char* size = std::getenv("PS2_RASTER_TILE"))
     {

@@ -814,6 +814,10 @@ if(EE_ENABLE_WEBGPU)
     set_tests_properties(ee_webgpu_native_smoke_lazy_setup
         PROPERTIES SKIP_RETURN_CODE 77
         ENVIRONMENT "PS2_RASTER_TILE=8;PS2_RASTER_WORKGROUP=8;PS2_RASTER_LAZY_SETUP=1")
+    add_test(NAME ee_webgpu_native_smoke_early_depth COMMAND ee_webgpu_native_smoke)
+    set_tests_properties(ee_webgpu_native_smoke_early_depth
+        PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "PS2_RASTER_EARLY_DEPTH=1")
 endif()
 
 if(Python3_Interpreter_FOUND)

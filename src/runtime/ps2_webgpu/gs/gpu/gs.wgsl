@@ -16,6 +16,7 @@ override SCALE: u32 = 1u;
 override RASTER_WORKGROUP: u32 = 16u;
 override RASTER_TILE: u32 = 16u;
 override RASTER_LAZY_SETUP: u32 = 0u;
+override RASTER_EARLY_DEPTH: u32 = 0u;
 
 const PSMCT32: u32 = 0x00u;
 const PSMCT24: u32 = 0x01u;
@@ -742,20 +743,34 @@ struct Attr {
     z: u32,
 }
 
-fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
+// Read each destination/depth value at most once. Attribute interpolation
+// is pure, so moving it after the existing rejection tests cannot change
+// their order or the values used by subsequent blending and stores.
+struct PlotState {
+    accepted: bool,
+    z: u32,
+    fl: Loc,
+    zl: Loc,
+    dst: u32,
+    have_dst: bool,
+    zte: bool,
+}
+
+fn prepare_plot(s: Setup, x: i32, y: i32, k: u32, depth: u32) -> PlotState {
+    var result: PlotState;
     if (x < s.scax0 || x > s.scax1 || y < s.scay0 || y > s.scay1) {
-        return;
+        return result;
     }
     let scanmsk = mode(s, 28u, 2u);
     if (scanmsk == 2u && (y & 1) == 0) {
-        return;
+        return result;
     }
     if (scanmsk == 3u && (y & 1) != 0) {
-        return;
+        return result;
     }
     let ux = u32(x);
     let uy = u32(y);
-    let z = min(at.z, s.zmax);
+    let z = min(depth, s.zmax);
     let fl = addr(s.ff, ux, uy);
     var zl = Loc(0u, 0u, 0u);
 
@@ -765,7 +780,7 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         dst = read_frame(s, fl, k);
         have_dst = true;
         if (((dst & 0x80000000u) != 0u) != has(s, F_DATM)) {
-            return;
+            return result;
         }
     }
 
@@ -773,17 +788,27 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
     if (zte) {
         let ztst = mode(s, 8u, 2u);
         if (ztst == 0u) {
-            return;
+            return result;
         }
         zl = addr(s.zf, ux, uy);
         if (ztst != 1u) {
             let old = load_at(zl, k) & s.zmax;
             if ((ztst == 2u && z < old) || (ztst == 3u && z <= old)) {
-                return;
+                return result;
             }
         }
     }
 
+    return PlotState(true, z, fl, zl, dst, have_dst, zte);
+}
+
+fn plot_prepared(s: Setup, k: u32, at: Attr, prepared: PlotState) {
+    let z = prepared.z;
+    let fl = prepared.fl;
+    let zl = prepared.zl;
+    var dst = prepared.dst;
+    let have_dst = prepared.have_dst;
+    let zte = prepared.zte;
     var r = i32(at.r);
     var g = i32(at.g);
     var b = i32(at.b);
@@ -969,6 +994,13 @@ fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
         store(zl, k, z);
     }
 }
+fn plot(s: Setup, x: i32, y: i32, k: u32, at: Attr) {
+    let prepared = prepare_plot(s, x, y, k, at.z);
+    if (prepared.accepted) {
+        plot_prepared(s, k, at, prepared);
+    }
+}
+
 
 const PRIM_WORDS: u32 = 28u;
 const SETUP_WORDS: u32 = 26u;
@@ -1019,6 +1051,17 @@ fn shade_at(p: u32, s: Setup, x: i32, y: i32, k: u32, px: f32, py: f32) {
                 return;
             }
             let w2 = 1.0 - w0 - w1;
+            if (RASTER_EARLY_DEPTH != 0u) {
+                let depth = z_at(p, fat(p + 25u) * w1 + fat(p + 26u) * w2);
+                let prepared = prepare_plot(s, x, y, k, depth);
+                if (!prepared.accepted) {
+                    return;
+                }
+                let c = vertex_attr(p, 0u) * w0 + vertex_attr(p, 1u) * w1 + vertex_attr(p, 2u) * w2;
+                let t = vertex_tex(p, 0u) * w0 + vertex_tex(p, 1u) * w1 + vertex_tex(p, 2u) * w2;
+                plot_prepared(s, k, Attr(c.x, c.y, c.z, c.w, t.x, t.y, t.z, t.w, depth), prepared);
+                return;
+            }
             let c = vertex_attr(p, 0u) * w0 + vertex_attr(p, 1u) * w1 + vertex_attr(p, 2u) * w2;
             let t = vertex_tex(p, 0u) * w0 + vertex_tex(p, 1u) * w1 + vertex_tex(p, 2u) * w2;
             at = Attr(c.x, c.y, c.z, c.w, t.x, t.y, t.z, t.w, z_at(p, fat(p + 25u) * w1 + fat(p + 26u) * w2));
