@@ -5,6 +5,8 @@
 #include "ee_strict_branch.h"
 #include "../architecture/ee_scalar_constant.h"
 
+#include <bit>
+
 namespace ee
 {
 // EE Core User's Manual v6.0 p.78: IC=010 (16 KiB), DC=001
@@ -1093,13 +1095,80 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         break;
     }
-    case 0x11u: // COP1 raw register/control transfers only
+    case 0x01u: // REGIMM: MTSAB / MTSAH
+        if (rt != 0x18u && rt != 0x19u)
+        {
+            return false;
+        }
+        cpu.m_sa = rt == 0x18u
+            ? ((static_cast<uint32_t>(read_gpr(cpu, rs)) ^ imm) & 15u) << 3u
+            : ((static_cast<uint32_t>(read_gpr(cpu, rs)) ^ imm) & 7u) << 4u;
+        return true;
+    case 0x11u: // COP1
     {
-        if (!cop1_enabled(cpu) || (opcode & 0x7ffu) != 0u)
+        if (!cop1_enabled(cpu))
         {
             return false;
         }
         const uint32_t fs = (opcode >> 11u) & 31u;
+        if (rs == 0x10u && (opcode & 0x7ffu) == 0x18u) // ADDA.S
+        {
+            // Mirror ee_cop1_add_bits: keep one guard bit, truncate, and
+            // treat exponent 255 as finite.
+            constexpr uint32_t sign_bit = 0x80000000u;
+            constexpr uint32_t fraction_mask = 0x007fffffu;
+            const uint32_t lhs = cpu.m_fpr[fs];
+            const uint32_t rhs = cpu.m_fpr[rt];
+            const int lhs_exp = (lhs >> 23u) & 255u;
+            const int rhs_exp = (rhs >> 23u) & 255u;
+            const int exponent = lhs_exp > rhs_exp ? lhs_exp : rhs_exp;
+            const bool discard_lhs = lhs_exp == 0 || exponent - lhs_exp >= 25;
+            const bool discard_rhs = rhs_exp == 0 || exponent - rhs_exp >= 25;
+            uint32_t result = (lhs & rhs) & sign_bit;
+            bool overflow = false;
+            bool underflow = false;
+            if (discard_lhs || discard_rhs)
+            {
+                if (discard_lhs != discard_rhs)
+                {
+                    result = discard_lhs ? rhs : lhs;
+                }
+            }
+            else
+            {
+                const auto align = [exponent](uint32_t bits, int operand_exp)
+                {
+                    const int significand = (((bits & fraction_mask) | 0x00800000u) << 1u) >>
+                        (exponent - operand_exp);
+                    return (bits & sign_bit) != 0u ? -significand : significand;
+                };
+                const int sum = align(lhs, lhs_exp) + align(rhs, rhs_exp);
+                if (sum != 0)
+                {
+                    const uint32_t magnitude = sum < 0 ? -sum : sum;
+                    const int leading = std::countl_zero(magnitude);
+                    const int result_exp = exponent + 7 - leading;
+                    const uint32_t fraction = ((magnitude << leading) >> 8u) & fraction_mask;
+                    overflow = result_exp > 255;
+                    underflow = result_exp < 1;
+                    result = overflow ? 0x7fffffffu : fraction;
+                    if (!overflow && !underflow)
+                    {
+                        result |= static_cast<uint32_t>(result_exp) << 23u;
+                    }
+                    result |= sum < 0 ? sign_bit : 0u;
+                }
+            }
+            cpu.m_fpu_acc = result;
+            cpu.m_fpu_acc_overflow = overflow;
+            cpu.m_fcsr = (cpu.m_fcsr & ~0xc000u) | (overflow ? 0x8010u : 0u) |
+                (underflow ? 0x4008u : 0u);
+            return true;
+        }
+        if ((opcode & 0x7ffu) != 0u)
+        {
+            return false;
+        }
         switch (rs)
         {
         case 0u: // MFC1
@@ -1126,7 +1195,26 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
         }
         break;
     }
-    case 0x1cu: // MMI: HI1/LO1 transfers
+    case 0x1cu: // MMI
+        if ((opcode & 0x7ffu) == 0x428u) // PADDUW
+        {
+            dest = (opcode >> 11u) & 31u;
+            if (dest != 0u)
+            {
+                const s_ee_u128 lhs = rs == 0u ? s_ee_u128{} : cpu.m_gpr[rs];
+                const s_ee_u128 rhs = rt == 0u ? s_ee_u128{} : cpu.m_gpr[rt];
+                const auto add_pair = [](uint64_t a, uint64_t b)
+                {
+                    constexpr uint64_t max_word = 0xffffffffu;
+                    const uint64_t low = (a & max_word) + (b & max_word);
+                    const uint64_t high = (a >> 32u) + (b >> 32u);
+                    return ((high > max_word ? max_word : high) << 32u) |
+                        (low > max_word ? max_word : low);
+                };
+                cpu.m_gpr[dest] = {add_pair(lhs.m_lo, rhs.m_lo), add_pair(lhs.m_hi, rhs.m_hi)};
+            }
+            return true;
+        }
         if ((opcode & 0x001fffffu) == 0x11u)
         {
             cpu.m_hi1 = read_gpr(cpu, rs);
@@ -1285,6 +1373,34 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
 
 // Exercise the actual register executor at compile time, including
 // signed 64-bit ordering, negative immediates and the upper GPR half.
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[1] = {0xfffffffe00000001ull, 0x00000003ffffffffull};
+    cpu.m_gpr[2] = {0x0000000400000002ull, 0x0000000500000001ull};
+    return execute_register_word(cpu, 0x70220c28u, nullptr) &&
+        cpu.m_gpr[1].m_lo == 0xffffffff00000003ull &&
+        cpu.m_gpr[1].m_hi == 0x00000008ffffffffull &&
+        execute_register_word(cpu, 0x70000c28u, nullptr) &&
+        cpu.m_gpr[1].m_lo == 0u && cpu.m_gpr[1].m_hi == 0u;
+}());
+
+static_assert([]()
+{
+    s_ee_cpu_state cpu{};
+    cpu.m_gpr[1].m_lo = 5u;
+    cpu.m_fpr[0] = 0x3f800000u;
+    cpu.m_fpr[1] = 0x3f800000u;
+    if (!execute_register_word(cpu, 0x04390006u, nullptr) || cpu.m_sa != 48u ||
+        execute_register_word(cpu, 0x46010018u, nullptr))
+    {
+        return false;
+    }
+    cpu.m_cop0[COP0_Status] = 0x20000000u;
+    return execute_register_word(cpu, 0x46010018u, nullptr) &&
+        cpu.m_fpu_acc == 0x40000000u && cpu.m_fpu_acc_overflow == 0u;
+}());
+
 static_assert([]()
 {
     s_ee_cpu_state cpu{};
