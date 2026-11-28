@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded single-use VU0 FMAC inline pilot over an authenticated O5 cache."""
+"""Bounded VU0 FMAC pilots over an authenticated O5 cache."""
 
 import argparse
 import hashlib
@@ -11,7 +11,10 @@ import subprocess
 import sys
 import zipfile
 
+from ee_vector_discard import vector_discard
+
 PILOT = (0x1068e0, 0x106a20, 0x106950, 0x106aa0)
+DISCARD_PILOT = (0x108220, *PILOT)
 HEADER = re.compile(rb"^define internal i32 @(ee_vu0_ir_fmac_s[0-9_]+(?:true|false))\([^\r\n]+\) \{", re.M)
 
 
@@ -35,7 +38,7 @@ def inline_single_use(raw):
     return result, names
 
 
-def stage(selection, ir, profile, output):
+def stage(selection, ir, profile, output, mode="inline"):
     from benchmark_ee_native_size import emit_native
     from link_native_objects import load_inputs
     from verify_ir import native_target_identity, ir_pipeline_id
@@ -83,7 +86,8 @@ def stage(selection, ir, profile, output):
     paths = {Path(fn["ir_path"]).name: path for fn, path in zip(functions, linked)}
     trials = {}
     replacements = {}
-    for pc in PILOT:
+    pilot = DISCARD_PILOT if mode == "vector-discard" else PILOT
+    for pc in pilot:
         fn = by_pc[pc]
         name = Path(fn["ir_path"]).name
         raw = (ir / name).read_bytes()
@@ -92,9 +96,10 @@ def stage(selection, ir, profile, output):
         if (raw != selected.get(name) or sha(raw) != record["ir_sha256"]
                 or sha(original) != record["sha256"]):
             raise ValueError("hot source/object mismatch: " + name)
-        changed, helpers = inline_single_use(raw)
+        changed, helpers = (vector_discard(raw) if mode == "vector-discard"
+                            else inline_single_use(raw))
         if not helpers:
-            raise ValueError("no single-use helpers: " + name)
+            raise ValueError("no eligible helpers: " + name)
         control = emit_native(raw, manifest["target_triple"], fn["host_symbol"], "O5")
         if control["sha256"] != record["sha256"]:
             raise ValueError("O5 control did not reproduce original: " + name)
@@ -104,12 +109,15 @@ def stage(selection, ir, profile, output):
     staged.mkdir()
     rows = []
     for name, (changed, helpers, control, symbol) in trials.items():
-        destination = staged / (Path(name).stem + ".inline.o")
+        destination = staged / (Path(name).stem + "." + mode + ".o")
         candidate = emit_native(changed, manifest["target_triple"], symbol,
                                 "O5", object_output=destination)
+        # A speed-oriented discard branch can cost some static bytes.
+        # Bound growth per module; keep the original stricter inline gate.
+        size_percent = 110 if mode == "vector-discard" else 100
         accepted = (candidate["sha256"] != control["sha256"]
-                    and candidate["object_bytes"] <= control["object_bytes"]
-                    and candidate["executable_bytes"] <= control["executable_bytes"])
+                    and candidate["object_bytes"] * 100 <= control["object_bytes"] * size_percent
+                    and candidate["executable_bytes"] * 100 <= control["executable_bytes"] * size_percent)
         rows.append({"module": name, "helpers": helpers, "control": control,
                      "candidate": candidate, "accepted_size_gate": accepted,
                      "transformed_ir_sha256": sha(changed)})
@@ -118,7 +126,8 @@ def stage(selection, ir, profile, output):
                                       size_bytes=candidate["object_bytes"],
                                       sha256=candidate["sha256"],
                                       transformed_ir_sha256=sha(changed),
-                                      experimental_fmac_inline=True)
+                                      experimental_fmac_inline=(mode == "inline"),
+                                      experimental_vector_discard=(mode == "vector-discard"))
         else:
             destination.unlink()
         print(f"{name}: {control['executable_bytes']} -> "
@@ -130,7 +139,8 @@ def stage(selection, ir, profile, output):
                for name, record in records.items()]
     overlay = dict(manifest, objects=entries,
                    object_bytes=sum(item["size_bytes"] for item in entries),
-                   experimental_mixed_pipeline="O5-single-use-fmac-inline",
+                   experimental_mixed_pipeline=("O5-vector-discard" if mode == "vector-discard"
+                                                else "O5-single-use-fmac-inline"),
                    production_cache_compatible=False)
     (staged / "objects.json").write_text(json.dumps(overlay, indent=2) + "\n", encoding="utf-8")
     (output / "ee_functions.json").write_bytes(meta_bytes)
@@ -141,7 +151,9 @@ def stage(selection, ir, profile, output):
     if sha(baseline_library.read_bytes()) != translation["library_sha256"]:
         raise ValueError("baseline library changed during pilot")
     plan = {
-        "mode": "experimental_single_use_fmac_inline",
+        "mode": ("experimental_vector_discard" if mode == "vector-discard"
+                 else "experimental_single_use_fmac_inline"),
+        "size_gate_percent": size_percent,
         "metadata_sha256": sha(meta_bytes),
         "source_manifest_sha256": sha((objects / "objects.json").read_bytes()),
         "baseline_library_sha256": translation["library_sha256"],
@@ -156,7 +168,7 @@ def stage(selection, ir, profile, output):
         "modules": rows,
     }
     (output / "helper-plan.json").write_text(json.dumps(plan, indent=2) + "\n", encoding="utf-8")
-    print(f"Isolated pilot: {len(replacements)}/{len(PILOT)} modules; {library}", flush=True)
+    print(f"Isolated pilot: {len(replacements)}/{len(pilot)} modules; {library}", flush=True)
 
 
 def main():
@@ -165,9 +177,10 @@ def main():
     parser.add_argument("--ir", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--mode", choices=("inline", "vector-discard"), default="inline")
     args = parser.parse_args()
     try:
-        stage(args.selection, args.ir, args.profile, args.out)
+        stage(args.selection, args.ir, args.profile, args.out, args.mode)
     except (OSError, ValueError, KeyError, TypeError, RuntimeError,
             zipfile.BadZipFile, subprocess.CalledProcessError) as error:
         print(f"FMAC inline pilot refused: {error}", file=sys.stderr)

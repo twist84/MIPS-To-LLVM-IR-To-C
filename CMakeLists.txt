@@ -928,6 +928,9 @@ if(Python3_Interpreter_FOUND)
         add_test(NAME ee_native_size_pilot
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_native_size_pilot.py)
+        add_test(NAME ee_vector_discard
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_SOURCE_DIR}/tests/tools/test_ee_vector_discard.py)
         add_test(NAME verify_ir_incremental
             COMMAND ${Python3_EXECUTABLE}
                     ${CMAKE_SOURCE_DIR}/tests/tools/test_verify_ir_incremental.py)

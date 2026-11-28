@@ -1634,3 +1634,51 @@ library identity gate. CI and retail correctness/performance
 pending. Next: if size gate passes, compare isolated DLL with
 deterministic PAD replay, then investigate matrix FMAC arithmetic
 and register residency. SC1 PARTIAL, SC4 FAIL.
+
+### P5C result — ee-fmac-inline-comparison.zip
+
+All five workflows at a5bebbc passed. Synchronous O5 control
+and inline overlay, 40M dispatches, 2560/2560 PAD polls,
+2003975 matched dispatch trace samples, zero differences or
+unpaired samples. Final parsed reports and rendered image
+match across baseline/control/candidate. Wall 51.204/51.500/
+51.469 s, 2623 fields each. Candidate +0.06% throughput versus
+control, less than A/A variation. Correctness accepted for this
+replay; no demonstrated speedup, do not promote.
+
+### P5D — exact packed discard fast paths
+
+Isolated O5 overlay from original production objects, not the
+P5C image. For multiply, return XOR-signed zero with both flags
+clear only if every lane has an exponent-zero operand. For
+add/sub, return the surviving operand (or intersection-signed
+zero) only if every lane has at least one exponent-zero or
+distance >=25 operand. Preserve the original full path,
+including Booth correction, cancellation underflow, architectural
+flags, ACC and synchronization. No approximate host floating
+arithmetic or FMA replacement.
+
+Local actual captured-IR test: LLVM 20.1.8 native O0/O3,
+600000 result/overflow/underflow lane comparisons matched;
+random raw operands, flush-to-zero, alternating lanes and
+large exponent differences. Windows x86_64 znver2 static
+O2 sizes (not production LLVM 22.1.0): 108220 19300->19942,
+1068e0 11827->12031, 106a20 19245->19893, 106950 15725->16023,
+106aa0 33753->33436 bytes. Actual branch hit rate and runtime
+benefit unknown. New CTest uses production arithmetic template
+and equivalent differential cases; CI pending.
+
+Reuse the authenticated overlay builder with --mode vector-discard;
+only these five hot modules, same byte-identical O5 control
+re-emission, per-module object and executable growth at most 10%.
+Original library identity and isolated cache enforced, deterministic
+PAD replay required. Receipt now includes raster tile/workgroup.
+Keep baseline unchanged.
+
+Platform/vendor-specific optimization explicitly permitted:
+use if constexpr for C++ compile-time target selection where
+appropriate, and recorded LLVM target CPU/features for emitted
+guest IR; not compiler-host inference. Portable exact arithmetic
+remains the reference/fallback. ISA availability must be proven
+before using intrinsics, and CPU features in artifact provenance.
+No vendor-specific instructions forced in this checkpoint.
