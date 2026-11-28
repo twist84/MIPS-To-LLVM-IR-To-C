@@ -230,6 +230,7 @@ if __name__ == "__main__":
     staging()
     raster_validation()
     async_workload_validation()
+    from tempfile import TemporaryDirectory
     from replay_ee_dedup_experiment import lean_overrides, report_options, LEAN_DIAGNOSTICS
     assert lean_overrides("all") == {key: "0" for key in LEAN_DIAGNOSTICS.values()}
     for name, key in LEAN_DIAGNOSTICS.items():
