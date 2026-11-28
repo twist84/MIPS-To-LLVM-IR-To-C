@@ -25,10 +25,10 @@ ExternalProject_Add(openps2bios_rom
     EXCLUDE_FROM_ALL TRUE
 )
 
-# Restore only the files owned by this patch in the managed dependency.
+# Reapply from the pinned source in this managed dependency checkout.
 # Depending on the patch file also rebuilds the ROM when the patch changes.
 ExternalProject_Add_Step(openps2bios_rom apply_disc_boot_patch
-    COMMAND "${GIT_EXECUTABLE}" restore --source=HEAD -- osd/osd.c src/ee/kernel.c
+    COMMAND "${GIT_EXECUTABLE}" restore --source=HEAD -- .
     COMMAND "${GIT_EXECUTABLE}" apply "${openps2bios_patch}"
     WORKING_DIRECTORY "<SOURCE_DIR>"
     DEPENDEES patch
