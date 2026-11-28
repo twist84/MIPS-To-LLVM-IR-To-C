@@ -3938,6 +3938,7 @@ int main(int argc, char** argv)
 
     uint32_t remaining = budget;
     uint64_t dispatched = 0;
+    uint64_t event_yield_count = 0u;
     uint32_t hot_expand_sequence = 0u;
     // Live cache-miss overlays hold only newly translated functions. They are
     // consulted after the base module reports an unowned PC, so a miss links
@@ -6466,10 +6467,20 @@ int main(int argc, char** argv)
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH) ||
             reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_RETURN);
-        if (trace && (dispatch_trace_every == 1u ||
-            dispatched <= 64u ||
-            dispatched % dispatch_trace_every == 0u ||
-            !ordinary_transition || status != 1u))
+        const bool routine_event_yield = reason == static_cast<uint32_t>(
+            ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD);
+        if (routine_event_yield)
+        {
+            ++event_yield_count;
+        }
+        const bool trace_stride_hit = routine_event_yield
+            ? dispatch_trace_every == 1u || event_yield_count <= 64u ||
+                event_yield_count % dispatch_trace_every == 0u
+            : dispatch_trace_every == 1u || dispatched <= 64u ||
+                dispatched % dispatch_trace_every == 0u;
+        if (trace && (trace_stride_hit ||
+            (!ordinary_transition && !routine_event_yield) ||
+            (status != 1u && !routine_event_yield)))
         {
             ee::c_runtime_profile_scope profile_scope(ee::e_runtime_profile_id::dispatch_trace_log);
             std::printf("dispatch=%llu pc=0x%08x -> 0x%08x reason=%s(%u) status=%u\n",
