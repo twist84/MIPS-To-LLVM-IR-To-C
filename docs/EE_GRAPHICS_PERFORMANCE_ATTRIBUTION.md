@@ -1830,3 +1830,43 @@ A synchronous recording may diverge on async execution; if so,
 the archive is diagnostic only. No production changes, no
 cache rebuild. One A/A/B is a screening measurement; repeat
 and sustained combat acceptance gates still required.
+
+### P4E result — ee-raster-tile8-async.zip
+
+Actual 16/16, 16/16, 8/8 markers, lazy setup off. All completed
+40M dispatches, PAD 2478/2478, 2541 fields/presentations, 88 native
+VU1 programs, 378121 native runs, 415895434 pairs, no fallback.
+Same final PPM SHA-256 81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a.
+Complete GIF/GS, path, VIF1 producer, presentation and SIO2
+report sections identical. However A/A first differs at dispatch
+11574272: 30107 different common samples and 207323 unpaired.
+A/B first differs at 11560336: 30070 different common samples,
+252236 unpaired. Final registers, PC and instruction counts differ.
+A/A/B wall 41.734/42.422/41.969 s; candidate +1.08% throughput
+vs A/A, within A/A variation. Late dispatch interval 24002560
+to 39993344: 332 fields each, 12.0188/12.4157/12.1557 s.
+Keep 16/16 default. Async scheduling variance is a blocker for
+strict dispatch matching; do not label equal graphics workloads
+as architectural equivalence. No cycle-accuracy detour.
+
+### P6A — bound optional host diagnostic overhead once
+
+The "profiling off" P4E arms still performed ~37M empty controller
+polls and ~14.6M EE/VU1 overlap intervals. Polling is already a
+single acquire check and changing it changes completion timing;
+do not reduce guest-visible polling cadence. The native overlap
+collector performs host clock reads at pending native boundaries.
+Existing report_hotspots and boundary_timing also default on.
+New --async-lean uses the same recorded workload, 16/16 GPU,
+same authenticated O5 DLL and runner, async VU1/GS, no detailed
+profiling. A/A force existing three host diagnostic options on,
+B sets SDBZ_REPORT_HOTSPOTS, SDBZ_REPORT_BOUNDARY_TIMING and
+SDBZ_VU1_NATIVE_OVERLAP_PROFILE to 0. Preserve dispatch tracing,
+history and scheduler cadence; no C++ changes. This is a single
+diagnostic overhead screening, not an assumption that tracing
+explains slow 3D. Save exact graphics workload and final-image
+hash comparison before strict trace checks, including when A/A
+fails; explicitly not architectural equivalence. Verify reported
+hotspots and overlap modes, and hash VU1 library inventory before
+and after all async comparisons. Keep strict trace/report gates.
+No production defaults change. SC4 remains unmet.

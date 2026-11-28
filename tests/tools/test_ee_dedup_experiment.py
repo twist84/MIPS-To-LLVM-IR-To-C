@@ -201,8 +201,33 @@ def raster_validation():
             raise AssertionError("async raster accepted changed guest field count")
 
 
+def async_workload_validation():
+    import json
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import (async_workload_evidence,
+                                           GRAPHICS_WORKLOAD_KEYS, VU1_WORKLOAD_KEYS)
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for index, arm in enumerate(("baseline", "control", "dedup")):
+            folder = root / arm
+            folder.mkdir()
+            report = {key: 10 for key in GRAPHICS_WORKLOAD_KEYS}
+            report.update(vu1_aot={key: 1 for key in VU1_WORKLOAD_KEYS},
+                          dispatches=40, guest_instruction_attempts=100 + index,
+                          m2_runtime={"enabled": index != 2},
+                          vu1_worker={"native_overlap_profile": index != 2})
+            (folder / "report.json").write_text(json.dumps(report))
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        evidence = async_workload_evidence(root)
+        assert evidence["graphics_workload_and_final_image_match"]
+        assert not evidence["architectural_equivalence_proven"]
+        (root / "dedup" / "gs-webgpu.ppm").write_bytes(b"changed")
+        assert not async_workload_evidence(root)["graphics_workload_and_final_image_match"]
+
+
 if __name__ == "__main__":
     run()
     staging()
     raster_validation()
+    async_workload_validation()
     print("PASS: isolated EE dedup route selection and exact dispatch inventory")

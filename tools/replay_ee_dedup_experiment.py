@@ -36,13 +36,13 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory, tile8=False, async_raster=False):
+def validate_raster_outputs(directory, tile8=False, async_raster=False, lean=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
     for arm in arms:
         folder = directory / arm
-        expected = "1" if arm == "dedup" and not tile8 else "0"
+        expected = "1" if arm == "dedup" and not tile8 and not lean else "0"
         log = (folder / "stderr.log").read_bytes()
         markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
         if not markers or any(value.decode("ascii") != expected for value in markers):
@@ -65,6 +65,15 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False):
         for arm in arms:
             report = read_json(directory / arm / "report.json")
             normalized = normalize(report)
+            if lean:
+                # These host-only collectors are the deliberate difference
+                # in this experiment. Keep all other state/counters intact.
+                normalized.pop("m2_runtime")
+                worker = normalized["vu1_worker"]
+                for key in ("native_overlap_profile", "ee_native_overlap_intervals",
+                            "ee_native_pending_boundaries", "ee_native_completed_at_entry",
+                            "ee_native_completed_at_exit"):
+                    worker.pop(key)
             results[arm]["normalized_report_sha256"] = hashlib.sha256(
                 json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode("utf-8")
             ).hexdigest()
@@ -75,6 +84,40 @@ def validate_raster_outputs(directory, tile8=False, async_raster=False):
            for arm in arms for key in (report_key, "image_sha256")):
         raise ValueError("raster replay terminal report or image differs")
     return results
+
+
+GRAPHICS_WORKLOAD_KEYS = (
+    "gs_fields_started", "m2_gif_gs", "m2_gif_paths", "m2_vif1_producer",
+    "m2_gs_presentation", "m2_iop_sio2",
+)
+VU1_WORKLOAD_KEYS = ("enabled", "programs", "native_runs", "native_pairs", "interpreter_fallbacks")
+
+
+def async_workload_evidence(directory):
+    """Diagnostic graphics workload comparison, not architectural equality."""
+    arms = ("baseline", "control", "dedup")
+    reports = {arm: read_json(directory / arm / "report.json") for arm in arms}
+    evidence = {}
+    for arm, report in reports.items():
+        payload = {key: report[key] for key in GRAPHICS_WORKLOAD_KEYS}
+        payload["vu1_aot"] = {key: report["vu1_aot"][key] for key in VU1_WORKLOAD_KEYS}
+        evidence[arm] = {
+            "graphics_workload_sha256": hashlib.sha256(
+                json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+            "image_sha256": sha(directory / arm / "gs-webgpu.ppm"),
+            "guest_fields": report["gs_fields_started"],
+            "dispatches": report["dispatches"],
+            "guest_instruction_attempts": report["guest_instruction_attempts"],
+            "vu1": payload["vu1_aot"],
+            "hotspots_enabled": report["m2_runtime"]["enabled"],
+            "overlap_enabled": report["vu1_worker"]["native_overlap_profile"],
+        }
+    keys = ("graphics_workload_sha256", "image_sha256")
+    return {"arms": evidence, "graphics_workload_and_final_image_match": all(
+        evidence[arm][key] == evidence["baseline"][key]
+        for arm in arms for key in keys),
+        "architectural_equivalence_proven": False}
 
 
 def validate_libraries(profile, experiment, elf):
@@ -331,6 +374,8 @@ def main():
                          help="compare 0/1 on the same verified O5 DLL and runner")
     variant.add_argument("--raster-tile8", action="store_true",
                          help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
+    variant.add_argument("--async-lean", action="store_true",
+                         help="screen cost of optional EE report and VU1 overlap diagnostics")
     parser.add_argument("--recording", type=Path,
                         help="replay an existing complete PAD0 record for every arm")
     parser.add_argument("--async-raster", action="store_true",
@@ -357,10 +402,13 @@ def main():
             setattr(args, key, value.resolve())
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
-        raster_mode = args.raster_lazy_setup or args.raster_tile8
+        raster_mode = args.raster_lazy_setup or args.raster_tile8 or args.async_lean
+        async_mode = args.async_raster or args.async_lean
+        if args.async_lean and (args.sync or args.async_raster or not args.recording):
+            raise ValueError("--async-lean requires --recording and no other async/sync mode")
         if args.async_raster and (not args.raster_tile8 or args.sync or not args.recording):
             raise ValueError("--async-raster requires --raster-tile8 and --recording, without --sync")
-        if raster_mode and (not args.control or not (args.sync or args.async_raster) or
+        if raster_mode and (not args.control or not (args.sync or async_mode) or
                 prior_dir is not None or args.source_comparison is not None or
                 args.prior_source_comparison is not None or args.reference_sha256):
             raise ValueError("raster comparison requires --control and --sync or --async-raster; no other candidate")
@@ -406,25 +454,35 @@ def main():
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
-        elif args.async_raster:
+        elif async_mode:
             env.update(SDBZ_VU1_ASYNC="1", SDBZ_GS_ASYNC="1")
         if raster_mode:
             env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
-        if args.raster_tile8:
+        if args.raster_tile8 or args.async_lean:
             env.update(PS2_RASTER_TILE="16", PS2_RASTER_WORKGROUP="16")
+        if args.async_lean:
+            env.update(SDBZ_REPORT_HOTSPOTS="1", SDBZ_REPORT_BOUNDARY_TIMING="1",
+                       SDBZ_VU1_NATIVE_OVERLAP_PROFILE="1")
         candidate_env = dict(env)
         if args.raster_lazy_setup:
             candidate_env["PS2_RASTER_LAZY_SETUP"] = "1"
         elif args.raster_tile8:
             candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
+        elif args.async_lean:
+            candidate_env.update(SDBZ_REPORT_HOTSPOTS="0", SDBZ_REPORT_BOUNDARY_TIMING="0",
+                                 SDBZ_VU1_NATIVE_OVERLAP_PROFILE="0")
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
             inputs["source_comparison_sha256"] = sha(args.source_comparison)
         if args.prior_source_comparison is not None:
             inputs["prior_source_comparison_sha256"] = sha(args.prior_source_comparison)
+        if async_mode:
+            from replay_ee_graphics_sweep import aot_identity
+            vu1_directory = Path(env["SDBZ_VU1_AOT"]).resolve()
+            inputs["vu1_inventory"] = aot_identity(vu1_directory)
         if args.recording:
             inputs["recording_sha256"] = sha(args.recording)
             external_polls = record_count(args.recording)
@@ -437,7 +495,8 @@ def main():
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
         if raster_mode:
-            receipt["experiment_mode"] = "raster_tile8" if args.raster_tile8 else "raster_lazy_setup"
+            receipt["experiment_mode"] = ("async_lean" if args.async_lean else
+                                          "raster_tile8" if args.raster_tile8 else "raster_lazy_setup")
             receipt["async_raster"] = args.async_raster
             receipt["candidate_environment_overrides"] = {
                 key: value for key, value in candidate_env.items() if env.get(key) != value}
@@ -494,6 +553,16 @@ def main():
                 args.output / "baseline" / "stdout.log", args.output / "dedup" / "stdout.log")
             receipt["dedup"]["terminal_budget_reached"] = terminal_budget(
                 args.output / "dedup", args.max_dispatches)
+            if async_mode and all(terminal_budget(args.output / arm, args.max_dispatches)
+                                  for arm in ("baseline", "control", "dedup")):
+                # Save workload evidence even if A/A trace matching fails.
+                # It is deliberately not a substitute for the strict gate.
+                receipt["async_workload"] = async_workload_evidence(args.output)
+                if args.async_lean:
+                    for arm, info in receipt["async_workload"]["arms"].items():
+                        expected = arm != "dedup"
+                        if info["hotspots_enabled"] is not expected or info["overlap_enabled"] is not expected:
+                            raise ValueError("host diagnostic settings not confirmed: " + arm)
             if args.control:
                 control = receipt["control_pad_replay"]
                 if (not control or not control["valid"] or
@@ -528,11 +597,17 @@ def main():
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
             if raster_mode:
                 receipt["raster_outputs"] = validate_raster_outputs(
-                    args.output, tile8=args.raster_tile8, async_raster=args.async_raster)
+                    args.output, tile8=args.raster_tile8, async_raster=async_mode, lean=args.async_lean)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
             receipt["runner_unchanged"] = sha(args.runner) == inputs["runner_sha256"]
+            if async_mode:
+                try:
+                    receipt["vu1_inventory_unchanged"] = (
+                        aot_identity(vu1_directory) == inputs["vu1_inventory"])
+                except (OSError, ValueError):
+                    receipt["vu1_inventory_unchanged"] = False
             if args.recording:
                 receipt["recording_unchanged"] = sha(args.recording) == inputs["recording_sha256"]
             receipt["libraries_unchanged"] = (
@@ -553,6 +628,7 @@ def main():
         if (receipt["error"] or not receipt["libraries_unchanged"] or not receipt["runner_unchanged"] or
                 not receipt.get("memcard_unchanged", True) or
                 not receipt.get("recording_unchanged", True) or
+                not receipt.get("vu1_inventory_unchanged", True) or
                 not receipt.get("source_comparison_unchanged", True) or
                 not receipt.get("prior_source_comparison_unchanged", True)):
             print("Replay requires investigation:", receipt["error"], file=sys.stderr)
