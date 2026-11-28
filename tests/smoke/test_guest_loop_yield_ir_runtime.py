@@ -59,6 +59,8 @@ def main():
         ir = ir_path.read_text(encoding="utf-8")
         require("loop_exhausted_" in ir and "select i1" in ir,
                 "generated guest loop is missing its resume-capable safepoint")
+        require(f"i64 {event_yield_offset}" not in ir,
+                "event budget guard still loads the redundant enable flag")
         module = llvm.parse_assembly(ir)
         module.verify()
 
@@ -105,6 +107,7 @@ def main():
         require(attempts.value == 6 and reference_slots.value == 6,
                 "event yield did not stop at the requested compatibility slot")
         event_yield_enabled.value = 0
+        event_deadline.value = (1 << 64) - 1
         state.pc = ENTRY_PC
         state.exit_reason = 0
         state.gpr[8].lo = 41

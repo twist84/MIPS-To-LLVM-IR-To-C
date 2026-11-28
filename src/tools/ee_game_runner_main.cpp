@@ -5824,8 +5824,10 @@ int main(int argc, char** argv)
             // Give translated EE loops a ps2-web-recomp-style bounded
             // compatibility-clock slice, shortened to the next known EE
             // timer, scanout or COP0 event. The loop-header check is cheap
-            // when disabled and does not call back per guest instruction.
+            // when disabled: UINT64_MAX is the no-deadline sentinel, so it
+            // avoids a per-header enable load and branch.
             runtime.m_event_budget_yield_enabled = 0u;
+            runtime.m_event_budget_slot_deadline = UINT64_MAX;
             if (runtime.m_ee_cycle_scheduler.source() ==
                 ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY)
             {

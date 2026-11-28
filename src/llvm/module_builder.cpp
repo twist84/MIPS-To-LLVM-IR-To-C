@@ -4033,12 +4033,8 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         const std::string continue_label = "loop_continue_" + suffix;
         const std::string is_null = newtemp();
         const std::string event_check = "event_budget_check_" + event_suffix;
-        const std::string event_active = "event_budget_active_" + event_suffix;
         const std::string event_yield = "event_budget_yield_" + event_suffix;
         const std::string event_continue = "event_budget_continue_" + event_suffix;
-        const std::string event_enabled_ptr = newtemp();
-        const std::string event_enabled = newtemp();
-        const std::string event_enabled_cond = newtemp();
         // Both the event deadline and legacy loop safepoint require a live
         // runtime. Share this null guard so hot guest loop headers pay for it
         // once instead of once per independent guard.
@@ -4046,16 +4042,6 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         m_out += "  br i1 " + is_null + ", label %" + continue_label +
                  ", label %" + event_check + "\n";
         m_out += event_check + ":\n";
-        m_out += "  " + event_enabled_ptr + " = getelementptr i8, ptr %rt, i64 " +
-                 std::to_string(offsetof(ee::s_ee_runtime,
-                     m_event_budget_yield_enabled)) + "\n";
-        m_out += "  " + event_enabled + " = load i32, ptr " +
-                 event_enabled_ptr + "\n";
-        m_out += "  " + event_enabled_cond + " = icmp ne i32 " +
-                 event_enabled + ", 0\n";
-        m_out += "  br i1 " + event_enabled_cond + ", label %" + event_active +
-                 ", label %" + event_continue + "\n";
-        m_out += event_active + ":\n";
         const std::string event_slot_ptr = newtemp();
         const std::string event_slot = newtemp();
         const std::string event_deadline_ptr = newtemp();
