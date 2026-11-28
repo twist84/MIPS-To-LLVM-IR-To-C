@@ -4306,7 +4306,8 @@ int main(int argc, char** argv)
     uint64_t horizon_mmio_free_direct_touched = 0u;
     uint64_t horizon_mmio_free_direct_quiet = 0u;
     // SDBZ_IDLE_SKIP=1: exact host-side acceleration of translated guest
-    // poll loops at HOST_YIELD safepoints (see ee_idle_loop_skip.h).
+    // poll loops at host or scheduler yield boundaries (see
+    // ee_idle_loop_skip.h).
     std::string idle_skip_environment;
     const char* idle_skip_value = read_host_environment(
         "SDBZ_IDLE_SKIP", &idle_skip_environment);
@@ -4320,9 +4321,10 @@ int main(int argc, char** argv)
     const bool idle_forward_branches = idle_forward_value != nullptr &&
         std::strcmp(idle_forward_value, "1") == 0;
     std::unordered_map<uint32_t, ee::s_idle_loop_shape> idle_loop_shapes;
-    // Guarded loop headers observed at HOST_YIELD. Any later native entry
-    // at one of them may probe; the one-iteration probe validates itself.
-    std::unordered_set<uint32_t> idle_yield_headers;
+    // Guarded loop headers observed at scheduler or host yields. Any later
+    // native entry at one of them may probe; the one-iteration probe validates
+    // itself before the runner skips repeated guest iterations.
+    std::unordered_set<uint32_t> idle_analyzed_headers;
     std::vector<uint32_t> idle_probe_headers;  // at most four armed headers
     uint32_t idle_probe_slots[4]{};
     const auto refresh_idle_probe_slots = [&]()
@@ -4330,6 +4332,30 @@ int main(int argc, char** argv)
         std::fill(std::begin(idle_probe_slots), std::end(idle_probe_slots), 0u);
         std::copy(idle_probe_headers.begin(), idle_probe_headers.end(),
                   std::begin(idle_probe_slots));
+    };
+    const auto analyze_idle_loop_header = [&](uint32_t header)
+    {
+        if (!idle_skip || !idle_analyzed_headers.insert(header).second)
+        {
+            return;
+        }
+        const auto shape = idle_loop_shapes.emplace(header, ee::analyze_idle_loop(
+            header,
+            [&](uint32_t pc, uint32_t* word)
+            {
+                if (!image.is_executable_address(pc) ||
+                    !memory->contains(pc, 4u))
+                {
+                    return false;
+                }
+                *word = memory->read32(pc);
+                return true;
+            }, idle_forward_branches)).first;
+        if (shape->second.eligible && idle_probe_headers.size() < 4u)
+        {
+            idle_probe_headers.push_back(header);
+            refresh_idle_probe_slots();
+        }
     };
     uint64_t idle_skip_slices = 0u;
     uint64_t idle_skip_instructions = 0u;
@@ -5802,8 +5828,15 @@ int main(int argc, char** argv)
             // Arm the translated loop-header idle probe with known pure,
             // idempotent poll loops (see ee_idle_loop_skip.h).
             bool idle_armed = false;
+            const bool event_timed_entry =
+                runtime.m_ee_cycle_scheduler.source() ==
+                    ee::e_ee_cycle_source::REFERENCE_COMPATIBILITY;
+            const bool idle_candidate_entry = std::find(
+                idle_probe_headers.begin(), idle_probe_headers.end(), from_pc) !=
+                idle_probe_headers.end();
             if (idle_skip && !hardware.dmac().deferred_vif1_pending() &&
                 !idle_probe_headers.empty() && slice == 1u &&
+                (!event_timed_entry || idle_candidate_entry) &&
                 runtime.m_loop_safepoint_limit > 1u &&
                 runtime.m_loop_safepoint_yield_enabled != 0u &&
                 runtime.m_instruction_trace == nullptr &&
@@ -5819,7 +5852,7 @@ int main(int argc, char** argv)
                 runtime.m_idle_probe_remaining = 0u;
                 idle_armed = true;
             }
-            const uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
+            uint32_t safepoint_budget = runtime.m_loop_safepoint_limit;
 
             // Give translated EE loops a ps2-web-recomp-style bounded
             // compatibility-clock slice, shortened to the next known EE
@@ -5870,6 +5903,28 @@ int main(int argc, char** argv)
                 runtime.m_event_budget_slot_deadline =
                     runtime.m_reference_instruction_slots + slice_cycles;
                 runtime.m_event_budget_yield_enabled = 1u;
+                if (idle_armed && idle_candidate_entry && from_pc == cpu.m_pc)
+                {
+                    const auto shape = idle_loop_shapes.find(from_pc);
+                    uint32_t slots_per_iteration = 0u;
+                    if (shape != idle_loop_shapes.end() &&
+                        idle_iteration_loops(shape->second, slots_per_iteration) &&
+                        slots_per_iteration != 0u)
+                    {
+                        const uint64_t slots_to_deadline =
+                            runtime.m_event_budget_slot_deadline -
+                            runtime.m_reference_instruction_slots;
+                        const uint32_t event_budget = ee::idle_loop_iteration_budget(
+                            slots_to_deadline, slots_per_iteration,
+                            runtime.m_loop_safepoint_limit);
+                        if (event_budget != 0u)
+                        {
+                            // A verified loop can be accelerated only to the
+                            // first header at or after this slice deadline.
+                            safepoint_budget = event_budget;
+                        }
+                    }
+                }
             }
 
             // One translated function invocation per native guest boundary.
@@ -6499,12 +6554,15 @@ int main(int argc, char** argv)
         if (reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_HOST_YIELD))
         {
+            const bool idle_event_fast_forwarded =
+                idle_skip_instructions != idle_before_dispatch &&
+                runtime.m_event_budget_yield_enabled != 0u;
             if (count == 0u || status == 2u ||
-                !loop_yield_budget.try_resume(
+                (!idle_event_fast_forwarded && !loop_yield_budget.try_resume(
                     loop_yield_resumes,
                     hardware.scanout().fields_started(),
                     last_iop_rpc_sequence,
-                    hardware.dmac().gif_trace_count()))
+                    hardware.dmac().gif_trace_count())))
             {
                 break;
             }
@@ -6531,28 +6589,7 @@ int main(int argc, char** argv)
             }
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
-            // A guarded loop header: analyze it once; arm pure poll loops.
-            if (idle_skip && idle_yield_headers.insert(cpu.m_pc).second)
-            {
-                const uint32_t header = cpu.m_pc;
-                const auto shape = idle_loop_shapes.emplace(header, ee::analyze_idle_loop(
-                    header,
-                    [&](uint32_t pc, uint32_t* word)
-                    {
-                        if (!image.is_executable_address(pc) ||
-                            !memory->contains(pc, 4u))
-                        {
-                            return false;
-                        }
-                        *word = memory->read32(pc);
-                        return true;
-                    }, idle_forward_branches)).first;
-                if (shape->second.eligible && idle_probe_headers.size() < 4u)
-                {
-                    idle_probe_headers.push_back(header);
-                    refresh_idle_probe_slots();
-                }
-            }
+            analyze_idle_loop_header(cpu.m_pc);
             continue;
         }
 
@@ -6562,6 +6599,11 @@ int main(int argc, char** argv)
         if (reason == static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_EVENT_YIELD))
         {
+            // Event-bounded loop yields bypass the legacy HOST_YIELD path
+            // that originally discovered poll loops. Analyze this exact
+            // committed loop header so a later slice can safely skip to its
+            // next scheduler deadline.
+            analyze_idle_loop_header(cpu.m_pc);
             cpu.m_exit_reason = static_cast<uint32_t>(
                 ee::e_ee_exit_reason::EE_EXIT_DISPATCH);
             continue;

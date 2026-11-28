@@ -11,9 +11,9 @@
 //
 // The runner uses this analysis to run exactly ONE real iteration natively
 // (all guest state comes from the translated code) and then charges the
-// instruction counters for the remaining budgeted iterations. The HOST_YIELD
-// it reports is identical to a full native slice: same PC, registers, exit
-// reason, dispatch count, and guest instruction/reference-slot totals.
+// instruction counters for repeated iterations up to the host or event
+// budget. At an event boundary the deadline-bounded skip preserves the same
+// loop-header resume PC and compatibility-slot total as native execution.
 
 #include "../architecture/ee_scalar_constant.h"
 
@@ -44,6 +44,21 @@ enum class e_idle_iteration : uint8_t
     exits,
     unsupported
 };
+
+// Limit a verified poll-loop fast-forward to the first loop header at or
+// after an event deadline. The original guest loop checks events at its
+// header, so an iteration may cross the deadline by at most one iteration.
+constexpr uint32_t idle_loop_iteration_budget(uint64_t slots_to_deadline,
+    uint32_t slots_per_iteration, uint32_t maximum)
+{
+    if (slots_to_deadline == 0u || slots_per_iteration == 0u || maximum == 0u)
+    {
+        return 0u;
+    }
+    const uint64_t iterations = slots_to_deadline / slots_per_iteration +
+        (slots_to_deadline % slots_per_iteration != 0u ? 1u : 0u);
+    return static_cast<uint32_t>(iterations < maximum ? iterations : maximum);
+}
 
 namespace idle_loop_detail
 {
