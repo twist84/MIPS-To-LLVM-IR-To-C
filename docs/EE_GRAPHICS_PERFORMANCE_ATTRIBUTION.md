@@ -2151,3 +2151,28 @@ transaction parsing, GS counters, GPU shader, scheduling or guest IR.
 --gs-packed-direct --control --sync --recording requires matching
 raw terminal JSON, PPM, trace, input identity and actual option marker.
 This is a CPU-side cost screen; no speedup claimed before validation.
+
+
+### P4K result — ee-gs-packed-direct-comparison.zip
+
+Strict sync A/A/B passed: 40M dispatches, 2478 PAD polls,
+1935262 matched trace samples, raw JSON and PPM independently identical,
+2541 guest fields, 88 native VU1 programs, 415895434 pairs, zero fallbacks.
+Wall 47.266/47.360/47.719 s. Combat dispatch 24002560..39993344:
+332 fields in 16.5708/16.2303/16.3738 s (20.04/20.46/20.28 fields/s).
+No meaningful gain. Keep packed direct off. SC4 remains unmet.
+
+### P4L — worker isolation, not another arithmetic pilot
+
+Use replay_ee_worker_isolation.py on the unchanged authenticated O5
+runner/DLL and 88-program inventory. Five lean runs: both async,
+VU1 only, GS only, synchronous, both async again. Keep exact recorded
+PAD, dispatch budget, 16/16 raster, original shader and regular GPU
+timestamps. Capture worker fences, execution, copy and backpressure,
+VU1 worker stats, presentation, per-section graphics hashes and a
+fixed sampled combat interval. Verify input hashes, actual worker
+mode, PAD consumption, terminal budget, presentation and native VU1
+coverage; report mismatched workloads and field endpoints explicitly.
+Do not imply architectural equivalence or add overlapping thread times.
+This diagnostic isolates concurrency contributions before attempting
+any further runtime modifications. No C++ or guest IR changes.
