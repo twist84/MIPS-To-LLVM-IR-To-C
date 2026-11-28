@@ -36,19 +36,25 @@ def validate_raster_library(profile, elf):
     return library, library, {"baseline": digest, "dedup": digest}
 
 
-def validate_raster_outputs(directory):
+def validate_raster_outputs(directory, tile8=False):
     """Require actual pipeline selection and identical terminal outputs."""
     arms = ("baseline", "control", "dedup")
     results = {}
     for arm in arms:
         folder = directory / arm
-        expected = "1" if arm == "dedup" else "0"
+        expected = "1" if arm == "dedup" and not tile8 else "0"
         log = (folder / "stderr.log").read_bytes()
         markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
         if not markers or any(value.decode("ascii") != expected for value in markers):
             raise ValueError("missing or inconsistent raster lazy_setup marker: " + arm)
+        if tile8:
+            size = b"8" if arm == "dedup" else b"16"
+            sizes = re.findall(rb"(?m)^\[gpu\] raster workgroup=(\d+)x(\d+) \((\d+)x(\d+) CPU tiles\)\r?$", log)
+            if not sizes or any(entry != (size,) * 4 for entry in sizes):
+                raise ValueError("missing or inconsistent raster tile marker: " + arm)
         results[arm] = {
             "lazy_setup": expected,
+            **({"tile": int(size), "workgroup": int(size)} if tile8 else {}),
             "report_sha256": sha(folder / "report.json"),
             "image_sha256": sha(folder / "gs-webgpu.ppm"),
         }
@@ -310,6 +316,10 @@ def main():
     variant.add_argument("--experiment", type=Path)
     variant.add_argument("--raster-lazy-setup", action="store_true",
                          help="compare 0/1 on the same verified O5 DLL and runner")
+    variant.add_argument("--raster-tile8", action="store_true",
+                         help="compare 16/16 vs 8/8 tiles/workgroups with lazy setup off")
+    parser.add_argument("--recording", type=Path,
+                        help="replay an existing complete PAD0 record for every arm")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
@@ -326,13 +336,14 @@ def main():
     parser.add_argument("--max-dispatches", type=int, default=40000000)
     parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
-    for key in ("runner", "elf", "disc", "profile", "experiment", "output"):
+    for key in ("runner", "elf", "disc", "profile", "experiment", "output", "recording"):
         value = getattr(args, key)
         if value is not None:
             setattr(args, key, value.resolve())
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
-        if args.raster_lazy_setup and (not args.control or not args.sync or prior_dir is not None or
+        raster_mode = args.raster_lazy_setup or args.raster_tile8
+        if raster_mode and (not args.control or not args.sync or prior_dir is not None or
                 args.source_comparison is not None or args.prior_source_comparison is not None or
                 args.reference_sha256):
             raise ValueError("raster comparison requires --control --sync and no other candidate")
@@ -347,7 +358,7 @@ def main():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
-        if args.raster_lazy_setup:
+        if raster_mode:
             baseline, candidate, hashes = validate_raster_library(args.profile, args.elf)
             prior_library = None
         elif args.source_comparison is not None:
@@ -378,19 +389,26 @@ def main():
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
-        if args.raster_lazy_setup:
+        if raster_mode:
             env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
                        SDBZ_PROFILE_PCS="0")
             env.pop("PS2_GPU_PROFILE", None)
+        if args.raster_tile8:
+            env.update(PS2_RASTER_TILE="16", PS2_RASTER_WORKGROUP="16")
         candidate_env = dict(env)
         if args.raster_lazy_setup:
             candidate_env["PS2_RASTER_LAZY_SETUP"] = "1"
+        elif args.raster_tile8:
+            candidate_env.update(PS2_RASTER_TILE="8", PS2_RASTER_WORKGROUP="8")
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
             inputs["source_comparison_sha256"] = sha(args.source_comparison)
         if args.prior_source_comparison is not None:
             inputs["prior_source_comparison_sha256"] = sha(args.prior_source_comparison)
+        if args.recording:
+            inputs["recording_sha256"] = sha(args.recording)
+            external_polls = record_count(args.recording)
         card = env.get("SDBZ_MEMCARD")
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
@@ -399,20 +417,35 @@ def main():
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
-        if args.raster_lazy_setup:
-            receipt["experiment_mode"] = "raster_lazy_setup"
-            receipt["candidate_environment_overrides"] = {"PS2_RASTER_LAZY_SETUP": "1"}
+        if raster_mode:
+            receipt["experiment_mode"] = "raster_tile8" if args.raster_tile8 else "raster_lazy_setup"
+            receipt["candidate_environment_overrides"] = {
+                key: value for key, value in candidate_env.items() if env.get(key) != value}
+        if args.recording:
+            receipt["external_recording"] = str(args.recording)
         if prior_library is not None:
             receipt.update(prior=None, prior_pad_replay=None, prior_trace=None)
         args.output.mkdir(parents=True)
         try:
-            print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
-            receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
-                                          dict(env, SDBZ_PAD0_RECORD="1"))
+            if args.recording:
+                recording = args.recording
+                receipt["recorded_polls"] = external_polls
+                print("Baseline: replaying the existing PAD0 recording.", flush=True)
+                receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
+                                              dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                summary = replay_summary(args.output / "baseline" / "stderr.log")
+                receipt["baseline_pad_replay"] = summary
+                if (not summary or not summary["valid"] or
+                        summary["consumed"] != external_polls or summary["total"] != external_polls):
+                    raise ValueError("baseline did not consume the existing recording")
+            else:
+                print("Baseline: play to the dispatch limit; PAD0 input is recorded.", flush=True)
+                receipt["baseline"] = run_one(args, baseline, args.output / "baseline",
+                                              dict(env, SDBZ_PAD0_RECORD="1"))
+                recording = args.output / "baseline" / "stderr.log"
+                receipt["recorded_polls"] = record_count(recording)
             if receipt["baseline"]["returncode"] != 4 or not terminal_budget(args.output / "baseline", args.max_dispatches):
                 raise ValueError("baseline failed to produce a terminal report")
-            recording = args.output / "baseline" / "stderr.log"
-            receipt["recorded_polls"] = record_count(recording)
             if args.control:
                 print("Control: replaying the recording on the original DLL.", flush=True)
                 receipt["control"] = run_one(args, baseline, args.output / "control",
@@ -473,12 +506,14 @@ def main():
                     receipt["dedup_trace"]["different_common_samples"] or
                     receipt["dedup_trace"]["unpaired_samples"]):
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
-            if args.raster_lazy_setup:
-                receipt["raster_outputs"] = validate_raster_outputs(args.output)
+            if raster_mode:
+                receipt["raster_outputs"] = validate_raster_outputs(args.output, tile8=args.raster_tile8)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
             receipt["runner_unchanged"] = sha(args.runner) == inputs["runner_sha256"]
+            if args.recording:
+                receipt["recording_unchanged"] = sha(args.recording) == inputs["recording_sha256"]
             receipt["libraries_unchanged"] = (
                 sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"] and
                 (prior_library is None or sha(prior_library) == hashes["prior"]))
@@ -496,6 +531,7 @@ def main():
             print("Comparison archive:", archive, flush=True)
         if (receipt["error"] or not receipt["libraries_unchanged"] or not receipt["runner_unchanged"] or
                 not receipt.get("memcard_unchanged", True) or
+                not receipt.get("recording_unchanged", True) or
                 not receipt.get("source_comparison_unchanged", True) or
                 not receipt.get("prior_source_comparison_unchanged", True)):
             print("Replay requires investigation:", receipt["error"], file=sys.stderr)

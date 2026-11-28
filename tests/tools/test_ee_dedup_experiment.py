@@ -165,6 +165,19 @@ def raster_validation():
             else:
                 raise AssertionError("incorrect raster replay accepted: " + name)
             path.write_bytes(original)
+        for arm in ("baseline", "control", "dedup"):
+            size = 8 if arm == "dedup" else 16
+            (root / arm / "stderr.log").write_bytes(
+                f"[gpu] raster lazy_setup=0\n[gpu] raster workgroup={size}x{size} ({size}x{size} CPU tiles)\n".encode())
+        assert validate_raster_outputs(root, tile8=True)["dedup"]["tile"] == 8
+        wrong = root / "dedup" / "stderr.log"
+        wrong.write_bytes(b"[gpu] raster lazy_setup=0\n[gpu] raster workgroup=8x8 (16x16 CPU tiles)\n")
+        try:
+            validate_raster_outputs(root, tile8=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("tile8 accepted wrong CPU tile size")
 
 
 if __name__ == "__main__":

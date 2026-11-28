@@ -1755,3 +1755,42 @@ no PGO instrumentation or ThinLTO claimed: this is hotness-based
 selection of optimization intensity, not edge-profile feedback.
 Full production CI and repeated async combat benchmarks remain
 required for any promotion. No measured speedup yet.
+
+### P5E result — ee-hot-o3-comparison.zip
+
+Build recovery succeeded. helper-plan(9).json: 161 selected modules,
+91 accepted and 70 rejected by the per-module 150% size gate;
+all 16252 functions retained, original O5 controls byte-identical.
+Selected owner candidates represent 77.65% of the original profile's
+exclusive boundary time; this is selection coverage, not proof that
+accepted objects account for that entire percentage. Accepted object
+bytes 1642697 -> 1934826 (+17.78%); executable bytes 1139290 ->
+1458799 (+28.04%). Candidate DLL 112148992 bytes. Host znver2,
+LLVM 22.1.0, x86_64-pc-windows-msvc.
+Receipt baseline and candidate DLL hashes match plan. All three
+arms 40M dispatches, 2541 fields/presentations, 12281599700 guest
+attempts, 415895434 native VU1 pairs, zero interpreter fallbacks.
+Recovered inventory 88 native programs, exceeding previous 84
+count but not proof of inventory superset. 2478 PAD polls, 1935262
+common trace samples, zero differences/unpaired. Independently
+verified byte-identical raw JSON and PPM across arms.
+Wall 50.797/50.579/50.766 s; candidate -0.368% throughput vs A/A
+control, within A/A spread. Matched late dispatch range 24002560
+to 39993344: 332 fields each, 17.839/17.859/17.798 s, 18.61/18.59/
+18.65 fields/s; native elapsed 11.604/11.568/11.527 s (inclusive).
+No measurable speedup. Do not promote O3 overlay. Synchronous
+results are not representative of normal asynchronous play.
+
+### P4D — matched validation of finer raster binning
+
+Earlier P4B GPU profile showed meaningful raster time reduction,
+but independent interactive runs cannot establish pixel equivalence.
+Add same-library --raster-tile8 comparison to existing replay harness:
+16/16 control and 8/8 candidate, lazy setup off, same O5 DLL/runner,
+synchronous, no profiling. Require confirmed tile and workgroup
+markers, matched PAD, trace and exact final report/PPM. Optional
+--recording accepts a complete prior PAD0 recording for every arm,
+validates baseline consumption as well and hashes the input before
+and after. No new C++ changes or cache rebuild. Reuse P5E recording
+for a comparable combat workload. Promotion still requires matched
+image checks and representative normal async performance evidence.
