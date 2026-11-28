@@ -2124,3 +2124,30 @@ waves, and aliased VRAM access order are risks. Strict sync replay
 requires actual dense dispatches, equal total raster dispatch counts,
 matched sampled transitions, exact raw report and final image. No
 speedup or general rendering equivalence claimed before validation.
+
+
+### P4J result — ee-raster-dense-comparison.zip
+
+Strict sync A/A/B passed; 40M dispatches, all 2478 PAD polls,
+1935262 trace samples identical, raw JSON and final PPM independently
+SHA-256 verified identical. 2541 fields/presentations, 88 native VU1
+programs, 415895434 pairs, zero fallback; all input identities
+unchanged. 16833 raster dispatches per arm, candidate 907 dense
+and 15926 standard. Wall 47.468/47.203/47.938 s; dispatch interval
+24002560..39993344: 332 fields in 16.4299/16.5435/16.5128 s.
+No meaningful gain. Keep disabled. Stop raster micro-experiments.
+
+### P4K — direct common packed GIF register writes in the GPU mirror
+
+The P4J workload reports 48175336 packed events, including 17504664
+RGBAQ, 12265725 ST and 17504664 XYZF2 events, and 4353515 GPU draws.
+PS2_GS_PACKED_DIRECT=1 (default 0) bypasses the second register
+switch and intermediate vertex register packing for common PACKED
+RGBAQ, ST, UV, XYZF2/3, XYZ2/3 and FOG. These register writes already
+preserve setup generation; preserve exact Q bits, masks, ADC draw
+suppression, fog, vertex queue, ordering and draw path. All other
+registers continue through the original path. No change to guest GIF
+transaction parsing, GS counters, GPU shader, scheduling or guest IR.
+--gs-packed-direct --control --sync --recording requires matching
+raw terminal JSON, PPM, trace, input identity and actual option marker.
+This is a CPU-side cost screen; no speedup claimed before validation.

@@ -353,6 +353,38 @@ def dense_workgroup_validation():
                 raise AssertionError("unexpected dense raster mode accepted")
 
 
+def gs_packed_direct_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm in ("baseline", "control", "dedup"):
+            folder = root / arm
+            folder.mkdir()
+            enabled = int(arm == "dedup")
+            (folder / "stderr.log").write_text(
+                "[gpu] raster lazy_setup=0\n[gpu] raster early_depth=0\n"
+                "[gpu] raster bilinear_coords=0\n[gpu] raster plot_address_cache=0\n"
+                "[gpu] raster dense_workgroup=0\n"
+                "[gpu] raster workgroup=16x16 (16x16 CPU tiles)\n"
+                f"[gpu] gs packed_direct={enabled}\n")
+            (folder / "report.json").write_bytes(b"{}")
+            (folder / "gs-webgpu.ppm").write_bytes(b"same")
+        result = validate_raster_outputs(root, gs_packed_direct=True)
+        assert result["dedup"]["gs_packed_direct"] == 1
+        path = root / "dedup" / "stderr.log"
+        original = path.read_text()
+        for before, after in (("packed_direct=1", "packed_direct=0"),
+                              ("dense_workgroup=0", "dense_workgroup=1")):
+            path.write_text(original.replace(before, after))
+            try:
+                validate_raster_outputs(root, gs_packed_direct=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("unexpected GS packed mode accepted")
+
+
 def sync_lean_validation():
     import json
     from tempfile import TemporaryDirectory
@@ -417,6 +449,7 @@ if __name__ == "__main__":
     plot_address_cache_validation()
     gpu_regular_timestamps_validation()
     dense_workgroup_validation()
+    gs_packed_direct_validation()
     sync_lean_validation()
     async_workload_validation()
     from tempfile import TemporaryDirectory

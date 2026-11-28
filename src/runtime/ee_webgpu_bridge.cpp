@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 
@@ -86,6 +87,20 @@ bool c_ee_webgpu_bridge::init()
         return true;
     }
 
+    m_packed_direct = false;
+    if (const char* direct = std::getenv("PS2_GS_PACKED_DIRECT"))
+    {
+        if (std::strcmp(direct, "1") == 0)
+        {
+            m_packed_direct = true;
+        }
+        else if (std::strcmp(direct, "0") != 0)
+        {
+            std::fprintf(stderr, "invalid PS2_GS_PACKED_DIRECT (expected 0 or 1)\n");
+            return false;
+        }
+    }
+    std::fprintf(stderr, "[gpu] gs packed_direct=%u\n", m_packed_direct ? 1u : 0u);
     // Native WebGPU compute mode, no window, SDL, JavaScript, or browser.
     m_ready = ps2::gs::gpu::init(ps2::gs::gpu::Mode::primary);
     if (m_ready)
@@ -406,6 +421,51 @@ void c_ee_webgpu_bridge::packed_write(
     const uint32_t b = lane32(low, high, 1u);
     const uint32_t c = lane32(low, high, 2u);
     const uint32_t d = lane32(low, high, 3u);
+    // These packed registers never invalidate the setup cache in
+    // register_write. Bypass the intermediate 64-bit register encoding
+    // and second register dispatch for the common vertex stream.
+    if (m_packed_direct)
+    {
+        switch (reg)
+        {
+        case 0x01u:
+        {
+            uint32_t qbits = 0u;
+            std::memcpy(&qbits, &m_state.q, sizeof(qbits));
+            m_state.rgbaq = (a & 0xffu) |
+                (static_cast<uint64_t>(b & 0xffu) << 8u) |
+                (static_cast<uint64_t>(c & 0xffu) << 16u) |
+                (static_cast<uint64_t>(d & 0xffu) << 24u) |
+                (static_cast<uint64_t>(qbits) << 32u);
+            return;
+        }
+        case 0x02u:
+            m_state.st = low;
+            m_state.q = float_bits(c);
+            return;
+        case 0x03u:
+            m_state.uv = (a & 0x3fffu) |
+                (static_cast<uint64_t>(b & 0x3fffu) << 16u);
+            return;
+        case 0x04u:
+        case 0x0cu:
+            vertex(a & 0xffffu, b & 0xffffu, (c >> 4u) & 0xffffffu,
+                static_cast<uint8_t>((d >> 4u) & 0xffu),
+                reg == 0x04u && ((high >> 47u) & 1u) == 0u);
+            return;
+        case 0x05u:
+        case 0x0du:
+            vertex(a & 0xffffu, b & 0xffffu, c,
+                static_cast<uint8_t>(m_state.fog >> 56u),
+                reg == 0x05u && ((high >> 47u) & 1u) == 0u);
+            return;
+        case 0x0au:
+            m_state.fog = static_cast<uint64_t>((d >> 4u) & 0xffu) << 56u;
+            return;
+        default:
+            break;
+        }
+    }
     switch (reg)
     {
     case 0x00u:
