@@ -1595,3 +1595,42 @@ lowering. Inspect original IR for the dominant native regions,
 then design a bounded hot-module interprocedural or direct-call
 experiment with correctness gates. Entry counts alone are not
 instrumented PGO edge profiles. No speedup claimed.
+
+### P5B/P5C — hot VU0 inline pilot
+
+ee-hot-combat-ir.zip selection receipt matches all 27 IR hashes;
+36 PCs cover 1.7482219 / 4.5012941 s (38.84% exclusive).
+0x108220 has eight LQC2, sixteen full-mask broadcast FMAC
+operations (four each VMULAX/VMADDAY/VMADDAZ/VMADDW), four SQC2,
+JR and delay; 193125 calls imply 3090000 FMAC operations.
+0x1068e0 dot product, 0x106a20 vector transform, 0x106950
+reciprocal-square-root path. The current generated helpers
+already implement exact packed VU arithmetic and synchronization.
+No host float substitutions, callback elision or flag changes.
+
+Local static pilot: LLVM 20.1.8, x86_64-pc-windows-msvc,
+znver2, O2 middle-end/backend, default target feature set,
+not exact LLVM 22.1.0 host target. Object sizes:
+
+| PC | Base | Single-use FMAC inline | All FMAC inline |
+|---|---:|---:|---:|
+| 108220 | 19300 | 19300 | 32219 |
+| 1068e0 | 11827 | 11526 | 11526 |
+| 106a20 | 19245 | 17900 | 17900 |
+| 106950 | 15725 | 14729 | 14729 |
+| 106aa0 | 33753 | 27669 | 32600 |
+
+Forcing sync inline did not change object sizes or static
+instruction counts. Reject blanket FMAC inlining. Single-use
+annotation reduces static instructions/calls/branches in these
+four modules, not proof of wall-time speedup. 108220 unchanged.
+P5C tool stages only four captured modules, authenticates
+production metadata/IR/object/library, requires byte-identical
+control re-emission, retains replacements only when object and
+executable bytes do not grow. Unchanged objects are reused;
+no production IR edits or promotion. The existing matched
+replay harness accepts this plan with an additional baseline
+library identity gate. CI and retail correctness/performance
+pending. Next: if size gate passes, compare isolated DLL with
+deterministic PAD replay, then investigate matrix FMAC arithmetic
+and register residency. SC1 PARTIAL, SC4 FAIL.
