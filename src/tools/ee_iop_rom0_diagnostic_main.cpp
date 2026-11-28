@@ -58,15 +58,26 @@ int main(int argc, char** argv)
     uint32_t budget = default_budget;
     std::filesystem::path iso_path;
     bool iso_requested = false;
+    bool cross_requested = false;
     bool budget_supplied = false;
-    if (argc < 2 || argc > 5)
+    if (argc < 2 || argc > 6)
     {
-        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget] [--iso IMAGE]\n");
+        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget] [--iso IMAGE] [--cross]\n");
         return 1;
     }
     for (int argument = 2; argument < argc; ++argument)
     {
         const std::string_view arg(argv[argument]);
+        if (arg == "--cross")
+        {
+            if (cross_requested)
+            {
+                std::fprintf(stderr, "duplicate --cross argument\n");
+                return 1;
+            }
+            cross_requested = true;
+            continue;
+        }
         if (arg == "--iso")
         {
             if (iso_requested || argument + 1 >= argc)
@@ -127,6 +138,11 @@ int main(int argc, char** argv)
     if (media != nullptr && !pilot.attach_disc(*media))
     {
         std::fprintf(stderr, "failed to attach ISO media to IOP CDVD\n");
+        return 1;
+    }
+    if (cross_requested && !pilot.set_pad0_buttons(0x0040u))
+    {
+        std::fprintf(stderr, "failed to configure Cross input\n");
         return 1;
     }
     std::printf("Dual ROM0 reset: bytes=%zu ee=%08x iop=%08x ratio=8:1 video=PAL budget=%u media=%s\n",
@@ -305,6 +321,8 @@ int main(int argc, char** argv)
     std::printf("Dual ROM0 CDVD: type=%02x bytes=%u last_lba=%u last_sectors=%u\n",
         pilot.cdvd_disc_type(), pilot.cdvd_bytes_transferred(),
         cdvd_request.m_lba, cdvd_request.m_sector_count);
+    std::printf("Dual ROM0 PAD: cross=%u polls=%u\n",
+        cross_requested ? 1u : 0u, pilot.pad0_poll_count());
     std::printf("Dual ROM0 SIF: mscom=%08x smcom=%08x msflag=%08x smflag=%08x sif0_bytes=%llu sif1_bytes=%llu fifo1_words=%u\n",
         pilot.sif_register_value(1u), pilot.sif_register_value(2u), pilot.sif_register_value(3u), pilot.sif_register_value(4u),
         static_cast<unsigned long long>(pilot.sif0_delivered()), static_cast<unsigned long long>(pilot.sif1_delivered()),

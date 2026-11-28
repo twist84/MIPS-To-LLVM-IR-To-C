@@ -198,6 +198,22 @@ public:
         return true;
     }
 
+    bool set_pad0_buttons(uint16_t buttons)
+    {
+        if (m_retired != 0u || m_iop == nullptr)
+        {
+            return false;
+        }
+        m_iop->hardware().set_sio2_pad0_input(
+            buttons, 0x80u, 0x80u, 0x80u, 0x80u);
+        return true;
+    }
+
+    uint32_t pad0_poll_count() const
+    {
+        return m_iop != nullptr ? m_iop->hardware().sio2_pad0_poll_count() : 0u;
+    }
+
     // Explicit independent IOP slice, not an EE-to-IOP clock mapping.
     // Calls are serialized between EE transactions. The next EE step
     // samples resulting interrupt levels before fetching any opcode.
