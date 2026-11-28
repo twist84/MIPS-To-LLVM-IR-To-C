@@ -1682,3 +1682,41 @@ guest IR; not compiler-host inference. Portable exact arithmetic
 remains the reference/fallback. ISA availability must be proven
 before using intrinsics, and CPU features in artifact provenance.
 No vendor-specific instructions forced in this checkpoint.
+
+### P5D result — ee-vector-discard-comparison.zip
+
+Synchronous O5 A/A/B, same V30 inventory directory, 8/8 tile/workgroup,
+40M dispatches each. 2359/2359 PAD polls consumed, 1837171 sampled
+transitions identical with zero missing samples. Raw terminal JSON
+and PPM byte-identical across all three arms (report SHA-256
+6bca8abc8587740e1ed136aa354b7e285665c99ea5ae5457466bb6b916b10086,
+image 08eab311b1a620f325d9b72d2713c720f342273286b6cea7be15714840902d7a).
+2422 fields and presentations, 441964423 VU1 native pairs,
+zero fallback. Wall 51.281/51.359/51.407 s. Candidate -0.093%
+throughput vs A/A control, less than A/A spread. Correctness
+accepted for this workload only; do not promote for performance.
+No controlled async speed result. CI at 05726db: four workflows
+passed, Build and test pending at inspection.
+
+### P4C — reject out-of-bounds pixels before loading GS setup
+
+Raster loop currently reads the primitive setup ID and loads the
+26-word immutable setup record, including three format calculations,
+before the per-pixel bounding-box rejection. Move the rejection
+ahead of setup loads via opt-in pipeline override RASTER_LAZY_SETUP
+(81d3033). No CPU binning changes, same list traversal and shade
+order, no VRAM/flag changes intended; last_setup always describes
+actually loaded state. Setup loading reads immutable data only;
+rejected primitives perform no shading. This may save repeated loads
+and computations, but divergent lanes or compiler scheduling could
+offset gains. Default 0 preserves baseline path; 1 enables candidate.
+PS2_RASTER_LAZY_SETUP recorded in boot provenance and stderr.
+New native WebGPU 8/8 lazy-setup smoke variant. Matched runner
+replay --raster-lazy-setup uses the same authenticated O5
+library and runner for baseline, A/A and B, forces sync and disables
+runtime/PC/GPU profiling, requires confirmed per-arm pipeline markers,
+PAD consumption, sampled trace agreement, exact final report and PPM
+hashes; no production cache writes. User must rebuild runner only.
+F5/F6/F7/F8 toggles should not be used during this correctness
+comparison. This is a bounded GPU speed hypothesis, not an achieved
+speedup. SC4 remains unmet; SC1 and SC10 partial.

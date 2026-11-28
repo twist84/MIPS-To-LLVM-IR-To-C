@@ -140,7 +140,35 @@ def staging():
         assert not (root / "stale").exists()
 
 
+def raster_validation():
+    from tempfile import TemporaryDirectory
+    from replay_ee_dedup_experiment import validate_raster_outputs
+    with TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for arm, value in (("baseline", "0"), ("control", "0"), ("dedup", "1")):
+            folder = root / arm
+            folder.mkdir()
+            (folder / "stderr.log").write_bytes(("[gpu] raster lazy_setup=" + value + "\r\n").encode())
+            (folder / "report.json").write_bytes(b'{}')
+            (folder / "gs-webgpu.ppm").write_bytes(b'image')
+        assert validate_raster_outputs(root)["dedup"]["lazy_setup"] == "1"
+        for name, wrong in (("stderr.log", b"[gpu] raster lazy_setup=0\n"),
+                            ("report.json", b'{"different":true}'),
+                            ("gs-webgpu.ppm", b'changed')):
+            path = root / "dedup" / name
+            original = path.read_bytes()
+            path.write_bytes(wrong)
+            try:
+                validate_raster_outputs(root)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("incorrect raster replay accepted: " + name)
+            path.write_bytes(original)
+
+
 if __name__ == "__main__":
     run()
     staging()
+    raster_validation()
     print("PASS: isolated EE dedup route selection and exact dispatch inventory")

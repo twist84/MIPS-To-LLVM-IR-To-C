@@ -21,6 +21,43 @@ def read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def validate_raster_library(profile, elf):
+    name = ("game-translated.dll" if os.name == "nt" else
+            "libgame-translated.dylib" if sys.platform == "darwin" else
+            "libgame-translated.so")
+    library = profile / name
+    translation = read_json(profile / "translation-cache.json")
+    inputs = translation.get("inputs", {})
+    digest = sha(library)
+    if (inputs.get("ELF") != sha(elf) or
+            inputs.get("native_alu_certificate_mode") != hashlib.sha256(b"0").hexdigest() or
+            translation.get("emit_opt") != 5 or translation.get("library_sha256") != digest):
+        raise ValueError("raster comparison requires authenticated production O5 library")
+    return library, library, {"baseline": digest, "dedup": digest}
+
+
+def validate_raster_outputs(directory):
+    """Require actual pipeline selection and identical terminal outputs."""
+    arms = ("baseline", "control", "dedup")
+    results = {}
+    for arm in arms:
+        folder = directory / arm
+        expected = "1" if arm == "dedup" else "0"
+        log = (folder / "stderr.log").read_bytes()
+        markers = re.findall(rb"(?m)^\[gpu\] raster lazy_setup=([01])\r?$", log)
+        if not markers or any(value.decode("ascii") != expected for value in markers):
+            raise ValueError("missing or inconsistent raster lazy_setup marker: " + arm)
+        results[arm] = {
+            "lazy_setup": expected,
+            "report_sha256": sha(folder / "report.json"),
+            "image_sha256": sha(folder / "gs-webgpu.ppm"),
+        }
+    if any(results[arm][key] != results["baseline"][key]
+           for arm in arms for key in ("report_sha256", "image_sha256")):
+        raise ValueError("raster replay terminal report or image differs")
+    return results
+
+
 def validate_libraries(profile, experiment, elf):
     name = ("game-translated.dll" if os.name == "nt" else
             "libgame-translated.dylib" if sys.platform == "darwin" else
@@ -269,7 +306,10 @@ def main():
     parser.add_argument("--elf", type=Path, required=True)
     parser.add_argument("--disc", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--experiment", type=Path, required=True)
+    variant = parser.add_mutually_exclusive_group(required=True)
+    variant.add_argument("--experiment", type=Path)
+    variant.add_argument("--raster-lazy-setup", action="store_true",
+                         help="compare 0/1 on the same verified O5 DLL and runner")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--prior-experiment", type=Path,
                         help="also replay the verified immediate helper-experiment parent")
@@ -287,21 +327,30 @@ def main():
     parser.add_argument("--timeout-seconds", type=int, default=600)
     args = parser.parse_args()
     for key in ("runner", "elf", "disc", "profile", "experiment", "output"):
-        setattr(args, key, getattr(args, key).resolve())
+        value = getattr(args, key)
+        if value is not None:
+            setattr(args, key, value.resolve())
     try:
         prior_dir = args.prior_experiment.resolve() if args.prior_experiment else None
+        if args.raster_lazy_setup and (not args.control or not args.sync or prior_dir is not None or
+                args.source_comparison is not None or args.prior_source_comparison is not None or
+                args.reference_sha256):
+            raise ValueError("raster comparison requires --control --sync and no other candidate")
         if prior_dir is not None and (not args.control or not args.sync):
             raise ValueError("prior experiment comparison requires --control --sync")
         if (args.output.exists() or args.output.with_suffix(".zip").exists() or
                 any(args.output.is_relative_to(path) for path in
-                    (args.profile, args.experiment, args.disc)) or
+                    (args.profile, args.experiment, args.disc) if path is not None) or
                 (prior_dir is not None and args.output.is_relative_to(prior_dir))):
             raise ValueError("use a fresh output directory outside the cache and disc")
         if not args.runner.is_file() or not args.elf.is_file() or not args.disc.is_dir():
             raise ValueError("runner, ELF or disc path missing")
         if not 1 <= args.max_dispatches <= 0xffffffff or args.timeout_seconds < 1:
             raise ValueError("invalid dispatch or timeout budget")
-        if args.source_comparison is not None:
+        if args.raster_lazy_setup:
+            baseline, candidate, hashes = validate_raster_library(args.profile, args.elf)
+            prior_library = None
+        elif args.source_comparison is not None:
             if prior_dir is None or not args.reference_sha256:
                 raise ValueError("source comparison requires a pinned accepted reference and --control --sync")
             baseline, candidate, hashes = validate_source_libraries(
@@ -329,6 +378,13 @@ def main():
         env = replay_environment(Path(__file__).resolve().parents[1])
         if args.sync:
             env.update(SDBZ_VU1_ASYNC="0", SDBZ_GS_ASYNC="0")
+        if args.raster_lazy_setup:
+            env.update(PS2_RASTER_LAZY_SETUP="0", SDBZ_RUNTIME_PROFILE="0",
+                       SDBZ_PROFILE_PCS="0")
+            env.pop("PS2_GPU_PROFILE", None)
+        candidate_env = dict(env)
+        if args.raster_lazy_setup:
+            candidate_env["PS2_RASTER_LAZY_SETUP"] = "1"
         inputs = {"runner_sha256": sha(args.runner), "elf_sha256": sha(args.elf),
                   "library_sha256": hashes}
         if args.source_comparison is not None:
@@ -339,10 +395,13 @@ def main():
         if card:
             inputs["memcard_sha256"] = sha(Path(card))
         receipt = {"inputs": inputs, "environment": {
-            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP")},
+            k: v for k, v in sorted(env.items()) if k.startswith(("SDBZ_", "EE_WEBGPU_")) or k in ("PS2_SCALE", "PS2_RASTER_TILE", "PS2_RASTER_WORKGROUP", "PS2_RASTER_LAZY_SETUP")},
             "baseline": None, "control": None, "dedup": None, "pad_replay": None,
             "control_pad_replay": None, "control_trace": None, "dedup_trace": None,
             "error": None, "libraries_unchanged": False}
+        if args.raster_lazy_setup:
+            receipt["experiment_mode"] = "raster_lazy_setup"
+            receipt["candidate_environment_overrides"] = {"PS2_RASTER_LAZY_SETUP": "1"}
         if prior_library is not None:
             receipt.update(prior=None, prior_pad_replay=None, prior_trace=None)
         args.output.mkdir(parents=True)
@@ -376,7 +435,7 @@ def main():
                     args.output / "prior", args.max_dispatches)
             print("Candidate: replaying the recorded PAD0 polls.", flush=True)
             receipt["dedup"] = run_one(args, candidate, args.output / "dedup",
-                                       dict(env, SDBZ_PAD0_REPLAY=str(recording)))
+                                       dict(candidate_env, SDBZ_PAD0_REPLAY=str(recording)))
             receipt["pad_replay"] = replay_summary(args.output / "dedup" / "stderr.log")
             receipt["dedup_trace"] = trace_comparison(
                 args.output / "baseline" / "stdout.log", args.output / "dedup" / "stdout.log")
@@ -414,9 +473,12 @@ def main():
                     receipt["dedup_trace"]["different_common_samples"] or
                     receipt["dedup_trace"]["unpaired_samples"]):
                 raise ValueError("sampled dispatch transitions differ; not a matched comparison")
+            if args.raster_lazy_setup:
+                receipt["raster_outputs"] = validate_raster_outputs(args.output)
         except (OSError, ValueError) as error:
             receipt["error"] = str(error)
         finally:
+            receipt["runner_unchanged"] = sha(args.runner) == inputs["runner_sha256"]
             receipt["libraries_unchanged"] = (
                 sha(baseline) == hashes["baseline"] and sha(candidate) == hashes["dedup"] and
                 (prior_library is None or sha(prior_library) == hashes["prior"]))
@@ -432,7 +494,7 @@ def main():
                 json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
             archive = shutil.make_archive(str(args.output), "zip", args.output)
             print("Comparison archive:", archive, flush=True)
-        if (receipt["error"] or not receipt["libraries_unchanged"] or
+        if (receipt["error"] or not receipt["libraries_unchanged"] or not receipt["runner_unchanged"] or
                 not receipt.get("memcard_unchanged", True) or
                 not receipt.get("source_comparison_unchanged", True) or
                 not receipt.get("prior_source_comparison_unchanged", True)):
