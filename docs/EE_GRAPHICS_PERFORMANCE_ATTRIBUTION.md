@@ -1452,3 +1452,43 @@ hot-PC attribution. No final performance acceptance.
 |---|---|---|---|
 | d768a2ac | 8x8 raster workgroups | Comparable raster mean -1.01%, no gameplay improvement | Retain opt-in only |
 | P3A | Select and fingerprint existing VU1 inventory | Pending matched measurement | Validate V20 vs V30 |
+
+### P3A result — 20261128-071148244 / 071322464
+
+Both at 2ad71292 with clean tree, O5, native target, 84 libraries,
+distinct inventory fingerprints (V20 72ad01e1..., V30 9a2f81a3...),
+16x16 tiles/workgroups and async workers. 40M dispatches each;
+manual input, F7 enabled during expensive combat in both runs.
+No VU1 interpreter fallback or worker failure. V20/V30 compiled
+exclusive 13.1246562/11.457634 s over 451915502/450664905 collected
+pairs, 29.0423/25.4238 ns/pair (-12.46%, +14.23% throughput).
+0x730 (same code hash) 35.8989 -> 31.1032 ns/pair; 0x620
+28.5937 -> 25.0566; 0x420 18.6744 -> 16.5189; 0x130
+15.8108 -> 15.6338; 0x5a0 30.2573 -> 25.8354.
+EE overlap 4.437 -> 3.782 s. Runner wall 41.8893 -> 41.3662 s,
+fields 2397 -> 2332; 57.2223 -> 56.3746 whole-run fields/s.
+Seven full capture intervals (indices 13 through 19) average
+24.3857 -> 24.6648 fields/s (+1.14%). No demonstrated gameplay
+speedup. GPU rows 35644/35141, submissions 396/407, no failed maps
+or pressure waits. Mean compute 10.3654 -> 9.8304 ms; workload
+differs. EE native boundary remains ~614.5/614.9 ms per 2s interval.
+Use V30 as experimental control (not an unconditional default).
+SC4 FAIL, SC1/SC10 PARTIAL. Deterministic visual validation and
+uninstrumented combat acceptance remain outstanding.
+
+### P4B — finer raster primitive lists
+
+P4A only subdivided workgroups; every subtile still traversed the
+16x16 primitive list. Add independent PS2_RASTER_TILE=8 alongside
+PS2_RASTER_WORKGROUP=8. Binning and triangle span clipping use the
+selected tile size, as do tile grid allocation, shader origin and
+dispatch mapping. Existing clipping margin and ordered primitive
+insertion are retained. Default 16x16 and prior 16/8 mode preserved.
+Finer lists should reduce redundant per-pixel traversal for small
+triangles, but increase CPU binning and list memory traffic. No
+speedup asserted. Native WebGPU smoke runs a second time with
+8x8 tiles/workgroups, using the same correctness checks; CI pending.
+Compare V30 at 16/16 vs 8/8, with detailed GPU capture in both arms.
+Compare tile entries times tile area (upper-bound pixel iterations),
+raster time, CPU batch scope, and combat rate; require deterministic
+VRAM/visual equivalence before promotion. No new EE/VU1 lowering.

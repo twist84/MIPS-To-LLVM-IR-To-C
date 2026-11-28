@@ -109,8 +109,9 @@ std::uint32_t g_field = 0, g_last_width = 0, g_last_height = 0;
 bool g_have_previous = false;
 std::uint64_t g_last_guest_field = 0u;
 bool g_last_interlaced = false, g_last_halved = false;
-// CPU binning stays at 16x16; the experimental raster pipeline can
-// distribute each existing tile across four 8x8 workgroups.
+// CPU tiles and GPU workgroups are independently selectable; a tile
+// must contain an integral number of workgroups along either axis.
+std::uint32_t g_raster_tile = 16u;
 std::uint32_t g_raster_workgroup = 16u;
 std::uint32_t g_scale = 1, g_copy_words = 1u << 20, g_field_words = 1u << 19;
 
@@ -497,8 +498,9 @@ std::vector<std::uint32_t> g_span_start;
 
 void add_spans(const std::uint32_t *rec, std::uint32_t lo, std::uint32_t hi) {
     const int sc = static_cast<int>(g_scale);
-    const int tx0 = static_cast<int>(lo & 0xFFFFu) * sc / 16, ty0 = static_cast<int>(lo >> 16) * sc / 16;
-    const int tx1 = (static_cast<int>(hi & 0xFFFFu) * sc + sc - 1) / 16, ty1 = (static_cast<int>(hi >> 16) * sc + sc - 1) / 16;
+    const int tile = static_cast<int>(g_raster_tile);
+    const int tx0 = static_cast<int>(lo & 0xFFFFu) * sc / tile, ty0 = static_cast<int>(lo >> 16) * sc / tile;
+    const int tx1 = (static_cast<int>(hi & 0xFFFFu) * sc + sc - 1) / tile, ty1 = (static_cast<int>(hi >> 16) * sc + sc - 1) / tile;
     const auto whole = [&] {
         for (int ty = ty0; ty <= ty1; ++ty) g_spans.push_back({static_cast<std::int16_t>(ty), static_cast<std::int16_t>(tx0), static_cast<std::int16_t>(tx1)});
     };
@@ -522,7 +524,7 @@ void add_spans(const std::uint32_t *rec, std::uint32_t lo, std::uint32_t hi) {
         m[e] = kind[e] ? -cb / ca : cb;
         q[e] = kind[e] ? -cc / ca : cc;
     }
-    const double span = 16.0 / static_cast<double>(sc);
+    const double span = static_cast<double>(tile) / static_cast<double>(sc);
     for (int ty = ty0; ty <= ty1; ++ty) {
         const double y0 = ty * span - 1.0, y1 = (ty + 1) * span + 1.0;
         double left = -1e30, right = 1e30;
@@ -785,7 +787,7 @@ void flush_batch() {
     const std::uint32_t snapshot = snapshot_batch(prims, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run);
     const std::uint32_t param = push_params({tile_offset, prim_offset, setup_offset, tiles, list_offset, snapshot_lo, snapshot_hi, snapshot_stride, snapshot_run});
     note_raster(prims, tiles, total, snapshot);
-    const std::uint32_t subtiles = 16u / g_raster_workgroup;
+    const std::uint32_t subtiles = g_raster_tile / g_raster_workgroup;
     const std::uint32_t groups = tiles * subtiles * subtiles;
     g_commands.push_back({kRaster, std::min(groups, 1024u), (groups + 1023u) / 1024u, param});
     mark_rendered(pages(b.fbp, b.fbw, b.fpsm, b.minx, b.miny, b.maxx, b.maxy));
@@ -1032,13 +1034,15 @@ bool make_scaled_pipelines(std::uint32_t scale, WGPUComputePipeline *pipelines)
         cd.layout = g_pipeline_layout;
         cd.compute.module = module;
         cd.compute.entryPoint = view(kEntryPoints[i]);
-        WGPUConstantEntry constants[2] = {
-            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
+        WGPUConstantEntry constants[3] = {
+            WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT, WGPU_CONSTANT_ENTRY_INIT};
         constants[0].key = view("SCALE");
         constants[0].value = static_cast<double>(scale);
         constants[1].key = view("RASTER_WORKGROUP");
         constants[1].value = static_cast<double>(g_raster_workgroup);
-        cd.compute.constantCount = i == kRaster ? 2u : 1u;
+        constants[2].key = view("RASTER_TILE");
+        constants[2].value = static_cast<double>(g_raster_tile);
+        cd.compute.constantCount = i == kRaster ? 3u : 1u;
         cd.compute.constants = constants;
         pipelines[i] = wgpuDeviceCreateComputePipeline(g_device, &cd);
         if (!pipelines[i])
@@ -1706,13 +1710,32 @@ bool init(Mode m) {
             return false;
         }
     }
-    std::fprintf(stderr, "[gpu] raster workgroup=%ux%u (16x16 CPU tiles)\n",
-        g_raster_workgroup, g_raster_workgroup);
+    g_raster_tile = 16u;
+    if (const char* size = std::getenv("PS2_RASTER_TILE"))
+    {
+        if (std::strcmp(size, "8") == 0)
+        {
+            g_raster_tile = 8u;
+        }
+        else if (std::strcmp(size, "16") != 0)
+        {
+            std::fprintf(stderr, "[gpu] invalid PS2_RASTER_TILE (expected 8 or 16)\n");
+            return false;
+        }
+    }
+    if (g_raster_tile < g_raster_workgroup)
+    {
+        std::fprintf(stderr, "[gpu] raster tile must not be smaller than its workgroup\n");
+        return false;
+    }
+    std::fprintf(stderr, "[gpu] raster workgroup=%ux%u (%ux%u CPU tiles)\n",
+        g_raster_workgroup, g_raster_workgroup, g_raster_tile, g_raster_tile);
     g_scale = 1u;
     if (const char *scale = std::getenv("PS2_SCALE")) g_scale = static_cast<std::uint32_t>(std::clamp(std::atoi(scale), 1, 4));
     while (g_scale > 1 && (8ull << 20) * g_scale * g_scale > std::min(supported.maxBufferSize, supported.maxStorageBufferBindingSize)) --g_scale;
     g_copy_words = (1u << 20) * g_scale * g_scale;
-    g_tiles_per_row = (2048 * static_cast<int>(g_scale) + 15) / 16;
+    g_tiles_per_row = (2048 * static_cast<int>(g_scale) + static_cast<int>(g_raster_tile) - 1) /
+        static_cast<int>(g_raster_tile);
     g_tile_count.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_tile_fill.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_field_words = (1u << 19) * g_scale * g_scale;
@@ -2686,7 +2709,8 @@ bool change_render_scale(std::uint32_t scale)
     g_scale = scale;
     g_copy_words = (1u << 20) * scale * scale;
     g_field_words = (1u << 19) * scale * scale;
-    g_tiles_per_row = (2048 * static_cast<int>(scale) + 15) / 16;
+    g_tiles_per_row = (2048 * static_cast<int>(scale) + static_cast<int>(g_raster_tile) - 1) /
+        static_cast<int>(g_raster_tile);
     g_tile_count.assign(static_cast<std::size_t>(g_tiles_per_row) * g_tiles_per_row, 0);
     g_tile_fill.assign(g_tile_count.size(), 0);
     g_touched.clear();
