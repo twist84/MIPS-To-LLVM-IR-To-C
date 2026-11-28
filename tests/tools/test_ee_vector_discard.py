@@ -70,6 +70,11 @@ entry:
   store <4 x i64> %result, ptr %out, align 8
   ret void
 }}
+
+define i64 @scalar_correct_probe(i32 %ma, i32 %mb, i64 %full) {{
+  %result = call i64 @ee_cop1_mul_correct(i32 %ma, i32 %mb, i64 %full)
+  ret i64 %result
+}}
 """
 
 
@@ -94,7 +99,7 @@ def compile_probe(text, opt):
     function = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p,
                                 ctypes.c_void_p, ctypes.c_uint32)(address)
     correction_address = engine.get_function_address("correct4_probe")
-    scalar_correction_address = engine.get_function_address("ee_cop1_mul_correct")
+    scalar_correction_address = engine.get_function_address("scalar_correct_probe")
     assert correction_address and scalar_correction_address
     correction = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * 5))(correction_address)
     scalar_signature = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint32,
