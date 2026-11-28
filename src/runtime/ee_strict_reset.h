@@ -925,6 +925,43 @@ inline constexpr uint32_t cop1_control_value(uint32_t value)
 static_assert(cop1_control_value(0u) == 0x01000001u);
 static_assert(cop1_control_value(0xffffffffu) == 0x0183c079u);
 
+// Mirror ee_cop1_mul_correct: the truncated Booth tree can lose bit 15.
+inline constexpr uint64_t cop1_multiply_significands(uint32_t lhs, uint32_t rhs)
+{
+    const uint64_t product = uint64_t{lhs} * rhs;
+    if ((product & 0x007fffffu) >= 0x8000u)
+    {
+        return product;
+    }
+    struct s_row { uint32_t m_sum; uint32_t m_carry; };
+    s_row rows[8]{};
+    for (uint32_t i = 0u; i < 8u; ++i)
+    {
+        const uint32_t shift = i * 2u;
+        const uint32_t code = ((rhs << 1u) >> shift) & 7u;
+        if (code != 0u && code != 7u)
+        {
+            const uint32_t position = 1u << shift;
+            const uint32_t word = lhs << (shift + (code == 3u || code == 4u ? 1u : 0u));
+            rows[i] = code >= 4u ? s_row{word ^ (0u - position), position} : s_row{word, 0u};
+        }
+    }
+    const auto compress = [](uint32_t a, uint32_t b, uint32_t c)
+    {
+        const uint32_t parity = a ^ b;
+        return s_row{parity ^ c, ((a & b) | (parity & c)) << 1u};
+    };
+    const auto first = compress(rows[1].m_sum, rows[2].m_sum, rows[3].m_sum);
+    const auto second = compress(rows[4].m_sum & ~0x7ffu, rows[5].m_sum & ~0xfffu, rows[6].m_sum);
+    const auto third = compress(rows[0].m_sum, first.m_sum, first.m_carry);
+    const auto fourth = compress(rows[7].m_sum | ((rows[5].m_sum & 0x400u) + rows[5].m_carry),
+        second.m_sum, second.m_carry | rows[6].m_carry | (rows[5].m_sum & 0x800u));
+    const auto fifth = compress(third.m_carry, fourth.m_sum, fourth.m_carry);
+    const auto last = compress(third.m_sum, fifth.m_sum, fifth.m_carry);
+    const uint32_t low = (last.m_sum & ~0x7fffu) + ((last.m_carry + rows[7].m_carry) & ~0x7fffu);
+    return product - ((low ^ static_cast<uint32_t>(product)) & 0x8000u);
+}
+
 inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode,
     c_ee_tlb* persistent_tlb)
 {
@@ -1248,6 +1285,46 @@ inline constexpr bool execute_register_word(s_ee_cpu_state& cpu, uint32_t opcode
             return true;
         }
         const bool accumulator = fd == 0u && (function == 0x18u || function == 0x19u);
+        if (rs == 0x10u && (function == 2u || (function == 0x1au && fd == 0u))) // MUL.S / MULA.S
+        {
+            const uint32_t lhs = cpu.m_fpr[fs];
+            const uint32_t rhs = cpu.m_fpr[rt];
+            const int lhs_exp = (lhs >> 23u) & 255u;
+            const int rhs_exp = (rhs >> 23u) & 255u;
+            uint32_t result = (lhs ^ rhs) & 0x80000000u;
+            bool overflow = false;
+            bool underflow = false;
+            if (lhs_exp != 0 && rhs_exp != 0)
+            {
+                const uint32_t significand = static_cast<uint32_t>(cop1_multiply_significands(
+                    (lhs & 0x007fffffu) | 0x00800000u, (rhs & 0x007fffffu) | 0x00800000u) >> 23u);
+                const int shift = significand >= 0x01000000u ? 1 : 0;
+                const int exponent = lhs_exp + rhs_exp - 127 + shift;
+                overflow = exponent > 255;
+                underflow = exponent < 1;
+                if (overflow)
+                {
+                    result |= 0x7fffffffu;
+                }
+                else if (!underflow)
+                {
+                    result |= (static_cast<uint32_t>(exponent) << 23u) |
+                        ((significand >> shift) & 0x007fffffu);
+                }
+            }
+            if (function == 0x1au)
+            {
+                cpu.m_fpu_acc = result;
+                cpu.m_fpu_acc_overflow = overflow;
+            }
+            else
+            {
+                cpu.m_fpr[fd] = result;
+            }
+            cpu.m_fcsr = (cpu.m_fcsr & ~0xc000u) | (overflow ? 0x8010u : 0u) |
+                (underflow ? 0x4008u : 0u);
+            return true;
+        }
         if (rs == 0x10u && (function <= 1u || accumulator)) // ADD/SUB/ADDA/SUBA.S
         {
             // Mirror ee_cop1_add_bits: keep one guard bit, truncate, and
