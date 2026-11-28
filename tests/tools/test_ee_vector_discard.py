@@ -56,6 +56,20 @@ done:
   store <4 x i32> %ui, ptr %p2, align 4
   ret void
 }}
+
+define void @correct4_probe(ptr %ma_ptr, ptr %mb_ptr, ptr %full_ptr,
+                            ptr %needs_ptr, ptr %out) {{
+entry:
+  %ma = load <4 x i32>, ptr %ma_ptr, align 4
+  %mb = load <4 x i32>, ptr %mb_ptr, align 4
+  %full = load <4 x i64>, ptr %full_ptr, align 8
+  %needs_bits = load <4 x i32>, ptr %needs_ptr, align 4
+  %needs = icmp ne <4 x i32> %needs_bits, zeroinitializer
+  %result = call <4 x i64> @vu_mul_correct4(<4 x i32> %ma,
+      <4 x i32> %mb, <4 x i64> %full, <4 x i1> %needs)
+  store <4 x i64> %result, ptr %out, align 8
+  ret void
+}}
 """
 
 
@@ -79,7 +93,14 @@ def compile_probe(text, opt):
     assert address
     function = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p,
                                 ctypes.c_void_p, ctypes.c_uint32)(address)
-    return engine, function
+    correction_address = engine.get_function_address("correct4_probe")
+    scalar_correction_address = engine.get_function_address("ee_cop1_mul_correct")
+    assert correction_address and scalar_correction_address
+    correction = ctypes.CFUNCTYPE(None, *([ctypes.c_void_p] * 5))(correction_address)
+    scalar_signature = ctypes.CFUNCTYPE(ctypes.c_uint64, ctypes.c_uint32,
+                                        ctypes.c_uint32, ctypes.c_uint64)
+    scalar_correction = scalar_signature(scalar_correction_address)
+    return engine, function, correction, scalar_correction
 
 
 def run():
@@ -100,8 +121,8 @@ def run():
     x, y, a, b = lanes(), lanes(), results(), results()
     count = 0
     for opt in (0, 3):
-        baseline_engine, baseline = compile_probe(raw, opt)
-        candidate_engine, trial = compile_probe(candidate.decode("utf-8"), opt)
+        baseline_engine, baseline, baseline_correct4, baseline_scalar_correct = compile_probe(raw, opt)
+        candidate_engine, trial, candidate_correct4, candidate_scalar_correct = compile_probe(candidate.decode("utf-8"), opt)
         for i in range(25000):
             for lane in range(4):
                 lhs, rhs = rng.getrandbits(32), rng.getrandbits(32)
@@ -122,6 +143,28 @@ def run():
                 baseline(x, y, a, kind)
                 trial(x, y, b, kind)
                 assert list(a) == list(b), (opt, i, kind, list(x), list(y), list(a), list(b))
+                count += 4
+        for correction4, scalar_correction in (
+                (baseline_correct4, baseline_scalar_correct),
+                (candidate_correct4, candidate_scalar_correct)):
+            ma = (ctypes.c_uint32 * 4)()
+            mb = (ctypes.c_uint32 * 4)()
+            full = (ctypes.c_uint64 * 4)()
+            needs = (ctypes.c_uint32 * 4)()
+            corrected = (ctypes.c_uint64 * 4)()
+            for i in range(4096):
+                for lane in range(4):
+                    ma[lane] = (1 << 23) | rng.getrandbits(23)
+                    mb[lane] = (1 << 23) | rng.getrandbits(23)
+                    full[lane] = ma[lane] * mb[lane]
+                    needs[lane] = (i >> lane) & 1
+                correction4(ma, mb, full, needs, corrected)
+                for lane in range(4):
+                    expected = scalar_correction(ma[lane], mb[lane], full[lane]) \
+                        if needs[lane] else full[lane]
+                    assert corrected[lane] == expected, (
+                        opt, i, lane, ma[lane], mb[lane], full[lane],
+                        needs[lane], corrected[lane], expected)
                 count += 4
         baseline_engine.close()
         candidate_engine.close()
