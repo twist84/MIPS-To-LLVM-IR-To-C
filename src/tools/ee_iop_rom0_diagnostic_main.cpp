@@ -1,5 +1,6 @@
 #include "ee_strict_firmware_pilot.h"
 #include "ee_decoder.h"
+#include "ee_gs_display.h"
 #include "../iop/iop_cdvd.h"
 
 #include <array>
@@ -50,6 +51,39 @@ uint32_t read_iop_ram_word(std::span<const uint8_t> ram, uint32_t offset)
         (static_cast<uint32_t>(ram[offset + 2u]) << 16u) |
         (static_cast<uint32_t>(ram[offset + 3u]) << 24u);
 }
+
+bool write_gs_ppm(
+    const std::filesystem::path& path,
+    const std::vector<uint32_t>& pixels,
+    uint32_t width,
+    uint32_t height)
+{
+    if (width == 0u || height == 0u ||
+        static_cast<uint64_t>(width) * height != pixels.size())
+    {
+        return false;
+    }
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    if (!output || !(output << "P6\n" << width << ' ' << height << "\n255\n"))
+    {
+        return false;
+    }
+    for (const uint32_t color : pixels)
+    {
+        const char rgb[3]
+        {
+            static_cast<char>(color),
+            static_cast<char>(color >> 8u),
+            static_cast<char>(color >> 16u)
+        };
+        output.write(rgb, sizeof(rgb));
+        if (!output)
+        {
+            return false;
+        }
+    }
+    return output.good();
+}
 } // namespace
 
 int main(int argc, char** argv)
@@ -57,12 +91,15 @@ int main(int argc, char** argv)
     constexpr uint32_t default_budget = 2000000u;
     uint32_t budget = default_budget;
     std::filesystem::path iso_path;
+    std::filesystem::path gs_dump_directory;
+    uint32_t gs_dump_interval = 0u;
+    bool gs_dump_requested = false;
     bool iso_requested = false;
     bool cross_requested = false;
     bool budget_supplied = false;
-    if (argc < 2 || argc > 6)
+    if (argc < 2 || argc > 9)
     {
-        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget] [--iso IMAGE] [--cross]\n");
+        std::fprintf(stderr, "usage: ee_iop_rom0_diagnostic ROM0 [EE-slot-budget] [--iso IMAGE] [--cross] [--gs-dump DIR EVERY_FIELDS]\n");
         return 1;
     }
     for (int argument = 2; argument < argc; ++argument)
@@ -87,6 +124,30 @@ int main(int argc, char** argv)
             }
             iso_path = argv[++argument];
             iso_requested = true;
+            continue;
+        }
+        if (arg == "--gs-dump")
+        {
+            if (gs_dump_requested || argument + 2 >= argc)
+            {
+                std::fprintf(stderr, "invalid --gs-dump arguments\n");
+                return 1;
+            }
+            const auto parsed = std::from_chars(
+                argv[argument + 2],
+                argv[argument + 2] + std::char_traits<char>::length(argv[argument + 2]),
+                gs_dump_interval);
+            if (parsed.ec != std::errc{} ||
+                parsed.ptr != argv[argument + 2] +
+                    std::char_traits<char>::length(argv[argument + 2]) ||
+                gs_dump_interval == 0u)
+            {
+                std::fprintf(stderr, "invalid --gs-dump interval\n");
+                return 1;
+            }
+            gs_dump_directory = argv[argument + 1];
+            gs_dump_requested = true;
+            argument += 2;
             continue;
         }
         if (budget_supplied)
@@ -140,6 +201,19 @@ int main(int argc, char** argv)
         std::fprintf(stderr, "failed to attach ISO media to IOP CDVD\n");
         return 1;
     }
+    if (gs_dump_requested)
+    {
+        std::error_code error;
+        std::filesystem::create_directories(gs_dump_directory, error);
+        if (error)
+        {
+            std::fprintf(stderr, "failed to create GS dump directory: %s\n",
+                gs_dump_directory.string().c_str());
+            return 1;
+        }
+        std::printf("Dual ROM0 GS dumps: directory=%s interval_fields=%u\n",
+            gs_dump_directory.string().c_str(), gs_dump_interval);
+    }
     if (cross_requested && !pilot.set_pad0_buttons(0x0040u))
     {
         std::fprintf(stderr, "failed to configure Cross input\n");
@@ -159,12 +233,47 @@ int main(int argc, char** argv)
     bool osdsys_entry_retired = false;
     uint32_t crt_completed = 0u;
     uint32_t gif_resets = 0u;
+    uint64_t next_gs_dump_field = 1u;
     for (; pilot.retired() < budget;)
     {
         const uint32_t pc = pilot.cpu().m_pc;
         const uint64_t before = pilot.retired();
         const uint64_t iop_before = pilot.iop_cycles();
         const auto step = pilot.step(static_cast<uint32_t>(budget - before));
+        if (gs_dump_requested)
+        {
+            const uint64_t field = pilot.fields_started();
+            if (field >= next_gs_dump_field)
+            {
+                next_gs_dump_field = field + gs_dump_interval;
+                std::vector<uint32_t> pixels;
+                uint32_t width = 0u;
+                uint32_t height = 0u;
+                if (ee::c_ee_gs_display::readback(
+                        pilot.gs_state(), pilot.gs_display_registers(),
+                        pilot.gs_crt_mode(), pixels, width, height))
+                {
+                    const auto path = gs_dump_directory /
+                        ("field-" + std::to_string(field) + ".ppm");
+                    if (write_gs_ppm(path, pixels, width, height))
+                    {
+                        std::printf("Dual ROM0 GS dump: field=%llu size=%ux%u path=%s\n",
+                            static_cast<unsigned long long>(field), width, height,
+                            path.string().c_str());
+                    }
+                    else
+                    {
+                        std::fprintf(stderr, "failed to write GS dump: %s\n",
+                            path.string().c_str());
+                    }
+                }
+                else
+                {
+                    std::printf("Dual ROM0 GS dump unavailable: field=%llu display unsupported\n",
+                        static_cast<unsigned long long>(field));
+                }
+            }
+        }
         if (step.m_boundary == boundary::SYSCALL_ENTRY)
         {
             const auto& cpu = pilot.cpu();

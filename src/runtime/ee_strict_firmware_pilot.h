@@ -154,6 +154,7 @@ public:
     {
         return m_hardware.gs_display_registers();
     }
+    const c_ee_gs_state& gs_state() const { return m_gs; }
 
     // Install a second reset domain before either processor executes.
     // Only immutable ROM input is supplied; no guest RAM/register
