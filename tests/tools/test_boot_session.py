@@ -593,7 +593,7 @@ def test_replay_provenance():
         suffix = ".dll" if os.name == "nt" else ".so"
         library = directory / ("0730-fixture" + suffix)
         library.write_bytes(b"native-code")
-        (directory / "vu1-build-target.txt").write_text("native\\n", encoding="utf-8")
+        (directory / "vu1-build-target.txt").write_text("native\n", encoding="utf-8")
         first = SESSION.fingerprint_vu1_inventory(ROOT, str(directory))
         assert first["directory"] == directory.name
         assert first["target"] == "native"
@@ -953,7 +953,7 @@ def main():
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
             short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000",
-                             SDBZ_P40_VU1_AOT="build\\\\vu1-test-inventory")
+                             SDBZ_P40_VU1_AOT="build\\vu1-test-inventory")
             short_env.pop("SDBZ_P40_LISTEN", None)
             short = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
@@ -961,7 +961,7 @@ def main():
             )
             assert short.returncode == 0, short.stdout + short.stderr
             assert "opt=5 dispatches=7505000" in short.stdout, short.stdout
-            assert 'P40 VU1 AOT: "build\\\\vu1-test-inventory"' in short.stdout, short.stdout
+            assert 'P40 VU1 AOT: "build\\vu1-test-inventory"' in short.stdout, short.stdout
             help_result = subprocess.run(
                 ["cmd.exe", "/d", "/c", r"call scripts\build.bat --help"],
                 cwd=ROOT, capture_output=True, text=True, timeout=30,
