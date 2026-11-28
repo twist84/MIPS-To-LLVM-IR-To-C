@@ -33,7 +33,7 @@ index d97fa5f..4f55994 100644
      argv[1] = (uint32_t)(uintptr_t)boot_path;
      /* EELOAD with "EELOAD <program>" runs the program (LoadExecPS2). */
 diff --git a/src/ee/kernel.c b/src/ee/kernel.c
-index 2e63f55..82dedfa 100644
+index 2e63f55..aa75041 100644
 --- a/src/ee/kernel.c
 +++ b/src/ee/kernel.c
 @@ -734,6 +734,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
@@ -54,6 +54,24 @@ index 2e63f55..82dedfa 100644
          exec_program(f, entry, 0);
          goto scheduled;
      }
+@@ -836,6 +840,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+         struct ob_thread_desc d;
+         ptr = ob_ee_user_pointer(a0, sizeof(d));
+         if (!ptr) { set_result(f, OB_EINVAL); break; }
++        /* The caller writes its descriptor through a cached mapping. */
++        flush_cache(0);
+         ob_copy(&d, ptr, sizeof(d));
+         if (!ob_ee_user_pointer(d.entry, 4) || !ob_ee_user_pointer(d.stack, d.stack_size)) {
+             set_result(f, OB_EINVAL); break;
+@@ -910,6 +916,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+         struct ob_sema_desc d;
+         ptr = ob_ee_user_pointer(a0, sizeof(d));
+         if (!ptr) { set_result(f, OB_EINVAL); break; }
++        /* The caller writes its descriptor through a cached mapping. */
++        flush_cache(0);
+         ob_copy(&d, ptr, sizeof(d));
+         set_result(f, ob_sema_create(&scheduler, &d));
+ #ifdef OB_TRACE_SYSCALLS
 diff --git a/src/iop/cdvdman.c b/src/iop/cdvdman.c
 index 0b3677a..b4549dd 100644
 --- a/src/iop/cdvdman.c
