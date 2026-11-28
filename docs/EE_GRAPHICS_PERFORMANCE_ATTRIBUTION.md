@@ -1404,3 +1404,51 @@ increase redundant list traversal or alter behavior for aliased
 targets. Require matched deterministic visual/VRAM correctness and
 comparable combat A/B capture with 16 versus 8. Record effective
 setting in log and replay provenance. No default switch until proven.
+
+### P4A result — 20261128-070738141
+
+Candidate d768a2ac, clean tree, PS2_RASTER_WORKGROUP=8 verified in
+provenance and console. 35467 rows across serials 2705–3081 (377
+submissions), no missing/duplicated indices, failed maps or pressure
+waits. Baseline 32470 rows/342 submissions. Total mean compute
+10.5462 -> 10.2927 ms (-2.40%), median 10.0390 -> 9.7007 ms,
+P95 14.0243 -> 13.8244 ms. Raster mean 7.8612 -> 7.6160 ms (-3.12%).
+Capture windows are different and manual PAD is not deterministic.
+Matching exact 80-operation pipeline sequence: 38 baseline and 26
+candidate submissions, total mean 9.5485 -> 9.4702 ms (-0.82%),
+raster 7.1377 -> 7.0659 ms (-1.01%); dense raster index 34 median
+1.3352 -> 1.3280 ms (-0.54%). Not a meaningful improvement. Whole
+replay 2430 fields/41.8714 s versus 2425/41.9079 s (58.03 -> 57.86
+fields/s). Fully captured combat intervals remain ~21–26.5 fields/s.
+No equivalent deterministic screenshot comparison; do not accept
+visual correctness merely from successful rendering. Retain 16x16
+default and 8x8 opt-in only. SC4 FAIL for captured unlocked combat;
+SC1/SC10 PARTIAL.
+
+### P3A — verify the native VU1 inventory before new lowering work
+
+Both live P40 captures used a launcher that hard-codes
+build/vu1-native-v20. Prior G2A proved a synchronous V22/V23 speedup;
+V30 was subsequently correctness-validated (see G3B). The selected
+live DLL hashes were not recorded, so do not infer that the directory
+name proves an exact historical version. New SDBZ_P40_VU1_AOT
+override leaves all other P40 settings unchanged and logs the
+selected directory. Provenance records directory basename, target
+marker, library count and SHA-256 over ordered filename/content
+digests (pre-run selection, not a loaded-binary attestation).
+Tests exercise the override and fingerprint stability/change.
+Compare existing V20 and V30 inventories at 16x16, same O5 EE
+cache, CPU scope profiling enabled, F7/F8 disabled. No new lowering
+or IR rebuild. Candidate report must retain 84 loaded programs and
+zero fallback. Use comparable active combat field intervals and
+VU1 ns/pair by PC; deterministic replay needed for acceptance.
+Candidate whole-replay 0x730: 200803030 pairs, 7.212 s; baseline
+199480795 pairs, 7.221 s. Do not mistake these for a measured effect
+of the GPU experiment. Prioritize this inventory control before
+further VU1 micro-optimizations, and separately acquire live F8
+hot-PC attribution. No final performance acceptance.
+
+| Commit | Experiment | Result | Decision |
+|---|---|---|---|
+| d768a2ac | 8x8 raster workgroups | Comparable raster mean -1.01%, no gameplay improvement | Retain opt-in only |
+| P3A | Select and fingerprint existing VU1 inventory | Pending matched measurement | Validate V20 vs V30 |

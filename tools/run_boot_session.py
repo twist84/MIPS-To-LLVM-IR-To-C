@@ -71,6 +71,36 @@ PROVENANCE_ENV = (
 )
 
 
+def fingerprint_vu1_inventory(repo, value):
+    """Hash the selected native inventory, without exposing its absolute path."""
+    if not value:
+        return None
+    directory = Path(value)
+    if not directory.is_absolute():
+        directory = repo / directory
+    result = {"directory": directory.name, "target": None, "libraries": 0,
+              "inventory_sha256": None}
+    try:
+        marker = directory / "vu1-build-target.txt"
+        if marker.is_file():
+            result["target"] = marker.read_text(encoding="utf-8").strip()
+        suffix = ".dll" if os.name == "nt" else ".so"
+        libraries = sorted(directory.glob("*" + suffix), key=lambda path: path.name)
+        result["libraries"] = len(libraries)
+        if libraries:
+            inventory = hashlib.sha256()
+            for path in libraries:
+                digest = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(block)
+                inventory.update(path.name.encode("utf-8") + b"\\0" + digest.digest())
+            result["inventory_sha256"] = inventory.hexdigest()
+    except (OSError, UnicodeError):
+        pass
+    return result
+
+
 def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
     def git(*args):
         try:
@@ -99,6 +129,7 @@ def capture_replay_provenance(repo, env, expansion_limit, replay_limit):
         "schema": "ee-retail-replay-provenance-v1",
         "pad0_replay_configured": bool(replay_input),
         "pad0_replay_source_sha256": replay_sha256,
+        "vu1_aot_inventory": fingerprint_vu1_inventory(repo, env.get("SDBZ_VU1_AOT")),
         "git_head": head,
         "tracked_tree_dirty": None if dirty is None else bool(dirty),
         "max_expansion_dispatches": expansion_limit,

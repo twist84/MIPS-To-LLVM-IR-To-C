@@ -94,6 +94,9 @@ rem Disable byte-wise image hashing, retain committed event/QWC counters.
 set "SDBZ_GIF_IMAGE_DIGEST=0"
 
 set "SDBZ_VU1_AOT=%CD%\build\vu1-native-v20"
+rem Compare already-built native inventories without changing other P40 settings.
+if defined SDBZ_P40_VU1_AOT set "SDBZ_VU1_AOT=%SDBZ_P40_VU1_AOT%"
+echo P40 VU1 AOT: "%SDBZ_VU1_AOT%"
 set "SDBZ_VU1_AOT_CAPTURE="
 set "SDBZ_VU1_AOT_CAPTURE_MISSES=%CD%\build\vu1-misses"
 
