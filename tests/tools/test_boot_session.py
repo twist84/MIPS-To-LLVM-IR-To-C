@@ -911,7 +911,10 @@ def main():
     assert 'if "%SDBZ_P40_SYNC_VU1%"=="1" set "SDBZ_VU1_ASYNC=0"' in preset
     assert 'if "%SDBZ_P40_SYNC_GS%"=="1" set "SDBZ_GS_ASYNC=0"' in preset
     assert 'if defined SDBZ_P40_VU1_AOT set "SDBZ_VU1_AOT=%SDBZ_P40_VU1_AOT%"' in preset
-    assert 'if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"' in preset
+    diagnostic_flags = ("SDBZ_RUNTIME_PROFILE", "SDBZ_REPORT_HOTSPOTS",
+                        "SDBZ_REPORT_BOUNDARY_TIMING", "SDBZ_VU1_NATIVE_OVERLAP_PROFILE")
+    for flag in diagnostic_flags:
+        assert f'if not defined {flag} set "{flag}=0"' in preset
     assert ('if "%SDBZ_P40_LISTEN%"=="1" (\n'
             '    set "SDBZ_SPEED_PERCENT=100"\n'
             '    if not defined SDBZ_HOST_AUDIO set "SDBZ_HOST_AUDIO=1"\n'
@@ -948,6 +951,8 @@ def main():
                 preset_env.pop("SDBZ_HOST_AUDIO", None)
                 preset_env.pop("SDBZ_P40_MAX_DISPATCHES", None)
                 preset_env.pop("SDBZ_P40_VU1_AOT", None)
+                for flag in diagnostic_flags:
+                    preset_env.pop(flag, None)
                 result = subprocess.run(
                     ["cmd.exe", "/d", "/c", fr"call scripts\run_ps2_game.bat {option} --overwrite-ir"],
                     cwd=ROOT, env=preset_env, capture_output=True, text=True, timeout=30,
@@ -955,6 +960,14 @@ def main():
                 assert result.returncode == 0, result.stdout + result.stderr
                 assert f"P40 preset: speed={speed} audio={audio} opt=5 dispatches=40000000" in result.stdout
                 assert "Boot ELF:" in result.stdout
+                assert "P40 diagnostics: runtime=0 hotspots=0 boundary=0 overlap=0" in result.stdout
+            diagnostic_env = dict(preset_env, **{flag: "1" for flag in diagnostic_flags})
+            diagnostic = subprocess.run(
+                ["cmd.exe", "/d", "/c", r"call scripts\run_ps2_game.bat --p40 --overwrite-ir"],
+                cwd=ROOT, env=diagnostic_env, capture_output=True, text=True, timeout=30,
+            )
+            assert diagnostic.returncode == 0, diagnostic.stdout + diagnostic.stderr
+            assert "P40 diagnostics: runtime=1 hotspots=1 boundary=1 overlap=1" in diagnostic.stdout
             short_env = dict(preset_env, SDBZ_P40_MAX_DISPATCHES="7505000",
                              SDBZ_P40_VU1_AOT="build\\vu1-test-inventory")
             short_env.pop("SDBZ_P40_LISTEN", None)

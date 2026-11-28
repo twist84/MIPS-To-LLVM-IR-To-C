@@ -72,8 +72,14 @@ if defined SDBZ_P40_MAX_DISPATCHES set "MAX_EXPANSION_DISPATCHES=%SDBZ_P40_MAX_D
 if defined SDBZ_P40_MAX_DISPATCHES set "MAX_REPLAY_DISPATCHES=%SDBZ_P40_MAX_DISPATCHES%"
 set "BOOT_TIMEOUT_SECONDS=600"
 
-rem Preserve full profiling by default, but allow a profiler-off control.
-if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=1"
+rem Lean gameplay defaults; explicit caller overrides retain diagnostics.
+rem F6/F7/F8 remain available for on-demand main-thread/GPU/PC profiles.
+rem Set collectors to 1 before launching to restore whole-session diagnostics.
+if not defined SDBZ_RUNTIME_PROFILE set "SDBZ_RUNTIME_PROFILE=0"
+if not defined SDBZ_REPORT_HOTSPOTS set "SDBZ_REPORT_HOTSPOTS=0"
+if not defined SDBZ_REPORT_BOUNDARY_TIMING set "SDBZ_REPORT_BOUNDARY_TIMING=0"
+if not defined SDBZ_VU1_NATIVE_OVERLAP_PROFILE set "SDBZ_VU1_NATIVE_OVERLAP_PROFILE=0"
+echo P40 diagnostics: runtime=%SDBZ_RUNTIME_PROFILE% hotspots=%SDBZ_REPORT_HOTSPOTS% boundary=%SDBZ_REPORT_BOUNDARY_TIMING% overlap=%SDBZ_VU1_NATIVE_OVERLAP_PROFILE%
 set "SDBZ_TRACE_BUFFERED=1"
 set "SDBZ_REPORT_SNAPSHOT_MS=2000"
 rem Progress text only; retain exact dispatch counters and periodic snapshots.

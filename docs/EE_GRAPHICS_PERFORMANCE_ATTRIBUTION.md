@@ -1945,3 +1945,39 @@ and exact final PPM. No other normalization in this sync mode.
 No production defaults changed; prior async performance evidence
 remains diagnostic. This separates correctness validation from
 async scheduling variation without altering guest clocks.
+
+### P6C result — ee-sync-lean-comparison.zip
+
+All three 40M dispatch runs completed with identical 2541 fields,
+12281599700 instruction attempts, 378121 native VU1 runs,
+415895434 native pairs, no fallback, 2478/2478 PAD polls. Both
+A/A and A/B matched 1935262 dispatch samples without mismatch
+or unpaired samples. Independently verified raw JSON differences
+limited to m2_runtime, exactly the intended hotspot collector;
+final PPM SHA-256 identical (81cbb5383d37d7a7a9ae1658447512d4c78a9812dd456fb09af097d998db169a).
+Runner, O5 library, VU1 inventory and recording unchanged.
+Wall 51.125/50.937/46.235 s (+10.17% throughput vs A/A).
+Late dispatch window 24002560..39993344: 332 fields each in
+17.9498/17.8287/16.1396 s (+10.47% late throughput vs A/A).
+Correctness accepted for EE report switches in matched sync mode.
+Prior asynchronous speedup remains diagnostic, not a claim of
+architectural equivalence under asynchronous scheduling.
+
+### P6D — lean P40 gameplay defaults
+
+P40 and P40-listen now default SDBZ_RUNTIME_PROFILE,
+SDBZ_REPORT_HOTSPOTS, SDBZ_REPORT_BOUNDARY_TIMING and
+SDBZ_VU1_NATIVE_OVERLAP_PROFILE to 0 if not already defined.
+Explicit environment overrides remain authoritative, and the
+launcher prints the actual choices. Existing provenance allowlist
+already records all four. This changes only the P40 launcher;
+non-P40 runner defaults and guest IR/cache inputs are unchanged.
+Keep F5 overlay, F6 main-thread scope toggle, F7 GPU detail and
+F8 PC profile. F6 does not dynamically enable startup-only worker
+profiling/overlap or hotspot collection; opt in before launch
+when those diagnostics are needed. Do not infer zero timings
+are zero cost. Restore legacy whole-session profiling by setting
+all four variables to 1. Raster default remains 16/16.
+Validate ordinary uncapped combat with lean defaults, 88-program
+inventory override, no profiling hotkeys active. SC4 still unmet;
+repeat async and locked sustained combat acceptance remain open.
