@@ -116,4 +116,213 @@ inline constexpr s_ee_memory_fault ee_plan_memory_fault(
     return fault;
 }
 
+// Scope: ordinary scalar data accesses and GPR LQ/SQ only. Merge
+// instructions, VU transfers, cache operations and fetch are separate.
+enum class e_ee_data_access_kind : uint8_t
+{
+    BYTE,
+    HALFWORD,
+    WORD,
+    DOUBLEWORD,
+    GPR_QUADWORD
+};
+
+struct s_ee_data_access_plan
+{
+    uint32_t m_effective_address = 0u;
+    uint32_t m_virtual_address = 0u;
+    uint32_t m_width = 0u;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// EE Instruction Set Manual v6.0: ordinary LH/LW/LD and stores require
+// natural alignment; LQ/SQ clear the low four bits before translation
+// (printed pp. 141, 287). Keep the original EA for diagnostics. A valid
+// aligned access of at most 16 bytes cannot straddle a supported page
+// or segment boundary; physical bus/backing validation is still required.
+inline constexpr s_ee_data_access_plan ee_plan_data_access(
+    const c_ee_tlb& tlb, e_ee_data_access_kind kind, bool write_access,
+    uint32_t address, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using k = e_ee_data_access_kind;
+    s_ee_data_access_plan plan{};
+    plan.m_effective_address = address;
+    plan.m_virtual_address = address;
+    switch (kind)
+    {
+    case k::BYTE: plan.m_width = 1u; break;
+    case k::HALFWORD: plan.m_width = 2u; break;
+    case k::WORD: plan.m_width = 4u; break;
+    case k::DOUBLEWORD: plan.m_width = 8u; break;
+    case k::GPR_QUADWORD:
+        plan.m_width = 16u;
+        plan.m_virtual_address &= ~15u;
+        break;
+    default:
+        break;
+    }
+    if (plan.m_width != 0u)
+    {
+        if ((plan.m_virtual_address & (plan.m_width - 1u)) != 0u)
+        {
+            plan.m_access.m_status = e_ee_access_status::ADDRESS_ERROR;
+        }
+        else
+        {
+            plan.m_access = ee_resolve_access(tlb, plan.m_virtual_address,
+                status, config, entry_hi, write_access);
+        }
+        plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+            write_access, plan.m_virtual_address, status, context, entry_hi);
+    }
+    return plan;
+}
+
+// The EE is little-endian for these transfers. Unlike LQ/SQ, the
+// original EA is the translation/fault address. The aligned container
+// and selected byte lanes describe the architectural transfer, not the
+// number or width of cache/bus transactions.
+enum class e_ee_partial_access_kind : uint8_t
+{
+    WORD_LEFT,
+    WORD_RIGHT,
+    DOUBLEWORD_LEFT,
+    DOUBLEWORD_RIGHT
+};
+
+struct s_ee_partial_access_plan
+{
+    uint32_t m_effective_address = 0u;
+    uint32_t m_aligned_virtual_address = 0u;
+    uint32_t m_width = 0u;
+    uint32_t m_memory_first_lane = 0u;
+    uint32_t m_register_first_lane = 0u;
+    uint32_t m_lane_count = 0u;
+    uint32_t m_memory_byte_mask = 0u;
+    uint32_t m_aligned_physical_address = 0u;
+    uint32_t m_aligned_scratchpad_offset = 0u;
+    bool m_sign_extend_word_load = false;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// MIPS left/right operations (EE Instruction Set Manual v6.0):
+// left transfers EA lane down to lane zero; right transfers EA lane
+// through the highest lane. Register bytes are numbered low to high.
+// A partial store is a STORE translation, never a guest load followed
+// by a store. A backing implementation must preserve disabled lanes
+// without requiring a read from a potentially side-effectful device.
+inline constexpr s_ee_partial_access_plan ee_plan_partial_access(
+    const c_ee_tlb& tlb, e_ee_partial_access_kind kind, bool write_access,
+    uint32_t address, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using k = e_ee_partial_access_kind;
+    s_ee_partial_access_plan plan{};
+    plan.m_effective_address = address;
+    bool left = false;
+    switch (kind)
+    {
+    case k::WORD_LEFT: plan.m_width = 4u; left = true; break;
+    case k::WORD_RIGHT: plan.m_width = 4u; break;
+    case k::DOUBLEWORD_LEFT: plan.m_width = 8u; left = true; break;
+    case k::DOUBLEWORD_RIGHT: plan.m_width = 8u; break;
+    default: break;
+    }
+    if (plan.m_width != 0u)
+    {
+        const uint32_t offset = address & (plan.m_width - 1u);
+        plan.m_aligned_virtual_address = address - offset;
+        plan.m_memory_first_lane = left ? 0u : offset;
+        plan.m_lane_count = left ? offset + 1u : plan.m_width - offset;
+        plan.m_register_first_lane = left ? plan.m_width - plan.m_lane_count : 0u;
+        plan.m_memory_byte_mask =
+            ((1u << plan.m_lane_count) - 1u) << plan.m_memory_first_lane;
+        plan.m_sign_extend_word_load = !write_access && plan.m_width == 4u &&
+            (left || offset == 0u);
+        plan.m_access = ee_resolve_access(tlb, address, status, config,
+                                          entry_hi, write_access);
+        if (plan.m_access.m_status == e_ee_access_status::PHYSICAL)
+        {
+            plan.m_aligned_physical_address =
+                plan.m_access.m_physical_address & ~(plan.m_width - 1u);
+        }
+        else if (plan.m_access.m_status == e_ee_access_status::SCRATCHPAD)
+        {
+            plan.m_aligned_scratchpad_offset =
+                plan.m_access.m_scratchpad_offset & ~(plan.m_width - 1u);
+        }
+        plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+            write_access, address, status, context, entry_hi);
+    }
+    return plan;
+}
+
+// Instruction fetch is not a data load: its cache enable is ICE, and
+// a scratchpad mapping must not be silently read through physical RAM.
+// These routes classify the access only; none guarantees that a bus
+// transaction or instruction-cache hit is available or executable.
+enum class e_ee_fetch_route : uint8_t
+{
+    UNMODELED,
+    FAULT,
+    CACHED_PHYSICAL,
+    CACHE_BYPASS_PHYSICAL,
+    SCRATCHPAD_UNVALIDATED
+};
+
+struct s_ee_fetch_plan
+{
+    uint32_t m_pc = 0u;
+    e_ee_fetch_route m_route = e_ee_fetch_route::UNMODELED;
+    s_ee_access_decision m_access{};
+    s_ee_memory_fault m_fault{};
+};
+
+// EE Core User's Manual v6.0, sections 4.2.7-4.2.9, Config p.78.
+// One architecturally requested instruction (not speculative fetch,
+// an entire cache line or a dual-issue pair). Read permission suffices;
+// the TLB dirty bit does not prohibit fetch. Preserve raw cache mode
+// even when ICE disables the instruction cache. SPRAM selection is
+// described at stage 2Q (p.19), but actual fetch semantics are deferred.
+inline constexpr s_ee_fetch_plan ee_plan_instruction_fetch(
+    const c_ee_tlb& tlb, uint32_t pc, uint32_t status, uint32_t config,
+    uint32_t context, uint32_t entry_hi)
+{
+    using route = e_ee_fetch_route;
+    using result = e_ee_access_status;
+    s_ee_fetch_plan plan{};
+    plan.m_pc = pc;
+    if ((pc & 3u) != 0u)
+    {
+        plan.m_access.m_status = result::ADDRESS_ERROR;
+    }
+    else
+    {
+        plan.m_access = ee_resolve_access(tlb, pc, status, config,
+                                          entry_hi, false);
+    }
+    plan.m_fault = ee_plan_memory_fault(plan.m_access.m_status,
+        false, pc, status, context, entry_hi);
+    if (plan.m_fault.m_valid)
+    {
+        plan.m_route = route::FAULT;
+    }
+    else if (plan.m_access.m_status == result::SCRATCHPAD)
+    {
+        plan.m_route = route::SCRATCHPAD_UNVALIDATED;
+    }
+    else if (plan.m_access.m_status == result::PHYSICAL)
+    {
+        constexpr uint32_t config_ice = 1u << 17u;
+        const uint32_t cache = plan.m_access.m_cache_mode;
+        plan.m_route = (config & config_ice) != 0u &&
+                       (cache == 0u || cache == 3u)
+            ? route::CACHED_PHYSICAL : route::CACHE_BYPASS_PHYSICAL;
+    }
+    return plan;
+}
+
 } // namespace ee

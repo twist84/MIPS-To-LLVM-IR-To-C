@@ -16,9 +16,11 @@ struct s_ee_gs_display_registers
     uint64_t m_smode2 = 0u;
     uint64_t m_dispfb[2]{};
     uint64_t m_display[2]{};
+    uint64_t m_bgcolor = 0u;
 
     // MMIO decoder ordinal: PMODE, SMODE2, DISPFB1, DISPLAY1,
-    // DISPFB2, DISPLAY2. No timing/device side effects.
+    // DISPFB2, DISPLAY2, BGCOLOR. Raw privileged latch snapshots;
+    // BGCOLOR RGB is in bits 23:0. No composition or timing effects.
     uint64_t register_value(uint32_t index) const
     {
         switch (index)
@@ -29,6 +31,7 @@ struct s_ee_gs_display_registers
         case 3u: return m_display[0];
         case 4u: return m_dispfb[1];
         case 5u: return m_display[1];
+        case 6u: return m_bgcolor;
         default: return 0u;
         }
     }
@@ -43,6 +46,7 @@ struct s_ee_gs_display_registers
         case 3u: m_display[0] = value; break;
         case 4u: m_dispfb[1] = value; break;
         case 5u: m_display[1] = value; break;
+        case 6u: m_bgcolor = value; break;
         default: break;
         }
     }

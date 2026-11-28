@@ -14,7 +14,51 @@ permissions:
   contents: read
 
 jobs:
-  diagnose:
+
+  build-patched-v07:
+    name: Build patched OpenPS2BIOS v0.7
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
+
+      - name: Install the LLVM cross toolchain
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --location --retry 3 \
+            https://apt.llvm.org/llvm-snapshot.gpg.key -o "$RUNNER_TEMP/llvm-snapshot.asc"
+          sudo install -m 644 "$RUNNER_TEMP/llvm-snapshot.asc" /usr/share/keyrings/llvm-snapshot.asc
+          echo 'deb [signed-by=/usr/share/keyrings/llvm-snapshot.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-23 main' \
+            | sudo tee /etc/apt/sources.list.d/llvm-23.list
+          sudo apt-get update
+          sudo apt-get install -y clang-23 lld-23 llvm-23
+
+      - name: Build and checksum the patched ROM
+        run: |
+          cmake -S . -B build-rom0-source -G Ninja \
+            -DEE_ENABLE_OPENPS2BIOS_SOURCE=ON \
+            -DOPENPS2BIOS_CLANG=/usr/bin/clang-23 \
+            -DOPENPS2BIOS_LLD=/usr/bin/ld.lld-23 \
+            -DOPENPS2BIOS_OBJCOPY=/usr/bin/llvm-objcopy-23
+          cmake --build build-rom0-source --target openps2bios_rom
+          cd build-rom0-source/_deps/openps2bios-build
+          test "$(wc -c < OpenPS2BIOS.bin)" -eq 4194304
+          sha256sum OpenPS2BIOS.bin > OpenPS2BIOS.bin.sha256
+
+      - name: Upload the patched ROM
+        uses: actions/upload-artifact@v4
+        with:
+          name: openps2bios-v07-patched-rom
+          path: build-rom0-source/_deps/openps2bios-build/OpenPS2BIOS.bin*
+          if-no-files-found: error
+          retention-days: 7
+  diagnose-v06:
+    name: OpenPS2BIOS v0.6 firmware regression
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -37,7 +81,7 @@ jobs:
             -R '^(iop_cpu|iop_rom0_boot|iop_rom0_runner|iop_hw|iop_timer5_exception|iop_dma_icr|iop_dma_global_enable|iop_dma_sif_channels|iop_sif_handoff)$'
 
       - name: Build native EE runner for authentic firmware rendezvous
-        run: cmake --build build-rom0 --parallel 2 --target ee_recomp ee_game_runner
+        run: cmake --build build-rom0 --parallel 2 --target ee_recomp ee_game_runner ee_rom0_fetch_probe ee_ram_tlb_test ee_iop_rom0_diagnostic
 
       - name: Install LLVM Python binding for synthetic EE translation
         run: |
@@ -62,6 +106,54 @@ jobs:
           printf '%s  %s\n' \
             '3702baa508ff40498fab4a95429a2ae1f903d11f5bbcdd4e1a87dbe9f5d21a84' \
             'OpenPS2BIOS-0.6.bin' | sha256sum --check
+
+      - name: Validate strict EE ROM0 fetch and synthetic BEV1 handlers
+        run: |
+          set -euo pipefail
+          ./build-rom0/ee_rom0_fetch_probe OpenPS2BIOS-0.6.bin | tee ee-rom0-fetch.log
+          ctest --test-dir build-rom0 --output-on-failure -R '^ee_ram_tlb$'
+
+      - name: Diagnose synchronized EE and IOP reset (v0.6)
+        run: |
+          set -euo pipefail
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.6.bin 16000000 | tee dual-rom0-v06.log
+          grep -q '^Dual ROM0 stop:' dual-rom0-v06.log
+          grep -q '^Dual ROM0 clocks:' dual-rom0-v06.log
+          grep -q '^Dual ROM0 fetch:' dual-rom0-v06.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v06.log").read_text()
+          stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
+          serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000000,00000000,00000000,00000000" in log, log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ee_pc=001006c0 .*slot_pending=0$", log, re.M), log
+          assert "Dual ROM0 IOP memory fault:" not in log, log
+          assert stop and int(stop[1]) > 819184, log
+          assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818763 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
+          assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696458 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
+          assert serial and int(serial[1]) >= 104, log
+          serial_bytes = b"".join(bytes.fromhex(x) for x in re.findall(r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))
+          assert b"[openbios:ee] LoadExecPS2 rom0:OSDSYS\n" in serial_bytes, log
+          assert b"[openbios:ee] exec entry=00100000 argc=00000001\n" in serial_bytes, log
+          assert b"[openbios:osd] boot screen\n" in serial_bytes, log
+          commits = re.findall(r"^Dual ROM0 GS timing commit: count=(\d+) mode=2 smode2=(\d+) smode1=0000000740814504 srfsh=0000000000000008 synch1=0007f5b61f06f040 synch2=000000000033a4d8 syncv=00c7800601a01801 retired=(\d+) next=(\d+)$", log, re.M)
+          assert len(commits) >= 2 and [x[:2] for x in commits[:2]] == [("1", "3"), ("2", "1")], log
+          assert int(commits[0][2]) < int(commits[1][2]) <= int(stop[1]), log
+          assert all(int(x[3]) == int(x[2]) - 1 + 4920115 for x in commits[:2]), log
+          assert re.search(r"^Dual ROM0 GIF reset: count=1 retired=[1-9][0-9]* bgcolor=0000000000000000 dmac=1$", log, re.M), log
+          assert re.search(r"^Dual ROM0 GS display: smode2=0000000000000001 pmode=000000000000ff25 dispfb1=0000000000001400 display1=001bf9ff0183228c ", log, re.M), log
+          assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
+          assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
+          assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
+          assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
+          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
+          assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
+          scanout = re.search(r"^Dual ROM0 GS scanout: started=(\d+) ended=(\d+) vsint_reads=(\d+) vsint_set_reads=(\d+)$", log, re.M)
+          assert scanout and int(scanout[1]) >= 2 and scanout[1] == scanout[2], log
+          assert int(scanout[3]) > 0 and int(scanout[4]) > 0, log
+          assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
+          PY
 
       - name: Execute guest IOP reset vector and capture stop
         run: |
@@ -217,6 +309,8 @@ jobs:
         with:
           name: openps2bios-v06-rom0-execution
           path: |
+            ee-rom0-fetch.log
+            dual-rom0-v06.log
             rom0-report.json
             rom0-ee-smflag.json
             rom0-ee-smflag.log
@@ -228,4 +322,176 @@ jobs:
             rom0-sif-integration.json
             rom0-sif-integration.log
           if-no-files-found: ignore
+          retention-days: 7
+
+  diagnose-v07:
+    name: OpenPS2BIOS v0.7 firmware diagnostics
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up CMake 4.5.1
+        uses: jwlawson/actions-setup-cmake@0d6a7d60b009d01c9e7523be22153ff8f19460d3 # v2
+        with:
+          cmake-version: '4.5.1'
+
+      - name: Build strict EE and IOP firmware diagnostics
+        run: |
+          cmake -S . -B build-rom0 -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-rom0 --parallel 2 --target ee_rom0_fetch_probe ee_ram_tlb_test iop_rom0_runner ee_iop_rom0_diagnostic
+          ctest --test-dir build-rom0 --output-on-failure -R '^ee_ram_tlb$'
+
+      - name: Download and verify official OpenPS2BIOS v0.7 ROM0
+        run: |
+          set -euo pipefail
+          base="https://github.com/TamaribaEmu/OpenPS2BIOS/releases/download/v0.7"
+          image="OpenPS2BIOS-0.7.bin"
+          curl --fail --location --retry 3 --retry-all-errors --output "$image" "$base/$image"
+          curl --fail --location --retry 3 --retry-all-errors --output "$image.sha256" "$base/$image.sha256"
+          python3 - <<'PY'
+          import sys
+          from pathlib import Path
+          sys.path.insert(0, "tools")
+          from ensure_openps2bios import ROM0_SIZE, parse_sha256, sha256_file
+          image = Path("OpenPS2BIOS-0.7.bin")
+          expected = parse_sha256(Path(str(image) + ".sha256").read_bytes(), image.name)
+          actual = sha256_file(image)
+          pinned = "062e563879f6bf12504cef125a4edeea2d5528f0e3c2cf49928942124eb6f150"
+          if image.stat().st_size != ROM0_SIZE or expected != actual or actual != pinned:
+              raise SystemExit("OpenPS2BIOS v0.7 size or SHA-256 mismatch")
+          print("Verified OpenPS2BIOS v0.7 SHA-256:", actual)
+          Path("rom0-v07-verified.sha256").write_text(f"{actual}  {image.name}\n")
+          PY
+
+      - name: Diagnose synchronized EE and IOP reset (v0.7)
+        run: |
+          set -euo pipefail
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 16000000 | tee dual-rom0-v07.log
+          grep -q '^Dual ROM0 stop:' dual-rom0-v07.log
+          grep -q '^Dual ROM0 clocks:' dual-rom0-v07.log
+          grep -q '^Dual ROM0 fetch:' dual-rom0-v07.log
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v07.log").read_text()
+          stop = re.search(r"^Dual ROM0 stop: .*ee_retired=(\d+)", log, re.M)
+          serial = re.search(r"^Dual ROM0 serial: bytes=(\d+)$", log, re.M)
+          assert "Dual ROM0 IOP RAM mailbox: backing=2097152 offset=00042f00 words=4f424344,00000000,00000000,00000000,00000000" in log, log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ee_pc=001006c0 .*slot_pending=0$", log, re.M), log
+          assert "Dual ROM0 IOP memory fault:" not in log, log
+          assert stop and int(stop[1]) > 819376, log
+          assert "Dual ROM0 syscall: pc=00100038 vector=80000180 retired=818955 status=70030c03 cause=00000020 epc=00100038 v1=0000000000000002" in log, log
+          assert "Dual ROM0 syscall: pc=000822c0 vector=80000180 retired=696650 status=70030c03 cause=00000020 epc=000822c0 v1=0000000000000006" in log, log
+          assert serial and int(serial[1]) >= 104, log
+          serial_bytes = b"".join(bytes.fromhex(x) for x in re.findall(r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))
+          assert b"[openbios:ee] LoadExecPS2 rom0:OSDSYS\n" in serial_bytes, log
+          assert b"[openbios:ee] exec entry=00100000 argc=00000001\n" in serial_bytes, log
+          assert b"[openbios:osd] boot screen\n" in serial_bytes, log
+          commits = re.findall(r"^Dual ROM0 GS timing commit: count=(\d+) mode=2 smode2=(\d+) smode1=0000000740814504 srfsh=0000000000000008 synch1=0007f5b61f06f040 synch2=000000000033a4d8 syncv=00c7800601a01801 retired=(\d+) next=(\d+)$", log, re.M)
+          assert len(commits) >= 2 and [x[:2] for x in commits[:2]] == [("1", "3"), ("2", "1")], log
+          assert int(commits[0][2]) < int(commits[1][2]) <= int(stop[1]), log
+          assert all(int(x[3]) == int(x[2]) - 1 + 4920115 for x in commits[:2]), log
+          assert re.search(r"^Dual ROM0 GIF reset: count=1 retired=[1-9][0-9]* bgcolor=0000000000000000 dmac=1$", log, re.M), log
+          assert re.search(r"^Dual ROM0 GS display: smode2=0000000000000001 pmode=000000000000ff25 dispfb1=0000000000001400 display1=001bf9ff0183228c ", log, re.M), log
+          assert re.search(r"^Dual ROM0 serial data: offset=0 hex=5b", log, re.M), log
+          assert "Dual ROM0 GS reset: count=1 upper=1 siglblid=0000000000000000" in log, log
+          assert "Dual ROM0 EELOAD backing: entry=00000000 call=0c020840 main=28880002 exec=00003021 syscall=0000000c marker=0c0208ae path=726f6d303a4f534453595300" in log, log
+          assert re.search(r"^Dual ROM0 I-cache: resident=[1-9][0-9]*$", log, re.M), log
+          assert re.search(r"^Dual ROM0 D-cache: resident=[1-9][0-9]* dirty=0$", log, re.M), log
+          assert re.search(r"^Dual ROM0 hardware: .*dstat=00000004 str=00000000 .*", log, re.M), log
+          scanout = re.search(r"^Dual ROM0 GS scanout: started=(\d+) ended=(\d+) vsint_reads=(\d+) vsint_set_reads=(\d+)$", log, re.M)
+          assert scanout and int(scanout[1]) >= 2 and scanout[1] == scanout[2], log
+          assert int(scanout[3]) > 0 and int(scanout[4]) > 0, log
+          assert re.search(r"^Dual ROM0 OSDSYS entry: pc=00100000 opcode=[0-9a-f]{8} retired=[1-9][0-9]*$", log, re.M), log
+          PY
+
+      - name: Verify mounted ISO boot path (v0.7)
+        run: |
+          set -euo pipefail
+          python3 tools/make_openps2bios_test_iso.py openps2bios-test.iso
+          ./build-rom0/ee_iop_rom0_diagnostic OpenPS2BIOS-0.7.bin 16000000 \
+            --iso openps2bios-test.iso > dual-rom0-v07-iso.log 2>&1
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          log = Path("dual-rom0-v07-iso.log").read_text()
+          serial = b"".join(bytes.fromhex(x) for x in re.findall(
+              r"^Dual ROM0 serial data: offset=\d+ hex=([0-9a-f]+)$", log, re.M))
+          assert "CDVD READ DMA3 complete: lba=16 sectors=8" in log, log
+          assert "Dual ROM0 CDVD: type=13 bytes=16384 last_lba=16 last_sectors=8" in log, log
+          assert b"starting cdrom0:\\TEST.ELF;1\n" in serial, log
+          assert re.search(r"^Dual ROM0 stop: boundary=BUDGET result=1 ee_retired=16000000 ", log, re.M), log
+          assert "HOST_REFUSAL" not in log, log
+          PY
+
+      - name: Explore authentic v0.7 EE reset execution
+        run: |
+          set -euo pipefail
+          status=0
+          ./build-rom0/ee_rom0_fetch_probe OpenPS2BIOS-0.7.bin --explore >ee-rom0-v07.log 2>&1 || status=$?
+          cat ee-rom0-v07.log
+          echo "EE v0.7 diagnostic exit: $status"
+          test "$status" -eq 3 -o "$status" -eq 4
+          grep -q '^EE exploration stop:' ee-rom0-v07.log
+          grep -Fx 'EE exploration first TLBWI: retired=653849 pc=a001976c index=0 mask=00000000 hi=70000000 lo0=80000007 lo1=00000007' ee-rom0-v07.log
+          grep -Fx 'EE exploration initial TLB writes: retired=654101 count=13' ee-rom0-v07.log
+          grep -Fx 'EE exploration VIF resets: vif0=1 vif1=1' ee-rom0-v07.log
+          grep -Fx 'EE exploration VIF FIFO: vif0=1 vif1=1' ee-rom0-v07.log
+          grep -Fx 'EE exploration INTC first write: retired=671789 pc=a00166ec read=00000000 write=00000002 mask=00000002 status=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration Timer3 write: retired=672737 pc=a0014cc8 address=10001810 value=00000c00 mode=00000000 count=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration Timer3 write: retired=672739 pc=a0014cd0 address=10001800 value=00000000 mode=00000000 count=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration Timer3 write: retired=672744 pc=a0014ce4 address=10001820 value=0000ffff mode=00000000 count=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration Timer3 write: retired=672746 pc=a0014cec address=10001810 value=00000083 mode=00000083 count=00000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration D_CTRL: retired=690997 pc=a00141ac read=00000000 write=00000001 control=00000001' ee-rom0-v07.log
+          grep -Fx 'EE exploration MSFLAG: retired=690998 pc=a00141b0 write=00010000 flags=00010000' ee-rom0-v07.log
+          grep -Fx 'EE exploration GS reset: retired=691013 pc=a0016270 count=1 siglblid=0000000000000000' ee-rom0-v07.log
+          grep -Fx 'EE exploration GS CSR upper: retired=691014 pc=a0016274 count=1' ee-rom0-v07.log
+          grep -Fx 'EE exploration ROM bounds: retired=691104 pc=a00102c4 result=0000000000000001' ee-rom0-v07.log
+          grep -E '^EE exploration ROM word: retired=691172 pc=a00102f0 value=[0-9a-f]{8} matched=1$' ee-rom0-v07.log
+          grep -Fx 'EE exploration DXWBIN: retired=695509 pc=a0019104 lines=128' ee-rom0-v07.log
+          grep -Fx 'EE exploration IXIN: retired=696409 pc=a0019130 lines=256' ee-rom0-v07.log
+          grep -Fx 'EE exploration interrupt boundary: retired=696585 pc=a0014a4c current=70000000 requested=70030c01 cause=00000000 intc_mask=00001002 intc_stat=00000000' ee-rom0-v07.log
+          echo "::notice::EE v0.7 diagnostic captured; full boot is not asserted."
+
+      - name: Explore authentic v0.7 IOP reset execution
+        if: success() || failure()
+        run: |
+          set -euo pipefail
+          test -f rom0-v07-verified.sha256
+          sha256sum --check rom0-v07-verified.sha256
+          status=0
+          ./build-rom0/iop_rom0_runner OpenPS2BIOS-0.7.bin \
+            --instructions=10000000 --trace-tail=64 \
+            --report=rom0-v07-report.json >rom0-v07-trace.log 2>&1 || status=$?
+          cat rom0-v07-trace.log
+          echo "IOP v0.7 diagnostic exit: $status"
+          test "$status" -eq 3 -o "$status" -eq 4
+          python3 - <<'PY'
+          import json
+          with open("rom0-v07-report.json", encoding="utf-8") as file:
+              report = json.load(file)
+          assert report["rom0_bytes"] == 4194304, report
+          assert report["reset_pc"] == 0xBFC00000, report
+          assert report["romdir_has_iopboot"], report
+          assert 0 < report["executed"] <= 10000000, report
+          print("IOP v0.7 observed stop:", report["stop"])
+          print("IOP v0.7 executed:", report["executed"])
+          print("IOP v0.7 PC: 0x%08X" % report["pc"])
+          print("IOP v0.7 memory fault:", report["memory_fault"])
+          PY
+          echo "::notice::IOP v0.7 diagnostic captured; full boot is not asserted."
+
+      - name: Preserve v0.7 execution evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openps2bios-v07-rom0-execution
+          path: |
+            rom0-v07-verified.sha256
+            ee-rom0-v07.log
+            dual-rom0-v07.log
+            rom0-v07-report.json
+            rom0-v07-trace.log
+          if-no-files-found: warn
           retention-days: 7

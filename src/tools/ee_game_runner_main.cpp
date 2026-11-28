@@ -4359,9 +4359,8 @@ int main(int argc, char** argv)
     auto pace_time = std::chrono::steady_clock::now();
     auto sample_time = pace_time;
 #endif
-#ifdef EE_ENABLE_WEBGPU
-    // Read diagnostic configuration once, outside the device service
-    // hot path. A disabled frame dump requires no local-static guard.
+    // Read diagnostic configuration once, outside the device service hot
+    // path. The CPU GS display readback also supports headless builds.
     const std::pair<std::string, uint64_t> s_frame_dump = []
     {
         std::string storage;
@@ -4381,7 +4380,6 @@ int main(int argc, char** argv)
             std::strtoull(spec.c_str() + colon + 1u, nullptr, 0)};
     }();
     uint64_t s_frame_dump_next = 0u;
-#endif
     enum class e_device_service { continued, window_closed, failed };
     const auto service_devices = [&]() -> e_device_service
     {
@@ -4473,44 +4471,68 @@ int main(int argc, char** argv)
                 iop_hle->signal_vblank_edge(start_edge != 0u);
             }
         }
-#ifdef EE_ENABLE_WEBGPU
-        // SDBZ_FRAME_DUMP=DIR:EVERY_FIELDS writes DIR/field-NNNNNNNN.ppm
-        // from the WebGPU raster every EVERY_FIELDS fields (diagnostic).
+        // SDBZ_FRAME_DUMP=DIR:EVERY_FIELDS writes a read-only GS display
+        // capture every EVERY_FIELDS guest scanout fields. Prefer the
+        // WebGPU raster when available; headless builds use CPU GS VRAM.
         {
             if (s_frame_dump.second != 0u)
             {
                 const uint64_t field = hardware.scanout().fields_started();
-                if (field >= s_frame_dump_next)
+                if (field != 0u && field >= s_frame_dump_next)
                 {
                     s_frame_dump_next = field + s_frame_dump.second;
                     std::vector<uint32_t> pixels;
                     uint32_t width = 0u;
                     uint32_t height = 0u;
-                    if (webgpu_bridge.readback(
+                    bool readback = false;
+                    const char* source = "CPU GS VRAM";
+#ifdef EE_ENABLE_WEBGPU
+                    if (webgpu_bridge.active())
+                    {
+                        readback = webgpu_bridge.readback(
                             hardware.gs_display_registers(),
-                            hardware.gs_crt_mode(), pixels, width, height))
+                            hardware.gs_crt_mode(), pixels, width, height);
+                        source = "WebGPU raster";
+                    }
+#endif
+                    if (!readback)
+                    {
+                        readback = ee::c_ee_gs_display::readback(
+                            gs_state, hardware.gs_display_registers(),
+                            hardware.gs_crt_mode(), pixels, width, height);
+                        source = "CPU GS VRAM";
+                    }
+                    if (readback)
                     {
                         char name[64];
                         std::snprintf(name, sizeof(name), "/field-%08llu.ppm",
                                       static_cast<unsigned long long>(field));
-                        (void)write_gs_ppm(
-                            (s_frame_dump.first + name).c_str(),
-                            pixels, width, height);
+                        if (!write_gs_ppm(
+                                (s_frame_dump.first + name).c_str(),
+                                pixels, width, height))
+                        {
+                            std::fprintf(stderr,
+                                "EE frame dump write failed: field=%llu path=%s%s\n",
+                                static_cast<unsigned long long>(field),
+                                s_frame_dump.first.c_str(), name);
+                        }
+                        else
+                        {
+                            std::fprintf(stderr,
+                                "EE frame dump: field=%llu size=%ux%u source=%s\n",
+                                static_cast<unsigned long long>(field),
+                                width, height, source);
+                        }
                     }
-                    const ee::c_ee_ipu& ipu = hardware.ipu();
-                    std::fprintf(stderr,
-                        "EE frame dump: field=%llu ipu bdec=%llu idec=%llu "
-                        "csc=%llu out_qwords=%llu dispatched=%llu\n",
-                        static_cast<unsigned long long>(field),
-                        static_cast<unsigned long long>(ipu.command_count(2u)),
-                        static_cast<unsigned long long>(ipu.command_count(1u)),
-                        static_cast<unsigned long long>(ipu.command_count(7u)),
-                        static_cast<unsigned long long>(ipu.output_qwords()),
-                        static_cast<unsigned long long>(dispatched));
+                    else
+                    {
+                        std::fprintf(stderr,
+                            "EE frame dump unavailable: field=%llu no supported display\n",
+                            static_cast<unsigned long long>(field));
+                    }
                 }
             }
         }
-#endif
 #ifdef EE_ENABLE_RAYLIB_WINDOW
         if (gs_webgpu_window)
         {

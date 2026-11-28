@@ -173,6 +173,7 @@ public:
         case 0x12000080u: return 3; // DISPLAY1
         case 0x12000090u: return 4; // DISPFB2
         case 0x120000a0u: return 5; // DISPLAY2
+        case 0x120000e0u: return 6; // BGCOLOR
         default: return -1;
         }
     }
@@ -239,6 +240,28 @@ public:
             // No calibrated field rate exists for other CRT modes.
             // A previous NTSC/PAL configuration must not keep firing.
             m_scanout = {};
+        }
+        m_gs_crt_interlace = interlace;
+        m_gs_crt_mode = mode;
+        m_gs_crt_ffmd = ffmd;
+        return true;
+    }
+
+    bool reconfigure_gs_crt(uint32_t interlace, uint32_t mode, uint32_t ffmd,
+                            uint64_t current_ee_cycle)
+    {
+        if (interlace > 1u || ffmd > 1u || mode > 0xffu ||
+            m_dmac.deferred_vif1_pending())
+        {
+            return false;
+        }
+        if (mode != 2u && mode != 3u)
+        {
+            return false;
+        }
+        if (!m_scanout.reconfigure(interlace, mode, ffmd, current_ee_cycle))
+        {
+            return false;
         }
         m_gs_crt_interlace = interlace;
         m_gs_crt_mode = mode;

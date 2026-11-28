@@ -111,6 +111,41 @@ public:
         return true;
     }
 
+    // Apply a guest-completed CRT timing sequence at its register boundary.
+    // Preserve HBlank counters and keep the already scheduled VBlank end;
+    // the next field uses the newly selected calibrated profile.
+    bool reconfigure_scanout(uint32_t interlace, uint32_t mode, uint32_t ffmd)
+    {
+        const uint64_t cycle = now();
+        if (m_hardware == nullptr || !m_hardware->scanout().enabled() ||
+            m_hardware->scanout().next_event_cycle() <= cycle ||
+            m_next_event <= cycle || m_hardware->dmac().started_channels() != 0u ||
+            m_hardware->dmac().deferred_vif1_pending() ||
+            (mode != 2u && mode != 3u))
+        {
+            return false;
+        }
+        uint32_t counts[4]{};
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            counts[i] = count(i, cycle);
+        }
+        if (!m_hardware->reconfigure_gs_crt(interlace, mode, ffmd, cycle))
+        {
+            return false;
+        }
+        for (uint32_t i = 0u; i < 4u; ++i)
+        {
+            if ((m_timers[i].m_mode & 3u) == 3u)
+            {
+                set_count(i, counts[i], cycle);
+                schedule(i, cycle);
+            }
+        }
+        refresh_deadline();
+        return true;
+    }
+
     void service()
     {
         service(now());

@@ -1,0 +1,204 @@
+diff --git a/include/openbios/iop.h b/include/openbios/iop.h
+index 31f025b..ef10bfd 100644
+--- a/include/openbios/iop.h
++++ b/include/openbios/iop.h
+@@ -1,6 +1,14 @@
+ /* SPDX-License-Identifier: MIT */
+ #ifndef OPENBIOS_IOP_H
+ #define OPENBIOS_IOP_H
++
++/* IOP export names are fixed-width fields and may fill all eight bytes. */
++#if __has_attribute(nonstring)
++#define OB_IOP_NONSTRING __attribute__((nonstring))
++#else
++#define OB_IOP_NONSTRING
++#endif
++
+ #include "irx.h"
+
+ /* Public IOP kernel error codes (ps2sdk kerr.h values). */
+diff --git a/osd/osd.c b/osd/osd.c
+index d97fa5f..4f55994 100644
+--- a/osd/osd.c
++++ b/osd/osd.c
+@@ -140,7 +140,9 @@ static int read_boot_path(void) {
+ }
+ static void start_disc(void) {
+     static char eeload_name[] = "EELOAD";
+-    static uint32_t argv[2];
++    static uint32_t argv_storage[2];
++    volatile uint32_t *argv = (volatile uint32_t *)(uintptr_t)
++        (((uint32_t)(uintptr_t)argv_storage & 0x1fffffffu) | 0xa0000000u);
+     argv[0] = (uint32_t)(uintptr_t)eeload_name;
+     argv[1] = (uint32_t)(uintptr_t)boot_path;
+     /* EELOAD with "EELOAD <program>" runs the program (LoadExecPS2). */
+diff --git a/src/ee/kernel.c b/src/ee/kernel.c
+index 2e63f55..aa75041 100644
+--- a/src/ee/kernel.c
++++ b/src/ee/kernel.c
+@@ -734,6 +734,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+                 ob_ee_set_exec_args(count, list);
+             }
+         }
++        /* Write back outgoing cached data before the uncached ELF loader runs. */
++        flush_cache(0);
+         ob_puts("[openbios:ee] LoadExecPS2 "); ob_puts(path); ob_puts("\n");
+         if (path[0] == 'r' && path[1] == 'o' && path[2] == 'm' && path[3] == '0' && path[4] == ':') {
+             if (ob_ee_rom_load(path + 5, &entry)) {
+@@ -744,6 +746,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+             ob_puts("[openbios:ee] LoadExecPS2 failed\n");
+             set_result(f, OB_ENOTFOUND); break;
+         }
++        /* The new ELF may overlap cached code from the outgoing program. */
++        flush_cache(2);
+         exec_program(f, entry, 0);
+         goto scheduled;
+     }
+@@ -836,6 +840,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+         struct ob_thread_desc d;
+         ptr = ob_ee_user_pointer(a0, sizeof(d));
+         if (!ptr) { set_result(f, OB_EINVAL); break; }
++        /* The caller writes its descriptor through a cached mapping. */
++        flush_cache(0);
+         ob_copy(&d, ptr, sizeof(d));
+         if (!ob_ee_user_pointer(d.entry, 4) || !ob_ee_user_pointer(d.stack, d.stack_size)) {
+             set_result(f, OB_EINVAL); break;
+@@ -910,6 +916,8 @@ struct ob_ee_frame *ob_ee_exception(struct ob_ee_frame *f) {
+         struct ob_sema_desc d;
+         ptr = ob_ee_user_pointer(a0, sizeof(d));
+         if (!ptr) { set_result(f, OB_EINVAL); break; }
++        /* The caller writes its descriptor through a cached mapping. */
++        flush_cache(0);
+         ob_copy(&d, ptr, sizeof(d));
+         set_result(f, ob_sema_create(&scheduler, &d));
+ #ifdef OB_TRACE_SYSCALLS
+diff --git a/src/iop/cdvdman.c b/src/iop/cdvdman.c
+index 0b3677a..b4549dd 100644
+--- a/src/iop/cdvdman.c
++++ b/src/iop/cdvdman.c
+@@ -540,7 +540,7 @@ static int sceCdSetTimeout(int which, int ms) {
+ }
+
+ static int ret_zero(void) { return 0; }
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[116]; } cdvdman = {OB_IRX_EXPORT_MAGIC, 0, 0x0101, 0, "cdvdman", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_cdvdman_init(void) {
+diff --git a/src/iop/dmacman.c b/src/iop/dmacman.c
+index abba35e..876431d 100644
+--- a/src/iop/dmacman.c
++++ b/src/iop/dmacman.c
+@@ -66,7 +66,7 @@ static void sceEnableDMAChannel(uint32_t ch) {
+ static void sceDisableDMAChannel(uint32_t ch) { dpcr_field(ch, 8, 0); }
+
+ static int ret_zero(void) { return 0; }
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[37]; } dmacman = {OB_IRX_EXPORT_MAGIC, 0, 0x0102, 0, "dmacman", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_dmacman_init(void) {
+diff --git a/src/iop/heaplib.c b/src/iop/heaplib.c
+index 1653e3a..1c7d679 100644
+--- a/src/iop/heaplib.c
++++ b/src/iop/heaplib.c
+@@ -26,7 +26,7 @@ static int HeapChunkSize(void *mem) {
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ static int ret_zero(void) { return 0; }
+ static struct { uint32_t magic, next; uint16_t version, mode;
+-                char name[8] __attribute__((nonstring)); uint32_t f[17]; } heaplib = {
++                char name[8] OB_IOP_NONSTRING; uint32_t f[17]; } heaplib = {
+     OB_IRX_EXPORT_MAGIC, 0, 0x0101, 0, "heaplib", {0}};
+
+ void ob_iop_heaplib_init(void) {
+diff --git a/src/iop/ioman.c b/src/iop/ioman.c
+index f44e7a6..5e4d967 100644
+--- a/src/iop/ioman.c
++++ b/src/iop/ioman.c
+@@ -508,7 +508,7 @@ void ob_io_share_drivers(int (*add_drv)(struct ob_iop_device *d)) {
+ }
+
+ /* ---- ioman exports ---- */
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[36]; } ioman = {OB_IRX_EXPORT_MAGIC, 0, 0x0104, 0, "ioman", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_ioman_init(void) {
+diff --git a/src/iop/kernel.c b/src/iop/kernel.c
+index 578f795..4dffbd4 100644
+--- a/src/iop/kernel.c
++++ b/src/iop/kernel.c
+@@ -1041,7 +1041,7 @@ static int ReleaseVblankHandler(int edge, int (*fn)(void *)) {
+
+ #define LIBRARY(var, text, major, minor, size) \
+     static struct { uint32_t magic, next; uint16_t version, mode; \
+-                    char name[8] __attribute__((nonstring)); uint32_t f[size + 1]; } var = { \
++                    char name[8] OB_IOP_NONSTRING; uint32_t f[size + 1]; } var = { \
+         OB_IRX_EXPORT_MAGIC, 0, (major) << 8 | (minor), 0, text, {0}}
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ static int ret_zero(void) { return 0; }
+diff --git a/src/iop/libs.c b/src/iop/libs.c
+index bab5a49..df8bdbc 100644
+--- a/src/iop/libs.c
++++ b/src/iop/libs.c
+@@ -9,7 +9,7 @@
+ int ob_iop_register_builtin(struct ob_irx_exports *exports, uint32_t count);
+
+ #define LIBRARY(var, text, major, minor, size) \
+-    static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring)); \
++    static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING; \
+                     uint32_t f[size + 1]; } var = { \
+         OB_IRX_EXPORT_MAGIC, 0, (major) << 8 | (minor), 0, text, {0}}
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+diff --git a/src/iop/modload.c b/src/iop/modload.c
+index 0462eaf..f7829f6 100644
+--- a/src/iop/modload.c
++++ b/src/iop/modload.c
+@@ -115,7 +115,7 @@ static int SetModuleFlags(int id, int flag) {
+ }
+ static int ret_zero(void) { return 0; }
+
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[33]; } modload = {OB_IRX_EXPORT_MAGIC, 0, 0x0107, 0, "modload", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_modload_init(void) {
+diff --git a/src/iop/secrman.c b/src/iop/secrman.c
+index 6993dda..52a5e50 100644
+--- a/src/iop/secrman.c
++++ b/src/iop/secrman.c
+@@ -159,7 +159,7 @@ static void SecrResetAuthCard(int port, int slot, int cnum) {
+ }
+
+ static int ret_zero(void) { return 0; }
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[22]; } secrman = {OB_IRX_EXPORT_MAGIC, 0, 0x0103, 0, "secrman", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_secrman_init(void) {
+diff --git a/src/iop/sifrpc.c b/src/iop/sifrpc.c
+index 5ffe76b..3410eea 100644
+--- a/src/iop/sifrpc.c
++++ b/src/iop/sifrpc.c
+@@ -547,7 +547,7 @@ static int sceSifIsSending(void) { return (REG32(0xbf801528u) & 0x01000000u) !=
+ static int ret_zero(void) { return 0; }
+ #define LIBRARY(var, text, size) \
+     static struct { uint32_t magic, next; uint16_t version, mode; \
+-                    char name[8] __attribute__((nonstring)); uint32_t f[size + 1]; } var = { \
++                    char name[8] OB_IOP_NONSTRING; uint32_t f[size + 1]; } var = { \
+         OB_IRX_EXPORT_MAGIC, 0, 0x0101, 0, text, {0}}
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ LIBRARY(sifman, "sifman", 36);
+diff --git a/src/iop/timrman.c b/src/iop/timrman.c
+index b17d105..0e80e23 100644
+--- a/src/iop/timrman.c
++++ b/src/iop/timrman.c
+@@ -240,7 +240,7 @@ static int StopHardTimer(int id) {
+
+ static int ret_zero(void) { return 0; }
+ static int ret_neg(void) { return -1; }
+-static struct { uint32_t magic, next; uint16_t version, mode; char name[8] __attribute__((nonstring));
++static struct { uint32_t magic, next; uint16_t version, mode; char name[8] OB_IOP_NONSTRING;
+                 uint32_t f[29]; } timrman = {OB_IRX_EXPORT_MAGIC, 0, 0x0103, 0, "timrman", {0}};
+ #define FN(p) ((uint32_t)(uintptr_t)(p))
+ void ob_iop_timrman_init(void) {

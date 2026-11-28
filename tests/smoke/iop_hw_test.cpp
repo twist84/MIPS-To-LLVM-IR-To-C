@@ -3857,6 +3857,28 @@ int main()
     {
         return fail("CDVD no-media type access or unsupported width safety");
     }
+    if (!hardware.set_cdvd_disc_type(0x14u) ||
+        hardware.cdvd_disc_type() != 0x14u ||
+        !hardware.read(iop::c_hw::k_cdvd_disc_type, 1u, &actual) ||
+        actual != 0x14u || hardware.set_cdvd_disc_type(0x15u))
+    {
+        return fail("CDVD mounted PS2 DVD type configuration");
+    }
+    hardware.reset();
+    if (hardware.cdvd_disc_type() != iop::c_hw::k_cdvd_no_disc ||
+        !hardware.read(iop::c_hw::k_cdvd_disc_type, 1u, &actual) ||
+        actual != iop::c_hw::k_cdvd_no_disc)
+    {
+        return fail("CDVD media state survived device reset");
+    }
+    if (!hardware.read(iop::c_hw::k_cdvd_drive_status, 1u, &actual) ||
+        actual != iop::c_hw::k_cdvd_stopped ||
+        hardware.read(iop::c_hw::k_cdvd_drive_status, 2u, &actual) ||
+        hardware.read(iop::c_hw::k_cdvd_drive_status, 4u, &actual) ||
+        hardware.write(iop::c_hw::k_cdvd_drive_status, 1u, 0x06u))
+    {
+        return fail("CDVD stopped drive status read or read-only width behavior");
+    }
 
     // Firmware writes bytes to the emulator's IOP debug console.
     // Other widths, reads, and nearby unmapped addresses must still fault.
@@ -4116,18 +4138,22 @@ int main()
         return fail("Guest SB to IOP diagnostic console was not captured");
     }
 
-    // Guest LBU from CDVD N-command readiness and disc-type via KSEG1.
+    // Guest LBU from CDVD drive status, N-command readiness and disc type.
     // The first LBU matches the real faulting ROM0 access at 0x0001CA14.
     const uint32_t cdvd_instructions[] =
     {
         0x3c08bf40u, // lui t0,0xbf40
+        0x3508200au, // ori t0,t0,0x200a
+        0x910b0000u, // lbu t3,0(t0): stopped=0
+        0x3c08bf40u, // lui t0,0xbf40
         0x35082005u, // ori t0,t0,0x2005
         0x91090000u, // lbu t1,0(t0): ready=0x40
+        0x3c08bf40u, // lui t0,0xbf40
         0x3508200fu, // ori t0,t0,0x200f
         0x910a0000u, // lbu t2,0(t0): disc type=0x00
         0x0000000du  // break
     };
-    for (uint32_t index = 0u; index < 6u; ++index)
+    for (uint32_t index = 0u; index < 10u; ++index)
     {
         put32(rom, index * 4u, cdvd_instructions[index]);
     }
@@ -4138,7 +4164,9 @@ int main()
     }
     const iop::s_kernel_run_result cdvd = cdvd_kernel.run(16u, 4u);
     if (cdvd.m_stop != iop::e_kernel_stop::breakpoint ||
-        cdvd.m_executed != 5u ||
+        cdvd.m_executed != 9u ||
+        cdvd_kernel.cpu().state().m_gpr[11u] !=
+            iop::c_hw::k_cdvd_stopped ||
         cdvd_kernel.cpu().state().m_gpr[9u] !=
             iop::c_hw::k_cdvd_ncmd_ready ||
         cdvd_kernel.cpu().state().m_gpr[10u] !=

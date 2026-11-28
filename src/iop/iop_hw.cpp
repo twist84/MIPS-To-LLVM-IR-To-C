@@ -23,6 +23,7 @@ void c_hw::reset()
     m_cdvd_i_stat = 0u;
     m_cdvd_dec_set = 0u;
     m_cdvd_ncmd_command = 0u;
+    m_cdvd_disc_type = k_cdvd_no_disc;
     std::fill(
         m_cdvd_ncmd_params,
         m_cdvd_ncmd_params + k_cdvd_ncmd_param_capacity,
@@ -994,6 +995,11 @@ bool c_hw::read(
         *value = m_cdvd_i_stat;
         return true;
     }
+    if (address == k_cdvd_drive_status && width == 1u)
+    {
+        *value = k_cdvd_stopped;
+        return true;
+    }
     if (address == k_cdvd_dec_set && width == 1u)
     {
         *value = m_cdvd_dec_set;
@@ -1012,7 +1018,7 @@ bool c_hw::read(
     }
     if (address == k_cdvd_disc_type && width == 1u)
     {
-        *value = k_cdvd_no_disc;
+        *value = m_cdvd_disc_type;
         return true;
     }
     if (address == k_sio2_rx_fifo &&
@@ -1910,6 +1916,23 @@ bool c_hw::cdvd_ncmd_pending() const
 uint8_t c_hw::cdvd_ncmd_command() const
 {
     return m_cdvd_ncmd_command;
+}
+
+uint8_t c_hw::cdvd_disc_type() const
+{
+    return m_cdvd_disc_type;
+}
+
+bool c_hw::set_cdvd_disc_type(uint8_t disc_type)
+{
+    if (m_cdvd_ncmd_pending || m_cdvd_ncmd_param_count != 0u ||
+        (disc_type != k_cdvd_no_disc &&
+         (disc_type < 0x10u || disc_type > 0x14u)))
+    {
+        return false;
+    }
+    m_cdvd_disc_type = disc_type;
+    return true;
 }
 
 uint32_t c_hw::cdvd_ncmd_parameter_count() const

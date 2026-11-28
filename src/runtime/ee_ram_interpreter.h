@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ee_state.h"
+#include "ee_strict_rom0.h"
 #include <cstdint>
 
 namespace ee
@@ -39,6 +40,39 @@ s_ee_ram_execution ee_execute_ram_callback(
     uint32_t max_instructions,
     s_ee_runtime* runtime = nullptr
 );
+
+// Opt-in, single ordinary memory or restricted guest handler instruction.
+// Caller owns the
+// execution thread and must establish an ordinary (not delay-slot)
+// dispatch boundary and isolated RAM: no pending cache/write-buffer,
+// DMA/device effects, native code coherence or clock/interrupt work.
+// This evidence is not inferred from PC or the memory attribute.
+struct s_ee_strict_ram_evidence
+{
+    bool m_ordinary_boundary = false;
+    bool m_isolated_ram = false;
+    bool m_guest_handler_execution = false;
+    s_ee_strict_rom0_view m_rom0{};
+};
+
+enum class e_ee_strict_ram_step_result : uint8_t
+{
+    COMMITTED,
+    FAULT_COMMITTED,
+    UNSAFE_BOUNDARY,
+    UNMODELED_ACCESS,
+    UNSUPPORTED_INSTRUCTION
+};
+
+// No HLE alias fallback, clock updates or automatic handler dispatch.
+// With explicit handler evidence, a committed memory exception can enter
+// its RAM- or ROM0-backed guest vector and execute restricted COP0 instructions.
+// Success advances PC by four or returns through EPC on ERET. A modeled
+// fault enters Level 1 before any data write. All rejected outcomes leave
+// CPU, RAM, TLB and diagnostic unchanged.
+e_ee_strict_ram_step_result ee_execute_strict_ram_step(
+    s_ee_cpu_state& cpu, ee_memory& memory, bool& actual_delay_slot,
+    const s_ee_strict_ram_evidence& evidence);
 
 const char* ee_ram_result_name(e_ee_ram_result result);
 

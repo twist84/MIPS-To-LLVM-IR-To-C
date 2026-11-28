@@ -110,6 +110,9 @@ public:
     static constexpr uint8_t k_cdvd_ncmd_busy = 0x80u;
     // CDVD I_STAT: byte-wide interrupt-reason register, write-one-to-clear.
     static constexpr uint32_t k_cdvd_i_stat = 0x1f402008u;
+    // CDVD drive status is byte-wide and read-only; stop/no-media is 0.
+    static constexpr uint32_t k_cdvd_drive_status = 0x1f40200au;
+    static constexpr uint8_t k_cdvd_stopped = 0x00u;
     // CDVD decryption configuration byte. This is register storage,
     // not a disc-sector decryption implementation.
     static constexpr uint32_t k_cdvd_dec_set = 0x1f40203au;
@@ -296,8 +299,10 @@ public:
     // Expose pending work to an eventual real CDVD sector provider.
     bool cdvd_ncmd_pending() const;
     uint8_t cdvd_ncmd_command() const;
+    uint8_t cdvd_disc_type() const;
     uint32_t cdvd_ncmd_parameter_count() const;
     bool cdvd_ncmd_parameter(uint32_t index, uint8_t* value) const;
+    bool set_cdvd_disc_type(uint8_t disc_type);
     bool cdrom_dma_register(uint32_t index, uint32_t* value) const;
     bool complete_cdvd_read(uint8_t interrupt_reason);
     size_t sio2_pending_tx_bytes() const;
@@ -395,6 +400,7 @@ private:
     uint8_t m_cdvd_i_stat = 0u;
     uint8_t m_cdvd_dec_set = 0u;
     uint8_t m_cdvd_ncmd_command = 0u;
+    uint8_t m_cdvd_disc_type = k_cdvd_no_disc;
     uint8_t m_cdvd_ncmd_params[k_cdvd_ncmd_param_capacity]{};
     uint32_t m_cdvd_ncmd_param_count = 0u;
     bool m_cdvd_ncmd_pending = false;

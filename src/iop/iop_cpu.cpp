@@ -117,6 +117,16 @@ s_cpu_state& c_cpu::state()
     return m_state;
 }
 
+std::span<uint8_t> c_cpu::ram_span()
+{
+    return m_ram;
+}
+
+std::span<const uint8_t> c_cpu::ram_span() const
+{
+    return m_ram;
+}
+
 uint64_t c_cpu::cycles() const
 {
     return m_cycles;

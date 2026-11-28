@@ -4,6 +4,12 @@ project(ps2_recompiler LANGUAGES C CXX)
 option(EE_MSVC_WARNINGS_AS_ERRORS "Treat project MSVC compiler warnings as errors" ON)
 option(EE_CLANG_WARNINGS_AS_ERRORS "Treat project Clang compiler warnings as errors" ON)
 
+option(EE_ENABLE_OPENPS2BIOS_SOURCE "Enable the patched OpenPS2BIOS source build target" OFF)
+
+if(EE_ENABLE_OPENPS2BIOS_SOURCE)
+    include(cmake/OpenPS2BIOS.cmake)
+endif()
+
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
@@ -44,6 +50,7 @@ add_library(ee_core STATIC
     src/lift/native_codegen.cpp
     src/runtime/ee_memory.cpp
     src/runtime/ee_ram_interpreter.cpp
+    src/runtime/ee_strict_native_word.cpp
     src/runtime/ee_unaligned.cpp
     src/runtime/ee_intc.cpp
     src/runtime/ee_dmac.cpp
@@ -276,6 +283,19 @@ target_link_libraries(ee_vu0_transfer_ir_fixture PRIVATE ee_core)
 add_executable(ee_checked_ir_fixture
     tests/smoke/ee_checked_ir_fixture.cpp)
 target_link_libraries(ee_checked_ir_fixture PRIVATE ee_core)
+
+# Separate experimental strict native word ABI. Build a real helper
+# library for MCJIT, without changing ee_core PIC or retail native ABI.
+add_library(ee_strict_word_jit_helpers SHARED
+    src/runtime/ee_strict_native_word.cpp
+    src/runtime/ee_memory.cpp
+    src/runtime/ee_ram_interpreter.cpp
+    src/runtime/ee_exceptions.cpp
+    tests/smoke/ee_strict_word_jit_helpers.cpp)
+set_target_properties(ee_strict_word_jit_helpers PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
+target_link_libraries(ee_strict_word_jit_helpers PRIVATE Threads::Threads)
+add_executable(ee_strict_word_ir_fixture tests/smoke/ee_strict_word_ir_fixture.cpp)
+target_link_libraries(ee_strict_word_ir_fixture PRIVATE ee_core)
 
 add_executable(ee_min_test
     tests/smoke/min_test.cpp
@@ -546,8 +566,12 @@ target_link_libraries(ee_ram_interpreter_test PRIVATE ee_core)
 add_executable(ee_scalar_constant_test tests/smoke/ee_scalar_constant_test.cpp)
 target_link_libraries(ee_scalar_constant_test PRIVATE ee_core)
 target_include_directories(ee_scalar_constant_test PRIVATE ${CMAKE_SOURCE_DIR}/src/architecture)
+add_executable(ee_rom0_fetch_probe src/tools/ee_rom0_fetch_probe_main.cpp)
+target_link_libraries(ee_rom0_fetch_probe PRIVATE ee_core)
 add_executable(ee_ram_tlb_test tests/smoke/ee_ram_tlb_test.cpp)
-target_link_libraries(ee_ram_tlb_test PRIVATE ee_core)
+target_link_libraries(ee_ram_tlb_test PRIVATE iop_cpu ee_core)
+add_executable(ee_iop_rom0_diagnostic src/tools/ee_iop_rom0_diagnostic_main.cpp)
+target_link_libraries(ee_iop_rom0_diagnostic PRIVATE iop_cpu ee_core)
 
 add_executable(ee_memory_alias_test tests/smoke/ee_memory_alias_test.cpp)
 target_link_libraries(ee_memory_alias_test PRIVATE ee_core)
@@ -1055,6 +1079,11 @@ if(EE_HAVE_LLVM_JIT_TEST)
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_alignment_ir_runtime.py
                 $<TARGET_FILE:ee_vu0_transfer_ir_fixture>
                 $<TARGET_FILE:ee_cop0_jit_helpers>)
+    add_test(NAME ee_strict_word_ir_runtime
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_strict_word_ir_runtime.py
+                $<TARGET_FILE:ee_strict_word_ir_fixture>
+                $<TARGET_FILE:ee_strict_word_jit_helpers>)
     add_test(NAME ee_checked_ir_runtime
         COMMAND ${Python3_EXECUTABLE}
                 ${CMAKE_SOURCE_DIR}/tests/smoke/test_ee_checked_ir_runtime.py
