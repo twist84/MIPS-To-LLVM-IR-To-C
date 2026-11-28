@@ -634,7 +634,7 @@ struct s_ee_reset_sio_tx
 };
 
 // Opt-in device transport for the isolated reset probe.
-// Admit only explicitly modeled canonical uncached device registers.
+// Admit only explicitly modeled uncached device registers.
 // Callbacks must accept the real device access or refuse.
 struct s_ee_reset_mmio
 {
@@ -650,6 +650,19 @@ struct s_ee_reset_mmio
     bool m_scheduled_sif_vif = false;
     bool m_scheduled_sif_dma = false;
     bool m_scheduled_scanout = false;
+
+    constexpr uint32_t device_register_address(uint32_t address,
+        const s_ee_bus_span_plan& bus) const
+    {
+        // Firmware can install an uncached identity TLB mapping for MMIO.
+        // Keep the same register allowlist and require the translated address.
+        if (m_scheduled_timers && address == bus.m_address &&
+            address >= 0x10000000u && address < 0x13000000u)
+        {
+            return address + 0xa0000000u;
+        }
+        return address;
+    }
 
     constexpr bool scheduled_timer_address(uint32_t address) const
     {
@@ -708,6 +721,7 @@ struct s_ee_reset_mmio
     constexpr bool read(const s_ee_bus_span_plan& bus, uint32_t address,
         s_ee_u128& value) const
     {
+        address = device_register_address(address, bus);
         return m_read != nullptr && bus.m_region == e_ee_bus_region::DEVICE &&
             bus.m_cache_policy == e_ee_data_cache_policy::UNCACHED &&
             bus.m_width == 4u &&
@@ -750,6 +764,7 @@ struct s_ee_reset_mmio
     constexpr bool write(const s_ee_bus_span_plan& bus, uint32_t address,
         const s_ee_u128& value) const
     {
+        address = device_register_address(address, bus);
         const bool gif_reset = m_scheduled_scanout && bus.m_width == 4u &&
             address == 0xb0003000u;
         const bool timing = m_scheduled_scanout && gs_timing_write_address(address, bus.m_width);
