@@ -4173,10 +4173,44 @@ int main(int argc, char** argv)
     }
     const bool vu1_native_overlap_profile = vu1_overlap_value == nullptr ||
         std::strcmp(vu1_overlap_value, "0") != 0;
+    // Opt-in worker-only attribution, independent of the EE main-thread
+    // profiler. Preserve the historical default when no override is set.
+    std::string vu1_worker_profile_environment;
+    const char* vu1_worker_profile_value = read_host_environment(
+        "SDBZ_VU1_WORKER_PROFILE", &vu1_worker_profile_environment);
+    if (vu1_worker_profile_value != nullptr && *vu1_worker_profile_value != '\0' &&
+        std::strcmp(vu1_worker_profile_value, "0") != 0 &&
+        std::strcmp(vu1_worker_profile_value, "1") != 0)
+    {
+        std::fprintf(stderr, "invalid SDBZ_VU1_WORKER_PROFILE (expected 0 or 1)\n");
+        return 2;
+    }
+    const bool vu1_worker_profile = vu1_worker_profile_value == nullptr ||
+        *vu1_worker_profile_value == '\0' ? ee::g_runtime_profile.m_enabled :
+        std::strcmp(vu1_worker_profile_value, "1") == 0;
+    std::string vu1_profile_window_environment;
+    const char* vu1_profile_window = read_host_environment(
+        "SDBZ_VU1_WORKER_PROFILE_WINDOW", &vu1_profile_window_environment);
+    unsigned long long vu1_profile_begin = 0u, vu1_profile_end = 0u;
+    unsigned vu1_profile_snapshots = 0u;
+    if (vu1_profile_window != nullptr && *vu1_profile_window != '\0')
+    {
+        char trailing = 0;
+        if (!async_vu1 || !vu1_worker_profile ||
+            std::sscanf(vu1_profile_window, "%llu,%llu%c", &vu1_profile_begin,
+                &vu1_profile_end, &trailing) != 2 ||
+            vu1_profile_begin == 0u || vu1_profile_end <= vu1_profile_begin ||
+            vu1_profile_end > 0xffffffffull)
+        {
+            std::fprintf(stderr, "invalid SDBZ_VU1_WORKER_PROFILE_WINDOW (requires async VU1, profiling, and begin,end dispatches)\n");
+            return 2;
+        }
+    }
     if (async_vu1)
     {
+        std::fprintf(stderr, "[vu1] worker_profile=%u\n", vu1_worker_profile ? 1u : 0u);
         if (!vif1.enable_deferred(std::move(vu1_aot),
-                ee::g_runtime_profile.m_enabled, vu1_native_overlap_profile))
+                vu1_worker_profile, vu1_native_overlap_profile))
         {
             std::fprintf(stderr, "failed to enable deferred VU1 worker\n");
             return 1;
@@ -6517,6 +6551,19 @@ int main(int argc, char** argv)
                 static_cast<double>(iop_time_ns) / 1e6, compile_wait_ms,
                 static_cast<unsigned long long>(hardware.scanout().fields_started())
             );
+            // Only the two requested checkpoints serialize the worker
+            // AOT counters. No extra polling or guest completion.
+            if (vu1_profile_begin != 0u && vu1_profile_snapshots < 2u &&
+                dispatched >= (vu1_profile_snapshots == 0u ?
+                    vu1_profile_begin : vu1_profile_end))
+            {
+                std::fprintf(stderr, "[vu1] worker profile snapshot dispatch=%llu fields=%llu aot=",
+                    static_cast<unsigned long long>(dispatched),
+                    static_cast<unsigned long long>(hardware.scanout().fields_started()));
+                vif1.write_aot_json(stderr);
+                std::fputc('\n', stderr);
+                ++vu1_profile_snapshots;
+            }
             std::fflush(stderr);
             last_progress_dispatch = dispatched;
         }

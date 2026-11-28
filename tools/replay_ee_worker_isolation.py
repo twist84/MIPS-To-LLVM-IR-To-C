@@ -23,6 +23,11 @@ ARMS = (
     ("sync", False, False),
     ("both_after", True, True),
 )
+PROFILE_ARMS = (
+    ("both_before", True, True),
+    ("profiled", True, True),
+    ("both_after", True, True),
+)
 PROGRESS = re.compile(
     r"EE progress: dispatched=(\d+).*?elapsed_ms=([\d.]+).*? fields=(\d+)")
 
@@ -59,12 +64,51 @@ def gs_worker_stats(log):
     return {key: int(value) for key, value in re.findall(r"(\w+)=(\d+)", lines[-1])}
 
 
+def program_profile_delta(log, window):
+    pattern = re.compile(r"(?m)^\[vu1\] worker profile snapshot dispatch=(\d+) fields=(\d+) aot=(\{.*\})$")
+    snapshots = [(int(m[1]), int(m[2]), json.loads(m[3])) for m in pattern.finditer(log)]
+    if len(snapshots) != 2 or [(d, f) for d, f, _ in snapshots] != [
+            (window["start_dispatch"], window["start_field"]),
+            (window["end_dispatch"], window["end_field"])]:
+        raise ValueError("VU1 worker profile snapshots do not match combat endpoints")
+
+    def indexed(report):
+        rows = report["program_profiles"]
+        result = {(row["pc"], row["library_index"], row["code_fnv1a64"]): row for row in rows}
+        if len(result) != len(rows):
+            raise ValueError("duplicate VU1 profile identity")
+        return result
+
+    before, after = (indexed(snapshot[2]) for snapshot in snapshots)
+    if before.keys() != after.keys():
+        raise ValueError("VU1 program identity changed in combat window")
+    metrics = ("native_runs", "native_pairs", "profiled_attempts", "profiled_pairs", "compiled_exclusive_ns")
+    result = []
+    for key, row in after.items():
+        delta = {metric: row[metric] - before[key][metric] for metric in metrics}
+        if min(delta.values()) < 0:
+            raise ValueError("VU1 profile counter regressed")
+        if delta["profiled_pairs"] != delta["native_pairs"] or delta["profiled_attempts"] != delta["native_runs"]:
+            raise ValueError("VU1 profile coverage differs from native work")
+        if delta["profiled_pairs"]:
+            if delta["compiled_exclusive_ns"] <= 0:
+                raise ValueError("missing VU1 timing for executed program")
+            result.append(dict(pc=key[0], library_index=key[1], code_fnv1a64=key[2],
+                               **delta, ns_per_pair=delta["compiled_exclusive_ns"] / delta["profiled_pairs"]))
+    total = sum(row["compiled_exclusive_ns"] for row in result)
+    if not total:
+        raise ValueError("no profiled VU1 work in combat window")
+    return {"compiled_exclusive_ns": total,
+            "profiled_pairs": sum(row["profiled_pairs"] for row in result),
+            "programs": sorted(result, key=lambda row: row["compiled_exclusive_ns"], reverse=True)}
+
+
 def digest_payload(payload):
     return hashlib.sha256(json.dumps(payload, sort_keys=True,
         separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def inspect_arm(args, directory, vu1, gs, polls, run, inventory):
+def inspect_arm(args, directory, vu1, gs, polls, run, inventory, profiled=False):
     if run["returncode"] != 4 or not terminal_budget(directory, args.max_dispatches):
         raise ValueError("arm did not reach terminal dispatch budget")
     pad = replay_summary(directory / "stderr.log")
@@ -95,9 +139,20 @@ def inspect_arm(args, directory, vu1, gs, polls, run, inventory):
     if (not presentation["gpu_enabled"] or not presentation["window_present_succeeded"] or
             presentation["window_present_succeeded"] != report["gs_fields_started"]):
         raise ValueError("GPU presentation incomplete")
+    if args.profile_vu1:
+        modes = re.findall(r"(?m)^\[vu1\] worker_profile=([01])$", log)
+        if not modes or any(mode != str(int(profiled)) for mode in modes):
+            raise ValueError("VU1 worker profile option not confirmed")
+        if report["runtime_profile"]["enabled"]:
+            raise ValueError("EE main-thread profiler unexpectedly active")
+        if not profiled and any(row["profiled_pairs"] for row in aot["program_profiles"]):
+            raise ValueError("unprofiled control collected VU1 program timings")
+    window = combat_window(log, args.combat_start, args.max_dispatches)
+    profile_evidence = program_profile_delta(log, window) if profiled else None
     payload = {key: report[key] for key in GRAPHICS_WORKLOAD_KEYS}
     payload["vu1_aot"] = {key: aot[key] for key in VU1_WORKLOAD_KEYS}
-    return {"pad": pad, "combat": combat_window(log, args.combat_start, args.max_dispatches),
+    return {"pad": pad, "combat": window,
+            "combat_vu1_profile": profile_evidence,
             "fields": report["gs_fields_started"], "guest_attempts": report["guest_instruction_attempts"],
             "draws": presentation["gpu_committed_draws"],
             "presentations": presentation["window_present_succeeded"],
@@ -138,6 +193,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for option in ("runner", "elf", "disc", "profile", "recording", "output"):
         parser.add_argument("--" + option, type=Path, required=True)
+    parser.add_argument("--profile-vu1", action="store_true",
+                        help="A/A/B diagnostic with only the VU1 worker profiled in the middle arm")
     parser.add_argument("--max-dispatches", type=int, default=40000000)
     parser.add_argument("--combat-start", type=int, default=24002560)
     parser.add_argument("--timeout-seconds", type=int, default=600)
@@ -160,6 +217,8 @@ def main():
                    PS2_RASTER_DENSE_WORKGROUP="0", PS2_GS_PACKED_DIRECT="0",
                    PS2_GPU_REGULAR_TIMESTAMPS="1", SDBZ_PAD0_REPLAY=str(args.recording))
         env.pop("PS2_GPU_PROFILE", None)
+        env["SDBZ_VU1_WORKER_PROFILE"] = "0"
+        env.pop("SDBZ_VU1_WORKER_PROFILE_WINDOW", None)
         vu1_dir = Path(env["SDBZ_VU1_AOT"]).resolve()
         inventory = aot_identity(vu1_dir)
         protected = (args.profile, args.disc, vu1_dir, args.recording, args.runner, args.elf)
@@ -174,23 +233,28 @@ def main():
         inputs = {"runner": sha(args.runner), "elf": sha(args.elf),
                   "library": hashes["baseline"], "recording": sha(args.recording),
                   "vu1": inventory, "memcard": sha(card) if card else None}
-        receipt = {"mode": "diagnostic_worker_isolation",
+        receipt = {"mode": "diagnostic_vu1_worker_profile" if args.profile_vu1 else "diagnostic_worker_isolation",
                    "architectural_equivalence_proven": False, "inputs": inputs,
                    "recorded_polls": polls, "arms": {}, "error": None,
                    "environment": {key: value for key, value in sorted(env.items())
                                    if key.startswith(("SDBZ_", "PS2_", "EE_WEBGPU_"))}}
         args.output.mkdir(parents=True)
         try:
-            for name, vu1, gs in ARMS:
+            for name, vu1, gs in (PROFILE_ARMS if args.profile_vu1 else ARMS):
                 settings = dict(env, SDBZ_VU1_ASYNC=str(int(vu1)), SDBZ_GS_ASYNC=str(int(gs)))
+                profiled = name == "profiled"
+                if profiled:
+                    settings["SDBZ_VU1_WORKER_PROFILE"] = "1"
+                    end = args.max_dispatches // 8192 * 8192
+                    settings["SDBZ_VU1_WORKER_PROFILE_WINDOW"] = f"{args.combat_start},{end}"
                 print("Worker isolation:", name, flush=True)
                 directory = args.output / name
-                arm = {"vu1_async": vu1, "gs_async": gs}
+                arm = {"vu1_async": vu1, "gs_async": gs, "vu1_profile": profiled}
                 receipt["arms"][name] = arm
                 arm["run"] = run_one(args, library, directory, settings)
                 try:
                     arm["evidence"] = inspect_arm(args, directory, vu1, gs, polls,
-                                                  arm["run"], inventory)
+                                                  arm["run"], inventory, profiled=profiled)
                 except (OSError, KeyError, ValueError) as error:
                     arm["error"] = str(error)
             if all("evidence" in arm for arm in receipt["arms"].values()):

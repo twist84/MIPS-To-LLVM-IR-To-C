@@ -2176,3 +2176,44 @@ coverage; report mismatched workloads and field endpoints explicitly.
 Do not imply architectural equivalence or add overlapping thread times.
 This diagnostic isolates concurrency contributions before attempting
 any further runtime modifications. No C++ or guest IR changes.
+
+
+### P4L result — ee-worker-isolation.zip
+
+All five arms completed 40M dispatches, 2478 PAD polls, 2541 fields
+and successful presentations, 88 native VU1 libraries, zero fallback.
+All final PPMs independently SHA-256 verified identical. Inputs unchanged.
+Combat 24002560..39993344, fields 2209..2541 in all five arms:
+
+| Mode | Wall s | Combat s | Combat fields/s |
+| --- | ---: | ---: | ---: |
+| Both before | 37.532 | 10.0790 | 32.940 |
+| VU1 only | 37.407 | 10.3939 | 31.942 |
+| GS only | 46.531 | 16.1266 | 20.587 |
+| Sync | 48.078 | 16.4857 | 20.139 |
+| Both after | 38.203 | 10.2226 | 32.477 |
+
+VU1 async gives +58.6% over sync; dual async average +62.4%.
+GS-only and sync workloads identical; async VU1 changes VIF/GS work
+slightly, even between repeat controls, so no architectural match claimed.
+Both-async worker VU1 execution 11.175/11.250 s, queue .454/.394 s;
+47.30/46.88M empty polls, no explicit waits or host failures. GS worker
+execution 1.518/1.495 s, copy .461/.502 s, fence .201/.147 s; zero
+backpressure waits. Worker times are whole-run, overlap and cannot be
+summed into a critical path. One VU1 job still pending at each async
+snapshot. Stop ungrounded GPU micro-optimizations; focus on VU1 and EE.
+
+### P4M — isolate VU1 worker native profiling in the combat window
+
+SDBZ_VU1_WORKER_PROFILE overrides only the worker's existing detailed
+scope collection; unspecified retains main-thread profiler default.
+SDBZ_VU1_WORKER_PROFILE_WINDOW=begin,end logs two AOT snapshots at
+existing progress checkpoints, without changing poll cadence or
+publishing a job. Serialization locks the backend, so the profiled arm
+is diagnostic and may perturb scheduling. --profile-vu1 runs both
+async lean, worker-only profile, both async lean again. It verifies
+actual mode, disabled EE main-thread profiler, endpoint equality, stable
+program identities, nondecreasing counters and complete per-program
+native timing coverage, ranking combat-only compiled exclusive ns and
+ns/pair. Worker AOT may include an in-flight result not yet published;
+no guest architectural equality claim. No lowering/cache changes.
