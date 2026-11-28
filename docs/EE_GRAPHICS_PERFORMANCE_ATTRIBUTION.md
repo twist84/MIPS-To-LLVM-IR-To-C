@@ -2217,3 +2217,38 @@ program identities, nondecreasing counters and complete per-program
 native timing coverage, ranking combat-only compiled exclusive ns and
 ns/pair. Worker AOT may include an in-flight result not yet published;
 no guest architectural equality claim. No lowering/cache changes.
+
+
+### P4M result — ee-vu1-combat-profile.zip
+
+All three runs stopped with return code 1 after exhausting the 2478
+recorded PAD polls before 40M dispatches. No terminal report or PPM.
+Do not accept architectural equivalence or a full performance comparison.
+Input identities unchanged. Worker profile markers confirmed 0/1/0.
+The profiled arm has one snapshot at dispatch 24002560, field 2210,
+and a periodic report at dispatch 37984811, field 2500. Subtraction
+of matching program identities yields 213416666 native pairs and
+5783556100 exclusive compiled ns. Top programs:
+
+| Entry | Code FNV | Pairs | Exclusive ns |
+| --- | --- | ---: | ---: |
+| 0x730 | 80e18246ed4922d9 | 96754096 | 3221800600 |
+| 0x620 | fdffdb7fcbf68252 | 37186584 | 984428800 |
+| 0x420 | 31d7741f1bfa69cf | 30360781 | 500554300 |
+| 0x130 | 2cf115e2c19ba013 | 28525046 | 464545200 |
+| 0x5a0 | cfae43a4ec036735 | 12117696 | 332875100 |
+
+0x730 and 0x620 account for 72.73% of recovered compiled time.
+The recovered interval is diagnostic, not a matched terminal replay.
+
+### P4N.0 — inspect hot IR before further lowering changes
+
+export_hot_vu1_ir.py reads the existing profile ZIP, subtracts matched
+program counters, resolves the exact loaded library indices and validates
+the retained inventory SHA-256, native target and full 16 KiB capture
+FNV against the original capture filename. Export the top two captures,
+current generated IR, O3 optimized IR and native assembly with compiler
+version and provenance. These are regenerated artifacts, not proof of
+the original DLL machine code. No retail replay or cache rewrite.
+Prioritize 0730-13b05ccb361a4d95-0 and 0620-7c2a8125eeca102a-0.
+No further speculative arithmetic change until inspected.
