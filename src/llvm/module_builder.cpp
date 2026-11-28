@@ -4029,16 +4029,21 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         // adding a callback to every translated instruction.
         const uint32_t pc = block[0].pc;
         const std::string event_suffix = std::to_string(pc);
+        const std::string suffix = std::to_string(pc);
+        const std::string continue_label = "loop_continue_" + suffix;
+        const std::string is_null = newtemp();
         const std::string event_check = "event_budget_check_" + event_suffix;
         const std::string event_active = "event_budget_active_" + event_suffix;
         const std::string event_yield = "event_budget_yield_" + event_suffix;
         const std::string event_continue = "event_budget_continue_" + event_suffix;
-        const std::string event_null = newtemp();
         const std::string event_enabled_ptr = newtemp();
         const std::string event_enabled = newtemp();
         const std::string event_enabled_cond = newtemp();
-        m_out += "  " + event_null + " = icmp eq ptr %rt, null\n";
-        m_out += "  br i1 " + event_null + ", label %" + event_continue +
+        // Both the event deadline and legacy loop safepoint require a live
+        // runtime. Share this null guard so hot guest loop headers pay for it
+        // once instead of once per independent guard.
+        m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
+        m_out += "  br i1 " + is_null + ", label %" + continue_label +
                  ", label %" + event_check + "\n";
         m_out += event_check + ":\n";
         m_out += "  " + event_enabled_ptr + " = getelementptr i8, ptr %rt, i64 " +
@@ -4082,16 +4087,11 @@ void module_builder::emit_block(const std::vector<ee::s_ee_instruction>& block,
         // Null runtime and a zero limit keep older JIT clients working.
         // Incoming predecessors must flush their architectural GPR
         // changes; emit_function_cfg seeds all GPRs live at this header.
-        const std::string suffix = std::to_string(pc);
         const std::string enabled_label = "loop_enabled_" + suffix;
         const std::string tick_label = "loop_tick_" + suffix;
         const std::string decrement_label = "loop_decrement_" + suffix;
         const std::string exhausted_label = "loop_exhausted_" + suffix;
-        const std::string continue_label = "loop_continue_" + suffix;
-        const std::string is_null = newtemp();
-        m_out += "  " + is_null + " = icmp eq ptr %rt, null\n";
-        m_out += "  br i1 " + is_null + ", label %" + continue_label +
-                 ", label %" + enabled_label + "\n";
+        m_out += "  br label %" + enabled_label + "\n";
         m_out += enabled_label + ":\n";
         const std::string limit_ptr = newtemp();
         const std::string limit = newtemp();
