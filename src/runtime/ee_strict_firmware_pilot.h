@@ -702,7 +702,8 @@ private:
     static constexpr bool owned_control(uint32_t opcode)
     {
         return status_write(opcode) || clock_write(opcode) ||
-            epc_write(opcode) || clock_read(opcode) || opcode == k_eret || syscall_word(opcode);
+            epc_write(opcode) || clock_read(opcode) || opcode == k_eret ||
+            opcode == 0x42000038u || opcode == 0x42000039u || syscall_word(opcode);
     }
 
     s_ee_reset_prefix_step execute_control(uint32_t opcode)
@@ -721,6 +722,13 @@ private:
                 return {result::UNSUPPORTED_OPCODE, opcode, 0u, pc};
             }
             (void)ee_exception_return(&m_cpu);
+        }
+        else if (opcode == 0x42000038u || opcode == 0x42000039u) // EI / DI
+        {
+            // The scheduled executor only admits kernel-mode Status values.
+            ee_cop0_write(&m_cpu, COP0_Status,
+                opcode == 0x42000038u ? status | STATUS_EIE : status & ~STATUS_EIE);
+            m_cpu.m_pc += 4u;
         }
         else if (clock_write(opcode))
         {
