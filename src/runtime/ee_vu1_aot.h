@@ -17,6 +17,7 @@ using t_vu1_aot_entry = uint32_t (*)(uint16_t*, uint32_t*, uint32_t*,
     t_vu1_aot_kick, void*, uint32_t*, uint32_t*, t_vu1_aot_efu, uint32_t*);
 using t_vu1_aot_info = const uint32_t* (*)();
 using t_vu1_aot_code = const uint8_t* (*)();
+using t_vu1_aot_mul_profile = void (*)(uint64_t*);
 using t_vu1_code = std::array<uint8_t, c_ee_vu1::k_memory_size>;
 
 enum class e_vu1_aot_fallback : uint32_t
@@ -80,6 +81,7 @@ private:
         std::vector<uint8_t> m_code;
         std::vector<s_code_range> m_ranges;
         t_vu1_aot_entry m_entry = nullptr;
+        t_vu1_aot_mul_profile m_mul_profile = nullptr;
         // Host diagnostics only; ownership follows the AOT backend.
         size_t m_library_index = 0u;
         uint64_t m_code_hash = 0u;

@@ -2295,3 +2295,34 @@ multiply-correction frequency on the same combat interval, then compare
 candidate code size and execution time against a paired control. This
 inspection adds no full-run correctness claim and makes no optimization
 change.
+
+### P4N.2 — opt-in vector multiply correction counters
+
+`build_vu1_aot.py --profile-mul-corrections` instruments a separate native
+VU1 inventory with per-library counters for `vu_mul4` invocations, entries
+to the exact Booth correction path, and corrected lanes. The AOT runtime
+reads these counters only when the optional diagnostic export is present;
+unmodified libraries and normal builds keep the existing path and report
+schema. Snapshot serialization holds the VU1 backend lock, so the ordinary
+counter loads do not race with worker execution. The instrumented inventory
+is for frequency attribution only: counter updates perturb execution and
+its timings must not be used to accept a performance change.
+
+Build into a fresh directory matched to the recovered 88-program inventory;
+leave the existing `vu1-native-recovered` directory untouched:
+
+```bat
+git pull --ff-only
+cmake --build build --config Release --target vu1_recomp ee_game_runner --parallel 8
+python tools\build_vu1_aot.py --build-dir build --capture build\vu1-capture --out build\vu1-native-mul-profile --match-inventory build\vu1-native-recovered --opt 3 --march native --jobs 8 --profile-mul-corrections
+```
+
+Run the existing P4M `replay_ee_worker_isolation.py --profile-vu1`
+diagnostic with `SDBZ_VU1_AOT=build\vu1-native-mul-profile`, the same
+runner, ELF, disc, recording, profile input and combat window. Keep its
+three arms and original recording. The earlier recording may again end
+before the dispatch budget; preserve the generated archive and do not
+claim terminal equivalence. `export_hot_vu1_ir.py` subtracts the two
+snapshots and includes the multiply/correction/lane deltas in `export.json`.
+Only after inspecting those counts should a production lowering candidate
+be chosen and compared in an uninstrumented paired replay.

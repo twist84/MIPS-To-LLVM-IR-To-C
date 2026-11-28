@@ -60,13 +60,26 @@ def hot_programs(archive):
         elapsed = row["compiled_exclusive_ns"] - old[key]["compiled_exclusive_ns"]
         if pairs != native or min(pairs, elapsed) < 0 or bool(pairs) != bool(elapsed):
             raise ValueError("invalid profile coverage")
+        mul_before = old[key].get("vu_mul_profile")
+        mul_after = row.get("vu_mul_profile")
+        mul_delta = None
+        if mul_before is not None or mul_after is not None:
+            if not isinstance(mul_before, dict) or not isinstance(mul_after, dict):
+                raise ValueError("VU1 multiply profile is missing from one snapshot")
+            fields = ("mul4_calls", "correction_calls", "correction_lanes")
+            if any(field not in mul_before or field not in mul_after for field in fields):
+                raise ValueError("VU1 multiply profile schema is incomplete")
+            mul_delta = {field: mul_after[field] - mul_before[field] for field in fields}
+            if min(mul_delta.values()) < 0 or mul_delta["correction_lanes"] < mul_delta["correction_calls"]:
+                raise ValueError("VU1 multiply profile counters regressed")
         if pairs:
             name, fingerprint = libraries[idx]
             if int(name.split("-", 1)[0], 16) != pc:
                 raise ValueError("library entry PC differs from profile")
             hot.append(dict(pc=pc, code_hash=code_hash, library=name,
                             library_fnv1a64=fingerprint, pairs=pairs,
-                            compiled_ns=elapsed, ns_per_pair=elapsed / pairs))
+                            compiled_ns=elapsed, ns_per_pair=elapsed / pairs,
+                            vu_mul_profile=mul_delta))
     if not hot:
         raise ValueError("no timed native VU1 programs")
     return inventory, sorted(hot, key=lambda r: r["compiled_ns"], reverse=True), {
