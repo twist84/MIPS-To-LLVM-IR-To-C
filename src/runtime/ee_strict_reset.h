@@ -339,6 +339,8 @@ public:
         {
         }
 
+        constexpr bool active() const { return m_cache != nullptr; }
+
         constexpr bool has_resident() const
         {
             return m_cache != nullptr && (m_cache->m_count != 0u || m_pending);
@@ -1511,8 +1513,9 @@ inline constexpr s_ee_reset_prefix_step execute_rom_word(
         const uint32_t address = static_cast<uint32_t>(read_gpr(cpu, (opcode >> 21u) & 31u)) +
             (imm | ((imm & 0x8000u) != 0u ? 0xffff0000u : 0u));
         const uint32_t op = (opcode >> 16u) & 31u;
-        if (op == 0x14u && ram.m_data_cache != nullptr &&
-            ram.m_data_cache->has_resident())
+        // Once the data cache is active, DXWBIN remains valid even when
+        // its selected line is empty or only the instruction cache has lines.
+        if (op == 0x14u && ram.m_data_cache != nullptr && ram.m_data_cache->active())
         {
             if (!ram.m_data_cache->index_writeback_invalidate(address,
                     ram.m_bytes, ram.m_size))
